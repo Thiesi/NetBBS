@@ -62,9 +62,10 @@ from netbbs.net.resource_editor import FieldSpec, choice_field, choice_step, edi
 from netbbs.net.session import Session, write_prompt
 from netbbs.net.unicode_style_preference import unicode_style_enabled
 from netbbs.rendering import (
-    ALERT_COLOR, LABEL_COLOR, METADATA_COLOR, MUTED_COLOR, VALUE_COLOR, colored, menu_key, sanitize_text,
-    wrap_to_width,
+    ALERT_COLOR, DATE_COLOR, ERROR_COLOR, METADATA_COLOR, MUTED_COLOR, SUCCESS_COLOR,
+    VALUE_COLOR, WARNING_COLOR, action_bar, colored, menu_key, sanitize_text, wrap_to_width,
 )
+from netbbs.rendering.detail import Field, Section, render_sections
 from netbbs.rendering.layout import screen_title
 from netbbs.net.char_input import reject_unhandled_key
 from netbbs.storage.execution import DatabaseLane
@@ -773,7 +774,7 @@ async def administer_service(session: Session, lane: DatabaseLane, actor: User) 
             columns=_ADMIN_COLUMNS,
             column_values_of=columns_of,
             title="Managed DNS service administration",
-            breadcrumb=("System", "Managed DNS"),
+            breadcrumb=("Settings", "Managed DNS"),
             empty_message="The service holds no registrations.",
             refresh=reload,
             **presentation,
@@ -792,26 +793,38 @@ async def _registration_detail(session: Session, lane: DatabaseLane, row, *, bas
     from netbbs.managed_dns.client import ManagedDnsError, admin_revoke, outbound_session
 
     def draw_lines() -> list[str]:
-        def field(label: str, value: str) -> str:
-            return colored(f"{label}: ", fg_color=LABEL_COLOR) + colored(sanitize_text(value), fg_color=METADATA_COLOR)
-
-        lines = [
-            field("Status", row.status),
-            field("Node fingerprint", row.node_fingerprint),
-            field("Follows address", "yes" if row.dynamic else "no"),
-            field("Registered", when(row.created_at)),
-            field("Live since", when(row.matured_at)),
-            field("Last contact", when(row.last_contact_at)),
-            field("Published address", row.last_known_address or "none"),
+        """The registration as two groups -- what it is, and when -- in the
+        SysOp console's shared label/value panel, so the values line up."""
+        status_color = {"matured": SUCCESS_COLOR, "revoked": ERROR_COLOR}.get(row.status, WARNING_COLOR)
+        registration = [
+            Field("Status", row.status, color=status_color, bold=True),
+            Field("Node fingerprint", row.node_fingerprint, color=METADATA_COLOR),
+            Field("Follows address", "yes" if row.dynamic else "no"),
+            Field("Published address", row.last_known_address or "none",
+                  color=VALUE_COLOR if row.last_known_address else MUTED_COLOR),
+        ]
+        if row.replaces_name:
+            registration.append(Field("Replaces", f"{row.replaces_name}.netbbs.org (rename in flight)"))
+        if row.replaced_by:
+            registration.append(Field(
+                "Replaced by", f"{row.replaced_by}.netbbs.org (rename in flight; revoking takes both)"
+            ))
+        if row.revoked_reason:
+            registration.append(Field("Revocation reason", row.revoked_reason, color=WARNING_COLOR))
+        timeline = [
+            Field("Registered", when(row.created_at), color=DATE_COLOR),
+            Field("Live since", when(row.matured_at), color=DATE_COLOR),
+            Field("Last contact", when(row.last_contact_at), color=DATE_COLOR),
         ]
         if row.released_at:
-            lines.append(field("Inactive since", when(row.released_at)))
-        if row.replaces_name:
-            lines.append(field("Replaces", f"{row.replaces_name}.netbbs.org (rename in flight)"))
-        if row.replaced_by:
-            lines.append(field("Replaced by", f"{row.replaced_by}.netbbs.org (rename in flight; revoking takes both)"))
-        if row.revoked_reason:
-            lines.append(field("Revocation reason", row.revoked_reason))
+            timeline.append(Field("Inactive since", when(row.released_at), color=DATE_COLOR))
+        lines: list[str] = []
+        for block in render_sections(
+            [Section("Registration", registration), Section("Timeline", timeline)],
+            width=session.terminal_width, unicode_style=presentation["unicode_style"],
+        ):
+            lines.append("")
+            lines.extend(block.lines)
         return lines
 
     while True:
@@ -819,7 +832,7 @@ async def _registration_detail(session: Session, lane: DatabaseLane, row, *, bas
             "\r\n"
             + screen_title(
                 f"{row.name}.netbbs.org",
-                breadcrumb=(session.node_display_name, "System", "Managed DNS", "Service administration"),
+                breadcrumb=(session.node_display_name, "Settings", "Managed DNS", "Service administration"),
                 subtitle="This registration as the service holds it.",
                 width=session.terminal_width,
                 clear=presentation["redraw_in_place"],
@@ -834,7 +847,8 @@ async def _registration_detail(session: Session, lane: DatabaseLane, row, *, bas
         if row.status != "revoked":
             actions.append(menu_key("R", "evoke"))
         actions.append(menu_key("B", "ack"))
-        await session.write_line("\r\n" + "    ".join(actions))
+        await session.write_line("\r\n" + action_bar(actions, width=session.terminal_width))
+        await write_prompt(session, "Choice: ")
 
         while True:
             choice = (await session.read_key()).lower()

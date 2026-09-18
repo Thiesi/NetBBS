@@ -53,9 +53,11 @@ import hashlib
 import json
 import logging
 import math
+import re
 import shlex
 import sqlite3
 import sys
+import weakref
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Sequence
@@ -358,7 +360,7 @@ from netbbs.net.char_input import (
 from netbbs.net.confirm import prompt_yes_no, prompt_yes_no_or_keep
 from netbbs.net.draft_storage import DraftPruneReport, prune_stale_drafts
 from netbbs.net.help_overlay import show_help
-from netbbs.net.picker import ListColumn, pick_item
+from netbbs.net.picker import ListColumn, pick_item as _pick_item
 from netbbs.net.resource_editor import (
     inline_field,
     read_field_line,
@@ -368,7 +370,7 @@ from netbbs.net.resource_editor import (
     bool_field,
     choice_field,
     choice_step,
-    edit_resource_draft,
+    edit_resource_draft as _edit_resource_draft,
     text_field,
 )
 from netbbs.net.session import Session, write_preformatted_line, write_prompt
@@ -493,11 +495,14 @@ from netbbs.net.chat_channel_picker_banner import (
     load_chat_channel_picker_banner,
     set_chat_channel_picker_banner_enabled,
 )
+from netbbs.net.detail_view import show_detail as _show_detail_view
 from netbbs.permissions.levels import meets_level
 from netbbs.rendering import (
     ACCENT_COLOR,
     ALERT_COLOR,
+    AUTHOR_COLOR,
     CLOCK_COLOR,
+    DATE_COLOR,
     ERROR_COLOR,
     GATE_COLOR,
     HEADER_COLOR,
@@ -520,7 +525,6 @@ from netbbs.rendering import (
     GRADIENTS,
     decode_ansi_bytes,
     double_frame,
-    empty_state,
     field_row,
     gradient_text,
     menu_grid,
@@ -536,6 +540,8 @@ from netbbs.rendering import (
     visible_width,
     wrap_to_width,
 )
+from netbbs.rendering.detail import Field, Note, Section, Table, render_sections
+from netbbs.rendering.reflow import wrap_terminal_text
 from netbbs.guest import (
     guest_user,
     pre_login_notice,
@@ -727,6 +733,360 @@ async def _load_condensed_status_line(lane: DatabaseLane, *, unicode_style: bool
         if backup_display else "Backup: never"
     )
     return field_row([(backup_text, None)], unicode_style=unicode_style)
+
+
+# -- outcomes carried into the next redraw ------------------------------------
+#
+# With redraw-in-place on (the default for a new account), a line written just
+# before a screen returns is never seen: the screen it returns to clears the
+# terminal in the same burst of output. So an action does not *write* its
+# outcome; it `_announce`s it, and whichever console screen is drawn next shows
+# it directly above its prompt -- `_choice_prompt` for a screen that draws
+# itself, `show_detail` for a paged one. No keypress is asked for: the outcome
+# is simply on the screen the SysOp lands on, where the eye already is.
+#
+# Keyed weakly by session, so a notice can never outlive the connection it was
+# meant for or reach another SysOp's console.
+_pending_notices: "weakref.WeakKeyDictionary[Session, list[str]]" = weakref.WeakKeyDictionary()
+
+
+def _announce(session: Session, text: str, *, error: bool = False, color: int | None = None) -> None:
+    """Queue one outcome line for the next console screen drawn on `session`."""
+    if color is None:
+        color = ERROR_COLOR if error else SUCCESS_COLOR
+    _pending_notices.setdefault(session, []).append(colored(sanitize_text(text), fg_color=color))
+
+
+_CLEAR_SEQUENCE = "\x1b[2J"
+_LEADING_BREAK = re.compile(r"^((?:\x1b\[[0-9;]*m)*)(?:\r\n)+")
+# An outcome that changed nothing reads muted, not as a green success.
+_NEUTRAL_OUTCOMES = ("Cancelled", "No change", "Already ", "No ", "Nothing ")
+# A net under the sites converted from a bare `write_line`: a failure that was
+# never styled must not turn success-green merely by being announced. A site
+# that knows it is reporting a failure says so with `_announce(..., error=True)`.
+_FAILED_OUTCOMES = ("Error", "Could not", "Cannot ", "Can't ", "Failed", "Unable ")
+
+
+def _announce_line(session: Session, line: str) -> None:
+    """Queue a line exactly as an action would have written it. One that is
+    already styled keeps its colours; a plain one reads as a success, or muted
+    when it says nothing was done. A leading blank row is dropped -- it spaced
+    the line off a keypress echo that is no longer above it."""
+    line = _LEADING_BREAK.sub(r"\1", line)
+    if "\x1b[" not in line:
+        if line.startswith(_FAILED_OUTCOMES):
+            color = ERROR_COLOR
+        elif line.startswith(_NEUTRAL_OUTCOMES):
+            color = MUTED_COLOR
+        else:
+            color = SUCCESS_COLOR
+        line = colored(line, fg_color=color)
+    _pending_notices.setdefault(session, []).append(line)
+
+
+def _announce_styled(session: Session, line: str) -> None:
+    """Queue a line that is already sanitized and styled (a badge, a captured row)."""
+    _pending_notices.setdefault(session, []).append(line)
+
+
+def _pending_notice_rows(session: Session) -> int:
+    width = max(1, session.terminal_width)
+    return sum(
+        wrap_terminal_text(line, width).count("\r\n") + 1 for line in _pending_notices.get(session, ())
+    )
+
+
+def _take_notices(session: Session) -> list[str]:
+    return _pending_notices.pop(session, [])
+
+
+class _TrailingOutput:
+    """A stand-in session for a flow that lives in another module and writes
+    its own outcome -- `netbbs.net.managed_dns_flow`'s register, release, rename
+    and cancel, which first-run onboarding also calls and which therefore
+    cannot `_announce`.
+
+    Lines are held rather than written. Anything else the flow does with the
+    session -- a prompt, a read -- writes the held lines first, in order, so
+    what the SysOp is asked is still asked under the text that explains it.
+    Whatever is still held when the flow returns was written after its last
+    question: that is its outcome, and `announce_rest` queues it for the screen
+    the console draws next instead of letting that screen's clear erase it.
+
+    Only ever handed to a flow that uses the session to read and write. It is
+    not the session: a flow that compares sessions by identity (the node
+    controls' registry does) must be given the real one."""
+
+    def __init__(self, session: Session) -> None:
+        self._session = session
+        self._held: list[str] = []
+
+    def __getattr__(self, name: str):
+        return getattr(self._session, name)
+
+    async def write_line(self, text: str = "") -> None:
+        self._held.append(text)
+
+    async def _release(self) -> None:
+        held, self._held = self._held, []
+        for text in held:
+            await self._session.write_line(text)
+
+    async def write(self, text: str) -> None:
+        await self._release()
+        await self._session.write(text)
+
+    async def read_line(self, *args, **kwargs) -> str:
+        await self._release()
+        return await self._session.read_line(*args, **kwargs)
+
+    async def read_key(self, *args, **kwargs) -> str:
+        await self._release()
+        return await self._session.read_key(*args, **kwargs)
+
+    async def read_any_key(self, *args, **kwargs) -> str:
+        await self._release()
+        return await self._session.read_any_key(*args, **kwargs)
+
+    async def read_editor_key(self, *args, **kwargs):
+        await self._release()
+        return await self._session.read_editor_key(*args, **kwargs)
+
+    # A Zmodem send talks to the terminal in raw bytes: "Starting Zmodem send
+    # ..." has to be on screen before the first of them, not after the last.
+    async def write_raw(self, data: bytes) -> None:
+        await self._release()
+        await self._session.write_raw(data)
+
+    async def read_byte(self):
+        await self._release()
+        return await self._session.read_byte()
+
+    def announce_rest(self) -> None:
+        """Queue the flow's outcome: the last paragraph of what is still held.
+
+        Not everything still held is an outcome. `send_file_to_caller` writes a
+        screen title (with its clear) and "Starting Zmodem send..." and only
+        then touches the terminal in raw bytes -- so when it fails before the
+        first of them (the blob is gone from disk), all three lines are still
+        here. Announced, that title's clear erased the screen the console had
+        just redrawn, leaving the error over a bare prompt. These flows open
+        their outcome with a blank row (a leading CR LF on the line), so the
+        outcome is what follows the last such break; and a line that clears
+        the terminal is never one."""
+        held, self._held = self._held, []
+        start = 0
+        for index, text in enumerate(held):
+            if not text.strip() or _LEADING_BREAK.match(text):
+                start = index
+        for text in held[start:]:
+            if text.strip() and _CLEAR_SEQUENCE not in text:
+                _announce_line(self._session, text)
+
+
+async def _choice_prompt(session: Session) -> None:
+    """A self-drawn console screen's prompt: any pending outcome, then `Choice:`."""
+    for line in _take_notices(session):
+        await session.write_line(line)
+    await write_prompt(session, "Choice: ")
+
+
+async def pick_item(session: Session, items, *, masthead="", **kwargs):
+    """`picker.pick_item`, with whatever the console's last action announced
+    shown above the list -- a picker is as likely as a menu to be the next
+    screen drawn (lifting one chat restriction returns to the list of the
+    rest). The picker re-reads a callable masthead on every render and counts
+    its rows, so the outcome is there for the first draw and gone once a key
+    has redrawn the list."""
+    async def _masthead() -> str:
+        own = (await masthead()) if callable(masthead) else masthead
+        return "\r\n".join(part for part in (own, *_take_notices(session)) if part)
+
+    # The picker's own answer to an empty list that nothing can change is to
+    # print `empty_message` and return -- straight into the console menu whose
+    # redraw erases it. Announced instead, it is on that menu when it draws.
+    if not items and kwargs.get("refresh") is None and kwargs.get("on_create") is None:
+        _announce(session, kwargs["empty_message"], color=MUTED_COLOR)
+        return None
+    return await _pick_item(session, items, masthead=_masthead, **kwargs)
+
+
+async def edit_resource_draft(session: Session, lane: DatabaseLane, **kwargs):
+    """`resource_editor.edit_resource_draft`, shown whatever a field's prompt or
+    the console's last action announced (see `_announce`)."""
+    return await _edit_resource_draft(session, lane, notices=lambda: _take_notices(session), **kwargs)
+
+
+async def show_detail(session: Session, *, message: str | None = None, **kwargs) -> tuple[str, int]:
+    """`detail_view.show_detail`, with whatever the SysOp's last action announced
+    shown ahead of the screen's own `message`."""
+    lines = [*_take_notices(session), *([message] if message else [])]
+    return await _show_detail_view(session, message="\r\n".join(lines) or None, **kwargs)
+
+
+@dataclass(frozen=True)
+class _Chrome:
+    """The display preferences every titled screen resolves before it draws,
+    fetched in one lane round trip instead of four."""
+
+    redraw_in_place: bool
+    unicode_style: bool
+    collapsed: bool
+    header_color: int | tuple[int, int, int]
+    accent_color: int | tuple[int, int, int]
+
+
+async def _load_chrome(lane: DatabaseLane, actor: User) -> _Chrome:
+    def _load(db: Database) -> _Chrome:
+        return _Chrome(
+            redraw_in_place=redraw_in_place_enabled(db, actor),
+            unicode_style=unicode_style_enabled(db, actor),
+            collapsed=breadcrumb_collapsed_enabled(db, actor),
+            header_color=effective_header_color_256(db),
+            accent_color=effective_accent_color_256(db),
+        )
+
+    return await lane.run(_load)
+
+
+def _detail_title(
+    session: Session, chrome: _Chrome, title: str, *, breadcrumb: Sequence[str], subtitle: str | None = None
+) -> str:
+    """A `screen_title` block for `show_detail`, which owns the clear itself
+    (so that turning a page redraws in place too)."""
+    return screen_title(
+        title,
+        breadcrumb=(session.node_display_name, *breadcrumb),
+        subtitle=subtitle,
+        width=session.terminal_width,
+        clear=False,
+        unicode_style=chrome.unicode_style, collapsed=chrome.collapsed,
+        header_color=chrome.header_color,
+        node_name_gradient=session.node_name_gradient,
+    )
+
+
+_BACK_ACTION = ("b", menu_key("B", "ack"))
+
+
+async def _show_report(
+    session: Session, lane: DatabaseLane, actor: User, title: str, *,
+    breadcrumb: Sequence[str], sections: Sequence[Section], subtitle: str | None = None,
+    message: str | None = None,
+) -> None:
+    """Hold a finished action's result on screen until the SysOp leaves it.
+
+    A result that was printed and returned from was wiped by the parent
+    menu's clear-and-redraw before it could be read; this is the one way a
+    SysOp screen reports an outcome it has nothing further to offer on."""
+    chrome = await _load_chrome(lane, actor)
+    await show_detail(
+        session,
+        title=_detail_title(session, chrome, title, breadcrumb=breadcrumb, subtitle=subtitle),
+        sections=sections, actions=[_BACK_ACTION], message=message,
+        redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+    )
+
+
+async def _write_sections(session: Session, sections: Sequence[Section], *, unicode_style: bool) -> int:
+    """Write a grouped label/value panel for a screen that keeps its own menu
+    and key loop below it, a blank row between groups. Returns the rows
+    written, so the caller can budget its menu against what is left of the
+    terminal instead of pushing the panel's top off it."""
+    rows = 0
+    for block in render_sections(sections, width=session.terminal_width, unicode_style=unicode_style):
+        # Led by a blank row, the first group included: what sits above a
+        # panel is a title rule or a status line, and the panel is a new
+        # paragraph either way.
+        await session.write_line("")
+        rows += 1
+        for line in block.lines:
+            await session.write_line(line)
+        rows += len(block.lines)
+    return rows
+
+
+def _fitted_menu(options: list[MenuEntry], description_level: str, *, session: Session, used_rows: int) -> str:
+    """The menu under a detail panel, as descriptive as the rows left allow.
+
+    `_menu_row` alone budgets a menu against the whole terminal, as if
+    nothing were drawn above it -- so on a screen that leads with a panel,
+    the described form pushed the panel's own top row off a 24-row terminal.
+    Measured here instead, the way `edit_resource_draft` measures its own:
+    the described grid if it fits under what is already on screen, else the
+    packed one-line bar."""
+    if description_level != "off":
+        described = menu_grid(
+            [("", options)], width=session.terminal_width, height=session.terminal_height,
+            description_level=description_level,
+        )
+        if used_rows + _pending_notice_rows(session) + described.count("\r\n") + 2 <= session.terminal_height:
+            return described
+    return action_bar([entry.label for entry in options], width=session.terminal_width)
+
+
+def _description_field(description: str | None) -> Field:
+    if description:
+        return Field("Description", description)
+    return Field("Description", "(none)", color=MUTED_COLOR)
+
+
+def _inheritable(level: int | None) -> str:
+    return str(level) if level is not None else "inherit"
+
+
+def _gate_field(label: str, value: int | str | None) -> Field:
+    """An access gate reads in `GATE_COLOR` when set -- the same orange the
+    resource pickers' own GATES column uses -- and muted when absent."""
+    if value is None or value == "":
+        return Field(label, "none", color=MUTED_COLOR)
+    return Field(label, str(value), color=GATE_COLOR)
+
+
+def _audit_details_text(details: dict) -> str:
+    """An audit row's stored details as `key: value` pairs a person can read,
+    rather than the JSON they are kept as. A nested mapping is flattened into
+    dotted keys and a list into its items, so no level of it is left as JSON."""
+    def _pairs(value, prefix: str) -> list[str]:
+        if isinstance(value, dict):
+            return [
+                pair for key, inner in sorted(value.items())
+                for pair in _pairs(inner, f"{prefix}.{key}" if prefix else str(key))
+            ]
+        if isinstance(value, (list, tuple)):
+            text = ", ".join(str(item) for item in value) or "(none)"
+        elif isinstance(value, bool):
+            text = "yes" if value else "no"
+        elif value is None:
+            text = "(none)"
+        else:
+            text = str(value)
+        return [f"{prefix}: {text}" if prefix else text]
+
+    return "; ".join(_pairs(details or {}, ""))
+
+
+def _banner_status_section(status, *, unicode_style: bool) -> Section:
+    """Whether a banner or masthead is switched on, and the state of the file
+    behind it -- the two facts every one of these seven menus leads with. They
+    were one run-on line (`disabled -- file: x.ans (missing)`); a missing file
+    behind an enabled banner is the case worth seeing, and now reads in red
+    on a row of its own."""
+    return Section("Status", [
+        Field(
+            "Shown to callers",
+            status_badge("ENABLED", tone="success", unicode_style=unicode_style) if status.enabled
+            else status_badge("DISABLED", tone="neutral", unicode_style=unicode_style),
+            styled=True,
+        ),
+        Field("File", status.path.name, color=METADATA_COLOR),
+        Field("On disk", _format_bytes(status.size_bytes), color=VALUE_COLOR) if status.exists
+        else Field("On disk", "missing", color=ERROR_COLOR if status.enabled else MUTED_COLOR),
+    ])
+
+
+def _yes_no(value: bool) -> str:
+    return "yes" if value else "no"
 
 
 def _degrade_description_level(
@@ -1051,8 +1411,6 @@ async def _draw_admin_menu(
             )
         )
 
-    await _write_panel(session, health, unicode_style=unicode_style, header_color=state["header_color"])
-
     # Brief descriptions are kept to roughly 34 characters or less --
     # the actual available width once this renders in two columns at
     # the classic 80-column terminal (menu_grid's own column_width
@@ -1083,7 +1441,7 @@ async def _draw_admin_menu(
     ]
     quick = [
         MenuEntry(label=menu_key("K", "up", prefix="Bac"), brief="Create and review complete backups"),
-        MenuEntry(label=menu_key("D", "NS"), brief="Managed netbbs.org subdomain status"),
+        MenuEntry(label=menu_key("D", "NS"), brief="Managed netbbs.org name status"),
     ]
     if node_controls is not None:
         quick.insert(
@@ -1095,17 +1453,124 @@ async def _draw_admin_menu(
             MenuEntry(label=menu_key("L", "ink status"), brief="NetBBS Link peer/network health"),
             MenuEntry(label=menu_key("X", "", prefix="Outbo"), brief="Pending outgoing Link work items"),
         ])
-    await session.write_line(
-        "\r\n"
-        + menu_grid(
+    # The landing page is the one console screen that had no answer to a short
+    # terminal: a twelve-row health panel over a described two-section menu is
+    # 32 rows, so on the classic 24 its own title and the top of the panel had
+    # scrolled away before `Choice:` appeared. The sub-consoles already compact
+    # their panels and drop descriptions (`_degrade_description_level`); here
+    # the same two steps are *measured* rather than estimated -- the full panel
+    # with the menu as asked for, then the compact panel, then the compact
+    # panel over an undescribed menu -- and the first that fits is drawn.
+    def _menu(level: str) -> str:
+        return menu_grid(
             [("Console", console), ("Quick", quick)],
-            width=session.terminal_width,
-            height=session.terminal_height,
-            description_level=state["description_level"],
+            width=session.terminal_width, height=session.terminal_height, description_level=level,
         )
+
+    framed = unicode_style and min(session.terminal_width, 78) >= 4
+    title_rows = 3 + (0 if state["redraw_in_place"] else 1)
+
+    def _rows(panel: list[str], menu: str) -> int:
+        return title_rows + len(panel) + (2 if framed else 0) + 1 + menu.count("\r\n") + 1 + 1
+
+    compact = _compact_dashboard_panel(
+        state, node_badge=node_badge, active_sessions=active_sessions, link_context=link_context,
+        node_controls=node_controls, unicode_style=unicode_style, width=box_inner_width,
     )
-    await session.write("Choice: ")
+    level = state["description_level"]
+    for panel, menu_level in ((health, level), (compact, level), (compact, "off")):
+        menu = _menu(menu_level)
+        if _rows(panel, menu) <= session.terminal_height:
+            break
+    await _write_panel(session, panel, unicode_style=unicode_style, header_color=state["header_color"])
+    await session.write_line("\r\n" + menu)
+    if menu_level != level and "Descriptions hidden" not in menu:
+        await session.write_line(
+            colored("Descriptions hidden -- terminal too short to show them.", fg_color=MUTED_COLOR)
+        )
+    await _choice_prompt(session)
     return state
+
+
+def _compact_dashboard_panel(
+    state: dict[str, object], *, node_badge: str, active_sessions: int | None,
+    link_context: LinkContext | None, node_controls: NodeControls | None, unicode_style: bool, width: int,
+) -> list[str]:
+    """The landing page's health panel with each group on one row -- the same
+    facts, in the same colours, in six rows instead of twelve. Every row is
+    wrapped to the frame by `_wrap_counts_panel`, as the sub-consoles' own
+    compact panels are."""
+    def _label(text: str) -> str:
+        return colored(f"{text:<11}", fg_color=LABEL_COLOR, bold=True)
+
+    panel: list[str] = []
+    if active_sessions is not None:
+        panel.extend(_wrap_counts_panel(
+            _label("NODE") + node_badge + "  ", [("Active sessions", active_sessions)], width=width,
+        ))
+    else:
+        panel.append(_label("NODE") + node_badge)
+        panel.extend(
+            colored(f"  {line}", fg_color=MUTED_COLOR)
+            for line in _wrap_panel_sentence(
+                "Live node controls unavailable in standalone mode.",
+                prefix="  ", width=width, unicode_style=unicode_style,
+            )
+        )
+    if link_context is None:
+        # See `_draw_admin_menu`'s own check for why `node_controls is None`,
+        # not `link_context` alone, decides between these two words.
+        panel.append(_label("LINK") + status_badge(
+            "UNAVAILABLE" if node_controls is None else "DISABLED", tone="neutral", unicode_style=unicode_style,
+        ))
+    else:
+        node = link_context.link_node
+        link_tone = "warning" if not node.peers or state["dead_letters"] else "success"
+        panel.extend(_wrap_counts_panel(
+            _label("LINK")
+            + status_badge("ATTENTION" if link_tone == "warning" else "HEALTHY", tone=link_tone, unicode_style=unicode_style)
+            + "  ",
+            [("Peers", len(node.peers)), ("Relays", len(node.relays_serving_me)), ("Dead letters", state["dead_letters"])],
+            width=width,
+        ))
+    panel.extend(_wrap_counts_panel(
+        _label("CONTENT"),
+        [
+            ("Users", state["total_users"]), ("Message boards", state["total_boards"]),
+            ("Posts", state["total_posts"]), ("File areas", state["total_areas"]), ("Files", state["total_files"]),
+        ],
+        width=width,
+    ))
+    pending_total = state["pending_users"] + state["pending_posts"] + state["pending_files"]
+    panel.extend(_wrap_counts_panel(
+        _label("ATTENTION") + counts_row([("Moderation", pending_total)]) + " pending  ",
+        [("Users", state["pending_users"]), ("Posts", state["pending_posts"]), ("Files", state["pending_files"])],
+        width=width,
+    ))
+    backup_at, _backup_path = state["backup"]
+    update_at, update_outcome = state["update"]
+    label_width = 11
+
+    def _fit(text: str, used: int) -> str:
+        return cut_to_width(text, max(1, width - used)) if unicode_style else text
+
+    panel.append(
+        _label("BACKUP")
+        + (colored(sanitize_text(_fit(backup_at, label_width)), fg_color=VALUE_COLOR) if backup_at
+           else colored("never", fg_color=WARNING_COLOR))
+    )
+    panel.append(
+        _label("UPDATES")
+        + (colored(sanitize_text(_fit(update_outcome or update_at or "completed", label_width)), fg_color=VALUE_COLOR)
+           if update_at else colored("never checked", fg_color=WARNING_COLOR))
+    )
+    if link_context is not None:
+        panel.extend(_wrap_counts_panel(
+            _label("LINK LOG"),
+            [("Recent errors", state["recent_errors"]), ("warnings", state["recent_warnings"])],
+            width=width,
+        ))
+    return panel
 
 
 # -- users submenu ---------------------------------------------------------
@@ -1294,7 +1759,7 @@ async def _draw_users_menu(session: Session, *, stats: dict[str, Any]) -> None:
         MenuEntry(label=menu_key("P", "romote/demote"), brief="Change a user's level"),
         MenuEntry(label=menu_key("E", "nable/disable"), brief="Toggle account access"),
         MenuEntry(label=menu_key("D", "elete user"), brief="Permanently remove a user"),
-        MenuEntry(label=menu_key("t", "ired names", prefix="Re"), brief="Usernames held for deleted accounts"),
+        MenuEntry(label=menu_key("t", "ired names", prefix="Re"), brief="Names held for deleted accounts"),
         MenuEntry(label=menu_key("B", "ack"), brief="Return to the SysOp console"),
     ]
     effective_desc_level, available_menu_height, desc_degraded = _degrade_description_level(
@@ -1311,7 +1776,7 @@ async def _draw_users_menu(session: Session, *, stats: dict[str, Any]) -> None:
             degraded=desc_degraded,
         )
     )
-    await session.write("Choice: ")
+    await _choice_prompt(session)
 
 
 # -- system submenu ----------------------------------------------------------
@@ -1498,7 +1963,7 @@ async def _operations_menu(
         # Link -- so on any running node the log is worth reading.
         if diagnostics_available:
             options.extend([
-                MenuEntry(label=menu_key("D", "iagnostics"), brief="Recent Link and MRC diagnostic events"),
+                MenuEntry(label=menu_key("D", "iagnostics"), brief="Recent Link and MRC diagnostics"),
                 MenuEntry(label=menu_key("F", "ollow log"), brief="Live-tail the diagnostic log"),
             ])
         if link_context is not None:
@@ -1518,7 +1983,7 @@ async def _operations_menu(
                 height=available_menu_height, degraded=desc_degraded,
             )
         )
-        await session.write("Choice: ")
+        await _choice_prompt(session)
         choice = (await session.read_key()).lower()
         if choice == "b":
             await session.write_line("")
@@ -1550,13 +2015,13 @@ async def _operations_menu(
             await _diagnostic_log_tail_screen(session, lane)
             state = await lane.run(_load_ops)
         elif choice == "r" and link_context is not None:
-            await _repair_carried_posts_screen(session, lane)
+            await _repair_carried_posts_screen(session, lane, actor)
             state = await lane.run(_load_ops)
         elif choice == "k":
             await _backup_status_screen(session, lane, actor, node_controls=node_controls)
             state = await lane.run(_load_ops)
         elif choice == "p":
-            await _prune_drafts_screen(session, lane)
+            await _prune_drafts_screen(session, lane, actor)
             state = await lane.run(_load_ops)
         elif choice == "a":
             await _audit_log_screen(session, lane, actor)
@@ -1683,7 +2148,7 @@ async def _system_menu(
             await _draw_system_menu(session, node_controls, link_context, stats=stats)
         elif choice == "r" and link_context is not None:
             await session.write_line("")
-            await _repair_carried_posts_screen(session, lane)
+            await _repair_carried_posts_screen(session, lane, actor)
             stats = await lane.run(_load_settings_stats)
             await _draw_system_menu(session, node_controls, link_context, stats=stats)
         elif choice == "d" and link_context is not None:
@@ -1763,9 +2228,14 @@ async def _draw_system_menu(
             f"{stats['trust_exceptions']} exception(s) active"
             if stats["trust_exceptions"] else "clear"
         )
+        # One label column, so the five values start under one another: each
+        # label used to be exactly as wide as its own text, which put every
+        # value at a different column and made the panel read as five
+        # sentences rather than five settings.
         node_name_label, update_label, timestamp_label, callers_label, trust_label = (
-            "Node name: ", "Update checks: ", "Timestamps shown as: ",
-            "Previous callers: ", "Trust policy: "
+            f"{label + ':':<22}" for label in (
+                "Node name", "Update checks", "Timestamps shown as", "Previous callers", "Trust policy",
+            )
         )
         update_value = f"{update_state} -- {update_summary}"
         # Code review follow-up (PR #215): unlike every other value in
@@ -1780,27 +2250,27 @@ async def _draw_system_menu(
         timestamp_value = f"{stats['timestamp_example']} ({stats['display_timezone']})"
         panel = [
             colored("CURRENT VALUES", fg_color=LABEL_COLOR, bold=True),
-            "  " + colored(node_name_label, fg_color=METADATA_COLOR)
-            + sanitize_text(_fit(stats["node_name"], 2 + len(node_name_label))),
-            "  " + colored(update_label, fg_color=METADATA_COLOR)
-            + sanitize_text(_fit(update_value, 2 + len(update_label))),
-            "  " + colored(timestamp_label, fg_color=METADATA_COLOR)
-            + sanitize_text(_fit(timestamp_value, 2 + len(timestamp_label))),
-            "  " + colored(callers_label, fg_color=METADATA_COLOR)
+            "  " + colored(node_name_label, fg_color=LABEL_COLOR)
+            + colored(sanitize_text(_fit(stats["node_name"], 2 + len(node_name_label))), fg_color=VALUE_COLOR, bold=True),
+            "  " + colored(update_label, fg_color=LABEL_COLOR)
+            + colored(sanitize_text(_fit(update_value, 2 + len(update_label))), fg_color=VALUE_COLOR),
+            "  " + colored(timestamp_label, fg_color=LABEL_COLOR)
+            + colored(sanitize_text(_fit(timestamp_value, 2 + len(timestamp_label))), fg_color=VALUE_COLOR),
+            "  " + colored(callers_label, fg_color=LABEL_COLOR)
             + colored(
                 "shown after login" if stats["previous_callers_enabled"] else "hidden",
                 fg_color=SUCCESS_COLOR if stats["previous_callers_enabled"] else MUTED_COLOR,
             ),
-            "  " + colored(trust_label, fg_color=METADATA_COLOR)
+            "  " + colored(trust_label, fg_color=LABEL_COLOR)
             + colored(_fit(trust_summary, 2 + len(trust_label)), fg_color=ERROR_COLOR if stats["trust_exceptions"] else SUCCESS_COLOR),
         ]
         await _write_panel(session, panel, unicode_style=unicode_style, header_color=header_color)
 
     option_list = [
-        MenuEntry(label=menu_key("M", "astheads & banners"), brief="Welcome/logoff/new-account banners and every masthead"),
-        MenuEntry(label=menu_key("C", "olors"), brief="Node-wide accent/header/clock branding"),
-        MenuEntry(label=menu_key("N", "ode name"), brief="The name and gradient shown in every screen's own corner"),
-        MenuEntry(label=menu_key("J", "oin NetBBS Link"), brief="Reliable-node seeds and relays, on or off"),
+        MenuEntry(label=menu_key("M", "astheads & banners"), brief="Banners and mastheads callers see"),
+        MenuEntry(label=menu_key("C", "olors"), brief="Accent, header and clock colors"),
+        MenuEntry(label=menu_key("N", "ode name"), brief="Name and gradient shown everywhere"),
+        MenuEntry(label=menu_key("J", "oin NetBBS Link"), brief="Reliable-node seeds and relays"),
         MenuEntry(label=menu_key("U", "pdate"), brief="Software update settings"),
         MenuEntry(label=menu_key("T", "imestamp format"), brief="Node-wide date/time display"),
         MenuEntry(
@@ -1820,19 +2290,19 @@ async def _draw_system_menu(
         MenuEntry(
             label=menu_key("V", "ious callers", prefix="Pre"),
             brief=(
-                "Shown after login; press to disable"
+                "Shown after login; press to hide"
                 if stats["previous_callers_enabled"]
-                else "Hidden after login; press to enable"
+                else "Hidden after login; press to show"
             ),
         ),
-        MenuEntry(label=menu_key("I", "nter-BBS chat (MRC)"), brief="Bridge chat channels to the Multi Relay Chat network"),
+        MenuEntry(label=menu_key("I", "nter-BBS chat (MRC)"), brief="Bridge channels to the MRC network"),
         MenuEntry(label=menu_key("P", "olicy trust"), brief="Federation trust policy"),
     ]
     option_list.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to the SysOp console"))
     await session.write_line(
         _menu_row(option_list, description_level, width=session.terminal_width, height=session.terminal_height)
     )
-    await session.write("Choice: ")
+    await _choice_prompt(session)
 
 
 async def _draw_node_name_screen(
@@ -1850,33 +2320,35 @@ async def _draw_node_name_screen(
         )
     )
     await session.write_line(await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width))
-    await session.write_line(colored(f"Name: {name!r}", fg_color=header_color, bold=True))
-    preview = gradient_text(name, gradient, truecolor=False) if gradient is not None else colored(name, fg_color=header_color, bold=True)
-    gradient_label = gradient if gradient is not None else "solid (no gradient)"
-    await session.write_line(
-        colored("Gradient: ", fg_color=LABEL_COLOR) + colored(gradient_label, fg_color=MUTED_COLOR) + "   " + preview
+    safe_name = sanitize_text(name)
+    preview = (
+        gradient_text(safe_name, gradient, truecolor=False) if gradient is not None
+        else colored(safe_name, fg_color=header_color, bold=True)
     )
-    await session.write_line(
-        colored(
+    panel_rows = await _write_sections(session, [
+        Section("Node name", [
+            Field("Name", name, bold=True),
+            Field("Gradient", gradient if gradient is not None else "solid (no gradient)",
+                  color=VALUE_COLOR if gradient is not None else MUTED_COLOR),
+            Field("Shown as", preview, styled=True),
+        ]),
+        Section("Where it appears", [Note(
             f"The name is shown in the upper-left corner of every screen, and to any door as its own "
             f"drop-file 'node_name' field (always plain there, never with gradient codes). Up to "
-            f"{MAX_NODE_DISPLAY_NAME_LENGTH} characters.",
-            fg_color=MUTED_COLOR,
-        )
-    )
+            f"{MAX_NODE_DISPLAY_NAME_LENGTH} characters."
+        )]),
+    ], unicode_style=unicode_style)
     await session.write_line(
-        "\r\n" + _menu_row(
+        "\r\n" + _fitted_menu(
             [
                 MenuEntry(label=menu_key("N", "ame"), brief="Rename the node"),
                 MenuEntry(label=menu_key("G", "radient"), brief="Recolor the node name"),
                 MenuEntry(label=menu_key("B", "ack"), brief="Return to Settings"),
             ],
-            description_level,
-            width=session.terminal_width,
-            height=session.terminal_height,
+            description_level, session=session, used_rows=panel_rows + 4,
         )
     )
-    await session.write("Choice: ")
+    await _choice_prompt(session)
 
 
 async def _link_participation_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
@@ -1889,29 +2361,42 @@ async def _link_participation_screen(session: Session, lane: DatabaseLane, actor
     (unlike `_link_status_screen`, which needs a live `link_context`),
     since changing this is exactly how a SysOp turns Link on from a
     silent configuration. Takes effect at the next sync pass for the
-    roster and at the next startup for enablement itself."""
-    description_level = await lane.run(menu_description_level, actor)
-    unicode_style = await lane.run(unicode_style_enabled, actor)
-    collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
-    redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
-    header_color = await lane.run(effective_header_color_256)
+    roster and at the next startup for enablement itself.
+
+    The outcome of a keypress is carried into the redraw it causes
+    (`show_detail`'s `message`): written above it, the redraw's own clear
+    wiped it before it could be read."""
+    page = 0
+    message: str | None = None
     while True:
-        participation = await _draw_link_participation_screen(
-            session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color
+        chrome = await _load_chrome(lane, actor)
+        sections, participation = await _link_participation_sections(lane)
+        actions = [_BACK_ACTION]
+        if participation is not Participation.DECLINED:
+            actions.insert(0, ("d", menu_key("D", "ecline")))
+        if participation is not Participation.ACCEPTED:
+            actions.insert(0, ("a", menu_key("A", "ccept")))
+        choice, page = await show_detail(
+            session,
+            title=_detail_title(
+                session, chrome, "Join NetBBS Link", breadcrumb=("Settings",),
+                subtitle="Whether this node uses the project's reliable nodes as seeds and relays.",
+            ),
+            preamble=[await _load_condensed_status_line(
+                lane, unicode_style=chrome.unicode_style, terminal_width=session.terminal_width
+            )],
+            sections=sections, actions=actions, page=page, message=message,
+            redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
         )
-        choice = (await session.read_key()).lower()
+        message = None
         if choice == "b":
-            await session.write_line("")
             return
-        elif choice == "a" and participation is not Participation.ACCEPTED:
-            await session.write_line("")
+        if choice == "a":
             if await lane.run(is_node_display_name_placeholder):
-                await session.write_line(
-                    colored(
-                        "Set a node name first (Settings > Node name) -- a node can't join NetBBS "
-                        "Link under the placeholder name.",
-                        fg_color=ERROR_COLOR,
-                    )
+                message = colored(
+                    "Set a node name first (Settings > Node name) -- a node can't join NetBBS "
+                    "Link under the placeholder name.",
+                    fg_color=ERROR_COLOR,
                 )
                 continue
 
@@ -1920,24 +2405,17 @@ async def _link_participation_screen(session: Session, lane: DatabaseLane, actor
                 record_action(db, actor=actor, action="set_link_participation", detail="accepted")
 
             await lane.run(_accept)
-            await session.write_line("Reliable-node participation accepted.")
-        elif choice == "d" and participation is not Participation.DECLINED:
-            await session.write_line("")
-
+            message = colored("Reliable-node participation accepted.", fg_color=SUCCESS_COLOR)
+        elif choice == "d":
             def _decline(db: Database) -> None:
                 set_participation(db, Participation.DECLINED)
                 record_action(db, actor=actor, action="set_link_participation", detail="declined")
 
             await lane.run(_decline)
-            await session.write_line("Reliable-node participation declined.")
-        else:
-            await session.write(reject_unhandled_key(choice))
+            message = colored("Reliable-node participation declined.", fg_color=SUCCESS_COLOR)
 
 
-async def _draw_link_participation_screen(
-    session: Session, lane: DatabaseLane, description_level: str, redraw_in_place: bool,
-    unicode_style: bool, collapsed: bool, header_color: int | tuple[int, int, int],
-) -> Participation:
+async def _link_participation_sections(lane: DatabaseLane) -> tuple[list[Section], Participation]:
     def _load(db: Database) -> tuple[Participation, bool | None | str, list, str, bool]:
         return (
             get_participation(db), get_configured_link_enabled(db), effective_reliable_nodes(db),
@@ -1945,19 +2423,6 @@ async def _draw_link_participation_screen(
         )
 
     participation, configured, reliable, source, placeholder = await lane.run(_load)
-    await session.write_line(
-        "\r\n" + screen_title(
-            "Join NetBBS Link",
-            breadcrumb=(session.node_display_name,), width=session.terminal_width, clear=redraw_in_place,
-            unicode_style=unicode_style, collapsed=collapsed, header_color=header_color,
-            node_name_gradient=session.node_name_gradient,
-        )
-    )
-    await session.write_line(await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width))
-    await session.write_line(
-        colored("Participation: ", fg_color=LABEL_COLOR)
-        + badge(participation.value.upper(), tone="success" if participation is Participation.ACCEPTED else "neutral")
-    )
     if configured is True:
         config_text = "[link] enabled = true -- Link runs regardless of this answer"
     elif configured is False:
@@ -1966,36 +2431,35 @@ async def _draw_link_participation_screen(
         config_text = "[link] enabled not set -- this answer decides (applies at the next startup)"
     else:
         config_text = "unknown until this node has started once on this version"
-    await session.write_line(colored("Configuration: ", fg_color=LABEL_COLOR) + colored(config_text, fg_color=METADATA_COLOR))
-    await session.write_line(
-        colored("Reliable nodes: ", fg_color=LABEL_COLOR)
-        + colored(f"{len(reliable)} ({source} list)", fg_color=METADATA_COLOR)
-    )
-    for entry in reliable:
-        await session.write_line(f"  {sanitize_text(entry.name)}  {sanitize_text(entry.url)}")
+    decision: list[Field | Note | Table] = [
+        Field(
+            "Participation",
+            badge(participation.value.upper(), tone="success" if participation is Participation.ACCEPTED else "neutral"),
+            styled=True,
+        ),
+        Field("Configuration", config_text, color=METADATA_COLOR),
+    ]
     if placeholder:
-        await session.write_line(
-            colored("This node still has the placeholder name -- set one under Node name before accepting.", fg_color=ERROR_COLOR)
-        )
-    _write_wrapped = wrap_to_width(
-        "Accepting dials these nodes as seeds after your own configured ones and, for a node that "
-        "can't be reached from the internet directly, uses them as relays. It hands them no say over "
-        "your content and is not a trust decision about anyone (design doc §16, issue #219).",
-        session.terminal_width,
-    )
-    for line in _write_wrapped:
-        await session.write_line(colored(line, fg_color=MUTED_COLOR))
-    option_list = []
-    if participation is not Participation.ACCEPTED:
-        option_list.append(MenuEntry(label=menu_key("A", "ccept"), brief="Use the reliable nodes"))
-    if participation is not Participation.DECLINED:
-        option_list.append(MenuEntry(label=menu_key("D", "ecline"), brief="Do not use them"))
-    option_list.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to Settings"))
-    await session.write_line(
-        _menu_row(option_list, description_level, width=session.terminal_width, height=session.terminal_height)
-    )
-    await session.write("Choice: ")
-    return participation
+        decision.append(Note(
+            "This node still has the placeholder name -- set one under Node name before accepting.",
+            color=ERROR_COLOR,
+        ))
+    roster: list[Field | Note | Table] = [Field("Reliable nodes", f"{len(reliable)} ({source} list)")]
+    if reliable:
+        roster.append(Table(
+            ("Name", "Address"),
+            [[(entry.name, ACCENT_COLOR), (entry.url, METADATA_COLOR)] for entry in reliable],
+            flex=1,
+        ))
+    return [
+        Section("This node's answer", decision),
+        Section("Who it would dial", roster),
+        Section("What accepting means", [Note(
+            "Accepting dials these nodes as seeds after your own configured ones and, for a node that "
+            "can't be reached from the internet directly, uses them as relays. It hands them no say over "
+            "your content and is not a trust decision about anyone (design doc §16, issue #219)."
+        )]),
+    ], participation
 
 
 async def _node_name_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
@@ -2155,7 +2619,7 @@ async def _guest_access_screen(session: Session, lane: DatabaseLane, actor: User
             # pressing Enter *is* the clear -- no sentinel, no word a
             # SysOp cannot type.
             prompt=text_field("guest_username"),
-            brief="Account that signs in without a password",
+            brief="Account that needs no password",
             help=(
                 "An existing account callers may sign in as without a password. It stays an "
                 "ordinary account: its level and per-object permissions decide what a guest can "
@@ -2189,7 +2653,7 @@ async def _guest_access_screen(session: Session, lane: DatabaseLane, actor: User
         header_color=await lane.run(effective_header_color_256),
     )
     if result is not None:
-        await session.write_line("Guest access settings saved.")
+        _announce_line(session, "Guest access settings saved.")
 
 
 async def _rename_node_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
@@ -2197,7 +2661,7 @@ async def _rename_node_screen(session: Session, lane: DatabaseLane, actor: User)
     await write_prompt(session, f"New name [{current}] (blank to leave unchanged): ")
     new_name = (await session.read_line()).strip()
     if not new_name:
-        await session.write_line("No change.")
+        _announce_line(session, "No change.")
         return
 
     def _apply(db: Database) -> None:
@@ -2207,9 +2671,9 @@ async def _rename_node_screen(session: Session, lane: DatabaseLane, actor: User)
     try:
         await lane.run(_apply)
     except ValueError as exc:
-        await session.write_line(colored(str(exc), fg_color=ERROR_COLOR))
+        _announce_line(session, colored(str(exc), fg_color=ERROR_COLOR))
         return
-    await session.write_line(f"Node name set to {new_name!r}.")
+    _announce_line(session, f"Node name set to {new_name!r}.")
 
 
 async def _set_node_name_gradient_screen(
@@ -2237,7 +2701,7 @@ async def _set_node_name_gradient_screen(
     await session.write_line(
         action_bar([menu_key(f"0-{len(choices) - 1}", ""), menu_key("B", "ack")], width=session.terminal_width)
     )
-    await write_prompt(session, "Choice: ")
+    await _choice_prompt(session)
     while True:
         raw = (await session.read_key()).lower()
         if raw == "b":
@@ -2252,7 +2716,7 @@ async def _set_node_name_gradient_screen(
         await session.write(reject_unhandled_key(raw))
 
     if chosen == current:
-        await session.write_line("Already set to that -- no change.")
+        _announce_line(session, "Already set to that -- no change.")
         return
 
     label = "solid" if chosen is None else chosen
@@ -2263,7 +2727,7 @@ async def _set_node_name_gradient_screen(
         record_action(db, actor=actor, action=action, detail=f"{current!r} -> {chosen!r}")
 
     await lane.run(_apply)
-    await session.write_line(f"Node name gradient set to {label!r}.")
+    _announce_line(session, f"Node name gradient set to {label!r}.")
 
 
 # -- trust policy (Phase 4, issue #129) -------------------------------------
@@ -2285,7 +2749,7 @@ async def _trust_menu(
             "\r\n"
             + screen_title(
                 "Policy trust",
-                breadcrumb=(session.node_display_name, "System"),
+                breadcrumb=(session.node_display_name, "Settings"),
                 subtitle="Inspect policy, explain restrictions, and manage trusted authorities.",
                 width=session.terminal_width,
                 clear=redraw_in_place,
@@ -2300,8 +2764,8 @@ async def _trust_menu(
             MenuEntry(label=menu_key("A", "nchors"), brief="Root trust anchor keys"),
             MenuEntry(label=menu_key("R", "eporters"), brief="Who can report abuse remotely"),
             MenuEntry(label=menu_key("I", "dentity authorities"), brief="Attestation authority list"),
-            MenuEntry(label=menu_key("P", "ublished identity"), brief="What this node asserts about its own users"),
-            MenuEntry(label=menu_key("V", "ouches"), brief="Identities this node vouches for to others"),
+            MenuEntry(label=menu_key("P", "ublished identity"), brief="What it asserts about its users"),
+            MenuEntry(label=menu_key("V", "ouches"), brief="Identities this node vouches for"),
             MenuEntry(label=menu_key("E", "xceptions"), brief="Sole-authority deviations"),
             MenuEntry(label=menu_key("H", "istory"), brief="Trust config change log"),
             MenuEntry(label=menu_key("B", "ack"), brief="Return to Settings"),
@@ -2319,7 +2783,7 @@ async def _trust_menu(
                     bold=True,
                 )
             )
-        await session.write("Choice: ")
+        await _choice_prompt(session)
         choice = (await session.read_key()).lower()
         if choice == "b":
             await session.write_line("")
@@ -2341,7 +2805,7 @@ async def _trust_menu(
         elif choice == "e":
             await _trust_exceptions_screen(session, lane, actor)
         elif choice == "h":
-            await _trust_config_history_screen(session, lane)
+            await _trust_config_history_screen(session, lane, actor)
         else:
             await session.write(reject_unhandled_key(choice))
 
@@ -2433,25 +2897,31 @@ def _own_fingerprint(db: Database, link_context: LinkContext | None) -> str | No
     return get_cached_node_fingerprint(db)
 
 
-def _vouch_status_line(intent, *, unicode_style: bool) -> str:
-    """One line saying where a standing vouch intent is, in words a SysOp can act on."""
-    badge_text = status_badge(intent.status, tone=_VOUCH_STATUS_TONE[intent.status], unicode_style=unicode_style)
+def _vouch_status_detail(intent) -> str:
+    """Where a standing vouch intent is, in words a SysOp can act on."""
     if intent.status == "published":
-        detail = f"signed and served until {sanitize_text((intent.expires_at or '')[:10])}"
-    elif intent.status == "pending":
-        detail = "signed on the next Link sync pass"
-    elif intent.status == "refused":
-        detail = "a node cannot vouch for itself or its own users; withdraw this"
-    else:
-        detail = "this node has the identity quarantined or blocked, so it is not vouching for it"
-    return f"{badge_text} -- {detail}"
+        return f"signed and served until {sanitize_text((intent.expires_at or '')[:10])}"
+    if intent.status == "pending":
+        return "signed on the next Link sync pass"
+    if intent.status == "refused":
+        return "a node cannot vouch for itself or its own users; withdraw this"
+    return "this node has the identity quarantined or blocked, so it is not vouching for it"
+
+
+def _vouch_status_line(intent, *, unicode_style: bool) -> str:
+    """`_vouch_status_detail` behind the status's own badge, as one line."""
+    badge_text = status_badge(intent.status, tone=_VOUCH_STATUS_TONE[intent.status], unicode_style=unicode_style)
+    return f"{badge_text} -- {_vouch_status_detail(intent)}"
 
 
 async def _reconcile_vouches_now(
     session: Session, lane: DatabaseLane, link_context: LinkContext | None, subject: TrustSubject,
-    *, done: str,
+    *, done: str, listing: "_Listing | None" = None,
 ) -> None:
     """Run the sync pass's own reconcile, if this console can sign; say which happened.
+
+    With a `listing`, the outcome is carried into that listing's next draw
+    rather than written here, where the redraw would wipe it.
 
     The *same* `reconcile_issued_vouches` the sync loop runs, not a signing
     path of this screen's own: two places that each decide when a signed
@@ -2459,10 +2929,14 @@ async def _reconcile_vouches_now(
     `python -m netbbs.admin` console has no node identity, so there the
     intent simply waits for Link.
     """
+    async def _say(text: str, color: int) -> None:
+        if listing is not None:
+            listing.say(text, color=color)
+        else:
+            await session.write_line(colored(text, fg_color=color))
+
     if link_context is None:
-        await session.write_line(
-            colored(f"{done} Link is not running here, so it is signed when Link next runs.", fg_color=SUCCESS_COLOR)
-        )
+        await _say(f"{done} Link is not running here, so it is signed when Link next runs.", SUCCESS_COLOR)
         return
     try:
         changes = await lane.run(
@@ -2471,9 +2945,7 @@ async def _reconcile_vouches_now(
             home_node_fingerprint=link_context.node_identity.fingerprint,
         )
     except (ValueError, sqlite3.Error) as exc:
-        await session.write_line(
-            colored(f"{done} It was not signed ({exc}); the next Link sync pass retries it.", fg_color=WARNING_COLOR)
-        )
+        await _say(f"{done} It was not signed ({exc}); the next Link sync pass retries it.", WARNING_COLOR)
         return
     if not any(change.subject == subject for change in changes):
         # About *this* identity, not the pass as a whole: an unrelated renewal
@@ -2481,11 +2953,9 @@ async def _reconcile_vouches_now(
         # withdrawing an intent that was never signed, or recording again the
         # reason an already published vouch carries -- and saying "signed"
         # would claim otherwise.
-        await session.write_line(colored(f"{done} Nothing needed signing.", fg_color=SUCCESS_COLOR))
+        await _say(f"{done} Nothing needed signing.", SUCCESS_COLOR)
         return
-    await session.write_line(
-        colored(f"{done} Signed; subscribers pick it up on their next pull.", fg_color=SUCCESS_COLOR)
-    )
+    await _say(f"{done} Signed; subscribers pick it up on their next pull.", SUCCESS_COLOR)
 
 
 async def _vouch_screen(
@@ -2499,49 +2969,61 @@ async def _vouch_screen(
     where a blank line cancels -- and then the one yes/no this project allows,
     the last keystroke before something is published to other nodes.
     """
-    unicode_style = await lane.run(unicode_style_enabled, actor)
-    header_color = await lane.run(effective_header_color_256)
+    listing = _Listing()
     while True:
+        chrome = await _load_chrome(lane, actor)
         own = await lane.run(_own_fingerprint, link_context)
         intent = await lane.run(get_vouch_intent, subject, home_node_fingerprint=own)
-        await session.write_line(colored(f"\r\nVouch for {sanitize_text(name)}", fg_color=header_color, bold=True))
-        await session.write_line(
-            colored(
-                "A vouch is a signed statement that you know this identity and stand behind it. "
-                "It is served to nodes that have named this node a trusted reporter, where it "
-                "counts toward ending the identity's probation. It changes nothing on this node: "
-                "to establish an identity here, use [O]verride on the previous screen.",
-                fg_color=MUTED_COLOR,
-            )
-        )
+        if intent is None:
+            standing: list[Field | Note | Table] = [Field(
+                "This node", "does not vouch for this identity", color=MUTED_COLOR,
+            )]
+        else:
+            standing = [
+                Field(
+                    "This node",
+                    status_badge(intent.status, tone=_VOUCH_STATUS_TONE[intent.status], unicode_style=chrome.unicode_style),
+                    styled=True, note=_vouch_status_detail(intent),
+                ),
+                Field("Published reason", intent.explanation),
+            ]
         travel = await _how_vouches_leave_this_node(lane, link_context)
         if travel is not None:
-            await session.write_line(colored(travel[0], fg_color=travel[1]))
-        if intent is None:
-            await session.write_line("This node does not vouch for this identity.")
-        else:
-            await session.write_line(_vouch_status_line(intent, unicode_style=unicode_style))
-            await session.write_line(
-                colored(f"Published reason: {sanitize_text(intent.explanation)}", fg_color=METADATA_COLOR)
-            )
-        issue_label = menu_key("I", "ssue") if intent is None else menu_key("I", "ssue with a new reason")
-        bar = [issue_label] + ([menu_key("W", "ithdraw")] if intent is not None else []) + [menu_key("B", "ack")]
-        await write_prompt(session, action_bar(bar, width=session.terminal_width) + ": ")
-        choice = (await session.read_key()).lower()
-        await session.write_line("")
+            standing.append(Note(travel[0], color=travel[1]))
+        actions = [("i", menu_key("I", "ssue") if intent is None else menu_key("I", "ssue with a new reason"))]
+        if intent is not None:
+            actions.append(("w", menu_key("W", "ithdraw")))
+        actions.append(_BACK_ACTION)
+        choice, listing.page = await show_detail(
+            session,
+            title=_detail_title(
+                session, chrome, f"Vouch for {sanitize_text(name)}",
+                breadcrumb=("Settings", "Policy trust", "Subjects"),
+            ),
+            sections=[
+                Section("Where it stands", standing),
+                Section("What a vouch is", [Note(
+                    "A vouch is a signed statement that you know this identity and stand behind it. "
+                    "It is served to nodes that have named this node a trusted reporter, where it "
+                    "counts toward ending the identity's probation. It changes nothing on this node: "
+                    "to establish an identity here, use [O]verride on the previous screen."
+                )]),
+            ],
+            actions=actions, page=listing.page, message=listing.take_message(),
+            redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+        )
         if choice == "b":
             return
-        if choice == "w" and intent is not None:
+        if choice == "w":
             if not await prompt_yes_no(
                 session, f"Stop vouching for {sanitize_text(name)}? This publishes a signed withdrawal.",
                 default=False,
             ):
                 continue
             await lane.run(withdraw_vouch_intent, subject, actor_user_id=actor.id)
-            await _reconcile_vouches_now(session, lane, link_context, subject, done="Vouch withdrawn.")
-            continue
-        if choice != "i":
-            await session.write(reject_unhandled_key(choice))
+            await _reconcile_vouches_now(
+                session, lane, link_context, subject, done="Vouch withdrawn.", listing=listing,
+            )
             continue
         await write_prompt(
             session,
@@ -2550,7 +3032,7 @@ async def _vouch_screen(
         )
         reason = (await session.read_line()).strip()
         if not reason:
-            await session.write_line(colored("Cancelled -- nothing recorded.", fg_color=MUTED_COLOR))
+            listing.say("Cancelled -- nothing recorded.", color=MUTED_COLOR)
             continue
         if not await prompt_yes_no(
             session,
@@ -2564,9 +3046,11 @@ async def _vouch_screen(
                 own_node_fingerprint=own,
             )
         except VouchIntentError as exc:
-            await session.write_line(colored(f"Not recorded: {exc}", fg_color=ERROR_COLOR))
+            listing.say(f"Not recorded: {exc}", error=True)
             continue
-        await _reconcile_vouches_now(session, lane, link_context, subject, done="Vouch recorded.")
+        await _reconcile_vouches_now(
+            session, lane, link_context, subject, done="Vouch recorded.", listing=listing,
+        )
 
 
 async def _published_vouches_screen(
@@ -2593,43 +3077,31 @@ async def _published_vouches_screen(
         label = (await lane.run(identity_for_fingerprint, intent.subject.node_fingerprint)).label
         return _trust_subject_name(intent.subject, label)
 
+    listing = _Listing()
     while True:
         intents = await _load()
         names = {intent.subject.subject_id: await _name(intent) for intent in intents}
-        await session.write_line(
-            colored("\r\nIdentities this node vouches for:", fg_color=header_color, bold=True)
-        )
-        for intent in intents:
-            await session.write_line(
-                f"{sanitize_text(names[intent.subject.subject_id])} "
-                + _vouch_status_line(intent, unicode_style=unicode_style)
-            )
-            await session.write_line(colored(f"  {sanitize_text(intent.explanation)}", fg_color=METADATA_COLOR))
-        if not intents:
-            await session.write_line(
-                colored(
-                    "None. Open an identity under [S]ubjects and choose [V]ouch to issue one.",
-                    fg_color=MUTED_COLOR,
-                )
-            )
+        rows: list[Field | Note | Table] = [Table(
+            ("Identity", "Status", "Where it stands, and why it was issued"),
+            [
+                [
+                    (names[intent.subject.subject_id], ACCENT_COLOR),
+                    (intent.status, _TONE_COLORS[_VOUCH_STATUS_TONE[intent.status]]),
+                    (f"{_vouch_status_detail(intent)} -- {intent.explanation}", METADATA_COLOR),
+                ]
+                for intent in intents
+            ],
+            flex=2,
+        )] if intents else [Note("None. Open an identity under [S]ubjects and choose [V]ouch to issue one.")]
         if link_context is None:
-            await session.write_line(
-                colored(
-                    "Link is not running here, so a change is signed when it next is.",
-                    fg_color=MUTED_COLOR,
-                )
-            )
-        await write_prompt(
-            session,
-            action_bar([menu_key("W", "ithdraw"), menu_key("B", "ack")], width=session.terminal_width) + ": ",
+            rows.append(Note("Link is not running here, so a change is signed when it next is."))
+        choice = await _trust_list_choice(
+            session, lane, actor, listing, title="Vouches",
+            subtitle="Identities this node vouches for to the nodes that subscribe to it.",
+            rows=rows, options=["w"] if intents else [],
         )
-        choice = (await session.read_key()).lower()
-        await session.write_line("")
         if choice == "b":
             return
-        if choice != "w":
-            await session.write(reject_unhandled_key(choice))
-            continue
         selected = await pick_item(
             session, intents,
             # `refresh` re-queries, so an intent recorded from another session
@@ -2655,7 +3127,9 @@ async def _published_vouches_screen(
         ):
             continue
         await lane.run(withdraw_vouch_intent, selected.subject, actor_user_id=actor.id)
-        await _reconcile_vouches_now(session, lane, link_context, selected.subject, done="Vouch withdrawn.")
+        await _reconcile_vouches_now(
+            session, lane, link_context, selected.subject, done="Vouch withdrawn.", listing=listing,
+        )
 
 
 async def _trust_subjects_screen(
@@ -2696,122 +3170,107 @@ async def _trust_subjects_screen(
     )
     if selected is None:
         return
-    description_level = await lane.run(menu_description_level, actor)
+    subject_name = _trust_subject_name(selected, labels.get(selected.node_fingerprint))
+    listing = _Listing()
     while True:
+        chrome = await _load_chrome(lane, actor)
         states = [
             await lane.run(get_effective_trust_state, selected, dimension)
             for dimension in TrustDimension
         ]
-        await session.write_line(
-            colored(
-                f"\r\n{sanitize_text(_trust_subject_name(selected, labels.get(selected.node_fingerprint)))}",
-                fg_color=await lane.run(effective_header_color_256), bold=True,
-            )
-        )
-        await session.write_line(
-            colored(f"Technical identity: {selected.node_fingerprint}", fg_color=METADATA_COLOR)
-        )
-        await _warn_about_changed_node_identity(
-            session, lane, selected.node_fingerprint, role="This subject's"
-        )
+        identity: list[Field | Note | Table] = [
+            Field("Subject", subject_name, bold=True),
+            Field("Kind", selected.kind),
+            Field("Technical identity", selected.node_fingerprint, color=METADATA_COLOR),
+        ]
+        identity_notice = await lane.run(latest_identity_observation, selected.node_fingerprint)
+        if identity_notice is not None and identity_notice.severity == "security":
+            identity.append(Note(
+                "Caution: this familiar node name now has a different cryptographic identity.",
+                color=ALERT_COLOR,
+            ))
         carrier = (
             await lane.run(introduced_by, selected.node_fingerprint) if selected.kind == "node" else None
         )
         if carrier is not None:
             carrier_label = (await lane.run(identity_for_fingerprint, carrier)).label
-            await session.write_line(
-                colored(
-                    f"This node has never exchanged a hello with that one. Its identity was learned "
-                    f"from {sanitize_text(carrier_label)}, and verifies on its own. It stays on "
-                    "probation, and its content is withheld, until you set both its identity "
-                    "integrity and its resource behavior to established with [O]verride.",
-                    fg_color=MUTED_COLOR,
-                )
+            identity.append(Note(
+                f"This node has never exchanged a hello with that one. Its identity was learned "
+                f"from {carrier_label}, and verifies on its own. It stays on "
+                "probation, and its content is withheld, until you set both its identity "
+                "integrity and its resource behavior to established with [O]verride."
+            ))
+        sections = [Section("Identity", identity)]
+
+        # One row per dimension: the state as its badge, the reason code beside
+        # it, and the stored explanation as readable pairs beneath -- it used
+        # to be the raw JSON on a line of its own under each.
+        sections.append(Section("Trust state, by dimension", [
+            Field(
+                state.dimension.value,
+                status_badge(state.state.value, tone=_TRUST_STATE_TONE[state.state], unicode_style=chrome.unicode_style)
+                + colored(f"  ({sanitize_text(state.reason_code)})", fg_color=METADATA_COLOR),
+                styled=True, note=_audit_details_text(state.explanation) or None,
             )
-        for state in states:
-            await session.write_line(
-                f"{state.dimension.value}: {status_badge(state.state.value, tone=_TRUST_STATE_TONE[state.state], unicode_style=unicode_style)} ({state.reason_code})"
-            )
-            await session.write_line(
-                colored(
-                    "  " + json.dumps(state.explanation, sort_keys=True, ensure_ascii=True),
-                    fg_color=METADATA_COLOR,
-                )
-            )
+            for state in states
+        ]))
+
         own_fingerprint = await lane.run(_own_fingerprint, link_context)
         vouch_intent = await lane.run(get_vouch_intent, selected, home_node_fingerprint=own_fingerprint)
         if vouch_intent is not None:
-            await session.write_line(
-                "this node vouches for it: " + _vouch_status_line(vouch_intent, unicode_style=unicode_style)
-            )
+            sections.append(Section("This node's vouch", [Field(
+                "Vouches for it",
+                status_badge(
+                    vouch_intent.status, tone=_VOUCH_STATUS_TONE[vouch_intent.status],
+                    unicode_style=chrome.unicode_style,
+                ),
+                styled=True, note=_vouch_status_detail(vouch_intent),
+            )]))
         if selected.kind == "user":
+            attestations = []
             for attribute in ("age", "name"):
-                attestation_state = await lane.run(
-                    get_remote_attestation_state, selected, attribute
-                )
+                attestation_state = await lane.run(get_remote_attestation_state, selected, attribute)
                 accepted_badge = (
-                    status_badge("accepted", tone="success", unicode_style=unicode_style)
+                    status_badge("accepted", tone="success", unicode_style=chrome.unicode_style)
                     if attestation_state.accepted
-                    else status_badge("not accepted", tone="error", unicode_style=unicode_style)
+                    else status_badge("not accepted", tone="error", unicode_style=chrome.unicode_style)
                 )
-                await session.write_line(
-                    f"remote {attribute} attestation: {accepted_badge} "
-                    f"({attestation_state.reason_code})"
-                )
-                await session.write_line(
-                    colored(
-                        "  " + json.dumps(
-                            attestation_state.explanation,
-                            sort_keys=True,
-                            ensure_ascii=True,
-                        ),
-                        fg_color=METADATA_COLOR,
-                    )
-                )
-        await session.write_line(
-            _menu_row(
-                [
-                    MenuEntry(label=menu_key("O", "verride"), brief="Force a trust dimension's state"),
-                    MenuEntry(label=menu_key("C", "lear override"), brief="Remove a forced state"),
-                    *(
-                        [MenuEntry(
-                            label=menu_key("I", "dentity attestation override"),
-                            brief="Force age/name attestation state",
-                        )]
-                        if selected.kind == "user" else []
-                    ),
-                    MenuEntry(label=menu_key("V", "ouch"), brief="Vouch for it to other nodes"),
-                    MenuEntry(label=menu_key("H", "istory"), brief="This subject's change log"),
-                    MenuEntry(label=menu_key("B", "ack"), brief="Return to the subject list"),
-                ],
-                description_level,
-                width=session.terminal_width,
-                height=session.terminal_height,
-            )
+                attestations.append(Field(
+                    f"Remote {attribute}",
+                    accepted_badge + colored(f"  ({sanitize_text(attestation_state.reason_code)})", fg_color=METADATA_COLOR),
+                    styled=True, note=_audit_details_text(attestation_state.explanation) or None,
+                ))
+            sections.append(Section("Remote identity attestations", attestations))
+
+        actions = [
+            ("o", menu_key("O", "verride")),
+            ("c", menu_key("C", "lear override")),
+        ]
+        if selected.kind == "user":
+            actions.append(("i", menu_key("I", "dentity attestation override")))
+        actions.extend([("v", menu_key("V", "ouch")), ("h", menu_key("H", "istory")), _BACK_ACTION])
+        choice, listing.page = await show_detail(
+            session,
+            title=_detail_title(
+                session, chrome, sanitize_text(subject_name), breadcrumb=("Settings", "Policy trust", "Subjects"),
+            ),
+            sections=sections, actions=actions, page=listing.page, message=listing.take_message(),
+            redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
         )
-        await session.write("Choice: ")
-        choice = (await session.read_key()).lower()
         if choice == "b":
-            await session.write_line("")
             return
         if choice == "o":
-            await _set_trust_override_screen(session, lane, actor, selected)
+            await _set_trust_override_screen(session, lane, actor, selected, listing)
             _retry_deferred_events(link_context, selected)
         elif choice == "c":
-            await _clear_trust_override_screen(session, lane, actor, selected)
+            await _clear_trust_override_screen(session, lane, actor, selected, listing)
             _retry_deferred_events(link_context, selected)
         elif choice == "h":
-            await _trust_decision_history_screen(session, lane, selected)
+            await _trust_decision_history_screen(session, lane, actor, selected)
         elif choice == "v":
-            await _vouch_screen(
-                session, lane, actor, selected,
-                _trust_subject_name(selected, labels.get(selected.node_fingerprint)),
-                link_context=link_context,
-            )
-        elif choice == "i" and selected.kind == "user":
-            await _remote_attestation_override_screen(session, lane, actor, selected)
-        else:
-            await session.write(reject_unhandled_key(choice))
+            await _vouch_screen(session, lane, actor, selected, subject_name, link_context=link_context)
+        elif choice == "i":
+            await _remote_attestation_override_screen(session, lane, actor, selected, listing)
 
 
 async def _pick_trust_dimension(session: Session) -> TrustDimension | None:
@@ -2827,7 +3286,7 @@ async def _pick_trust_dimension(session: Session) -> TrustDimension | None:
             width=session.terminal_width,
         )
     )
-    await session.write("Choice: ")
+    await _choice_prompt(session)
     choice = (await session.read_key()).lower()
     return {
         "i": TrustDimension.IDENTITY_INTEGRITY,
@@ -2968,26 +3427,80 @@ async def _trust_editor(
     )
 
 
-async def _trust_list_choice(session: Session, options: list[str]) -> str:
-    """The listing screens' own action bar (kept in its established
-    `write_prompt(action_bar(...) + ": ")` form): returns the chosen
-    lowercase key, re-prompting on anything not offered."""
-    keys = {"b"} | {o for o in options}
-    labels = {"a": menu_key("A", "dd/update"), "r": menu_key("R", "emove"), "b": menu_key("B", "ack")}
-    while True:
-        await write_prompt(
-            session,
-            f"{action_bar([labels[k] for k in ('a', 'r', 'b') if k in keys], width=session.terminal_width)}: "
-        )
-        choice = (await session.read_key()).lower()
-        if choice in keys:
-            await session.write_line("")
-            return choice
-        await session.write(reject_unhandled_key(choice))
+# A `status_badge` tone as the colour of plain text, for a table cell.
+_TONE_COLORS = {
+    "neutral": METADATA_COLOR, "success": SUCCESS_COLOR, "warning": WARNING_COLOR, "error": ERROR_COLOR,
+}
+
+
+class _Listing:
+    """What a listing screen carries from one redraw to the next: the page it
+    was on, and the one result line of whatever the SysOp just did.
+
+    The result used to be written straight to the session and the listing
+    redrawn under it -- and with redraw-in-place on, that redraw's clear wiped
+    the line before it could be read. `say` holds it instead, and the next
+    draw shows it above the action bar."""
+
+    def __init__(self) -> None:
+        self.page = 0
+        self._message: str | None = None
+
+    def say(self, text: str, *, error: bool = False, color: int | None = None) -> None:
+        if color is None:
+            color = ERROR_COLOR if error else SUCCESS_COLOR
+        self._message = colored(sanitize_text(text), fg_color=color)
+
+    def take_message(self) -> str | None:
+        message, self._message = self._message, None
+        return message
+
+
+async def _say_or_write(session: Session, listing: "_Listing | None", text: str, *, error: bool = False) -> None:
+    """An action's one-line outcome: carried into the calling screen's next draw
+    when that screen passed its `_Listing`, written here when the action was
+    entered on its own."""
+    if listing is not None:
+        listing.say(text, error=error)
+    else:
+        await session.write_line(colored(sanitize_text(text), fg_color=ERROR_COLOR if error else SUCCESS_COLOR))
+
+
+_TRUST_LIST_ACTIONS = {
+    "a": menu_key("A", "dd/update"),
+    "r": menu_key("R", "emove"),
+    "w": menu_key("W", "ithdraw"),
+}
+
+
+async def _trust_list_choice(
+    session: Session, lane: DatabaseLane, actor: User, listing: _Listing, *,
+    title: str, subtitle: str, rows: Sequence[Field | Note | Table], options: list[str],
+    extra_actions: Sequence[tuple[str, str]] = (),
+) -> str:
+    """One trust-policy listing, drawn in full -- title, the entries as a
+    table, the action bar -- and the lowercase key the SysOp chose from it.
+
+    These screens used to print a bare heading and one run-on sentence per
+    entry underneath whatever menu came before, with no title and no clear,
+    so a list of any length scrolled and no entry's fields lined up with the
+    next one's."""
+    chrome = await _load_chrome(lane, actor)
+    actions = [(key, _TRUST_LIST_ACTIONS[key]) for key in options]
+    actions.extend(extra_actions)
+    actions.append(_BACK_ACTION)
+    choice, listing.page = await show_detail(
+        session,
+        title=_detail_title(session, chrome, title, breadcrumb=("Settings", "Policy trust"), subtitle=subtitle),
+        sections=[Section(None, rows)], actions=actions, page=listing.page, message=listing.take_message(),
+        redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+    )
+    return choice
 
 
 async def _set_trust_override_screen(
-    session: Session, lane: DatabaseLane, actor: User, subject: TrustSubject
+    session: Session, lane: DatabaseLane, actor: User, subject: TrustSubject,
+    listing: "_Listing | None" = None,
 ) -> None:
     """
     Issue #282: was a fixed five-step chain (dimension, state, reason,
@@ -3019,7 +3532,7 @@ async def _set_trust_override_screen(
                 width=session.terminal_width,
             )
         )
-        await write_prompt(session, "Choice: ")
+        await _choice_prompt(session)
         state = {
             "p": TrustState.PROBATIONARY, "e": TrustState.ESTABLISHED,
             "q": TrustState.QUARANTINED, "b": TrustState.BLOCKED,
@@ -3101,9 +3614,9 @@ async def _set_trust_override_screen(
                 reason=reason, actor_user_id=actor.id,
             )
         except ValueError as exc:
-            await session.write_line(colored(f"Trust state changed concurrently: {exc}", fg_color=ERROR_COLOR))
+            await _say_or_write(session, listing, f"Trust state changed concurrently: {exc}", error=True)
             return None
-        await session.write_line(colored("Trust override applied and audited.", fg_color=SUCCESS_COLOR))
+        await _say_or_write(session, listing, "Trust override applied and audited.")
         return True
 
     await _trust_editor(
@@ -3112,7 +3625,8 @@ async def _set_trust_override_screen(
 
 
 async def _clear_trust_override_screen(
-    session: Session, lane: DatabaseLane, actor: User, subject: TrustSubject
+    session: Session, lane: DatabaseLane, actor: User, subject: TrustSubject,
+    listing: "_Listing | None" = None,
 ) -> None:
     overrides = await lane.run(list_trust_overrides, subject)
     selected = await pick_item(
@@ -3133,32 +3647,49 @@ async def _clear_trust_override_screen(
     try:
         await lane.run(clear_trust_override, selected.override_id, actor_user_id=actor.id)
     except ValueError as exc:
-        await session.write_line(colored(f"Trust state changed concurrently: {exc}", fg_color=ERROR_COLOR))
+        await _say_or_write(session, listing, f"Trust state changed concurrently: {exc}", error=True)
         return
-    await session.write_line(colored("Override cleared; recovery policy was recomputed.", fg_color=SUCCESS_COLOR))
+    await _say_or_write(session, listing, "Override cleared; recovery policy was recomputed.")
 
 
 async def _trust_decision_history_screen(
-    session: Session, lane: DatabaseLane, subject: TrustSubject
+    session: Session, lane: DatabaseLane, actor: User, subject: TrustSubject
 ) -> None:
-    rows = await lane.run(list_trust_decision_audit, subject)
-    await session.write_line(
-        colored("\r\nTrust decision history:", fg_color=await lane.run(effective_header_color_256), bold=True)
-    )
-    for row in rows:
-        await session.write_line(
-            f"{row.created_at} {row.kind} {row.action} "
-            f"{json.dumps(row.details, sort_keys=True, ensure_ascii=True)}"
-        )
-    if not rows:
-        await session.write_line(colored("No decision history.", fg_color=MUTED_COLOR))
+    """One subject's trust decisions, newest first, as a paged table.
+
+    It printed `timestamp kind action {json}` rows and returned without a
+    pause, so the subject screen's redraw wiped them before they could be
+    read."""
+    entries = [
+        (row.created_at, row.kind, row.action, _audit_details_text(row.details))
+        for row in await lane.run(list_trust_decision_audit, subject)
+    ]
     if subject.kind == "user":
-        attestation_rows = await lane.run(list_remote_attestation_audit, subject)
-        for row in attestation_rows:
-            await session.write_line(
-                f"{row.created_at} remote-{row.object_kind} {row.action} "
-                f"{json.dumps(row.details, sort_keys=True, ensure_ascii=True)}"
-            )
+        entries.extend(
+            (row.created_at, f"remote-{row.object_kind}", row.action, _audit_details_text(row.details))
+            for row in await lane.run(list_remote_attestation_audit, subject)
+        )
+    # Newest first; within one timestamp, the row recorded later first (a plain
+    # reverse sort is stable and would keep insertion order inside the tie).
+    entries = [entry for _index, entry in sorted(
+        enumerate(entries), key=lambda pair: (pair[1][0], pair[0]), reverse=True,
+    )]
+    display_format, display_timezone = await lane.run(resolve_display_preferences)
+    body: list[Field | Note | Table] = [Table(
+        ("When", "Kind", "Action", "Details"),
+        [
+            [
+                (format_for_display(when, override_format=display_format, override_timezone=display_timezone), DATE_COLOR),
+                (kind, ACCENT_COLOR), action, (details, METADATA_COLOR),
+            ]
+            for when, kind, action, details in entries
+        ],
+        flex=3,
+    )] if entries else [Note("No decision history.")]
+    await _show_report(
+        session, lane, actor, "Trust decision history", breadcrumb=("Settings", "Policy trust", "Subjects"),
+        sections=[Section(None, body)],
+    )
 
 
 async def _trust_domains_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
@@ -3166,14 +3697,19 @@ async def _trust_domains_screen(session: Session, lane: DatabaseLane, actor: Use
     ID, display name, weight -- instead of three prompts in a row where
     a bad weight discarded the other two) and `[B]ack`. The listing
     redraws after a save."""
+    listing = _Listing()
     while True:
         domains = await lane.run(list_trust_domains)
-        await session.write_line(
-            colored("\r\nTrust domains:", fg_color=await lane.run(effective_header_color_256), bold=True)
+        rows: list[Field | Note | Table] = [Table(
+            ("Domain ID", "Display name", "Weight"),
+            [[(d.domain_id, ACCENT_COLOR), d.display_name, f"{d.weight:.2f}"] for d in domains],
+            flex=1, right_aligned=frozenset({2}),
+        )] if domains else [Note("No trust domains are configured.")]
+        choice = await _trust_list_choice(
+            session, lane, actor, listing, title="Trust domains",
+            subtitle="Groups of reporters whose signals count together, and how much.",
+            rows=rows, options=["a"],
         )
-        for domain in domains:
-            await session.write_line(f"{domain.domain_id}: {domain.display_name} (weight {domain.weight:.2f})")
-        choice = await _trust_list_choice(session, ["a"])
         if choice == "b":
             return
 
@@ -3223,7 +3759,7 @@ async def _trust_domains_screen(session: Session, lane: DatabaseLane, actor: Use
                 configure_trust_domain, draft["domain_id"], display_name=draft["display_name"],
                 weight=draft["weight"], actor_user_id=actor.id,
             )
-            await session.write_line(colored("Trust domain saved and audited.", fg_color=SUCCESS_COLOR))
+            listing.say("Trust domain saved and audited.")
             return True
 
         await _trust_editor(session, lane, actor, title="Trust domain", fields=fields, draft=draft, save=save)
@@ -3254,7 +3790,7 @@ async def _confirm_node_despite_identity_warning(session: Session, lane: Databas
         f"Continue with technical identity {sanitize_text(fingerprint)}?",
         default=False,
     ):
-        await session.write_line("No trust policy change made.")
+        _announce_line(session, "No trust policy change made.")
         return False
     return True
 
@@ -3287,7 +3823,7 @@ async def _resolve_admin_node_reference(
             candidates.append(
                 f"{sanitize_text(identity.label)} [{sanitize_text(fingerprint)}]"
             )
-        await session.write_line(
+        _announce_line(session,
             colored(
                 "That name matches multiple nodes. Enter one complete technical "
                 f"identity: {', '.join(candidates)}.",
@@ -3299,7 +3835,7 @@ async def _resolve_admin_node_reference(
     # complete technical identity -- never from a typo in a human-facing name.
     if is_node_fingerprint(reference):
         return reference.strip().lower()
-    await session.write_line(colored("No linked node matches that name or fingerprint.", fg_color=ERROR_COLOR))
+    _announce_line(session, colored("No linked node matches that name or fingerprint.", fg_color=ERROR_COLOR))
     return None
 
 
@@ -3310,17 +3846,19 @@ async def _trust_anchors_screen(session: Session, lane: DatabaseLane, actor: Use
     redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
     unicode_style = await lane.run(unicode_style_enabled, actor)
     collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
+    listing = _Listing()
     while True:
         anchors = await lane.run(list_trust_anchors)
         labels = {a.fingerprint: (await lane.run(identity_for_fingerprint, a.fingerprint)).label for a in anchors}
-        await session.write_line(
-            colored("\r\nTrust anchors:", fg_color=await lane.run(effective_header_color_256), bold=True)
+        rows: list[Field | Note | Table] = [Table(
+            ("Node", "Reason"),
+            [[(labels[a.fingerprint], ACCENT_COLOR), a.reason] for a in anchors], flex=1,
+        )] if anchors else [Note("No trust anchors are configured.")]
+        choice = await _trust_list_choice(
+            session, lane, actor, listing, title="Trust anchors",
+            subtitle="Nodes whose trust signals this node accepts as a root.",
+            rows=rows, options=["a", "r"] if anchors else ["a"],
         )
-        for anchor in anchors:
-            await session.write_line(
-                f"{sanitize_text(labels[anchor.fingerprint])}: {sanitize_text(anchor.reason)}"
-            )
-        choice = await _trust_list_choice(session, ["a", "r"])
         if choice == "b":
             return
         if choice == "r":
@@ -3345,9 +3883,9 @@ async def _trust_anchors_screen(session: Session, lane: DatabaseLane, actor: Use
             try:
                 await lane.run(remove_trust_anchor, selected.fingerprint, actor_user_id=actor.id)
             except ValueError as exc:
-                await session.write_line(colored(f"Trust anchor not changed: {exc}", fg_color=ERROR_COLOR))
+                listing.say(f"Trust anchor not changed: {exc}", error=True)
                 continue
-            await session.write_line(colored("Trust anchor removed and audited.", fg_color=SUCCESS_COLOR))
+            listing.say("Trust anchor removed and audited.")
             continue
 
         draft: dict = {"node": None, "node_label": None, "reason": ""}
@@ -3391,7 +3929,7 @@ async def _trust_anchors_screen(session: Session, lane: DatabaseLane, actor: Use
             await lane.run(
                 configure_trust_anchor, draft["node"], reason=draft["reason"], actor_user_id=actor.id,
             )
-            await session.write_line(colored("Trust anchor changed and audited.", fg_color=SUCCESS_COLOR))
+            listing.say("Trust anchor changed and audited.")
             return True
 
         await _trust_editor(
@@ -3419,20 +3957,31 @@ async def _trust_reporters_screen(session: Session, lane: DatabaseLane, actor: U
     redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
     unicode_style = await lane.run(unicode_style_enabled, actor)
     collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
+    listing = _Listing()
     while True:
         reporters = await lane.run(list_trusted_reporters)
         labels = {r.fingerprint: (await lane.run(identity_for_fingerprint, r.fingerprint)).label for r in reporters}
-        await session.write_line(
-            colored("\r\nTrusted reporters:", fg_color=await lane.run(effective_header_color_256), bold=True)
+        rows: list[Field | Note | Table] = [Table(
+            ("Node", "Domain", "Scopes", "Vouches for"),
+            [
+                [
+                    (labels[r.fingerprint], ACCENT_COLOR),
+                    r.domain_id,
+                    (", ".join(f"{d.value}:{c}" for d, c in r.scopes) or "no scopes", METADATA_COLOR),
+                    ", ".join(
+                        kind for kind, allowed in (("nodes", r.can_vouch_nodes), ("users", r.can_vouch_users))
+                        if allowed
+                    ) or "nobody",
+                ]
+                for r in reporters
+            ],
+            flex=2,
+        )] if reporters else [Note("No trusted reporters are configured.")]
+        choice = await _trust_list_choice(
+            session, lane, actor, listing, title="Trusted reporters",
+            subtitle="Who may report abuse to this node, in which domain and for what.",
+            rows=rows, options=["a", "r"] if reporters else ["a"],
         )
-        for reporter in reporters:
-            scopes = ", ".join(f"{d.value}:{c}" for d, c in reporter.scopes) or "no scopes"
-            await session.write_line(
-                f"{sanitize_text(labels[reporter.fingerprint])} domain={sanitize_text(reporter.domain_id)} "
-                f"scopes={sanitize_text(scopes)} "
-                f"vouch(node={reporter.can_vouch_nodes}, user={reporter.can_vouch_users})"
-            )
-        choice = await _trust_list_choice(session, ["a", "r"])
         if choice == "b":
             return
         if choice == "r":
@@ -3457,9 +4006,9 @@ async def _trust_reporters_screen(session: Session, lane: DatabaseLane, actor: U
             try:
                 await lane.run(remove_trusted_reporter, selected.fingerprint, actor_user_id=actor.id)
             except ValueError as exc:
-                await session.write_line(colored(f"Trusted reporter not changed: {exc}", fg_color=ERROR_COLOR))
+                listing.say(f"Trusted reporter not changed: {exc}", error=True)
                 continue
-            await session.write_line(colored("Trusted reporter removed and audited.", fg_color=SUCCESS_COLOR))
+            listing.say("Trusted reporter removed and audited.")
             continue
 
         draft: dict = {
@@ -3505,14 +4054,14 @@ async def _trust_reporters_screen(session: Session, lane: DatabaseLane, actor: U
                 key="domain_id", hotkey="d", menu_text=menu_key("D", "omain ID"), label="Domain ID",
                 render=lambda d: sanitize_text(d["domain_id"]) if d["domain_id"] else "(required)",
                 prompt=text_field("domain_id", required=True),
-                brief="Trust domain this reporter belongs to",
+                brief="Domain this reporter belongs to",
                 help="Must name a configured trust domain (see Trust [D]omains).",
             ),
             FieldSpec(
                 key="scopes", hotkey="c", menu_text=menu_key("c", "opes", prefix="S"), label="Scopes",
                 render=lambda d: sanitize_text(d["scopes"]) if d["scopes"] else "(required)",
                 prompt=text_field("scopes", required=True),
-                brief="dimension:category, comma separated",
+                brief="dimension:category, by commas",
                 help=(
                     "Which evidence this reporter may speak to, as dimension:category pairs separated by "
                     "commas -- e.g. identity_integrity:signed_equivocation, content_conduct:spam."
@@ -3546,7 +4095,7 @@ async def _trust_reporters_screen(session: Session, lane: DatabaseLane, actor: U
                 can_vouch_nodes=draft["can_vouch_nodes"], can_vouch_users=draft["can_vouch_users"],
                 actor_user_id=actor.id,
             )
-            await session.write_line(colored("Trusted reporter changed and audited.", fg_color=SUCCESS_COLOR))
+            listing.say("Trusted reporter changed and audited.")
             return True
 
         await _trust_editor(
@@ -3563,26 +4112,20 @@ async def _attestation_authorities_screen(
     unicode_style = await lane.run(unicode_style_enabled, actor)
     collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
     attribute_sets = ["age,name", "age", "name"]
+    listing = _Listing()
     while True:
         authorities = await lane.run(list_attestation_authorities)
         labels = {a.fingerprint: (await lane.run(identity_for_fingerprint, a.fingerprint)).label for a in authorities}
-        await session.write_line(
-            colored(
-                "\r\nRemote identity-attestation authorities:",
-                fg_color=await lane.run(effective_header_color_256), bold=True,
-            )
+        rows: list[Field | Note | Table] = [Table(
+            ("Node", "Attests", "Reason"),
+            [[(labels[a.fingerprint], ACCENT_COLOR), ",".join(a.attributes), a.reason] for a in authorities],
+            flex=2,
+        )] if authorities else [Note("None. Remote attestations fail closed.", color=SUCCESS_COLOR)]
+        choice = await _trust_list_choice(
+            session, lane, actor, listing, title="Identity authorities",
+            subtitle="Nodes whose signed age/name attestations this node believes.",
+            rows=rows, options=["a", "r"] if authorities else ["a"],
         )
-        for authority in authorities:
-            await session.write_line(
-                f"{sanitize_text(labels[authority.fingerprint])} "
-                f"scope={sanitize_text(','.join(authority.attributes))} -- "
-                f"{sanitize_text(authority.reason)}"
-            )
-        if not authorities:
-            await session.write_line(
-                colored("None. Remote attestations fail closed.", fg_color=SUCCESS_COLOR)
-            )
-        choice = await _trust_list_choice(session, ["a", "r"])
         if choice == "b":
             return
         if choice == "r":
@@ -3607,13 +4150,9 @@ async def _attestation_authorities_screen(
             try:
                 await lane.run(remove_attestation_authority, selected.fingerprint, actor_user_id=actor.id)
             except ValueError as exc:
-                await session.write_line(
-                    colored(f"Attestation authority not changed: {exc}", fg_color=ERROR_COLOR)
-                )
+                listing.say(f"Attestation authority not changed: {exc}", error=True)
                 continue
-            await session.write_line(
-                colored("Attestation authority removed and audited.", fg_color=SUCCESS_COLOR)
-            )
+            listing.say("Attestation authority removed and audited.")
             continue
 
         draft: dict = {"node": None, "node_label": None, "attributes": "age,name", "reason": ""}
@@ -3676,9 +4215,7 @@ async def _attestation_authorities_screen(
                 attributes=[part.strip() for part in draft["attributes"].split(",")],
                 reason=draft["reason"], actor_user_id=actor.id,
             )
-            await session.write_line(
-                colored("Attestation authority changed and audited.", fg_color=SUCCESS_COLOR)
-            )
+            listing.say("Attestation authority changed and audited.")
             return True
 
         await _trust_editor(
@@ -3702,28 +4239,22 @@ async def _attestation_recipients_screen(
     redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
     unicode_style = await lane.run(unicode_style_enabled, actor)
     collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
+    listing = _Listing()
     while True:
         recipients = await lane.run(list_attestation_recipients)
         labels = {r.fingerprint: (await lane.run(identity_for_fingerprint, r.fingerprint)).label for r in recipients}
-        await session.write_line(
-            colored(
-                "\r\nNodes that receive this node's identity attestations:",
-                fg_color=await lane.run(effective_header_color_256), bold=True,
-            )
+        rows: list[Field | Note | Table] = [Table(
+            ("Node", "Reason"),
+            [[(labels[r.fingerprint], ACCENT_COLOR), r.reason] for r in recipients], flex=1,
+        )] if recipients else [Note(
+            "None. No verified age or name leaves this node, whatever its callers have switched on.",
+            color=SUCCESS_COLOR,
+        )]
+        choice = await _trust_list_choice(
+            session, lane, actor, listing, title="Attestation recipients",
+            subtitle="Nodes that receive this node's identity attestations.",
+            rows=rows, options=["a", "r"] if recipients else ["a"],
         )
-        for recipient in recipients:
-            await session.write_line(
-                f"{sanitize_text(labels[recipient.fingerprint])} -- {sanitize_text(recipient.reason)}"
-            )
-        if not recipients:
-            await session.write_line(
-                colored(
-                    "None. No verified age or name leaves this node, whatever its callers "
-                    "have switched on.",
-                    fg_color=SUCCESS_COLOR,
-                )
-            )
-        choice = await _trust_list_choice(session, ["a", "r"])
         if choice == "b":
             return
         if choice == "r":
@@ -3756,13 +4287,9 @@ async def _attestation_recipients_screen(
             try:
                 await lane.run(remove_attestation_recipient, selected.fingerprint, actor_user_id=actor.id)
             except ValueError as exc:
-                await session.write_line(
-                    colored(f"Attestation recipient not changed: {exc}", fg_color=ERROR_COLOR)
-                )
+                listing.say(f"Attestation recipient not changed: {exc}", error=True)
                 continue
-            await session.write_line(
-                colored("Attestation recipient removed and audited.", fg_color=SUCCESS_COLOR)
-            )
+            listing.say("Attestation recipient removed and audited.")
             continue
 
         draft: dict = {"node": None, "node_label": None, "reason": ""}
@@ -3810,9 +4337,7 @@ async def _attestation_recipients_screen(
                 configure_attestation_recipient, draft["node"],
                 reason=draft["reason"], actor_user_id=actor.id,
             )
-            await session.write_line(
-                colored("Attestation recipient changed and audited.", fg_color=SUCCESS_COLOR)
-            )
+            listing.say("Attestation recipient changed and audited.")
             return True
 
         await _trust_editor(
@@ -3901,97 +4426,84 @@ async def _published_identity_screen(
     collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
     header_color = await lane.run(effective_header_color_256)
     show_all = False
+    listing = _Listing()
     while True:
         records = await lane.run(list_issued_attestations, include_inactive=show_all)
         live = [record for record in records if record.is_live]
-        await session.write_line(
-            colored(
-                "\r\nPublished over Link about this node's own users:",
-                fg_color=header_color, bold=True,
-            )
-        )
-        for record in records:
-            await session.write_line(
-                f"{_issued_subject(record)} "
-                + colored(record.attribute, fg_color=LABEL_COLOR)
-                + " "
-                + colored(
-                    record.status,
-                    fg_color=_ISSUED_STATUS_COLORS.get(record.status, VALUE_COLOR),
-                )
-                + colored(f" -- {_issued_when(record)}", fg_color=METADATA_COLOR)
-            )
-        if not records:
-            await session.write_line(
-                colored(
-                    "Nothing. No caller has opted in to sharing a verified "
-                    "age or name over Link."
-                    if not show_all
-                    else "Nothing. This node has never published an attestation.",
-                    fg_color=SUCCESS_COLOR,
-                )
-            )
+        published: list[Field | Note | Table] = [Table(
+            ("Account", "Attribute", "Status", "Date"),
+            [
+                [
+                    (_issued_subject(record), ACCENT_COLOR),
+                    (record.attribute, LABEL_COLOR),
+                    (record.status, _ISSUED_STATUS_COLORS.get(record.status, VALUE_COLOR)),
+                    (_issued_when(record), DATE_COLOR),
+                ]
+                for record in records
+            ],
+        )] if records else [Note(
+            "Nothing. No caller has opted in to sharing a verified age or name over Link."
+            if not show_all
+            else "Nothing. This node has never published an attestation.",
+            color=SUCCESS_COLOR,
+        )]
+
         recipient_count = len(await lane.run(list_attestation_recipients))
+        delivery: list[Field | Note | Table] = []
         if recipient_count:
-            await session.write_line(
-                colored(
-                    f"Given to {recipient_count} recipient node{'s' if recipient_count != 1 else ''}.",
-                    fg_color=METADATA_COLOR,
-                )
-            )
+            delivery.append(Field(
+                "Given to", f"{recipient_count} recipient node{'s' if recipient_count != 1 else ''}"
+            ))
             if await lane.run(link_is_outgoing_only):
                 # Issue #627: said here because the line above reads as delivery.
-                await session.write_line(
-                    colored(
-                        "Nobody can dial this node, and an attestation is only ever fetched from "
-                        "the node that issued it, so no recipient receives any of this yet.",
-                        fg_color=WARNING_COLOR,
-                    )
-                )
+                delivery.append(Note(
+                    "Nobody can dial this node, and an attestation is only ever fetched from "
+                    "the node that issued it, so no recipient receives any of this yet.",
+                    color=WARNING_COLOR,
+                ))
         else:
-            await session.write_line(
-                colored(
-                    "No recipient nodes are named, so none of this leaves the node. "
-                    "[R]ecipients names them.",
-                    fg_color=WARNING_COLOR,
-                )
-            )
+            delivery.append(Field("Given to", "no recipient nodes", color=WARNING_COLOR))
+            delivery.append(Note(
+                "No recipient nodes are named, so none of this leaves the node. [R]ecipients names them.",
+                color=WARNING_COLOR,
+            ))
         pending = [record for record in live if record.status == "withdrawing"]
         if pending:
-            await session.write_line(
-                colored(
-                    f"{len(pending)} awaiting revocation on the next Link sync pass.",
-                    fg_color=WARNING_COLOR,
-                )
-            )
+            delivery.append(Field(
+                "Awaiting revocation", f"{len(pending)} on the next Link sync pass", color=WARNING_COLOR
+            ))
         if link_context is None:
-            await session.write_line(
-                colored(
-                    "Link is not running here, so a withdrawal takes effect when it next is.",
-                    fg_color=MUTED_COLOR,
-                )
-            )
-        toggle = menu_key("C", "urrent only") if show_all else menu_key("S", "how all")
-        await write_prompt(
+            delivery.append(Note("Link is not running here, so a withdrawal takes effect when it next is."))
+
+        chrome = await _load_chrome(lane, actor)
+        actions = [
+            ("r", menu_key("R", "ecipients")),
+            ("c", menu_key("C", "urrent only")) if show_all else ("s", menu_key("S", "how all")),
+            _BACK_ACTION,
+        ]
+        if live:
+            actions.insert(0, ("w", menu_key("W", "ithdraw")))
+        choice, listing.page = await show_detail(
             session,
-            action_bar(
-                [menu_key("W", "ithdraw"), menu_key("R", "ecipients"), toggle, menu_key("B", "ack")],
-                width=session.terminal_width,
-            )
-            + ": ",
+            title=_detail_title(
+                session, chrome, "Published identity", breadcrumb=("Settings", "Policy trust"),
+                subtitle="What this node asserts over Link about its own users.",
+            ),
+            sections=[
+                Section("Published attestations" + (" (all, including ended)" if show_all else ""), published),
+                Section("Who receives them", delivery),
+            ],
+            actions=actions, page=listing.page, message=listing.take_message(),
+            redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
         )
-        choice = (await session.read_key()).lower()
-        await session.write_line("")
         if choice == "b":
             return
-        if choice == ("c" if show_all else "s"):
+        if choice in {"c", "s"}:
             show_all = not show_all
+            listing.page = 0
             continue
         if choice == "r":
             await _attestation_recipients_screen(session, lane, actor)
-            continue
-        if choice != "w":
-            await session.write(reject_unhandled_key(choice))
             continue
         async def _reload_live():
             return [
@@ -4033,7 +4545,7 @@ async def _published_identity_screen(
             default=False,
         ):
             continue
-        await _withdraw_published_attestation(session, lane, actor, selected, link_context)
+        await _withdraw_published_attestation(session, lane, actor, selected, link_context, listing)
 
 
 async def _withdraw_published_attestation(
@@ -4042,8 +4554,12 @@ async def _withdraw_published_attestation(
     actor: User,
     record,
     link_context: LinkContext | None,
+    listing: _Listing,
 ) -> None:
     """Clear the consent, then let the ordinary reconcile sign the revocation.
+
+    The outcome is said through `listing`, so it shows on the redrawn
+    Published identity screen rather than being wiped by it.
 
     Clearing consent is not enough on its own and signing is not enough on its
     own: leave the consent set and the very next reconcile pass re-mints what
@@ -4057,17 +4573,10 @@ async def _withdraw_published_attestation(
         try:
             await lane.run(withdraw_link_visibility, subject, record.attribute, actor=actor)
         except AttestationError as exc:
-            await session.write_line(
-                colored(f"Sharing not changed: {exc}", fg_color=ERROR_COLOR)
-            )
+            listing.say(f"Sharing not changed: {exc}", error=True)
             return
     if link_context is None:
-        await session.write_line(
-            colored(
-                "Sharing withdrawn. The signed revocation goes out when Link next runs.",
-                fg_color=SUCCESS_COLOR,
-            )
-        )
+        listing.say("Sharing withdrawn. The signed revocation goes out when Link next runs.")
         return
     try:
         await lane.run(
@@ -4076,21 +4585,13 @@ async def _withdraw_published_attestation(
             home_node_fingerprint=link_context.node_identity.fingerprint,
         )
     except (ValueError, sqlite3.Error) as exc:
-        await session.write_line(
-            colored(
-                f"Sharing withdrawn, but the revocation was not signed ({exc}) -- "
-                "the next Link sync pass retries it.",
-                fg_color=WARNING_COLOR,
-            )
+        listing.say(
+            f"Sharing withdrawn, but the revocation was not signed ({exc}) -- "
+            "the next Link sync pass retries it.",
+            color=WARNING_COLOR,
         )
         return
-    await session.write_line(
-        colored(
-            "Sharing withdrawn and the revocation signed. Subscribers pick it up "
-            "on their next pull.",
-            fg_color=SUCCESS_COLOR,
-        )
-    )
+    listing.say("Sharing withdrawn and the revocation signed. Subscribers pick it up on their next pull.")
 
 
 async def _remote_attestation_override_screen(
@@ -4098,6 +4599,7 @@ async def _remote_attestation_override_screen(
     lane: DatabaseLane,
     actor: User,
     subject: TrustSubject,
+    listing: "_Listing | None" = None,
 ) -> None:
     """`[O]verride` (issue #282: a draft editor -- attribute, decision,
     reason, with the accept-side confirmation kept inside Save) or
@@ -4109,7 +4611,7 @@ async def _remote_attestation_override_screen(
             width=session.terminal_width,
         )
     )
-    await write_prompt(session, "Choice: ")
+    await _choice_prompt(session)
     while True:
         choice = (await session.read_key()).lower()
         if choice in ("o", "c", "b"):
@@ -4143,13 +4645,9 @@ async def _remote_attestation_override_screen(
                 actor_user_id=actor.id,
             )
         except ValueError as exc:
-            await session.write_line(
-                colored(f"Attestation state changed concurrently: {exc}", fg_color=ERROR_COLOR)
-            )
+            await _say_or_write(session, listing, f"Attestation state changed concurrently: {exc}", error=True)
             return
-        await session.write_line(
-            colored("Remote attestation override cleared.", fg_color=SUCCESS_COLOR)
-        )
+        await _say_or_write(session, listing, "Remote attestation override cleared.")
         return
 
     attributes = ["age", "name"]
@@ -4167,7 +4665,7 @@ async def _remote_attestation_override_screen(
             key="decision", hotkey="d", menu_text=menu_key("D", "ecision"), label="Decision",
             render=lambda d: "accept current trusted record" if d["decision"] == "accept" else "reject",
             prompt=choice_field("decision", decisions), step=choice_step("decision", decisions),
-            brief="reject, or accept the current record",
+            brief="reject, or accept current record",
             help=(
                 "Reject refuses the attestation regardless of its signature. Accept only holds while a "
                 "current signed record from a configured authority exists -- it never revives an expired "
@@ -4205,13 +4703,9 @@ async def _remote_attestation_override_screen(
                 actor_user_id=actor.id,
             )
         except ValueError as exc:
-            await session.write_line(
-                colored(f"Remote attestation override not changed: {exc}", fg_color=ERROR_COLOR)
-            )
+            await _say_or_write(session, listing, f"Remote attestation override not changed: {exc}", error=True)
             return None
-        await session.write_line(
-            colored("Remote attestation override applied and audited.", fg_color=SUCCESS_COLOR)
-        )
+        await _say_or_write(session, listing, "Remote attestation override applied and audited.")
         return True
 
     await _trust_editor(
@@ -4226,20 +4720,36 @@ async def _trust_exceptions_screen(session: Session, lane: DatabaseLane, actor: 
     redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
     unicode_style = await lane.run(unicode_style_enabled, actor)
     collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
+    listing = _Listing()
     while True:
         exceptions = await lane.run(list_sole_authorities)
         labels = {
             item.reporter_fingerprint: (await lane.run(identity_for_fingerprint, item.reporter_fingerprint)).label
             for item in exceptions
         }
-        await session.write_line(colored("\r\nSole-authority safety deviations:", fg_color=ALERT_COLOR, bold=True))
-        for item in exceptions:
-            await session.write_line(
-                f"{sanitize_text(labels[item.reporter_fingerprint])} {item.dimension.value}:{item.category} -- {item.reason}"
-            )
-        if not exceptions:
-            await session.write_line(colored("None. Two independent domains remain required.", fg_color=SUCCESS_COLOR))
-        choice = await _trust_list_choice(session, ["a", "r"])
+        rows: list[Field | Note | Table] = [
+            Note(
+                "Each of these lets ONE reporter restrict on its own word, without a second domain agreeing.",
+                color=ALERT_COLOR,
+            ),
+            Table(
+                ("Reporter", "Scope", "Justification"),
+                [
+                    [
+                        (labels[item.reporter_fingerprint], ACCENT_COLOR),
+                        (f"{item.dimension.value}:{item.category}", ALERT_COLOR),
+                        item.reason,
+                    ]
+                    for item in exceptions
+                ],
+                flex=2,
+            ),
+        ] if exceptions else [Note("None. Two independent domains remain required.", color=SUCCESS_COLOR)]
+        choice = await _trust_list_choice(
+            session, lane, actor, listing, title="Sole-authority exceptions",
+            subtitle="Safety deviations from the two-independent-domains rule.",
+            rows=rows, options=["a", "r"] if exceptions else ["a"],
+        )
         if choice == "b":
             return
         if choice == "r":
@@ -4270,9 +4780,9 @@ async def _trust_exceptions_screen(session: Session, lane: DatabaseLane, actor: 
                     actor_user_id=actor.id,
                 )
             except ValueError as exc:
-                await session.write_line(colored(f"Safety deviation not changed: {exc}", fg_color=ERROR_COLOR))
+                listing.say(f"Safety deviation not changed: {exc}", error=True)
                 continue
-            await session.write_line(colored("Safety deviation removed and audited.", fg_color=SUCCESS_COLOR))
+            listing.say("Safety deviation removed and audited.")
             continue
 
         draft: dict = {"node": None, "node_label": None, "dimension": None, "category": "", "reason": ""}
@@ -4303,7 +4813,7 @@ async def _trust_exceptions_screen(session: Session, lane: DatabaseLane, actor: 
                 key="category", hotkey="c", menu_text=menu_key("C", "ategory"), label="Category",
                 render=lambda d: sanitize_text(d["category"]) if d["category"] else "(required)",
                 prompt=text_field("category", required=True),
-                brief="Evidence category within the dimension",
+                brief="Evidence category in the dimension",
                 help="The evidence category (e.g. signed_equivocation) this single reporter may decide alone.",
             ),
             FieldSpec(
@@ -4329,7 +4839,7 @@ async def _trust_exceptions_screen(session: Session, lane: DatabaseLane, actor: 
                 configure_sole_authority, draft["node"], draft["dimension"], draft["category"],
                 reason=draft["reason"], actor_user_id=actor.id,
             )
-            await session.write_line(colored("Safety deviation changed and audited.", fg_color=SUCCESS_COLOR))
+            listing.say("Safety deviation changed and audited.")
             return True
 
         await _trust_editor(
@@ -4338,42 +4848,54 @@ async def _trust_exceptions_screen(session: Session, lane: DatabaseLane, actor: 
         )
 
 
-async def _trust_config_history_screen(session: Session, lane: DatabaseLane) -> None:
-    rows = await lane.run(list_trust_config_audit)
-    await session.write_line(
-        colored("\r\nTrust configuration history:", fg_color=await lane.run(effective_header_color_256), bold=True)
-    )
-    for row in rows:
-        await session.write_line(
-            f"{row.created_at} {row.kind} {row.action} "
-            f"{json.dumps(row.details, sort_keys=True, ensure_ascii=True)}"
-        )
-    if not rows:
-        await session.write_line(colored("No configuration history.", fg_color=MUTED_COLOR))
-    # Vouch intents keep their own history (issue #589): the config-audit
-    # table above constrains its kinds, so these are read from the intents.
+async def _trust_config_history_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
+    """Every trust-policy change on record, newest first, as one paged table.
+
+    Three sources feed it -- the configuration audit table, the vouch intents'
+    own history (issue #589: the audit table constrains its kinds, so those
+    are read from the intents), and the remote-attestation audit rows that
+    are about an object rather than a subject. It used to print them as three
+    consecutive runs of `timestamp kind action {json}` with no order between
+    them and no bound, behind a "Press any key" that came after the top had
+    already scrolled away."""
+    entries: list[tuple[str, str, str, str]] = []
+    for row in await lane.run(list_trust_config_audit):
+        entries.append((row.created_at, row.kind, row.action, _audit_details_text(row.details)))
     for entry in await lane.run(list_vouch_intent_history):
         node_label = (await lane.run(identity_for_fingerprint, entry.subject.node_fingerprint)).label
-        subject_name = sanitize_text(_trust_subject_name(entry.subject, node_label))
-        await session.write_line(
-            f"{entry.created_at} vouch recorded for {subject_name}: {sanitize_text(entry.explanation)}"
-        )
+        subject_name = _trust_subject_name(entry.subject, node_label)
+        entries.append((entry.created_at, "vouch", "recorded", f"{subject_name}: {entry.explanation}"))
         if entry.withdrawn_at is not None:
-            await session.write_line(f"{entry.withdrawn_at} vouch withdrawn for {subject_name}")
-    attestation_rows = await lane.run(list_remote_attestation_audit)
-    for row in attestation_rows:
+            entries.append((entry.withdrawn_at, "vouch", "withdrawn", subject_name))
+    for row in await lane.run(list_remote_attestation_audit):
         if row.subject_id is None:
-            await session.write_line(
-                f"{row.created_at} remote-{row.object_kind}:{row.object_id} {row.action} "
-                f"{json.dumps(row.details, sort_keys=True, ensure_ascii=True)}"
-            )
-    # Dogfood report: this screen used to return straight to _trust_menu's
-    # loop with no pause at all -- under redraw_in_place, the very next
-    # redraw wiped everything just written (most visibly the empty-log
-    # case, a single line with nothing else on screen to leave a
-    # lingering impression) before it could be read.
-    await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-    await session.read_any_key()
+            entries.append((
+                row.created_at, f"remote-{row.object_kind}:{row.object_id}", row.action,
+                _audit_details_text(row.details),
+            ))
+    # Newest first; within one timestamp, the row recorded later first (a plain
+    # reverse sort is stable and would keep insertion order inside the tie).
+    entries = [entry for _index, entry in sorted(
+        enumerate(entries), key=lambda pair: (pair[1][0], pair[0]), reverse=True,
+    )]
+
+    display_format, display_timezone = await lane.run(resolve_display_preferences)
+    body: list[Field | Note | Table] = [Table(
+        ("When", "Kind", "Action", "Details"),
+        [
+            [
+                (format_for_display(when, override_format=display_format, override_timezone=display_timezone), DATE_COLOR),
+                (kind, ACCENT_COLOR), action, (details, METADATA_COLOR),
+            ]
+            for when, kind, action, details in entries
+        ],
+        flex=3,
+    )] if entries else [Note("No configuration history.")]
+    await _show_report(
+        session, lane, actor, "Trust configuration history", breadcrumb=("Settings", "Policy trust"),
+        subtitle="Every change to this node's trust policy, newest first.",
+        sections=[Section(None, body)],
+    )
 
 
 # -- create ------------------------------------------------------------
@@ -4386,53 +4908,57 @@ async def _retired_usernames_screen(session: Session, lane: DatabaseLane, actor:
     answering or writing anything; `[R]elease` is a picker and then the one
     yes/no this project allows, the last keystroke before an action that lets
     one account take over another's Link identity.
+
+    The listing is a paged table (`show_detail`): it grows by one row for every
+    account ever deleted, and printed flat it scrolled its own explanation and
+    oldest names off the top.
     """
-    redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
-    unicode_style = await lane.run(unicode_style_enabled, actor)
-    collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
-    header_color = await lane.run(effective_header_color_256)
+    chrome = await _load_chrome(lane, actor)
+    page = 0
+    message: str | None = None
     while True:
         retired = await lane.run(list_retired_usernames)
-        await session.write_line(colored("\r\nRetired usernames:", fg_color=header_color, bold=True))
-        for entry in retired:
-            await session.write_line(
-                f"{sanitize_text(entry.username)} "
-                + colored(f"-- retired {sanitize_text(entry.retired_at[:10])}", fg_color=METADATA_COLOR)
-            )
-        if not retired:
-            await session.write_line(colored("None.", fg_color=SUCCESS_COLOR))
-        await session.write_line(
-            colored(
-                "On NetBBS Link a username is the account's identity, so on a node that has run "
-                "Link the name of a deleted account is held: whoever registered it next would "
-                "inherit the old account's Link mail address, the authorship of its carried "
-                "posts, and what other nodes recorded about it."
-                if await lane.run(link_has_ever_run)
-                else "This node has never run NetBBS Link, so deleting an account frees its "
-                "username at once and nothing is held here.",
-                fg_color=MUTED_COLOR,
-            )
+        held: list[Field | Note | Table] = (
+            [Table(
+                ("Username", "Retired"),
+                [[(entry.username, ACCENT_COLOR), (entry.retired_at[:10], DATE_COLOR)] for entry in retired],
+            )]
+            if retired else [Note("None.", color=SUCCESS_COLOR)]
         )
-        await write_prompt(
+        why = Note(
+            "On NetBBS Link a username is the account's identity, so on a node that has run "
+            "Link the name of a deleted account is held: whoever registered it next would "
+            "inherit the old account's Link mail address, the authorship of its carried "
+            "posts, and what other nodes recorded about it."
+            if await lane.run(link_has_ever_run)
+            else "This node has never run NetBBS Link, so deleting an account frees its "
+            "username at once and nothing is held here."
+        )
+        actions = [_BACK_ACTION]
+        if retired:
+            actions.insert(0, ("r", menu_key("R", "elease")))
+        choice, page = await show_detail(
             session,
-            action_bar([menu_key("R", "elease"), menu_key("B", "ack")], width=session.terminal_width) + ": ",
+            title=_detail_title(
+                session, chrome, "Retired usernames", breadcrumb=("SysOp", "Users"),
+                subtitle="Names held for deleted accounts so nobody inherits their Link identity.",
+            ),
+            sections=[Section("Why names are held", [why]), Section("Held usernames", held)],
+            actions=actions, page=page, message=message,
+            redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
         )
-        choice = (await session.read_key()).lower()
-        await session.write_line("")
+        message = None
         if choice == "b":
             return
-        if choice != "r":
-            await session.write(reject_unhandled_key(choice))
-            continue
         selected = await pick_item(
             session, retired,
             name_of=lambda entry: entry.username,
             stable_id_of=lambda entry: _stable_id_for(entry.username.lower()),
             description_of=lambda entry: f"retired {entry.retired_at[:10]}",
             title="Release which username?", empty_message="No usernames are retired.",
-            redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
-            accent_color=await lane.run(effective_accent_color_256),
-            header_color=header_color,
+            redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style, collapsed=chrome.collapsed,
+            accent_color=chrome.accent_color,
+            header_color=chrome.header_color,
         )
         if selected is None:
             continue
@@ -4446,11 +4972,9 @@ async def _retired_usernames_screen(session: Session, lane: DatabaseLane, actor:
         try:
             await lane.run(release_retired_username, selected.username, released_by=actor)
         except UserManagementError as exc:
-            await session.write_line(colored(str(exc), fg_color=MUTED_COLOR))
+            message = colored(sanitize_text(str(exc)), fg_color=ERROR_COLOR)
             continue
-        await session.write_line(
-            colored(f"{sanitize_text(selected.username)!r} released and audited.", fg_color=SUCCESS_COLOR)
-        )
+        message = colored(f"{sanitize_text(selected.username)!r} released and audited.", fg_color=SUCCESS_COLOR)
 
 
 def _create_user_password_field() -> Callable[[Session, DatabaseLane, dict], Awaitable[None]]:
@@ -4577,8 +5101,8 @@ async def _create_user_screen(session: Session, lane: DatabaseLane, actor: User)
         header_color=await lane.run(effective_header_color_256),
     )
     if new_user is not None:
-        await session.write_line(f"Created {new_user.username!r} at level {new_user.user_level}.")
-        await session.write_line(
+        _announce_line(session, f"Created {new_user.username!r} at level {new_user.user_level}.")
+        _announce_line(session,
             colored(
                 "In-place redraw is on by default for this account -- they can turn it off in Your profile.",
                 fg_color=MUTED_COLOR,
@@ -4594,7 +5118,7 @@ async def _prompt_optional_password(session: Session) -> str | None:
     await session.write("Confirm password: ")
     second = await session.read_line(echo=False)
     if not first or first != second:
-        await session.write_line(
+        _announce_line(session,
             colored("Passwords did not match or were blank -- no password set.", fg_color=MUTED_COLOR)
         )
         return None
@@ -4609,7 +5133,7 @@ async def _prompt_optional_pubkey(session: Session) -> nacl.signing.VerifyKey | 
     try:
         return parse_verify_key(text)
     except IdentityError as exc:
-        await session.write_line(colored(f"Could not parse key: {exc} -- no key set.", fg_color=MUTED_COLOR))
+        _announce_line(session, colored(f"Could not parse key: {exc} -- no key set.", fg_color=MUTED_COLOR))
         return None
 
 
@@ -4744,7 +5268,7 @@ async def _pick_target_user(session: Session, lane: DatabaseLane, actor: User, *
     unicode_style = await lane.run(unicode_style_enabled, actor)
     users = await lane.run(_load)
     if not users:
-        await session.write_line("\r\nNo registered users yet.")
+        _announce_line(session, "\r\nNo registered users yet.")
         return None
 
     def _standing_label() -> str:
@@ -4918,37 +5442,15 @@ async def _draw_user_detail(
     )
     await session.write_line(await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width))
     accent = await lane.run(effective_accent_color_256)
-    await session.write_line(_user_detail_field_line("l", "Level", str(target.user_level), selected=selected, accent=accent))
-    await session.write_line(_user_detail_field_line("t", "Status", _status_label(target), selected=selected, accent=accent))
+
+    def _editable(hotkey: str, label: str, value: str, *, color: int = VALUE_COLOR) -> Field:
+        return Field(label, value, color=color, selected=selected == hotkey, accent=accent)
+
     display_format, display_timezone = await lane.run(resolve_display_preferences)
     member_since = format_for_display(
         target.created_at, override_format=display_format, override_timezone=display_timezone
     )
-    await session.write_line(f"Member since: {member_since}")
-    # Design doc §18: a narrow, SysOp-grantable permission independent
-    # of the four moderator scope tiers.
-    await session.write_line(
-        _user_detail_field_line(
-            "i", "Can verify identity (age/name attestation)",
-            "yes" if target.can_verify_identity else "no", selected=selected, accent=accent,
-        )
-    )
-    await session.write_line(
-        _user_detail_field_line(
-            "k", "Public key (SSH/Link login)",
-            target.fingerprint if target.fingerprint else "(none)", selected=selected, accent=accent,
-        )
-    )
-    # Issue #611: whether a password exists, never the password. Beside
-    # the key line because the two together are "how this account gets
-    # in", and a SysOp resetting one wants to see the other.
-    await session.write_line(
-        _user_detail_field_line(
-            "p", "Password",
-            "set" if await lane.run(has_password, target) else "(none -- key login only)",
-            selected=selected, accent=accent,
-        )
-    )
+    status = _status_label(target)
     # Dogfood follow-up (`netbbs.moderation.blocklist`): the local
     # blocklist enforcement path was real and already wired into login
     # (`netbbs.net.login_flow`'s own distinct "Your access to this
@@ -4962,38 +5464,43 @@ async def _draw_user_detail(
     # (module docstring) -- a real, separate capability, not just a
     # second button for the same thing.
     blocked = await lane.run(is_blocked, target)
-    await session.write_line(
-        _user_detail_field_line("r", "Blocked (local blocklist)", "yes" if blocked else "no", selected=selected, accent=accent)
-    )
-
     entries = await lane.run(list_actions_for_target_user, target.id)
-    if not entries:
-        await session.write_line(colored("No recorded admin actions.", fg_color=MUTED_COLOR))
-    else:
-        # Dogfood follow-up: this list used to show *what* happened but
-        # never *who* did it, even though `actor_user_id` is stored for
-        # exactly this (`netbbs.moderation.log.ModerationLogEntry`'s own
-        # docstring: nullable specifically so a deleted actor's audit
-        # trail survives, implying display was always the intent) --
-        # the in-channel notice for the same action already says "by
-        # bob," this screen just never repeated it. Resolved once for
-        # the shown slice, not once per entry.
-        shown = entries[-10:]
-        actor_ids = {entry.actor_user_id for entry in shown if entry.actor_user_id is not None}
-        actor_usernames: dict[int, str] = {}
-        for actor_id in actor_ids:
-            actor = await lane.run(get_user_by_id, actor_id)
-            actor_usernames[actor_id] = actor.username if actor is not None else "(deleted account)"
-
-        await session.write_line(colored("Recent admin actions:", fg_color=MUTED_COLOR))
-        for entry in shown:
-            when = format_for_display(
-                entry.created_at, override_format=display_format, override_timezone=display_timezone
-            )
-            detail = f" -- {sanitize_text(entry.detail)}" if entry.detail else ""
-            by = actor_usernames.get(entry.actor_user_id, "(unknown)") if entry.actor_user_id is not None else "(system)"
-            await session.write_line(f"  {when}: {sanitize_text(entry.action)} (by {sanitize_text(by)}){detail}")
-
+    sections = [
+        Section("Account", [
+            _editable("l", "Level", str(target.user_level)),
+            _editable("t", "Status", status, color=SUCCESS_COLOR if status == "active" else WARNING_COLOR),
+            Field("Member since", member_since, color=METADATA_COLOR),
+            _editable(
+                "r", "Blocked", "yes (local blocklist)" if blocked else "no",
+                color=ERROR_COLOR if blocked else VALUE_COLOR,
+            ),
+            # The list itself is a screen of its own (`[H]istory`): ten rows of
+            # it here pushed the account's own fields off a 24-row terminal.
+            Field(
+                "Admin actions", f"{len(entries)} recorded" if entries else "none recorded",
+                color=VALUE_COLOR if entries else MUTED_COLOR,
+            ),
+        ], paired=True),
+        # Issue #611: whether a password exists, never the password. Beside
+        # the key line because the two together are "how this account gets
+        # in", and a SysOp resetting one wants to see the other.
+        Section("Sign-in", [
+            _editable(
+                "k", "Public key", target.fingerprint if target.fingerprint else "(none)",
+                color=VALUE_COLOR if target.fingerprint else MUTED_COLOR,
+            ),
+            _editable(
+                "p", "Password",
+                "set" if await lane.run(has_password, target) else "(none -- key login only)",
+            ),
+        ]),
+        # Design doc §18: a narrow, SysOp-grantable permission independent
+        # of the four moderator scope tiers.
+        Section("Privileges", [
+            _editable("i", "Can verify identity", f"{_yes_no(target.can_verify_identity)} (age/name attestation)"),
+        ]),
+    ]
+    panel_rows = await _write_sections(session, sections, unicode_style=unicode_style)
     options = []
     if target.pending_approval:
         options.append(MenuEntry(label=menu_key("A", "pprove"), brief="Approve this pending signup"))
@@ -5003,18 +5510,54 @@ async def _draw_user_detail(
     options.append(MenuEntry(label=menu_key("K", "ey"), brief="View/replace this user's SSH key"))
     options.append(MenuEntry(label=menu_key("P", "assword"), brief="Set or clear this user's password"))
     options.append(MenuEntry(label=menu_key("R", "estrict login"), brief="Block or unblock this account"))
+    options.append(MenuEntry(label=menu_key("H", "istory"), brief="Admin actions on this account"))
     options.append(MenuEntry(label=menu_key("D", "elete"), brief="Permanently remove this user"))
     options.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to the picker"))
     await session.write_line(
-        "\r\n"
-        + _menu_row(options, description_level, width=session.terminal_width, height=session.terminal_height)
+        "\r\n" + _fitted_menu(options, description_level, session=session, used_rows=panel_rows + 5)
     )
     await session.write_line(colored("(Ctrl-H for help on these fields)", fg_color=MUTED_COLOR))
-    await session.write("Choice: ")
+    await _choice_prompt(session)
     return blocked
 
 
-_USER_DETAIL_FIELD_ORDER = ("l", "t", "i", "k", "p", "r")
+_USER_DETAIL_FIELD_ORDER = ("l", "t", "r", "k", "p", "i")
+async def _user_history_screen(session: Session, lane: DatabaseLane, actor: User, target: User) -> None:
+    """Every recorded admin action against `target`, newest first, paged.
+
+    Dogfood follow-up: this list used to show *what* happened but never
+    *who* did it, even though `actor_user_id` is stored for exactly this
+    (`netbbs.moderation.log.ModerationLogEntry`'s own docstring: nullable
+    specifically so a deleted actor's audit trail survives, implying
+    display was always the intent) -- the in-channel notice for the same
+    action already says "by bob," this screen just never repeated it.
+
+    It was the bottom ten rows of the user detail screen, under the
+    account's own fields, and on a 24-row terminal pushed them off the
+    top. A screen of its own, it shows all of them."""
+    entries = list(reversed(await lane.run(list_actions_for_target_user, target.id)))
+    display_format, display_timezone = await lane.run(resolve_display_preferences)
+    actor_ids = {entry.actor_user_id for entry in entries if entry.actor_user_id is not None}
+    actor_usernames: dict[int, str] = {}
+    for actor_id in actor_ids:
+        found = await lane.run(get_user_by_id, actor_id)
+        actor_usernames[actor_id] = found.username if found is not None else "(deleted account)"
+
+    rows = []
+    for entry in entries:
+        when = format_for_display(
+            entry.created_at, override_format=display_format, override_timezone=display_timezone
+        )
+        by = actor_usernames.get(entry.actor_user_id, "(unknown)") if entry.actor_user_id is not None else "(system)"
+        rows.append([(when, DATE_COLOR), entry.action, (by, AUTHOR_COLOR), (entry.detail or "", METADATA_COLOR)])
+    body: list[Field | Note | Table] = (
+        [Table(("When", "Action", "By", "Detail"), rows, flex=3)] if rows
+        else [Note("No recorded admin actions.")]
+    )
+    await _show_report(
+        session, lane, actor, "Admin actions", breadcrumb=(sanitize_text(target.username),),
+        sections=[Section(None, body)],
+    )
 
 
 async def _read_user_detail_key(session: Session) -> EditorKey:
@@ -5209,7 +5752,7 @@ async def _user_detail_screen(
             await session.write_line("")
             if await prompt_yes_no(session, "Approve this account so it can log in?", default=False):
                 target = await lane.run(approve_pending_user, target, approved_by=actor)
-                await session.write_line(f"{target.username!r} approved.")
+                _announce_line(session, f"{target.username!r} approved.")
             blocked = await _draw_user_detail(
                 session, lane, target, description_level, redraw_in_place, unicode_style, collapsed, selected=selected,
             )
@@ -5221,14 +5764,14 @@ async def _user_detail_screen(
                 try:
                     new_level = int(raw)
                 except ValueError:
-                    await session.write_line(colored("Not a number -- cancelled.", fg_color=MUTED_COLOR))
+                    _announce_line(session, colored("Not a number -- cancelled.", fg_color=MUTED_COLOR))
                 else:
                     try:
                         target = await lane.run(set_user_level, target, new_level, changed_by=actor)
                     except UserManagementError as exc:
-                        await session.write_line(colored(str(exc), fg_color=MUTED_COLOR))
+                        _announce_line(session, colored(str(exc), fg_color=MUTED_COLOR))
                     else:
-                        await session.write_line(f"{target.username!r} is now level {target.user_level}.")
+                        _announce_line(session, f"{target.username!r} is now level {target.user_level}.")
             blocked = await _draw_user_detail(
                 session, lane, target, description_level, redraw_in_place, unicode_style, collapsed, selected=selected,
             )
@@ -5240,10 +5783,11 @@ async def _user_detail_screen(
                 try:
                     target = await lane.run(set_user_disabled, target, not currently_disabled, changed_by=actor)
                 except UserManagementError as exc:
-                    await session.write_line(colored(str(exc), fg_color=MUTED_COLOR))
+                    _announce_line(session, colored(str(exc), fg_color=MUTED_COLOR))
                 else:
-                    await session.write_line(
-                        f"{target.username!r} is now {'disabled' if target.disabled_at is not None else 'active'}."
+                    _announce_line(
+                        session,
+                        f"{target.username!r} is now {'disabled' if target.disabled_at is not None else 'active'}.",
                     )
                     if target.disabled_at is not None:
                         await _revoke_live_sessions(session, node_controls, target, actor)
@@ -5259,7 +5803,7 @@ async def _user_detail_screen(
                 target = await lane.run(
                     set_can_verify_identity, target, not target.can_verify_identity, changed_by=actor
                 )
-                await session.write_line(
+                _announce_line(session,
                     f"{target.username!r} can now verify identity: "
                     f"{'yes' if target.can_verify_identity else 'no'}."
                 )
@@ -5295,15 +5839,20 @@ async def _user_detail_screen(
             if await prompt_yes_no(session, prompt, default=False):
                 if blocked:
                     await lane.run(unblock_user, target)
-                    await session.write_line(f"{target.username!r} can log in again.")
+                    _announce_line(session, f"{target.username!r} can log in again.")
                 else:
                     try:
                         await lane.run(block_user, target, blocked_by=actor)
                     except BlocklistError as exc:
-                        await session.write_line(colored(str(exc), fg_color=MUTED_COLOR))
+                        _announce_line(session, colored(str(exc), fg_color=MUTED_COLOR))
                     else:
-                        await session.write_line(f"{target.username!r} is now blocked from logging in.")
+                        _announce_line(session, f"{target.username!r} is now blocked from logging in.")
                         await _revoke_live_sessions(session, node_controls, target, actor)
+            blocked = await _draw_user_detail(
+                session, lane, target, description_level, redraw_in_place, unicode_style, collapsed, selected=selected,
+            )
+        elif choice == "h":
+            await _user_history_screen(session, lane, actor, target)
             blocked = await _draw_user_detail(
                 session, lane, target, description_level, redraw_in_place, unicode_style, collapsed, selected=selected,
             )
@@ -5353,14 +5902,14 @@ async def _delete_user_confirm(
     )
     confirmation = (await session.read_line()).strip()
     if confirmation != target.username:
-        await session.write_line("Cancelled.")
+        _announce_line(session, "Cancelled.")
         return False
     try:
         await lane.run(delete_user, target, deleted_by=actor)
     except UserManagementError as exc:
-        await session.write_line(colored(str(exc), fg_color=MUTED_COLOR))
+        _announce_line(session, colored(str(exc), fg_color=MUTED_COLOR))
         return False
-    await session.write_line(f"{target.username!r} deleted.")
+    _announce_line(session, f"{target.username!r} deleted.")
     await _revoke_live_sessions(session, node_controls, target, actor)
     return True
 
@@ -5385,54 +5934,55 @@ async def _registration_settings_screen(session: Session, lane: DatabaseLane, ac
     account's own detail screen (`_user_detail_screen`'s `[A]pprove` action),
     reusing the existing user-management flow rather than building a
     second, parallel pending-accounts queue UI.
+
+    The screen stays up after a change and shows the mode it now has:
+    it used to print the outcome and return, and the Users menu's
+    redraw wiped the line before it could be read.
     """
     def _load(db: Database) -> tuple[RegistrationMode, int]:
         return get_registration_mode(db), sum(1 for u in list_users(db) if u.pending_approval)
 
-    current, pending_count = await lane.run(_load)
-
-    header = colored("\r\nSelf-service registration:", fg_color=await lane.run(effective_header_color_256), bold=True)
-    await session.write_line(header)
-    await session.write_line(f"Current mode: {_REGISTRATION_MODE_LABELS[current]}")
-    if pending_count:
-        await session.write_line(
-            colored(
-                f"{pending_count} account(s) awaiting approval -- see [L]ist users.",
-                fg_color=MUTED_COLOR,
-            )
-        )
-
-    await session.write_line(
-        "\r\n"
-        + action_bar(
-            [
-                menu_key("O", "pen"),
-                menu_key("A", "pproval required"),
-                menu_key("C", "losed"),
-                menu_key("B", "ack (leave unchanged)"),
+    modes = {"o": RegistrationMode.OPEN, "a": RegistrationMode.APPROVAL_REQUIRED, "c": RegistrationMode.CLOSED}
+    chrome = await _load_chrome(lane, actor)
+    message: str | None = None
+    while True:
+        current, pending_count = await lane.run(_load)
+        rows: list[Field | Note] = [Field("Current mode", _REGISTRATION_MODE_LABELS[current], bold=True)]
+        if pending_count:
+            rows.append(Field(
+                "Awaiting approval", f"{pending_count} account(s) -- see [L]ist users", color=WARNING_COLOR
+            ))
+        choice, _page = await show_detail(
+            session,
+            title=_detail_title(
+                session, chrome, "Registration", breadcrumb=("SysOp", "Users"),
+                subtitle="Who may create an account on this node by themselves.",
+            ),
+            sections=[Section("Self-service registration", rows)],
+            actions=[
+                ("o", menu_key("O", "pen")),
+                ("a", menu_key("A", "pproval required")),
+                ("c", menu_key("C", "losed")),
+                _BACK_ACTION,
             ],
-            width=session.terminal_width,
+            message=message,
+            redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
         )
-    )
-    await session.write("Choice: ")
-    choice = (await session.read_key()).lower()
-    await session.write_line("")
+        if choice == "b":
+            return
+        new_mode = modes[choice]
+        if new_mode == current:
+            message = colored("Already set to that mode.", fg_color=MUTED_COLOR)
+            continue
 
-    new_mode = {"o": RegistrationMode.OPEN, "a": RegistrationMode.APPROVAL_REQUIRED, "c": RegistrationMode.CLOSED}.get(
-        choice
-    )
-    if new_mode is None:
-        return
-    if new_mode == current:
-        await session.write_line(colored("Already set to that mode.", fg_color=MUTED_COLOR))
-        return
+        def _apply(db: Database) -> None:
+            set_registration_mode(db, new_mode)
+            record_action(db, actor=actor, action="set_registration_mode", detail=f"mode={new_mode.value}")
 
-    def _apply(db: Database) -> None:
-        set_registration_mode(db, new_mode)
-        record_action(db, actor=actor, action="set_registration_mode", detail=f"mode={new_mode.value}")
-
-    await lane.run(_apply)
-    await session.write_line(f"Registration mode is now: {_REGISTRATION_MODE_LABELS[new_mode]}")
+        await lane.run(_apply)
+        message = colored(
+            f"Registration mode is now: {_REGISTRATION_MODE_LABELS[new_mode]}", fg_color=SUCCESS_COLOR
+        )
 
 
 # -- self-update (design doc §17) --
@@ -5464,7 +6014,7 @@ async def _draw_update_status(
         "\r\n"
         + screen_title(
             "Self-update",
-            breadcrumb=(session.node_display_name, "System"),
+            breadcrumb=(session.node_display_name, "Settings"),
             subtitle="Release checks only; applying an update remains an operator action.",
             width=session.terminal_width,
             clear=redraw_in_place,
@@ -5476,48 +6026,48 @@ async def _draw_update_status(
     # same reasoning as _backup_status_screen's own exclusion: this
     # screen's whole content already is the update-check status, in
     # richer detail than the condensed line would add, right below.
-    await session.write_line(
-        colored("Running version: ", fg_color=LABEL_COLOR)
-        + colored(current_version, fg_color=METADATA_COLOR)
-    )
     auto_badge = (
         status_badge("ON", tone="success", unicode_style=unicode_style)
         if auto_enabled
         else status_badge("OFF", tone="warning", unicode_style=unicode_style)
     )
-    await session.write_line(
-        colored("Daily automatic check: ", fg_color=LABEL_COLOR) + auto_badge
+    token_badge = (
+        status_badge(f"set ({masked_token})", tone="success", unicode_style=unicode_style)
+        if masked_token is not None
+        else status_badge("not set", tone="neutral", unicode_style=unicode_style)
     )
-    await session.write_line(
-        colored("GitHub token: ", fg_color=LABEL_COLOR)
-        + (
-            status_badge(f"set ({masked_token})", tone="success", unicode_style=unicode_style)
-            if masked_token is not None
-            else status_badge("not set", tone="neutral", unicode_style=unicode_style)
-        )
-    )
+    sections = [Section("This node", [
+        Field("Running version", current_version, bold=True),
+        Field("Daily automatic check", auto_badge, styled=True),
+        Field("GitHub token", token_badge, styled=True),
+    ])]
     if checked_at is not None:
         display_format, display_timezone = await lane.run(resolve_display_preferences)
         when = format_for_display(checked_at, override_format=display_format, override_timezone=display_timezone)
-        await session.write_line(
-            colored("Last check: ", fg_color=LABEL_COLOR)
-            + colored(f"{when} -- {sanitize_text(outcome or '')}", fg_color=METADATA_COLOR)
-        )
+        checks: list[Field | Note | Table] = [Field("Last check", when, color=DATE_COLOR, note=outcome or None)]
         # Dogfood follow-up: "Last check" alone couldn't distinguish
         # "runs on a healthy schedule" from "happened to succeed once"
         # -- a few of the most recent runs make a gap or a run of
         # consecutive failures visible at a glance.
         history = await lane.run(list_operational_run_history, "update_check", limit=5)
         if len(history) > 1:
-            await session.write_line(colored("Recent checks:", fg_color=MUTED_COLOR))
-            for run in history:
-                run_when = format_for_display(
-                    run.created_at, override_format=display_format, override_timezone=display_timezone
-                )
-                await session.write_line(f"  {run_when}: {sanitize_text(run.outcome)}")
+            checks.append(Table(
+                ("Recent checks", "Outcome"),
+                [
+                    [
+                        (format_for_display(
+                            run.created_at, override_format=display_format, override_timezone=display_timezone
+                        ), DATE_COLOR),
+                        run.outcome,
+                    ]
+                    for run in history
+                ],
+                flex=1,
+            ))
+        sections.append(Section("Release checks", checks))
     else:
-        await session.write_line(colored("No check has been run on this node yet.", fg_color=MUTED_COLOR))
-
+        sections.append(Section("Release checks", [Note("No check has been run on this node yet.")]))
+    await _write_sections(session, sections, unicode_style=unicode_style)
     await session.write_line(
         "\r\n"
         + action_bar(
@@ -5530,7 +6080,7 @@ async def _draw_update_status(
             width=session.terminal_width,
         )
     )
-    await write_prompt(session, "Choice: ")
+    await _choice_prompt(session)
     return auto_enabled, masked_token, unicode_style
 
 
@@ -5548,12 +6098,12 @@ async def _run_release_check(session: Session, lane: DatabaseLane, *, unicode_st
         )
     except UpdateError as exc:
         await lane.run(record_check_outcome, f"check failed: {exc}")
-        await session.write_line(colored(f"Could not check for updates: {exc}", fg_color=ERROR_COLOR))
+        _announce_line(session, colored(f"Could not check for updates: {exc}", fg_color=ERROR_COLOR))
     else:
         await lane.run(save_release_cache, new_etag, release)
         if is_newer(current_version, release.tag_name):
             await lane.run(record_check_outcome, f"newer release available: {release.tag_name}")
-            await session.write_line(
+            _announce_line(session,
                 status_badge("UPDATE AVAILABLE", tone="warning", unicode_style=unicode_style)
                 + " "
                 + colored(
@@ -5561,7 +6111,7 @@ async def _run_release_check(session: Session, lane: DatabaseLane, *, unicode_st
                     fg_color=WARNING_COLOR,
                 )
             )
-            await session.write_line(
+            _announce_line(session,
                 colored(
                     "Automatic download/apply is not yet available from this "
                     "screen -- update manually for now.",
@@ -5570,7 +6120,7 @@ async def _run_release_check(session: Session, lane: DatabaseLane, *, unicode_st
             )
         else:
             await lane.run(record_check_outcome, f"up to date ({current_version})")
-            await session.write_line(
+            _announce_line(session,
                 status_badge("UP TO DATE", tone="success", unicode_style=unicode_style)
                 + " "
                 + colored(current_version, fg_color=SUCCESS_COLOR)
@@ -5599,16 +6149,16 @@ async def _github_token_prompt(
             record_action(db, actor=actor, action="set_github_pat", detail=f"token ending {token_input[-4:]}")
 
         await lane.run(_apply_token)
-        await session.write_line("GitHub token saved.")
+        _announce_line(session, "GitHub token saved.")
     elif masked_token is not None:
         def _clear_token(db: Database) -> None:
             clear_github_pat(db)
             record_action(db, actor=actor, action="clear_github_pat")
 
         await lane.run(_clear_token)
-        await session.write_line("GitHub token cleared.")
+        _announce_line(session, "GitHub token cleared.")
     else:
-        await session.write_line(colored("Cancelled -- no change.", fg_color=MUTED_COLOR))
+        _announce_line(session, colored("Cancelled -- no change.", fg_color=MUTED_COLOR))
 
 
 
@@ -5672,12 +6222,11 @@ async def _update_settings_screen(session: Session, lane: DatabaseLane, actor: U
             return
         elif choice == "c":
             await session.write_line("")
+            # The check's own verdict (UPDATE AVAILABLE / UP TO DATE / the
+            # error) is richer than the recorded one-line outcome the panel
+            # shows, so it is announced and appears above the redrawn
+            # screen's prompt.
             await _run_release_check(session, lane, unicode_style=unicode_style)
-            # The check's own verdict line (UPDATE AVAILABLE / UP TO DATE /
-            # the error) is richer than the recorded one-line outcome the
-            # redrawn panel shows -- keep it on screen until dismissed.
-            await session.write_line(colored("\r\nPress any key to continue...", fg_color=MUTED_COLOR))
-            await session.read_any_key()
             auto_enabled, masked_token, unicode_style = await _draw_update_status(session, lane, actor)
         elif choice == "t":
             await session.write_line("")
@@ -5691,7 +6240,7 @@ async def _update_settings_screen(session: Session, lane: DatabaseLane, actor: U
                 record_action(db, actor=actor, action="set_auto_update_check", detail=f"enabled={not auto_enabled}")
 
             await lane.run(_apply)
-            await session.write_line(f"Daily automatic check is now {'ON' if not auto_enabled else 'off'}.")
+            _announce_line(session, f"Daily automatic check is now {'ON' if not auto_enabled else 'off'}.")
             auto_enabled, masked_token, unicode_style = await _draw_update_status(session, lane, actor)
         else:
             await session.write(reject_unhandled_key(choice))
@@ -5765,142 +6314,116 @@ async def _backup_status_screen(
     can_create = identity_dir is not None
     db_path = await lane.run(lambda db: db.path)
 
+    page = 0
     while True:
         checked_at, path = await lane.run(get_last_backup_summary)
         history = await lane.run(list_operational_run_history, "backup", limit=5)
-        redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
-        unicode_style = await lane.run(unicode_style_enabled, actor)
-        collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
-        header_color = await lane.run(effective_header_color_256)
+        chrome = await _load_chrome(lane, actor)
+        unicode_style = chrome.unicode_style
+        display_format, display_timezone = await lane.run(resolve_display_preferences)
 
-        await session.write_line(
-            "\r\n"
-            + screen_title(
-                "Backup",
-                breadcrumb=(session.node_display_name, "Operations"),
-                subtitle="Create and review complete local node backups.",
-                width=session.terminal_width,
-                clear=redraw_in_place,
-                unicode_style=unicode_style,
-                collapsed=collapsed,
-                header_color=header_color,
-                node_name_gradient=session.node_name_gradient,
-            )
-        )
         if checked_at is not None:
-            display_format, display_timezone = await lane.run(resolve_display_preferences)
             when = format_for_display(
-                checked_at,
-                override_format=display_format,
-                override_timezone=display_timezone,
+                checked_at, override_format=display_format, override_timezone=display_timezone,
             )
-            await session.write_line(
-                status_badge("BACKED UP", tone="success", unicode_style=unicode_style)
-            )
-            await session.write_line(
-                colored("Last backup: ", fg_color=LABEL_COLOR)
-                + colored(when, fg_color=METADATA_COLOR)
-            )
-            await session.write_line(
-                colored("Location: ", fg_color=LABEL_COLOR)
-                + colored(sanitize_text(path or ""), fg_color=METADATA_COLOR)
-            )
+            last_rows: list[Field | Note | Table] = [
+                Field("Status", status_badge("BACKED UP", tone="success", unicode_style=unicode_style), styled=True),
+                Field("Last backup", when, color=DATE_COLOR),
+                Field("Location", path or "", color=METADATA_COLOR),
+            ]
         else:
-            await session.write_line(
-                empty_state(
-                    "No backup recorded",
-                    detail="No backup has been taken on this node yet.",
-                    width=session.terminal_width,
-                    header_color=header_color,
-                )
-            )
+            last_rows = [
+                Field("Status", status_badge("NO BACKUP RECORDED", tone="warning", unicode_style=unicode_style), styled=True),
+                Note("No backup has been taken on this node yet."),
+            ]
+        sections = [Section("Last backup", last_rows)]
 
         if len(history) > 1:
-            display_format, display_timezone = await lane.run(resolve_display_preferences)
-            await session.write_line(colored("\r\nRecent backups:", fg_color=MUTED_COLOR))
-            for run in history:
-                when = format_for_display(
-                    run.created_at,
-                    override_format=display_format,
-                    override_timezone=display_timezone,
-                )
-                await session.write_line(f"  {when}: {sanitize_text(run.outcome)}")
+            sections.append(Section("Recent backups", [Table(
+                ("When", "Outcome"),
+                [
+                    [
+                        (format_for_display(
+                            run.created_at, override_format=display_format, override_timezone=display_timezone,
+                        ), DATE_COLOR),
+                        run.outcome,
+                    ]
+                    for run in history
+                ],
+                flex=1,
+            )]))
 
-        await session.write_line(
-            colored("Voidrunner source: ", fg_color=LABEL_COLOR)
+        installs_on = await lane.run(door_installs_included)
+        sections.append(Section("Door data in a backup", [
             # `[0]`: this screen runs *inside* the node, so the recorded
             # location and the one this process would resolve are the same
             # answer by construction -- the provenance that says which one
             # it was matters only to the backup CLI, which is a different
             # process with a different home (issue #555).
-            + colored(sanitize_text(str(voidrunner_save_directory()[0])), fg_color=METADATA_COLOR)
-        )
-        await session.write_line(
-            "Includes saved careers and scores when this directory exists. "
-            "Close Voidrunner sessions before creating a backup."
-        )
-        await session.write_line(
-            "War Dialer: includes existing node-default and registered override worlds. "
-            "Close War Dialer sessions before backup; restore requires explicit world destinations."
-        )
-        await session.write_line(
-            "Door outbound receipts: included automatically, and restored beside the database "
-            "with the archive's own generation."
-        )
-        installs_on = await lane.run(door_installs_included)
-        await session.write_line(
-            colored("Door installation directories: ", fg_color=LABEL_COLOR)
-            + colored("included" if installs_on else "not included", fg_color=METADATA_COLOR)
-        )
-        await session.write_line(
-            "Each door's own game installation, which NetBBS otherwise leaves to you. "
-            "Off by default: these are operator-owned and can be far larger than node state. "
-            "Including them makes every backup that much larger and slower, so check you have "
-            "the space and that nothing in those directories links to host data you would not "
-            "want copied. Captured as a copy only -- restore never writes back over a live "
-            "installation."
-            if not installs_on else
-            "Every registered door's game installation is copied into each backup. "
-            "Backups will be larger and slower; restore never writes these back over a live "
-            "installation, so recover them with ordinary file tools. The copy is not quiesced: "
-            "halt a door's service and let its callers leave before backing up, or its game "
-            "state may be captured mid-write."
-        )
+            Field(
+                "Voidrunner source", str(voidrunner_save_directory()[0]),
+                note="Includes saved careers and scores when this directory exists. "
+                     "Close Voidrunner sessions before creating a backup.",
+            ),
+            Field(
+                "War Dialer", "existing node-default and registered override worlds",
+                note="Close War Dialer sessions before backup; restore requires explicit world destinations.",
+            ),
+            Field(
+                "Door outbound receipts", "included automatically",
+                note="Restored beside the database with the archive's own generation.",
+            ),
+        ]))
+        sections.append(Section("Door installation directories", [
+            Field(
+                "In each backup", "included" if installs_on else "not included",
+                color=WARNING_COLOR if installs_on else VALUE_COLOR, bold=True,
+            ),
+            Note(
+                "Each door's own game installation, which NetBBS otherwise leaves to you. "
+                "Off by default: these are operator-owned and can be far larger than node state. "
+                "Including them makes every backup that much larger and slower, so check you have "
+                "the space and that nothing in those directories links to host data you would not "
+                "want copied. Captured as a copy only -- restore never writes back over a live "
+                "installation."
+                if not installs_on else
+                "Every registered door's game installation is copied into each backup. "
+                "Backups will be larger and slower; restore never writes these back over a live "
+                "installation, so recover them with ordinary file tools. The copy is not quiesced: "
+                "halt a door's service and let its callers leave before backing up, or its game "
+                "state may be captured mid-write."
+            ),
+        ]))
 
-        if not can_create:
-            await session.write_line(
-                colored(
-                    "Live backup creation is unavailable in standalone admin. "
-                    "Run 'python -m netbbs.backup create --to <path>' instead.",
-                    fg_color=MUTED_COLOR,
-                )
-            )
-            await session.write_line(
-                colored("\r\nPress any key to continue...", fg_color=MUTED_COLOR)
-            )
-            await session.read_any_key()
-            return
+        if can_create:
+            actions = [
+                ("c", menu_key("C", "reate backup now")),
+                ("d", menu_key("D", "oor installations: " + ("on" if installs_on else "off"))),
+                _BACK_ACTION,
+            ]
+        else:
+            sections.append(Section("Creating a backup", [Note(
+                "Live backup creation is unavailable in standalone admin. "
+                "Run 'python -m netbbs.backup create --to <path>' instead."
+            )]))
+            actions = [_BACK_ACTION]
 
-        await session.write_line(
-            "\r\n"
-            + action_bar(
-                [menu_key("C", "reate backup now"),
-                 menu_key("D", "oor installations: " + ("on" if installs_on else "off")),
-                 menu_key("B", "ack")],
-                width=session.terminal_width,
-            )
+        choice, page = await show_detail(
+            session,
+            title=_detail_title(
+                session, chrome, "Backup", breadcrumb=("SysOp", "Operations"),
+                subtitle="Create and review complete local node backups.",
+            ),
+            sections=sections, actions=actions, page=page,
+            redraw_in_place=chrome.redraw_in_place, unicode_style=unicode_style,
         )
-        await write_prompt(session, "Choice: ")
-        choice = (await session.read_key()).lower()
         if choice == "b":
-            await session.write_line("")
             return
         if choice == "d":
             # A toggle toggles (AGENTS.md, design doc §3.5). The setting is
             # reversible and changes nothing until the next backup runs, so it
             # gets no confirmation; the consequences are screen content above,
             # read before the hotkey, and the new state shows on redraw.
-            await session.write_line("")
             wanted = not installs_on
             await lane.run(set_door_installs_included, wanted)
             await lane.run(
@@ -5910,10 +6433,6 @@ async def _backup_status_screen(
                 )
             )
             continue
-        if choice != "c":
-            await session.write(reject_unhandled_key(choice))
-            continue
-
         destination = default_backup_destination(db_path)
         await session.write_line(
             "\r\n"
@@ -5938,24 +6457,21 @@ async def _backup_status_screen(
                 destination=destination,
             )
         except (BackupError, OSError, sqlite3.Error) as exc:
-            await session.write_line(
+            _announce_styled(
+                session,
                 status_badge("BACKUP FAILED", tone="error", unicode_style=unicode_style)
+                + " " + colored(sanitize_text(str(exc)), fg_color=ERROR_COLOR),
             )
-            await session.write_line(colored(sanitize_text(str(exc)), fg_color=ERROR_COLOR))
             if destination.exists():
-                await session.write_line(
-                    colored(
-                        f"A partial directory may remain at {sanitize_text(str(destination))}.",
-                        fg_color=MUTED_COLOR,
-                    )
+                _announce(
+                    session, f"A partial directory may remain at {destination}.", color=MUTED_COLOR,
                 )
         else:
-            await session.write_line(
+            _announce_styled(
+                session,
                 status_badge("BACKUP COMPLETE", tone="success", unicode_style=unicode_style)
-            )
-            await session.write_line(
-                colored("Created: ", fg_color=LABEL_COLOR)
-                + colored(sanitize_text(str(created)), fg_color=METADATA_COLOR)
+                + colored("  Created: ", fg_color=LABEL_COLOR)
+                + colored(sanitize_text(str(created)), fg_color=METADATA_COLOR),
             )
             try:
                 await lane.run(
@@ -5965,16 +6481,10 @@ async def _backup_status_screen(
                 )
             except sqlite3.Error as exc:
                 _logger.warning("could not audit completed backup %s: %s", created, exc)
-                await session.write_line(
-                    colored(
-                        "The backup completed, but its SysOp audit entry could not be recorded.",
-                        fg_color=MUTED_COLOR,
-                    )
+                _announce(
+                    session, "The backup completed, but its SysOp audit entry could not be recorded.",
+                    color=WARNING_COLOR,
                 )
-        await session.write_line(
-            colored("\r\nPress any key to continue...", fg_color=MUTED_COLOR)
-        )
-        await session.read_any_key()
 
 
 _MANAGED_DNS_ACTIVE_STATUSES = (ManagedDnsRegistrationStatus.PENDING, ManagedDnsRegistrationStatus.MATURED)
@@ -6004,7 +6514,7 @@ async def _draw_managed_dns_status(
         "\r\n"
         + screen_title(
             "Managed DNS",
-            breadcrumb=(session.node_display_name, "System"),
+            breadcrumb=(session.node_display_name, "Settings"),
             subtitle="This node's netbbs.org subdomain registration, if any.",
             width=session.terminal_width,
             clear=redraw_in_place,
@@ -6013,24 +6523,24 @@ async def _draw_managed_dns_status(
         node_name_gradient=session.node_name_gradient)
     )
 
+    sections: list[Section] = []
     if opt_in is ManagedDnsOptIn.UNDECIDED:
-        await session.write_line(
-            empty_state(
-                "Not yet decided",
-                detail="This node hasn't been asked (or hasn't answered) the managed-DNS opt-in prompt yet.",
-                width=session.terminal_width,
-                header_color=header_color,
-            )
-        )
+        sections.append(Section("Registration", [
+            Field("Status", status_badge("NOT YET DECIDED", tone="neutral", unicode_style=unicode_style), styled=True),
+            Note("This node hasn't been asked (or hasn't answered) the managed-DNS opt-in prompt yet."),
+        ]))
     elif name is None:
-        await session.write_line(
-            empty_state(
-                "Declined" if opt_in is ManagedDnsOptIn.DECLINED else "No registration",
-                detail="This node has no active managed-DNS registration.",
-                width=session.terminal_width,
-                header_color=header_color,
-            )
-        )
+        sections.append(Section("Registration", [
+            Field(
+                "Status",
+                status_badge(
+                    "DECLINED" if opt_in is ManagedDnsOptIn.DECLINED else "NO REGISTRATION",
+                    tone="neutral", unicode_style=unicode_style,
+                ),
+                styled=True,
+            ),
+            Note("This node has no active managed-DNS registration."),
+        ]))
     else:
         # "LIVE" is a claim callers can act on, so it is made only once
         # the service has confirmed a published record (`published`):
@@ -6049,14 +6559,26 @@ async def _draw_managed_dns_status(
             ManagedDnsRegistrationStatus.REVOKED: "REVOKED",
             ManagedDnsRegistrationStatus.NONE: "NONE",
         }[status]
-        await session.write_line(status_badge(badge_text, tone=tone, unicode_style=unicode_style))
-        await session.write_line(
-            colored("Name: ", fg_color=LABEL_COLOR) + colored(f"{name}.netbbs.org", fg_color=METADATA_COLOR)
-        )
+        display_format, display_timezone = await lane.run(resolve_display_preferences)
+        registration: list[Field | Note] = [
+            Field("Status", status_badge(badge_text, tone=tone, unicode_style=unicode_style), styled=True),
+            Field("Name" if previous_name is None else "New name", f"{name}.netbbs.org", bold=True),
+        ]
+        if previous_name is not None:
+            registration.append(Field("Current name", f"{previous_name}.netbbs.org", bold=True))
+        if last_contact_at is not None:
+            registration.append(Field(
+                "Last contact",
+                format_for_display(last_contact_at, override_format=display_format, override_timezone=display_timezone),
+                color=DATE_COLOR,
+            ))
+        sections.append(Section("Registration", registration))
+
         # What the state means for the SysOp and what, if anything, they
         # need to do about it -- every state here used to be a bare badge.
         # A revocation takes both halves of a rename, so it is explained
         # even while `previous_name` is still set.
+        meaning: list[Field | Note] = []
         if previous_name is None or status is ManagedDnsRegistrationStatus.REVOKED:
             note = (
                 await lane.run(get_managed_dns_recovery_note)
@@ -6066,54 +6588,40 @@ async def _draw_managed_dns_status(
                 await lane.run(get_managed_dns_service_contact)
                 if status is ManagedDnsRegistrationStatus.REVOKED else None
             )
-            for line in _managed_dns_state_guidance(
+            meaning.extend(Note(line) for line in _managed_dns_state_guidance(
                 status, published, recovery_refused=note is not None,
                 recovery_final=note is not None and note.final, contact=contact,
-            ):
-                await _write_wrapped_muted(session, line)
-            if status is ManagedDnsRegistrationStatus.ABANDONED:
-                if note is not None:
-                    display_format, display_timezone = await lane.run(resolve_display_preferences)
-                    when = format_for_display(
-                        note.at, override_format=display_format, override_timezone=display_timezone
-                    )
-                    await _write_wrapped_muted(
-                        session, f"Last automatic attempt ({when}): {sanitize_text(note.text)[:240]}"
-                    )
+            ))
+            if note is not None:
+                when = format_for_display(
+                    note.at, override_format=display_format, override_timezone=display_timezone
+                )
+                meaning.append(Note(
+                    f"Last automatic attempt ({when}): {sanitize_text(note.text)[:240]}", color=WARNING_COLOR
+                ))
         if previous_name is not None:
-            await session.write_line(
-                colored("Current name: ", fg_color=LABEL_COLOR)
-                + colored(f"{previous_name}.netbbs.org", fg_color=METADATA_COLOR)
-            )
             if status is ManagedDnsRegistrationStatus.ABANDONED:
-                await session.write_line(
-                    colored(
-                        "The new name is inactive. Cancel the change to restore the current name.",
-                        fg_color=WARNING_COLOR,
-                    )
-                )
+                meaning.append(Note(
+                    "The new name is inactive. Cancel the change to restore the current name.",
+                    color=WARNING_COLOR,
+                ))
             elif status is ManagedDnsRegistrationStatus.REVOKED:
-                await session.write_line(
-                    colored("Both names were revoked together; the change cannot be cancelled.", fg_color=MUTED_COLOR)
-                )
+                meaning.append(Note("Both names were revoked together; the change cannot be cancelled."))
             else:
-                await session.write_line(colored("The new name is reserved and maturing.", fg_color=MUTED_COLOR))
-        if last_contact_at is not None:
-            display_format, display_timezone = await lane.run(resolve_display_preferences)
-            when = format_for_display(
-                last_contact_at, override_format=display_format, override_timezone=display_timezone
-            )
-            await session.write_line(colored("Last contact: ", fg_color=LABEL_COLOR) + colored(when, fg_color=METADATA_COLOR))
+                meaning.append(Note("The new name is reserved and maturing."))
+        if meaning:
+            sections.append(Section("What this means", meaning))
         if status in _MANAGED_DNS_ACTIVE_STATUSES:
             # Design doc §16 Decision 6 (issue #603): the convention
             # that makes the name reach this board, against this node's
             # own listeners. Stated here, where the SysOp looks after
             # registering, not only in the editor they saw once.
-            await session.write_line("")
             listeners = await lane.run(get_managed_dns_local_listeners)
-            for line in managed_dns_standard_ports_lines(listeners):
-                await _write_wrapped_muted(session, line)
-
+            sections.append(Section(
+                "Reaching this board by name",
+                [Note(line) for line in managed_dns_standard_ports_lines(listeners)],
+            ))
+    await _write_sections(session, sections, unicode_style=unicode_style)
     actions = [menu_key("R", "egister")]
     if previous_name is not None and status is not ManagedDnsRegistrationStatus.REVOKED:
         actions.append(menu_key("C", "ancel change"))
@@ -6126,13 +6634,9 @@ async def _draw_managed_dns_status(
         # runs the service gets the service's own table here.
         actions.append(menu_key("A", "dminister service"))
     actions.append(menu_key("B", "ack"))
-    await session.write_line("\r\n" + "    ".join(actions))
+    await session.write_line("\r\n" + action_bar(actions, width=session.terminal_width))
+    await _choice_prompt(session)
     return status
-
-
-async def _write_wrapped_muted(session: Session, text: str) -> None:
-    for wrapped in wrap_to_width(text, session.terminal_width):
-        await session.write_line(colored(wrapped, fg_color=MUTED_COLOR))
 
 
 def _managed_dns_state_guidance(
@@ -6219,35 +6723,39 @@ async def _managed_dns_status_screen(session: Session, lane: DatabaseLane, actor
             return
         elif choice == "r":
             await session.write_line("")
-            if await register_via_prompt(session, lane, actor=actor):
-                # register_via_prompt reports every terminal outcome inline,
-                # including missing configuration and service rejections.
-                # Keep that result visible before this status screen
-                # redraws over it; [B]ack wrote nothing and returns straight
-                # to the status.
-                await session.write_line(colored("\r\nPress any key to continue...", fg_color=MUTED_COLOR))
-                await session.read_any_key()
+            # register_via_prompt reports every terminal outcome inline,
+            # including missing configuration and service rejections; held
+            # here and shown on the redrawn status screen, not under a clear.
+            flow = _TrailingOutput(session)
+            await register_via_prompt(flow, lane, actor=actor)
+            flow.announce_rest()
             status = await _draw_managed_dns_status(session, lane, actor)
         elif (
             choice == "l" and status in _MANAGED_DNS_ACTIVE_STATUSES
             and await lane.run(get_managed_dns_previous_name) is None
         ):
             await session.write_line("")
-            await release_registration(session, lane)
+            flow = _TrailingOutput(session)
+            await release_registration(flow, lane)
+            flow.announce_rest()
             status = await _draw_managed_dns_status(session, lane, actor)
         elif (
             choice == "n" and status in _MANAGED_DNS_ACTIVE_STATUSES
             and await lane.run(get_managed_dns_previous_name) is None
         ):
             await session.write_line("")
-            await rename_registration(session, lane)
+            flow = _TrailingOutput(session)
+            await rename_registration(flow, lane)
+            flow.announce_rest()
             status = await _draw_managed_dns_status(session, lane, actor)
         elif (
             choice == "c" and await lane.run(get_managed_dns_previous_name) is not None
             and status is not ManagedDnsRegistrationStatus.REVOKED
         ):
             await session.write_line("")
-            await cancel_registration_rename(session, lane)
+            flow = _TrailingOutput(session)
+            await cancel_registration_rename(flow, lane)
+            flow.announce_rest()
             status = await _draw_managed_dns_status(session, lane, actor)
         elif choice == "a" and await lane.run(get_managed_dns_admin_token) is not None:
             await session.write_line("")
@@ -6309,7 +6817,7 @@ async def _timestamp_settings_screen(session: Session, lane: DatabaseLane, actor
         try:
             await lane.run(_apply)
         except ValueError as exc:
-            await session.write_line(colored(str(exc), fg_color=MUTED_COLOR))
+            _announce_line(session, colored(str(exc), fg_color=MUTED_COLOR))
         else:
             draft["format"] = new_fmt
 
@@ -6354,7 +6862,7 @@ async def _timestamp_settings_screen(session: Session, lane: DatabaseLane, actor
         try:
             await lane.run(_apply)
         except ValueError as exc:
-            await session.write_line(colored(str(exc), fg_color=MUTED_COLOR))
+            _announce_line(session, colored(str(exc), fg_color=MUTED_COLOR))
         else:
             draft["timezone"] = selected
 
@@ -6562,7 +7070,7 @@ async def _mrc_settings_screen(
             key="send_caller_ip", hotkey="u", menu_text=menu_key("U", "SERIP"), label="Send callers' IP addresses (USERIP)",
             render=lambda d: "yes" if d["send_caller_ip"] else "no",
             prompt=_toggle_draft_field("send_caller_ip"),
-            brief="Off: the connecting address stays local", section="About callers",
+            brief="Off: caller addresses stay local", section="About callers",
             help=(
                 "Off by default. On: each caller announced on the network is followed by their "
                 "connecting IP address (USERIP), which the hub uses to tell this board's callers apart "
@@ -6574,7 +7082,7 @@ async def _mrc_settings_screen(
             key="send_caller_meta", hotkey="m", menu_text=menu_key("M", "etadata"), label="Send caller level and SysOp name (BBSMETA)",
             render=lambda d: "yes" if d["send_caller_meta"] else "no",
             prompt=_toggle_draft_field("send_caller_meta"),
-            brief="Off: the hub learns no caller levels", section="About callers",
+            brief="Off: hub learns no caller levels", section="About callers",
             help=(
                 "Off by default. On: each announced caller is followed by their security level and "
                 "this node's SysOp name (BBSMETA), which the hub's operator uses to judge a caller's "
@@ -6585,7 +7093,7 @@ async def _mrc_settings_screen(
             key="open_rooms", hotkey="o", menu_text=menu_key("O", "pen rooms"), label="Callers may open any room",
             render=lambda d: "yes" if d["open_rooms"] else "no",
             prompt=_toggle_draft_field("open_rooms"),
-            brief="Rooms callers open appear as mrc:<room> channels", section="Open rooms",
+            brief="Callers' rooms become mrc:<room>", section="Open rooms",
             help=(
                 "Off by default. On: the chat channel picker gains a Multi Relay Chat section where a "
                 "caller can open any room on the network by name; it becomes a channel named mrc:<room> "
@@ -6597,32 +7105,32 @@ async def _mrc_settings_screen(
             key="open_min_level", hotkey="v", menu_text=menu_key("v", "el for open rooms", prefix="Le"),
             label="Minimum level (open rooms)",
             render=lambda d: str(d["open_min_level"]), prompt=_int_field("open_min_level", "Minimum level"),
-            brief="Level a caller needs to open or enter one", section="Open rooms",
+            brief="Level needed to open or enter one", section="Open rooms",
         ),
         FieldSpec(
             key="open_min_age", hotkey="g", menu_text=menu_key("g", "e for open rooms", prefix="A"),
             label="Minimum age (open rooms)",
             render=lambda d: "none" if d["open_min_age"] is None else str(d["open_min_age"]),
             prompt=_optional_int_field("open_min_age", "Minimum age (blank = none)"),
-            brief="Age gate on every room callers open", section="Open rooms",
+            brief="Age gate on rooms callers open", section="Open rooms",
         ),
         FieldSpec(
             key="open_name_requirement", hotkey="q", menu_text=menu_key("q", "uired name (open rooms)", prefix="Re"),
             label="Name requirement (open rooms)",
             render=lambda d: d["open_name_requirement"] or "none",
             prompt=choice_field("open_name_requirement", [None, "verified", "verified_and_displayed"]),
-            brief="none / verified / verified_and_displayed", section="Open rooms",
+            brief="Name gate on rooms callers open", section="Open rooms",
         ),
         FieldSpec(
             key="open_cap", hotkey="c", menu_text=menu_key("C", "ap on open rooms"), label="Cap on open rooms",
             render=lambda d: str(d["open_cap"]), prompt=_int_field("open_cap", "Most rooms open at once"),
-            brief="Opening refuses past this; nothing is evicted", section="Open rooms",
+            brief="Opening refuses past this cap", section="Open rooms",
         ),
         FieldSpec(
             key="open_retention_days", hotkey="r", menu_text=menu_key("R", "etention (days)"), label="Retention (days)",
             render=lambda d: str(d["open_retention_days"]),
             prompt=_int_field("open_retention_days", "Days an open room may sit idle"),
-            brief="An idle, unfollowed open room is retired after this", section="Open rooms",
+            brief="Idle open rooms retire after this", section="Open rooms",
             help=(
                 "A room callers opened is deleted, with its scrollback, once nobody has been in it for "
                 "this many days -- unless someone follows it or you adopt it from its channel screen."
@@ -6690,14 +7198,18 @@ async def _mrc_settings_screen(
         return
     unreachable = await lane.run(_mrc_unreachable_note) if saved.enabled else None
     if mrc_bridge is None:
-        await session.write_line("Saved. Applies the next time the node runs.")
+        _announce_line(session, "Saved. Applies the next time the node runs.")
     else:
         status = mrc_bridge.status()
-        await session.write_line("Saved and applied. Link now: " + _mrc_state_line(status, unicode_style=unicode_style))
+        _announce_styled(
+            session,
+            colored("Saved and applied. Link now: ", fg_color=SUCCESS_COLOR)
+            + _mrc_state_line(status, unicode_style=unicode_style),
+        )
         if status.last_error:
-            await session.write_line(colored(f"Last error: {sanitize_text(status.last_error)}", fg_color=MUTED_COLOR))
+            _announce_line(session, colored(f"Last error: {sanitize_text(status.last_error)}", fg_color=MUTED_COLOR))
     if unreachable is not None:
-        await session.write_line(colored(unreachable, fg_color=WARNING_COLOR))
+        _announce_line(session, colored(unreachable, fg_color=WARNING_COLOR))
 
 
 def _mrc_unreachable_note(db: Database) -> str | None:
@@ -6779,337 +7291,343 @@ async def _blocklist_field(session: Session, lane: DatabaseLane, draft: dict) ->
         await session.write(reject_unhandled_key(choice))
 
 
-async def _draw_mrc_status(session: Session, lane: DatabaseLane, actor: User, node_controls: NodeControls) -> None:
-    redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
-    unicode_style = await lane.run(unicode_style_enabled, actor)
-    collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
-    header_color = await lane.run(effective_header_color_256)
-    await session.write_line(
-        "\r\n"
-        + screen_title(
-            "Chat bridge (MRC)",
-            breadcrumb=(session.node_display_name, "Node"),
-            subtitle="This node's link to the Multi Relay Chat network, live.",
-            width=session.terminal_width,
-            clear=redraw_in_place,
-            unicode_style=unicode_style, collapsed=collapsed,
-            header_color=header_color,
-            node_name_gradient=session.node_name_gradient,
-        )
-    )
-    mrc_bridge = node_controls.mrc_bridge
-    if mrc_bridge is None:
-        await session.write_line(
-            empty_state(
-                "Not available here",
-                detail="The MRC bridge lives inside the running node; the standalone admin CLI can't see it.",
-                width=session.terminal_width, header_color=header_color,
-            )
-        )
-        await session.write_line("\r\n" + menu_key("B", "ack"))
-        return
-    status = mrc_bridge.status()
-    mappings = await lane.run(list_mrc_mappings)
+async def _mrc_status_sections(
+    lane: DatabaseLane, mrc_bridge: MrcBridge, status: MrcStatus, *, unicode_style: bool
+) -> list[Section]:
+    """The live bridge as grouped facts: the hub connection, what the network
+    looks like from here, caller-opened rooms, and one table row per bridged
+    channel."""
+    sections: list[Section] = []
     if not status.enabled:
-        await session.write_line(
-            empty_state(
-                "MRC is off",
-                detail="Enable it under Settings > Inter-BBS chat (MRC), then bridge channels from each channel's screen.",
-                width=session.terminal_width, header_color=header_color,
-            )
-        )
+        sections.append(Section("Connection", [
+            Field("State", status_badge("MRC IS OFF", tone="neutral", unicode_style=unicode_style), styled=True),
+            Note("Enable it under Settings > Inter-BBS chat (MRC), then bridge channels from each channel's screen."),
+        ]))
     else:
-        await session.write_line(_mrc_state_line(status, unicode_style=unicode_style))
         transport = "TLS" if status.tls else "plain"
-        await session.write_line(
-            colored("Hub: ", fg_color=LABEL_COLOR)
-            + colored(f"{sanitize_text(status.host)}:{status.port} ({transport})", fg_color=METADATA_COLOR)
-        )
-        await session.write_line(
-            colored("Site name: ", fg_color=LABEL_COLOR) + colored(sanitize_text(status.site_name), fg_color=METADATA_COLOR)
-        )
+        connection: list[Field | Note] = [
+            Field("State", _mrc_state_line(status, unicode_style=unicode_style), styled=True),
+            Field("Hub", f"{status.host}:{status.port} ({transport})"),
+            Field("Site name", status.site_name),
+        ]
         if status.connected_since is not None:
             display_format, display_timezone = await lane.run(resolve_display_preferences)
-            when = format_for_display(
-                status.connected_since, override_format=display_format, override_timezone=display_timezone
-            )
-            await session.write_line(colored("Connected since: ", fg_color=LABEL_COLOR) + colored(when, fg_color=METADATA_COLOR))
+            connection.append(Field(
+                "Connected since",
+                format_for_display(
+                    status.connected_since, override_format=display_format, override_timezone=display_timezone
+                ),
+                color=DATE_COLOR,
+            ))
         if status.last_error:
-            await session.write_line(
-                colored("Last error: ", fg_color=LABEL_COLOR) + colored(sanitize_text(status.last_error), fg_color=METADATA_COLOR)
-            )
-        await session.write_line(
-            colored("Connection attempts: ", fg_color=LABEL_COLOR) + colored(str(status.attempts), fg_color=METADATA_COLOR)
-            + colored("  Callers announced: ", fg_color=LABEL_COLOR) + colored(str(status.participants), fg_color=METADATA_COLOR)
-        )
-        await session.write_line(
-            colored("Dropped lines: ", fg_color=LABEL_COLOR)
-            + colored(f"{status.dropped_outbound} outbound, {status.dropped_inbound} inbound", fg_color=METADATA_COLOR)
-        )
+            connection.append(Field("Last error", status.last_error, color=WARNING_COLOR))
+        sections.append(Section("Connection", connection))
+
+        dropped = status.dropped_outbound or status.dropped_inbound
+        sections.append(Section("Traffic", [
+            Field("Connection attempts", str(status.attempts)),
+            Field("Callers announced", str(status.participants)),
+            Field(
+                "Dropped lines", f"{status.dropped_outbound} outbound, {status.dropped_inbound} inbound",
+                color=WARNING_COLOR if dropped else VALUE_COLOR,
+            ),
+        ]))
+
         if status.network_summary is not None:
             age = status.network_stats_age_seconds or 0.0
             activity = f", {status.network_activity_label}" if status.network_activity_label else ""
-            network_line = f"{status.network_summary}, {status.network_rooms} rooms{activity} (as of {int(age // 60)} min ago)"
+            network = Field(
+                "Network size",
+                f"{status.network_summary}, {status.network_rooms} rooms{activity} (as of {int(age // 60)} min ago)",
+            )
         elif status.network_stats_raw:
-            network_line = f"unknown -- the hub answered STATS with: {sanitize_text(status.network_stats_raw)}"
+            network = Field(
+                "Network size", f"unknown -- the hub answered STATS with: {status.network_stats_raw}",
+                color=MUTED_COLOR,
+            )
         else:
-            network_line = "unknown yet (asked once a caller is announced)"
-        await session.write_line(
-            colored("Network size: ", fg_color=LABEL_COLOR) + colored(network_line, fg_color=METADATA_COLOR)
-        )
+            network = Field("Network size", "unknown yet (asked once a caller is announced)", color=MUTED_COLOR)
         if status.hub_latency_seconds is not None:
             latency_age = int(status.hub_latency_age_seconds or 0.0)
-            latency_line = f"{status.hub_latency_seconds * 1000:.0f} ms (as of {latency_age} s ago)"
+            latency = Field(
+                "Hub round trip", f"{status.hub_latency_seconds * 1000:.0f} ms (as of {latency_age} s ago)"
+            )
         else:
-            latency_line = "not measured yet (the hub answers the next keepalive)"
-        await session.write_line(
-            colored("Hub round trip: ", fg_color=LABEL_COLOR) + colored(latency_line, fg_color=METADATA_COLOR)
-        )
+            latency = Field(
+                "Hub round trip", "not measured yet (the hub answers the next keepalive)", color=MUTED_COLOR
+            )
+        sections.append(Section("Network", [network, latency]))
+
     if status.enabled or status.open_rooms or status.retired_rooms:
         # Shown whenever there is open-room state to report -- with MRC
         # switched off node-wide too, since the sweeper keeps retiring
         # rooms opened earlier and a SysOp should see that happening.
         open_settings = await lane.run(load_open_room_settings)
-        ageing = (
-            f"{status.open_rooms} opened earlier still age out after {open_settings.retention_days} idle "
-            f"day{'s' if open_settings.retention_days != 1 else ''}; {status.retired_rooms} retired since start"
-        )
+        days = f"{open_settings.retention_days} idle day{'s' if open_settings.retention_days != 1 else ''}"
         if status.open_rooms_enabled:
-            open_line = (
-                f"{status.open_rooms} of {open_settings.cap} open, retired after {open_settings.retention_days} idle "
-                f"day{'s' if open_settings.retention_days != 1 else ''}; {status.observed_rooms} room"
-                f"{'s' if status.observed_rooms != 1 else ''} heard of; {status.retired_rooms} retired since start"
-            )
-        elif not status.enabled:
-            open_line = f"MRC is off node-wide; {ageing}"
+            rooms: list[Field | Note] = [
+                Field("Open rooms", f"{status.open_rooms} of {open_settings.cap} open, retired after {days}"),
+                Field("Heard of", f"{status.observed_rooms} room{'s' if status.observed_rooms != 1 else ''}"),
+            ]
         else:
-            open_line = f"off (callers cannot open rooms); {ageing}"
-        await session.write_line(
-            colored("Open rooms: ", fg_color=LABEL_COLOR) + colored(open_line, fg_color=METADATA_COLOR)
-        )
+            rooms = [
+                Field(
+                    "Open rooms",
+                    "MRC is off node-wide" if not status.enabled else "off (callers cannot open rooms)",
+                    color=MUTED_COLOR,
+                ),
+                Field("Opened earlier", f"{status.open_rooms} still age out after {days}"),
+            ]
+        rooms.append(Field("Retired since start", str(status.retired_rooms)))
+        sections.append(Section("Caller-opened rooms", rooms))
+
+    mappings = await lane.run(list_mrc_mappings)
     if not mappings:
-        await session.write_line(colored("\r\nNo channel is bridged to an MRC room yet.", fg_color=MUTED_COLOR))
+        sections.append(Section("Bridged channels", [Note("No channel is bridged to an MRC room yet.")]))
     else:
-        await session.write_line("\r\nBridged channels:")
+        rows = []
         for mapping in mappings:
             state = "paused" if mapping.paused else ("open room" if mapping.is_open_room else "bridged")
             roster = mrc_bridge.remote_roster(mapping.channel)
-            who = f"{len(roster)} MRC user{'s' if len(roster) != 1 else ''}"
-            if roster:
-                who += ": " + ", ".join(sanitize_text(display_roster_entry(name)) for name in roster[:12])
-                if len(roster) > 12:
-                    who += ", ..."
-            await session.write_line(
-                f"  {sanitize_text(mapping.channel.name)} -> #{sanitize_text(mapping.room)} ({state}) -- {who}"
-            )
-    actions = []
-    if status.enabled:
-        actions.append(menu_key("R", "econnect now"))
-    actions.append(menu_key("S", "ettings"))
-    actions.append(menu_key("B", "ack"))
-    await session.write_line("\r\n" + "    ".join(actions))
+            who = ", ".join(display_roster_entry(name) for name in roster[:12]) + (", ..." if len(roster) > 12 else "")
+            rows.append([
+                (mapping.channel.name, ACCENT_COLOR),
+                f"#{mapping.room}",
+                (state, WARNING_COLOR if mapping.paused else SUCCESS_COLOR),
+                str(len(roster)),
+                (who, METADATA_COLOR),
+            ])
+        sections.append(Section("Bridged channels", [
+            Table(("Channel", "MRC room", "State", "Users", "Who"), rows, flex=4, right_aligned=frozenset({3})),
+        ]))
+    return sections
 
 
 async def _mrc_status_screen(session: Session, lane: DatabaseLane, actor: User, node_controls: NodeControls) -> None:
     """Issue #275: the "what is the bridge doing right now" screen §16
     left open -- read-only apart from `[R]econnect now` (a settings
-    reload, which drops and redials the hub) and a jump to Settings."""
-    await _draw_mrc_status(session, lane, actor, node_controls)
-    while True:
-        choice = (await session.read_key()).lower()
+    reload, which drops and redials the hub) and a jump to Settings.
 
-        if choice == "b":
-            await session.write_line("")
+    Grouped and paged (`show_detail`): with a few bridged channels the
+    flat form ran past a 24-row terminal, the hub's own state first off
+    the top."""
+    page = 0
+    message = None
+    while True:
+        chrome = await _load_chrome(lane, actor)
+        title = _detail_title(
+            session, chrome, "Chat bridge (MRC)", breadcrumb=("Node",),
+            subtitle="This node's link to the Multi Relay Chat network, live.",
+        )
+        mrc_bridge = node_controls.mrc_bridge
+        if mrc_bridge is None:
+            await show_detail(
+                session, title=title, actions=[_BACK_ACTION],
+                sections=[Section(None, [
+                    Field("State", status_badge("NOT AVAILABLE HERE", tone="neutral", unicode_style=chrome.unicode_style), styled=True),
+                    Note("The MRC bridge lives inside the running node; the standalone admin CLI can't see it."),
+                ])],
+                redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+            )
             return
-        elif choice == "r" and node_controls.mrc_bridge is not None and node_controls.mrc_bridge.status().enabled:
-            await session.write_line("")
+        status = mrc_bridge.status()
+        actions = [("s", menu_key("S", "ettings")), _BACK_ACTION]
+        if status.enabled:
+            actions.insert(0, ("r", menu_key("R", "econnect now")))
+        choice, page = await show_detail(
+            session, title=title, actions=actions, page=page, message=message,
+            sections=await _mrc_status_sections(lane, mrc_bridge, status, unicode_style=chrome.unicode_style),
+            redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+        )
+        message = None
+        if choice == "b":
+            return
+        if choice == "r":
             await lane.run(record_action, actor=actor, action="reconnect_mrc")
-            await node_controls.mrc_bridge.reload_settings()
-            await session.write_line("Reconnecting...")
-            await _draw_mrc_status(session, lane, actor, node_controls)
+            await mrc_bridge.reload_settings()
+            message = colored("Reconnecting...", fg_color=SUCCESS_COLOR)
         elif choice == "s":
-            await session.write_line("")
             await _mrc_settings_screen(session, lane, actor, node_controls=node_controls)
-            await _draw_mrc_status(session, lane, actor, node_controls)
-        else:
-            await session.write(reject_unhandled_key(choice))
 
 
 # -- Link status (issue #60, narrow scope) -----------------------------------
 
 
-async def _draw_link_status(
-    session: Session, lane: DatabaseLane, actor: User, *, link_context: LinkContext
-) -> tuple[list, bool]:
-    """Renders the whole Link status panel -- identity, any observed
-    identity changes, mode/capacity, counters, relay mailbox, and the
-    verified-peer count -- followed by its action bar. Returns the
-    identity notices shown (so `[A]cknowledge` dismisses exactly those)
-    and whether any verified peers exist (so `[P]eers` is only offered
-    when there is something to open)."""
+def _identity_notice_message(notice) -> str:
+    """One observed identity change as a sentence a SysOp can act on."""
+    if notice.kind == "friendly_name_changed":
+        return (
+            f"{notice.previous_friendly_name or 'A linked node'} is now called "
+            f"{notice.friendly_name}; its verified identity is unchanged."
+        )
+    if notice.kind == "dns_name_changed":
+        return (
+            f"{notice.friendly_name or 'A linked node'} moved from "
+            f"{notice.previous_dns_name or 'no DNS name'} to "
+            f"{notice.canonical_dns_name or 'no DNS name'}; its verified identity is unchanged."
+        )
+    current_claims = {
+        value.lower(): value for value in (notice.friendly_name, notice.canonical_dns_name) if value
+    }
+    previous_claims = {
+        value.lower() for value in (notice.previous_friendly_name, notice.previous_dns_name) if value
+    }
+    shared_claim = next(
+        (value for key, value in current_claims.items() if key in previous_claims),
+        "a familiar node name",
+    )
+    return (
+        f"The cryptographic identity presented as {shared_claim} changed. "
+        "This may be recovery or replacement, but could indicate impersonation."
+    )
+
+
+async def _link_status_sections(
+    lane: DatabaseLane, *, link_context: LinkContext
+) -> tuple[list[Section], list]:
+    """The Link status panel as grouped facts -- identity, any observed
+    identity changes, peers and seeds, relay activity, and carried content --
+    plus the identity notices shown, so `[A]cknowledge` dismisses exactly
+    those."""
     node = link_context.link_node
     config = link_context.link_config
-    redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
-    unicode_style = await lane.run(unicode_style_enabled, actor)
-    collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
-    header_color = await lane.run(effective_header_color_256)
 
-    await session.write_line(
-        "\r\n"
-        + screen_title(
-            "Link status",
-            breadcrumb=(session.node_display_name, "System"),
-            subtitle="Identity, capacity, relay activity, and verified peers.",
-            width=session.terminal_width,
-            clear=redraw_in_place,
-            unicode_style=unicode_style, collapsed=collapsed,
-            header_color=header_color,
-        node_name_gradient=session.node_name_gradient)
-    )
-    await session.write_line(await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width))
     own_dns = await lane.run(own_canonical_dns_name, config.advertised_host if config else None)
     own_name = await lane.run(get_node_display_name)
-    await session.write_line(
-        colored("Node: ", fg_color=LABEL_COLOR)
-        + colored(
-            sanitize_text(own_name + (f" · {own_dns}" if own_dns else "")),
-            fg_color=METADATA_COLOR,
+    identity = [
+        Field("Node", own_name + (f" · {own_dns}" if own_dns else ""), bold=True),
+        Field("Technical identity", link_context.node_identity.fingerprint, color=METADATA_COLOR),
+    ]
+    if config is not None:
+        identity.append(
+            Field("Mode", badge("OUTGOING ONLY" if config.outgoing_only else "FULL PEER", tone="neutral"), styled=True)
         )
-    )
-    await session.write_line(
-        colored("Technical identity: ", fg_color=LABEL_COLOR)
-        + colored(sanitize_text(link_context.node_identity.fingerprint), fg_color=METADATA_COLOR)
-    )
+        if not config.outgoing_only:
+            if config.advertised_host:
+                identity.append(Field("Advertised address", f"{config.advertised_host}:{config.advertised_port}"))
+            else:
+                identity.append(Field("Advertised address", "(not configured)", color=WARNING_COLOR))
+    sections = [Section("Identity", identity)]
+
     identity_notices = await lane.run(list_identity_observations)
     if identity_notices:
         security_count = sum(item.severity == "security" for item in identity_notices)
-        await session.write_line(
-            colored(
+        tone = ALERT_COLOR if security_count else WARNING_COLOR
+        sections.append(Section("Identity changes", [
+            Note(
                 f"Identity changes observed: {len(identity_notices)}"
                 + (f" ({security_count} cryptographic)" if security_count else ""),
-                fg_color=ALERT_COLOR if security_count else WARNING_COLOR,
-            )
-        )
-        for notice in identity_notices[:5]:
-            if notice.kind == "friendly_name_changed":
-                message = (
-                    f"{notice.previous_friendly_name or 'A linked node'} is now called "
-                    f"{notice.friendly_name}; its verified identity is unchanged."
-                )
-            elif notice.kind == "dns_name_changed":
-                message = (
-                    f"{notice.friendly_name or 'A linked node'} moved from "
-                    f"{notice.previous_dns_name or 'no DNS name'} to "
-                    f"{notice.canonical_dns_name or 'no DNS name'}; its verified identity is unchanged."
-                )
-            else:
-                current_claims = {
-                    value.lower(): value for value in (
-                        notice.friendly_name, notice.canonical_dns_name,
-                    ) if value
-                }
-                previous_claims = {
-                    value.lower() for value in (
-                        notice.previous_friendly_name, notice.previous_dns_name,
-                    ) if value
-                }
-                shared_claim = next(
-                    (value for key, value in current_claims.items() if key in previous_claims),
-                    "a familiar node name",
-                )
-                message = (
-                    f"The cryptographic identity presented as {shared_claim} changed. "
-                    "This may be recovery or replacement, but could indicate impersonation."
-                )
-            await session.write_line(colored("  " + sanitize_text(message), fg_color=METADATA_COLOR))
-    if config is not None:
-        await session.write_line(
-            colored("Mode: ", fg_color=LABEL_COLOR)
-            + badge("OUTGOING ONLY" if config.outgoing_only else "FULL PEER", tone="neutral")
-        )
-        if not config.outgoing_only:
-            address = (
-                f"{config.advertised_host}:{config.advertised_port}"
-                if config.advertised_host else "(not configured)"
-            )
-            await session.write_line(f"Advertised address: {sanitize_text(address)}")
-        await session.write_line(
-            f"Relay-serving: {'on' if config.relay_serving_enabled else 'off'} "
-            f"({len(node.relaying_for)}/{config.max_relay_clients} slots in use)"
-        )
-        await session.write_line(f"Sync interval: {config.sync_interval_seconds:.0f}s")
-        await session.write_line(f"Configured seeds: {len(config.seeds)}")
-    else:
-        await session.write_line(f"Relaying for: {len(node.relaying_for)} requester(s)")
+                color=tone,
+            ),
+            *(Note(_identity_notice_message(notice), color=VALUE_COLOR) for notice in identity_notices[:5]),
+        ]))
 
+    peers = [
+        Field(
+            "Verified peers",
+            str(len(node.peers)) if config is None else f"{len(node.peers)}/{config.max_peers}",
+            color=VALUE_COLOR if node.peers else WARNING_COLOR, bold=True,
+        ),
+        Field("Candidate peers", f"{len(node.candidate_descriptors)} (unverified)"),
+    ]
+    if config is not None:
+        peers.append(Field("Configured seeds", str(len(config.seeds))))
     participation = await lane.run(get_participation)
-    reliable = await lane.run(effective_reliable_nodes)
-    source = await lane.run(reliable_nodes_source)
     if participation is Participation.ACCEPTED:
-        await session.write_line(
-            f"Reliable nodes: {len(reliable)} ({source} list) -- dialed as seeds after the configured ones"
-        )
+        reliable = await lane.run(effective_reliable_nodes)
+        source = await lane.run(reliable_nodes_source)
+        peers.append(Field(
+            "Reliable nodes", f"{len(reliable)} ({source} list) -- dialed as seeds after the configured ones"
+        ))
     else:
-        await session.write_line(f"Reliable nodes: not in use (participation {participation.value})")
-
-    await session.write_line(f"Linked boards: {len(node.boards)}")
+        peers.append(Field(
+            "Reliable nodes", f"not in use (participation {participation.value})", color=MUTED_COLOR
+        ))
     if config is not None:
-        carried = await lane.run(carried_board_count, link_context.node_identity.fingerprint)
-        await session.write_line(f"Carried boards: {carried}/{config.max_carried_boards}")
-    await session.write_line(f"Known events: {len(node.known_event_ids)}")
+        peers.append(Field("Sync interval", f"{config.sync_interval_seconds:.0f}s"))
+    live_sessions = link_context.realtime_registry.all_sessions() if link_context.realtime_registry is not None else []
+    peers.append(Field("Live sessions", str(len(live_sessions))))
+    sections.append(Section("Peers and seeds", peers))
+
+    relays: list[Field | Note] = []
+    if config is not None:
+        relays.append(Field(
+            "Relay-serving",
+            f"{'on' if config.relay_serving_enabled else 'off'} "
+            f"({len(node.relaying_for)}/{config.max_relay_clients} slots in use)",
+            color=SUCCESS_COLOR if config.relay_serving_enabled else MUTED_COLOR,
+        ))
+    else:
+        relays.append(Field("Relaying for", f"{len(node.relaying_for)} requester(s)"))
     relay = link_context.relay
     if relay is not None:
         if relay.serving:
-            await session.write_line(
-                f"Live relay: serving ({relay.active_pairs}/{relay.max_concurrent_pairs} bridged pairs, "
-                f"{relay.pending_rendezvous} pending)"
-            )
+            relays.append(Field(
+                "Live relay",
+                f"serving ({relay.active_pairs}/{relay.max_concurrent_pairs} bridged pairs, "
+                f"{relay.pending_rendezvous} pending)",
+                color=SUCCESS_COLOR,
+            ))
         else:
-            await session.write_line("Live relay: not serving (outgoing-only node, or relay serving off)")
-    live_sessions = link_context.realtime_registry.all_sessions() if link_context.realtime_registry is not None else []
-    await session.write_line(f"Live sessions: {len(live_sessions)}")
-    await session.write_line(f"Post-edit chains: {len(node.post_edits)}")
-    await session.write_line(f"Candidate (unverified) peers: {len(node.candidate_descriptors)}")
-    await session.write_line(f"Relays serving this node: {len(node.relays_serving_me)}")
-    await session.write_line(
-        f"Outstanding relay-consent requests of this node's own: {len(node.pending_own_relay_requests)}"
-    )
-
+            relays.append(Field(
+                "Live relay", "not serving (outgoing-only node, or relay serving off)", color=MUTED_COLOR
+            ))
+    relays.append(Field("Relays serving this node", str(len(node.relays_serving_me))))
+    relays.append(Field("Own consent requests", f"{len(node.pending_own_relay_requests)} outstanding"))
     mailbox_by_recipient = await lane.run(mailbox_sizes)
     if mailbox_by_recipient:
         held = sum(mailbox_by_recipient.values())
-        await session.write_line(
-            f"Relay mailbox: {held} envelope(s) held for {len(mailbox_by_recipient)} recipient(s)."
-        )
+        relays.append(Field(
+            "Relay mailbox", f"{held} envelope(s) held for {len(mailbox_by_recipient)} recipient(s)"
+        ))
     else:
-        await session.write_line(colored("Relay mailbox: empty.", fg_color=MUTED_COLOR))
+        relays.append(Field("Relay mailbox", "empty", color=MUTED_COLOR))
+    sections.append(Section("Relays", relays))
 
-    if not node.peers:
-        no_peers_message = "No verified peers." if config is None else f"No verified peers. (max {config.max_peers})"
-        await session.write_line(colored(f"\r\n{no_peers_message}", fg_color=MUTED_COLOR))
-    else:
-        peers_line = (
-            f"Verified peers: {len(node.peers)}" if config is None else f"Verified peers: {len(node.peers)}/{config.max_peers}"
-        )
-        await session.write_line(f"\r\n{peers_line}")
+    content = [Field("Linked boards", str(len(node.boards)))]
+    if config is not None:
+        carried = await lane.run(carried_board_count, link_context.node_identity.fingerprint)
+        content.append(Field("Carried boards", f"{carried}/{config.max_carried_boards}"))
+    content.append(Field("Known events", str(len(node.known_event_ids))))
+    content.append(Field("Post-edit chains", str(len(node.post_edits))))
+    sections.append(Section("Content", content))
+    return sections, identity_notices
 
-    actions = []
-    if node.peers:
-        actions.append(menu_key("P", "eers"))
-    if identity_notices:
-        actions.append(menu_key("A", "cknowledge identity changes"))
-    actions.append(menu_key("B", "ack"))
-    await session.write_line("\r\n" + action_bar(actions, width=session.terminal_width))
-    await write_prompt(session, "Choice: ")
-    return identity_notices, bool(node.peers)
+
+def _link_peer_sections(
+    peer: PeerRecord, *, node, label: str, score: float, last_contact: str
+) -> list[Section]:
+    """One verified peer's detail. `peer.descriptor`'s fields are
+    peer-controlled; `Field` sanitizes every value it is handed."""
+    addresses = peer.descriptor.payload.get("addresses") or []
+    reach: list[Field | Note] = [
+        Field("Address", f"{a.get('protocol')}://{a.get('address')}:{a.get('port')}") for a in addresses
+    ] or [Field("Addresses", "none published (outgoing-only)", color=MUTED_COLOR)]
+    relays = peer.descriptor.payload.get("relays") or []
+    if relays:
+        reach.append(Field("Published relays", str(len(relays))))
+    return [
+        Section("Identity", [
+            Field("Node", label, bold=True),
+            Field("Technical identity", peer.fingerprint, color=METADATA_COLOR),
+            Field("Kind", "outgoing-only" if peer.descriptor.payload.get("outgoing_only") else "full peer"),
+        ]),
+        Section("Health", [
+            Field("Reliability", f"{score:.2f}"),
+            Field("Last contact", last_contact, color=MUTED_COLOR if last_contact == "never" else VALUE_COLOR),
+        ]),
+        Section("Reachability", reach),
+        Section("Relaying", [
+            Field("We relay for it", _yes_no(peer.fingerprint in node.relaying_for)),
+            Field("It relays for us", _yes_no(peer.fingerprint in node.relays_serving_me)),
+        ]),
+    ]
 
 
 async def _link_peer_detail(
     session: Session, lane: DatabaseLane, actor: User, *, link_context: LinkContext
-) -> bool:
-    """Picker over the verified peers, then one peer's detail lines.
-    Returns whether a peer was actually opened, so the caller knows
-    whether there is anything on screen worth pausing over."""
+) -> None:
+    """Picker over the verified peers, then one peer's own detail screen."""
     node = link_context.link_node
     def _load(db: Database) -> tuple[dict[str, float], dict[str, str]]:
         return (
@@ -7119,14 +7637,15 @@ async def _link_peer_detail(
 
     scores, last_contact = await lane.run(_load)
     display_format, display_timezone = await lane.run(resolve_display_preferences)
+    chrome = await _load_chrome(lane, actor)
 
     def _peer_description(peer: PeerRecord) -> str:
         # Kept to a single short word -- this is squeezed onto one line
         # alongside the fingerprint (32+ chars) and pick_item's own
         # "(#<id>)" reference, then truncated to terminal width
         # (netbbs.net.picker.truncate); reliability and last-contact
-        # both get their own full-width line in the post-selection
-        # detail below instead, where truncation isn't a concern.
+        # both get their own row on the detail screen instead, where
+        # truncation isn't a concern.
         return "outgoing-only" if peer.descriptor.payload.get("outgoing_only") else "full peer"
 
     selected = await pick_item(
@@ -7136,49 +7655,30 @@ async def _link_peer_detail(
         description_of=_peer_description,
         title="Verified peers",
         empty_message="No verified peers.",
-        redraw_in_place=await lane.run(redraw_in_place_enabled, actor),
-        unicode_style=await lane.run(unicode_style_enabled, actor),
-        collapsed=await lane.run(breadcrumb_collapsed_enabled, actor),
-        accent_color=await lane.run(effective_accent_color_256),
-        header_color=await lane.run(effective_header_color_256),
+        redraw_in_place=chrome.redraw_in_place,
+        unicode_style=chrome.unicode_style,
+        collapsed=chrome.collapsed,
+        accent_color=chrome.accent_color,
+        header_color=chrome.header_color,
     )
     if selected is None:
-        return False
+        return
 
-    selected_identity = identity_for_peer(selected)
-    await session.write_line(f"Node: {sanitize_text(selected_identity.label)}")
-    await session.write_line(f"Technical identity: {sanitize_text(selected.fingerprint)}")
-    await session.write_line(f"Reliability: {scores.get(selected.fingerprint, 0.5):.2f}")
+    label = identity_for_peer(selected).label
     when = last_contact.get(selected.fingerprint)
     last = (
         format_for_display(when, override_format=display_format, override_timezone=display_timezone)
         if when else "never"
     )
-    await session.write_line(f"Last contact: {last}")
-
-    # selected.descriptor's fields are peer-controlled -- sanitized here
-    # since this is a plain session.write_line, outside pick_item's own
-    # automatic name_of/description_of sanitization.
-    addresses = selected.descriptor.payload.get("addresses") or []
-    if addresses:
-        rendered = ", ".join(
-            sanitize_text(f"{a.get('protocol')}://{a.get('address')}:{a.get('port')}") for a in addresses
-        )
-        await session.write_line(f"Addresses: {rendered}")
-    else:
-        await session.write_line(colored("Addresses: none published (outgoing-only).", fg_color=MUTED_COLOR))
-
-    relays = selected.descriptor.payload.get("relays") or []
-    if relays:
-        await session.write_line(f"Publishes {len(relays)} relay(s) in its own descriptor.")
-    await session.write_line(
-        f"Currently relaying for this node's requests: "
-        f"{'yes' if selected.fingerprint in node.relaying_for else 'no'}"
+    await show_detail(
+        session,
+        title=_detail_title(session, chrome, label, breadcrumb=("SysOp", "Operations", "Link status", "Verified peers")),
+        sections=_link_peer_sections(
+            selected, node=node, label=label, score=scores.get(selected.fingerprint, 0.5), last_contact=last
+        ),
+        actions=[_BACK_ACTION],
+        redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
     )
-    await session.write_line(
-        f"This node relays for it: {'yes' if selected.fingerprint in node.relays_serving_me else 'no'}"
-    )
-    return True
 
 
 async def _link_status_screen(
@@ -7191,8 +7691,8 @@ async def _link_status_screen(
     backup/quota/retry-queue/dead-letter machinery #60 also calls for,
     which stays a future design task). The only thing that writes
     anything here is `[A]cknowledge identity changes`, which dismisses
-    the notices currently shown; `actor` is otherwise accepted only so
-    this screen's signature matches its `_system_menu` siblings.
+    the notices currently shown; `actor` is otherwise used only to
+    resolve display preferences.
 
     Issue #282: acknowledging identity changes used to be a yes/no
     prompt asked *mid-render*, before the mode/capacity/peer half of
@@ -7200,8 +7700,12 @@ async def _link_status_screen(
     security notice to read, the SysOp had to answer a mutating
     question before seeing the rest. Now the whole panel is drawn
     first and acknowledging is an explicit hotkey on the action bar,
-    alongside `[P]eers` for the per-peer detail that used to be an
-    unconditional picker at the end of the screen.
+    alongside `[P]eers` for the per-peer detail.
+
+    The panel is grouped and paged (`show_detail`): it used to be some
+    twenty `Label: value` sentences in one colour, two rows taller than
+    a 24-row terminal, so the node's own identity had scrolled away by
+    the time the prompt appeared.
 
     `link_context.link_node`'s in-memory fields are read directly, no
     lane dispatch -- the same "in-memory, no I/O" shape `_who_screen`
@@ -7210,31 +7714,52 @@ async def _link_status_screen(
     are separate, read-only lane-dispatched queries, since none of that
     is held in memory.
     """
-    identity_notices, has_peers = await _draw_link_status(session, lane, actor, link_context=link_context)
+    page = 0
+    message = None
     while True:
-        choice = (await session.read_key()).lower()
-
+        chrome = await _load_chrome(lane, actor)
+        sections, identity_notices = await _link_status_sections(lane, link_context=link_context)
+        has_peers = bool(link_context.link_node.peers)
+        actions = []
+        if has_peers:
+            actions.append(("p", menu_key("P", "eers")))
+        if identity_notices:
+            actions.append(("a", menu_key("A", "cknowledge identity changes")))
+        actions.append(_BACK_ACTION)
+        choice, page = await show_detail(
+            session,
+            title=_detail_title(
+                session, chrome, "Link status", breadcrumb=("SysOp", "Operations"),
+                subtitle="Identity, capacity, relay activity, and verified peers.",
+            ),
+            preamble=[await _load_condensed_status_line(
+                lane, unicode_style=chrome.unicode_style, terminal_width=session.terminal_width
+            )],
+            sections=sections, actions=actions, page=page, message=message,
+            redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+        )
+        message = None
         if choice == "b":
-            await session.write_line("")
             return
-        elif choice == "p" and has_peers:
-            await session.write_line("")
-            if await _link_peer_detail(session, lane, actor, link_context=link_context):
-                await session.write_line(colored("\r\nPress any key to continue...", fg_color=MUTED_COLOR))
-                await session.read_any_key()
-            identity_notices, has_peers = await _draw_link_status(session, lane, actor, link_context=link_context)
-        elif choice == "a" and identity_notices:
-            await session.write_line("")
+        if choice == "p":
+            await _link_peer_detail(session, lane, actor, link_context=link_context)
+        elif choice == "a":
             for notice in identity_notices[:5]:
                 await lane.run(dismiss_identity_observation, notice.id)
-            await session.write_line(colored("Identity changes acknowledged.", fg_color=SUCCESS_COLOR))
-            identity_notices, has_peers = await _draw_link_status(session, lane, actor, link_context=link_context)
-        else:
-            await session.write(reject_unhandled_key(choice))
+            message = colored("Identity changes acknowledged.", fg_color=SUCCESS_COLOR)
 
 
 # -- outbox: work-item inspection/replay/cancel (design doc §13.7, ----------
 # -- issue #60's second operational slice) ----------------------------------
+
+
+_WORK_ITEM_STATUS_COLORS = {
+    "pending": VALUE_COLOR,
+    "pushed": SUCCESS_COLOR,
+    "retrying": WARNING_COLOR,
+    "dead_lettered": ERROR_COLOR,
+    "cancelled": MUTED_COLOR,
+}
 
 
 async def _outbox_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
@@ -7245,39 +7770,67 @@ async def _outbox_screen(session: Session, lane: DatabaseLane, actor: User) -> N
     gossip or relay maintenance, which don't fit this model (see that
     module's own docstring for why not).
 
-    The picker only ever offers `retrying`/`dead_lettered` items --
+    The screen leads with a count per status, then `[I]tems` opens a
+    picker that only ever offers `retrying`/`dead_lettered` items --
     `pending` will be attempted on its own within one sync pass,
     `pushed`/`cancelled` are already resolved, so there's nothing a
-    SysOp would act on for either. Replaying a dead-lettered
+    SysOp would act on for either. One item's detail is a screen of its
+    own with `[R]eplay` or `[C]ancel` on its action bar (design doc
+    §3.5: it used to print the item and then ask a yes/no that had to
+    be answered to leave). Replaying a dead-lettered
     `link_mail_delivery` item also undoes its `mail_messages.
     link_delivery_status = 'expired'` side effect back to `'pending'`
     -- the one place that undo happens, symmetric with `netbbs.link.
     sync`'s own dead-letter side effect.
     """
-    def _load(db: Database) -> list[WorkItem]:
-        return list_work_items(db)
+    chrome = await _load_chrome(lane, actor)
+    message = None
+    while True:
+        items = await lane.run(list_work_items)
+        counts: dict[str, int] = {}
+        for item in items:
+            counts[item.status] = counts.get(item.status, 0) + 1
+        actionable = [item for item in items if item.status in ("retrying", "dead_lettered")]
+        if items:
+            rows: list[Field | Note] = [
+                Field(
+                    status.replace("_", " ").capitalize(), str(count),
+                    color=_WORK_ITEM_STATUS_COLORS.get(status, VALUE_COLOR), bold=True,
+                )
+                for status, count in sorted(counts.items())
+            ]
+            if not actionable:
+                rows.append(Note("Nothing currently retrying or dead-lettered."))
+        else:
+            rows = [Note("No outbound work items recorded yet.")]
+        actions = [_BACK_ACTION]
+        if actionable:
+            actions.insert(0, ("i", menu_key("I", "tems needing attention")))
+        choice, _page = await show_detail(
+            session,
+            title=_detail_title(
+                session, chrome, "Outbox", breadcrumb=("SysOp", "Operations"),
+                subtitle="Outgoing Link mail and acknowledgement deliveries.",
+            ),
+            sections=[Section("Work items by status", rows)], actions=actions, message=message,
+            redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+        )
+        message = None
+        if choice == "b":
+            return
+        message = await _outbox_item_screen(session, lane, actor, chrome, actionable)
 
-    items = await lane.run(_load)
 
-    await session.write_line(colored("\r\nOutbox:", fg_color=await lane.run(effective_header_color_256), bold=True))
-    if not items:
-        await session.write_line(colored("No outbound work items recorded yet.", fg_color=MUTED_COLOR))
-        return
-
-    counts: dict[str, int] = {}
-    for item in items:
-        counts[item.status] = counts.get(item.status, 0) + 1
-    await session.write_line(", ".join(f"{status}: {count}" for status, count in sorted(counts.items())))
-
-    actionable = [item for item in items if item.status in ("retrying", "dead_lettered")]
+async def _outbox_item_screen(
+    session: Session, lane: DatabaseLane, actor: User, chrome: _Chrome, actionable: list[WorkItem]
+) -> str | None:
+    """Pick one retrying/dead-lettered work item and act on it. Returns the
+    styled result line for the Outbox screen to show, if anything was done."""
     target_labels = {
         item.target_fingerprint: (await lane.run(identity_for_fingerprint, item.target_fingerprint)).label
         for item in actionable
     }
-    unicode_style = await lane.run(unicode_style_enabled, actor)
-    collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
-    redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
-    arrow = " → " if unicode_style else " -> "
+    arrow = " → " if chrome.unicode_style else " -> "
     selected = await pick_item(
         session, actionable,
         name_of=lambda item: f"{item.kind}{arrow}{target_labels[item.target_fingerprint]}",
@@ -7285,39 +7838,50 @@ async def _outbox_screen(session: Session, lane: DatabaseLane, actor: User) -> N
         description_of=lambda item: f"{item.status}, {item.attempts} attempt(s)",
         title="Retrying/dead-lettered work items",
         empty_message="Nothing currently retrying or dead-lettered.",
-        redraw_in_place=redraw_in_place,
-        unicode_style=unicode_style,
-        collapsed=collapsed,
-        accent_color=await lane.run(effective_accent_color_256),
-        header_color=await lane.run(effective_header_color_256),
+        redraw_in_place=chrome.redraw_in_place,
+        unicode_style=chrome.unicode_style,
+        collapsed=chrome.collapsed,
+        accent_color=chrome.accent_color,
+        header_color=chrome.header_color,
     )
     if selected is None:
-        return
+        return None
 
-    await session.write_line(f"\r\nKind: {sanitize_text(selected.kind)}")
-    await session.write_line(f"Target: {sanitize_text(target_labels[selected.target_fingerprint])}")
-    await session.write_line(f"Technical identity: {sanitize_text(selected.target_fingerprint)}")
-    await session.write_line(f"Status: {selected.status}, {selected.attempts} attempt(s)")
+    dead = selected.status == "dead_lettered"
+    rows: list[Field | Note] = [
+        Field("Kind", selected.kind),
+        Field("Target", target_labels[selected.target_fingerprint], bold=True),
+        Field("Technical identity", selected.target_fingerprint, color=METADATA_COLOR),
+        Field(
+            "Status", f"{selected.status.replace('_', ' ')}, {selected.attempts} attempt(s)",
+            color=_WORK_ITEM_STATUS_COLORS.get(selected.status, VALUE_COLOR),
+        ),
+    ]
     if selected.last_error:
-        await session.write_line(f"Last error: {sanitize_text(selected.last_error)}")
+        rows.append(Field("Last error", selected.last_error, color=WARNING_COLOR))
+    action = ("r", menu_key("R", "eplay now")) if dead else ("c", menu_key("C", "ancel (stop retrying)"))
+    choice, _page = await show_detail(
+        session,
+        title=_detail_title(session, chrome, "Work item", breadcrumb=("SysOp", "Operations", "Outbox")),
+        sections=[Section(None, rows)], actions=[action, _BACK_ACTION],
+        redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+    )
+    if choice == "r":
+        def _replay(db: Database) -> WorkItem:
+            replayed = replay_work_item(db, selected.id, replayed_by=actor)
+            if replayed.kind == KIND_LINK_MAIL_DELIVERY:
+                unexpire_link_message_delivery(db, replayed.reference_id)
+            return replayed
 
-    if selected.status == "dead_lettered":
-        if await prompt_yes_no(session, "\r\nReplay this work item now?", default=False):
-            def _replay(db: Database) -> WorkItem:
-                replayed = replay_work_item(db, selected.id, replayed_by=actor)
-                if replayed.kind == KIND_LINK_MAIL_DELIVERY:
-                    unexpire_link_message_delivery(db, replayed.reference_id)
-                return replayed
+        replayed = await lane.run(_replay)
+        return colored(f"Replayed -- status is now {replayed.status!r}.", fg_color=SUCCESS_COLOR)
+    if choice == "c":
+        def _cancel(db: Database) -> WorkItem:
+            return cancel_work_item(db, selected.id, cancelled_by=actor)
 
-            replayed = await lane.run(_replay)
-            await session.write_line(f"Replayed -- status is now {replayed.status!r}.")
-    else:
-        if await prompt_yes_no(session, "\r\nCancel this work item (stop retrying)?", default=False):
-            def _cancel(db: Database) -> WorkItem:
-                return cancel_work_item(db, selected.id, cancelled_by=actor)
-
-            cancelled = await lane.run(_cancel)
-            await session.write_line(f"Cancelled -- status is now {cancelled.status!r}.")
+        cancelled = await lane.run(_cancel)
+        return colored(f"Cancelled -- status is now {cancelled.status!r}.", fg_color=SUCCESS_COLOR)
+    return None
 
 
 def _diagnostic_level_color(level: str) -> int:
@@ -7348,12 +7912,13 @@ async def _diagnostic_log_screen(session: Session, lane: DatabaseLane, actor: Us
     opens newest-first with nothing to answer, and the order can be
     flipped in place as often as wanted.
     """
-    await session.write_line(
-        colored("\r\nDiagnostic log:", fg_color=await lane.run(effective_header_color_256), bold=True)
-    )
+    chrome = await _load_chrome(lane, actor)
     entries = await lane.run(list_diagnostic_log_entries)
     if not entries:
-        await session.write_line(colored("Nothing logged yet.", fg_color=MUTED_COLOR))
+        await _show_report(
+            session, lane, actor, "Diagnostic log", breadcrumb=("SysOp", "Operations"),
+            sections=[Section(None, [Note("Nothing logged yet.")])],
+        )
         return
 
     newest_first = list(entries)
@@ -7363,29 +7928,47 @@ async def _diagnostic_log_screen(session: Session, lane: DatabaseLane, actor: Us
         order["ascending"] = not order["ascending"]
         return list(reversed(newest_first)) if order["ascending"] else list(newest_first)
 
-    selected = await pick_item(
-        session, newest_first,
-        name_of=lambda entry: f"{entry.created_at}  {entry.level}",
-        stable_id_of=lambda entry: entry.id,
-        description_of=lambda entry: sanitize_text(entry.message),
-        title="Diagnostic log",
-        empty_message="Nothing logged yet.",
-        on_sort=_flip_order,
-        sort_label=lambda: "oldest first" if order["ascending"] else "newest first",
-        redraw_in_place=await lane.run(redraw_in_place_enabled, actor),
-        unicode_style=await lane.run(unicode_style_enabled, actor),
-        collapsed=await lane.run(breadcrumb_collapsed_enabled, actor),
-        accent_color=await lane.run(effective_accent_color_256),
-        header_color=await lane.run(effective_header_color_256),
-    )
-    if selected is None:
-        return
+    display_format, display_timezone = await lane.run(resolve_display_preferences)
+    # One entry's detail is a screen of its own, and leaving it comes back to
+    # the list: it used to be four lines printed after the picker closed, which
+    # the Operations menu's redraw wiped before they could be read.
+    reopen_at: int | None = None
+    while True:
+        selected = await pick_item(
+            session, list(reversed(newest_first)) if order["ascending"] else newest_first,
+            name_of=lambda entry: f"{entry.created_at}  {entry.level}",
+            stable_id_of=lambda entry: entry.id,
+            description_of=lambda entry: sanitize_text(entry.message),
+            title="Diagnostic log",
+            empty_message="Nothing logged yet.",
+            start_stable_id=reopen_at,
+            on_sort=_flip_order,
+            sort_label=lambda: "oldest first" if order["ascending"] else "newest first",
+            redraw_in_place=chrome.redraw_in_place,
+            unicode_style=chrome.unicode_style,
+            collapsed=chrome.collapsed,
+            accent_color=chrome.accent_color,
+            header_color=chrome.header_color,
+        )
+        if selected is None:
+            return
+        reopen_at = selected.id
 
-    level_color = _diagnostic_level_color(selected.level)
-    await session.write_line(colored(f"\r\nWhen: {selected.created_at}", fg_color=MUTED_COLOR))
-    await session.write_line(f"Level: {colored(selected.level, fg_color=level_color, bold=True)}")
-    await session.write_line(colored(f"Logger: {sanitize_text(selected.logger_name)}", fg_color=MUTED_COLOR))
-    await session.write_line(f"Message: {sanitize_text(selected.message)}")
+        when = format_for_display(
+            selected.created_at, override_format=display_format, override_timezone=display_timezone
+        )
+        await show_detail(
+            session,
+            title=_detail_title(session, chrome, "Diagnostic entry", breadcrumb=("SysOp", "Operations", "Diagnostic log")),
+            sections=[Section(None, [
+                Field("When", when, color=DATE_COLOR),
+                Field("Level", selected.level, color=_diagnostic_level_color(selected.level), bold=True),
+                Field("Logger", selected.logger_name, color=METADATA_COLOR),
+                Field("Message", selected.message),
+            ])],
+            actions=[_BACK_ACTION],
+            redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+        )
 
 
 async def _audit_log_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
@@ -7400,12 +7983,13 @@ async def _audit_log_screen(session: Session, lane: DatabaseLane, actor: User) -
     it, pick an entry for its full detail) since both are "here's what's
     been logged lately" screens.
     """
-    await session.write_line(
-        colored("\r\nAudit log:", fg_color=await lane.run(effective_header_color_256), bold=True)
-    )
+    chrome = await _load_chrome(lane, actor)
     entries = await lane.run(list_recent_actions)
     if not entries:
-        await session.write_line(colored("Nothing logged yet.", fg_color=MUTED_COLOR))
+        await _show_report(
+            session, lane, actor, "Audit log", breadcrumb=("SysOp", "Operations"),
+            sections=[Section(None, [Note("Nothing logged yet.")])],
+        )
         return
 
     newest_first = list(entries)
@@ -7479,35 +8063,49 @@ async def _audit_log_screen(session: Session, lane: DatabaseLane, actor: User) -
             parts.append(sanitize_text(entry.detail))
         return "  ".join(parts) if parts else "(no detail)"
 
-    selected = await pick_item(
-        session, entries,
-        name_of=_row_label,
-        stable_id_of=lambda entry: entry.id,
-        description_of=_row_description,
-        name_segments_of=_row_name_segments,
-        title="Audit log",
-        empty_message="Nothing logged yet.",
-        on_sort=_flip_order,
-        sort_label=lambda: "oldest first" if order["ascending"] else "newest first",
-        redraw_in_place=await lane.run(redraw_in_place_enabled, actor),
-        unicode_style=await lane.run(unicode_style_enabled, actor),
-        collapsed=await lane.run(breadcrumb_collapsed_enabled, actor),
-        accent_color=accent_color,
-        header_color=await lane.run(effective_header_color_256),
-    )
-    if selected is None:
-        return
+    # One entry's detail is a screen of its own, and leaving it comes back to
+    # the list: printed after the picker closed, it was wiped by the
+    # Operations menu's redraw before it could be read.
+    reopen_at: int | None = None
+    while True:
+        selected = await pick_item(
+            session, list(reversed(newest_first)) if order["ascending"] else newest_first,
+            name_of=_row_label,
+            stable_id_of=lambda entry: entry.id,
+            description_of=_row_description,
+            name_segments_of=_row_name_segments,
+            title="Audit log",
+            empty_message="Nothing logged yet.",
+            start_stable_id=reopen_at,
+            on_sort=_flip_order,
+            sort_label=lambda: "oldest first" if order["ascending"] else "newest first",
+            redraw_in_place=chrome.redraw_in_place,
+            unicode_style=chrome.unicode_style,
+            collapsed=chrome.collapsed,
+            accent_color=accent_color,
+            header_color=chrome.header_color,
+        )
+        if selected is None:
+            return
+        reopen_at = selected.id
 
-    await session.write_line(colored(f"\r\nWhen: {_when(selected)}", fg_color=MUTED_COLOR))
-    await session.write_line(f"Action: {sanitize_text(selected.action)}")
-    await session.write_line(f"By: {sanitize_text(_actor_name(selected))}")
-    if selected.object_type is not None:
-        await session.write_line(f"Object: {sanitize_text(selected.object_type)} #{selected.object_id}")
-    if selected.target_user_id is not None:
-        target_name = usernames.get(selected.target_user_id, "(deleted account)")
-        await session.write_line(f"Target: {sanitize_text(target_name)}")
-    if selected.detail:
-        await session.write_line(f"Detail: {sanitize_text(selected.detail)}")
+        rows = [
+            Field("When", _when(selected), color=DATE_COLOR),
+            Field("Action", selected.action, bold=True),
+            Field("By", _actor_name(selected), color=AUTHOR_COLOR),
+        ]
+        if selected.object_type is not None:
+            rows.append(Field("Object", f"{selected.object_type} #{selected.object_id}"))
+        if selected.target_user_id is not None:
+            rows.append(Field("Target", usernames.get(selected.target_user_id, "(deleted account)")))
+        if selected.detail:
+            rows.append(Field("Detail", selected.detail))
+        await show_detail(
+            session,
+            title=_detail_title(session, chrome, "Audit entry", breadcrumb=("SysOp", "Operations", "Audit log")),
+            sections=[Section(None, rows)], actions=[_BACK_ACTION],
+            redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+        )
 
 
 # How often `_diagnostic_log_tail_screen` polls for new rows -- the log
@@ -7582,7 +8180,7 @@ async def _diagnostic_log_tail_screen(session: Session, lane: DatabaseLane) -> N
     await session.write_line("")
 
 
-async def _repair_carried_posts_screen(session: Session, lane: DatabaseLane) -> None:
+async def _repair_carried_posts_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
     """
     Design doc §9.3/issue #73's own "supported rebuild path" acceptance
     criterion, exposed the same way `_gc_screen` exposes reference-aware
@@ -7598,28 +8196,51 @@ async def _repair_carried_posts_screen(session: Session, lane: DatabaseLane) -> 
     docstring) -- persistence and projection are atomic for every new
     event going forward, so a freshly upgraded node reporting 0 here is
     the expected steady state, not a sign anything is broken.
+
+    The outcome is held on a screen of its own (`_show_report`): printed
+    and returned from, it was wiped by the Operations menu's redraw
+    before it could be read.
     """
     rebuilt = await lane.run(rebuild_carried_post_materialization)
     if rebuilt == 0:
-        await session.write_line(
-            colored(
-                "\r\nRepair carried posts: nothing to do -- every accepted board_post/"
-                "board_post_edit already has a local posts row.",
-                fg_color=MUTED_COLOR,
-            )
-        )
+        rows: list[Field | Note] = [
+            Field("Result", "nothing to do", color=SUCCESS_COLOR),
+            Note("Every accepted board_post/board_post_edit already has a local posts row."),
+        ]
     else:
-        await session.write_line(f"\r\nRepair carried posts: materialized {rebuilt} missing row(s).")
+        rows = [Field("Result", f"materialized {rebuilt} missing row(s)", color=SUCCESS_COLOR)]
+    await _show_report(
+        session, lane, actor, "Repair carried posts", breadcrumb=("SysOp", "Operations"),
+        subtitle="Rebuilds local posts rows from already-accepted Link events.",
+        sections=[Section(None, rows)],
+    )
 
 
-async def _prune_drafts_screen(session: Session, lane: DatabaseLane) -> None:
+def _prune_report_section(report: DraftPruneReport) -> Section:
+    rows: list[Field | Note] = [
+        Field(
+            "Would delete" if report.dry_run else "Deleted",
+            f"{report.stale_files} stale draft(s), {_format_bytes(report.stale_bytes)}",
+            color=VALUE_COLOR if report.stale_files else MUTED_COLOR, bold=bool(report.stale_files),
+        ),
+    ]
+    if report.skipped_recent:
+        rows.append(Field(
+            "Skipped", f"{report.skipped_recent} draft(s) still within the retention window", color=MUTED_COLOR
+        ))
+    rows.extend(Field("Error", error, color=ERROR_COLOR) for error in report.errors)
+    return Section("Dry run" if report.dry_run else "Result", rows)
+
+
+async def _prune_drafts_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
     """
     Bounds stale post/bio draft files (GitHub issue #158, split from
-    #149): always shows a dry-run report first, then asks separately
-    before actually deleting anything -- the same "preview, then
-    explicit confirm" shape `_gc_screen` already uses, appropriate here
-    too since this is a one-way filesystem operation the database
-    itself can't undo.
+    #149): always shows a dry-run report first, then offers the actual
+    delete as an explicit hotkey -- the same "preview, then explicit
+    action" shape `_gc_screen` uses, appropriate here too since this is a
+    one-way filesystem operation the database itself can't undo. `[B]ack`
+    leaves without a question, a report with nothing stale never offers
+    anything, and the result stays on screen until it is left.
 
     `new`-kind post drafts are already naturally bounded (one file per
     (user, board), always overwritten) and never need this; `edit`-kind
@@ -7629,31 +8250,24 @@ async def _prune_drafts_screen(session: Session, lane: DatabaseLane) -> None:
     why every draft is safe to prune the same way once stale, regardless
     of which caller wrote it.
     """
-    preview = await lane.run(prune_stale_drafts, dry_run=True)
-    await _write_draft_prune_report(session, preview)
-    if preview.stale_files == 0:
-        return
-    if not await prompt_yes_no(session, "Delete these stale drafts now?", default=False):
-        return
-    result = await lane.run(prune_stale_drafts, dry_run=False)
-    await _write_draft_prune_report(session, result)
-
-
-async def _write_draft_prune_report(session: Session, report: DraftPruneReport) -> None:
-    verb = "Would delete" if report.dry_run else "Deleted"
-    await session.write_line(
-        f"\r\n{verb} {report.stale_files} stale draft(s), {_format_bytes(report.stale_bytes)}."
-    )
-    if report.skipped_recent:
-        await session.write_line(
-            colored(
-                f"{report.skipped_recent} draft(s) still within the retention window skipped "
-                "this pass.",
-                fg_color=MUTED_COLOR,
-            )
+    chrome = await _load_chrome(lane, actor)
+    report = await lane.run(prune_stale_drafts, dry_run=True)
+    while True:
+        actions = [_BACK_ACTION]
+        if report.dry_run and report.stale_files:
+            actions.insert(0, ("d", menu_key("D", "elete stale drafts now")))
+        choice, _page = await show_detail(
+            session,
+            title=_detail_title(
+                session, chrome, "Prune drafts", breadcrumb=("SysOp", "Operations"),
+                subtitle="Abandoned post-edit and bio drafts past the retention window.",
+            ),
+            sections=[_prune_report_section(report)], actions=actions,
+            redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
         )
-    for error in report.errors:
-        await session.write_line(colored(f"Error: {error}", fg_color=MUTED_COLOR))
+        if choice == "b":
+            return
+        report = await lane.run(prune_stale_drafts, dry_run=False)
 
 
 async def _revoke_live_sessions(
@@ -7685,7 +8299,7 @@ async def _revoke_live_sessions(
     )
     if disconnected:
         plural = "session" if disconnected == 1 else "sessions"
-        await session.write_line(
+        _announce_line(session,
             colored(f"Disconnected {disconnected} live {plural}.", fg_color=MUTED_COLOR)
         )
 
@@ -7767,8 +8381,32 @@ async def _draw_node_menu(
     """
     await session.write_line("\r\n" + screen_title("Node management",
             breadcrumb=(session.node_display_name,), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, header_color=header_color, node_name_gradient=session.node_name_gradient))
+    # The state leads the screen, above the menu that changes it, each fact in
+    # the colour of what it means: it used to trail the menu as one alert-red
+    # sentence, "off" included, so a quiet node read as an alarm.
+    lockdown = node_controls.maintenance.is_lockdown_active()
+    state: list[Field | Note] = [
+        Field(
+            "Maintenance mode", "ON -- non-SysOp logins are refused" if lockdown else "off",
+            color=ALERT_COLOR if lockdown else SUCCESS_COLOR, bold=lockdown,
+        ),
+        Field("Connected sessions", str(len(node_controls.session_registry))),
+    ]
+    if node_controls.drain_scheduler.is_scheduled():
+        remaining = node_controls.drain_scheduler.remaining_seconds()
+        state.append(Field(
+            "Drain scheduled", f"disconnecting non-SysOps in {format_remaining_seconds(remaining)}",
+            color=ALERT_COLOR, bold=True,
+        ))
+    if node_controls.shutdown_scheduler.is_scheduled():
+        remaining = node_controls.shutdown_scheduler.remaining_seconds()
+        line = f"going down in {format_remaining_seconds(remaining)}"
+        if not node_controls.shutdown_scheduler.is_cancellable():
+            line += f" (triggered by {_shutdown_source_label(node_controls.shutdown_scheduler.source())}, cannot be cancelled)"
+        state.append(Field("Shutdown scheduled", line, color=ALERT_COLOR, bold=True))
+    panel_rows = await _write_sections(session, [Section("Right now", state)], unicode_style=unicode_style)
     await session.write_line(
-        _menu_row(
+        "\r\n" + _fitted_menu(
             [
                 MenuEntry(label=menu_key("W", "ho"), brief="See who's currently connected"),
                 MenuEntry(label=menu_key("M", "aintenance mode"), brief="Toggle: block non-SysOp logins"),
@@ -7778,25 +8416,10 @@ async def _draw_node_menu(
                 MenuEntry(label=menu_key("C", "hat bridge (MRC)"), brief="Inter-BBS chat link status"),
                 MenuEntry(label=menu_key("B", "ack"), brief="Return to Operations"),
             ],
-            description_level,
-            width=session.terminal_width,
-            height=session.terminal_height,
+            description_level, session=session, used_rows=panel_rows + 3,
         )
     )
-    status_lines = [
-        f"Maintenance mode: {'ON' if node_controls.maintenance.is_lockdown_active() else 'off'}"
-    ]
-    if node_controls.drain_scheduler.is_scheduled():
-        remaining = node_controls.drain_scheduler.remaining_seconds()
-        status_lines.append(f"Drain scheduled -- disconnecting non-SysOps in {format_remaining_seconds(remaining)}")
-    if node_controls.shutdown_scheduler.is_scheduled():
-        remaining = node_controls.shutdown_scheduler.remaining_seconds()
-        line = f"Shutdown scheduled -- going down in {format_remaining_seconds(remaining)}"
-        if not node_controls.shutdown_scheduler.is_cancellable():
-            line += f" (triggered by {_shutdown_source_label(node_controls.shutdown_scheduler.source())}, cannot be cancelled)"
-        status_lines.append(line)
-    await session.write_line(colored("  ".join(status_lines), fg_color=ALERT_COLOR, bold=True))
-    await session.write("Choice: ")
+    await _choice_prompt(session)
 
 
 def _session_name(entry: SessionSummary) -> str:
@@ -7837,9 +8460,10 @@ async def _who_screen(session: Session, lane: DatabaseLane, actor: User, node_co
     # resolved once via the lane *before* the picker, same shape
     # established for format_for_display generally.
     display_format, display_timezone = await lane.run(resolve_display_preferences)
-    await session.write_line(
-        colored("\r\nSelect a session below to disconnect it.", fg_color=MUTED_COLOR)
-    )
+    if entries:
+        # Shown by the picker itself, above the list: written before it, the
+        # picker's clear erased the one line that says what selecting does.
+        _announce(session, "Select a session below to disconnect it.", color=MUTED_COLOR)
     selected = await pick_item(
         session, entries,
         name_of=_session_name,
@@ -7858,7 +8482,7 @@ async def _who_screen(session: Session, lane: DatabaseLane, actor: User, node_co
         return
 
     if selected.session is session:
-        await session.write_line(
+        _announce_line(session,
             colored("That's your own session -- use Logoff instead.", fg_color=MUTED_COLOR)
         )
         return
@@ -7876,7 +8500,7 @@ async def _who_screen(session: Session, lane: DatabaseLane, actor: User, node_co
     async def save(draft: dict) -> bool | None:
         message = draft["message"]
         if not await prompt_yes_no(session, f"Disconnect {name!r} now?", default=False):
-            await session.write_line("Cancelled.")
+            _announce_line(session, "Cancelled.")
             return None
 
         target_user_id: int | None = None
@@ -7894,14 +8518,14 @@ async def _who_screen(session: Session, lane: DatabaseLane, actor: User, node_co
 
         disconnected = await node_controls.session_registry.disconnect_one(selected.session)
         if not disconnected:
-            await session.write_line(colored("That session is already gone.", fg_color=ERROR_COLOR))
+            _announce_line(session, colored("That session is already gone.", fg_color=ERROR_COLOR))
             return True
 
         await lane.run(
             record_action, actor=actor, action="disconnect_session",
             target_user_id=target_user_id, detail=f"{detail}, message={message!r}",
         )
-        await session.write_line(colored(f"{name!r} disconnected.", fg_color=SUCCESS_COLOR))
+        _announce_line(session, colored(f"{name!r} disconnected.", fg_color=SUCCESS_COLOR))
         return True
 
     redraw_in_place, redraw_hint = await lane.run(_resolve_redraw_preference, actor)
@@ -7913,7 +8537,7 @@ async def _who_screen(session: Session, lane: DatabaseLane, actor: User, node_co
                 key="message", hotkey="m", menu_text=menu_key("M", "essage"), label="Message",
                 render=lambda d: sanitize_text(d["message"]) if d.get("message") else "(none)",
                 prompt=text_field("message"),
-                brief="Shown to them before the disconnect",
+                brief="Shown to them before disconnect",
                 help="Optional. Delivered to that session just before its connection is closed.",
             ),
         ],
@@ -7946,10 +8570,10 @@ def _delay_seconds_field(key: str = "delay_seconds") -> Callable[[Session, Datab
         try:
             value = float(raw)
         except ValueError:
-            await session.write_line(colored("Not a number.", fg_color=MUTED_COLOR))
+            _announce_line(session, colored("Not a number.", fg_color=MUTED_COLOR))
             return
         if value < 0:
-            await session.write_line(colored("Delay cannot be negative.", fg_color=MUTED_COLOR))
+            _announce_line(session, colored("Delay cannot be negative.", fg_color=MUTED_COLOR))
             return
         draft[key] = value
 
@@ -7987,7 +8611,7 @@ def _shutdown_field_specs() -> list[FieldSpec]:
             key="message", hotkey="c", menu_text=menu_key("C", "ustom message"), label="Custom message",
             render=lambda d: d.get("message") or "(default message)",
             prompt=text_field("message"),
-            brief="Shown instead of the default notice",
+            brief="Replaces the default notice",
             help='Broadcast to every connected session instead of the default "going down" notice.',
         ),
     ]
@@ -8010,7 +8634,7 @@ async def _scheduled_action_prelude(
         options.append(menu_key("R", replace_label))
     options.append(menu_key("B", "ack"))
     await session.write_line(action_bar(options, width=session.terminal_width))
-    await write_prompt(session, "Choice: ")
+    await _choice_prompt(session)
     while True:
         choice = (await session.read_key()).lower()
         if choice == "b":
@@ -8062,12 +8686,12 @@ async def _shutdown_screen(session: Session, lane: DatabaseLane, actor: User, no
         remaining = node_controls.shutdown_scheduler.remaining_seconds()
         if not node_controls.shutdown_scheduler.is_cancellable():
             source_label = _shutdown_source_label(node_controls.shutdown_scheduler.source())
-            await _write_wrapped_subtitle(
+            _announce(
                 session,
-                f"\r\nA shutdown was triggered externally ({source_label}) and is already "
+                f"A shutdown was triggered externally ({source_label}) and is already "
                 f"in progress -- going down in {format_remaining_seconds(remaining)}. It "
                 "cannot be cancelled or replaced from here.",
-                color=ALERT_COLOR, bold=True,
+                color=ALERT_COLOR,
             )
             return
         choice = await _scheduled_action_prelude(
@@ -8082,7 +8706,7 @@ async def _shutdown_screen(session: Session, lane: DatabaseLane, actor: User, no
             node_controls.maintenance.deactivate()
             await lane.run(record_action, actor=actor, action="cancel_shutdown")
             _logger.info("scheduled shutdown cancelled by %s", actor.username)
-            await session.write_line("Scheduled shutdown cancelled.")
+            _announce_line(session, "Scheduled shutdown cancelled.")
             return
         await session.write_line(
             colored("Scheduling a new shutdown will replace it.", fg_color=MUTED_COLOR)
@@ -8107,7 +8731,7 @@ async def _shutdown_screen(session: Session, lane: DatabaseLane, actor: User, no
         mode_label = "graceful" if graceful else "immediate"
         confirm_detail = f" in {delay_seconds:g}s" if graceful else ""
         if not await prompt_yes_no(session, f"Confirm {mode_label} shutdown{confirm_detail}?", default=False):
-            await session.write_line("Cancelled.")
+            _announce_line(session, "Cancelled.")
             return None
 
         # Logged before triggering, not after: the sequence disconnects
@@ -8136,7 +8760,12 @@ async def _shutdown_screen(session: Session, lane: DatabaseLane, actor: User, no
         node_controls.shutdown_scheduler.schedule(
             task, deadline=loop.time() + (delay_seconds if graceful else 0.0), message=message
         )
-        await session.write_line("Shutdown sequence started.")
+        if graceful:
+            _announce(session, "Shutdown sequence started.", color=ALERT_COLOR)
+        else:
+            # An immediate shutdown may end this session before another prompt
+            # is ever drawn: written now, it at least reaches the terminal.
+            await session.write_line("Shutdown sequence started.")
         return True
 
     redraw_in_place, redraw_hint = await lane.run(_resolve_redraw_preference, actor)
@@ -8185,11 +8814,9 @@ async def _toggle_maintenance_mode(session: Session, lane: DatabaseLane, actor: 
     await lane.run(record_action, actor=actor, action="set_maintenance_mode", detail=f"enabled={not currently_on}")
     _logger.info("maintenance mode set to %s by %s", "ON" if not currently_on else "off", actor.username)
     if currently_on:
-        await _write_wrapped_subtitle(
-            session, "Maintenance mode is now off. New non-SysOp logins are allowed again.", color=SUCCESS_COLOR,
-        )
+        _announce(session, "Maintenance mode is now off. New non-SysOp logins are allowed again.")
     else:
-        await _write_wrapped_subtitle(
+        _announce(
             session,
             "Maintenance mode is now ON. New non-SysOp logins are blocked; already-connected "
             "sessions are unaffected -- use [D]rain to disconnect them.",
@@ -8214,7 +8841,7 @@ def _drain_field_specs() -> list[FieldSpec]:
             key="message", hotkey="c", menu_text=menu_key("C", "ustom message"), label="Custom message",
             render=lambda d: d.get("message") or "(default message)",
             prompt=text_field("message"),
-            brief="Shown instead of the default notice",
+            brief="Replaces the default notice",
             help='Broadcast to every non-SysOp session instead of the default "going down" notice.',
         ),
     ]
@@ -8258,7 +8885,7 @@ async def _drain_screen(session: Session, lane: DatabaseLane, actor: User, node_
             node_controls.drain_scheduler.cancel()
             await lane.run(record_action, actor=actor, action="cancel_drain")
             _logger.info("scheduled drain cancelled by %s", actor.username)
-            await session.write_line("Scheduled drain cancelled.")
+            _announce_line(session, "Scheduled drain cancelled.")
             return
         await session.write_line(
             colored("Scheduling a new drain will replace it.", fg_color=MUTED_COLOR)
@@ -8281,7 +8908,7 @@ async def _drain_screen(session: Session, lane: DatabaseLane, actor: User, node_
         if not await prompt_yes_no(
             session, f"Confirm drain (disconnect non-SysOps after {delay_seconds:g}s)?", default=False
         ):
-            await session.write_line("Cancelled.")
+            _announce_line(session, "Cancelled.")
             return None
 
         await lane.run(
@@ -8296,7 +8923,7 @@ async def _drain_screen(session: Session, lane: DatabaseLane, actor: User, node_
         )
         loop = asyncio.get_running_loop()
         node_controls.drain_scheduler.schedule(task, deadline=loop.time() + delay_seconds, message=message)
-        await session.write_line(f"Drain started -- non-SysOp sessions will be disconnected in {delay_seconds:g}s.")
+        _announce_line(session, f"Drain started -- non-SysOp sessions will be disconnected in {delay_seconds:g}s.")
         return True
 
     redraw_in_place, redraw_hint = await lane.run(_resolve_redraw_preference, actor)
@@ -8379,9 +9006,9 @@ async def _lock_and_drain_screen(session: Session, lane: DatabaseLane, actor: Us
             node_controls.maintenance.disable_lockdown()
             await lane.run(record_action, actor=actor, action="cancel_lock_and_drain")
             _logger.info("lock & drain cancelled by %s", actor.username)
-            await session.write_line("Lock & drain cancelled -- maintenance mode is off again.")
+            _announce_line(session, "Lock & drain cancelled -- maintenance mode is off again.")
             return
-        await session.write_line(colored("Leaving lock & drain active.", fg_color=MUTED_COLOR))
+        _announce_line(session, colored("Leaving lock & drain active.", fg_color=MUTED_COLOR))
         return
 
     # Lockdown may still be on here -- just not because this command put
@@ -8410,7 +9037,7 @@ async def _lock_and_drain_screen(session: Session, lane: DatabaseLane, actor: Us
             node_controls.drain_scheduler.cancel()
             await lane.run(record_action, actor=actor, action="cancel_drain")
             _logger.info("scheduled drain cancelled by %s", actor.username)
-            await session.write_line("Scheduled drain cancelled.")
+            _announce_line(session, "Scheduled drain cancelled.")
             return
         await session.write_line(
             colored("Scheduling a new drain will replace it.", fg_color=MUTED_COLOR)
@@ -8434,7 +9061,7 @@ async def _lock_and_drain_screen(session: Session, lane: DatabaseLane, actor: Us
             f"Confirm lock & drain (lock now, disconnect non-SysOps after {int(delay_seconds)}s)?",
             default=False,
         ):
-            await session.write_line("Cancelled.")
+            _announce_line(session, "Cancelled.")
             return None
 
         await lane.run(
@@ -8457,12 +9084,12 @@ async def _lock_and_drain_screen(session: Session, lane: DatabaseLane, actor: Us
             task, deadline=loop.time() + delay_seconds, message=message, source="lock_and_drain"
         )
         if lockdown_already_independent:
-            await session.write_line(
+            _announce_line(session,
                 f"Drain started -- non-SysOp sessions will be disconnected in {int(delay_seconds)}s. "
                 "The existing maintenance lock (enabled independently) was left as-is."
             )
         else:
-            await session.write_line(
+            _announce_line(session,
                 f"Locked -- new non-SysOp logins are blocked, and non-SysOp sessions will be "
                 f"disconnected in {int(delay_seconds)}s."
             )
@@ -8549,7 +9176,7 @@ async def _draw_banners_and_mastheads_menu(
     unicode_style: bool, collapsed: bool, header_color: int | tuple[int, int, int],
 ) -> None:
     await session.write_line("\r\n" + screen_title("Mastheads & banners",
-            breadcrumb=(session.node_display_name, "System"), width=session.terminal_width, clear=redraw_in_place,
+            breadcrumb=(session.node_display_name, "Settings"), width=session.terminal_width, clear=redraw_in_place,
             unicode_style=unicode_style, collapsed=collapsed, header_color=header_color,
             node_name_gradient=session.node_name_gradient))
     await _write_wrapped_subtitle(
@@ -8559,8 +9186,8 @@ async def _draw_banners_and_mastheads_menu(
     await session.write_line(
         "\r\n" + _menu_row(
             [
-                MenuEntry(label=menu_key("M", "astheads"), brief="Art above the main menu and section pickers"),
-                MenuEntry(label=menu_key("n", "nners", prefix="Ba"), brief="Welcome, logoff, and new-account text"),
+                MenuEntry(label=menu_key("M", "astheads"), brief="Art above the menu and pickers"),
+                MenuEntry(label=menu_key("n", "nners", prefix="Ba"), brief="Welcome, logoff, new-account text"),
                 MenuEntry(label=menu_key("B", "ack"), brief="Return to Settings"),
             ],
             description_level,
@@ -8569,7 +9196,7 @@ async def _draw_banners_and_mastheads_menu(
         )
     )
     await session.write_line(colored("(Ctrl-H for help placing your own .ans files)", fg_color=MUTED_COLOR))
-    await session.write("Choice: ")
+    await _choice_prompt(session)
 
 
 # -- welcome banner (design doc -- part one of a three-part skinning
@@ -8630,24 +9257,11 @@ async def _draw_welcome_banner_menu(
     collapsed: bool,
 ) -> None:
     status = await lane.run(welcome_banner_status)
-    state = "ENABLED" if status.enabled else "disabled"
-    if status.exists:
-        file_state = f"{status.size_bytes} bytes"
-    else:
-        file_state = "missing"
-    state_color = SUCCESS_COLOR if status.enabled else MUTED_COLOR
-    file_color = METADATA_COLOR if status.exists else ERROR_COLOR
-    detail = (
-        colored(state, fg_color=state_color, bold=status.enabled)
-        + colored(" -- file: ", fg_color=LABEL_COLOR)
-        + colored(status.path.name, fg_color=METADATA_COLOR)
-        + colored(f" ({file_state})", fg_color=file_color)
-    )
     await session.write_line("\r\n" + screen_title("Welcome banner",
-            breadcrumb=(session.node_display_name, "System", "Mastheads & banners", "Banners"), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
+            breadcrumb=(session.node_display_name, "Settings", "Mastheads & banners", "Banners"), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
             header_color=await lane.run(effective_header_color_256), node_name_gradient=session.node_name_gradient))
-    await session.write_line(detail)
     await session.write_line(await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width))
+    await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style)], unicode_style=unicode_style)
     await session.write_line(
         "\r\n" + _menu_row(
             [
@@ -8656,7 +9270,7 @@ async def _draw_welcome_banner_menu(
                 MenuEntry(label=menu_key("D", "isable"), brief="Turn the banner off"),
                 MenuEntry(label=menu_key("i", "t", prefix="Ed"), brief="Edit the banner text"),
                 MenuEntry(label=menu_key("G", "allery"), brief="Apply a bundled sample banner"),
-                MenuEntry(label=menu_key("F", "rom disk"), brief="Load your own .ans file from this node"),
+                MenuEntry(label=menu_key("F", "rom disk"), brief="Load your own .ans from this node"),
                 MenuEntry(label=menu_key("B", "ack"), brief="Return to Banners"),
             ],
             description_level,
@@ -8665,7 +9279,7 @@ async def _draw_welcome_banner_menu(
         )
     )
     await session.write_line(colored("(Ctrl-H for where to place your own .ans files)", fg_color=MUTED_COLOR))
-    await session.write("Choice: ")
+    await _choice_prompt(session)
 
 
 async def _preview_welcome_banner_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
@@ -8725,13 +9339,10 @@ async def _preview_welcome_banner_screen(session: Session, lane: DatabaseLane, a
 async def _enable_welcome_banner_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
     status = await lane.run(welcome_banner_status)
     if not status.exists:
-        await _write_wrapped_subtitle(
-            session,
-            f"No banner file found at {status.path}. Place a .ans file there first, then enable.",
-        )
+        _announce(session, f"No banner file found at {status.path}. Place a .ans file there first, then enable.", color=WARNING_COLOR)
         return
     if (status.size_bytes or 0) > MAX_BANNER_SIZE_BYTES:
-        await session.write_line(
+        _announce_line(session,
             colored(
                 f"Banner file at {status.path} is {status.size_bytes} bytes, over the "
                 f"{MAX_BANNER_SIZE_BYTES} byte limit -- not enabling.",
@@ -8745,7 +9356,7 @@ async def _enable_welcome_banner_screen(session: Session, lane: DatabaseLane, ac
         record_action(db, actor=actor, action="enable_welcome_banner", detail=str(status.path))
 
     await lane.run(_apply)
-    await session.write_line("Welcome banner enabled. Use [P]review to verify it looks right.")
+    _announce_line(session, "Welcome banner enabled. Use [P]review to verify it looks right.")
 
 
 async def _disable_welcome_banner_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
@@ -8756,7 +9367,7 @@ async def _disable_welcome_banner_screen(session: Session, lane: DatabaseLane, a
         return status
 
     status = await lane.run(_apply)
-    await session.write_line(
+    _announce_line(session,
         f"Reverted to the default banner. Your file at {status.path} was left in place."
     )
 
@@ -8778,12 +9389,12 @@ async def _edit_welcome_banner_screen(session: Session, lane: DatabaseLane, acto
         collapsed=await lane.run(breadcrumb_collapsed_enabled, actor),
     )
     if result is None:
-        await session.write_line(colored("\r\nNo changes saved.", fg_color=MUTED_COLOR))
+        _announce_line(session, colored("\r\nNo changes saved.", fg_color=MUTED_COLOR))
         return
 
     path.write_bytes(result)
     await lane.run(record_action, actor=actor, action="edit_welcome_banner", detail=str(path))
-    await session.write_line(f"\r\nSaved {path}. Use [P]review to verify it looks right.")
+    _announce_line(session, f"\r\nSaved {path}. Use [P]review to verify it looks right.")
 
 
 async def _preview_apply_choice(session: Session, label: str) -> bool:
@@ -8865,9 +9476,7 @@ async def _welcome_banner_gallery_screen(
             return path
 
         path = await lane.run(_apply)
-        await session.write_line(f"Applied and enabled. Saved to {path}. Use [P]review to verify it looks right.")
-        await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-        await session.read_any_key()
+        _announce_line(session, f"Applied and enabled. Saved to {path}. Use [P]review to verify it looks right.")
         return
 
 
@@ -8970,20 +9579,13 @@ async def _welcome_banner_filesystem_screen(
 
     files, directory = await lane.run(_list)
     if not files:
-        await session.write_line("")
-        await _write_wrapped_subtitle(
+        # Announced, not held behind a keypress: it is on the menu this returns to.
+        _announce(
             session,
             f"No other .ans files found in {directory}. Place one there "
             f"(e.g. via SFTP/SCP), then browse again.",
+            color=MUTED_COLOR,
         )
-        # Dogfood report: this message used to fall straight through to
-        # the menu's own immediate redraw, which -- with redraw_in_place
-        # on (the default for new accounts) -- cleared it before it could
-        # actually be read, making the whole screen look like a no-op.
-        # Same present-then-wait fix `_preview_welcome_banner_screen`
-        # already established for the identical reason.
-        await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-        await session.read_any_key()
         return
 
     last_stable_id: int | None = None
@@ -9034,9 +9636,7 @@ async def _welcome_banner_filesystem_screen(
             return target
 
         target = await lane.run(_apply)
-        await session.write_line(f"Loaded and enabled. Saved to {target}. Use [P]review to verify it looks right.")
-        await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-        await session.read_any_key()
+        _announce_line(session, f"Loaded and enabled. Saved to {target}. Use [P]review to verify it looks right.")
         return
 
 
@@ -9099,24 +9699,11 @@ async def _draw_main_menu_banner_menu(
     collapsed: bool,
 ) -> None:
     status = await lane.run(main_menu_banner_status)
-    state = "ENABLED" if status.enabled else "disabled"
-    if status.exists:
-        file_state = f"{status.size_bytes} bytes"
-    else:
-        file_state = "missing"
-    state_color = SUCCESS_COLOR if status.enabled else MUTED_COLOR
-    file_color = METADATA_COLOR if status.exists else ERROR_COLOR
-    detail = (
-        colored(state, fg_color=state_color, bold=status.enabled)
-        + colored(" -- file: ", fg_color=LABEL_COLOR)
-        + colored(status.path.name, fg_color=METADATA_COLOR)
-        + colored(f" ({file_state})", fg_color=file_color)
-    )
     await session.write_line("\r\n" + screen_title("Main-menu masthead",
-            breadcrumb=(session.node_display_name, "System", "Mastheads & banners", "Mastheads"), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
+            breadcrumb=(session.node_display_name, "Settings", "Mastheads & banners", "Mastheads"), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
             header_color=await lane.run(effective_header_color_256), node_name_gradient=session.node_name_gradient))
-    await session.write_line(detail)
     await session.write_line(await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width))
+    await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style)], unicode_style=unicode_style)
     await session.write_line("")
     await _write_wrapped_subtitle(
         session,
@@ -9126,12 +9713,12 @@ async def _draw_main_menu_banner_menu(
     await session.write_line(
         "\r\n" + _menu_row(
             [
-                MenuEntry(label=menu_key("P", "review"), brief="Show the masthead as callers see it"),
+                MenuEntry(label=menu_key("P", "review"), brief="Show it as callers see it"),
                 MenuEntry(label=menu_key("E", "nable"), brief="Turn the masthead on"),
                 MenuEntry(label=menu_key("D", "isable"), brief="Turn the masthead off"),
                 MenuEntry(label=menu_key("i", "t", prefix="Ed"), brief="Edit the masthead art"),
                 MenuEntry(label=menu_key("G", "allery"), brief="Apply a bundled sample masthead"),
-                MenuEntry(label=menu_key("F", "rom disk"), brief="Load your own .ans file from this node"),
+                MenuEntry(label=menu_key("F", "rom disk"), brief="Load your own .ans from this node"),
                 MenuEntry(label=menu_key("B", "ack"), brief="Return to Mastheads"),
             ],
             description_level,
@@ -9140,7 +9727,7 @@ async def _draw_main_menu_banner_menu(
         )
     )
     await session.write_line(colored("(Ctrl-H for where to place your own .ans files)", fg_color=MUTED_COLOR))
-    await session.write("Choice: ")
+    await _choice_prompt(session)
 
 
 async def _preview_main_menu_banner_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
@@ -9182,13 +9769,10 @@ async def _preview_main_menu_banner_screen(session: Session, lane: DatabaseLane,
 async def _enable_main_menu_banner_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
     status = await lane.run(main_menu_banner_status)
     if not status.exists:
-        await _write_wrapped_subtitle(
-            session,
-            f"No masthead file found at {status.path}. Place a .ans file there first, then enable.",
-        )
+        _announce(session, f"No masthead file found at {status.path}. Place a .ans file there first, then enable.", color=WARNING_COLOR)
         return
     if (status.size_bytes or 0) > MAX_MASTHEAD_SIZE_BYTES:
-        await session.write_line(
+        _announce_line(session,
             colored(
                 f"Masthead file at {status.path} is {status.size_bytes} bytes, over the "
                 f"{MAX_MASTHEAD_SIZE_BYTES} byte limit -- not enabling.",
@@ -9202,7 +9786,7 @@ async def _enable_main_menu_banner_screen(session: Session, lane: DatabaseLane, 
         record_action(db, actor=actor, action="enable_main_menu_banner", detail=str(status.path))
 
     await lane.run(_apply)
-    await session.write_line("Main-menu masthead enabled. Use [P]review to verify it looks right.")
+    _announce_line(session, "Main-menu masthead enabled. Use [P]review to verify it looks right.")
 
 
 async def _disable_main_menu_banner_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
@@ -9213,7 +9797,7 @@ async def _disable_main_menu_banner_screen(session: Session, lane: DatabaseLane,
         return status
 
     status = await lane.run(_apply)
-    await session.write_line(
+    _announce_line(session,
         f"Masthead disabled -- the main menu reverts to showing no banner above it. "
         f"Your file at {status.path} was left in place."
     )
@@ -9233,12 +9817,12 @@ async def _edit_main_menu_banner_screen(session: Session, lane: DatabaseLane, ac
         collapsed=await lane.run(breadcrumb_collapsed_enabled, actor),
     )
     if result is None:
-        await session.write_line(colored("\r\nNo changes saved.", fg_color=MUTED_COLOR))
+        _announce_line(session, colored("\r\nNo changes saved.", fg_color=MUTED_COLOR))
         return
 
     path.write_bytes(result)
     await lane.run(record_action, actor=actor, action="edit_main_menu_banner", detail=str(path))
-    await session.write_line(f"\r\nSaved {path}. Use [P]review to verify it looks right.")
+    _announce_line(session, f"\r\nSaved {path}. Use [P]review to verify it looks right.")
 
 
 async def _main_menu_banner_gallery_screen(
@@ -9284,9 +9868,7 @@ async def _main_menu_banner_gallery_screen(
             return path
 
         path = await lane.run(_apply)
-        await session.write_line(f"Applied and enabled. Saved to {path}. Use [P]review to verify it looks right.")
-        await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-        await session.read_any_key()
+        _announce_line(session, f"Applied and enabled. Saved to {path}. Use [P]review to verify it looks right.")
         return
 
 
@@ -9305,14 +9887,13 @@ async def _main_menu_banner_filesystem_screen(
 
     files, directory = await lane.run(_list)
     if not files:
-        await session.write_line("")
-        await _write_wrapped_subtitle(
+        # Announced, not held behind a keypress: it is on the menu this returns to.
+        _announce(
             session,
             f"No other .ans files found in {directory}. Place one there "
             f"(e.g. via SFTP/SCP), then browse again.",
+            color=MUTED_COLOR,
         )
-        await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-        await session.read_any_key()
         return
 
     last_stable_id: int | None = None
@@ -9360,9 +9941,7 @@ async def _main_menu_banner_filesystem_screen(
             return target
 
         target = await lane.run(_apply)
-        await session.write_line(f"Loaded and enabled. Saved to {target}. Use [P]review to verify it looks right.")
-        await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-        await session.read_any_key()
+        _announce_line(session, f"Loaded and enabled. Saved to {target}. Use [P]review to verify it looks right.")
         return
 
 
@@ -9422,7 +10001,7 @@ async def _draw_banners_menu(
     unicode_style: bool, collapsed: bool, header_color: int | tuple[int, int, int],
 ) -> None:
     await session.write_line("\r\n" + screen_title("Banners",
-            breadcrumb=(session.node_display_name, "System", "Mastheads & banners"), width=session.terminal_width, clear=redraw_in_place,
+            breadcrumb=(session.node_display_name, "Settings", "Mastheads & banners"), width=session.terminal_width, clear=redraw_in_place,
             unicode_style=unicode_style, collapsed=collapsed, header_color=header_color,
             node_name_gradient=session.node_name_gradient))
     await _write_wrapped_subtitle(
@@ -9446,7 +10025,7 @@ async def _draw_banners_menu(
         )
     )
     await session.write_line(colored("(Ctrl-H for help placing your own .ans files)", fg_color=MUTED_COLOR))
-    await session.write("Choice: ")
+    await _choice_prompt(session)
 
 
 # -- logoff banner --------------------------------------------------------
@@ -9505,18 +10084,8 @@ async def _draw_logoff_banner_menu(
     unicode_style: bool, collapsed: bool, header_color: int | tuple[int, int, int],
 ) -> None:
     status = await lane.run(logoff_banner_status)
-    state = "ENABLED" if status.enabled else "disabled"
-    file_state = f"{status.size_bytes} bytes" if status.exists else "missing"
-    state_color = SUCCESS_COLOR if status.enabled else MUTED_COLOR
-    file_color = METADATA_COLOR if status.exists else ERROR_COLOR
-    detail = (
-        colored(state, fg_color=state_color, bold=status.enabled)
-        + colored(" -- file: ", fg_color=LABEL_COLOR)
-        + colored(status.path.name, fg_color=METADATA_COLOR)
-        + colored(f" ({file_state})", fg_color=file_color)
-    )
     await session.write_line("\r\n" + screen_title("Logoff banner",
-            breadcrumb=(session.node_display_name, "System", "Mastheads & banners", "Banners"), width=session.terminal_width,
+            breadcrumb=(session.node_display_name, "Settings", "Mastheads & banners", "Banners"), width=session.terminal_width,
             clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, header_color=header_color,
             node_name_gradient=session.node_name_gradient))
     await _write_wrapped_subtitle(
@@ -9524,8 +10093,8 @@ async def _draw_logoff_banner_menu(
         "Shown above the ordinary Goodbye message on an intentional Log off only -- never on an idle "
         "timeout, kick, or account revocation.",
     )
-    await session.write_line(detail)
     await session.write_line(await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width))
+    await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style)], unicode_style=unicode_style)
     await session.write_line(
         "\r\n" + _menu_row(
             [
@@ -9534,7 +10103,7 @@ async def _draw_logoff_banner_menu(
                 MenuEntry(label=menu_key("D", "isable"), brief="Turn the banner off"),
                 MenuEntry(label=menu_key("i", "t", prefix="Ed"), brief="Edit the banner text"),
                 MenuEntry(label=menu_key("G", "allery"), brief="Apply a bundled sample banner"),
-                MenuEntry(label=menu_key("F", "rom disk"), brief="Load your own .ans file from this node"),
+                MenuEntry(label=menu_key("F", "rom disk"), brief="Load your own .ans from this node"),
                 MenuEntry(label=menu_key("B", "ack"), brief="Return to Banners"),
             ],
             description_level,
@@ -9543,7 +10112,7 @@ async def _draw_logoff_banner_menu(
         )
     )
     await session.write_line(colored("(Ctrl-H for where to place your own .ans files)", fg_color=MUTED_COLOR))
-    await session.write("Choice: ")
+    await _choice_prompt(session)
 
 
 async def _preview_logoff_banner_screen(session: Session, lane: DatabaseLane) -> None:
@@ -9564,13 +10133,10 @@ async def _preview_logoff_banner_screen(session: Session, lane: DatabaseLane) ->
 async def _enable_logoff_banner_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
     status = await lane.run(logoff_banner_status)
     if not status.exists:
-        await _write_wrapped_subtitle(
-            session,
-            f"No banner file found at {status.path}. Place a .ans file there first, then enable.",
-        )
+        _announce(session, f"No banner file found at {status.path}. Place a .ans file there first, then enable.", color=WARNING_COLOR)
         return
     if (status.size_bytes or 0) > MAX_LOGOFF_BANNER_SIZE_BYTES:
-        await session.write_line(
+        _announce_line(session,
             colored(
                 f"Banner file at {status.path} is {status.size_bytes} bytes, over the "
                 f"{MAX_LOGOFF_BANNER_SIZE_BYTES} byte limit -- not enabling.",
@@ -9584,7 +10150,7 @@ async def _enable_logoff_banner_screen(session: Session, lane: DatabaseLane, act
         record_action(db, actor=actor, action="enable_logoff_banner", detail=str(status.path))
 
     await lane.run(_apply)
-    await session.write_line("Logoff banner enabled. Use [P]review to verify it looks right.")
+    _announce_line(session, "Logoff banner enabled. Use [P]review to verify it looks right.")
 
 
 async def _disable_logoff_banner_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
@@ -9595,7 +10161,7 @@ async def _disable_logoff_banner_screen(session: Session, lane: DatabaseLane, ac
         return status
 
     status = await lane.run(_apply)
-    await session.write_line(f"Logoff banner disabled. Your file at {status.path} was left in place.")
+    _announce_line(session, f"Logoff banner disabled. Your file at {status.path} was left in place.")
 
 
 async def _edit_logoff_banner_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
@@ -9610,12 +10176,12 @@ async def _edit_logoff_banner_screen(session: Session, lane: DatabaseLane, actor
         collapsed=await lane.run(breadcrumb_collapsed_enabled, actor),
     )
     if result is None:
-        await session.write_line(colored("\r\nNo changes saved.", fg_color=MUTED_COLOR))
+        _announce_line(session, colored("\r\nNo changes saved.", fg_color=MUTED_COLOR))
         return
 
     path.write_bytes(result)
     await lane.run(record_action, actor=actor, action="edit_logoff_banner", detail=str(path))
-    await session.write_line(f"\r\nSaved {path}. Use [P]review to verify it looks right.")
+    _announce_line(session, f"\r\nSaved {path}. Use [P]review to verify it looks right.")
 
 
 async def _logoff_banner_gallery_screen(
@@ -9658,9 +10224,7 @@ async def _logoff_banner_gallery_screen(
             return path
 
         path = await lane.run(_apply)
-        await session.write_line(f"Applied and enabled. Saved to {path}. Use [P]review to verify it looks right.")
-        await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-        await session.read_any_key()
+        _announce_line(session, f"Applied and enabled. Saved to {path}. Use [P]review to verify it looks right.")
         return
 
 
@@ -9677,14 +10241,13 @@ async def _logoff_banner_filesystem_screen(
 
     files, directory = await lane.run(_list)
     if not files:
-        await session.write_line("")
-        await _write_wrapped_subtitle(
+        # Announced, not held behind a keypress: it is on the menu this returns to.
+        _announce(
             session,
             f"No other .ans files found in {directory}. Place one there "
             f"(e.g. via SFTP/SCP), then browse again.",
+            color=MUTED_COLOR,
         )
-        await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-        await session.read_any_key()
         return
 
     last_stable_id: int | None = None
@@ -9732,9 +10295,7 @@ async def _logoff_banner_filesystem_screen(
             return target
 
         target = await lane.run(_apply)
-        await session.write_line(f"Loaded and enabled. Saved to {target}. Use [P]review to verify it looks right.")
-        await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-        await session.read_any_key()
+        _announce_line(session, f"Loaded and enabled. Saved to {target}. Use [P]review to verify it looks right.")
         return
 
 
@@ -9794,18 +10355,8 @@ async def _draw_new_account_banner_before_menu(
     unicode_style: bool, collapsed: bool, header_color: int | tuple[int, int, int],
 ) -> None:
     status = await lane.run(new_account_banner_before_status)
-    state = "ENABLED" if status.enabled else "disabled"
-    file_state = f"{status.size_bytes} bytes" if status.exists else "missing"
-    state_color = SUCCESS_COLOR if status.enabled else MUTED_COLOR
-    file_color = METADATA_COLOR if status.exists else ERROR_COLOR
-    detail = (
-        colored(state, fg_color=state_color, bold=status.enabled)
-        + colored(" -- file: ", fg_color=LABEL_COLOR)
-        + colored(status.path.name, fg_color=METADATA_COLOR)
-        + colored(f" ({file_state})", fg_color=file_color)
-    )
     await session.write_line("\r\n" + screen_title("New account banner (before)",
-            breadcrumb=(session.node_display_name, "System", "Mastheads & banners", "Banners"), width=session.terminal_width,
+            breadcrumb=(session.node_display_name, "Settings", "Mastheads & banners", "Banners"), width=session.terminal_width,
             clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, header_color=header_color,
             node_name_gradient=session.node_name_gradient))
     await _write_wrapped_subtitle(
@@ -9813,8 +10364,8 @@ async def _draw_new_account_banner_before_menu(
         "Shown once, right when a caller starts self-service signup -- before the Create "
         "account prompts, never repeated on a fixable retry.",
     )
-    await session.write_line(detail)
     await session.write_line(await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width))
+    await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style)], unicode_style=unicode_style)
     await session.write_line(
         "\r\n" + _menu_row(
             [
@@ -9823,7 +10374,7 @@ async def _draw_new_account_banner_before_menu(
                 MenuEntry(label=menu_key("D", "isable"), brief="Turn the banner off"),
                 MenuEntry(label=menu_key("i", "t", prefix="Ed"), brief="Edit the banner text"),
                 MenuEntry(label=menu_key("G", "allery"), brief="Apply a bundled sample banner"),
-                MenuEntry(label=menu_key("F", "rom disk"), brief="Load your own .ans file from this node"),
+                MenuEntry(label=menu_key("F", "rom disk"), brief="Load your own .ans from this node"),
                 MenuEntry(label=menu_key("B", "ack"), brief="Return to Banners"),
             ],
             description_level,
@@ -9832,7 +10383,7 @@ async def _draw_new_account_banner_before_menu(
         )
     )
     await session.write_line(colored("(Ctrl-H for where to place your own .ans files)", fg_color=MUTED_COLOR))
-    await session.write("Choice: ")
+    await _choice_prompt(session)
 
 
 async def _preview_new_account_banner_before_screen(session: Session, lane: DatabaseLane) -> None:
@@ -9857,13 +10408,10 @@ async def _preview_new_account_banner_before_screen(session: Session, lane: Data
 async def _enable_new_account_banner_before_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
     status = await lane.run(new_account_banner_before_status)
     if not status.exists:
-        await _write_wrapped_subtitle(
-            session,
-            f"No banner file found at {status.path}. Place a .ans file there first, then enable.",
-        )
+        _announce(session, f"No banner file found at {status.path}. Place a .ans file there first, then enable.", color=WARNING_COLOR)
         return
     if (status.size_bytes or 0) > MAX_NEW_ACCOUNT_BANNER_BEFORE_SIZE_BYTES:
-        await session.write_line(
+        _announce_line(session,
             colored(
                 f"Banner file at {status.path} is {status.size_bytes} bytes, over the "
                 f"{MAX_NEW_ACCOUNT_BANNER_BEFORE_SIZE_BYTES} byte limit -- not enabling.",
@@ -9877,7 +10425,7 @@ async def _enable_new_account_banner_before_screen(session: Session, lane: Datab
         record_action(db, actor=actor, action="enable_new_account_banner_before", detail=str(status.path))
 
     await lane.run(_apply)
-    await session.write_line("New-account (before) banner enabled. Use [P]review to verify it looks right.")
+    _announce_line(session, "New-account (before) banner enabled. Use [P]review to verify it looks right.")
 
 
 async def _disable_new_account_banner_before_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
@@ -9888,7 +10436,7 @@ async def _disable_new_account_banner_before_screen(session: Session, lane: Data
         return status
 
     status = await lane.run(_apply)
-    await session.write_line(f"New-account (before) banner disabled. Your file at {status.path} was left in place.")
+    _announce_line(session, f"New-account (before) banner disabled. Your file at {status.path} was left in place.")
 
 
 async def _edit_new_account_banner_before_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
@@ -9903,12 +10451,12 @@ async def _edit_new_account_banner_before_screen(session: Session, lane: Databas
         collapsed=await lane.run(breadcrumb_collapsed_enabled, actor),
     )
     if result is None:
-        await session.write_line(colored("\r\nNo changes saved.", fg_color=MUTED_COLOR))
+        _announce_line(session, colored("\r\nNo changes saved.", fg_color=MUTED_COLOR))
         return
 
     path.write_bytes(result)
     await lane.run(record_action, actor=actor, action="edit_new_account_banner_before", detail=str(path))
-    await session.write_line(f"\r\nSaved {path}. Use [P]review to verify it looks right.")
+    _announce_line(session, f"\r\nSaved {path}. Use [P]review to verify it looks right.")
 
 
 async def _new_account_banner_before_gallery_screen(
@@ -9953,9 +10501,7 @@ async def _new_account_banner_before_gallery_screen(
             return path
 
         path = await lane.run(_apply)
-        await session.write_line(f"Applied and enabled. Saved to {path}. Use [P]review to verify it looks right.")
-        await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-        await session.read_any_key()
+        _announce_line(session, f"Applied and enabled. Saved to {path}. Use [P]review to verify it looks right.")
         return
 
 
@@ -9972,14 +10518,13 @@ async def _new_account_banner_before_filesystem_screen(
 
     files, directory = await lane.run(_list)
     if not files:
-        await session.write_line("")
-        await _write_wrapped_subtitle(
+        # Announced, not held behind a keypress: it is on the menu this returns to.
+        _announce(
             session,
             f"No other .ans files found in {directory}. Place one there "
             f"(e.g. via SFTP/SCP), then browse again.",
+            color=MUTED_COLOR,
         )
-        await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-        await session.read_any_key()
         return
 
     last_stable_id: int | None = None
@@ -10029,9 +10574,7 @@ async def _new_account_banner_before_filesystem_screen(
             return target
 
         target = await lane.run(_apply)
-        await session.write_line(f"Loaded and enabled. Saved to {target}. Use [P]review to verify it looks right.")
-        await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-        await session.read_any_key()
+        _announce_line(session, f"Loaded and enabled. Saved to {target}. Use [P]review to verify it looks right.")
         return
 
 
@@ -10091,18 +10634,8 @@ async def _draw_new_account_banner_after_menu(
     unicode_style: bool, collapsed: bool, header_color: int | tuple[int, int, int],
 ) -> None:
     status = await lane.run(new_account_banner_after_status)
-    state = "ENABLED" if status.enabled else "disabled"
-    file_state = f"{status.size_bytes} bytes" if status.exists else "missing"
-    state_color = SUCCESS_COLOR if status.enabled else MUTED_COLOR
-    file_color = METADATA_COLOR if status.exists else ERROR_COLOR
-    detail = (
-        colored(state, fg_color=state_color, bold=status.enabled)
-        + colored(" -- file: ", fg_color=LABEL_COLOR)
-        + colored(status.path.name, fg_color=METADATA_COLOR)
-        + colored(f" ({file_state})", fg_color=file_color)
-    )
     await session.write_line("\r\n" + screen_title("New account banner (after)",
-            breadcrumb=(session.node_display_name, "System", "Mastheads & banners", "Banners"), width=session.terminal_width,
+            breadcrumb=(session.node_display_name, "Settings", "Mastheads & banners", "Banners"), width=session.terminal_width,
             clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, header_color=header_color,
             node_name_gradient=session.node_name_gradient))
     await _write_wrapped_subtitle(
@@ -10110,8 +10643,8 @@ async def _draw_new_account_banner_after_menu(
         "Shown once self-service signup succeeds -- covers both an immediate login and a "
         "pending-approval account, alongside the existing message either way.",
     )
-    await session.write_line(detail)
     await session.write_line(await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width))
+    await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style)], unicode_style=unicode_style)
     await session.write_line(
         "\r\n" + _menu_row(
             [
@@ -10120,7 +10653,7 @@ async def _draw_new_account_banner_after_menu(
                 MenuEntry(label=menu_key("D", "isable"), brief="Turn the banner off"),
                 MenuEntry(label=menu_key("i", "t", prefix="Ed"), brief="Edit the banner text"),
                 MenuEntry(label=menu_key("G", "allery"), brief="Apply a bundled sample banner"),
-                MenuEntry(label=menu_key("F", "rom disk"), brief="Load your own .ans file from this node"),
+                MenuEntry(label=menu_key("F", "rom disk"), brief="Load your own .ans from this node"),
                 MenuEntry(label=menu_key("B", "ack"), brief="Return to Banners"),
             ],
             description_level,
@@ -10129,7 +10662,7 @@ async def _draw_new_account_banner_after_menu(
         )
     )
     await session.write_line(colored("(Ctrl-H for where to place your own .ans files)", fg_color=MUTED_COLOR))
-    await session.write("Choice: ")
+    await _choice_prompt(session)
 
 
 async def _preview_new_account_banner_after_screen(session: Session, lane: DatabaseLane) -> None:
@@ -10154,13 +10687,10 @@ async def _preview_new_account_banner_after_screen(session: Session, lane: Datab
 async def _enable_new_account_banner_after_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
     status = await lane.run(new_account_banner_after_status)
     if not status.exists:
-        await _write_wrapped_subtitle(
-            session,
-            f"No banner file found at {status.path}. Place a .ans file there first, then enable.",
-        )
+        _announce(session, f"No banner file found at {status.path}. Place a .ans file there first, then enable.", color=WARNING_COLOR)
         return
     if (status.size_bytes or 0) > MAX_NEW_ACCOUNT_BANNER_AFTER_SIZE_BYTES:
-        await session.write_line(
+        _announce_line(session,
             colored(
                 f"Banner file at {status.path} is {status.size_bytes} bytes, over the "
                 f"{MAX_NEW_ACCOUNT_BANNER_AFTER_SIZE_BYTES} byte limit -- not enabling.",
@@ -10174,7 +10704,7 @@ async def _enable_new_account_banner_after_screen(session: Session, lane: Databa
         record_action(db, actor=actor, action="enable_new_account_banner_after", detail=str(status.path))
 
     await lane.run(_apply)
-    await session.write_line("New-account (after) banner enabled. Use [P]review to verify it looks right.")
+    _announce_line(session, "New-account (after) banner enabled. Use [P]review to verify it looks right.")
 
 
 async def _disable_new_account_banner_after_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
@@ -10185,7 +10715,7 @@ async def _disable_new_account_banner_after_screen(session: Session, lane: Datab
         return status
 
     status = await lane.run(_apply)
-    await session.write_line(f"New-account (after) banner disabled. Your file at {status.path} was left in place.")
+    _announce_line(session, f"New-account (after) banner disabled. Your file at {status.path} was left in place.")
 
 
 async def _edit_new_account_banner_after_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
@@ -10200,12 +10730,12 @@ async def _edit_new_account_banner_after_screen(session: Session, lane: Database
         collapsed=await lane.run(breadcrumb_collapsed_enabled, actor),
     )
     if result is None:
-        await session.write_line(colored("\r\nNo changes saved.", fg_color=MUTED_COLOR))
+        _announce_line(session, colored("\r\nNo changes saved.", fg_color=MUTED_COLOR))
         return
 
     path.write_bytes(result)
     await lane.run(record_action, actor=actor, action="edit_new_account_banner_after", detail=str(path))
-    await session.write_line(f"\r\nSaved {path}. Use [P]review to verify it looks right.")
+    _announce_line(session, f"\r\nSaved {path}. Use [P]review to verify it looks right.")
 
 
 async def _new_account_banner_after_gallery_screen(
@@ -10250,9 +10780,7 @@ async def _new_account_banner_after_gallery_screen(
             return path
 
         path = await lane.run(_apply)
-        await session.write_line(f"Applied and enabled. Saved to {path}. Use [P]review to verify it looks right.")
-        await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-        await session.read_any_key()
+        _announce_line(session, f"Applied and enabled. Saved to {path}. Use [P]review to verify it looks right.")
         return
 
 
@@ -10269,14 +10797,13 @@ async def _new_account_banner_after_filesystem_screen(
 
     files, directory = await lane.run(_list)
     if not files:
-        await session.write_line("")
-        await _write_wrapped_subtitle(
+        # Announced, not held behind a keypress: it is on the menu this returns to.
+        _announce(
             session,
             f"No other .ans files found in {directory}. Place one there "
             f"(e.g. via SFTP/SCP), then browse again.",
+            color=MUTED_COLOR,
         )
-        await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-        await session.read_any_key()
         return
 
     last_stable_id: int | None = None
@@ -10326,9 +10853,7 @@ async def _new_account_banner_after_filesystem_screen(
             return target
 
         target = await lane.run(_apply)
-        await session.write_line(f"Loaded and enabled. Saved to {target}. Use [P]review to verify it looks right.")
-        await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-        await session.read_any_key()
+        _announce_line(session, f"Loaded and enabled. Saved to {target}. Use [P]review to verify it looks right.")
         return
 
 
@@ -10382,7 +10907,7 @@ async def _draw_mastheads_menu(
     unicode_style: bool, collapsed: bool, header_color: int | tuple[int, int, int],
 ) -> None:
     await session.write_line("\r\n" + screen_title("Mastheads",
-            breadcrumb=(session.node_display_name, "System", "Mastheads & banners"), width=session.terminal_width, clear=redraw_in_place,
+            breadcrumb=(session.node_display_name, "Settings", "Mastheads & banners"), width=session.terminal_width, clear=redraw_in_place,
             unicode_style=unicode_style, collapsed=collapsed, header_color=header_color,
             node_name_gradient=session.node_name_gradient))
     await _write_wrapped_subtitle(
@@ -10407,7 +10932,7 @@ async def _draw_mastheads_menu(
         )
     )
     await session.write_line(colored("(Ctrl-H for help placing your own .ans files)", fg_color=MUTED_COLOR))
-    await session.write("Choice: ")
+    await _choice_prompt(session)
 
 
 # -- board list masthead --------------------------------------------------
@@ -10466,18 +10991,8 @@ async def _draw_board_list_masthead_menu(
     unicode_style: bool, collapsed: bool, header_color: int | tuple[int, int, int],
 ) -> None:
     status = await lane.run(board_list_banner_status)
-    state = "ENABLED" if status.enabled else "disabled"
-    file_state = f"{status.size_bytes} bytes" if status.exists else "missing"
-    state_color = SUCCESS_COLOR if status.enabled else MUTED_COLOR
-    file_color = METADATA_COLOR if status.exists else ERROR_COLOR
-    detail = (
-        colored(state, fg_color=state_color, bold=status.enabled)
-        + colored(" -- file: ", fg_color=LABEL_COLOR)
-        + colored(status.path.name, fg_color=METADATA_COLOR)
-        + colored(f" ({file_state})", fg_color=file_color)
-    )
     await session.write_line("\r\n" + screen_title("Board list masthead",
-            breadcrumb=(session.node_display_name, "System", "Mastheads & banners", "Mastheads"), width=session.terminal_width,
+            breadcrumb=(session.node_display_name, "Settings", "Mastheads & banners", "Mastheads"), width=session.terminal_width,
             clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, header_color=header_color,
             node_name_gradient=session.node_name_gradient))
     await _write_wrapped_subtitle(
@@ -10485,17 +11000,17 @@ async def _draw_board_list_masthead_menu(
         "Shown above every board-browsing view -- the top level, a category, or a "
         "Community/Uncategorized scope.",
     )
-    await session.write_line(detail)
     await session.write_line(await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width))
+    await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style)], unicode_style=unicode_style)
     await session.write_line(
         "\r\n" + _menu_row(
             [
-                MenuEntry(label=menu_key("P", "review"), brief="Show the masthead as callers see it"),
+                MenuEntry(label=menu_key("P", "review"), brief="Show it as callers see it"),
                 MenuEntry(label=menu_key("E", "nable"), brief="Turn the masthead on"),
                 MenuEntry(label=menu_key("D", "isable"), brief="Turn the masthead off"),
                 MenuEntry(label=menu_key("i", "t", prefix="Ed"), brief="Edit the masthead art"),
                 MenuEntry(label=menu_key("G", "allery"), brief="Apply a bundled sample masthead"),
-                MenuEntry(label=menu_key("F", "rom disk"), brief="Load your own .ans file from this node"),
+                MenuEntry(label=menu_key("F", "rom disk"), brief="Load your own .ans from this node"),
                 MenuEntry(label=menu_key("B", "ack"), brief="Return to Mastheads"),
             ],
             description_level,
@@ -10504,7 +11019,7 @@ async def _draw_board_list_masthead_menu(
         )
     )
     await session.write_line(colored("(Ctrl-H for where to place your own .ans files)", fg_color=MUTED_COLOR))
-    await session.write("Choice: ")
+    await _choice_prompt(session)
 
 
 async def _preview_board_list_masthead_screen(session: Session, lane: DatabaseLane) -> None:
@@ -10523,13 +11038,10 @@ async def _preview_board_list_masthead_screen(session: Session, lane: DatabaseLa
 async def _enable_board_list_masthead_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
     status = await lane.run(board_list_banner_status)
     if not status.exists:
-        await _write_wrapped_subtitle(
-            session,
-            f"No masthead file found at {status.path}. Place a .ans file there first, then enable.",
-        )
+        _announce(session, f"No masthead file found at {status.path}. Place a .ans file there first, then enable.", color=WARNING_COLOR)
         return
     if (status.size_bytes or 0) > MAX_BOARD_LIST_BANNER_SIZE_BYTES:
-        await session.write_line(
+        _announce_line(session,
             colored(
                 f"Masthead file at {status.path} is {status.size_bytes} bytes, over the "
                 f"{MAX_BOARD_LIST_BANNER_SIZE_BYTES} byte limit -- not enabling.",
@@ -10543,7 +11055,7 @@ async def _enable_board_list_masthead_screen(session: Session, lane: DatabaseLan
         record_action(db, actor=actor, action="enable_board_list_banner", detail=str(status.path))
 
     await lane.run(_apply)
-    await session.write_line("Board list masthead enabled. Use [P]review to verify it looks right.")
+    _announce_line(session, "Board list masthead enabled. Use [P]review to verify it looks right.")
 
 
 async def _disable_board_list_masthead_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
@@ -10554,7 +11066,7 @@ async def _disable_board_list_masthead_screen(session: Session, lane: DatabaseLa
         return status
 
     status = await lane.run(_apply)
-    await session.write_line(f"Board list masthead disabled. Your file at {status.path} was left in place.")
+    _announce_line(session, f"Board list masthead disabled. Your file at {status.path} was left in place.")
 
 
 async def _edit_board_list_masthead_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
@@ -10569,12 +11081,12 @@ async def _edit_board_list_masthead_screen(session: Session, lane: DatabaseLane,
         collapsed=await lane.run(breadcrumb_collapsed_enabled, actor),
     )
     if result is None:
-        await session.write_line(colored("\r\nNo changes saved.", fg_color=MUTED_COLOR))
+        _announce_line(session, colored("\r\nNo changes saved.", fg_color=MUTED_COLOR))
         return
 
     path.write_bytes(result)
     await lane.run(record_action, actor=actor, action="edit_board_list_banner", detail=str(path))
-    await session.write_line(f"\r\nSaved {path}. Use [P]review to verify it looks right.")
+    _announce_line(session, f"\r\nSaved {path}. Use [P]review to verify it looks right.")
 
 
 async def _board_list_masthead_gallery_screen(
@@ -10617,9 +11129,7 @@ async def _board_list_masthead_gallery_screen(
             return path
 
         path = await lane.run(_apply)
-        await session.write_line(f"Applied and enabled. Saved to {path}. Use [P]review to verify it looks right.")
-        await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-        await session.read_any_key()
+        _announce_line(session, f"Applied and enabled. Saved to {path}. Use [P]review to verify it looks right.")
         return
 
 
@@ -10638,14 +11148,13 @@ async def _board_list_masthead_filesystem_screen(
 
     files, directory = await lane.run(_list)
     if not files:
-        await session.write_line("")
-        await _write_wrapped_subtitle(
+        # Announced, not held behind a keypress: it is on the menu this returns to.
+        _announce(
             session,
             f"No other .ans files found in {directory}. Place one there "
             f"(e.g. via SFTP/SCP), then browse again.",
+            color=MUTED_COLOR,
         )
-        await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-        await session.read_any_key()
         return
 
     last_stable_id: int | None = None
@@ -10693,9 +11202,7 @@ async def _board_list_masthead_filesystem_screen(
             return target
 
         target = await lane.run(_apply)
-        await session.write_line(f"Loaded and enabled. Saved to {target}. Use [P]review to verify it looks right.")
-        await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-        await session.read_any_key()
+        _announce_line(session, f"Loaded and enabled. Saved to {target}. Use [P]review to verify it looks right.")
         return
 
 
@@ -10755,18 +11262,8 @@ async def _draw_file_area_masthead_menu(
     unicode_style: bool, collapsed: bool, header_color: int | tuple[int, int, int],
 ) -> None:
     status = await lane.run(file_area_banner_status)
-    state = "ENABLED" if status.enabled else "disabled"
-    file_state = f"{status.size_bytes} bytes" if status.exists else "missing"
-    state_color = SUCCESS_COLOR if status.enabled else MUTED_COLOR
-    file_color = METADATA_COLOR if status.exists else ERROR_COLOR
-    detail = (
-        colored(state, fg_color=state_color, bold=status.enabled)
-        + colored(" -- file: ", fg_color=LABEL_COLOR)
-        + colored(status.path.name, fg_color=METADATA_COLOR)
-        + colored(f" ({file_state})", fg_color=file_color)
-    )
     await session.write_line("\r\n" + screen_title("File area masthead",
-            breadcrumb=(session.node_display_name, "System", "Mastheads & banners", "Mastheads"), width=session.terminal_width,
+            breadcrumb=(session.node_display_name, "Settings", "Mastheads & banners", "Mastheads"), width=session.terminal_width,
             clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, header_color=header_color,
             node_name_gradient=session.node_name_gradient))
     await _write_wrapped_subtitle(
@@ -10774,17 +11271,17 @@ async def _draw_file_area_masthead_menu(
         "Shown above every file-area-browsing view -- the top level, a category, or a "
         "Community/Uncategorized scope.",
     )
-    await session.write_line(detail)
     await session.write_line(await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width))
+    await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style)], unicode_style=unicode_style)
     await session.write_line(
         "\r\n" + _menu_row(
             [
-                MenuEntry(label=menu_key("P", "review"), brief="Show the masthead as callers see it"),
+                MenuEntry(label=menu_key("P", "review"), brief="Show it as callers see it"),
                 MenuEntry(label=menu_key("E", "nable"), brief="Turn the masthead on"),
                 MenuEntry(label=menu_key("D", "isable"), brief="Turn the masthead off"),
                 MenuEntry(label=menu_key("i", "t", prefix="Ed"), brief="Edit the masthead art"),
                 MenuEntry(label=menu_key("G", "allery"), brief="Apply a bundled sample masthead"),
-                MenuEntry(label=menu_key("F", "rom disk"), brief="Load your own .ans file from this node"),
+                MenuEntry(label=menu_key("F", "rom disk"), brief="Load your own .ans from this node"),
                 MenuEntry(label=menu_key("B", "ack"), brief="Return to Mastheads"),
             ],
             description_level,
@@ -10793,7 +11290,7 @@ async def _draw_file_area_masthead_menu(
         )
     )
     await session.write_line(colored("(Ctrl-H for where to place your own .ans files)", fg_color=MUTED_COLOR))
-    await session.write("Choice: ")
+    await _choice_prompt(session)
 
 
 async def _preview_file_area_masthead_screen(session: Session, lane: DatabaseLane) -> None:
@@ -10812,13 +11309,10 @@ async def _preview_file_area_masthead_screen(session: Session, lane: DatabaseLan
 async def _enable_file_area_masthead_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
     status = await lane.run(file_area_banner_status)
     if not status.exists:
-        await _write_wrapped_subtitle(
-            session,
-            f"No masthead file found at {status.path}. Place a .ans file there first, then enable.",
-        )
+        _announce(session, f"No masthead file found at {status.path}. Place a .ans file there first, then enable.", color=WARNING_COLOR)
         return
     if (status.size_bytes or 0) > MAX_FILE_AREA_BANNER_SIZE_BYTES:
-        await session.write_line(
+        _announce_line(session,
             colored(
                 f"Masthead file at {status.path} is {status.size_bytes} bytes, over the "
                 f"{MAX_FILE_AREA_BANNER_SIZE_BYTES} byte limit -- not enabling.",
@@ -10832,7 +11326,7 @@ async def _enable_file_area_masthead_screen(session: Session, lane: DatabaseLane
         record_action(db, actor=actor, action="enable_file_area_banner", detail=str(status.path))
 
     await lane.run(_apply)
-    await session.write_line("File area masthead enabled. Use [P]review to verify it looks right.")
+    _announce_line(session, "File area masthead enabled. Use [P]review to verify it looks right.")
 
 
 async def _disable_file_area_masthead_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
@@ -10843,7 +11337,7 @@ async def _disable_file_area_masthead_screen(session: Session, lane: DatabaseLan
         return status
 
     status = await lane.run(_apply)
-    await session.write_line(f"File area masthead disabled. Your file at {status.path} was left in place.")
+    _announce_line(session, f"File area masthead disabled. Your file at {status.path} was left in place.")
 
 
 async def _edit_file_area_masthead_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
@@ -10858,12 +11352,12 @@ async def _edit_file_area_masthead_screen(session: Session, lane: DatabaseLane, 
         collapsed=await lane.run(breadcrumb_collapsed_enabled, actor),
     )
     if result is None:
-        await session.write_line(colored("\r\nNo changes saved.", fg_color=MUTED_COLOR))
+        _announce_line(session, colored("\r\nNo changes saved.", fg_color=MUTED_COLOR))
         return
 
     path.write_bytes(result)
     await lane.run(record_action, actor=actor, action="edit_file_area_banner", detail=str(path))
-    await session.write_line(f"\r\nSaved {path}. Use [P]review to verify it looks right.")
+    _announce_line(session, f"\r\nSaved {path}. Use [P]review to verify it looks right.")
 
 
 async def _file_area_masthead_gallery_screen(
@@ -10906,9 +11400,7 @@ async def _file_area_masthead_gallery_screen(
             return path
 
         path = await lane.run(_apply)
-        await session.write_line(f"Applied and enabled. Saved to {path}. Use [P]review to verify it looks right.")
-        await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-        await session.read_any_key()
+        _announce_line(session, f"Applied and enabled. Saved to {path}. Use [P]review to verify it looks right.")
         return
 
 
@@ -10925,14 +11417,13 @@ async def _file_area_masthead_filesystem_screen(
 
     files, directory = await lane.run(_list)
     if not files:
-        await session.write_line("")
-        await _write_wrapped_subtitle(
+        # Announced, not held behind a keypress: it is on the menu this returns to.
+        _announce(
             session,
             f"No other .ans files found in {directory}. Place one there "
             f"(e.g. via SFTP/SCP), then browse again.",
+            color=MUTED_COLOR,
         )
-        await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-        await session.read_any_key()
         return
 
     last_stable_id: int | None = None
@@ -10980,9 +11471,7 @@ async def _file_area_masthead_filesystem_screen(
             return target
 
         target = await lane.run(_apply)
-        await session.write_line(f"Loaded and enabled. Saved to {target}. Use [P]review to verify it looks right.")
-        await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-        await session.read_any_key()
+        _announce_line(session, f"Loaded and enabled. Saved to {target}. Use [P]review to verify it looks right.")
         return
 
 
@@ -11042,18 +11531,8 @@ async def _draw_chat_channel_picker_masthead_menu(
     unicode_style: bool, collapsed: bool, header_color: int | tuple[int, int, int],
 ) -> None:
     status = await lane.run(chat_channel_picker_banner_status)
-    state = "ENABLED" if status.enabled else "disabled"
-    file_state = f"{status.size_bytes} bytes" if status.exists else "missing"
-    state_color = SUCCESS_COLOR if status.enabled else MUTED_COLOR
-    file_color = METADATA_COLOR if status.exists else ERROR_COLOR
-    detail = (
-        colored(state, fg_color=state_color, bold=status.enabled)
-        + colored(" -- file: ", fg_color=LABEL_COLOR)
-        + colored(status.path.name, fg_color=METADATA_COLOR)
-        + colored(f" ({file_state})", fg_color=file_color)
-    )
     await session.write_line("\r\n" + screen_title("Chat channel picker masthead",
-            breadcrumb=(session.node_display_name, "System", "Mastheads & banners", "Mastheads"), width=session.terminal_width,
+            breadcrumb=(session.node_display_name, "Settings", "Mastheads & banners", "Mastheads"), width=session.terminal_width,
             clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, header_color=header_color,
             node_name_gradient=session.node_name_gradient))
     await _write_wrapped_subtitle(
@@ -11061,17 +11540,17 @@ async def _draw_chat_channel_picker_masthead_menu(
         "Shown above every channel-picker view -- the top level, a category, or a "
         "Community/Uncategorized scope. Never inside a live channel.",
     )
-    await session.write_line(detail)
     await session.write_line(await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width))
+    await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style)], unicode_style=unicode_style)
     await session.write_line(
         "\r\n" + _menu_row(
             [
-                MenuEntry(label=menu_key("P", "review"), brief="Show the masthead as callers see it"),
+                MenuEntry(label=menu_key("P", "review"), brief="Show it as callers see it"),
                 MenuEntry(label=menu_key("E", "nable"), brief="Turn the masthead on"),
                 MenuEntry(label=menu_key("D", "isable"), brief="Turn the masthead off"),
                 MenuEntry(label=menu_key("i", "t", prefix="Ed"), brief="Edit the masthead art"),
                 MenuEntry(label=menu_key("G", "allery"), brief="Apply a bundled sample masthead"),
-                MenuEntry(label=menu_key("F", "rom disk"), brief="Load your own .ans file from this node"),
+                MenuEntry(label=menu_key("F", "rom disk"), brief="Load your own .ans from this node"),
                 MenuEntry(label=menu_key("B", "ack"), brief="Return to Mastheads"),
             ],
             description_level,
@@ -11080,7 +11559,7 @@ async def _draw_chat_channel_picker_masthead_menu(
         )
     )
     await session.write_line(colored("(Ctrl-H for where to place your own .ans files)", fg_color=MUTED_COLOR))
-    await session.write("Choice: ")
+    await _choice_prompt(session)
 
 
 async def _preview_chat_channel_picker_masthead_screen(session: Session, lane: DatabaseLane) -> None:
@@ -11103,13 +11582,10 @@ async def _preview_chat_channel_picker_masthead_screen(session: Session, lane: D
 async def _enable_chat_channel_picker_masthead_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
     status = await lane.run(chat_channel_picker_banner_status)
     if not status.exists:
-        await _write_wrapped_subtitle(
-            session,
-            f"No masthead file found at {status.path}. Place a .ans file there first, then enable.",
-        )
+        _announce(session, f"No masthead file found at {status.path}. Place a .ans file there first, then enable.", color=WARNING_COLOR)
         return
     if (status.size_bytes or 0) > MAX_CHAT_CHANNEL_PICKER_BANNER_SIZE_BYTES:
-        await session.write_line(
+        _announce_line(session,
             colored(
                 f"Masthead file at {status.path} is {status.size_bytes} bytes, over the "
                 f"{MAX_CHAT_CHANNEL_PICKER_BANNER_SIZE_BYTES} byte limit -- not enabling.",
@@ -11123,7 +11599,7 @@ async def _enable_chat_channel_picker_masthead_screen(session: Session, lane: Da
         record_action(db, actor=actor, action="enable_chat_channel_picker_banner", detail=str(status.path))
 
     await lane.run(_apply)
-    await session.write_line("Chat channel picker masthead enabled. Use [P]review to verify it looks right.")
+    _announce_line(session, "Chat channel picker masthead enabled. Use [P]review to verify it looks right.")
 
 
 async def _disable_chat_channel_picker_masthead_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
@@ -11134,7 +11610,7 @@ async def _disable_chat_channel_picker_masthead_screen(session: Session, lane: D
         return status
 
     status = await lane.run(_apply)
-    await session.write_line(f"Chat channel picker masthead disabled. Your file at {status.path} was left in place.")
+    _announce_line(session, f"Chat channel picker masthead disabled. Your file at {status.path} was left in place.")
 
 
 async def _edit_chat_channel_picker_masthead_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
@@ -11149,12 +11625,12 @@ async def _edit_chat_channel_picker_masthead_screen(session: Session, lane: Data
         collapsed=await lane.run(breadcrumb_collapsed_enabled, actor),
     )
     if result is None:
-        await session.write_line(colored("\r\nNo changes saved.", fg_color=MUTED_COLOR))
+        _announce_line(session, colored("\r\nNo changes saved.", fg_color=MUTED_COLOR))
         return
 
     path.write_bytes(result)
     await lane.run(record_action, actor=actor, action="edit_chat_channel_picker_banner", detail=str(path))
-    await session.write_line(f"\r\nSaved {path}. Use [P]review to verify it looks right.")
+    _announce_line(session, f"\r\nSaved {path}. Use [P]review to verify it looks right.")
 
 
 async def _chat_channel_picker_masthead_gallery_screen(
@@ -11199,9 +11675,7 @@ async def _chat_channel_picker_masthead_gallery_screen(
             return path
 
         path = await lane.run(_apply)
-        await session.write_line(f"Applied and enabled. Saved to {path}. Use [P]review to verify it looks right.")
-        await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-        await session.read_any_key()
+        _announce_line(session, f"Applied and enabled. Saved to {path}. Use [P]review to verify it looks right.")
         return
 
 
@@ -11218,14 +11692,13 @@ async def _chat_channel_picker_masthead_filesystem_screen(
 
     files, directory = await lane.run(_list)
     if not files:
-        await session.write_line("")
-        await _write_wrapped_subtitle(
+        # Announced, not held behind a keypress: it is on the menu this returns to.
+        _announce(
             session,
             f"No other .ans files found in {directory}. Place one there "
             f"(e.g. via SFTP/SCP), then browse again.",
+            color=MUTED_COLOR,
         )
-        await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-        await session.read_any_key()
         return
 
     last_stable_id: int | None = None
@@ -11275,9 +11748,7 @@ async def _chat_channel_picker_masthead_filesystem_screen(
             return target
 
         target = await lane.run(_apply)
-        await session.write_line(f"Loaded and enabled. Saved to {target}. Use [P]review to verify it looks right.")
-        await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-        await session.read_any_key()
+        _announce_line(session, f"Loaded and enabled. Saved to {target}. Use [P]review to verify it looks right.")
         return
 
 
@@ -11354,13 +11825,13 @@ def _theme_color_field(slot: str) -> Callable[[Session, DatabaseLane, dict], Awa
             return
         if raw.lower() == "default":
             if current is None:
-                await session.write_line("Already using the default -- no change.")
+                _announce_line(session, "Already using the default -- no change.")
                 return
             draft[slot] = None
             return
         rgb = _parse_rgb(raw)
         if rgb is None:
-            await session.write_line(colored("Not a valid R,G,B triple (each 0-255) -- no change.", fg_color=ERROR_COLOR))
+            _announce_line(session, colored("Not a valid R,G,B triple (each 0-255) -- no change.", fg_color=ERROR_COLOR))
             return
         draft[slot] = rgb
 
@@ -11695,7 +12166,7 @@ async def _draw_content_menu(session: Session, *, stats: dict[str, Any]) -> None
             degraded=desc_degraded,
         )
     )
-    await session.write("Choice: ")
+    await _choice_prompt(session)
 
 
 async def _read_int(session: Session, *, default: int) -> int | None:
@@ -12302,7 +12773,7 @@ async def _draw_community_menu(
             height=session.terminal_height,
         )
     )
-    await session.write("Choice: ")
+    await _choice_prompt(session)
 
 
 def _community_field_specs() -> list[FieldSpec]:
@@ -12453,7 +12924,7 @@ async def _community_screen(
     )
     if community is not None:
         verb = "Updated" if existing is not None else "Created Community"
-        await session.write_line(f"{verb} {community.name!r}.")
+        _announce_line(session, f"{verb} {community.name!r}.")
     return community
 
 
@@ -12545,30 +13016,28 @@ async def _draw_community_detail(
             header_color=header_color, node_name_gradient=session.node_name_gradient)
     )
     await session.write_line(status_line)
-    await session.write_line(
-        f"Description: {sanitize_text(community.description) if community.description else '(none)'}"
-    )
-    await session.write_line(f"Hidden: {'yes' if community.hidden else 'no'}")
-    read_default = community.default_min_read_level if community.default_min_read_level is not None else "none"
-    write_default = community.default_min_write_level if community.default_min_write_level is not None else "none"
-    await session.write_line(f"Default read level: {read_default}  Default write level: {write_default}")
-    await session.write_line(
-        f"Default minimum age: "
-        f"{community.default_min_age if community.default_min_age is not None else 'none'}  "
-        f"Default name requirement: {community.default_name_requirement or 'none'}"
-    )
-    options = _menu_row(
+    panel_rows = await _write_sections(session, [
+        Section("Community", [
+            _description_field(community.description),
+            Field("Hidden", _yes_no(community.hidden)),
+        ]),
+        Section("Defaults for its boards, areas and channels", [
+            Field("Read level", _optional_int_label(community.default_min_read_level)),
+            Field("Write level", _optional_int_label(community.default_min_write_level)),
+            _gate_field("Minimum age", community.default_min_age),
+            _gate_field("Name requirement", community.default_name_requirement),
+        ], paired=True),
+    ], unicode_style=unicode_style)
+    options = _fitted_menu(
         [
             MenuEntry(label=menu_key("E", "dit"), brief="Change this Community's settings"),
             MenuEntry(label=menu_key("D", "elete"), brief="Permanently remove it"),
             MenuEntry(label=menu_key("B", "ack"), brief="Return to the list"),
         ],
-        description_level,
-        width=session.terminal_width,
-        height=session.terminal_height,
+        description_level, session=session, used_rows=panel_rows + 4,
     )
     await session.write_line(f"\r\n{options}")
-    await session.write("Choice: ")
+    await _choice_prompt(session)
 
 
 async def _delete_community_screen(session: Session, lane: DatabaseLane, actor: User, community: Community) -> bool:
@@ -12599,10 +13068,10 @@ async def _delete_community_screen(session: Session, lane: DatabaseLane, actor: 
     )
     confirmation = (await session.read_line()).strip()
     if confirmation != community.name:
-        await session.write_line("Cancelled.")
+        _announce_line(session, "Cancelled.")
         return False
     await lane.run(delete_community, community, deleted_by=actor)
-    await session.write_line(f"{community.name!r} deleted.")
+    _announce_line(session, f"{community.name!r} deleted.")
     return True
 
 
@@ -12658,7 +13127,7 @@ async def _draw_board_menu(
             height=session.terminal_height,
         )
     )
-    await session.write("Choice: ")
+    await _choice_prompt(session)
 
 
 def _board_field_specs(
@@ -12870,7 +13339,7 @@ async def _board_screen(
     )
     if board is not None:
         verb = "Updated" if existing is not None else "Created message board"
-        await session.write_line(f"{verb} {board.name!r}.")
+        _announce_line(session, f"{verb} {board.name!r}.")
     return board
 
 
@@ -13353,7 +13822,7 @@ async def _link_board_screen(
         link_context.link_node.boards[board.board_id] = genesis
         link_context.link_node.known_event_ids.add(genesis.content_id)
         link_context.link_node.events[genesis.content_id] = genesis.to_dict()
-        await session.write_line(f"Linked {board.name!r} -- it will be pushed to peers on the next sync pass.")
+        _announce_line(session, f"Linked {board.name!r} -- it will be pushed to peers on the next sync pass.")
         return True
 
     redraw_in_place, redraw_hint = await lane.run(_resolve_redraw_preference, actor)
@@ -13445,7 +13914,7 @@ async def _transfer_board_origin_screen(
         colored("\r\nTransfer message board origin", fg_color=await lane.run(effective_header_color_256), bold=True)
     )
     if not peers:
-        await session.write_line(colored("No known peers to transfer this message board to.", fg_color=MUTED_COLOR))
+        _announce_line(session, colored("No known peers to transfer this message board to.", fg_color=MUTED_COLOR))
         return
     selected = await pick_item(
         session, peers,
@@ -13467,7 +13936,7 @@ async def _transfer_board_origin_screen(
         session, lane, target, role="The proposed new origin's",
     )
     if not await prompt_yes_no(session, f"Offer to hand {board.name!r} off to {target_label}?", default=False):
-        await session.write_line("Cancelled.")
+        _announce_line(session, "Cancelled.")
         return
 
     try:
@@ -13478,7 +13947,7 @@ async def _transfer_board_origin_screen(
             new_origin_fingerprint=target,
         )
     except LinkBoardsError as exc:
-        await session.write_line(colored(f"Could not offer transfer: {exc}", fg_color=MUTED_COLOR))
+        _announce_line(session, colored(f"Could not offer transfer: {exc}", fg_color=MUTED_COLOR))
         return
 
     link_context.link_node.pending_origin_transfers[board.board_id] = offer
@@ -13486,7 +13955,7 @@ async def _transfer_board_origin_screen(
     link_context.link_node.known_event_ids.add(offer.content_id)
     link_context.link_node.events[offer.content_id] = offer.to_dict()
 
-    await session.write_line("Offer sent -- it will be pushed to peers on the next sync pass.")
+    _announce_line(session, "Offer sent -- it will be pushed to peers on the next sync pass.")
 
 
 async def _close_board_screen(session: Session, lane: DatabaseLane, board: Board, link_context: LinkContext) -> None:
@@ -13508,7 +13977,7 @@ async def _close_board_screen(session: Session, lane: DatabaseLane, board: Board
     await session.write("Optional reason (blank for none): ")
     reason = (await session.read_line()).strip() or None
     if not await prompt_yes_no(session, f"Close {board.name!r}?", default=False):
-        await session.write_line("Cancelled.")
+        _announce_line(session, "Cancelled.")
         return
 
     try:
@@ -13516,7 +13985,7 @@ async def _close_board_screen(session: Session, lane: DatabaseLane, board: Board
             close_board_if_linked, board, node_identity=link_context.node_identity, reason=reason,
         )
     except LinkBoardsError as exc:
-        await session.write_line(colored(f"Could not close message board: {exc}", fg_color=MUTED_COLOR))
+        _announce_line(session, colored(f"Could not close message board: {exc}", fg_color=MUTED_COLOR))
         return
 
     link_context.link_node.board_closures[board.board_id] = closure
@@ -13524,7 +13993,7 @@ async def _close_board_screen(session: Session, lane: DatabaseLane, board: Board
     link_context.link_node.known_event_ids.add(closure.content_id)
     link_context.link_node.events[closure.content_id] = closure.to_dict()
 
-    await session.write_line(f"{board.name!r} closed -- it will be pushed to peers on the next sync pass.")
+    _announce_line(session, f"{board.name!r} closed -- it will be pushed to peers on the next sync pass.")
 
 
 async def _accept_board_origin_transfer_screen(
@@ -13542,7 +14011,7 @@ async def _accept_board_origin_transfer_screen(
     """
     offer = link_context.link_node.pending_origin_transfers.get(board.board_id)
     if offer is None or offer.payload.get("new_origin_fingerprint") != link_context.node_identity.fingerprint:
-        await session.write_line(colored("\r\nNo pending incoming offer for this message board.", fg_color=MUTED_COLOR))
+        _announce_line(session, colored("\r\nNo pending incoming offer for this message board.", fg_color=MUTED_COLOR))
         return
 
     old_origin = offer.payload.get("old_origin_fingerprint")
@@ -13560,7 +14029,7 @@ async def _accept_board_origin_transfer_screen(
             session, lane, old_origin, role="The offering node's",
         )
     if not await prompt_yes_no(session, f"Accept origin of {board.name!r} from {old_label}?", default=False):
-        await session.write_line("Cancelled.")
+        _announce_line(session, "Cancelled.")
         return
 
     try:
@@ -13571,7 +14040,7 @@ async def _accept_board_origin_transfer_screen(
             offer=offer,
         )
     except LinkBoardsError as exc:
-        await session.write_line(colored(f"Could not accept transfer: {exc}", fg_color=MUTED_COLOR))
+        _announce_line(session, colored(f"Could not accept transfer: {exc}", fg_color=MUTED_COLOR))
         return
 
     link_context.link_node.board_origin[board.board_id] = link_context.node_identity.fingerprint
@@ -13580,7 +14049,7 @@ async def _accept_board_origin_transfer_screen(
     link_context.link_node.known_event_ids.add(accepted.content_id)
     link_context.link_node.events[accepted.content_id] = accepted.to_dict()
 
-    await session.write_line(
+    _announce_line(session,
         f"Accepted -- this node is now {board.name!r}'s origin. Pushed to peers on the next sync pass."
     )
 
@@ -13627,7 +14096,6 @@ async def _draw_board_detail(
             header_color=await lane.run(effective_header_color_256), node_name_gradient=session.node_name_gradient)
     )
     await session.write_line(await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width))
-    await session.write_line(f"Description: {sanitize_text(board.description) if board.description else '(none)'}")
     # Dogfood follow-up: nothing on this screen (or the board-list picker)
     # ever showed how many posts actually exist or when the last one was
     # made -- a SysOp trying to spot a dead board versus an active one had
@@ -13639,64 +14107,70 @@ async def _draw_board_detail(
     else:
         display_format, display_timezone = await lane.run(resolve_display_preferences)
         activity = f"last post {format_for_display(last_post_at, override_format=display_format, override_timezone=display_timezone)}"
-    await session.write_line(f"Posts: {post_count} ({activity})")
-    await session.write_line(f"Community: {await lane.run(_community_label, board.community_id)}")
-    read_level = board.min_read_level if board.min_read_level is not None else "inherit"
-    write_level = board.min_write_level if board.min_write_level is not None else "inherit"
-    await session.write_line(f"Read level: {read_level}  Write level: {write_level}")
-    await session.write_line(
-        f"Pinned: {'yes' if board.pinned else 'no'}  Moderated: {'yes' if board.moderated else 'no'}"
-    )
-    age = board.max_post_age_days if board.max_post_age_days is not None else "unlimited"
-    await session.write_line(f"Max post age: {age} days")
-    await session.write_line(
-        f"Minimum age: {board.min_age if board.min_age is not None else 'none'}  "
-        f"Name requirement: {board.name_requirement or 'none'}"
-    )
+    sections = [
+        Section("Message board", [
+            _description_field(board.description),
+            Field("Posts", f"{post_count} ({activity})"),
+            Field("Community", await lane.run(_community_label, board.community_id)),
+        ]),
+        Section("Access", [
+            Field("Read level", _inheritable(board.min_read_level)),
+            Field("Write level", _inheritable(board.min_write_level)),
+            _gate_field("Minimum age", board.min_age),
+            _gate_field("Name requirement", board.name_requirement),
+        ], paired=True),
+        Section("Behavior", [
+            Field("Pinned", _yes_no(board.pinned)),
+            Field("Moderated", _yes_no(board.moderated)),
+            Field(
+                "Max post age",
+                f"{board.max_post_age_days} days" if board.max_post_age_days is not None else "unlimited",
+            ),
+        ], paired=True),
+    ]
     is_origin = False
     has_incoming_offer = False
     is_closed = False
     if link_context is not None:
-        await session.write_line(f"Linked: {'yes' if linked else 'no'}")
+        link_rows: list[Field | Note] = [Field("Linked", _yes_no(linked))]
         if linked:
             is_closed = await lane.run(is_board_closed, board)
             if is_closed:
-                await session.write_line(colored("Closed: yes -- no longer accepts new posts", fg_color=MUTED_COLOR))
+                link_rows.append(Field("Closed", "yes -- no longer accepts new posts", color=WARNING_COLOR))
             origin_fingerprint = await lane.run(board_origin_fingerprint, board)
             is_origin = origin_fingerprint == link_context.node_identity.fingerprint
-            orphan_note = ""
-            if not is_origin:
-                peer = link_context.link_node.peers.get(origin_fingerprint)
-                if peer is not None and is_board_origin_orphaned(peer):
-                    orphan_note = colored(
-                        " (ORPHANED -- origin's signing key was revoked, no replacement on file)",
-                        fg_color=MUTED_COLOR,
-                    )
             origin_label = (
                 "this node" if is_origin
                 else _linked_node_label(link_context, origin_fingerprint)
             )
-            await session.write_line(f"Origin: {sanitize_text(origin_label)}{orphan_note}")
+            link_rows.append(Field("Origin", origin_label))
+            if not is_origin:
+                peer = link_context.link_node.peers.get(origin_fingerprint)
+                if peer is not None and is_board_origin_orphaned(peer):
+                    link_rows.append(Note(
+                        "ORPHANED -- origin's signing key was revoked, no replacement on file",
+                        color=WARNING_COLOR,
+                    ))
 
             offer = link_context.link_node.pending_origin_transfers.get(board.board_id)
             if offer is not None:
                 if offer.payload.get("new_origin_fingerprint") == link_context.node_identity.fingerprint:
                     has_incoming_offer = True
-                    await session.write_line(
-                        colored(
-                            f"Pending: an incoming origin-transfer offer from "
-                            f"{sanitize_text(_linked_node_label(link_context, offer.payload.get('old_origin_fingerprint')))}",
-                            fg_color=MUTED_COLOR,
-                        )
-                    )
+                    link_rows.append(Field(
+                        "Pending",
+                        "an incoming origin-transfer offer from "
+                        + _linked_node_label(link_context, offer.payload.get("old_origin_fingerprint")),
+                        color=WARNING_COLOR,
+                    ))
                 elif is_origin:
-                    await session.write_line(
-                        colored(
-                            f"Pending: your own outstanding transfer offer to "
-                            f"{sanitize_text(_linked_node_label(link_context, offer.payload.get('new_origin_fingerprint')))}",
-                            fg_color=MUTED_COLOR,
-                        )
-                    )
+                    link_rows.append(Field(
+                        "Pending",
+                        "your own outstanding transfer offer to "
+                        + _linked_node_label(link_context, offer.payload.get("new_origin_fingerprint")),
+                        color=WARNING_COLOR,
+                    ))
+        sections.append(Section("NetBBS Link", link_rows))
+    panel_rows = await _write_sections(session, sections, unicode_style=unicode_style)
     options = [
         MenuEntry(label=menu_key("E", "dit"), brief="Change this board's settings"),
         MenuEntry(label=menu_key("D", "elete"), brief="Permanently remove this board"),
@@ -13714,10 +14188,9 @@ async def _draw_board_detail(
         options.append(MenuEntry(label=menu_key("A", "ccept transfer"), brief="Accept incoming origin transfer"))
     options.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to the list"))
     await session.write_line(
-        "\r\n"
-        + _menu_row(options, description_level, width=session.terminal_width, height=session.terminal_height)
+        "\r\n" + _fitted_menu(options, description_level, session=session, used_rows=panel_rows + 4)
     )
-    await session.write("Choice: ")
+    await _choice_prompt(session)
     return is_origin, has_incoming_offer, is_closed
 
 
@@ -13735,10 +14208,10 @@ async def _delete_board_screen(session: Session, lane: DatabaseLane, actor: User
     )
     confirmation = (await session.read_line()).strip()
     if confirmation != board.name:
-        await session.write_line("Cancelled.")
+        _announce_line(session, "Cancelled.")
         return False
     await lane.run(delete_board, board, deleted_by=actor)
-    await session.write_line(f"{board.name!r} deleted.")
+    _announce_line(session, f"{board.name!r} deleted.")
     return True
 
 
@@ -13772,6 +14245,7 @@ async def _draw_post_action(
     header_color: int | tuple[int, int, int] = HEADER_COLOR,
     *,
     status_line: str,
+    when: str,
 ) -> None:
     await session.write_line(
         "\r\n" + screen_title(sanitize_text(post.subject),
@@ -13779,9 +14253,20 @@ async def _draw_post_action(
             header_color=header_color, node_name_gradient=session.node_name_gradient)
     )
     await session.write_line(status_line)
-    await session.write_line(f"By: {sanitize_text(post.author_label)}")
-    await session.write_line(reflow(sanitize_text(post.body, allow_newlines=True), width=session.terminal_width))
-    options = _menu_row(
+    # What the moderator is deciding about, then the post itself under its own
+    # heading: the body used to follow a bare "By:" line with nothing between
+    # them, and the pin/exempt toggles below had no state shown anywhere.
+    panel_rows = await _write_sections(session, [Section("Pending post", [
+        Field("By", post.author_label, color=AUTHOR_COLOR),
+        Field("Posted", when, color=DATE_COLOR),
+        Field("Pinned", _yes_no(post.pinned)),
+        Field("Exempt from auto-purge", _yes_no(post.exempt_from_expiry)),
+    ], paired=True)], unicode_style=unicode_style)
+    await session.write_line("")
+    await session.write_line(colored("MESSAGE", fg_color=METADATA_COLOR, bold=True))
+    body = reflow(sanitize_text(post.body, allow_newlines=True), width=session.terminal_width)
+    await session.write_line(colored(body, fg_color=VALUE_COLOR))
+    options = _fitted_menu(
         [
             MenuEntry(label=menu_key("A", "pprove"), brief="Publish this pending post"),
             MenuEntry(label=menu_key("R", "eject"), brief="Delete this pending post"),
@@ -13789,12 +14274,10 @@ async def _draw_post_action(
             MenuEntry(label=menu_key("X", "empt toggle"), brief="Toggle exempt from auto-purge"),
             MenuEntry(label=menu_key("B", "ack"), brief="Return to the pending list"),
         ],
-        description_level,
-        width=session.terminal_width,
-        height=session.terminal_height,
+        description_level, session=session, used_rows=panel_rows + 6 + body.count("\r\n") + 1,
     )
     await session.write_line(f"\r\n{options}")
-    await session.write("Choice: ")
+    await _choice_prompt(session)
 
 
 async def _post_action_screen(
@@ -13812,7 +14295,9 @@ async def _post_action_screen(
     redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
     header_color = await lane.run(effective_header_color_256)
     status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
-    await _draw_post_action(session, post, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
+    display_format, display_timezone = await lane.run(resolve_display_preferences)
+    when = format_for_display(post.created_at, override_format=display_format, override_timezone=display_timezone)
+    await _draw_post_action(session, post, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line, when=when)
     while True:
         choice = (await session.read_key()).lower()
 
@@ -13826,26 +14311,26 @@ async def _post_action_screen(
                 await lane.run(
                     queue_board_post_if_linked, approved, board, node_identity=link_context.node_identity
                 )
-            await session.write_line("Approved.")
+            _announce_line(session, "Approved.")
             return
         elif choice == "r":
             await session.write_line("")
             try:
                 await lane.run(delete_post, post, deleted_by=actor)
             except PostError as exc:
-                await session.write_line(f"Error: {exc}")
-                await _draw_post_action(session, post, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
+                _announce(session, f"Error: {exc}", error=True)
+                await _draw_post_action(session, post, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line, when=when)
                 continue
-            await session.write_line("Rejected.")
+            _announce_line(session, "Rejected.")
             return
         elif choice == "p":
             await session.write_line("")
             post = await lane.run(set_post_pinned, post, not post.pinned, changed_by=actor)
-            await _draw_post_action(session, post, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
+            await _draw_post_action(session, post, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line, when=when)
         elif choice == "x":
             await session.write_line("")
             post = await lane.run(set_post_exempt, post, not post.exempt_from_expiry, changed_by=actor)
-            await _draw_post_action(session, post, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
+            await _draw_post_action(session, post, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line, when=when)
         else:
             await session.write(reject_unhandled_key(choice))
 
@@ -13882,7 +14367,7 @@ async def _area_menu(
             await _draw_area_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
         elif choice == "g":
             await session.write_line("")
-            await _gc_screen(session, lane)
+            await _gc_screen(session, lane, actor)
             status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
             await _draw_area_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
         else:
@@ -13919,10 +14404,10 @@ async def _draw_area_menu(
             description_level=description_level,
         )
     )
-    await session.write("Choice: ")
+    await _choice_prompt(session)
 
 
-async def _gc_screen(session: Session, lane: DatabaseLane) -> None:
+async def _gc_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
     """
     Reference-aware blob garbage collection (GitHub issue #35): always
     shows a dry-run report first, then offers the actual reclaim as an
@@ -13931,26 +14416,29 @@ async def _gc_screen(session: Session, lane: DatabaseLane) -> None:
     itself can't undo. Issue #282: the confirm used to be a yes/no that
     gated leaving the screen; `[B]ack` now leaves without a question,
     and a report with nothing to reclaim never offers anything.
+
+    Both reports are held on screen until left: a dry run with nothing
+    to reclaim, and the result of a real reclaim, each used to print and
+    return, and the File areas menu's redraw wiped them unread.
     """
-    preview = await lane.run(reclaim_orphaned_blobs, dry_run=True)
-    await _write_gc_report(session, preview)
-    if preview.reclaimable_blobs == 0:
-        return
-    await session.write_line(
-        action_bar([menu_key("R", "eclaim now"), menu_key("B", "ack")], width=session.terminal_width)
-    )
-    await write_prompt(session, "Choice: ")
+    chrome = await _load_chrome(lane, actor)
+    report = await lane.run(reclaim_orphaned_blobs, dry_run=True)
     while True:
-        choice = (await session.read_key()).lower()
+        actions = [_BACK_ACTION]
+        if report.dry_run and report.reclaimable_blobs:
+            actions.insert(0, ("r", menu_key("R", "eclaim now")))
+        choice, _page = await show_detail(
+            session,
+            title=_detail_title(
+                session, chrome, "GC storage", breadcrumb=("File areas",),
+                subtitle="File blobs on disk that no file entry refers to any more.",
+            ),
+            sections=[_gc_report_section(report)], actions=actions,
+            redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+        )
         if choice == "b":
-            await session.write_line("")
             return
-        if choice == "r":
-            await session.write_line("")
-            result = await lane.run(reclaim_orphaned_blobs, dry_run=False)
-            await _write_gc_report(session, result)
-            return
-        await session.write(reject_unhandled_key(choice))
+        report = await lane.run(reclaim_orphaned_blobs, dry_run=False)
 
 
 def _format_bytes(size_bytes: int) -> str:
@@ -13968,22 +14456,22 @@ def _format_bytes(size_bytes: int) -> str:
     return f"{size:.1f} GiB"  # unreachable, satisfies type checkers
 
 
-async def _write_gc_report(session: Session, report: GCReport) -> None:
-    verb = "Would reclaim" if report.dry_run else "Reclaimed"
-    await session.write_line(
-        f"\r\n{verb} {report.reclaimable_blobs} orphaned blob(s), "
-        f"{_format_bytes(report.reclaimable_bytes)}."
-    )
+def _gc_report_section(report: GCReport) -> Section:
+    rows: list[Field | Note] = [
+        Field(
+            "Would reclaim" if report.dry_run else "Reclaimed",
+            f"{report.reclaimable_blobs} orphaned blob(s), {_format_bytes(report.reclaimable_bytes)}",
+            color=VALUE_COLOR if report.reclaimable_blobs else MUTED_COLOR, bold=bool(report.reclaimable_blobs),
+        ),
+    ]
     if report.skipped_recent:
-        await session.write_line(
-            colored(
-                f"{report.skipped_recent} recently-written orphan(s) skipped this pass "
-                "(safety age not yet reached).",
-                fg_color=MUTED_COLOR,
-            )
-        )
-    for error in report.errors:
-        await session.write_line(colored(f"Error: {error}", fg_color=MUTED_COLOR))
+        rows.append(Field(
+            "Skipped",
+            f"{report.skipped_recent} recently-written orphan(s) (safety age not yet reached)",
+            color=MUTED_COLOR,
+        ))
+    rows.extend(Field("Error", error, color=ERROR_COLOR) for error in report.errors)
+    return Section("Dry run" if report.dry_run else "Result", rows)
 
 
 def _area_field_specs(
@@ -14186,7 +14674,7 @@ async def _area_screen(
     )
     if area is not None:
         verb = "Updated" if existing is not None else "Created file area"
-        await session.write_line(f"{verb} {area.name!r}.")
+        _announce_line(session, f"{verb} {area.name!r}.")
     return area
 
 
@@ -14287,29 +14775,36 @@ async def _draw_area_detail(
             header_color=await lane.run(effective_header_color_256), node_name_gradient=session.node_name_gradient)
     )
     await session.write_line(await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width))
-    await session.write_line(f"Description: {sanitize_text(area.description) if area.description else '(none)'}")
     file_count, last_file_at = await lane.run(count_visible_files, area)
     if last_file_at is None:
         activity = "no files yet"
     else:
         display_format, display_timezone = await lane.run(resolve_display_preferences)
         activity = f"last upload {format_for_display(last_file_at, override_format=display_format, override_timezone=display_timezone)}"
-    await session.write_line(f"Files: {file_count} ({activity})")
-    await session.write_line(f"Community: {await lane.run(_community_label, area.community_id)}")
-    read_level = area.min_read_level if area.min_read_level is not None else "inherit"
-    write_level = area.min_write_level if area.min_write_level is not None else "inherit"
-    await session.write_line(f"Read level: {read_level}  Write level: {write_level}")
-    await session.write_line(
-        f"Pinned: {'yes' if area.pinned else 'no'}  Moderated: {'yes' if area.moderated else 'no'}"
-    )
-    age = area.max_file_age_days if area.max_file_age_days is not None else "unlimited"
-    await session.write_line(f"Max file age: {age} days")
-    await session.write_line(
-        f"Minimum age: {area.min_age if area.min_age is not None else 'none'}  "
-        f"Name requirement: {area.name_requirement or 'none'}"
-    )
+    sections = [
+        Section("File area", [
+            _description_field(area.description),
+            Field("Files", f"{file_count} ({activity})"),
+            Field("Community", await lane.run(_community_label, area.community_id)),
+        ]),
+        Section("Access", [
+            Field("Read level", _inheritable(area.min_read_level)),
+            Field("Write level", _inheritable(area.min_write_level)),
+            _gate_field("Minimum age", area.min_age),
+            _gate_field("Name requirement", area.name_requirement),
+        ], paired=True),
+        Section("Behavior", [
+            Field("Pinned", _yes_no(area.pinned)),
+            Field("Moderated", _yes_no(area.moderated)),
+            Field(
+                "Max file age",
+                f"{area.max_file_age_days} days" if area.max_file_age_days is not None else "unlimited",
+            ),
+        ], paired=True),
+    ]
     if link_context is not None:
-        await session.write_line(f"Linked: {'yes' if linked else 'no'}")
+        sections.append(Section("NetBBS Link", [Field("Linked", _yes_no(linked))]))
+    panel_rows = await _write_sections(session, sections, unicode_style=unicode_style)
     options = [
         MenuEntry(label=menu_key("E", "dit"), brief="Change this area's settings"),
         MenuEntry(label=menu_key("D", "elete"), brief="Permanently remove this area"),
@@ -14319,10 +14814,9 @@ async def _draw_area_detail(
         options.append(MenuEntry(label=menu_key("L", "ink this file area"), brief="Share it via NetBBS Link"))
     options.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to the list"))
     await session.write_line(
-        "\r\n"
-        + _menu_row(options, description_level, width=session.terminal_width, height=session.terminal_height)
+        "\r\n" + _fitted_menu(options, description_level, session=session, used_rows=panel_rows + 4)
     )
-    await session.write("Choice: ")
+    await _choice_prompt(session)
 
 
 def _link_area_field_specs() -> list[FieldSpec]:
@@ -14423,7 +14917,7 @@ async def _link_area_screen(
         link_context.link_node.file_areas[area.area_id] = genesis
         link_context.link_node.known_event_ids.add(genesis.content_id)
         link_context.link_node.events[genesis.content_id] = genesis.to_dict()
-        await session.write_line(f"Linked {area.name!r} -- it will be pushed to peers on the next sync pass.")
+        _announce_line(session, f"Linked {area.name!r} -- it will be pushed to peers on the next sync pass.")
         return True
 
     redraw_in_place, redraw_hint = await lane.run(_resolve_redraw_preference, actor)
@@ -14456,10 +14950,10 @@ async def _delete_area_screen(session: Session, lane: DatabaseLane, actor: User,
     )
     confirmation = (await session.read_line()).strip()
     if confirmation != area.name:
-        await session.write_line("Cancelled.")
+        _announce_line(session, "Cancelled.")
         return False
     await lane.run(delete_file_area, area, deleted_by=actor)
-    await session.write_line(f"{area.name!r} deleted.")
+    _announce_line(session, f"{area.name!r} deleted.")
     return True
 
 
@@ -14496,6 +14990,7 @@ async def _draw_file_action(
     header_color: int | tuple[int, int, int] = HEADER_COLOR,
     *,
     status_line: str,
+    when: str,
     can_download: bool = False,
 ) -> None:
     await session.write_line(
@@ -14504,14 +14999,25 @@ async def _draw_file_action(
             header_color=header_color, node_name_gradient=session.node_name_gradient)
     )
     await session.write_line(status_line)
-    await session.write_line(f"By: {sanitize_text(entry.uploader_label)}")
+    panel_rows = await _write_sections(session, [Section("Pending file", [
+        Field("By", entry.uploader_label, color=AUTHOR_COLOR),
+        Field("Uploaded", when, color=DATE_COLOR),
+        Field("Size", f"{_format_bytes(entry.size_bytes)} ({entry.size_bytes} bytes)"),
+        Field("SHA-256", entry.sha256, color=METADATA_COLOR),
+        Field("Pinned", _yes_no(entry.pinned)),
+        Field("Exempt from auto-purge", _yes_no(entry.exempt_from_expiry)),
+    ])], unicode_style=unicode_style)
     # Line by line (issue #463): a description may be a FILE_ID.DIZ
     # block now, and running its ten lines together into one is exactly
     # what a moderator deciding whether to approve the upload should not
     # be shown. Same cap the file listing applies, for the same reason.
-    for description_line in (entry.description or "").splitlines()[:MAX_DESCRIPTION_LINES]:
-        await session.write_line(sanitize_text(description_line))
-    await session.write_line(f"Size: {entry.size_bytes} bytes")
+    description_lines = (entry.description or "").splitlines()[:MAX_DESCRIPTION_LINES]
+    await session.write_line("")
+    await session.write_line(colored("DESCRIPTION", fg_color=METADATA_COLOR, bold=True))
+    for description_line in description_lines or ["(none)"]:
+        await session.write_line(
+            colored(sanitize_text(description_line), fg_color=VALUE_COLOR if description_lines else MUTED_COLOR)
+        )
     entries = [
         MenuEntry(label=menu_key("A", "pprove"), brief="Publish this pending file"),
         MenuEntry(label=menu_key("R", "eject"), brief="Delete this pending file"),
@@ -14531,14 +15037,12 @@ async def _draw_file_action(
         MenuEntry(label=menu_key("X", "empt toggle"), brief="Toggle exempt from auto-purge"),
         MenuEntry(label=menu_key("B", "ack"), brief="Return to the pending list"),
     ]
-    options = _menu_row(
-        entries,
-        description_level,
-        width=session.terminal_width,
-        height=session.terminal_height,
+    options = _fitted_menu(
+        entries, description_level, session=session,
+        used_rows=panel_rows + 6 + max(1, len(description_lines)),
     )
     await session.write_line(f"\r\n{options}")
-    await session.write("Choice: ")
+    await _choice_prompt(session)
 
 
 async def _file_action_screen(
@@ -14557,6 +15061,8 @@ async def _file_action_screen(
     redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
     header_color = await lane.run(effective_header_color_256)
     status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
+    display_format, display_timezone = await lane.run(resolve_display_preferences)
+    when = format_for_display(entry.created_at, override_format=display_format, override_timezone=display_timezone)
     # Imported here rather than at module scope: this is the only
     # place `admin_flow` reaches into the caller-facing file screens,
     # and `door_profile_flow` above sets the same local-import
@@ -14568,10 +15074,14 @@ async def _file_action_screen(
     # as the caller-facing screen does (issue #475), so the key is
     # offered only when one of the two can actually happen.
     can_download = supports_zmodem(session) or transfers is not None
-    await _draw_file_action(
-        session, entry, description_level, redraw_in_place, unicode_style, collapsed, header_color,
-        status_line=status_line, can_download=can_download,
-    )
+
+    async def _draw() -> None:
+        await _draw_file_action(
+            session, entry, description_level, redraw_in_place, unicode_style, collapsed, header_color,
+            status_line=status_line, when=when, can_download=can_download,
+        )
+
+    await _draw()
     while True:
         choice = (await session.read_key()).lower()
 
@@ -14580,13 +15090,15 @@ async def _file_action_screen(
             return
         elif choice == "d" and can_download:
             await session.write_line("")
-            await send_file_to_caller(
-                session, lane, area, entry, actor, transfers=transfers,
-            )
-            await _draw_file_action(
-                session, entry, description_level, redraw_in_place, unicode_style, collapsed,
-                header_color, status_line=status_line, can_download=can_download,
-            )
+            # `send_file_to_caller` belongs to the caller-facing file screens
+            # and writes its own outcome -- "Sent 'x.zip'.", a failure, or the
+            # browser link the moderator is meant to open -- and this screen
+            # redraws straight after it. Held behind the stand-in, what it
+            # wrote last is on the redrawn screen instead of under its clear.
+            flow = _TrailingOutput(session)
+            await send_file_to_caller(flow, lane, area, entry, actor, transfers=transfers)
+            flow.announce_rest()
+            await _draw()
         elif choice == "a":
             await session.write_line("")
             approved = await lane.run(approve_file, entry, approved_by=actor)
@@ -14595,27 +15107,21 @@ async def _file_action_screen(
                     queue_file_descriptor_if_linked, approved, area,
                     node_identity=link_context.node_identity,
                 )
-            await session.write_line("Approved.")
+            _announce_line(session, "Approved.")
             return
         elif choice == "r":
             await session.write_line("")
             await lane.run(delete_file, entry, deleted_by=actor)
-            await session.write_line("Rejected.")
+            _announce_line(session, "Rejected.")
             return
         elif choice == "p":
             await session.write_line("")
             entry = await lane.run(set_file_pinned, entry, not entry.pinned, changed_by=actor)
-            await _draw_file_action(
-                session, entry, description_level, redraw_in_place, unicode_style, collapsed,
-                header_color, status_line=status_line, can_download=can_download,
-            )
+            await _draw()
         elif choice == "x":
             await session.write_line("")
             entry = await lane.run(set_file_exempt, entry, not entry.exempt_from_expiry, changed_by=actor)
-            await _draw_file_action(
-                session, entry, description_level, redraw_in_place, unicode_style, collapsed,
-                header_color, status_line=status_line, can_download=can_download,
-            )
+            await _draw()
         else:
             await session.write(reject_unhandled_key(choice))
 
@@ -14683,7 +15189,7 @@ async def _draw_door_menu(
                 [
                     MenuEntry(label=menu_key("C", "reate"), brief="Register a new door"),
                     MenuEntry(label=menu_key("G", "allery"), brief="Register one of NetBBS's own doors"),
-                    MenuEntry(label=menu_key("F", "rom disk"), brief="Register your own script from this node"),
+                    MenuEntry(label=menu_key("F", "rom disk"), brief="Register a script from this node"),
                     MenuEntry(label=menu_key("L", "ist"), brief="Browse and edit doors"),
                     MenuEntry(label=menu_key("B", "ack"), brief="Return to the Content menu"),
                 ],
@@ -14693,7 +15199,7 @@ async def _draw_door_menu(
             description_level=description_level,
         )
     )
-    await session.write("Choice: ")
+    await _choice_prompt(session)
 
 
 def _door_field_specs(*, actor: User) -> list[FieldSpec]:
@@ -14837,7 +15343,7 @@ async def _door_screen(
     )
     if door is not None:
         verb = "Updated" if existing is not None else "Registered door"
-        await session.write_line(f"{verb} {door.name!r}.")
+        _announce_line(session, f"{verb} {door.name!r}.")
     return door
 
 
@@ -14882,7 +15388,7 @@ async def _resolve_door_name_collision(
             width=session.terminal_width,
         )
     )
-    await write_prompt(session, "Choice: ")
+    await _choice_prompt(session)
     while True:
         choice = (await session.read_key()).lower()
         if choice in ("n", "e", "c"):
@@ -14956,7 +15462,7 @@ async def _door_gallery_screen(
     time."""
     available = available_bundled_doors()
     if not available:
-        await session.write_line(
+        _announce_line(session,
             colored(
                 "\r\nNo bundled doors found on this filesystem -- NetBBS's own doors ship as "
                 "real installed package data, so this suggests an incomplete install rather "
@@ -15054,7 +15560,7 @@ async def _door_filesystem_screen(
 
     files, directory = await lane.run(_list)
     if not files:
-        await session.write_line(colored(
+        _announce_line(session, colored(
             f"\r\nNo files found in {directory}. Place your own door script there "
             f"(e.g. via SFTP/SCP), then browse again.", fg_color=MUTED_COLOR,
         ))
@@ -15190,19 +15696,27 @@ async def _draw_door_detail(
             header_color=await lane.run(effective_header_color_256), node_name_gradient=session.node_name_gradient)
     )
     await session.write_line(await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width))
-    description_text = sanitize_text(door.description) if door.description else "(none)"
-    await session.write_line("Description:")
-    await session.write_line(reflow(description_text, width=session.terminal_width))
-    await session.write_line(f"Executable: {sanitize_text(door.executable_path)}")
-    await session.write_line(f"Arguments: {' '.join(door.args) if door.args else '(none)'}")
-    await session.write_line(f"Community: {await lane.run(_community_label, door.community_id)}")
-    await session.write_line(f"Play level: {door.min_play_level}  Pinned: {'yes' if door.pinned else 'no'}")
-    await session.write_line(f"Compatibility: {door.profile.adapter if door.profile else 'NetBBS native API'}")
+    sections = [
+        Section("Door", [
+            _description_field(door.description),
+            Field("Community", await lane.run(_community_label, door.community_id)),
+        ]),
+        Section("Launch", [
+            Field("Executable", door.executable_path),
+            Field("Arguments", " ".join(door.args), color=VALUE_COLOR) if door.args
+            else Field("Arguments", "(none)", color=MUTED_COLOR),
+            Field("Compatibility", door.profile.adapter if door.profile else "NetBBS native API"),
+        ]),
+        Section("Access", [
+            Field("Play level", str(door.min_play_level)),
+            Field("Pinned", _yes_no(door.pinned)),
+        ], paired=True),
+    ]
     options = [
         MenuEntry(label=menu_key("C", "ompatibility"), brief="Profile, preflight and test launch"),
         MenuEntry(label=menu_key("L", "ast diagnostic"), brief="View runtime errors"),
         MenuEntry(label=menu_key("E", "dit"), brief="Change this door's settings"),
-        MenuEntry(label=menu_key("O", "utbound"), brief="Whether this door may post to a board"),
+        MenuEntry(label=menu_key("O", "utbound"), brief="Whether it may post to a board"),
         MenuEntry(label=menu_key("D", "elete"), brief="Permanently remove this door"),
         MenuEntry(label=menu_key("B", "ack"), brief="Return to the list"),
     ]
@@ -15210,22 +15724,28 @@ async def _draw_door_detail(
     # about one, so the overwhelming majority of doors look exactly as before.
     if door.profile and door.profile.service:
         status = door_services.status(door.id) if door_services is not None else None
-        await session.write_line("")
-        await session.write_line("Service: " + (status.summary() if status is not None
-                                                else "not supervised by this process"))
+        service_rows = [Field(
+            "Service", status.summary() if status is not None else "not supervised by this process",
+            color=VALUE_COLOR if status is not None else MUTED_COLOR,
+        )]
         if status is not None and status.last_exit_code is not None:
-            await session.write_line(f"Last service exit code: {status.last_exit_code}")
+            service_rows.append(Field(
+                "Last service exit code", str(status.last_exit_code),
+                color=VALUE_COLOR if status.last_exit_code == 0 else WARNING_COLOR,
+            ))
+        sections.append(Section("Companion service", service_rows))
         if door_services is not None:
             options[-1:-1] = [
-                MenuEntry(label=menu_key("S", "tart service"), brief="Start this door's companion process"),
+                MenuEntry(label=menu_key("S", "tart service"), brief="Start its companion process"),
                 MenuEntry(label=menu_key("H", "alt service"), brief="Stop this door's companion process"),
                 MenuEntry(label=menu_key("R", "estart service"), brief="Stop then start it again"),
                 MenuEntry(label=menu_key("V", "iew service log"), brief="Recent service stderr"),
             ]
+    panel_rows = await _write_sections(session, sections, unicode_style=unicode_style)
     await session.write_line(
-        "\r\n" + _menu_row(options, description_level, width=session.terminal_width, height=session.terminal_height)
+        "\r\n" + _fitted_menu(options, description_level, session=session, used_rows=panel_rows + 4)
     )
-    await session.write("Choice: ")
+    await _choice_prompt(session)
 
 
 def _door_target_description(board: Board) -> str | None:
@@ -15272,7 +15792,7 @@ async def _door_outbound_screen(session: Session, lane: DatabaseLane, actor: Use
         await session.write_line("Press any key to return.")
         await session.read_any_key()
         return
-    message = ""
+    message, message_failed = "", False
     while True:
         config = await lane.run(outbound_config, door.id)
         allowed = await lane.run(outbound_targets, door.id) if config is not None else []
@@ -15283,28 +15803,46 @@ async def _door_outbound_screen(session: Session, lane: DatabaseLane, actor: Use
                 header_color=header_color, node_name_gradient=session.node_name_gradient)
         )
         if config is None:
-            await session.write_line(reflow(
-                "Off. This door cannot post anything. Switching it on lets it post to boards "
-                "you allow here, and nothing else — it can never read the BBS, send mail, or "
-                "look up a caller.", width=session.terminal_width))
+            hook: list[Field | Note | Table] = [
+                Field("Outbound", status_badge("OFF", tone="neutral", unicode_style=unicode_style), styled=True),
+                Note(
+                    "This door cannot post anything. Switching it on lets it post to boards "
+                    "you allow here, and nothing else — it can never read the BBS, send mail, or "
+                    "look up a caller."
+                ),
+            ]
         else:
-            await session.write_line(f"On. Posts appear as: {sanitize_text(config.label)}")
-            await session.write_line(f"Ceiling: {config.posts_per_hour} posts per hour")
-            await session.write_line("Allowed boards: " + (
-                ", ".join(sanitize_text(board.name) for board in allowed) if allowed
-                else "(none yet — it can post nowhere until you allow one)"))
-            if config.enabled_by_user_id is None:
-                await session.write_line(colored(reflow(
+            lapsed = config.enabled_by_user_id is None
+            hook = [
+                Field(
+                    "Outbound",
+                    status_badge("LAPSED" if lapsed else "ON", tone="warning" if lapsed else "success",
+                                 unicode_style=unicode_style),
+                    styled=True,
+                ),
+                Field("Posts appear as", config.label, color=AUTHOR_COLOR),
+                Field("Ceiling", f"{config.posts_per_hour} posts per hour"),
+                Field(
+                    "Allowed boards",
+                    ", ".join(board.name for board in allowed) if allowed
+                    else "(none yet — it can post nowhere until you allow one)",
+                    color=VALUE_COLOR if allowed else WARNING_COLOR,
+                ),
+            ]
+            if lapsed:
+                hook.append(Note(
                     "The account which switched this on no longer exists, so the door is "
-                    "refused until a SysOp vouches for it again.", width=session.terminal_width),
-                    fg_color=MUTED_COLOR))
+                    "refused until a SysOp vouches for it again.", color=WARNING_COLOR,
+                ))
             if any(board.moderated for board in allowed):
-                await session.write_line(colored(
-                    "A moderated board holds this door's posts for your approval first.",
-                    fg_color=MUTED_COLOR))
+                hook.append(Note("A moderated board holds this door's posts for your approval first."))
+        await _write_sections(session, [Section("Outbound hook", hook)], unicode_style=unicode_style)
         if message:
-            await session.write_line(colored(sanitize_text(message), fg_color=MUTED_COLOR))
-            message = ""
+            await session.write_line("")
+            await session.write_line(
+                colored(sanitize_text(message), fg_color=ERROR_COLOR if message_failed else SUCCESS_COLOR)
+            )
+            message, message_failed = "", False
         options = [MenuEntry(label=menu_key("T", "urn " + ("off" if config else "on")),
                              brief="Whether this door may post at all")]
         if config is not None and config.enabled_by_user_id is None:
@@ -15313,7 +15851,7 @@ async def _door_outbound_screen(session: Session, lane: DatabaseLane, actor: Use
             # would be telling the SysOp to do something whose only available
             # action destroys their configuration.
             options.insert(1, MenuEntry(label=menu_key("V", "ouch for it"),
-                                        brief="Take responsibility for what it posts"))
+                                        brief="Take responsibility for its posts"))
         if config is not None:
             options += [
                 MenuEntry(label=menu_key("A", "llow a board"), brief="Let it post to one more board"),
@@ -15325,7 +15863,7 @@ async def _door_outbound_screen(session: Session, lane: DatabaseLane, actor: Use
             "\r\n" + _menu_row(options, description_level, width=session.terminal_width,
                                height=session.terminal_height)
         )
-        await session.write("Choice: ")
+        await _choice_prompt(session)
         choice = (await session.read_key()).lower()
         await session.write_line("")
 
@@ -15379,6 +15917,7 @@ async def _door_outbound_screen(session: Session, lane: DatabaseLane, actor: Use
                     config = await lane.run(set_rate_ceiling, door, int(raw), changed_by=actor)
                     message = f"Ceiling is now {config.posts_per_hour} posts per hour."
                 except (ValueError, OutboundError) as exc:
+                    message_failed = True
                     message = (str(exc) if isinstance(exc, OutboundError)
                                else "That is not a whole number.")
         else:
@@ -15407,7 +15946,7 @@ async def _door_service_action(session: Session, lane: DatabaseLane, actor: User
         return
     service = await door_services.adopt(door)
     if service is None:
-        await session.write_line("This door no longer declares a service.")
+        _announce(session, "This door no longer declares a service.", error=True)
         return
     try:
         if choice == "s":
@@ -15417,13 +15956,11 @@ async def _door_service_action(session: Session, lane: DatabaseLane, actor: User
         else:
             await service.restart()
     except OSError as exc:
-        await session.write_line(sanitize_text(f"Could not {verb.lower()} the service: {exc}"))
+        _announce(session, f"Could not {verb.lower()} the service: {exc}", error=True)
         return
     await lane.run(record_action, actor=actor, action="door_service", object_type="door",
                    object_id=door.id, detail=f"door={door.name!r} action={verb.lower()}")
-    await session.write_line(f"{verb} requested. Current state: {door_services.status(door.id).summary()}")
-    await session.write_line("Press any key to return.")
-    await session.read_any_key()
+    _announce_line(session, f"{verb} requested. Current state: {door_services.status(door.id).summary()}")
 
 
 async def _delete_door_screen(session: Session, lane: DatabaseLane, actor: User, door: Door,
@@ -15444,10 +15981,10 @@ async def _delete_door_screen(session: Session, lane: DatabaseLane, actor: User,
     )
     confirmation = (await session.read_line()).strip()
     if confirmation != door.name:
-        await session.write_line("Cancelled.")
+        _announce_line(session, "Cancelled.")
         return False
     await lane.run(delete_door, door, deleted_by=actor)
-    await session.write_line(f"{door.name!r} deleted.")
+    _announce_line(session, f"{door.name!r} deleted.")
     return True
 
 
@@ -15516,7 +16053,7 @@ async def _draw_channel_menu(
             height=session.terminal_height,
         )
     )
-    await session.write("Choice: ")
+    await _choice_prompt(session)
 
 
 def _channel_field_specs(
@@ -15741,9 +16278,9 @@ async def _channel_screen(
     )
     if channel is not None:
         verb = "Updated" if existing is not None else "Created chat channel"
-        await session.write_line(f"{verb} {channel.name!r}.")
+        _announce_line(session, f"{verb} {channel.name!r}.")
         if existing is not None and channel.name != existing.name and chat_hub is None:
-            await session.write_line(
+            _announce_line(session,
                 colored(
                     "If the node is running with callers in this channel, they keep the old name "
                     "until they leave and rejoin.",
@@ -15900,54 +16437,57 @@ async def _draw_channel_detail(
             header_color=await lane.run(effective_header_color_256), node_name_gradient=session.node_name_gradient)
     )
     await session.write_line(await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width))
-    await session.write_line(
-        f"Description: {sanitize_text(channel.description) if channel.description else '(none)'}"
-    )
-    await session.write_line(f"Community: {await lane.run(_community_label, channel.community_id)}")
-    await session.write_line(f"Minimum level: {channel.min_level}")
-    await session.write_line(
-        f"Pinned: {'yes' if channel.pinned else 'no'}  Hidden: {'yes' if channel.hidden else 'no'}"
-    )
-    await session.write_line(
-        f"Members-only: {'yes' if channel.members_only else 'no'}  "
-        f"Allow member invites: {'yes' if channel.allow_member_invites else 'no'}"
-    )
-    await session.write_line(
-        f"Minimum age: {channel.min_age if channel.min_age is not None else 'none'}  "
-        f"Name requirement: {channel.name_requirement or 'none'}"
-    )
+    sections = [
+        Section("Chat channel", [
+            _description_field(channel.description),
+            Field("Community", await lane.run(_community_label, channel.community_id)),
+        ]),
+        Section("Access", [
+            Field("Minimum level", str(channel.min_level)),
+            Field("Members-only", _yes_no(channel.members_only)),
+            _gate_field("Minimum age", channel.min_age),
+            _gate_field("Name requirement", channel.name_requirement),
+        ], paired=True),
+        Section("Behavior", [
+            Field("Pinned", _yes_no(channel.pinned)),
+            Field("Hidden", _yes_no(channel.hidden)),
+            Field("Allow member invites", _yes_no(channel.allow_member_invites)),
+        ], paired=True),
+    ]
+    sharing: list[Field | Note] = []
     if link_context is not None:
-        await session.write_line(f"Linked: {'yes' if linked else 'no'}")
+        sharing.append(Field("Linked", _yes_no(linked)))
     open_room = mrc_mapping is not None and mrc_mapping.is_open_room
     if mrc_mapping is None:
-        await session.write_line("MRC room: none (not bridged)")
+        sharing.append(Field("MRC room", "none (not bridged)", color=MUTED_COLOR))
     elif open_room:
         last_active = mrc_mapping.last_active_at
         if last_active:
             display_format, display_timezone = await lane.run(resolve_display_preferences)
             last_active = format_for_display(last_active, override_format=display_format, override_timezone=display_timezone)
-        await session.write_line(
-            f"MRC room: #{sanitize_text(mrc_mapping.room)} (open room -- opened by a caller"
-            f"{', paused' if mrc_mapping.paused else ''}; last active {last_active or 'unknown'})"
-        )
-        await session.write_line(
-            colored(
-                "Retired automatically once idle and unfollowed; adopt it to keep it as an ordinary bridged "
-                "channel. Never shared over NetBBS Link.",
-                fg_color=MUTED_COLOR,
-            )
-        )
+        sharing.append(Field(
+            "MRC room",
+            f"#{mrc_mapping.room} (open room -- opened by a caller"
+            f"{', paused' if mrc_mapping.paused else ''}; last active {last_active or 'unknown'})",
+        ))
+        sharing.append(Note(
+            "Retired automatically once idle and unfollowed; adopt it to keep it as an ordinary bridged "
+            "channel. Never shared over NetBBS Link."
+        ))
     else:
         state = "paused" if mrc_mapping.paused else "bridged"
-        await session.write_line(f"MRC room: #{sanitize_text(mrc_mapping.room)} ({state})")
+        sharing.append(Field(
+            "MRC room", f"#{mrc_mapping.room} ({state})",
+            color=WARNING_COLOR if mrc_mapping.paused else SUCCESS_COLOR,
+        ))
         if not (await lane.run(load_mrc_settings)).enabled:
-            await session.write_line(
-                colored(
-                    "MRC is switched off node-wide -- nothing is relayed until you enable it under "
-                    "Settings > Inter-BBS chat (MRC).",
-                    fg_color=MUTED_COLOR,
-                )
-            )
+            sharing.append(Note(
+                "MRC is switched off node-wide -- nothing is relayed until you enable it under "
+                "Settings > Inter-BBS chat (MRC).",
+                color=WARNING_COLOR,
+            ))
+    sections.append(Section("Sharing", sharing))
+    panel_rows = await _write_sections(session, sections, unicode_style=unicode_style)
     options = [
         MenuEntry(label=menu_key("E", "dit"), brief="Change this channel's settings"),
         MenuEntry(label=menu_key("D", "elete"), brief="Permanently remove this channel"),
@@ -15956,7 +16496,7 @@ async def _draw_channel_detail(
     if link_context is not None and not linked and not open_room:
         options.append(MenuEntry(label=menu_key("L", "ink this chat channel"), brief="Share it via NetBBS Link"))
     if open_room:
-        options.append(MenuEntry(label=menu_key("A", "dopt"), brief="Keep it as an ordinary bridged channel"))
+        options.append(MenuEntry(label=menu_key("A", "dopt"), brief="Keep it as a bridged channel"))
         options.append(MenuEntry(label=menu_key("t", "ire", prefix="Re"), brief="Remove it and its scrollback now"))
     else:
         options.append(MenuEntry(label=menu_key("M", "RC room"), brief="Bridge to a Multi Relay Chat room"))
@@ -15968,10 +16508,9 @@ async def _draw_channel_detail(
             options.append(MenuEntry(label=menu_key("P", "ause MRC bridge"), brief="Keep the mapping, relay nothing"))
     options.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to the list"))
     await session.write_line(
-        "\r\n"
-        + _menu_row(options, description_level, width=session.terminal_width, height=session.terminal_height)
+        "\r\n" + _fitted_menu(options, description_level, session=session, used_rows=panel_rows + 4)
     )
-    await session.write("Choice: ")
+    await _choice_prompt(session)
 
 
 async def _adopt_open_room_screen(
@@ -15992,11 +16531,11 @@ async def _adopt_open_room_screen(
     try:
         mapping = await lane.run(_adopt)
     except MrcSettingsError as exc:
-        await session.write_line(colored(str(exc), fg_color=MUTED_COLOR))
+        _announce_line(session, colored(str(exc), fg_color=MUTED_COLOR))
         return await lane.run(get_mrc_mapping, channel)
     if mrc_bridge is not None:
         await mrc_bridge.refresh_channel_mappings()
-    await session.write_line(
+    _announce_line(session,
         f"Adopted: {channel.name!r} stays bridged to MRC room #{mapping.room} until you unbridge it."
     )
     return mapping
@@ -16024,13 +16563,13 @@ async def _retire_open_room_screen(
     try:
         await lane.run(_retire)
     except MrcSettingsError as exc:
-        await session.write_line(colored(str(exc), fg_color=MUTED_COLOR))
+        _announce_line(session, colored(str(exc), fg_color=MUTED_COLOR))
         return False
     if mrc_bridge is not None:
         await mrc_bridge.refresh_channel_mappings()
-    await session.write_line(f"Retired {channel.name!r}.")
+    _announce_line(session, f"Retired {channel.name!r}.")
     if mrc_bridge is None:
-        await session.write_line(colored(_MRC_STANDALONE_NOTE, fg_color=MUTED_COLOR))
+        _announce_line(session, colored(_MRC_STANDALONE_NOTE, fg_color=MUTED_COLOR))
     return True
 
 
@@ -16070,13 +16609,13 @@ async def _mrc_room_screen(
     try:
         mapping = await lane.run(_set)
     except MrcSettingsError as exc:
-        await session.write_line(colored(str(exc), fg_color=MUTED_COLOR))
+        _announce_line(session, colored(str(exc), fg_color=MUTED_COLOR))
         return current
     if mrc_bridge is not None:
         await mrc_bridge.refresh_channel_mappings()
-    await session.write_line(f"Channel {channel.name!r} is now bridged to MRC room #{mapping.room}.")
+    _announce_line(session, f"Channel {channel.name!r} is now bridged to MRC room #{mapping.room}.")
     if mrc_bridge is None:
-        await session.write_line(colored(_MRC_STANDALONE_NOTE, fg_color=MUTED_COLOR))
+        _announce_line(session, colored(_MRC_STANDALONE_NOTE, fg_color=MUTED_COLOR))
     return mapping
 
 
@@ -16097,9 +16636,9 @@ async def _unbridge_mrc_room(
     await lane.run(_clear)
     if mrc_bridge is not None:
         await mrc_bridge.refresh_channel_mappings()
-    await session.write_line(f"Channel {channel.name!r} is no longer bridged to MRC.")
+    _announce_line(session, f"Channel {channel.name!r} is no longer bridged to MRC.")
     if mrc_bridge is None:
-        await session.write_line(colored(_MRC_STANDALONE_NOTE, fg_color=MUTED_COLOR))
+        _announce_line(session, colored(_MRC_STANDALONE_NOTE, fg_color=MUTED_COLOR))
     return None
 
 
@@ -16122,14 +16661,14 @@ async def _toggle_mrc_pause(
     try:
         mapping = await lane.run(_apply)
     except MrcSettingsError as exc:
-        await session.write_line(colored(str(exc), fg_color=MUTED_COLOR))
+        _announce_line(session, colored(str(exc), fg_color=MUTED_COLOR))
         return current
     if mrc_bridge is not None:
         await mrc_bridge.refresh_channel_mappings()
     verb = "paused" if paused else "resumed"
-    await session.write_line(f"MRC bridge for {channel.name!r} {verb}.")
+    _announce_line(session, f"MRC bridge for {channel.name!r} {verb}.")
     if mrc_bridge is None:
-        await session.write_line(colored(_MRC_STANDALONE_NOTE, fg_color=MUTED_COLOR))
+        _announce_line(session, colored(_MRC_STANDALONE_NOTE, fg_color=MUTED_COLOR))
     return mapping
 
 
@@ -16200,7 +16739,7 @@ async def _channel_restrictions_screen(session: Session, lane: DatabaseLane, act
 
         target_label = usernames[selected.user_id]
         if not await prompt_yes_no(session, f"Lift this {selected.kind} on {target_label!r}?", default=False):
-            await session.write_line("Cancelled.")
+            _announce_line(session, "Cancelled.")
             continue
 
         target = await lane.run(get_user_by_id, selected.user_id)
@@ -16212,14 +16751,14 @@ async def _channel_restrictions_screen(session: Session, lane: DatabaseLane, act
             # subject is gone. Same "nothing to do" shape lifting an
             # already-lifted restriction gets, just for a different
             # reason.
-            await session.write_line(colored("That account no longer exists.", fg_color=MUTED_COLOR))
+            _announce_line(session, colored("That account no longer exists.", fg_color=MUTED_COLOR))
             continue
 
         if selected.kind == "mute":
             await lane.run(unmute_user, channel, target, unmuted_by=actor)
         else:
             await lane.run(unban_user, channel, target, unbanned_by=actor)
-        await session.write_line(f"Lifted the {selected.kind} on {target_label!r}.")
+        _announce_line(session, f"Lifted the {selected.kind} on {target_label!r}.")
 
 
 def _link_channel_field_specs() -> list[FieldSpec]:
@@ -16290,7 +16829,7 @@ async def _link_channel_screen(
         link_context.link_node.channels[channel.channel_id] = genesis
         link_context.link_node.known_event_ids.add(genesis.content_id)
         link_context.link_node.events[genesis.content_id] = genesis.to_dict()
-        await session.write_line(f"Linked {channel.name!r} -- it will be pushed to peers on the next sync pass.")
+        _announce_line(session, f"Linked {channel.name!r} -- it will be pushed to peers on the next sync pass.")
         return True
 
     redraw_in_place, redraw_hint = await lane.run(_resolve_redraw_preference, actor)
@@ -16325,10 +16864,10 @@ async def _delete_channel_screen(session: Session, lane: DatabaseLane, actor: Us
     )
     confirmation = (await session.read_line()).strip()
     if confirmation != channel.name:
-        await session.write_line("Cancelled.")
+        _announce_line(session, "Cancelled.")
         return False
     await lane.run(delete_channel, channel, deleted_by=actor)
-    await session.write_line(f"{channel.name!r} deleted.")
+    _announce_line(session, f"{channel.name!r} deleted.")
     return True
 
 
@@ -16403,7 +16942,7 @@ async def _draw_category_menu(
             height=session.terminal_height,
         )
     )
-    await session.write("Choice: ")
+    await _choice_prompt(session)
 
 
 async def _generic_category_screen(
@@ -16465,7 +17004,7 @@ async def _draw_generic_category_menu(
             height=session.terminal_height,
         )
     )
-    await session.write("Choice: ")
+    await _choice_prompt(session)
 
 
 async def _create_category_screen(
@@ -16551,7 +17090,7 @@ async def _create_category_screen(
             create, draft["name"], description=draft["description"],
             parent_category_id=parent.id if parent is not None else None, created_by=actor,
         )
-        await session.write_line(f"Created category {category.name!r}.")
+        _announce_line(session, f"Created category {category.name!r}.")
         return category
 
     return await edit_resource_draft(
@@ -16605,10 +17144,10 @@ async def _list_categories_screen(
     )
     confirmation = (await session.read_line()).strip()
     if confirmation != selected.name:
-        await session.write_line("Cancelled.")
+        _announce_line(session, "Cancelled.")
         return
     await lane.run(delete, selected, deleted_by=actor)
-    await session.write_line(f"{selected.name!r} deleted.")
+    _announce_line(session, f"{selected.name!r} deleted.")
 
 
 # -- moderator grants -----------------------------------------------------
@@ -16685,7 +17224,7 @@ async def _pick_moderator_scope(
     elif scope_key == "z":
         object_type, label = "channel", "all chat channels (blanket)"
     else:
-        await session.write_line(colored("Not a valid scope.", fg_color=MUTED_COLOR))
+        _announce_line(session, colored("Not a valid scope.", fg_color=MUTED_COLOR))
         return None
     return object_type, None, label
 
@@ -16760,7 +17299,7 @@ async def _grant_moderator_screen(session: Session, lane: DatabaseLane, actor: U
 
     async def _community_prompt(session: Session, lane: DatabaseLane, draft: dict) -> None:
         if draft["object_type"] is None or draft["object_id"] is not None:
-            await session.write_line(
+            _announce_line(session,
                 colored(
                     "Community scoping applies to blanket grants only -- choose a blanket scope under [O]n first.",
                     fg_color=MUTED_COLOR,
@@ -16801,7 +17340,7 @@ async def _grant_moderator_screen(session: Session, lane: DatabaseLane, actor: U
             key="label", hotkey="o", menu_text=menu_key("O", "n"), label="On",
             render=lambda d: sanitize_text(d["label"]) if d["label"] else "(not chosen)",
             prompt=_scope_prompt,
-            brief="One board/area/channel, or all of one kind",
+            brief="One resource, or all of one kind",
             help=(
                 "A specific message board, file area, or chat channel -- or a blanket grant across "
                 "every board, every area, or every channel on this node."
@@ -16811,7 +17350,7 @@ async def _grant_moderator_screen(session: Session, lane: DatabaseLane, actor: U
             key="community", hotkey="c", menu_text=menu_key("C", "ommunity"), label="Community",
             render=_community_render,
             prompt=_community_prompt,
-            brief="Narrow a blanket grant to one Community",
+            brief="Narrow the grant to one Community",
             help=(
                 "For a blanket grant only: limit it to the boards/areas/channels of one Community "
                 "instead of the whole node (design doc, Community-blanket tier)."
@@ -16822,7 +17361,7 @@ async def _grant_moderator_screen(session: Session, lane: DatabaseLane, actor: U
             render=lambda d: _moderator_preset_label(d["object_type"], d["preset"]),
             prompt=choice_field("preset", _MODERATOR_PRESETS),
             step=choice_step("preset", _MODERATOR_PRESETS),
-            brief="Full moderator, or approve/moderate only",
+            brief="Full, or approve/moderate only",
             help=(
                 "Full moderator can edit, delete/moderate, and (for boards/areas) approve or (for "
                 "channels) manage members. The limited preset only approves (boards/areas) or "
@@ -16847,7 +17386,7 @@ async def _grant_moderator_screen(session: Session, lane: DatabaseLane, actor: U
             permissions=_moderator_preset_permissions(draft["object_type"], draft["preset"]),
             granted_by=actor, community_id=community.id if community is not None else None,
         )
-        await session.write_line(f"Granted {preset_label} on {label} to {draft['user'].username!r}.")
+        _announce_line(session, f"Granted {preset_label} on {label} to {draft['user'].username!r}.")
         return True
 
     await edit_resource_draft(
@@ -16897,7 +17436,7 @@ async def _revoke_moderator_screen(session: Session, lane: DatabaseLane, actor: 
 
     grants, names, communities = await lane.run(_load)
     if not grants:
-        await session.write_line(colored(f"{target.username!r} has no moderator grants.", fg_color=MUTED_COLOR))
+        _announce_line(session, colored(f"{target.username!r} has no moderator grants.", fg_color=MUTED_COLOR))
         return
 
     kind_labels = {"board": "message board", "file_area": "file area", "channel": "chat channel"}
@@ -16928,7 +17467,7 @@ async def _revoke_moderator_screen(session: Session, lane: DatabaseLane, actor: 
         return
     label = _grant_label(selected)
     if not await prompt_yes_no(session, f"Revoke all permissions for {target.username!r} on {label}?", default=False):
-        await session.write_line("Cancelled.")
+        _announce_line(session, "Cancelled.")
         return
 
     permission_enum = ChannelPermission if selected.object_type == "channel" else BoardPermission
@@ -16937,4 +17476,4 @@ async def _revoke_moderator_screen(session: Session, lane: DatabaseLane, actor: 
         target, object_type=selected.object_type, object_id=selected.object_id,
         permissions=permission_enum(selected.permissions), revoked_by=actor, community_id=selected.community_id,
     )
-    await session.write_line(f"Revoked the grant on {label} from {target.username!r}.")
+    _announce_line(session, f"Revoked the grant on {label} from {target.username!r}.")

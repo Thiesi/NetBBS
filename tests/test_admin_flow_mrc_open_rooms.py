@@ -90,7 +90,7 @@ def test_open_room_detail_offers_adopt_and_retire_but_never_link_or_unbridge(db,
     # Adopt: origin cleared, scrollback kept, sweeper ignores it from now on.
     session = FakeSession(["a", "b"])
     asyncio.run(admin_flow._channel_detail_screen(session, lane, sysop, channel, mrc_bridge=None))
-    text = _visible(_written_text(session))
+    text = " ".join(_visible(_written_text(session)).split())
     assert "Adopted: 'mrc:lobby' stays bridged to MRC room #lobby" in text
     mapping = get_mrc_mapping(db, channel)
     assert mapping is not None and not mapping.is_open_room
@@ -117,7 +117,9 @@ def test_retire_asks_first_and_then_removes_the_room(db, lane, sysop):
     asyncio.run(admin_flow._channel_detail_screen(session, lane, sysop, channel, mrc_bridge=None))
     text = _visible(_written_text(session))
     assert "Retire mrc:lobby and delete its scrollback now?" in text
-    assert "Retired 'mrc:lobby'." in text
+    # Entered directly, so the outcome is still queued for the menu that would
+    # be drawn next rather than written under this screen.
+    assert "Retired 'mrc:lobby'." in _visible("".join(admin_flow._take_notices(session)))
     assert get_mrc_mapping(db, channel) is None
     try:
         get_channel_by_name(db, "mrc:lobby")
@@ -143,8 +145,10 @@ def test_status_screen_reports_retained_open_rooms_with_mrc_switched_off(db, lan
             # The line wraps at the terminal width; compare with the
             # wrap-inserted breaks folded back into single spaces.
             text = " ".join(_visible(_written_text(session)).split())
-            assert "MRC is off node-wide; 1 opened earlier still age out after 3 idle days; 0 retired since start" in text
-            assert "mrc:leftover -> #leftover (open room)" in text
+            assert "Open rooms: MRC is off node-wide" in text
+            assert "Opened earlier: 1 still age out after 3 idle days" in text
+            assert "Retired since start: 0" in text
+            assert "mrc:leftover #leftover open room" in text
         finally:
             await bridge.close()
     asyncio.run(scenario())
@@ -164,11 +168,13 @@ def test_status_screen_reports_open_rooms(db, lane, sysop, lobby):
         await _wait_state(bridge, admin_flow.MrcState.CONNECTED)
         try:
             await bridge.open_room("garden", "alice")
-            session = FakeSession(["n", "c", "b", "b", "b"])
+            # Paged on a 24-row terminal: open rooms and the channel table
+            # are on the second page.
+            session = FakeSession(["n", "c", "PAGE_DOWN", "b", "b", "b"])
             await admin_menu(session, lane, sysop, node_controls=_controls(bridge))
-            text = _visible(_written_text(session))
+            text = " ".join(_visible(_written_text(session)).split())
             assert "Open rooms: 1 of 8 open, retired after 2 idle days" in text
-            assert "mrc:garden -> #garden (open room)" in text
+            assert "mrc:garden #garden open room" in text
         finally:
             await bridge.close()
             await fake.close()
