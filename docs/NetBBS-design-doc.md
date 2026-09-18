@@ -6427,8 +6427,10 @@ departure prompt says "Raiders there can outclass this hull" when the
 destination's worst raider (its danger plus one) would. Found in play: the first
 profitable market of a career sat in a danger-4 system one jump from the First
 Flight destination, and under version 2 a starter Shuttle there had Evade at
-5-14% and Dump at 24-34% against a volley worth two thirds of its hull, so the
-only available lesson was never to go. In trials a Shuttle with a full hold that
+5-14% and Dump at 24-34% against an attack worth two thirds of its hull and a
+volley worth all of it, so the only available lesson was never to go. The rules
+are for raiders: a Concord patrol is not after the cargo, takes no Dump and has
+Surrender as its way out, so its odds are unchanged and its panel is not marked. In trials a Shuttle with a full hold that
 dumps and runs now survives a tier-4 contact 94 times in 100, giving up thirteen
 units on average, against 48 under version 2; with an empty hold it is still a
 coin toss, which is what the departure warning is for. Rejected: lowering tier-4
