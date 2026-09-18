@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import asyncio
 
-from netbbs.auth.users import SYSOP_LEVEL, User, current_account, get_user_by_id
+from netbbs.auth.users import SYSOP_LEVEL, User, current_account
 from netbbs.chat import (
     ChatHub,
     DirectChatInvites,
@@ -504,6 +504,13 @@ async def _main_menu_loop(
                     # A screen that swallowed the unwind's CancelledError
                     # leaves it pending; retire it before carrying on.
                     registry.finish_level_unwind(session)
+                if changed is not None:
+                    # Cleared before the read, not only on adoption: an
+                    # account that can no longer be read would otherwise
+                    # leave it set, and the race below would redraw
+                    # forever without ever reading the key that reaches
+                    # the "no longer active" exit.
+                    changed.clear()
                 fresh = current_account(db, user)
                 if fresh is not None:
                     notice = _access_change_notice(user, fresh) or notice
@@ -702,7 +709,7 @@ async def _main_menu_loop(
                     # Issue #659: a level change made while the caller was
                     # in here would otherwise be adopted silently -- the
                     # redraw below compares against this refreshed `user`.
-                    refreshed = await lane.run(get_user_by_id, user.id) or user
+                    refreshed = await lane.run(current_account, user) or user
                     notice = _access_change_notice(user, refreshed)
                     user = refreshed
                 else:
@@ -805,9 +812,6 @@ def _adopt_account(session: Session, registry: ActiveSessionRegistry | None, fre
         registry.record_account(
             session, user_level=fresh.user_level, can_verify_identity=fresh.can_verify_identity
         )
-        changed = registry.account_changed_event(session)
-        if changed is not None:
-            changed.clear()
     return fresh
 
 

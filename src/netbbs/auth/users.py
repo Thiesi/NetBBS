@@ -424,12 +424,23 @@ def current_account(db: Database, user: User) -> User | None:
     `user`'s row as stored now, or `None` once the account is disabled
     or deleted -- `account_still_active` for a caller that also needs
     the fresh level and permissions (issue #659: a SysOp's level change
-    reaches a live session without a re-login). Looked up by id, not by
-    username, so a deleted account's name taken over by a new one can
-    never hand this session the newcomer's access.
+    reaches a live session without a re-login).
+
+    Neither the id nor the name alone identifies the account across a
+    hard delete: `users.id` is a plain rowid, so deleting the newest
+    account frees its id for the next registration, and a node that has
+    never run Link frees the name as well. A row is only this account if
+    id, username and creation time all still match -- otherwise the
+    session's account is gone, and it must never be handed the
+    newcomer's access.
     """
     current = get_user_by_id(db, user.id)
-    if current is None or current.disabled_at is not None:
+    if (
+        current is None
+        or current.username != user.username
+        or current.created_at != user.created_at
+        or current.disabled_at is not None
+    ):
         return None
     return current
 

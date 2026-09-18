@@ -22,8 +22,10 @@ from netbbs.auth.users import (
     SYSOP_LEVEL,
     UserManagementError,
     create_user,
+    delete_user,
     get_user_by_id,
     set_can_verify_identity,
+    set_user_disabled,
     set_user_level,
 )
 from netbbs.chat.hub import ChatHub
@@ -307,6 +309,62 @@ def test_drain_stops_treating_a_demoted_sysop_as_exempt(db):
         await _finish(task)
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("same_name", [False, True])
+def test_a_deleted_accounts_id_taken_by_a_newcomer_disconnects_rather_than_adopting_it(db, same_name):
+    """`users.id` is a plain rowid: deleting the newest account frees its
+    id for the next registration, and on a node that has never run Link
+    the name is freed too. The old session must end, not become the
+    newcomer."""
+    boss = create_user(db, "boss", password="hunter2", user_level=SYSOP_LEVEL)
+    caller = create_user(db, "caller", password="hunter2", user_level=10)
+    registry = ActiveSessionRegistry()
+    session = FedSession()
+
+    async def scenario():
+        task = asyncio.create_task(_drive(db, registry, caller, session))
+        session.feed("n")
+        await _until(lambda: "Choice" in session.text())
+        delete_user(db, caller, deleted_by=boss)
+        newcomer = create_user(
+            db, "caller" if same_name else "newcomer", password="hunter2", user_level=SYSOP_LEVEL
+        )
+        # Windows' clock can hand both rows the same timestamp; a real
+        # re-registration is never within the same 15 ms.
+        db.connection.execute(
+            "UPDATE users SET created_at = ? WHERE id = ?", ("2099-01-01T00:00:00.000000Z", newcomer.id)
+        )
+        db.connection.commit()
+        assert newcomer.id == caller.id
+        await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), timeout=2.0)
+
+    asyncio.run(scenario())
+    assert "no longer active" in session.text()
+    assert "Your access level" not in session.text()
+
+
+def test_an_access_change_for_an_account_that_is_gone_does_not_spin_the_menu(db, monkeypatch):
+    monkeypatch.setattr(login_flow, "_REVOCATION_CHECK_INTERVAL_SECONDS", 30.0)
+    boss = create_user(db, "boss", password="hunter2", user_level=SYSOP_LEVEL)
+    caller = create_user(db, "caller", password="hunter2", user_level=10)
+    registry = ActiveSessionRegistry()
+    session = FedSession()
+
+    async def scenario():
+        task = asyncio.create_task(_drive(db, registry, caller, session))
+        session.feed("n")
+        await _until(lambda: "Choice" in session.text())
+        mark = len(session.written)
+        set_user_disabled(db, caller, True, changed_by=boss)
+        registry.account_changed_event(session).set()  # as the watcher would
+        await asyncio.sleep(0.2)
+        assert session.text_since(mark).count("Choice") <= 1
+        session.feed("x")
+        await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), timeout=2.0)
+
+    asyncio.run(scenario())
+    assert "no longer active" in session.text()
 
 
 def test_a_real_disconnect_during_a_pending_unwind_still_disconnects(db):
