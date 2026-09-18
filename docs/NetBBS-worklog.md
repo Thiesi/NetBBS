@@ -1890,6 +1890,94 @@ screen `prompt` like `live_choice_field`, so no extra keystrokes are
 needed to back out again) is the workaround, not the field the
 assertion is actually about.
 
+### Read-only detail panels and what a redraw erases
+
+`netbbs.rendering.detail` builds a status screen's rows; `netbbs.net.
+detail_view.show_detail` pages and shows them. The split is the same one
+`_field_value_lines` makes for the draft editor and exists for the same reason:
+a screen can only page itself if it can *measure* itself, and it can only
+measure rows it has built without writing them. A renderer that writes as it
+goes has no way to know it is about to run past the terminal, which is how Link
+status came to be two rows taller than a 24-row screen.
+
+**With redraw-in-place on (the default for new accounts), anything written
+immediately before returning to a caller that redraws is never seen.** The
+caller's `screen_title(clear=True)` homes the cursor and blanks the terminal in
+the same burst of output. The console had three shapes of this, all invisible
+to a test session (whose account has the preference off, so the line is still
+in the transcript the assertion reads): a whole result printed by a screen that
+then returned (prune drafts, GC storage, repair carried posts, an empty outbox
+or log); one entry's detail printed after its picker closed; and a one-line
+outcome written by a screen just before it looped to redraw itself. The
+remedies are, respectively, a titled screen held until `[B]ack`
+(`_show_report`), a `show_detail` screen that returns to the picker, and an
+outcome carried into the next draw -- never a "Press any key" hold.
+
+The carrying is a per-session queue in `admin_flow` (`_announce`,
+`_announce_line`; a `WeakKeyDictionary`, so a notice cannot outlive its
+connection or reach another SysOp). Four things drain it, which is why they
+are *wrappers defined in `admin_flow`* and not the imported names: `_choice_
+prompt` (every self-drawn screen's `Choice:`), `show_detail`, `edit_resource_
+draft` (through the editor's `notices` hook, so a field prompt's "Not a
+number." survives the editor's redraw), and `pick_item` (through the picker's
+callable masthead, which it already re-reads and budgets every render; the
+wrapper also announces an empty list's `empty_message`, which the picker
+otherwise prints and returns from). A new console screen that calls
+`netbbs.net.picker.pick_item` or `resource_editor.edit_resource_draft`
+directly, or writes `"Choice: "` itself, silently drops whatever was pending.
+`_Listing.say` remains for a listing that owns several actions and a page.
+
+Do not hand `_TrailingOutput` (the stand-in session that captures a foreign
+flow's trailing lines) to anything that takes `node_controls`: the session
+registry compares sessions by identity -- "that's your own session", "disconnect
+everyone but me" -- and a stand-in is not the session. That is why the ~160
+console outcome sites were converted to `_announce_line` at the write, by an
+AST pass (a `write_line` that is the last output before `return`, `continue`,
+the end of the function, or an `await _draw_*()`), rather than by wrapping the
+calls in a recorder. An *immediate* `Shutdown sequence started.` is
+deliberately still a direct write: the session may not live to see another
+prompt. Two things that pass missed, both found in review: an outcome followed
+by statements that were themselves not yet converted (their awaits made it look
+non-final -- re-run the pass over its own output until it finds nothing), and
+outcomes written through `_write_wrapped_subtitle` rather than `write_line`
+(the banner menus' "No banner file found", the maintenance toggle).
+
+Not everything a `_TrailingOutput` still holds is an outcome. A flow that draws
+a title and a progress line before its first raw byte (`send_file_to_caller`)
+still holds both when it fails early, and announcing a title announces its
+clear -- which erased the screen the console had just redrawn. `announce_rest`
+queues only the last paragraph (these flows open their outcome with a blank
+row) and never a line that clears the terminal.
+
+A test for this class has to
+turn the preference on and look at what is on the terminal *after the last
+clear* -- asserting that the text was written somewhere in the transcript
+passes against the bug. `tests/test_detail_view.py` and
+`tests/test_sysop_console_outcomes.py` do it that way.
+
+`_fitted_menu` exists because `_menu_row`/`menu_grid` budget a described menu
+against the *whole* terminal height, as though nothing were drawn above it. On
+a screen that leads with a panel, the described form then pushes the panel's
+own top row off the terminal. Measure the described grid against the rows the
+panel left, and fall back to the packed action bar when it does not fit --
+descriptions are a nicety, seeing the screen is the point.
+
+Two rendering details that are easy to get wrong again: a table's flexible
+column *wraps* under itself rather than being cut (the terminal-text rule is
+that nothing is dropped to make a row fit, and an audit row's details are
+exactly the text a SysOp opened the screen for); and the selection cursor of an
+arrow-navigable panel takes the indent's own two columns, so selecting a row
+never moves its value. `show_detail` pages with `[N]`/`[P]` only when the
+calling screen has not claimed those letters -- Link status owns `[P]eers` --
+and with `[>]`/`[<]` otherwise; `PgUp`/`PgDn` always work, which needs
+`read_editor_key`, so its `Session` double must map the `PAGE_UP`/`PAGE_DOWN`
+sentinels (see the pagination note above).
+
+Menu briefs are cut, not wrapped, at the description column -- 34 characters
+in two columns at 80 -- by design (`_entry_block_lines`). Forty-nine had grown
+past that and were being shown mid-word; the fix for an over-long brief is a
+shorter brief.
+
 ### Picker line width
 
 `netbbs.net.picker.pick_item` truncates each rendered row to terminal width

@@ -28,6 +28,7 @@ from __future__ import annotations
 
 from contextvars import ContextVar
 from dataclasses import dataclass
+from collections.abc import Sequence
 from typing import Any, Awaitable, Callable
 
 from netbbs.net.char_input import (
@@ -458,6 +459,7 @@ async def edit_resource_draft(
     redraw_in_place: bool = False,
     redraw_hint: bool = False,
     preamble: str | Callable[[Draft], str] | None = None,
+    notices: Callable[[], Sequence[str]] | None = None,
     unicode_style: bool = False,
     collapsed: bool = False,
     accent_color: int = ACCENT_COLOR,
@@ -638,6 +640,15 @@ async def edit_resource_draft(
         # flicker on/off across pages for no reason a caller could
         # predict, and Ctrl-H itself would still work fine even on a
         # page whose hint is hidden.
+        # `notices` (the SysOp console's pending outcomes): whatever a field's
+        # own prompt reported -- "Not a number.", "No linked node matches that
+        # name" -- is shown on this redraw, where `field_message` goes, instead
+        # of having been written above a screen this very redraw clears. Taken
+        # here, before the fit-check, so the rows it needs are budgeted for.
+        if notices is not None:
+            announced = list(notices())
+            if announced:
+                field_message = "\r\n".join([*announced, *([field_message] if field_message else [])])
         base_fixed_lines = (
             header_lines
             + 1  # blank line before the menu row

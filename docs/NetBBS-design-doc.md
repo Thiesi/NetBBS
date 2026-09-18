@@ -518,6 +518,57 @@ screen without re-deriving a richer panel those screens have no room to show.
 A screen that already has its own full panel does not also show the condensed
 line.
 
+A console screen that shows facts shows them as a *detail panel*
+(`netbbs.rendering.detail`), the read-only counterpart of the draft editor's
+field list: facts are grouped under uppercase section headings with a blank row
+between groups; a label, its value, and a heading are three different colours;
+every value on the screen starts in one column, a long one wrapping under where
+it began; a state reads in the colour of what it means (a healthy one green, a
+lapsed one amber, a missing file behind an enabled banner red) rather than in
+the colour of the row it is on; and anything with more than one entry is a
+table with a header row, its widest column wrapping rather than being cut.
+Short related facts may share a row two to a line where the terminal is wide
+enough. A `Label: value` sentence printed in the terminal's default colour is
+not a way to show a fact.
+
+No console screen is taller than an 80x24 terminal, the landing page included:
+it draws its full health panel over a described menu where that fits, and
+otherwise the same facts one group to a row over an undescribed menu, saying
+that descriptions were hidden. `scripts/sysop_gallery.py` renders every console
+screen and flags any that is too tall, and `tests/
+test_sysop_console_presentation.py` holds the same list of screens to the
+terminal's size. A panel that does not fit is
+paged (`netbbs.net.detail_view.show_detail`): whole groups are kept together, a
+group taller than a page repeats its heading where it continues, `PgUp`/`PgDn`
+always turn the page, and `[N]ext`/`[P]rev` join the action bar — `[>]`/`[<]`
+on a screen that already uses those letters. A list that grows without bound
+(an account's admin actions, trust configuration history) is a screen of its
+own rather than the tail of another. A detail screen that keeps its own
+described menu gives the menu only the rows the panel leaves, and falls back to
+the packed action bar before it lets the panel's top row scroll away. That
+fallback is not paging: on a terminal much narrower than 80 columns, where the
+packed bar itself wraps to several rows, a screen of this kind (a board, file
+area, channel or user's detail, the Settings overview, a banner menu, the
+landing page) can still be taller than the terminal. Paged screens are not
+affected.
+
+The outcome of an action is carried into the next redraw; it is never written
+somewhere that redraw erases, and the console never asks for a keypress just to
+keep a result on screen. With redraw-in-place on, a line printed just before
+returning to a menu is wiped by that menu's clear before it can be read. So a
+console action *announces* its outcome -- `'General' deleted.`, a rejected
+field value, "Cancelled.", an empty list's "No message boards yet." -- and
+whichever console screen is drawn next shows it directly above its prompt: a
+menu, a detail panel, a draft editor, or a picker. It is shown once, to the
+session whose action produced it, and is gone at the next redraw. What is more
+than a line is a screen of its own instead: a maintenance action (prune drafts,
+GC storage, repair carried posts), an empty log, and one entry's detail are
+each titled and held until `[B]ack`. The pauses that remain are for looking at
+something -- a banner preview, a door's service log -- not for reading a
+result. A flow shared with first-run onboarding (managed-DNS register, release,
+rename, cancel) writes its own outcome; the console runs it behind a stand-in
+session that holds what it wrote after its last question and announces that.
+
 ### 3.5 Interaction model for screens (issue #282)
 
 Every screen reached by a hotkey shows its content first and can be left with
@@ -5796,6 +5847,17 @@ upgrades and encounter choices, and retains a recap of active commitments for
 returning pilots. Reading or declining it neither writes a save nor advances time.
 Accepting First Flight returns straight to the station deck, which shows the next
 step (market, quantity, chart destination) as a result line (issue #415).
+
+What the game has to say before its first screen is part of that screen, never a
+line written ahead of it: every screen begins by clearing the terminal, so a line
+printed first is erased before it can be read (issue #641). The first Command
+Deck of a session therefore opens with the pointer to the Pilot Guide for a new
+pilot, or with a welcome and the recap of commitments for a returning one, shown
+once in the place results are shown. A pilot whose last session ended
+mid-journey is told so on a screen that waits for a key, since the encounter's
+own first panel follows it. A new career after retirement, and a career rolled
+back to its previous checkpoint by the recovery screen, announce themselves on
+their first deck the same way.
 
 Escape answers No at every yes/no confirmation and cancels a quantity field,
 erasing what was typed (issue #413); prompts say so. Unsupported keys still do

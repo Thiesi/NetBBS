@@ -281,14 +281,19 @@ def test_profile_shows_whether_a_password_is_set(db, lane):
 
 
 def test_user_detail_password_action_resets_another_account(db, lane, sysop, alice):
-    session = FakeSession(["u", "l", "g", str(alice.id), "p", "c", "by-sysop", "by-sysop", "b", "b", "b", "b"])
+    # Back on the user detail screen, [H]istory is where the account's admin
+    # actions are listed now (it used to be the tail of the detail screen).
+    session = FakeSession(
+        ["u", "l", "g", str(alice.id), "p", "c", "by-sysop", "by-sysop", "b", "h", "b", "b", "b", "b"]
+    )
     asyncio.run(admin_menu(session, lane, sysop))
 
     assert _logs_in(db, "alice", "by-sysop")
     assert not _logs_in(db, "alice", "hunter2")
-    text = _visible(_written_text(session))
+    text = " ".join(_visible(_written_text(session)).split())
     assert "Password" in text
-    assert "(by sysop)" in text  # the recent-actions list on redraw
+    assert "Admin actions: 1 recorded" in text
+    assert "When Action By Detail" in text and " sysop " in text.split("When Action By Detail", 1)[1]
 
 
 def test_user_detail_shows_the_password_line_and_help(db, lane, sysop, alice):

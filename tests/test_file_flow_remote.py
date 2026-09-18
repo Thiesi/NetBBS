@@ -382,7 +382,7 @@ def test_fetch_says_so_when_the_origin_is_known_only_by_introduction(
     link_context.link_node.handle_introduction(
         origin.build_hello(addresses=None, outgoing_only=True, created_at="2026-01-01T00:00:00+00:00")
     )
-    session = FakeSession(["/remote", "0", "1", "y"])
+    session = FakeSession(["l", "0", "1", "y"])
 
     asyncio.run(file_flow._show_area(session, lane, area, alice, link_context=link_context))
 
