@@ -2823,4 +2823,30 @@ MIGRATIONS = [
                         WHERE key = 'link_onboarding_participation' AND value = 'accepted');
         """,
     ),
+    Migration(
+        description=(
+            "Issue #589, slice 1: the subjects this node's SysOp has chosen to vouch for. "
+            "An intent, not a signed object: the screen that records it holds no signing "
+            "key, and the offline admin console has no node identity at all, so the sync "
+            "pass signs. The signed vouch itself lives in `link_trust_wire_objects` under "
+            "this node's own fingerprint, which is what the trust pull already serves. "
+            "A withdrawn intent keeps its row, with who withdrew it and when: "
+            "`link_trust_config_audit` constrains `object_kind` to anchor, domain and "
+            "reporter, so this table is its own history. The partial unique index is what "
+            "makes 'the standing intent for a subject' one row."
+        ),
+        sql="""
+        CREATE TABLE link_trust_vouch_intents (
+            intent_id             INTEGER PRIMARY KEY,
+            subject_id            TEXT NOT NULL REFERENCES link_trust_subjects(subject_id),
+            explanation           TEXT NOT NULL,
+            actor_user_id         INTEGER REFERENCES users(id) ON DELETE SET NULL,
+            created_at            TEXT NOT NULL,
+            withdrawn_at          TEXT,
+            withdrawn_by_user_id  INTEGER REFERENCES users(id) ON DELETE SET NULL
+        );
+        CREATE UNIQUE INDEX idx_link_trust_vouch_intents_standing
+            ON link_trust_vouch_intents(subject_id) WHERE withdrawn_at IS NULL;
+        """,
+    ),
 ]

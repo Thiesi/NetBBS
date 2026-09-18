@@ -2677,6 +2677,31 @@ the way every schema has stored one. "Has this node ever run Link" is a sticky
 leaves behind, because stored peers alone miss a node that originated a linked
 board without ever storing one.
 
+**A node's own trust objects are stored with the ones it carries (issue
+#589).** `trust_issuance.reconcile_issued_vouches` signs a vouch and writes it
+to `link_trust_wire_objects` under the node's own fingerprint through
+`store_issued_trust_object`, which deliberately bypasses
+`ingest_trust_objects`: that is admission control for a peer's objects, and a
+node is not its own reporter. For the same reason an own vouch is never in
+`link_trust_vouches` and never counts locally. "Which own vouches are live" is
+therefore a query on the carrier store by issuer, and key rotation is detected
+by verifying the stored signature under the current key, not by a stored key
+fingerprint. `link_trust_config_audit` constrains `object_kind` to anchor,
+domain and reporter, so vouch intents keep their own history as withdrawn
+rows instead of auditing there.
+
+`ingest_trust_objects` has two kinds of refusal and the difference is the
+cursor. `TrustWireError` aborts the batch; the subscriber does not save its
+cursor and retries, which is right when time or state can change the answer.
+`TrustObjectOutOfScope` skips one object and the batch continues, which is
+right when only local configuration could change it, because aborting there
+wedges the subscription for good. Skipped objects are not stored, so
+`configure_trusted_reporter` deletes that issuer's pull cursor. The sync loop
+likewise parses a served page per object and takes its cursor from the last
+object *served*, computed from the envelope, so that skipping the last object
+of a page still advances past it. `ingest_trust_objects` still returns a
+two-tuple for every existing caller; `.skipped` rides on it.
+
 **Remote attestations do not turn Link identities into local users.** The
 signed carrier and local acceptance projection use the stable
 `TrustSubject.user(home_node_fingerprint, opaque_user_id)` identity throughout.

@@ -169,6 +169,7 @@ from netbbs.link.events import (
     LINK_MESSAGE_OBJECT_TYPE,
     EndpointDescriptor,
     canonical_bytes,
+    event_content_id,
 )
 from netbbs.link.enforcement import (
     decide_event_authorship,
@@ -199,6 +200,7 @@ from netbbs.link.remote_attestation import (
     reconcile_issued_attestations,
     save_attestation_pull_cursor,
 )
+from netbbs.link.trust_issuance import reconcile_issued_vouches
 from netbbs.link.transport import (
     AttestationRecipientRefused,
     LinkTransportError,
@@ -427,6 +429,11 @@ async def run_link_sync(
             _dialable_addresses(descriptor)
             for descriptor in node.candidate_descriptors.values()
         )
+        # Issue #589: this node's own signed vouches are brought in line with
+        # its SysOp's standing intents before anything is pulled, so an intent
+        # recorded or withdrawn since the last pass is already what a
+        # subscriber reads this pass.
+        await _reconcile_own_vouches(node, lane)
         await _pull_trust_subscriptions(
             node, session, lane, enforce_trust_policy=enforce_trust_policy
         )
@@ -816,6 +823,63 @@ async def _pull_trust_subscriptions(
         )
 
 
+async def _reconcile_own_vouches(node: LinkNode, lane: DatabaseLane) -> None:
+    """Sign, renew and revoke this node's own trust vouches (issue #589).
+
+    Runs every pass whether or not anything changed, because renewal and the
+    revocation that follows a subject being quarantined here are not triggered
+    by any SysOp action.
+    """
+    try:
+        changes = await lane.run(
+            reconcile_issued_vouches,
+            node.identity.signing_key,
+            home_node_fingerprint=node.identity.fingerprint,
+        )
+    except (ValueError, sqlite3.Error) as exc:
+        _logger.warning("Link trust: could not reconcile this node's own vouches: %s", exc)
+        return
+    for change in changes:
+        _logger.info(
+            "Link trust: %s a vouch for %s %s (%s)",
+            change.action, change.subject.kind, change.subject.node_fingerprint, change.reason,
+        )
+
+
+def _parse_trust_page(raw_objects: list, verify_key, issuer: str) -> tuple[list[SignedTrustObject], str | None]:
+    """The usable objects of one served page, and the cursor for the whole page.
+
+    Per object, not per page. An object whose signature does not verify under
+    the issuer's *current* key is one this node cannot use -- and the ordinary
+    way to meet one is an issuer that has rotated its operational key, whose
+    stream still holds what the previous key signed. Parsing the page in one
+    comprehension turned that into a rejected page, and since the cursor then
+    never moved, into a subscription that could not get past it, ever. The
+    attestation pull already parses this way.
+
+    The cursor is the content ID of the last object *served*, computed here
+    from its envelope rather than taken from a parsed object, so that skipping
+    the last object of a page still advances past it. An object that names
+    another issuer is not skipped: that is a responder serving something it
+    was not asked for, and it rejects the page.
+    """
+    parsed: list[SignedTrustObject] = []
+    last: str | None = None
+    for raw in raw_objects:
+        if not isinstance(raw, dict) or not isinstance(raw.get("envelope"), dict):
+            raise TrustWireError("trust response contains a malformed entry")
+        last = event_content_id(raw["envelope"])
+        try:
+            obj = SignedTrustObject.from_dict(raw, issuer_verify_key=verify_key)
+        except TrustWireError as exc:
+            _logger.info("Link trust pull: skipped an object from %s: %s", issuer, exc)
+            continue
+        if obj.issuer_fingerprint != issuer:
+            raise TrustWireError("trust response contains an object from another issuer")
+        parsed.append(obj)
+    return parsed, last
+
+
 async def _pull_one_trust_reporter(
     node: LinkNode,
     session: ClientSession,
@@ -841,21 +905,22 @@ async def _pull_one_trust_reporter(
                     revocations_only=revocations_only,
                 )
                 raw_objects, more = await request_trust_objects(node, session, base_url, pull)
-                parsed = [
-                    SignedTrustObject.from_dict(raw, issuer_verify_key=verify_key)
-                    for raw in raw_objects
-                ]
-                if any(obj.issuer_fingerprint != issuer for obj in parsed):
-                    raise TrustWireError("trust response contains an object from another issuer")
+                parsed, last_served = _parse_trust_page(raw_objects, verify_key, issuer)
                 if parsed:
-                    await lane.run(ingest_trust_objects, parsed)
-                    cursor = parsed[-1].content_id
+                    result = await lane.run(ingest_trust_objects, parsed)
+                    for skipped in result.skipped:
+                        _logger.info(
+                            "Link trust pull: %s sent an object outside what this node "
+                            "configured it for; skipped %s", issuer, skipped,
+                        )
+                if last_served is not None:
+                    cursor = last_served
                     if not revocations_only:
                         await lane.run(save_trust_pull_cursor, responder, issuer, cursor)
                 if not more:
                     completed = True
                     break
-                if not parsed:
+                if not raw_objects:
                     raise TrustWireError("trust response claims another page but returned no objects")
             if not completed:
                 _logger.warning(

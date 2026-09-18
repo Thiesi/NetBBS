@@ -39,7 +39,17 @@ from netbbs.link.remote_attestation import (
     remote_meets_age,
 )
 from netbbs.link.sync import run_link_sync
-from netbbs.link.trust import TrustSubject, register_subject
+from netbbs.link.trust import (
+    TrustSubject,
+    configure_trust_domain,
+    configure_trusted_reporter,
+    register_subject,
+)
+from netbbs.link.trust_issuance import (
+    reconcile_issued_vouches,
+    record_vouch_intent,
+    withdraw_vouch_intent,
+)
 from netbbs.link.transport import LinkServer, LinkTransportError
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
@@ -2468,5 +2478,186 @@ def test_a_node_with_no_opt_in_signs_and_serves_nothing(tmp_path):
             "SELECT COUNT(*) FROM link_remote_attestations"
         ).fetchone()[0] == 0
         assert not remote_meets_age(pair.subscriber.db, pair.subject, 18)
+    finally:
+        pair.close()
+
+
+# -- trust vouches over real sync passes (issue #589, slice 1) ----------------
+
+
+class _VouchPair:
+    """An issuer whose SysOp vouches for identities, and a subscriber that has
+    named it a trusted reporter."""
+
+    NODE_SUBJECT = TrustSubject.node("a-third-node-fingerprint")
+    USER_SUBJECT = TrustSubject.user("a-third-node-fingerprint", "carol")
+
+    def __init__(self, tmp_path, label: str, *, users: bool = True) -> None:
+        self.issuer_identity = bootstrap_node_identity(f"{label}-issuer")
+        self.subscriber_identity = bootstrap_node_identity(f"{label}-subscriber")
+        self.issuer_node = LinkNode(identity=self.issuer_identity)
+        self.subscriber_node = LinkNode(identity=self.subscriber_identity)
+        self.issuer = _NodeDb(tmp_path, f"{label}-issuer")
+        self.subscriber = _NodeDb(tmp_path, f"{label}-subscriber")
+        self.port = 0
+        for subject in (self.NODE_SUBJECT, self.USER_SUBJECT):
+            register_subject(
+                self.issuer.db, subject,
+                first_accepted_at="2026-08-01T12:00:00+00:00", now_iso="2026-09-15T12:00:00+00:00",
+            )
+        configure_trust_domain(self.subscriber.db, "friends", display_name="Friends")
+        configure_trusted_reporter(
+            self.subscriber.db, self.issuer_identity.fingerprint, domain_id="friends",
+            scopes=[], can_vouch_nodes=True, can_vouch_users=users,
+        )
+
+    def issuer_hello(self):
+        return self.issuer_node.build_hello(
+            addresses=[{"protocol": "http", "address": "127.0.0.1", "port": self.port}],
+            outgoing_only=False, created_at="2026-01-01T00:00:00+00:00",
+        )
+
+    async def start(self):
+        server = LinkServer(
+            host="127.0.0.1", port=0, node=self.issuer_node, lane=self.issuer.lane,
+            own_hello_provider=self.issuer_hello,
+        )
+        await server.start()
+        self.port = server.port
+        self.seeds = [f"http://127.0.0.1:{server.port}"]
+        return server
+
+    async def issuer_pass(self, session):
+        await _one_pass(self.issuer_node, session, [], self.issuer_hello, self.issuer.lane)
+
+    async def subscriber_pass(self, session):
+        await _one_pass(
+            self.subscriber_node, session, self.seeds,
+            lambda: _hello_for(self.subscriber_node), self.subscriber.lane,
+        )
+
+    def held(self, subject):
+        return self.subscriber.db.connection.execute(
+            "SELECT revoked_at FROM link_trust_vouches WHERE subject_id = ? ORDER BY received_at",
+            (subject.subject_id,),
+        ).fetchall()
+
+    def cursor(self):
+        row = self.subscriber.db.connection.execute(
+            "SELECT after_content_id FROM link_trust_pull_cursors WHERE issuer_fingerprint = ?",
+            (self.issuer_identity.fingerprint,),
+        ).fetchone()
+        return row[0] if row else None
+
+    def last_served(self):
+        return self.issuer.db.connection.execute(
+            "SELECT content_id FROM link_trust_wire_objects ORDER BY rowid DESC LIMIT 1"
+        ).fetchone()[0]
+
+    def close(self):
+        self.issuer.close()
+        self.subscriber.close()
+
+
+def test_one_sync_pass_signs_serves_pulls_and_records_a_vouch(tmp_path):
+    """Issue #589 said no dogfood run, however long, could exercise trust
+    propagation, because no node could issue a trust object. This drives real
+    passes of the loop and asserts on the *subscriber's* tables, so what is
+    under test is that `run_link_sync` calls the reconcile at all."""
+    pair = _VouchPair(tmp_path, "vouching")
+    record_vouch_intent(pair.issuer.db, pair.NODE_SUBJECT, explanation="known operator")
+
+    async def scenario():
+        server = await pair.start()
+        try:
+            async with aiohttp.ClientSession() as session:
+                await pair.issuer_pass(session)
+                await pair.subscriber_pass(session)
+                assert [row[0] for row in pair.held(pair.NODE_SUBJECT)] == [None]
+
+                withdraw_vouch_intent(pair.issuer.db, pair.NODE_SUBJECT)
+                await pair.issuer_pass(session)
+                await pair.subscriber_pass(session)
+        finally:
+            await server.stop()
+
+    try:
+        asyncio.run(scenario())
+        [row] = pair.held(pair.NODE_SUBJECT)
+        assert row[0] is not None
+        assert pair.cursor() == pair.last_served()
+    finally:
+        pair.close()
+
+
+def test_a_vouch_outside_a_subscribers_grant_does_not_wedge_its_subscription(tmp_path):
+    """The first real issuer reaches this immediately: its SysOp vouches for a
+    caller, and one subscriber only ever granted it node vouches. Aborting the
+    batch left the cursor where it was, so every later pass met the same
+    object first and nothing after it ever arrived."""
+    pair = _VouchPair(tmp_path, "narrow", users=False)
+    record_vouch_intent(pair.issuer.db, pair.USER_SUBJECT, explanation="long-standing caller")
+
+    async def scenario():
+        server = await pair.start()
+        try:
+            async with aiohttp.ClientSession() as session:
+                await pair.issuer_pass(session)
+                await pair.subscriber_pass(session)
+                # The user vouch was skipped, and the subscription moved on.
+                assert pair.held(pair.USER_SUBJECT) == []
+                assert pair.cursor() == pair.last_served()
+
+                record_vouch_intent(pair.issuer.db, pair.NODE_SUBJECT, explanation="known operator")
+                await pair.issuer_pass(session)
+                await pair.subscriber_pass(session)
+                assert [row[0] for row in pair.held(pair.NODE_SUBJECT)] == [None]
+
+                # Widening the grant resets the cursor, so the next pass
+                # re-reads the stream and reaches what it skipped.
+                configure_trusted_reporter(
+                    pair.subscriber.db, pair.issuer_identity.fingerprint, domain_id="friends",
+                    scopes=[], can_vouch_nodes=True, can_vouch_users=True,
+                )
+                await pair.subscriber_pass(session)
+        finally:
+            await server.stop()
+
+    try:
+        asyncio.run(scenario())
+        assert [row[0] for row in pair.held(pair.USER_SUBJECT)] == [None]
+        assert len(pair.held(pair.NODE_SUBJECT)) == 1
+    finally:
+        pair.close()
+
+
+def test_an_object_the_previous_key_signed_does_not_wedge_a_new_subscriber(tmp_path):
+    """A subscriber resolves only the issuer's current operational key. After a
+    rotation the issuer's stream still holds what the old key signed, and a
+    page parsed all-or-nothing turned that one object into a subscription
+    that could never start."""
+    pair = _VouchPair(tmp_path, "rotated")
+    record_vouch_intent(pair.issuer.db, pair.NODE_SUBJECT, explanation="known operator")
+    previous_key = bootstrap_node_identity("rotated-previous").signing_key
+    reconcile_issued_vouches(
+        pair.issuer.db, previous_key, home_node_fingerprint=pair.issuer_identity.fingerprint,
+    )
+
+    async def scenario():
+        server = await pair.start()
+        try:
+            async with aiohttp.ClientSession() as session:
+                await pair.issuer_pass(session)  # re-signs under the current key
+                await pair.subscriber_pass(session)
+        finally:
+            await server.stop()
+
+    try:
+        asyncio.run(scenario())
+        assert pair.issuer.db.connection.execute(
+            "SELECT COUNT(*) FROM link_trust_wire_objects WHERE object_type = 'trust_vouch'"
+        ).fetchone()[0] == 2
+        assert [row[0] for row in pair.held(pair.NODE_SUBJECT)] == [None]
+        assert pair.cursor() == pair.last_served()
     finally:
         pair.close()

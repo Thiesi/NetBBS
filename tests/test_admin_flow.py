@@ -9313,3 +9313,144 @@ def test_declining_the_release_confirm_keeps_the_name_held(db, lane, sysop):
     _run(session, lane, sysop)
 
     assert is_username_retired(db, "alice")
+
+
+# -- vouching for an identity to the rest of the Link (issue #589, slice 1) ---
+
+
+def _vouchable_subject(db):
+    from netbbs.link.trust import TrustSubject, register_subject
+
+    subject = TrustSubject.node("abcdefghijklmnopqrstuvwxyz234567")
+    register_subject(db, subject, first_accepted_at="2026-08-01T00:00:00.000000Z")
+    return subject
+
+
+def _standing_intents(db):
+    from netbbs.link.trust_issuance import list_vouch_intents
+
+    return list_vouch_intents(db, home_node_fingerprint=None)
+
+
+def test_vouch_screen_explains_itself_and_can_be_left_without_writing(db, lane, sysop):
+    _vouchable_subject(db)
+    # Settings -> Policy trust -> Subjects -> the subject -> [V]ouch -> Back.
+    session = FakeSession(["s", "p", "s", "0", "1", "v", "b", "b", "b", "b", "b"])
+
+    _run(session, lane, sysop)
+
+    text = " ".join(_visible(_written_text(session)).split())
+    assert "A vouch is a signed statement that you know this identity and stand behind it." in text
+    assert "It changes nothing on this node" in text
+    assert "This node does not vouch for this identity." in text
+    assert _standing_intents(db) == []
+
+
+def test_sysop_can_vouch_for_a_subject_behind_one_confirm(db, lane, sysop):
+    subject = _vouchable_subject(db)
+    session = FakeSession(
+        ["s", "p", "s", "0", "1", "v", "i", "met them at the 2026 meet", "y", "b", "b", "b", "b", "b"]
+    )
+
+    _run(session, lane, sysop)
+
+    [intent] = _standing_intents(db)
+    assert intent.subject == subject and intent.explanation == "met them at the 2026 meet"
+    text = " ".join(_visible(_written_text(session)).split())
+    assert "published with the vouch" in text
+    assert "to the nodes that subscribe to this one?" in text
+    # No LinkContext in this harness, so signing is honestly deferred.
+    assert "Vouch recorded. Link is not running here, so it is signed when Link next runs." in text
+    assert "pending -- signed on the next Link sync pass" in text
+
+
+def test_a_blank_reason_or_a_declined_confirm_records_nothing(db, lane, sysop):
+    _vouchable_subject(db)
+    session = FakeSession(["s", "p", "s", "0", "1", "v", "i", "", "i", "a reason", "n", "b", "b", "b", "b", "b"])
+
+    _run(session, lane, sysop)
+
+    assert _standing_intents(db) == []
+    assert "Cancelled -- nothing recorded." in _visible(_written_text(session))
+
+
+def test_vouching_for_an_identity_blocked_here_is_refused_in_words(db, lane, sysop):
+    from netbbs.link.trust import TrustDimension, TrustState, set_trust_override
+
+    subject = _vouchable_subject(db)
+    set_trust_override(
+        db, subject, TrustDimension.RESOURCE_BEHAVIOR, TrustState.BLOCKED,
+        reason="flooding", actor_user_id=sysop.id,
+    )
+    session = FakeSession(["s", "p", "s", "0", "1", "v", "i", "a reason", "y", "b", "b", "b", "b", "b"])
+
+    _run(session, lane, sysop)
+
+    assert _standing_intents(db) == []
+    text = " ".join(_visible(_written_text(session)).split())
+    assert "Not recorded: this node has that identity quarantined or blocked" in text
+
+
+def test_sysop_can_withdraw_a_vouch_from_the_subject_screen(db, lane, sysop):
+    from netbbs.link.trust_issuance import record_vouch_intent
+
+    record_vouch_intent(db, _vouchable_subject(db), explanation="known operator")
+    session = FakeSession(["s", "p", "s", "0", "1", "v", "w", "y", "b", "b", "b", "b", "b"])
+
+    _run(session, lane, sysop)
+
+    assert _standing_intents(db) == []
+    assert "Vouch withdrawn." in _visible(_written_text(session))
+
+
+def test_the_subject_screen_says_when_this_node_vouches_for_it(db, lane, sysop):
+    from netbbs.link.trust_issuance import record_vouch_intent
+
+    record_vouch_intent(db, _vouchable_subject(db), explanation="known operator")
+    session = FakeSession(["s", "p", "s", "0", "1", "b", "b", "b", "b"])
+
+    _run(session, lane, sysop)
+
+    assert "this node vouches for it:" in _visible(_written_text(session))
+
+
+def test_vouches_listing_shows_everything_and_withdraws(db, lane, sysop):
+    from netbbs.link.trust_issuance import record_vouch_intent
+
+    record_vouch_intent(db, _vouchable_subject(db), explanation="known operator")
+    # Settings -> Policy trust -> [V]ouches -> [W]ithdraw -> pick -> yes.
+    session = FakeSession(["s", "p", "v", "w", "0", "1", "y", "b", "b", "b", "b"])
+
+    _run(session, lane, sysop)
+
+    text = " ".join(_visible(_written_text(session)).split())
+    assert "Identities this node vouches for:" in text
+    assert "known operator" in text
+    assert "Vouch withdrawn." in text
+    assert _standing_intents(db) == []
+
+
+def test_vouches_listing_says_where_to_issue_one_when_empty(db, lane, sysop):
+    session = FakeSession(["s", "p", "v", "b", "b", "b", "b"])
+
+    _run(session, lane, sysop)
+
+    text = " ".join(_visible(_written_text(session)).split())
+    assert "None. Open an identity under [S]ubjects and choose [V]ouch to issue one." in text
+
+
+
+def test_trust_history_shows_vouches_recorded_and_withdrawn(db, lane, sysop):
+    from netbbs.link.trust_issuance import record_vouch_intent, withdraw_vouch_intent
+
+    subject = _vouchable_subject(db)
+    record_vouch_intent(db, subject, explanation="known operator", actor_user_id=sysop.id)
+    withdraw_vouch_intent(db, subject, actor_user_id=sysop.id)
+    # Settings -> Policy trust -> [H]istory -> any key.
+    session = FakeSession(["s", "p", "h", " ", "b", "b", "b"])
+
+    _run(session, lane, sysop)
+
+    text = " ".join(_visible(_written_text(session)).split())
+    assert "vouch recorded for node:abcdefghijklmnopqrstuvwxyz234567: known operator" in text
+    assert "vouch withdrawn for node:abcdefghijklmnopqrstuvwxyz234567" in text

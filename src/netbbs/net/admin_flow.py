@@ -96,6 +96,7 @@ from netbbs.backup import (
     get_last_backup_summary,
 )
 from netbbs.managed_dns.state import (
+    get_node_fingerprint as get_cached_node_fingerprint,
     get_admin_token as get_managed_dns_admin_token,
     get_local_listeners as get_managed_dns_local_listeners,
     get_published as get_managed_dns_published,
@@ -262,6 +263,16 @@ from netbbs.link.onboarding import (
 )
 from netbbs.link.reliable_nodes import effective_reliable_nodes, reliable_nodes_source
 from netbbs.link.store import load_peer_last_contact
+from netbbs.link.trust_issuance import (
+    MAX_VOUCH_EXPLANATION_CHARS,
+    VouchIntentError,
+    get_vouch_intent,
+    list_vouch_intent_history,
+    list_vouch_intents,
+    reconcile_issued_vouches,
+    record_vouch_intent,
+    withdraw_vouch_intent,
+)
 from netbbs.link.trust import (
     TrustDimension,
     TrustState,
@@ -2286,6 +2297,7 @@ async def _trust_menu(
             MenuEntry(label=menu_key("R", "eporters"), brief="Who can report abuse remotely"),
             MenuEntry(label=menu_key("I", "dentity authorities"), brief="Attestation authority list"),
             MenuEntry(label=menu_key("P", "ublished identity"), brief="What this node asserts about its own users"),
+            MenuEntry(label=menu_key("V", "ouches"), brief="Identities this node vouches for to others"),
             MenuEntry(label=menu_key("E", "xceptions"), brief="Sole-authority deviations"),
             MenuEntry(label=menu_key("H", "istory"), brief="Trust config change log"),
             MenuEntry(label=menu_key("B", "ack"), brief="Return to Settings"),
@@ -2309,7 +2321,9 @@ async def _trust_menu(
             await session.write_line("")
             return
         if choice == "s":
-            await _trust_subjects_screen(session, lane, actor)
+            await _trust_subjects_screen(session, lane, actor, link_context=link_context)
+        elif choice == "v":
+            await _published_vouches_screen(session, lane, actor, link_context=link_context)
         elif choice == "d":
             await _trust_domains_screen(session, lane, actor)
         elif choice == "a":
@@ -2347,7 +2361,226 @@ def _trust_subject_stable_id(subject: TrustSubject) -> int:
     return int(subject.subject_id[:12], 16)
 
 
-async def _trust_subjects_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
+_VOUCH_STATUS_TONE = {"published": "success", "pending": "warning", "suspended": "error"}
+
+
+def _own_fingerprint(db: Database, link_context: LinkContext | None) -> str | None:
+    """This node's own fingerprint: from the running Link node, else the startup cache."""
+    if link_context is not None:
+        return link_context.node_identity.fingerprint
+    return get_cached_node_fingerprint(db)
+
+
+def _vouch_status_line(intent, *, unicode_style: bool) -> str:
+    """One line saying where a standing vouch intent is, in words a SysOp can act on."""
+    badge_text = status_badge(intent.status, tone=_VOUCH_STATUS_TONE[intent.status], unicode_style=unicode_style)
+    if intent.status == "published":
+        detail = f"signed and served until {sanitize_text((intent.expires_at or '')[:10])}"
+    elif intent.status == "pending":
+        detail = "signed on the next Link sync pass"
+    else:
+        detail = "this node has the identity quarantined or blocked, so it is not vouching for it"
+    return f"{badge_text} -- {detail}"
+
+
+async def _reconcile_vouches_now(
+    session: Session, lane: DatabaseLane, link_context: LinkContext | None, *, done: str
+) -> None:
+    """Run the sync pass's own reconcile, if this console can sign; say which happened.
+
+    The *same* `reconcile_issued_vouches` the sync loop runs, not a signing
+    path of this screen's own: two places that each decide when a signed
+    object should exist will eventually disagree. The offline
+    `python -m netbbs.admin` console has no node identity, so there the
+    intent simply waits for Link.
+    """
+    if link_context is None:
+        await session.write_line(
+            colored(f"{done} Link is not running here, so it is signed when Link next runs.", fg_color=SUCCESS_COLOR)
+        )
+        return
+    try:
+        await lane.run(
+            reconcile_issued_vouches,
+            link_context.node_identity.signing_key,
+            home_node_fingerprint=link_context.node_identity.fingerprint,
+        )
+    except (ValueError, sqlite3.Error) as exc:
+        await session.write_line(
+            colored(f"{done} It was not signed ({exc}); the next Link sync pass retries it.", fg_color=WARNING_COLOR)
+        )
+        return
+    await session.write_line(
+        colored(f"{done} Signed; subscribers pick it up on their next pull.", fg_color=SUCCESS_COLOR)
+    )
+
+
+async def _vouch_screen(
+    session: Session, lane: DatabaseLane, actor: User, subject: TrustSubject, name: str,
+    *, link_context: LinkContext | None,
+) -> None:
+    """Vouch for one identity to the rest of the Link, or stop (issue #589).
+
+    Issue #282 shape: what a vouch is and where this one stands come first and
+    `[B]ack` leaves without writing. `[I]ssue` takes one value -- the reason,
+    where a blank line cancels -- and then the one yes/no this project allows,
+    the last keystroke before something is published to other nodes.
+    """
+    unicode_style = await lane.run(unicode_style_enabled, actor)
+    header_color = await lane.run(effective_header_color_256)
+    while True:
+        own = await lane.run(_own_fingerprint, link_context)
+        intent = await lane.run(get_vouch_intent, subject, home_node_fingerprint=own)
+        await session.write_line(colored(f"\r\nVouch for {sanitize_text(name)}", fg_color=header_color, bold=True))
+        await session.write_line(
+            colored(
+                "A vouch is a signed statement that you know this identity and stand behind it. "
+                "It is served to nodes that have named this node a trusted reporter, where it "
+                "counts toward ending the identity's probation. It changes nothing on this node: "
+                "to establish an identity here, use [O]verride on the previous screen.",
+                fg_color=MUTED_COLOR,
+            )
+        )
+        if intent is None:
+            await session.write_line("This node does not vouch for this identity.")
+        else:
+            await session.write_line(_vouch_status_line(intent, unicode_style=unicode_style))
+            await session.write_line(
+                colored(f"Published reason: {sanitize_text(intent.explanation)}", fg_color=METADATA_COLOR)
+            )
+        issue_label = menu_key("I", "ssue") if intent is None else menu_key("I", "ssue with a new reason")
+        bar = [issue_label] + ([menu_key("W", "ithdraw")] if intent is not None else []) + [menu_key("B", "ack")]
+        await write_prompt(session, action_bar(bar, width=session.terminal_width) + ": ")
+        choice = (await session.read_key()).lower()
+        await session.write_line("")
+        if choice == "b":
+            return
+        if choice == "w" and intent is not None:
+            if not await prompt_yes_no(
+                session, f"Stop vouching for {sanitize_text(name)}? This publishes a signed withdrawal.",
+                default=False,
+            ):
+                continue
+            await lane.run(withdraw_vouch_intent, subject, actor_user_id=actor.id)
+            await _reconcile_vouches_now(session, lane, link_context, done="Vouch withdrawn.")
+            continue
+        if choice != "i":
+            await session.write(reject_unhandled_key(choice))
+            continue
+        await write_prompt(
+            session,
+            f"Reason, published with the vouch (up to {MAX_VOUCH_EXPLANATION_CHARS} characters; "
+            "blank cancels): ",
+        )
+        reason = (await session.read_line()).strip()
+        if not reason:
+            await session.write_line(colored("Cancelled -- nothing recorded.", fg_color=MUTED_COLOR))
+            continue
+        if not await prompt_yes_no(
+            session,
+            f"Publish a signed vouch for {sanitize_text(name)} to the nodes that subscribe to this one?",
+            default=False,
+        ):
+            continue
+        try:
+            await lane.run(
+                record_vouch_intent, subject, explanation=reason, actor_user_id=actor.id,
+                own_node_fingerprint=own,
+            )
+        except VouchIntentError as exc:
+            await session.write_line(colored(f"Not recorded: {exc}", fg_color=ERROR_COLOR))
+            continue
+        await _reconcile_vouches_now(session, lane, link_context, done="Vouch recorded.")
+
+
+async def _published_vouches_screen(
+    session: Session, lane: DatabaseLane, actor: User, *, link_context: LinkContext | None = None
+) -> None:
+    """Every identity this node vouches for, and how to stop (issue #589).
+
+    The companion to Published identity: that screen is what this node asserts
+    about its own users, this one what it asserts about everyone else. Issuing
+    lives on the subject's own screen, where the SysOp is looking at the
+    identity they are about to stand behind; this list is for seeing the whole
+    of it and for withdrawing.
+    """
+    redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
+    unicode_style = await lane.run(unicode_style_enabled, actor)
+    collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
+    header_color = await lane.run(effective_header_color_256)
+
+    async def _load():
+        own = await lane.run(_own_fingerprint, link_context)
+        return await lane.run(list_vouch_intents, home_node_fingerprint=own)
+
+    async def _name(intent) -> str:
+        label = (await lane.run(identity_for_fingerprint, intent.subject.node_fingerprint)).label
+        return _trust_subject_name(intent.subject, label)
+
+    while True:
+        intents = await _load()
+        names = {intent.subject.subject_id: await _name(intent) for intent in intents}
+        await session.write_line(
+            colored("\r\nIdentities this node vouches for:", fg_color=header_color, bold=True)
+        )
+        for intent in intents:
+            await session.write_line(
+                f"{sanitize_text(names[intent.subject.subject_id])} "
+                + _vouch_status_line(intent, unicode_style=unicode_style)
+            )
+            await session.write_line(colored(f"  {sanitize_text(intent.explanation)}", fg_color=METADATA_COLOR))
+        if not intents:
+            await session.write_line(
+                colored(
+                    "None. Open an identity under [S]ubjects and choose [V]ouch to issue one.",
+                    fg_color=MUTED_COLOR,
+                )
+            )
+        if link_context is None:
+            await session.write_line(
+                colored(
+                    "Link is not running here, so a change is signed when it next is.",
+                    fg_color=MUTED_COLOR,
+                )
+            )
+        await write_prompt(
+            session,
+            action_bar([menu_key("W", "ithdraw"), menu_key("B", "ack")], width=session.terminal_width) + ": ",
+        )
+        choice = (await session.read_key()).lower()
+        await session.write_line("")
+        if choice == "b":
+            return
+        if choice != "w":
+            await session.write(reject_unhandled_key(choice))
+            continue
+        selected = await pick_item(
+            session, intents,
+            name_of=lambda intent: names[intent.subject.subject_id],
+            stable_id_of=lambda intent: _trust_subject_stable_id(intent.subject),
+            description_of=lambda intent: f"{intent.status} -- {intent.explanation}",
+            title="Stop vouching for which identity?",
+            empty_message="This node vouches for nobody.",
+            refresh=_load,
+            redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
+            accent_color=await lane.run(effective_accent_color_256),
+            header_color=header_color,
+        )
+        if selected is None:
+            continue
+        name = names.get(selected.subject.subject_id) or await _name(selected)
+        if not await prompt_yes_no(
+            session, f"Stop vouching for {sanitize_text(name)}? This publishes a signed withdrawal.",
+            default=False,
+        ):
+            continue
+        await lane.run(withdraw_vouch_intent, selected.subject, actor_user_id=actor.id)
+        await _reconcile_vouches_now(session, lane, link_context, done="Vouch withdrawn.")
+
+
+async def _trust_subjects_screen(
+    session: Session, lane: DatabaseLane, actor: User, *, link_context: LinkContext | None = None
+) -> None:
     async def _load_subjects() -> list[TrustSubject]:
         return await lane.run(list_trust_subjects)
 
@@ -2411,6 +2644,12 @@ async def _trust_subjects_screen(session: Session, lane: DatabaseLane, actor: Us
                     fg_color=METADATA_COLOR,
                 )
             )
+        own_fingerprint = await lane.run(_own_fingerprint, link_context)
+        vouch_intent = await lane.run(get_vouch_intent, selected, home_node_fingerprint=own_fingerprint)
+        if vouch_intent is not None:
+            await session.write_line(
+                "this node vouches for it: " + _vouch_status_line(vouch_intent, unicode_style=unicode_style)
+            )
         if selected.kind == "user":
             for attribute in ("age", "name"):
                 attestation_state = await lane.run(
@@ -2447,6 +2686,7 @@ async def _trust_subjects_screen(session: Session, lane: DatabaseLane, actor: Us
                         )]
                         if selected.kind == "user" else []
                     ),
+                    MenuEntry(label=menu_key("V", "ouch"), brief="Vouch for it to other nodes"),
                     MenuEntry(label=menu_key("H", "istory"), brief="This subject's change log"),
                     MenuEntry(label=menu_key("B", "ack"), brief="Return to the subject list"),
                 ],
@@ -2466,6 +2706,12 @@ async def _trust_subjects_screen(session: Session, lane: DatabaseLane, actor: Us
             await _clear_trust_override_screen(session, lane, actor, selected)
         elif choice == "h":
             await _trust_decision_history_screen(session, lane, selected)
+        elif choice == "v":
+            await _vouch_screen(
+                session, lane, actor, selected,
+                _trust_subject_name(selected, labels.get(selected.node_fingerprint)),
+                link_context=link_context,
+            )
         elif choice == "i" and selected.kind == "user":
             await _remote_attestation_override_screen(session, lane, actor, selected)
         else:
@@ -3999,6 +4245,16 @@ async def _trust_config_history_screen(session: Session, lane: DatabaseLane) -> 
         )
     if not rows:
         await session.write_line(colored("No configuration history.", fg_color=MUTED_COLOR))
+    # Vouch intents keep their own history (issue #589): the config-audit
+    # table above constrains its kinds, so these are read from the intents.
+    for entry in await lane.run(list_vouch_intent_history):
+        node_label = (await lane.run(identity_for_fingerprint, entry.subject.node_fingerprint)).label
+        subject_name = sanitize_text(_trust_subject_name(entry.subject, node_label))
+        await session.write_line(
+            f"{entry.created_at} vouch recorded for {subject_name}: {sanitize_text(entry.explanation)}"
+        )
+        if entry.withdrawn_at is not None:
+            await session.write_line(f"{entry.withdrawn_at} vouch withdrawn for {subject_name}")
     attestation_rows = await lane.run(list_remote_attestation_audit)
     for row in attestation_rows:
         if row.subject_id is None:
