@@ -9670,21 +9670,27 @@ Link mail address is `name@node` by design, so whoever holds the name gets
 the mail whatever identifier sits underneath. Retiring the name is the part
 every answer needs, so it is the part built.
 
-**Decision 2 — recorded at deletion, on a node that runs Link.**
+**Decision 2 — recorded at deletion, on a node that has ever run Link.**
 `delete_user` writes the retired name in the transaction that deletes the
-account, when the node's effective Link setting is on
-(`resolve_link_enabled` over the configuration the last startup recorded).
-A standalone node records nothing and its names stay reusable, which is both
-BBS tradition and the cost the issue names: a small board should not lose
-names forever to a network it is not on. A recorded name stays retired
-whatever the Link setting does afterwards, because what peers hold does not
-evaporate when Link is switched off. Registration checks the record
-case-insensitively, as the uniqueness index does.
+account, when the node runs Link now or has at any time before. "Ever" is a
+sticky marker the node sets the first time it starts with Link effectively
+on, with stored peers standing in for the marker on a node that ran Link
+before the marker existed. A node that has never run Link records nothing and
+its names stay reusable, which is both BBS tradition and the cost the issue
+names: a small board should not lose names forever to a network it is not on.
+A recorded name stays retired whatever the Link setting does afterwards.
+Registration checks the record case-insensitively, as the uniqueness index
+does.
 
-Pre-Link history is never backfilled, so an account that lived and
-died while Link was off has no Link-visible history to inherit. The boundary
-accepted: an account that was Link-visible, then deleted during a period with
-Link switched off, is not retired.
+The test is "ever", not "now", because what peers hold does not evaporate
+when Link is switched off. Keying on the setting at the moment of deletion
+would let an account that was Link-visible be deleted during a maintenance
+window with Link off, re-registered, and then carried back onto the network
+under an identity its peers already know. The price is over-reservation on a
+node that once ran Link and no longer does, where an account that never
+federated is retired anyway; the SysOp can release it (Decision 3), and the
+alternative is tracking per account whether it was ever Link-visible, which
+every Link subsystem would have to feed.
 
 **Decision 3 — the SysOp can release a name, on purpose.** A list of retired
 names reachable from user administration, with release as a confirmed,
