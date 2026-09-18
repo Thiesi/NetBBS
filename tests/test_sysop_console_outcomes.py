@@ -125,6 +125,22 @@ def test_an_outcome_is_shown_once(db, lane, sysop):
     assert not any("Created" in row for row in rows)
 
 
+def test_an_unstyled_outcome_is_coloured_by_what_it_reports():
+    """Sites converted from a bare `write_line` hand `_announce_line` plain
+    text. A failure among them must not turn success-green by being announced."""
+    from netbbs.net import admin_flow
+    from netbbs.rendering import ERROR_COLOR, MUTED_COLOR, SUCCESS_COLOR, fg
+
+    session = ScriptedSession([])
+    for text in ("'General' deleted.", "Cancelled.", "Error: post is locked", "Could not start the service: ENOENT"):
+        admin_flow._announce_line(session, text)
+    deleted, cancelled, error, could_not = admin_flow._take_notices(session)
+    assert fg(SUCCESS_COLOR) in deleted
+    assert fg(MUTED_COLOR) in cancelled
+    assert fg(ERROR_COLOR) in error and fg(SUCCESS_COLOR) not in error
+    assert fg(ERROR_COLOR) in could_not
+
+
 def test_an_outcome_never_reaches_another_sessions_console(db, lane, sysop):
     from netbbs.net import admin_flow
 

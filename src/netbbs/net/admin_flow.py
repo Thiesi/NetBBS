@@ -760,6 +760,10 @@ def _announce(session: Session, text: str, *, error: bool = False, color: int | 
 _LEADING_BREAK = re.compile(r"^((?:\x1b\[[0-9;]*m)*)(?:\r\n)+")
 # An outcome that changed nothing reads muted, not as a green success.
 _NEUTRAL_OUTCOMES = ("Cancelled", "No change", "Already ", "No ", "Nothing ")
+# A net under the sites converted from a bare `write_line`: a failure that was
+# never styled must not turn success-green merely by being announced. A site
+# that knows it is reporting a failure says so with `_announce(..., error=True)`.
+_FAILED_OUTCOMES = ("Error", "Could not", "Cannot ", "Can't ", "Failed", "Unable ")
 
 
 def _announce_line(session: Session, line: str) -> None:
@@ -769,8 +773,13 @@ def _announce_line(session: Session, line: str) -> None:
     the line off a keypress echo that is no longer above it."""
     line = _LEADING_BREAK.sub(r"\1", line)
     if "\x1b[" not in line:
-        neutral = line.startswith(_NEUTRAL_OUTCOMES)
-        line = colored(line, fg_color=MUTED_COLOR if neutral else SUCCESS_COLOR)
+        if line.startswith(_FAILED_OUTCOMES):
+            color = ERROR_COLOR
+        elif line.startswith(_NEUTRAL_OUTCOMES):
+            color = MUTED_COLOR
+        else:
+            color = SUCCESS_COLOR
+        line = colored(line, fg_color=color)
     _pending_notices.setdefault(session, []).append(line)
 
 
@@ -7176,7 +7185,11 @@ async def _mrc_settings_screen(
         _announce_line(session, "Saved. Applies the next time the node runs.")
     else:
         status = mrc_bridge.status()
-        await session.write_line("Saved and applied. Link now: " + _mrc_state_line(status, unicode_style=unicode_style))
+        _announce_styled(
+            session,
+            colored("Saved and applied. Link now: ", fg_color=SUCCESS_COLOR)
+            + _mrc_state_line(status, unicode_style=unicode_style),
+        )
         if status.last_error:
             _announce_line(session, colored(f"Last error: {sanitize_text(status.last_error)}", fg_color=MUTED_COLOR))
     if unreachable is not None:
@@ -14317,7 +14330,7 @@ async def _post_action_screen(
             try:
                 await lane.run(delete_post, post, deleted_by=actor)
             except PostError as exc:
-                _announce_line(session, f"Error: {exc}")
+                _announce(session, f"Error: {exc}", error=True)
                 await _draw_post_action(session, post, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line, when=when)
                 continue
             _announce_line(session, "Rejected.")
@@ -15942,7 +15955,7 @@ async def _door_service_action(session: Session, lane: DatabaseLane, actor: User
         return
     service = await door_services.adopt(door)
     if service is None:
-        _announce_line(session, "This door no longer declares a service.")
+        _announce(session, "This door no longer declares a service.", error=True)
         return
     try:
         if choice == "s":
@@ -15952,7 +15965,7 @@ async def _door_service_action(session: Session, lane: DatabaseLane, actor: User
         else:
             await service.restart()
     except OSError as exc:
-        _announce_line(session, sanitize_text(f"Could not {verb.lower()} the service: {exc}"))
+        _announce(session, f"Could not {verb.lower()} the service: {exc}", error=True)
         return
     await lane.run(record_action, actor=actor, action="door_service", object_type="door",
                    object_id=door.id, detail=f"door={door.name!r} action={verb.lower()}")

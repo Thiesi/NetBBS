@@ -273,6 +273,36 @@ def test_node_status_screen_when_mrc_is_off(db, lane, sysop):
     asyncio.run(scenario())
 
 
+def test_saving_mrc_settings_on_a_running_bridge_confirms_on_the_redrawn_screen(db, lane, lobby):
+    """With redraw-in-place on, "Saved and applied." was written and then
+    erased by the Settings redraw; the follow-up notes were carried, so they
+    showed up with no headline above them."""
+    from netbbs.net.redraw_preference import set_redraw_in_place_enabled
+    from tests.test_detail_view import ScriptedSession, _Exhausted
+
+    async def scenario():
+        operator = create_user(db, "redraw-sysop", password="hunter2", user_level=SYSOP_LEVEL)
+        set_redraw_in_place_enabled(db, operator, True)
+        fake = FakeMrcHub()
+        await fake.start()
+        bridge = _bridge(lane)
+        await bridge.start()
+        try:
+            set_mrc_room(db, lobby, "lobby")
+            session = ScriptedSession([
+                "s", "i", "e", "y", "h", "127.0.0.1", "p", str(fake.port), "t", "n", "n", "Test Board", "s",
+            ])
+            with pytest.raises(_Exhausted):
+                await admin_menu(session, lane, operator, node_controls=_controls(bridge))
+            rows = session.on_terminal()
+            assert rows[0].endswith("Settings")
+            assert any(row.startswith("Saved and applied. Link now:") for row in rows), rows[-4:]
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())
+
+
 def test_deleting_a_mapped_channel_refreshes_the_running_bridge(db, lane, sysop, lobby):
     """Review of #275: the bridge kept a deleted channel's room mapping
     until the next inbound line for it failed."""
