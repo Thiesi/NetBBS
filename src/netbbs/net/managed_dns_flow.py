@@ -78,11 +78,15 @@ _OPT_IN_BLURB = (
     "menu."
 )
 
-# Issue #583. Until `netbbs.managed_dns.state.DEFAULT_SERVICE_URL` names
-# a deployed instance, a node has no service to register against -- and
-# the message this replaced ("ask your operator to set the service
-# address") sent the SysOp looking for an operator who is themselves,
-# for a setting no surface of the product could set. Two notes, not one,
+# Issue #583. While `netbbs.managed_dns.state.DEFAULT_SERVICE_URL` was
+# `None` (v7.7.0 up to the deployment, roadmap tracker #612 step 2) a
+# node had no service to register against -- and the message this
+# replaced ("ask your operator to set the service address") sent the
+# SysOp looking for an operator who is themselves, for a setting no
+# surface of the product could set. The constant names the deployed
+# instance now, so these notes are reached only if it is ever reverted;
+# they stay because nothing else says anything sensible when there is no
+# service to dial. Two notes, not one,
 # because the two callers are in different places: the first-run screen
 # is telling someone who just answered a question that their answer is
 # recorded and costs them nothing more, while the SysOp console is

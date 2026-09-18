@@ -3711,11 +3711,23 @@ HTTP, never imports it.
   absent*, which is what makes removing it fall back to the shipped
   `DEFAULT_SERVICE_URL` rather than pin the node to an old override; it
   is also the only production writer of that key, so it cannot clobber
-  a decision made elsewhere. `DEFAULT_SERVICE_URL` is `None` until the
-  backend is actually deployed, guarded by a test that has to be flipped
-  with it. The lesson: a setter whose only callers are tests is not
+  a decision made elsewhere. `DEFAULT_SERVICE_URL` was `None` until the
+  backend was actually deployed, guarded by a test that was flipped with
+  it (the project instance is `https://dns.netbbs.org`, roadmap tracker
+  #612 step 2). The lesson: a setter whose only callers are tests is not
   "configurable", and a domain layer reading a value nothing writes
   fails at the far end of a user-visible flow instead of at startup.
+- **The deployment found two things the runbook had not said.** A
+  reverse proxy that *appends* the client to `X-Forwarded-For` (Apache's
+  `mod_proxy`, most others) hands a registrant the leftmost slot the
+  service trusts, so the proxy must drop the incoming header before
+  forwarding; and `Rfc2136DnsProvider.upsert_record` *replaces* a
+  name's address records, so a static name in the zone (`dns`,
+  `relink`) is not a collision but an overwrite waiting for a
+  registrant -- the blocklist carries the zone's static names, and the
+  runbook makes adding one to the zone conditional on adding it there
+  first. Turning the zone dynamic also ends hand edits to its file:
+  `rndc freeze`/`thaw` around every static change from now on.
 - **A revoked registration is not a released one, and the difference is
   reclaim.** Release and abandonment are deliberately reclaimable by the
   credential that held the name, for the cooldown's length (Decision 5).

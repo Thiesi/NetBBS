@@ -79,18 +79,21 @@ ADMIN_TOKEN_CONFIG_KEY = "managed_dns_admin_token"
 
 # The address of the project's own `services.managed_dns` instance, as
 # shipped -- what a node reaches when its operator configures nothing,
-# which is every ordinary node (design doc §16 Decision 8). `None` while
-# that backend is not standing anywhere: a node then simply has no
-# service to talk to, which `netbbs.net.managed_dns_flow` now says
-# plainly instead of telling the SysOp to go ask an operator who is
-# themselves (issue #583).
+# which is every ordinary node (design doc §16 Decision 8). Same shape,
+# and the same reason, as `netbbs.link.reliable_nodes.RELIABLE_NODES_URL`:
+# a project-run service a node must not need to be told about to use.
 #
-# Deploying the backend is an operational step
-# (`services/managed_dns/README.md`); the code change that follows it is
-# this one line. Same shape, and the same reason, as `netbbs.link.
-# reliable_nodes.RELIABLE_NODES_URL`: a project-run service a node must
-# not need to be told about to use.
-DEFAULT_SERVICE_URL: str | None = None
+# The instance behind it runs on Roanoke behind a TLS-terminating
+# reverse proxy (roadmap tracker #612, step 2); the address is the
+# proxy's, never the service's own loopback bind. Deploying it was an
+# operational step (`services/managed_dns/README.md`), and this one line
+# was the code change that followed. `None` is still a legal value --
+# it means "no project instance is standing", which is what every node
+# said between v7.7.0 and the deployment (issue #583), and
+# `netbbs.net.managed_dns_flow` keeps saying it plainly if the constant
+# is ever reverted rather than telling the SysOp to go ask an operator
+# who is themselves.
+DEFAULT_SERVICE_URL: str | None = "https://dns.netbbs.org"
 
 
 def _set_config_values(db: Database, values: tuple[tuple[str, str], ...]) -> None:

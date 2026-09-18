@@ -134,7 +134,17 @@ def test_node_fingerprint_roundtrip(tmp_path):
     db.close()
 
 
-def test_service_url_defaults_to_none(tmp_path):
+def test_service_url_defaults_to_the_shipped_address(tmp_path):
+    db = Database(tmp_path / "node.db")
+    assert get_service_url(db) == state.DEFAULT_SERVICE_URL
+    db.close()
+
+
+def test_service_url_defaults_to_none_when_no_address_is_shipped(tmp_path, monkeypatch):
+    """The shape every node had between v7.7.0 and the deployment
+    (issue #583): nothing configured and nothing shipped is "no
+    service", not an error."""
+    monkeypatch.setattr(state, "DEFAULT_SERVICE_URL", None)
     db = Database(tmp_path / "node.db")
     assert get_service_url(db) is None
     db.close()
@@ -142,16 +152,16 @@ def test_service_url_defaults_to_none(tmp_path):
 
 def test_service_url_roundtrip(tmp_path):
     db = Database(tmp_path / "node.db")
-    set_service_url(db, "https://managed.netbbs.org")
-    assert get_service_url(db) == "https://managed.netbbs.org"
+    set_service_url(db, "https://managed.example.org")
+    assert get_service_url(db) == "https://managed.example.org"
     db.close()
 
 
-def test_service_url_can_be_cleared_back_to_none(tmp_path):
+def test_service_url_can_be_cleared_back_to_the_shipped_address(tmp_path):
     db = Database(tmp_path / "node.db")
-    set_service_url(db, "https://managed.netbbs.org")
+    set_service_url(db, "https://managed.example.org")
     set_service_url(db, None)
-    assert get_service_url(db) is None
+    assert get_service_url(db) == state.DEFAULT_SERVICE_URL
     db.close()
 
 
@@ -311,13 +321,23 @@ def test_clearing_a_configured_service_url_returns_to_the_shipped_default(tmp_pa
     db.close()
 
 
-def test_the_shipped_default_is_unset_until_the_service_is_deployed():
-    """A guard, not a preference: `services.managed_dns` is not standing
-    anywhere yet, and shipping an address that resolves to nothing would
-    turn every node's registration into a connection error instead of
-    the plain "not running yet" the flow says today. Flip this test in
-    the same commit that flips the constant."""
-    assert state.DEFAULT_SERVICE_URL is None
+def test_the_shipped_default_names_the_deployed_project_instance():
+    """The other half of the guard this test used to be: while
+    `services.managed_dns` stood nowhere, this asserted `None`, because
+    shipping an address that resolves to nothing turns every node's
+    registration into a connection error instead of the plain "not
+    running yet" the flow says. The instance is deployed now (roadmap
+    tracker #612, step 2), so the constant is the one address every
+    ordinary node dials -- and it has to satisfy the same rules
+    `[managed_dns] service_url` is held to, since the node concatenates
+    and dials both identically."""
+    from netbbs.net.nodeconfig import ManagedDnsConfig, NodeConfig
+
+    assert state.DEFAULT_SERVICE_URL == "https://dns.netbbs.org"
+    # Not a loopback exception, not a bare host, no trailing slash, no
+    # credentials in the authority: exactly what an operator-typed
+    # override is refused for, applied to the value we ship.
+    NodeConfig(managed_dns=ManagedDnsConfig(service_url=state.DEFAULT_SERVICE_URL)).validate()
 
 
 # -- the credential's issuing service (Codex review of PR #587) --------------

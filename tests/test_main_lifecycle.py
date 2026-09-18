@@ -1608,7 +1608,10 @@ def test_run_clears_a_managed_dns_service_url_the_operator_removed(tmp_path):
     asyncio.run(_run_until_ready_then_shut_down(plain))
 
     db = Database(plain.db_path)
-    # DEFAULT_SERVICE_URL is None until the service is deployed, so this
-    # is also "back to nothing configured".
-    assert get_service_url(db) is None
+    # Back on the shipped address, not pinned to the override the
+    # previous start was told about.
+    from netbbs.managed_dns.state import DEFAULT_SERVICE_URL
+
+    assert get_service_url(db) == DEFAULT_SERVICE_URL
+    assert get_service_url(db) != "http://127.0.0.1:8099"
     db.close()

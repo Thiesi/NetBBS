@@ -62,6 +62,26 @@ as `MANAGED_DNS_BIND_SERVER` below -- point it at the zone's primary
 (the host actually authoritative for writes), not a secondary or a
 public-facing resolver.
 
+Two consequences of turning the zone dynamic, both found the hard way
+on the project's own instance:
+
+- **The zone file is no longer yours to edit in place.** Once BIND
+  accepts updates for a zone it keeps them in a journal beside the file,
+  and a hand edit followed by `rndc reload` is refused (or, worse,
+  loads and drops the journal). Every static change from now on -- a
+  new MX, a DKIM key, the service's own `A` record -- is
+  `rndc freeze <zone>`, edit, bump the serial, `rndc thaw <zone>`.
+  `freeze` writes the journal into the file first, so the managed
+  records appear in it; leave them there. An `inline-signing` zone is
+  no exception: it is the *unsigned* file that becomes dynamic.
+- **Every static name in the zone must be in `RESERVED_NAMES`**
+  (`services/managed_dns/blocklist.py`) *before* it exists in the zone.
+  `Rfc2136DnsProvider.upsert_record` replaces a name's address records
+  rather than adding to them, so a registration for a name the zone
+  already carries would not collide -- it would overwrite the static
+  record. Adding a host to the zone is therefore a code change plus a
+  redeploy of this service, then the zone edit, in that order.
+
 ## 4. Configure this service
 
 `services/managed_dns/__main__.py` reads its entire configuration from
@@ -94,7 +114,14 @@ __main__.py` for the exact default values currently shipped):
   that reverse proxy is actually in place and this service can trust
   the header it sets. Leaving this on without a trusted proxy in front
   lets any caller spoof its own source address into a dynamic-DNS
-  record.
+  record. The service reads the *leftmost* entry, which is only the
+  real client if the proxy is the one that wrote it: Apache's
+  `mod_proxy` (and most others) *appends* the client address to any
+  `X-Forwarded-For` the client sent, so the proxy must drop the
+  incoming header before forwarding --
+  `RequestHeader unset X-Forwarded-For early` in Apache -- or a
+  registrant can publish any address it likes by sending the header
+  itself.
 - `MANAGED_DNS_MIN_AGE_SECONDS` -- Decision 3's age gate before a
   `pending` registration first publishes.
 - `MANAGED_DNS_COOLDOWN_SECONDS` -- Decision 5's shared cooldown before
@@ -149,14 +176,18 @@ address. There are exactly two ways one gets there, and neither is a
 thing a SysOp is ever asked to type (design doc §16 Decision 8, issue
 #583):
 
-**The shipped address, for every ordinary node.** Set
-`DEFAULT_SERVICE_URL` in `src/netbbs/managed_dns/state.py` to this
-instance's public base URL -- the reverse proxy's `https://` address,
-not the `MANAGED_DNS_HOST`/`MANAGED_DNS_PORT` bind -- and release. It is
-`None` until then, which is why a node today records the SysOp's opt-in
-and says the service is not running yet. `tests/test_managed_dns_state.
-py` has a test asserting it is still `None`; flip that test in the same
-commit.
+**The shipped address, for every ordinary node.** `DEFAULT_SERVICE_URL`
+in `src/netbbs/managed_dns/state.py` is the project instance's public
+base URL, `https://dns.netbbs.org` -- the reverse proxy's `https://`
+address, not the `MANAGED_DNS_HOST`/`MANAGED_DNS_PORT` bind. It was
+`None` from v7.7.0 until the instance was deployed (roadmap tracker
+#612, step 2), which is why a node of those versions records the
+SysOp's opt-in and says the service is not running yet; the constant and
+its guard test in `tests/test_managed_dns_state.py` were flipped in the
+same commit, and a self-hoster standing up their own instance for their
+own zone would change both the same way. The deployment itself -- host,
+reverse proxy, TSIG key, `allow-update`, the record for `dns` -- is
+recorded in the project's private operations repository, not here.
 
 **`[managed_dns] service_url` in a node's `netbbs.toml`**, or
 `--managed-dns-service-url` on its command line, for a node that should

@@ -7239,9 +7239,13 @@ def test_managed_dns_status_explains_a_revocation_and_names_the_contact(db, lane
     assert "Re[l]ease" not in text and "Change [n]ame" not in text
 
 
-def test_managed_dns_status_offers_service_administration_only_with_a_token(db, lane, sysop):
+def test_managed_dns_status_offers_service_administration_only_with_a_token(db, lane, sysop, monkeypatch):
+    from netbbs.managed_dns import state
     from netbbs.managed_dns.state import set_admin_token
 
+    # No service address: the shipped default names a live instance, and
+    # a test must not dial it. With none, the console explains instead.
+    monkeypatch.setattr(state, "DEFAULT_SERVICE_URL", None)
     session = FakeSession(["d", "a", "b", "b"])  # "a" is rejected without a token
     _run(session, lane, sysop)
     assert "[A]dminister service" not in _visible(_written_text(session))
@@ -7351,9 +7355,16 @@ def test_managed_dns_abandoned_replacement_still_offers_cancel_change(
     assert cancelled == [True]
 
 
-def test_managed_dns_status_allows_recovery_registration_when_cached_status_is_active(db, lane, sysop):
+def test_managed_dns_status_allows_recovery_registration_when_cached_status_is_active(
+    db, lane, sysop, monkeypatch
+):
+    from netbbs.managed_dns import state
     from netbbs.managed_dns.state import OptIn, RegistrationStatus, set_opt_in, set_registered_name, set_registration_status
 
+    # No service address at all -- the reverted-constant case now that
+    # the shipped default names a deployed instance -- so the flow
+    # reports why instead of opening an editor over nothing.
+    monkeypatch.setattr(state, "DEFAULT_SERVICE_URL", None)
     set_opt_in(db, OptIn.ACCEPTED)
     set_registered_name(db, "myboard")
     set_registration_status(db, RegistrationStatus.PENDING)
@@ -7366,7 +7377,10 @@ def test_managed_dns_status_allows_recovery_registration_when_cached_status_is_a
     assert "isn't running yet" in _visible(_written_text(session))
 
 
-def test_managed_dns_status_pauses_after_register_message_before_redraw(db, lane, sysop):
+def test_managed_dns_status_pauses_after_register_message_before_redraw(db, lane, sysop, monkeypatch):
+    from netbbs.managed_dns import state
+
+    monkeypatch.setattr(state, "DEFAULT_SERVICE_URL", None)
     session = FakeSession(["d", "r", " ", "b", "b"])
 
     _run(session, lane, sysop)

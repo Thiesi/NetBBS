@@ -9107,17 +9107,20 @@ behind a TLS-terminating proxy, so the node's side of it is the proxy's
 address, and a plaintext hop to a remote host would put the credential
 on the wire on every heartbeat.
 
-Until the backend is actually deployed anywhere, `DEFAULT_SERVICE_URL`
-is `None` and a node simply has no service to register against. The
-opt-in is still asked, and still recorded exactly once, per Decision 1
-and issue #219 Decision 7; what changes is only that the node says
-plainly that the service
-is not running yet. Deliberately not "hide the question until the
-service exists": the decision being asked is whether this node may
-contact project infrastructure at all, the first-run screen is the one
-moment that question is naturally in front of a SysOp, and deferring it
-would mean either re-opening a settled consent question later or
-enrolling a node that had said yes to something narrower.
+`DEFAULT_SERVICE_URL` is `https://dns.netbbs.org`: the project's
+instance on Roanoke, behind the same Apache that serves the website,
+against the same BIND that serves the zone (roadmap tracker #612, step
+2). From v7.7.0 until that deployment the constant was `None` and a
+node simply had no service to register against. The opt-in was still
+asked, and still recorded exactly once, per Decision 1 and issue #219
+Decision 7; what differed was only that the node said plainly that the
+service was not running yet, and it still says so if the constant is
+ever reverted. Deliberately not "hide the question until the service
+exists": the decision being asked is whether this node may contact
+project infrastructure at all, the first-run screen is the one moment
+that question is naturally in front of a SysOp, and deferring it would
+mean either re-opening a settled consent question later or enrolling a
+node that had said yes to something narrower.
 
 **Decision 9 (locked in, implemented) — a SysOp may change their
 managed name, and the change is make-before-break: the old name stays
@@ -9229,8 +9232,13 @@ process (issue #599); `MANAGED_DNS_CONTACT` is the channel Decision 3's
 refusals name (issue #598). Actually standing the backend up
 — a host, DNS delegation, a real BIND server's `allow-update` ACL and
 matching TSIG key — is an operational step the code does not perform on
-its own; see `services/managed_dns/README.md`. Until that is done, the
-shipped `DEFAULT_SERVICE_URL` stays `None` (Decision 8).
+its own; see `services/managed_dns/README.md`. It is done: the project
+instance answers at `https://dns.netbbs.org`, and the shipped
+`DEFAULT_SERVICE_URL` names it (Decision 8). Turning the zone dynamic
+had two consequences the runbook now records: hand edits to the zone
+file go through `rndc freeze`/`thaw`, and every static name in the zone
+is in the service's blocklist first, because the provider *replaces* a
+name's address records rather than adding to them.
 
 The minimum-age period measures uninterrupted successful heartbeat
 contact, not wall-clock time since registration: first contact starts
