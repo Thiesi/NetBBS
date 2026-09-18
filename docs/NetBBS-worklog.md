@@ -2719,7 +2719,11 @@ stop every subscriber on this release at the first new object type. A
 rotation re-issues live vouches, and `_resign_orphaned_revocations` re-signs
 revocations whose targets are still running, because a subscriber on the new
 key skips anything the old key signed and nothing else would ever revoke
-those vouches there. `resolve_peer_superseded_signing_keys` is the first code
+those vouches there. None of the rotation handling can be reached in
+production yet, because nothing rotates a key (issue #624); it is exercised
+only by tests that call `rotate_operational_key` themselves, which is the
+#584 shape and should be remembered when that issue is built.
+`resolve_peer_superseded_signing_keys` is the first code
 to decode a *historical* chain key, so it tolerates an entry that is not a key,
 and the pull calls it where a failure cannot escape the sync task. Both subscription pulls answer an unresolvable
 cursor with `reason_code` `unknown_pull_cursor`, still HTTP 400, and the

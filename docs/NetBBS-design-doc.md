@@ -884,8 +884,12 @@ that replacement recognizable to humans but does not establish continuity;
 peers raise the strong warning above and continue to permit interaction.
 
 Root and operational keys are generated at initial bootstrap. Rotation is a
-guided SysOp action. Root-key custody is part of ordinary node backup and
-restore rather than requiring an HSM or offline ceremony.
+guided SysOp action. That action is not built yet (issue #624): peers verify a
+transition chain and everything that depends on one is in place, but no
+screen, command or task produces a rotation, so a leaked operational key
+currently has no response short of replacing the root identity. Root-key
+custody is part of ordinary node backup and restore rather than requiring an
+HSM or offline ceremony.
 ### 4.6 Guest login (issue #531)
 
 A node may designate one **existing account** as its guest identity. Typing
@@ -9935,9 +9939,14 @@ per-object skips, and changing a reporter's grant now resets its cursor
 real issuer and one subscriber that has established it, it is reached as soon
 as the issuer's SysOp vouches for a caller and the subscriber only granted it
 node vouches: the batch is abandoned and that subscription never moves again.
-The same goes for the first operational-key rotation, which the Phase 4
-recovery exercise includes. A slice that let nodes issue vouches and left
-their subscribers wedged would not have made the subsystem real.
+The same would go for the first operational-key rotation. A slice that let
+nodes issue vouches and left their subscribers wedged would not have made the
+subsystem real.
+
+An earlier version of this entry said the Phase 4 recovery exercise includes
+a key rotation. It does not, and more to the point no production path rotates
+an operational key at all (issue #624), so everything here about rotation is
+correct preparation that nothing can yet reach.
 
 The same decision covers a responder that no longer knows a subscriber's
 cursor, filed as #621 while this slice was in review and fixed with it for
