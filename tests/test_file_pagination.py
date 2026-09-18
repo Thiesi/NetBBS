@@ -144,9 +144,14 @@ def test_composite_file_pagination_index_exists(db):
 
 
 def test_get_file_by_name_finds_a_file_not_on_the_newest_page(db, alice, monkeypatch):
-    """The whole reason get_file_by_name exists: /download must still
-    work for a file that isn't on the currently displayed (newest)
-    page."""
+    """The whole reason get_file_by_name exists: pagination bounds what
+    is fetched for *browsing*, never what can be referenced by name, so
+    the lookup has to reach a file that isn't on the currently displayed
+    (newest) page. (The file area's `/download <filename>` command was
+    its first caller and is gone -- that screen is keystrokes only now
+    -- but the by-name lookup and its pending rule remain this module's
+    answer to "which file is called this", which
+    netbbs.net.file_transfer._may_see_pending cites as canonical.)"""
     area = create_file_area(db, "docs", creator=alice)
     _upload_with_distinct_timestamps(db, area, alice, monkeypatch, count=10)
 

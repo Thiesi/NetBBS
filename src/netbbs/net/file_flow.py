@@ -8,7 +8,7 @@ reasoning as chat_flow.py.
 Upload/download (design doc) go over real ZMODEM
 (`netbbs.net.zmodem`), not a NetBBS-specific scheme — the whole point
 being that a real Zmodem-capable terminal (SyncTERM, lrzsz) can drive
-this without any custom client software. `/upload`/`/download` take
+this without any custom client software. `[U]pload`/`[D]ownload` take
 over the session's raw byte stream for the duration of the transfer,
 then hand control back to normal character-mode text I/O once it
 finishes (or aborts — see `netbbs.net.zmodem`'s module docstring on
@@ -52,6 +52,7 @@ from __future__ import annotations
 import logging
 from dataclasses import replace
 from pathlib import Path
+from typing import Callable
 
 from netbbs.activity import record_file_area_seen
 from netbbs.attestation import format_name_for_resource, meets_age, meets_name_requirement
@@ -70,7 +71,6 @@ from netbbs.files import (
     FileEntryError,
     FileEntryPage,
     download_file,
-    get_file_by_name,
     list_file_areas,
     list_files_page,
     list_pending_files,
@@ -105,7 +105,7 @@ from netbbs.link.files import (
 )
 from netbbs.link.protocol import LinkProtocolError
 from netbbs.net import zmodem
-from netbbs.net.char_input import EditorKey, EditorKeyKind, reject_unhandled_key
+from netbbs.net.char_input import REDRAW_KEY, EditorKey, EditorKeyKind, reject_unhandled_key
 from netbbs.net.color_depth_preference import effective_truecolor
 from netbbs.net.composition import edit_line_body
 from netbbs.net.confirm import prompt_yes_no
@@ -186,10 +186,10 @@ async def enter_file_area(
     channels.
 
     `link_context` (design doc, issue #92), if given, is passed straight
-    through to `_show_area`, which offers a `/remote` command to browse
-    and fetch this area's carried-but-not-yet-fetched remote catalogue
-    when it's Linked -- `None` (Link disabled on this node, or a direct
-    test/CLI call site) simply hides that command, same degrade-
+    through to `_show_area`, which offers a `[L]ink catalogue` hotkey to
+    browse and fetch this area's carried-but-not-yet-fetched remote
+    catalogue when it's Linked -- `None` (Link disabled on this node, or a
+    direct test/CLI call site) simply hides that key, same degrade-
     gracefully shape every other optional `link_context` parameter
     already has."""
     await _show_area(session, lane, area, user, initial_cursor=initial_cursor, link_context=link_context, transfers=transfers)
@@ -458,6 +458,7 @@ async def _render_area_page(
     can_write: bool,
     name_requirement: str | None,
     can_describe: bool = False,
+    describable_pending: bool = False,
     show_transfer_hint: bool = False,
     show_remote_hint: bool = False,
     description_level: str = "off",
@@ -490,29 +491,55 @@ async def _render_area_page(
     # #475): telling a browser caller to "receive via Zmodem" describes
     # a transfer their client cannot start, which is how the file area
     # came to look broken to most people in the first place.
-    zmodem = _supports_zmodem(session)
+    zmodem = supports_zmodem(session)
     _receive_how = "receive via Zmodem" if zmodem else "get a browser download link"
+    _receive_one = (
+        "Receive the highlighted file via Zmodem" if zmodem
+        else "Get a browser download link for the highlighted file"
+    )
     _send_how = "Send a file via Zmodem" if zmodem else "Send a file from your browser"
 
     n_files = len(page.entries)
+    hints = []
     if n_files > 0:
         num_label = f"1-{n_files}" if n_files > 1 else "1"
-        hints = [MenuEntry(label=menu_key(num_label, f" or /download <name|#> — {_receive_how}"))]
-    else:
-        hints = [MenuEntry(label=menu_key("/download <filename>", f" — {_receive_how}"))]
+        hints.append(MenuEntry(label=menu_key(num_label, f" — {_receive_how}")))
+        hints.append(MenuEntry(label=menu_key("D", "ownload"), brief=_receive_one))
     if can_write:
         hints.append(MenuEntry(label=menu_key("U", "pload"), brief=_send_how))
     if can_describe:
-        hints.append(MenuEntry(label=menu_key("E", "dit description"), brief="Describe the highlighted file"))
+        # Says what the key can actually reach: with an upload of the
+        # caller's own waiting for approval, `[E]`'s picker offers that
+        # too, and it is invisible in this approved-only listing -- so
+        # "the highlighted file" would be the one description under
+        # which they would never think to press it.
+        hints.append(
+            MenuEntry(
+                label=menu_key("E", "dit description"),
+                brief="Describe a file, or your upload awaiting approval" if describable_pending
+                else "Describe the highlighted file",
+            )
+        )
     if show_transfer_hint and zmodem:
         hints.append(
             MenuEntry(label=menu_key("W", "eb transfer"), brief="Get a browser link instead of Zmodem")
         )
     if show_remote_hint:
-        hints.append(MenuEntry(label=menu_key("/remote", " — browse/fetch this file area's remote catalogue")))
-    await session.write_line(
-        _menu_row(hints, width=session.terminal_width, height=session.terminal_height, description_level=description_level)
-    )
+        hints.append(
+            MenuEntry(
+                label=menu_key("L", "ink catalogue"),
+                brief="Browse/fetch this file area's remote catalogue",
+            )
+        )
+    if hints:
+        # An empty page with nothing this caller may do on it has no
+        # hints at all, and a blank row is not a menu.
+        await session.write_line(
+            _menu_row(
+                hints, width=session.terminal_width, height=session.terminal_height,
+                description_level=description_level,
+            )
+        )
     await _write_choice_prompt(session)
 
 
@@ -525,7 +552,7 @@ async def _render_area_page(
 # iteration wrote a second copy with no newline between them, and a
 # caller leaning on Enter got
 #
-#     Choice or command: Choice or command: Choice or command: ...
+#     Choice: Choice: Choice: ...
 #
 # marching across the line. The rule every other interactive loop in
 # the codebase already follows (`netbbs.net.picker`'s docstring states
@@ -538,14 +565,10 @@ async def _render_area_page(
 # echo, so an unhandled key leaves the cursor sitting right after the
 # prompt and there is nothing to reprint -- but the keys this screen
 # *does* recognize echo themselves with a trailing newline before
-# dispatching, and a typed command line consumes one too. Those have
-# scrolled the prompt away by the time they turn out to be refusable
-# (`o` on a page with no older files, `e` where nothing is
-# describable, an unknown typed command), so they reprint it
-# deliberately. That is the same distinction `picker` draws between a
-# stray keystroke and "a deliberately typed sub-prompt that fails on
-# its own terms."
-_CHOICE_PROMPT = "Choice or command: "
+# dispatching. Those have scrolled the prompt away by the time they
+# turn out to be refusable (`o` on a page with no older files, `e`
+# where nothing is describable), so they reprint it deliberately.
+_CHOICE_PROMPT = "Choice: "
 
 
 async def _write_choice_prompt(session: Session) -> None:
@@ -553,42 +576,86 @@ async def _write_choice_prompt(session: Session) -> None:
 
 
 async def _reject_after_echo(session: Session) -> None:
-    """Refuse an action whose own keystroke (or typed line) already
-    echoed a newline: bell, then put the prompt back, because the one
-    that was on screen has scrolled up out of reach."""
+    """Refuse an action whose own keystroke already echoed a newline:
+    bell, then put the prompt back, because the one that was on screen
+    has scrolled up out of reach."""
     await session.write("\a")
     await _write_choice_prompt(session)
+
+
+_NAV_KEYS = {"b": "back", "o": "older", "n": "newer", "r": "recent"}
+
+
+def _key_action(
+    char: str, page: FileEntryPage, highlighted: int | None
+) -> tuple[str, FileEntry | None, int | None] | None:
+    """Map one printable keystroke to this screen's action, or `None`
+    when the screen does not handle it.
+
+    Shared by both input paths in `_read_file_choice` so a transport
+    without editor-key support answers to exactly the same keys instead
+    of to a second dialect of this screen.
+    """
+    lowered = char.lower()
+    if char.isascii() and char.isdigit():
+        # `isascii()` as well as `isdigit()`: `str.isdigit` is true for
+        # characters `int()` then refuses -- `'²'.isdigit()` is `True`
+        # and `int('²')` raises `ValueError` -- and AltGr+2 on a German
+        # keyboard sends exactly that, which would have taken the
+        # session down from a keystroke on this screen.
+        index = int(char)
+        if 1 <= index <= len(page.entries):
+            return ("download", page.entries[index - 1], None)
+        return None
+    if lowered in _NAV_KEYS:
+        return (_NAV_KEYS[lowered], None, highlighted)
+    if lowered == "d":
+        # No entry named: `[D]` means "the one I am looking at", and the
+        # loop resolves it from the cursor, a single-entry page, or a
+        # picker -- the same resolution `[E]` already uses.
+        return ("download", None, highlighted)
+    if lowered == "e":
+        return ("describe", None, highlighted)
+    if lowered == "u":
+        return ("upload", None, highlighted)
+    if lowered == "w":
+        return ("weblink", None, highlighted)
+    if lowered == "l":
+        return ("remote", None, highlighted)
+    return None
 
 
 async def _read_file_choice(
     session: Session,
     page: FileEntryPage,
     highlighted: int | None,
-) -> tuple[str, str | None, int | None]:
-    """Read a command, file number shortcut, or arrow navigation.
+) -> tuple[str, FileEntry | None, int | None]:
+    """Read one keystroke: a hotkey, a file-number shortcut, or cursor
+    navigation.
 
     Returns:
-      ('nav', action, None) - navigation command ('b', 'o', 'n', 'r')
-      ('download', filename, None) - direct file download
-      ('upload', None, highlighted) - start a Zmodem upload
+      ('back'|'older'|'newer'|'recent', None, highlighted) - navigation
+      ('download', entry, _) - download that file (a number, or Enter
+          on the cursor)
+      ('download', None, highlighted) - `[D]`, target still to resolve
+      ('upload', None, highlighted) - start an upload
       ('describe', None, highlighted) - edit a description (issue #463)
+      ('weblink', None, highlighted) - the browser-transfer screen
+      ('remote', None, highlighted) - the Link catalogue (issue #92)
       ('refresh', None, highlighted) - re-query and redraw (Ctrl-L)
       ('highlight', None, new_index) - arrow key highlight change
-      ('command', full_cmd, None) - multi-character command line
       ('none', None, highlighted) - no-op / rejected key
 
-    `e` and `u` join `b`/`o`/`n`/`r` as immediate single keystrokes
-    rather than `/describe` and `/upload` command lines. `e` acts on
-    whatever the cursor is already on, which is the whole point of
-    having a cursor; `u` never took an argument in the first place.
-    Nothing typed on this screen starts with either letter.
-
-    `u` was a slash command for no reason anyone recorded: this screen
-    read whole lines before it grew editor-key support (issue #184's
-    numbered download shortcuts), and when that arrived only navigation
-    and download were given keys. The slash forms still work — both
-    here, through the `read_line()` fallback below for a transport with
-    no editor-key support, and as typed commands in `_show_area`.
+    Every action here is a keystroke, like every other menu in NetBBS
+    (design doc §3.5). This screen used to read whole lines and carry
+    `/download`, `/upload`, `/describe`, `/weblink` and `/remote`
+    command forms, a dialect no other screen spoke: it predates its own
+    editor-key support (issue #184's numbered download shortcuts), and
+    when keys arrived only navigation and download were given them.
+    `/download <name>` was the one form that reached a file on another
+    page; `[F]ind` reaches it instead, landing in this area with that
+    file at the top of its page (as row 1, not as a preselected cursor
+    -- this screen always starts with no highlight).
 
     Deliberately writes no prompt of its own: the prompt belongs to
     whatever last rendered the screen (see `_CHOICE_PROMPT`). Returning
@@ -624,7 +691,7 @@ async def _read_file_choice(
             elif key.kind == EditorKeyKind.ENTER:
                 if highlighted is not None and 0 <= highlighted < len(page.entries):
                     await session.write_line("")
-                    return ("download", page.entries[highlighted].filename, highlighted)
+                    return ("download", page.entries[highlighted], highlighted)
                 else:
                     await session.write("\a")
                     return ("none", None, highlighted)
@@ -634,27 +701,14 @@ async def _read_file_choice(
                 await session.write("\a")
                 return ("none", None, highlighted)
             elif key.kind == EditorKeyKind.CHAR and key.char:
-                char = key.char
-                if char.isdigit():
-                    idx = int(char)
-                    if 1 <= idx <= len(page.entries):
-                        await session.write_line(char)
-                        return ("download", page.entries[idx - 1].filename, None)
-                if char.lower() in ("b", "o", "n", "r"):
-                    await session.write_line(char)
-                    return ("nav", char.lower(), None)
-                if char.lower() == "e":
-                    await session.write_line(char)
-                    return ("describe", None, highlighted)
-                if char.lower() == "u":
-                    await session.write_line(char)
-                    return ("upload", None, highlighted)
-                if char.lower() == "w":
-                    await session.write_line(char)
-                    return ("weblink", None, highlighted)
-                await session.write(char)
-                rest = await session.read_line()
-                return ("command", (char + rest).strip(), highlighted)
+                action = _key_action(key.char, page, highlighted)
+                if action is None:
+                    # `read_editor_key` echoes nothing, so the prompt is
+                    # still intact and the bell is the whole response.
+                    await session.write("\a")
+                    return ("none", None, highlighted)
+                await session.write_line(key.char)
+                return action
             elif key.kind == EditorKeyKind.CTRL and key.char == "l":
                 # Ctrl-L redraws with fresh data, which is also what the
                 # browser page sends once an upload it is handling
@@ -668,8 +722,26 @@ async def _read_file_choice(
         except (NotImplementedError, AttributeError):
             pass
 
-    line = (await session.read_line()).strip()
-    return ("command", line, highlighted)
+    # A transport with no editor-key support gets the same keys without
+    # the cursor, never the typed command line this screen used to fall
+    # back to. `read_key` echoes the character itself, so an accepted
+    # key owes only the newline, and `reject_unhandled_key` erases what
+    # a refused one drew before ringing the bell.
+    char = await session.read_key()
+    if char == REDRAW_KEY:
+        # The same redraw the editor-key path reports for Ctrl-L. It
+        # cannot live in `_key_action`: through `read_editor_key` this
+        # key arrives as an `EditorKeyKind.CTRL` event rather than as
+        # this byte, so the two paths recognize it in their own idiom
+        # and agree on the answer. `read_key` returns it unechoed, so
+        # there is nothing to erase and no newline to owe.
+        return ("refresh", None, highlighted)
+    action = _key_action(char, page, highlighted)
+    if action is None:
+        await session.write(reject_unhandled_key(char))
+        return ("none", None, highlighted)
+    await session.write_line("")
+    return action
 
 
 async def _show_area(
@@ -696,34 +768,34 @@ async def _show_area(
     overrides only the very first render, falling back to the newest
     page if nothing is newer than the cursor.
 
-    One deliberate mechanical difference from `_show_board`, not an
-    inconsistency: this reads the choice via `read_line()`, not
-    `read_key()`. `_show_board`'s options are all single immediate
-    keystrokes; this screen also needs to accept free-text multi-
-    character commands (`/download <filename>`, `/upload`) in the same
-    prompt, which single-keystroke dispatch can't support — `read_key()`
-    returns after exactly one character, before "/download " could ever
-    be typed.
+    Like `_show_board`, every option is a keystroke (design doc §3.5).
+    It reads them through `_read_file_choice` rather than `read_key()`
+    directly because this screen also has a cursor: an arrow key moves
+    the highlight and Enter downloads whatever it sits on. Until this
+    pass the screen read whole *lines* so that it could also carry
+    `/download`, `/upload`, `/describe`, `/weblink` and `/remote`
+    command forms; those are gone, and the prompt is the ordinary
+    `Choice: ` every other menu writes.
 
-    `/download <filename>` deliberately looks a file up by name across
-    the *whole area* (`get_file_by_name`), not just the currently
-    displayed page — pagination bounds what's fetched for browsing, not
-    what can be referenced by a name the user already knows (from an
-    earlier page, or from outside this session entirely).
+    `[D]ownload` (like `[E]`) acts on the file under the cursor, on the
+    only file on the page, or on whichever one `pick_item` returns — a
+    number key `1`-`5` names one directly. A file on *another* page is
+    reached through `[F]ind` (`netbbs.net.scan_and_find`), which enters
+    this area positioned on that file; `/download <filename>`'s
+    area-wide `get_file_by_name` lookup is what that replaced.
 
-    `[E]` (issue #463) edits the highlighted file's description in the
-    caller's own editor, and `/describe <file>` names one the same way
-    `/download` does. Offered only when this caller could actually use
-    it on something on screen — their own upload, or any file if they
-    hold `BoardPermission.EDIT` on the area — since a hotkey that is
-    always refused is worse than one that isn't there.
+    `[E]` (issue #463) edits a file's description in the caller's own
+    editor. Offered only when this caller could actually use it on
+    something on screen — their own upload, or any file if they hold
+    `BoardPermission.EDIT` on the area — since a hotkey that is always
+    refused is worse than one that isn't there.
 
     `link_context` (design doc, issue #92), if given *and this specific
     area is actually Linked* (`is_area_linked` — Link being enabled
     node-wide is not enough, the same distinction `netbbs.net.admin_flow`'s
     board admin screen already draws between "Link is on" and "this
-    board is Linked"), offers `/remote` — browse this area's carried-
-    but-not-yet-fetched remote catalogue and fetch one on demand
+    board is Linked"), offers `[L]ink catalogue` — browse this area's
+    carried-but-not-yet-fetched remote catalogue and fetch one on demand
     (`_browse_remote_files`). Reachable both from the ordinary
     pagination loop and from the "has no files yet" fallback prompt
     below it, since a Linked area can have remote catalogue entries even
@@ -736,7 +808,9 @@ async def _show_area(
     """
     area_name = sanitize_text(area.name)
 
-    def _load(db: Database) -> tuple[FileEntryPage, str | None, bool, bool, str, bool, bool, bool, bool, bool]:
+    def _load(
+        db: Database,
+    ) -> tuple[FileEntryPage, str | None, bool, bool, str, bool, bool, bool, bool, bool, list[FileEntry]]:
         # Bundled into one lane call: the page, the effective
         # name_requirement, the can_write gate, whether this area is
         # actually Linked, and the menu-description preference all come
@@ -764,11 +838,19 @@ async def _show_area(
             has_permission(
                 db, user, object_type="file_area", object_id=area.id, permission=BoardPermission.EDIT
             ),
+            # What this caller has waiting for approval here. Fetched in
+            # the same pass whether or not the listing turns out to be
+            # empty, because both screens need it: `list_files_page`
+            # carries `'approved'` rows only, so a pending upload is
+            # invisible in the listing and `[E]` is the only thing that
+            # can reach it. `list_pending_files` shows a caller nothing
+            # but their own uploads unless they hold APPROVE.
+            list_pending_files(db, area, requesting_user=user),
         )
 
     (
         page, effective_name_requirement, can_write, area_linked, description_level, redraw_in_place,
-        unicode_style, collapsed, truecolor, can_edit_any_file,
+        unicode_style, collapsed, truecolor, can_edit_any_file, pending_uploads,
     ) = await lane.run(_load)
 
     def _may_describe(entry: FileEntry) -> bool:
@@ -788,10 +870,28 @@ async def _show_area(
             return False
         return not (area.moderated and entry.status == "approved")
 
+    describable_pending = [entry for entry in pending_uploads if _may_describe(entry)]
+
+    def _describe_candidates(current_page: FileEntryPage) -> FileEntryPage:
+        """Everything `[E]` could act on: the page's own rows, plus this
+        caller's uploads still awaiting approval here.
+
+        The pending half is not decoration. `list_files_page` carries
+        `'approved'` rows only, so while `/describe <filename>` existed
+        an uploader reached their waiting file by naming it -- the
+        "no files yet" screen was given its own `[E]` for exactly that
+        case (Codex review), and a moderated area that also holds other
+        people's approved files renders *non*-empty, so without this the
+        one screen that can describe it would never offer to.
+
+        Appended after the listing's rows so a cursor position stays an
+        index into the page it was taken from."""
+        return replace(current_page, entries=[*current_page.entries, *describable_pending])
+
     def _can_describe(current_page: FileEntryPage) -> bool:
         """`[E]dit description` is only offered when this caller could
-        actually use it on something currently on screen."""
-        return any(_may_describe(entry) for entry in current_page.entries)
+        actually use it on something this screen can reach."""
+        return any(_may_describe(entry) for entry in _describe_candidates(current_page).entries)
 
     show_remote_hint = link_context is not None and area_linked
 
@@ -802,6 +902,7 @@ async def _show_area(
         await _render_area_page(
             session, lane, area_name, current_page, can_write=can_write, name_requirement=effective_name_requirement,
             can_describe=_can_describe(current_page),
+            describable_pending=bool(describable_pending),
             show_transfer_hint=transfers is not None,
             show_remote_hint=show_remote_hint, description_level=description_level, redraw_in_place=redraw_in_place,
             unicode_style=unicode_style, collapsed=collapsed, truecolor=truecolor, highlighted=highlighted,
@@ -836,9 +937,24 @@ async def _show_area(
             elif kind == "none":
                 continue
             elif kind == "download":
-                if target is not None:
-                    await _handle_download(session, lane, area, target, user, transfers=transfers)
-                    return
+                # A number key or Enter arrives with its entry; `[D]`
+                # arrives with none and resolves one the same way `[E]`
+                # does -- cursor, only entry, else a picker.
+                entry = target if target is not None else await _choose_entry(
+                    session, lane, user, page,
+                    highlighted=highlighted,
+                    title=f"Download a file from {area_name}",
+                    empty_message="No files to download.",
+                    description_of=_download_choice_description,
+                )
+                if entry is None:
+                    # Backing out of the picker is not a rejection, but
+                    # it drew over the listing, so redraw rather than
+                    # bell.
+                    await _render_and_advance_cursor(page, highlighted=highlighted)
+                    continue
+                await send_file_to_caller(session, lane, area, entry, user, transfers=transfers)
+                return
             elif kind == "upload":
                 if not can_write:
                     await _reject_after_echo(session)
@@ -856,7 +972,13 @@ async def _show_area(
                 await _render_and_advance_cursor(page, highlighted=highlighted)
                 continue
             elif kind == "weblink":
-                if transfers is None:
+                # Gated on the same condition the hint is drawn under
+                # (issue #475): on a transport that cannot carry Zmodem
+                # at all, `[D]`/`[U]` already hand out browser links
+                # themselves, so `[W]` is not offered there -- and §3.5
+                # now says a `Choice: ` prompt accepts exactly the keys
+                # its action bar shows.
+                if transfers is None or not supports_zmodem(session):
                     await _reject_after_echo(session)
                     continue
                 await _transfer_link_screen(
@@ -869,147 +991,72 @@ async def _show_area(
                 if not _can_describe(page):
                     await _reject_after_echo(session)
                     continue
-                page = await _handle_describe(
-                    session, lane, area, user, page,
-                    highlighted=highlighted, target=None, can_edit_any_file=can_edit_any_file,
+                described = await _handle_describe(
+                    session, lane, area, user, _describe_candidates(page),
+                    highlighted=highlighted, can_edit_any_file=can_edit_any_file,
                     area_linked=area_linked,
                 )
+                # Only the listing's own rows go back into the loop's
+                # page: a pending upload is reachable by `[E]` but is
+                # not part of the listing, and rendering it as a row
+                # would show everyone's approved-only page a file that
+                # is not in it.
+                #
+                # The pending half is amended in place instead (Claude
+                # review). `_describe_candidates` closes over this list,
+                # so leaving it alone made a second `[E]` in the same
+                # visit offer the pre-edit `FileEntry`: the picker still
+                # said "(no description yet)" and the editor reopened on
+                # the old text, inviting the caller to overwrite what
+                # they had just saved. Neither half is re-queried --
+                # this screen's cursor is positional, which is why
+                # `_handle_describe` hands the amended row back at all.
+                amended = {entry.file_id: entry for entry in described.entries}
+                page = replace(page, entries=[amended.get(e.file_id, e) for e in page.entries])
+                describable_pending = [amended.get(e.file_id, e) for e in describable_pending]
                 await _render_and_advance_cursor(page, highlighted=highlighted)
                 continue
-            elif kind == "nav":
-                if target == "b":
-                    break
-                elif target == "o" and page.has_older:
-                    oldest = page.entries[0]
-                    page = await lane.run(
-                        list_files_page, area, user, before=(oldest.created_at, oldest.file_id)
-                    )
-                    highlighted = None
-                    await _render_and_advance_cursor(page, highlighted=highlighted)
-                elif target == "n" and page.has_newer:
-                    newest = page.entries[-1]
-                    page = await lane.run(
-                        list_files_page, area, user, after=(newest.created_at, newest.file_id)
-                    )
-                    highlighted = None
-                    await _render_and_advance_cursor(page, highlighted=highlighted)
-                elif target == "r" and page.has_newer:
-                    page = await lane.run(list_files_page, area, user)
-                    highlighted = None
-                    await _render_and_advance_cursor(page, highlighted=highlighted)
-                else:
-                    # `b`/`o`/`n`/`r` echo themselves with a newline
-                    # before dispatching, so a nav key refused at the
-                    # edge of the listing has already scrolled the
-                    # prompt away.
+            elif kind == "remote":
+                if not show_remote_hint:
                     await _reject_after_echo(session)
+                    continue
+                await _browse_remote_files(session, lane, area, user, link_context)
+                return
+            elif kind == "back":
+                break
+            elif kind == "older":
+                if not page.has_older:
+                    # Every recognized key echoes itself with a newline
+                    # before dispatching, so one refused at the edge of
+                    # the listing has already scrolled the prompt away.
+                    await _reject_after_echo(session)
+                    continue
+                oldest = page.entries[0]
+                page = await lane.run(
+                    list_files_page, area, user, before=(oldest.created_at, oldest.file_id)
+                )
+                highlighted = None
+                await _render_and_advance_cursor(page, highlighted=highlighted)
                 continue
-            elif kind == "command":
-                choice = target or ""
-                if choice.lower() == "b":
-                    break
-                elif choice.lower() == "o" and page.has_older:
-                    oldest = page.entries[0]
-                    page = await lane.run(
-                        list_files_page, area, user, before=(oldest.created_at, oldest.file_id)
-                    )
-                    highlighted = None
-                    await _render_and_advance_cursor(page, highlighted=highlighted)
-                elif choice.lower() == "n" and page.has_newer:
-                    newest = page.entries[-1]
-                    page = await lane.run(
-                        list_files_page, area, user, after=(newest.created_at, newest.file_id)
-                    )
-                    highlighted = None
-                    await _render_and_advance_cursor(page, highlighted=highlighted)
-                elif choice.lower() == "r" and page.has_newer:
-                    page = await lane.run(list_files_page, area, user)
-                    highlighted = None
-                    await _render_and_advance_cursor(page, highlighted=highlighted)
-                elif choice.lower() in ("w", "/weblink") and transfers is not None:
-                    await _transfer_link_screen(
-                        session, lane, user, area, page,
-                        highlighted=highlighted, can_write=can_write, transfers=transfers,
-                    )
-                    await _render_and_advance_cursor(page, highlighted=highlighted)
-                elif choice.lower() in ("u", "/upload") and can_write:
-                    if await _handle_upload(
-                        session, lane, area, user, link_context=link_context, transfers=transfers
-                    ) is not False:
-                        return
-                    await _render_and_advance_cursor(page, highlighted=highlighted)
-                elif choice.lower().startswith("/describe ") or (
-                    choice.lower() in ("e", "/describe") and _can_describe(page)
-                ):
-                    # The read_line() path (a transport without
-                    # editor-key support) and an explicit
-                    # "/describe <file>" both land here; the immediate
-                    # `e` keystroke is handled as its own kind above.
-                    #
-                    # Only the no-argument forms are gated on the page
-                    # (Codex review): `_can_describe` answers "is this
-                    # hotkey worth offering for what is on screen",
-                    # which is the wrong question for a filename the
-                    # caller typed -- that file may be their own
-                    # upload on some other page, and its real answer
-                    # comes from the domain either way.
-                    argument = choice.split(maxsplit=1)[1].strip() if " " in choice else None
-                    page = await _handle_describe(
-                        session, lane, area, user, page,
-                        highlighted=highlighted, target=argument, can_edit_any_file=can_edit_any_file,
-                        area_linked=area_linked,
-                    )
-                    await _render_and_advance_cursor(page, highlighted=highlighted)
-                elif choice.lower() == "/remote" and show_remote_hint:
-                    await _browse_remote_files(session, lane, area, user, link_context)
-                    return
-                elif choice.isdigit() and 1 <= int(choice) <= len(page.entries):
-                    target_file = page.entries[int(choice) - 1].filename
-                    await _handle_download(session, lane, area, target_file, user, transfers=transfers)
-                    return
-                elif choice.startswith("#") and choice[1:].isdigit() and 1 <= int(choice[1:]) <= len(page.entries):
-                    target_file = page.entries[int(choice[1:]) - 1].filename
-                    await _handle_download(session, lane, area, target_file, user, transfers=transfers)
-                    return
-                elif choice.lower().startswith("/download ") or choice.lower().startswith("d ") or choice.lower().startswith("dl "):
-                    arg = choice.split(maxsplit=1)[1].strip()
-                    if arg.isdigit() and 1 <= int(arg) <= len(page.entries):
-                        exact = next((e.filename for e in page.entries if e.filename == arg), None)
-                        target_file = exact if exact is not None else page.entries[int(arg) - 1].filename
-                    else:
-                        target_file = arg
-                    await _handle_download(session, lane, area, target_file, user, transfers=transfers)
-                    return
-                elif choice.lower() in ("/download", "d", "dl"):
-                    if highlighted is not None and 0 <= highlighted < len(page.entries):
-                        target_file = page.entries[highlighted].filename
-                        await _handle_download(session, lane, area, target_file, user, transfers=transfers)
-                        return
-                    elif len(page.entries) == 1:
-                        target_file = page.entries[0].filename
-                        await _handle_download(session, lane, area, target_file, user, transfers=transfers)
-                        return
-                    else:
-                        await session.write("File number or name to download: ")
-                        sub_choice = (await session.read_line()).strip()
-                        if not sub_choice:
-                            # Backing out of the sub-prompt is not a
-                            # rejection, so no bell -- but it consumed
-                            # a line, so the screen still owes the
-                            # caller a prompt to type the next thing at.
-                            await _write_choice_prompt(session)
-                            continue
-                        if sub_choice.isdigit() and 1 <= int(sub_choice) <= len(page.entries):
-                            exact = next((e.filename for e in page.entries if e.filename == sub_choice), None)
-                            target_file = exact if exact is not None else page.entries[int(sub_choice) - 1].filename
-                        else:
-                            target_file = sub_choice
-                        await _handle_download(session, lane, area, target_file, user, transfers=transfers)
-                        return
-                else:
-                    # A typed line that means nothing here. Enter
-                    # consumed the prompt, so it has to come back.
+            elif kind == "newer":
+                if not page.has_newer:
                     await _reject_after_echo(session)
+                    continue
+                newest = page.entries[-1]
+                page = await lane.run(
+                    list_files_page, area, user, after=(newest.created_at, newest.file_id)
+                )
+                highlighted = None
+                await _render_and_advance_cursor(page, highlighted=highlighted)
+                continue
+            elif kind == "recent":
+                if not page.has_newer:
+                    await _reject_after_echo(session)
+                    continue
+                page = await lane.run(list_files_page, area, user)
+                highlighted = None
+                await _render_and_advance_cursor(page, highlighted=highlighted)
+                continue
         return
 
     # This screen has no listing to act on, so [E] resolves its target
@@ -1017,17 +1064,19 @@ async def _show_area(
     # moderated area holding only their own pending upload renders
     # empty, since `list_files_page` shows nothing unapproved -- and
     # that upload is exactly the one they are most likely to want to
-    # describe while it waits.
+    # describe while it waits. The listing screen above offers the same
+    # uploads for the same reason (`_describe_candidates`); this is the
+    # case where they are *all* there is.
     #
-    # Asked regardless of `can_write` (Codex review): describing your
+    # Offered regardless of `can_write` (Codex review): describing your
     # own upload is not writing to the area, and a SysOp who raises the
     # write level after it lands must not strand the file's own
-    # uploader with no way to describe it. `list_pending_files` shows a
-    # caller nothing but their own pending uploads unless they hold
-    # APPROVE, so this offers nothing it shouldn't.
-    describable = await lane.run(list_pending_files, area, requesting_user=user)
-
-    if not can_write and not show_remote_hint and not describable:
+    # uploader with no way to describe it. Already filtered to what this
+    # caller's save would actually be accepted for, so a file is never
+    # offered here only to be refused after the editor opens -- which
+    # also keeps an APPROVE holder from being shown someone else's
+    # pending upload as if they could describe it.
+    if not can_write and not show_remote_hint and not describable_pending:
         return
 
     hints = []
@@ -1035,14 +1084,14 @@ async def _show_area(
         hints.append(
             MenuEntry(
                 label=menu_key("U", "pload"),
-                brief="Send a file via Zmodem" if _supports_zmodem(session) else "Send a file from your browser",
+                brief="Send a file via Zmodem" if supports_zmodem(session) else "Send a file from your browser",
             )
         )
-    if describable:
+    if describable_pending:
         hints.append(
             MenuEntry(label=menu_key("E", "dit description"), brief="Describe an upload awaiting approval")
         )
-    if transfers is not None and _supports_zmodem(session):
+    if transfers is not None and supports_zmodem(session):
         # The same key the listing offers (Codex review): an empty area
         # is exactly where a caller whose emulator has no Zmodem needs
         # to put the first file.
@@ -1050,57 +1099,87 @@ async def _show_area(
             MenuEntry(label=menu_key("W", "eb transfer"), brief="Get a browser upload link")
         )
     if show_remote_hint:
-        hints.append(MenuEntry(label=menu_key("/remote", " — browse/fetch this file area's remote catalogue")))
+        hints.append(
+            MenuEntry(
+                label=menu_key("L", "ink catalogue"),
+                brief="Browse/fetch this file area's remote catalogue",
+            )
+        )
+    hints.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to the previous menu"))
+
+    # Keystrokes and `[B]ack`, like the listing above it and like every
+    # other menu (design doc §3.5) -- this used to be a typed
+    # "Command (or press Enter to go back): " line carrying the same
+    # slash forms the listing did. Each accepted key still acts and
+    # leaves; the loop is only so an unrecognized one bells instead of
+    # dropping the caller out of the area.
+    #
+    # Drawn once, outside the loop, and an unrecognized key does not
+    # redraw it: `reject_unhandled_key` erases the character the key
+    # echoed, so the prompt is left exactly as it was and the bell is
+    # the whole response (`_CHOICE_PROMPT` above states the rule).
+    # Reprinting per keystroke scrolled "This file area has no files
+    # yet" off a short terminal after two stray keys.
     await session.write_line(
         f"\r\n{_menu_row(hints, width=session.terminal_width, height=session.terminal_height, description_level=description_level)}"
     )
-    await session.write("Command (or press Enter to go back): ")
-    command = (await session.read_line()).strip()
+    await _write_choice_prompt(session)
+    while True:
+        # `read_key`, so Enter is discarded with no effect -- the same
+        # on this action bar as on every other hotkey menu in NetBBS
+        # (`board_flow` included), and §3.5's own rule that `[B]ack`,
+        # not a bare Enter, is the one consistent way out. The typed
+        # line this replaced did treat Enter as "go back".
+        choice = (await session.read_key()).lower()
 
-    if not command:
-        return
-    elif command.lower() in ("u", "/upload") and can_write:
-        if await _handle_upload(
-            session, lane, area, user, link_context=link_context, transfers=transfers
-        ) is False:
-            # The browser is uploading the area's first file; staying
-            # here is the whole point, since this is the screen it will
-            # appear on (Codex review).
-            await _show_area(
-                session, lane, area, user, link_context=link_context, transfers=transfers,
+        if choice == "b":
+            await session.write_line("")
+            return
+        if choice == "u" and can_write:
+            await session.write_line("")
+            if await _handle_upload(
+                session, lane, area, user, link_context=link_context, transfers=transfers
+            ) is False:
+                # The browser is uploading the area's first file; staying
+                # here is the whole point, since this is the screen it will
+                # appear on (Codex review).
+                await _show_area(
+                    session, lane, area, user, link_context=link_context, transfers=transfers,
+                )
+            return
+        if choice == "w" and transfers is not None and supports_zmodem(session):
+            await session.write_line("")
+            await _transfer_link_screen(
+                session, lane, user, area,
+                FileEntryPage(entries=[], has_older=False, has_newer=False),
+                highlighted=None, can_write=can_write, transfers=transfers,
             )
-    elif command.lower() in ("w", "/weblink") and transfers is not None:
-        await _transfer_link_screen(
-            session, lane, user, area,
-            FileEntryPage(entries=[], has_older=False, has_newer=False),
-            highlighted=None, can_write=can_write, transfers=transfers,
-        )
-    elif command.lower().startswith("/describe ") or (
-        command.lower() in ("e", "/describe") and describable
-    ):
-        # A named file is looked up area-wide; the bare key picks from
-        # what is waiting, through the same single-entry/picker logic
-        # the listing screen uses.
-        named = command.split(maxsplit=1)[1].strip() if " " in command else None
-        await _handle_describe(
-            session, lane, area, user,
-            FileEntryPage(entries=[] if named else describable, has_older=False, has_newer=False),
-            highlighted=None, target=named,
-            can_edit_any_file=can_edit_any_file, area_linked=area_linked,
-        )
-    elif command.lower() == "/remote" and show_remote_hint:
-        await _browse_remote_files(session, lane, area, user, link_context)
-    else:
-        await session.write_line("Unknown command.")
+            return
+        if choice == "e" and describable_pending:
+            await session.write_line("")
+            # `[E]` picks from what is waiting, through the same
+            # single-entry/picker logic the listing screen uses.
+            await _handle_describe(
+                session, lane, area, user,
+                FileEntryPage(entries=describable_pending, has_older=False, has_newer=False),
+                highlighted=None,
+                can_edit_any_file=can_edit_any_file, area_linked=area_linked,
+            )
+            return
+        if choice == "l" and show_remote_hint:
+            await session.write_line("")
+            await _browse_remote_files(session, lane, area, user, link_context)
+            return
+        await session.write(reject_unhandled_key(choice))
 
 
 async def _browse_remote_files(
     session: Session, lane: DatabaseLane, area: FileArea, user: User, link_context: LinkContext
 ) -> None:
     """
-    `/remote` (design doc, issue #92): list every catalogued file for
-    `area` -- both fetched and not -- and offer to fetch one that isn't
-    local yet. No per-file access check here beyond what already gated
+    `[L]ink catalogue` (design doc, issue #92): list every catalogued
+    file for `area` -- both fetched and not -- and offer to fetch one
+    that isn't local yet. No per-file access check here beyond what already gated
     entering `_show_area` itself (see that function's own docstring) --
     a `RemoteFile` carries no independent moderation state of its own to
     re-check.
@@ -1177,8 +1256,8 @@ async def _browse_remote_files(
     if selected.fetched_file_id is not None:
         await session.write_line(
             colored(
-                f"\r\n{sanitize_text(selected.filename)!r} is already available locally -- use "
-                "/download to receive it.",
+                f"\r\n{sanitize_text(selected.filename)!r} is already available locally -- press "
+                "[D] on it in the file listing to receive it.",
                 fg_color=MUTED_COLOR,
             )
         )
@@ -1325,7 +1404,8 @@ async def _fetch_remote_file(
     if transfer.status == "completed":
         await session.write_line(
             colored(
-                f"{sanitize_text(remote_file.filename)!r} fetched and verified — available via /download now.",
+                f"{sanitize_text(remote_file.filename)!r} fetched and verified — it is in this "
+                "file area's listing now.",
                 fg_color=SUCCESS_COLOR,
             )
         )
@@ -1555,6 +1635,74 @@ async def _compose_description(
     )
 
 
+def _describe_choice_description(entry: FileEntry) -> str:
+    """One file's row in the `[E]` picker: its current first line, and
+    whether it is still waiting for approval.
+
+    The pending marker matters because those rows are the ones *not* in
+    the listing behind the picker (`list_files_page` carries `'approved'`
+    rows only), so without it a caller cannot tell which of two rows is
+    the upload they are waiting on."""
+    first_line = (entry.description or "").splitlines()
+    current = sanitize_text(first_line[0]) if first_line else "(no description yet)"
+    if entry.status == "pending":
+        return f"awaiting approval — {current}"
+    return current
+
+
+def _download_choice_description(entry: FileEntry) -> str:
+    """One file's row in the `[D]ownload` picker: the size a caller is
+    deciding on, plus the first line of its description when it has
+    one."""
+    size = _format_size(entry.size_bytes)
+    first_line = (entry.description or "").splitlines()
+    return f"{size} — {sanitize_text(first_line[0])}" if first_line else size
+
+
+async def _choose_entry(
+    session: Session,
+    lane: DatabaseLane,
+    user: User,
+    page: FileEntryPage,
+    *,
+    highlighted: int | None,
+    title: str,
+    empty_message: str,
+    description_of: Callable[[FileEntry], str],
+) -> FileEntry | None:
+    """The file a hotkey acts on: the one under the cursor, the only one
+    on the page, else whichever one `pick_item` returns.
+
+    A picker, not a "which one?" prompt in front of the action (design
+    doc §3.5, Codex review): `[D]`/`[E]` with nothing under the cursor
+    still has to find out which file it means, and the way this codebase
+    asks that question is `pick_item` -- backing out of it changes
+    nothing, exactly like backing out of the action behind it.
+
+    Shared by `[D]ownload` and `[E]dit description` so one hotkey cannot
+    drift into resolving its target differently from the other; it is
+    also what `/download <filename>`'s area-wide name lookup was
+    replaced with, `[F]ind` being how a file on another page is reached.
+    """
+    if highlighted is not None and 0 <= highlighted < len(page.entries):
+        return page.entries[highlighted]
+    if len(page.entries) == 1:
+        return page.entries[0]
+    return await pick_item(
+        session, page.entries,
+        name_of=lambda file_entry: sanitize_text(file_entry.filename),
+        stable_id_of=lambda file_entry: file_entry.id,
+        description_of=description_of,
+        title=title,
+        empty_message=empty_message,
+        redraw_in_place=await lane.run(redraw_in_place_enabled, user),
+        unicode_style=await lane.run(unicode_style_enabled, user),
+        collapsed=await lane.run(breadcrumb_collapsed_enabled, user),
+        accent_color=await lane.run(effective_accent_color_256),
+        header_color=await lane.run(effective_header_color_256),
+    )
+
+
 async def _handle_describe(
     session: Session,
     lane: DatabaseLane,
@@ -1563,7 +1711,6 @@ async def _handle_describe(
     page: FileEntryPage,
     *,
     highlighted: int | None,
-    target: str | None,
     can_edit_any_file: bool,
     area_linked: bool = False,
 ) -> FileEntryPage:
@@ -1575,13 +1722,12 @@ async def _handle_describe(
     "the current page" after an in-place edit would silently move the
     caller somewhere else.
 
-    Which file: whatever `target` names (a number on this page or a
-    filename anywhere in the area, matching `/download`'s own
-    resolution), else the cursor-highlighted entry, else the only entry
-    on the page, else whichever one `pick_item` returns. The permission
-    answer comes from the domain (`set_file_description`); the check
-    here only decides whether to open an editor at all, so nobody types
-    out a description that was never going to be saved.
+    Which file: whichever one `_choose_entry` resolves — the
+    cursor-highlighted entry, the only entry on the page, else a
+    picker. The permission answer comes from the domain
+    (`set_file_description`); the check here only decides whether to
+    open an editor at all, so nobody types out a description that was
+    never going to be saved.
 
     `area_linked` only changes what is *said* after a successful save
     (issue #464): in a Linked area an approved upload's catalogue entry
@@ -1596,48 +1742,21 @@ async def _handle_describe(
     looping straight back into an editor that would then ask its own
     recovery question about text typed seconds ago.
     """
-    entry: FileEntry | None = None
-    if target is None and highlighted is not None and 0 <= highlighted < len(page.entries):
-        entry = page.entries[highlighted]
-    elif target is None and len(page.entries) == 1:
-        entry = page.entries[0]
-    elif target is None:
-        # A picker, not a "which one?" prompt in front of the editor
-        # (design doc §3.5, Codex review): `[E]` with nothing under the
-        # cursor still has to find out which file it means, and the way
-        # this codebase asks that question is `pick_item` -- backing out
-        # of it changes nothing, exactly like backing out of the editor
-        # behind it.
-        entry = await pick_item(
-            session, page.entries,
-            name_of=lambda file_entry: sanitize_text(file_entry.filename),
-            stable_id_of=lambda file_entry: file_entry.id,
-            description_of=lambda file_entry: (file_entry.description or "").splitlines()[0]
-            if file_entry.description else "(no description yet)",
-            title=f"Describe a file in {sanitize_text(area.name)}",
-            empty_message="No files to describe.",
-            redraw_in_place=await lane.run(redraw_in_place_enabled, user),
-            unicode_style=await lane.run(unicode_style_enabled, user),
-            collapsed=await lane.run(breadcrumb_collapsed_enabled, user),
-            accent_color=await lane.run(effective_accent_color_256),
-            header_color=await lane.run(effective_header_color_256),
-        )
-        if entry is None:
-            return page
-    else:
-        if target.isdigit() and 1 <= int(target) <= len(page.entries):
-            exact = next((e for e in page.entries if e.filename == target), None)
-            entry = exact if exact is not None else page.entries[int(target) - 1]
-        else:
-            entry = await lane.run(get_file_by_name, area, target, requesting_user=user)
+    entry = await _choose_entry(
+        session, lane, user, page,
+        highlighted=highlighted,
+        title=f"Describe a file in {sanitize_text(area.name)}",
+        empty_message="No files to describe.",
+        description_of=_describe_choice_description,
+    )
     if entry is None:
-        await session.write_line(
-            colored(f"\r\nNo file named {sanitize_text(target or '')!r} in this file area.", fg_color=ERROR_COLOR)
-        )
+        # The picker was backed out of, which changes nothing and has
+        # nothing to report.
         return page
 
-    # A typed filename bypasses the on-screen gate above, so this is
-    # where a caller who named a file they may not describe is told so.
+    # `[E]` is offered when *any* file on the page is describable, so
+    # the one actually chosen may still not be: this is where a caller
+    # who picked someone else's file is told so.
     if not can_edit_any_file and entry.uploader_user_id != user.id:
         await session.write_line(
             colored(
@@ -1651,6 +1770,15 @@ async def _handle_describe(
         # Refused before an editor opens, not after it is filled in
         # (Codex review) -- the domain would reject this save, and the
         # honest place to say so is here.
+        #
+        # Still reachable, and by a route that did not exist before
+        # `[E]` began offering the caller's pending uploads: one waiting
+        # upload turns the key on for the whole page, and the cursor may
+        # then be sitting on an *approved* file of theirs in the same
+        # moderated area. Without this they would type a description and
+        # be told afterwards that they lack a permission they never had,
+        # which is what `set_file_description` says rather than what
+        # actually happened.
         await session.write_line(
             colored(
                 f"\r\n{sanitize_text(entry.filename)!r} has already been approved in a moderated "
@@ -1779,7 +1907,7 @@ async def _handle_describe(
     )
 
 
-def _supports_zmodem(session: Session) -> bool:
+def supports_zmodem(session: Session) -> bool:
     """Whether this session's transport can carry a Zmodem transfer at
     all (issue #475).
 
@@ -2048,7 +2176,7 @@ async def _handle_upload(
     # or a future caller that forgets -- therefore behaves the way every
     # caller did before it existed, rather than looping on a screen
     # whose input source has nothing left to give.
-    if not _supports_zmodem(session):
+    if not supports_zmodem(session):
         # This transport could never carry the transfer (issue #475),
         # so it is not started: a browser link is the whole of what
         # this caller can do, and offering it beats a Zmodem handshake
@@ -2192,26 +2320,19 @@ async def _handle_upload(
     return True
 
 
-async def _handle_download(
-    session: Session, lane: DatabaseLane, area: FileArea, filename: str, user: User, *,
+async def send_file_to_caller(
+    session: Session, lane: DatabaseLane, area: FileArea, entry: FileEntry, user: User, *,
     transfers: TransferGrants | None = None,
 ) -> None:
-    # Looked up by exact name across the whole area (get_file_by_name),
-    # not just the currently displayed page -- see _show_area's
-    # docstring. Matched against the raw, unsanitized `filename` the
-    # user actually typed -- sanitizing before comparison risks a false
-    # match/miss against real stored filenames; sanitize_text is only
-    # applied below, at the point this gets echoed back to the terminal.
-    # requesting_user is passed so a still-pending upload (moderated
-    # area, design doc sign-off) isn't downloadable by name
-    # before it's been approved, unless this user is its own uploader
-    # or holds approve permission on the area.
-    entry = await lane.run(get_file_by_name, area, filename, requesting_user=user)
-    if entry is None:
-        await session.write_line(
-            colored(f"\r\nNo file named {sanitize_text(filename)!r} in this file area.", fg_color=ERROR_COLOR)
-        )
-        return
+    # Takes the entry the caller actually chose -- a number key, Enter
+    # on the cursor, or `_choose_entry`'s picker -- rather than a
+    # filename to look up again. While `/download <filename>` existed
+    # this re-read the area by name (`get_file_by_name`) because the
+    # name was all the screen had; a filename is not unique within an
+    # area, so that lookup could hand back a different row than the one
+    # under the cursor. Every caller now holds the row itself, and one
+    # already passed this area's read/age/name gate and
+    # `list_files_page`'s own moderation filter to be on screen at all.
 
     # Returns whether the session itself carried a transfer (Codex
     # review). A Zmodem upload owns the byte stream and ends with the
@@ -2220,7 +2341,7 @@ async def _handle_download(
     # and the caller is still sitting in the file area, which is where
     # the file they are about to send should appear.
 
-    if not _supports_zmodem(session):
+    if not supports_zmodem(session):
         # Issue #475: same reasoning as the upload side -- this
         # transport cannot carry the transfer, so the browser link is
         # the whole of what this caller can do.
@@ -2261,5 +2382,20 @@ async def _handle_download(
         await zmodem.send_file(session, entry.filename, data)
     except (zmodem.ZmodemError, NotImplementedError) as exc:
         await session.write_line(colored(f"\r\nDownload failed: {exc}", fg_color=ERROR_COLOR))
+        return
+    except OSError:
+        # The row the caller chose is the row that gets sent now, rather
+        # than one re-read by name -- so a file deleted and then
+        # collected (`netbbs.files.gc`) while this page was on screen
+        # reaches `download_file` with no bytes behind it. Reported the
+        # way the by-name lookup used to report a missing file, instead
+        # of leaving the screen through `FileNotFoundError`.
+        await session.write_line(
+            colored(
+                f"\r\n{entry_filename!r} is no longer on this node — it was removed while this "
+                "listing was on screen.",
+                fg_color=ERROR_COLOR,
+            )
+        )
         return
     await session.write_line(colored(f"\r\nSent {entry_filename!r}.", fg_color=SUCCESS_COLOR))

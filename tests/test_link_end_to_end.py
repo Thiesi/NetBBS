@@ -1276,12 +1276,39 @@ def test_remote_file_duplicate_chunk_request_over_real_transport_is_idempotent(t
         seed.close()
 
 
+class _KeyScriptedSession(PickerFakeSession):
+    """`PickerFakeSession` blocks forever once its script runs dry, the
+    way a real terminal with nothing typed at it does. That is right
+    for the chat loop it was written for, but the file-area screen is
+    keystrokes only now: a key it does not recognize bells and reads
+    again, so a mis-scripted keystroke would hang this test instead of
+    failing it. Fail loudly, like every other keystroke fake in the
+    suite (see `tests/test_board_pagination_ui.py`).
+    """
+
+    async def read_key(self, echo: bool = True) -> str:
+        if not self._inputs:
+            raise AssertionError("read_key() called with no more scripted keys")
+        return self._inputs.pop(0)
+
+
 def test_remote_file_browse_and_fetch_via_the_live_interactive_ui_flow(tmp_path):
     """Design doc, issue #92's own acceptance criterion: a full
     interactive-flow regression test proving browse -> fetch -> verify/
-    promote -> ordinary download visibility, driven through the actual
-    `netbbs.net.file_flow._show_area` UI (`/remote` command, `pick_item`
-    selection, the fetch confirmation prompt), not a direct domain call."""
+    promote -> the file landing in the area's ordinary local storage,
+    driven through the actual `netbbs.net.file_flow._show_area` UI (the
+    `[L]ink catalogue` keystroke, `pick_item` selection, the fetch
+    confirmation prompt), not a direct domain call.
+
+    The promoted file is asserted through `download_file`, the same
+    bytes the listing's `[D]ownload` key sends; no `[D]` is pressed
+    here, since `_show_area` returns once the catalogue screen is done.
+    The listing's own download keys are covered in
+    `tests/test_file_columnar_and_shortcuts.py`.
+
+    The catalogue used to be reached by typing `/remote` on this
+    screen; it is keystrokes only now (design doc §3.5), so the script
+    below starts with `l`."""
     dialer_identity = bootstrap_node_identity("dialer")
     seed_identity = bootstrap_node_identity("seed")
     seed_node = LinkNode(identity=seed_identity)
@@ -1296,7 +1323,7 @@ def test_remote_file_browse_and_fetch_via_the_live_interactive_ui_flow(tmp_path)
     link_file_area(dialer.db, area, node_identity=dialer_identity)
     queue_file_descriptor_if_linked(dialer.db, entry, area, node_identity=dialer_identity)
 
-    ui_session = PickerFakeSession(["/remote", "0", "1", "y"])
+    ui_session = _KeyScriptedSession(["l", "0", "1", "y"])
 
     async def scenario():
         dialer_server = await _run_server(dialer_node, dialer.lane)

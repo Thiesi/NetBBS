@@ -1,12 +1,17 @@
 """
 Tests for the interactive remote-file-catalogue browse/fetch UI (design
-doc, issue #92) -- `netbbs.net.file_flow._show_area`'s `/remote` command
-and `_browse_remote_files`/`_fetch_remote_file`. The full real-transport
-browse -> fetch -> verify/promote -> ordinary download scenario lives in
-`tests/test_link_end_to_end.py` (needs a real second node to fetch from);
-this file covers the UI-level edge cases that don't need one: no
-catalogue entries yet, an already-fetched entry, cancelling the fetch
-prompt, and an unreachable origin.
+doc, issue #92) -- `netbbs.net.file_flow._show_area`'s `[L]ink
+catalogue` key and `_browse_remote_files`/`_fetch_remote_file`. The full
+real-transport browse -> fetch -> verify/promote -> ordinary download
+scenario lives in `tests/test_link_end_to_end.py` (needs a real second
+node to fetch from); this file covers the UI-level edge cases that don't
+need one: no catalogue entries yet, an already-fetched entry, cancelling
+the fetch prompt, and an unreachable origin.
+
+The catalogue used to be reached by typing `/remote` -- the one screen in
+NetBBS that read whole lines. It is a single `l` keystroke now (design
+doc §3.5), from the paginated listing and from the "has no files yet"
+action bar alike, so every scenario here scripts keys rather than lines.
 """
 
 from __future__ import annotations
@@ -24,7 +29,36 @@ from netbbs.link.protocol import LinkNode
 from netbbs.net import file_flow
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
-from tests.test_chat_flow_picker_authorization import FakeSession
+from tests.test_chat_flow_picker_authorization import FakeSession as _PickerFakeSession
+
+
+class FakeSession(_PickerFakeSession):
+    """The picker-authorization session, but running out of scripted
+    input *fails* instead of blocking forever.
+
+    Every screen here is keystroke-driven now, and an unrecognized key
+    bells and re-renders rather than leaving -- so a script one key
+    short would hang the borrowed session's readers on their never-set
+    `asyncio.Event` instead of reporting a mis-scripted test.
+
+    `read_line` stays scripted from the same queue: `netbbs.net.confirm.
+    read_confirmation_choice` deliberately falls back to it for a
+    session (like this one) whose `read_editor_key` raises, which is how
+    the y/n fetch prompt reads its answer here.
+    """
+
+    async def read_key(self, echo: bool = True) -> str:
+        if not self._inputs:
+            raise AssertionError("FakeSession.read_key() called with no more scripted keys")
+        return self._inputs.pop(0)
+
+    async def read_line(
+        self, echo: bool = True, history=None, completer=None, *,
+        live_buffer=None, lock=None, list_candidates=None,
+    ) -> str:
+        if not self._inputs:
+            raise AssertionError("FakeSession.read_line() called with no more scripted input")
+        return self._inputs.pop(0)
 
 
 @pytest.fixture
@@ -70,14 +104,14 @@ def test_remote_hint_hidden_without_link_context(db, lane, alice):
 
     asyncio.run(file_flow._show_area(session, lane, area, alice))
 
-    assert "/remote" not in _written(session)
+    assert "ink catalogue" not in _written(session)
 
 
-def test_remote_command_reports_no_catalogue_entries(db, lane, alice, node_identity):
+def test_link_catalogue_key_reports_no_catalogue_entries(db, lane, alice, node_identity):
     area = create_file_area(db, "downloads", creator=alice)
     link_file_area(db, area, node_identity=node_identity)
     link_context = _link_context_for(node_identity)
-    session = FakeSession(["/remote"])
+    session = FakeSession(["l"])
 
     asyncio.run(file_flow._show_area(session, lane, area, alice, link_context=link_context))
 
@@ -86,33 +120,34 @@ def test_remote_command_reports_no_catalogue_entries(db, lane, alice, node_ident
 
 def test_remote_hint_hidden_when_link_enabled_but_this_area_was_never_linked(db, lane, alice, node_identity):
     """Link being enabled node-wide is not the same as this specific
-    area being Linked (`is_area_linked`) -- offering /remote on an area
-    that structurally can never have a remote catalogue (never
-    `link_file_area`'d) is misleading, the same distinction `netbbs.
-    net.admin_flow`'s board admin screen already draws between "Link is
-    on" and "this board is Linked"."""
+    area being Linked (`is_area_linked`) -- offering `[L]ink catalogue`
+    on an area that structurally can never have a remote catalogue
+    (never `link_file_area`'d) is misleading, the same distinction
+    `netbbs.net.admin_flow`'s board admin screen already draws between
+    "Link is on" and "this board is Linked"."""
     area = create_file_area(db, "downloads", creator=alice)
     link_context = _link_context_for(node_identity)
     session = FakeSession(["b"])
 
     asyncio.run(file_flow._show_area(session, lane, area, alice, link_context=link_context))
 
-    assert "/remote" not in _written(session)
+    assert "ink catalogue" not in _written(session)
 
 
 def test_remote_hint_shown_even_with_zero_local_uploads(db, lane, alice, node_identity):
     """A Linked area can have remote catalogue entries even with zero
-    *local* uploads of its own -- /remote must be reachable from the
-    'has no files yet' fallback prompt, not just the paginated listing."""
+    *local* uploads of its own -- `[L]ink catalogue` must be reachable
+    from the 'has no files yet' action bar, not just the paginated
+    listing."""
     area = create_file_area(db, "downloads", creator=alice)
     link_file_area(db, area, node_identity=node_identity)
     link_context = _link_context_for(node_identity)
-    session = FakeSession(["/remote"])
+    session = FakeSession(["l"])
 
     asyncio.run(file_flow._show_area(session, lane, area, alice, link_context=link_context))
 
     assert "has no files yet" in _written(session)
-    assert "/remote" in _written(session)
+    assert "ink catalogue" in _written(session)
     assert "has no remote catalogue entries" in _written(session)
 
 
@@ -140,11 +175,11 @@ def _carried_area_with_one_remote_file(db, node_identity, remote_node_identity, 
     return area, remote_file
 
 
-def test_remote_command_lists_a_catalogued_but_not_yet_fetched_file(db, lane, alice, node_identity, remote_node_identity):
+def test_link_catalogue_key_lists_a_catalogued_but_not_yet_fetched_file(db, lane, alice, node_identity, remote_node_identity):
     area, remote_file = _carried_area_with_one_remote_file(db, node_identity, remote_node_identity)
     link_context = _link_context_for(node_identity)
-    # /remote -> picker shows item 01 -> pick it -> decline the fetch prompt
-    session = FakeSession(["/remote", "0", "1", "n"])
+    # [L] -> picker shows item 01 -> pick it -> decline the fetch prompt
+    session = FakeSession(["l", "0", "1", "n"])
 
     asyncio.run(file_flow._show_area(session, lane, area, alice, link_context=link_context))
 
@@ -181,7 +216,7 @@ def test_remote_fetch_warns_before_confirming_a_changed_origin_identity(
     save_peer(db, changed_peer)
     link_context = _link_context_for(node_identity)
     link_context.link_node.peers[changed_peer.fingerprint] = changed_peer
-    session = FakeSession(["/remote", "0", "1", "n"])
+    session = FakeSession(["l", "0", "1", "n"])
 
     asyncio.run(
         file_flow._show_area(session, lane, area, alice, link_context=link_context)
@@ -238,7 +273,7 @@ def test_remote_fetch_refreshes_identity_warning_after_the_picker(
     assert "Cancelled" in output
 
 
-def test_remote_command_reports_an_already_fetched_entry_without_offering_to_fetch(
+def test_link_catalogue_key_reports_an_already_fetched_entry_without_offering_to_fetch(
     db, lane, alice, node_identity, remote_node_identity
 ):
     area, remote_file = _carried_area_with_one_remote_file(db, node_identity, remote_node_identity)
@@ -262,12 +297,15 @@ def test_remote_command_reports_an_already_fetched_entry_without_offering_to_fet
     )
     db.connection.commit()
     link_context = _link_context_for(node_identity)
-    session = FakeSession(["/remote", "0", "1"])
+    session = FakeSession(["l", "0", "1"])
 
     asyncio.run(file_flow._show_area(session, lane, area, alice, link_context=link_context))
 
     output = _written(session)
-    assert "already available locally" in output
+    # The entry it points at is a real local file now, so it names the
+    # key that receives it -- not the `/download` command that used to
+    # be the only way to ask for one.
+    assert "is already available locally -- press [D] on it in the file listing to receive it." in output
     assert "Fetch it from its origin now?" not in output
 
 
@@ -277,7 +315,7 @@ def test_fetch_reports_an_unreachable_origin(db, lane, alice, node_identity, rem
     the fetch must fail clearly rather than hang or crash."""
     area, remote_file = _carried_area_with_one_remote_file(db, node_identity, remote_node_identity)
     link_context = _link_context_for(node_identity)
-    session = FakeSession(["/remote", "0", "1", "y"])
+    session = FakeSession(["l", "0", "1", "y"])
 
     asyncio.run(file_flow._show_area(session, lane, area, alice, link_context=link_context))
 
@@ -324,7 +362,7 @@ def test_fetch_reports_a_withdrawn_file_instead_of_a_generic_transfer_error(
         raise transport_module.RemoteFileWithdrawnError("gone", withdrawal)
 
     monkeypatch.setattr(transport_module, "fetch_next_file_chunk", gone)
-    session = FakeSession(["/remote", "0", "1", "y"])
+    session = FakeSession(["l", "0", "1", "y"])
 
     asyncio.run(file_flow._show_area(session, lane, area, alice, link_context=link_context))
 

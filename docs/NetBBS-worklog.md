@@ -1947,6 +1947,67 @@ Any future caller moving from `read_key()` to `read_editor_key()` in a
 screen with broad test-double reuse should expect both gaps, not just
 whichever one its own first test run happens to hit.
 
+### A screen that reads keys two ways needs one key map and two echo regimes
+
+`netbbs.net.file_flow._read_file_choice` reads `read_editor_key()` for its
+cursor and falls back to `read_key()` on a transport without one. Both paths
+must resolve a keystroke through the *same* map (`_key_action`): while they
+each had their own `if char ==` ladder, a key added to one silently did
+nothing on the other, which is how the file area came to accept `/upload`
+as a typed line on some transports and `[U]` on others.
+
+The two readers echo differently, and a refusal has to match whichever one
+produced the key:
+
+- `read_editor_key()` echoes **nothing**. A key the screen does not handle
+  leaves the prompt intact, so the bell alone is the whole response —
+  reprinting the prompt would stack a second copy on the line.
+- `read_key()` echoes **the character**. An accepted key therefore owes only
+  the newline, and a refused one goes through `reject_unhandled_key`, which
+  erases what was echoed before belling.
+- A key the screen *recognizes* and then refuses (`[O]` on a page with no
+  older files) has already echoed itself plus a newline, so the prompt has
+  scrolled away and must be reprinted deliberately.
+
+A `Session` test double for such a screen must make `read_key()` **raise**
+when its script runs out, exactly as `tests/test_board_pagination_ui.py`
+does. Returning `""` forever is not a benign default: no real transport ever
+returns it (`read_key` discards CR/LF rather than returning them), the
+screen treats it as an unhandled key, and the bell-and-reprompt loop spins
+until the test is killed. This is the `read_key()` twin of the silent hang
+an exhausted `read_editor_key` double produces.
+
+### A hotkey acting on "this file" resolves its target in one place
+
+`[D]ownload` and `[E]dit description` both mean "the file I am looking at",
+and both go through `file_flow._choose_entry`: the cursor-highlighted entry,
+else the only entry on the page, else `pick_item`. Two hotkeys on one screen
+with two copies of that resolution will drift.
+
+`send_file_to_caller` (`_handle_download` until it grew a second caller)
+takes the chosen `FileEntry`, not a filename. It used to
+re-read the row with `get_file_by_name` because a typed `/download <name>`
+was all the screen had, and a filename is *not* unique within an area
+(`get_file_by_name` documents that it returns the oldest match) — so the
+number key under a duplicate name could start a transfer of a different row
+than the one on screen. A screen that already holds the row should hand it
+over rather than a name to look up again. The row it hands over may have
+been deleted and collected since the page was drawn, so the send path
+answers `OSError` as well as `ZmodemError`; the by-name lookup used to
+absorb that as "no file named …".
+
+**A refusal's reachability is a property of the candidate set, not of the
+screen.** Removing `/describe <filename>` looked like it made
+`_handle_describe`'s "already approved in a moderated area" refusal dead
+code: `[E]` is gated on `_can_describe`, and in a moderated area no listed
+row satisfies it for a caller without EDIT. The same commit then widened
+`[E]` to also offer the caller's *pending* uploads — and one waiting upload
+turns the key on for the whole page, cursor included, so the refusal was
+live again while deleted. Before deleting a per-item refusal because the
+gate in front of it can never pass, check every set the chooser can draw
+from, and re-check it if that set later grows: the gate answers "is this
+hotkey worth offering at all", never "is this particular item allowed".
+
 ### Pinned chat UI
 
 The pinned status/input rows and line editor share one write lock. The live
@@ -3518,9 +3579,10 @@ worth keeping for any future "attach a command to an existing listing"
 work: `_show_area` had two separate display paths (the normal paginated
 loop and a separate fallback prompt for "no files yet"), and a Linked area
 can have remote catalogue entries while having zero local uploads — the
-new `/remote` command had to be wired into *both* branches, not just the
-main loop, or it would silently be unreachable for exactly the areas most
-likely to have something worth fetching.
+new remote-catalogue action (`/remote` then, the `[L]ink catalogue` hotkey
+now) had to be wired into *both* branches, not just the main loop, or it
+would silently be unreachable for exactly the areas most likely to have
+something worth fetching.
 
 **Extending inventory/pull catch-up to file-area catalogues (issue #93).**
 Adding a third scope to an existing generalized mechanism (`InventoryRequest.
@@ -4782,11 +4844,11 @@ These are recurring failure patterns, not a defect catalogue:
   layer without also reusing its UI layer — passing tests only prove the
   function works when called, not that anything calls it. The same audit
   also caught a related but different mistake in `netbbs.net.file_flow`'s
-  `/remote` hint: it was gated on Link being enabled *node-wide*
+  remote-catalogue hint: it was gated on Link being enabled *node-wide*
   (`link_context is not None`) rather than on the specific area actually
   being Linked (`is_area_linked`), unlike the board admin screen's own
   `[L]ink`/`[T]ransfer`/`[C]lose` gating, which already drew that exact
-  distinction — offering `/remote` on an area that structurally can never
+  distinction — offering the catalogue on an area that structurally can never
   have a remote catalogue is a small honesty gap, not a crash, but the
   same class of "capability enabled somewhere in the stack" vs "capability
   applies to *this* specific resource" confusion.

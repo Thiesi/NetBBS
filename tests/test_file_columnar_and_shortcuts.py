@@ -30,7 +30,8 @@ from netbbs.storage.execution import DatabaseLane
 
 
 class FakeSession:
-    def __init__(self, lines=None, width=80, height=24):
+    def __init__(self, keys=None, lines=None, width=80, height=24):
+        self._keys = iter(keys or [])
         self._lines = iter(lines or [])
         self.written: list[str] = []
         self.terminal_width = width
@@ -45,6 +46,15 @@ class FakeSession:
 
     async def write_line(self, text: str = "") -> None:
         self.written.append(text + "\n")
+
+    async def read_key(self, echo: bool = True) -> str:
+        # Raises rather than returning "" forever: a key the file
+        # listing does not handle changes nothing, so a fake that never
+        # runs out would spin the loop belling instead of failing.
+        key = next(self._keys, None)
+        if key is None:
+            raise AssertionError("FakeSession.read_key() called with no more scripted keys")
+        return key
 
     async def read_line(self, echo: bool = True, **kwargs) -> str:
         return next(self._lines, "")
@@ -65,13 +75,13 @@ class FakeSession:
 
 
 class FakeInteractiveSession(FakeSession):
-    def __init__(self, editor_keys=None, lines=None, width=80, height=24):
-        super().__init__(lines=lines, width=width, height=height)
-        self._keys = iter(editor_keys or [])
+    def __init__(self, editor_keys=None, keys=None, lines=None, width=80, height=24):
+        super().__init__(keys=keys, lines=lines, width=width, height=height)
+        self._editor_keys = iter(editor_keys or [])
 
     async def read_editor_key(self, *, distinguish_ctrl_h: bool = False) -> EditorKey:
         try:
-            return next(self._keys)
+            return next(self._editor_keys)
         except StopIteration:
             return EditorKey(EditorKeyKind.CHAR, char="b")
 
@@ -134,7 +144,7 @@ def test_columnar_headers_and_dividers_rendered(tmp_path, monkeypatch):
     db_path = tmp_path / "node.db"
     db = Database(db_path)
     area, user = _setup_area(db, count=2, monkeypatch=monkeypatch)
-    session = FakeSession(lines=["b"], width=80)
+    session = FakeSession(keys=["b"], width=80)
     lane = DatabaseLane(db_path)
 
     asyncio.run(_show_area(session, lane, area, user))
@@ -170,7 +180,7 @@ def test_columnar_verified_name_display_no_truncation(tmp_path, monkeypatch):
     upload_file(db, area, alice, "release.zip", b"zip data")
     attest_name(db, alice, "Alice Wonderland", verifier=sysop)
 
-    session = FakeSession(lines=["b"], width=80)
+    session = FakeSession(keys=["b"], width=80)
     lane = DatabaseLane(db_path)
 
     asyncio.run(_show_area(session, lane, area, alice))
@@ -198,7 +208,7 @@ def test_each_column_of_a_row_is_separately_colored(tmp_path, monkeypatch):
     db_path = tmp_path / "node.db"
     db = Database(db_path)
     area, user = _setup_area(db, count=2, monkeypatch=monkeypatch)
-    session = FakeSession(lines=["b"], width=80)
+    session = FakeSession(keys=["b"], width=80)
     lane = DatabaseLane(db_path)
 
     asyncio.run(_show_area(session, lane, area, user))
@@ -297,15 +307,21 @@ def test_a_verified_uploader_does_not_stripe_the_highlighted_bar(tmp_path, monke
     assert "(=Alice Wonderland=)" in bar, bar
 
 
-# -- Numbered Download Shortcuts (Line mode) --
+# -- Numbered Download Shortcuts (no editor-key support) --
+#
+# These drive the `read_key()` fallback path: one keystroke per action,
+# exactly the keys the cursor path below answers to. The screen used to
+# read whole typed lines here and also carried `#<n>`, `/download <n>`
+# and a `d <n>` alias; those forms are gone (design doc §3.5), and
+# `[D]` is the keystroke that names a file without typing its number.
 
 
 def test_download_via_direct_number_shortcut(tmp_path, monkeypatch):
     db_path = tmp_path / "node.db"
     db = Database(db_path)
     area, user = _setup_area(db, count=2, monkeypatch=monkeypatch)
-    # Typing '1' directly downloads the 1st file on the page (pkg0.tar.gz)
-    session = FakeSession(lines=["1"])
+    # Pressing '1' downloads the 1st file on the page (pkg0.tar.gz)
+    session = FakeSession(keys=["1"])
     lane = DatabaseLane(db_path)
 
     asyncio.run(_show_area(session, lane, area, user))
@@ -320,8 +336,8 @@ def test_download_via_second_number_shortcut(tmp_path, monkeypatch):
     db_path = tmp_path / "node.db"
     db = Database(db_path)
     area, user = _setup_area(db, count=2, monkeypatch=monkeypatch)
-    # Typing '2' downloads the 2nd file on the page (pkg1.tar.gz)
-    session = FakeSession(lines=["2"])
+    # Pressing '2' downloads the 2nd file on the page (pkg1.tar.gz)
+    session = FakeSession(keys=["2"])
     lane = DatabaseLane(db_path)
 
     asyncio.run(_show_area(session, lane, area, user))
@@ -332,12 +348,14 @@ def test_download_via_second_number_shortcut(tmp_path, monkeypatch):
     db.close()
 
 
-def test_download_via_hash_number_shortcut(tmp_path, monkeypatch):
+def test_download_key_on_a_single_file_page_needs_no_number(tmp_path, monkeypatch):
+    """`[D]` on a page holding one file means that file: there is
+    nothing to disambiguate, so no picker and no prompt. This is what
+    the `#1`/`/download 1` typed forms were for."""
     db_path = tmp_path / "node.db"
     db = Database(db_path)
-    area, user = _setup_area(db, count=2, monkeypatch=monkeypatch)
-    # Typing '#1' downloads the 1st file
-    session = FakeSession(lines=["#1"])
+    area, user = _setup_area(db, count=1, monkeypatch=monkeypatch)
+    session = FakeSession(keys=["d"])
     lane = DatabaseLane(db_path)
 
     asyncio.run(_show_area(session, lane, area, user))
@@ -348,12 +366,15 @@ def test_download_via_hash_number_shortcut(tmp_path, monkeypatch):
     db.close()
 
 
-def test_download_via_download_number(tmp_path, monkeypatch):
+def test_download_key_on_a_multi_file_page_picks_through_the_picker(tmp_path, monkeypatch):
+    """`[D]` with several files and no cursor asks which one the way
+    this codebase asks any "which one?" question -- `pick_item`, whose
+    own two-digit selection ("01") names the first entry. The replaced
+    `d 1` alias answered the same question inline."""
     db_path = tmp_path / "node.db"
     db = Database(db_path)
     area, user = _setup_area(db, count=2, monkeypatch=monkeypatch)
-    # Typing '/download 1' downloads the 1st file on the page
-    session = FakeSession(lines=["/download 1"])
+    session = FakeSession(keys=["d", "0", "1"])
     lane = DatabaseLane(db_path)
 
     asyncio.run(_show_area(session, lane, area, user))
@@ -364,17 +385,18 @@ def test_download_via_download_number(tmp_path, monkeypatch):
     db.close()
 
 
-def test_download_via_d_shortcut_command(tmp_path, monkeypatch):
+def test_download_key_backed_out_of_the_picker_downloads_nothing(tmp_path, monkeypatch):
+    """Backing out of the picker is not a refusal: the listing comes
+    back (it was drawn over) and nothing is sent."""
     db_path = tmp_path / "node.db"
     db = Database(db_path)
     area, user = _setup_area(db, count=2, monkeypatch=monkeypatch)
-    # Typing 'd 1' downloads the 1st file
-    session = FakeSession(lines=["d 1"])
+    session = FakeSession(keys=["d", "b", "b"])
     lane = DatabaseLane(db_path)
 
     asyncio.run(_show_area(session, lane, area, user))
 
-    assert "Starting Zmodem send of 'pkg0.tar.gz'" in session.output
+    assert "Starting Zmodem send" not in session.output
 
     lane.close()
     db.close()
@@ -384,8 +406,44 @@ def test_download_out_of_range_number_beeps_and_stays(tmp_path, monkeypatch):
     db_path = tmp_path / "node.db"
     db = Database(db_path)
     area, user = _setup_area(db, count=2, monkeypatch=monkeypatch)
-    # '99' is out of range; then 'b' to back out
-    session = FakeSession(lines=["99", "b"])
+    # '9' is out of range for a two-file page; then 'b' to back out
+    session = FakeSession(keys=["9", "b"])
+    lane = DatabaseLane(db_path)
+
+    asyncio.run(_show_area(session, lane, area, user))
+
+    assert "\a" in session.output
+    assert "Starting Zmodem send" not in session.output
+
+    lane.close()
+    db.close()
+
+
+@pytest.mark.parametrize("char", ["²", "٣"])
+def test_a_non_ascii_digit_key_is_refused_rather_than_crashing(tmp_path, monkeypatch, char):
+    """`str.isdigit()` is true for two kinds of character this screen
+    must not treat as a file number, and they fail differently:
+
+    - `'²'` (AltGr+2 on a German keyboard, so a key a caller really
+      presses): `isdigit()` is true but `isdecimal()` is false and
+      `int('²')` raises `ValueError`, which nothing on the read path
+      catches -- it left the screen through `_show_area`.
+    - `'٣'` (Arabic-Indic three): `int()` accepts it as `3`, so the
+      screen would have started a transfer of the third file for a key
+      its own `1-3` hint never offered.
+
+    Both arrive as an `EditorKeyKind.CHAR`, the path a real terminal
+    takes, and both must land on the same bell every other unhandled
+    key gets."""
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
+    area, user = _setup_area(db, count=3, monkeypatch=monkeypatch)
+    session = FakeInteractiveSession(
+        editor_keys=[
+            EditorKey(EditorKeyKind.CHAR, char=char),
+            EditorKey(EditorKeyKind.CHAR, char="b"),
+        ]
+    )
     lane = DatabaseLane(db_path)
 
     asyncio.run(_show_area(session, lane, area, user))
@@ -401,14 +459,16 @@ def test_download_hints_reflect_page_count(tmp_path, monkeypatch):
     db_path = tmp_path / "node.db"
     db = Database(db_path)
     area, user = _setup_area(db, count=3, monkeypatch=monkeypatch)
-    session = FakeSession(lines=["b"])
+    session = FakeSession(keys=["b"])
     lane = DatabaseLane(db_path)
 
     asyncio.run(_show_area(session, lane, area, user))
 
-    # Shows "1-3 or /download" hint
-    assert "1-3" in session.output
-    assert "/download" in session.output
+    # Shows the "1-3" number range plus the [D]ownload key that
+    # replaced the typed `/download` form.
+    assert "1-3" in session.visible_output
+    assert "[D]ownload" in session.visible_output
+    assert "/download" not in session.visible_output
 
     lane.close()
     db.close()
@@ -439,6 +499,31 @@ def test_interactive_arrow_highlight_and_enter_download(tmp_path, monkeypatch):
     # Highlight marker appears
     assert ">[ 1]" in session.output
     assert ">[ 2]" in session.output
+    assert "Starting Zmodem send of 'pkg1.tar.gz'" in session.output
+
+    lane.close()
+    db.close()
+
+
+def test_interactive_download_key_acts_on_the_cursor_entry(tmp_path, monkeypatch):
+    """`[D]` with a cursor on the page means the file under it -- no
+    number, no picker. Enter does the same thing; this is the hotkey
+    half of it, and between them they cover what `/download <n>` and
+    `/download <name>` used to do on the page in front of the caller."""
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
+    area, user = _setup_area(db, count=3, monkeypatch=monkeypatch)
+
+    keys = [
+        EditorKey(EditorKeyKind.DOWN),  # highlights row 0 (pkg0)
+        EditorKey(EditorKeyKind.DOWN),  # highlights row 1 (pkg1)
+        EditorKey(EditorKeyKind.CHAR, char="d"),
+    ]
+    session = FakeInteractiveSession(editor_keys=keys)
+    lane = DatabaseLane(db_path)
+
+    asyncio.run(_show_area(session, lane, area, user))
+
     assert "Starting Zmodem send of 'pkg1.tar.gz'" in session.output
 
     lane.close()

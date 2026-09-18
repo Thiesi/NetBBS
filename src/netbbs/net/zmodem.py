@@ -30,8 +30,8 @@ Thiesi before writing this:**
 - **One deliberate exception to "no timeouts":** every point where this
   module is waiting on the peer's *next expected response* (not
   mid-transfer bulk data, which has no fixed duration) is bounded by
-  `_HANDSHAKE_TIMEOUT`. Without this, invoking `/upload` or `/download`
-  against a terminal that doesn't actually support Zmodem — the most
+  `_HANDSHAKE_TIMEOUT`. Without this, invoking `[U]pload` or
+  `[D]ownload` against a terminal that doesn't actually support Zmodem — the most
   likely real-world failure, not data corruption — would hang the whole
   session forever waiting for a `ZRINIT`/`ZFILE` that will never come.
   This is a bounded wait-then-abort, not a retry loop: still consistent

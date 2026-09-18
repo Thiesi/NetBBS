@@ -30,8 +30,9 @@ from netbbs.storage.execution import DatabaseLane
 class FakeSession:
     supports_zmodem = True
 
-    def __init__(self, editor_keys=None, lines=None, width=80, height=24):
-        self._keys = iter(editor_keys or [])
+    def __init__(self, editor_keys=None, keys=None, lines=None, width=80, height=24):
+        self._editor_keys = iter(editor_keys or [])
+        self._keys = iter(keys or [])
         self._lines = iter(lines or [])
         self.written: list[str] = []
         self.terminal_width = width
@@ -51,10 +52,16 @@ class FakeSession:
         return next(self._lines, "")
 
     async def read_key(self, echo: bool = True) -> str:
-        return next(self._lines, "b")
+        # Raises rather than handing back a filler key: every screen
+        # here bells and re-renders on a key it does not know, so a
+        # mis-scripted fake would spin forever instead of failing.
+        key = next(self._keys, None)
+        if key is None:
+            raise AssertionError("FakeSession.read_key() called with no more scripted keys")
+        return key
 
     async def read_editor_key(self, *, distinguish_ctrl_h: bool = False) -> EditorKey:
-        return next(self._keys, EditorKey(EditorKeyKind.CHAR, char="b"))
+        return next(self._editor_keys, EditorKey(EditorKeyKind.CHAR, char="b"))
 
     async def write_raw(self, data: bytes) -> None:
         raise NotImplementedError
@@ -74,9 +81,10 @@ class BrowserSession(FakeSession):
     supports_zmodem = False
 
 
-class FakeLineSession(FakeSession):
+class FakeKeyOnlySession(FakeSession):
     """A transport with no editor-key support: `_read_file_choice`
-    falls back to reading whole command lines."""
+    falls back to `read_key()` -- the same keys without a cursor, never
+    the typed command line this screen used to accept."""
 
     async def read_editor_key(self, *, distinguish_ctrl_h: bool = False):
         raise NotImplementedError
@@ -158,7 +166,7 @@ def test_a_browser_session_on_a_node_without_transfers_is_told_why(db, lane, ali
 def test_w_offers_an_upload_link_on_a_zmodem_capable_transport(db, lane, alice, grants):
     area = create_file_area(db, "downloads", creator=alice)
     upload_file(db, area, alice, "game.zip", b"payload")
-    session = FakeSession(editor_keys=[_key("w")], lines=["u"])
+    session = FakeSession(editor_keys=[_key("w")], keys=["u"])
 
     asyncio.run(_show_area(session, lane, area, alice, transfers=grants))
 
@@ -170,7 +178,7 @@ def test_w_offers_an_upload_link_on_a_zmodem_capable_transport(db, lane, alice, 
 def test_w_offers_a_download_link_for_the_selected_file(db, lane, alice, grants):
     area = create_file_area(db, "downloads", creator=alice)
     upload_file(db, area, alice, "game.zip", b"payload")
-    session = FakeSession(editor_keys=[_key("w")], lines=["d"])
+    session = FakeSession(editor_keys=[_key("w")], keys=["d"])
 
     asyncio.run(_show_area(session, lane, area, alice, transfers=grants))
 
@@ -181,7 +189,7 @@ def test_w_offers_a_download_link_for_the_selected_file(db, lane, alice, grants)
 def test_backing_out_of_the_link_screen_mints_nothing(db, lane, alice, grants):
     area = create_file_area(db, "downloads", creator=alice)
     upload_file(db, area, alice, "game.zip", b"payload")
-    session = FakeSession(editor_keys=[_key("w")], lines=["b"])
+    session = FakeSession(editor_keys=[_key("w")], keys=["b"])
 
     asyncio.run(_show_area(session, lane, area, alice, transfers=grants))
 
@@ -202,7 +210,7 @@ def test_the_key_is_not_offered_when_the_node_has_no_transfers(db, lane, alice):
 def test_a_node_with_no_public_address_says_so_rather_than_printing_one(db, lane, alice):
     area = create_file_area(db, "downloads", creator=alice)
     upload_file(db, area, alice, "game.zip", b"payload")
-    session = FakeSession(editor_keys=[_key("w")], lines=["u"])
+    session = FakeSession(editor_keys=[_key("w")], keys=["u"])
 
     asyncio.run(_show_area(session, lane, area, alice, transfers=TransferGrants()))
 
@@ -214,7 +222,7 @@ def test_a_minted_link_is_the_one_the_gateway_will_honour(db, lane, alice, grant
     -- printing one it would not is the failure mode this catches."""
     area = create_file_area(db, "downloads", creator=alice)
     upload_file(db, area, alice, "game.zip", b"payload")
-    session = FakeSession(editor_keys=[_key("w")], lines=["u"])
+    session = FakeSession(editor_keys=[_key("w")], keys=["u"])
 
     asyncio.run(_show_area(session, lane, area, alice, transfers=grants))
 
@@ -253,7 +261,7 @@ def test_an_empty_area_still_offers_a_browser_upload_link(db, lane, alice, grant
     """An empty area is exactly where a caller whose emulator has no
     Zmodem needs to put the first file (Codex review)."""
     area = create_file_area(db, "downloads", creator=alice)
-    session = FakeSession(lines=["w", "u"])
+    session = FakeSession(keys=["w", "u"])
 
     asyncio.run(_show_area(session, lane, area, alice, transfers=grants))
 
@@ -277,7 +285,7 @@ def test_minting_a_link_does_not_touch_the_database_lane(db, lane, alice, grants
         return real_issue(**kwargs)
 
     monkeypatch.setattr(grants, "issue", watching_issue)
-    session = FakeSession(editor_keys=[_key("w")], lines=["u"])
+    session = FakeSession(editor_keys=[_key("w")], keys=["u"])
 
     asyncio.run(_show_area(session, lane, area, alice, transfers=grants))
 
@@ -375,7 +383,7 @@ def test_a_terminal_caller_still_needs_a_public_url(db, lane, alice):
     """The same node, a caller whose transport has no page to tell."""
     area = create_file_area(db, "downloads", creator=alice)
     upload_file(db, area, alice, "game.zip", b"payload")
-    session = FakeSession(editor_keys=[_key("w")], lines=["u"])
+    session = FakeSession(editor_keys=[_key("w")], keys=["u"])
 
     asyncio.run(_show_area(session, lane, area, alice, transfers=TransferGrants()))
 
@@ -413,7 +421,7 @@ def test_no_grant_is_minted_when_nobody_could_redeem_it(db, lane, alice):
     area = create_file_area(db, "downloads", creator=alice)
     upload_file(db, area, alice, "game.zip", b"payload")
     grants = TransferGrants()
-    session = FakeSession(editor_keys=[_key("w")], lines=["u"])
+    session = FakeSession(editor_keys=[_key("w")], keys=["u"])
 
     asyncio.run(_show_area(session, lane, area, alice, transfers=grants))
 
@@ -437,7 +445,7 @@ def test_an_upload_helper_that_reports_nothing_still_closes_the_screen(db, lane,
 
     async def scenario():
         await asyncio.wait_for(
-            _show_area(FakeLineSession(lines=["/upload"]), lane, area, alice, transfers=grants),
+            _show_area(FakeKeyOnlySession(keys=["u"]), lane, area, alice, transfers=grants),
             timeout=5,
         )
 
