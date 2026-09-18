@@ -337,6 +337,36 @@ def _chain_head_id(
     return ordered[-1].content_id
 
 
+def superseded_operational_keys(
+    transitions: tuple[KeyTransition, ...],
+    *,
+    root_verify_key: nacl.signing.VerifyKey,
+    subject_fingerprint: str,
+    purpose: str,
+) -> list[str]:
+    """Every operational key the verified chain ever authorized, except the current one.
+
+    What a subscriber needs in order to tell two unverifiable objects apart:
+    one a *superseded* key signed will never verify under the current key, so
+    it can be skipped for good; one that verifies under no key this node knows
+    may have been signed by a key it has not learned yet, and must not be.
+    Base64, in the order they were authorized, without duplicates.
+    """
+    ordered = _verify_and_order_chain(
+        transitions, root_verify_key=root_verify_key, subject_fingerprint=subject_fingerprint, purpose=purpose
+    )
+    current = resolve_current_operational_key(
+        transitions, root_verify_key=root_verify_key,
+        subject_fingerprint=subject_fingerprint, purpose=purpose,
+    )
+    seen: list[str] = []
+    for transition in ordered:
+        key = transition.payload["operational_key"]
+        if transition.payload["action"] == "authorize" and key != current and key not in seen:
+            seen.append(key)
+    return seen
+
+
 def resolve_current_operational_key(
     transitions: tuple[KeyTransition, ...],
     *,

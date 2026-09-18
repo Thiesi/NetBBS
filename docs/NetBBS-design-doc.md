@@ -3756,17 +3756,46 @@ to the ordinary request throttle. Over-limit input is rejected or deferred
 visibly, never converted into evidence.
 
 A subscriber distinguishes an object it cannot use from a response it must
-not trust. A rejection that time or state can undo, such as an issue time in
-the future or a full quota, rejects the batch, which is retried from the same
-cursor. An object outside what the subscriber configured its reporter for, a
-revocation naming an object the subscriber does not hold, and an object whose
-signature does not verify under the issuer's current key, which is what an
-issuer's stream holds after it rotates, are each skipped while the rest is
-admitted and the cursor moves on. Treating those as fatal would wedge the
-subscription: the batch rolls back, the cursor stays, and every later pass
-meets the same object first. A skipped object is not stored, so changing a
-reporter's grant resets that reporter's cursor and the next pass re-reads its
-stream, where everything already held is a replay.
+not trust, and both from an object it cannot use *yet*. A rejection that time
+or state can undo, such as an issue time in the future or a full quota,
+rejects the batch, which is retried from the same cursor. An object outside
+what the subscriber configured its reporter for, a revocation naming an object
+the subscriber does not hold or one already revoked, and an object signed by a
+key the issuer has since replaced, which is what an issuer's stream holds
+after it rotates, are each skipped while the rest is admitted and the cursor
+moves on. Treating those as fatal would wedge the subscription: the batch is
+abandoned, the cursor stays, and every later pass meets the same object first.
+A skipped object is not stored, so changing a reporter's grant resets that
+reporter's cursor and the next pass re-reads its stream, where everything
+already held is a replay.
+
+An object that verifies under no key the subscriber knows for its issuer is
+different. The ordinary cause is that the subscriber is the stale party: the
+issuer rotated and re-signed everything, and the subscriber has not completed
+a hello with it since. Skipping would move the cursor past every re-issued
+vouch and every revocation. The subscriber therefore tells the two apart by
+the issuer's own transition chain. A superseded key's signature is skipped for
+good; an unknown key's stops the page there, with the cursor left on the last
+settled object, and the next pass retries after the next hello.
+
+A cursor the responder cannot resolve is its own case (issue #621). A
+responder restored from an older backup, or recreated, will never again hold
+the object a subscriber's cursor names. It answers HTTP 400 with `reason_code`
+`unknown_pull_cursor`, and the subscriber forgets the cursor and re-reads that
+issuer from the start, where everything it holds is a replay and the page
+budget bounds the cost. The attestation pull of §5.5 does the same. This also
+means a cursor saved from something a responder never stored cannot wedge a
+subscription for longer than one pass. The subscriber's cursor in any case
+moves only past objects it could authenticate: one signed by the issuer's
+current key, or by a key the issuer has replaced. A served entry whose shape
+does not allow a signature check rejects the page.
+
+A reporter has to be established before any of this happens. Under the policy
+a running node enforces, a probationary, quarantined or blocked reporter is not
+pulled in the ordinary way, and a vouch from a reporter that is not established
+in identity integrity and resource behavior does not count. Naming a reporter
+is the grant of authority; establishing it is a separate act, by override or by
+graduation.
 
 ### 12.8 Quarantine effects
 
@@ -9894,12 +9923,22 @@ the vouch without anyone having to remember it.
 hostile response.** Three rejections that were fatal to a whole batch became
 per-object skips, and changing a reporter's grant now resets its cursor
 (§12.7). None of this could be reached while nothing was ever issued. With one
-real issuer it is reached at once: its SysOp vouches for a caller, a
-subscriber that only granted it node vouches rolls the batch back, and that
-subscription never moves again. The same goes for the first operational-key
-rotation, which the Phase 4 recovery exercise includes. A slice that let nodes
-issue vouches and left their subscribers wedged would not have made the
-subsystem real.
+real issuer and one subscriber that has established it, it is reached as soon
+as the issuer's SysOp vouches for a caller and the subscriber only granted it
+node vouches: the batch is abandoned and that subscription never moves again.
+The same goes for the first operational-key rotation, which the Phase 4
+recovery exercise includes. A slice that let nodes issue vouches and left
+their subscribers wedged would not have made the subsystem real.
+
+The same decision covers a responder that no longer knows a subscriber's
+cursor, filed as #621 while this slice was in review and fixed with it for
+both pulls, because it is the same wedge by another route and the recovery
+exercise restores a node on purpose.
+
+An object signed by a key the subscriber does not know is the one case that is
+*not* skipped, because there the subscriber may be the stale party, and a
+skip would lose every object the issuer re-signed. The first cut of this slice
+skipped it; review caught that it turned a rotation into permanent loss.
 
 **Decision 8 — pages in storage order.** See §12.7. The attestation page made
 the same change for the same reason.

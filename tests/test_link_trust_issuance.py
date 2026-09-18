@@ -388,3 +388,22 @@ def test_the_listing_without_a_known_fingerprint_claims_nothing_is_published(db,
 
     [intent] = list_vouch_intents(db, home_node_fingerprint=None, now_iso=stamp(NOW))
     assert intent.status == "pending"
+
+
+def test_withdrawing_during_a_renewal_overlap_revokes_both_live_vouches(db, issuer, subscriber):
+    """A renewal leaves the vouch it replaces to run out, so for a month two are
+    live. Revoking only the newer one would leave support standing at every
+    subscriber until the older one expired."""
+    record_vouch_intent(db, FRIEND, explanation="known operator", now_iso=stamp(NOW))
+    reconcile(db, issuer)
+    renewal_day = NOW + timedelta(days=61)
+    reconcile(db, issuer, at=renewal_day)
+    deliver(db, issuer, subscriber, at=renewal_day)
+    assert [row["revoked_at"] is None for row in held_vouches(subscriber, FRIEND)] == [True, True]
+
+    withdraw_vouch_intent(db, FRIEND, now_iso=stamp(renewal_day + timedelta(hours=1)))
+    changes = reconcile(db, issuer, at=renewal_day + timedelta(hours=1))
+    deliver(db, issuer, subscriber, at=renewal_day + timedelta(hours=1))
+
+    assert [(c.action, c.reason) for c in changes] == [("revoked", "intent_withdrawn")] * 2
+    assert [row["revoked_at"] is None for row in held_vouches(subscriber, FRIEND)] == [False, False]

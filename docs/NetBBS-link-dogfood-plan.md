@@ -220,9 +220,11 @@ Use test identities and non-sensitive evidence.
 - [ ] Propagate a vouch end to end, which needs nothing outside the product.
       On node A, open the test subject under `[P]olicy trust` → `[S]ubjects`,
       choose `[V]ouch`, give a reason and confirm. On node B, name A a trusted
-      reporter allowed to vouch for that kind of subject. After one sync pass
-      on each, confirm B's explanation for the subject lists A's trust domain
-      under `vouch_domains`. Withdraw the vouch on A under `[V]ouches` and
+      reporter allowed to vouch for that kind of subject, and establish A
+      under `[S]ubjects` → A → `[O]verride` for identity integrity and resource
+      behavior: a reporter still on probation is neither pulled nor counted.
+      After one sync pass on each, confirm B's explanation for the subject
+      lists A's trust domain under `vouch_domains`. Withdraw the vouch on A under `[V]ouches` and
       confirm B records the revocation and the domain disappears. Then grant A
       only node vouches on B, vouch for a *user* on A, and confirm B's
       subscription keeps moving: a later node vouch still arrives.

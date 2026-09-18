@@ -16,6 +16,7 @@ see `tests/test_link_transport.py`'s module docstring for why a
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from datetime import date
 
@@ -2237,7 +2238,7 @@ def test_sync_push_is_not_pinned_by_a_resource_the_seed_refused_to_carry(tmp_pat
 # -- remote identity attestations over real sync passes (issue #584) --------
 
 
-async def _one_pass(node, session, seeds, hello_provider, lane):
+async def _one_pass(node, session, seeds, hello_provider, lane, **sync_options):
     """Run exactly one full pass of `run_link_sync`, then return.
 
     The stop event is set from inside the hello provider, which the loop calls
@@ -2253,7 +2254,7 @@ async def _one_pass(node, session, seeds, hello_provider, lane):
 
     await run_link_sync(
         node, session, seeds, provider, lane,
-        interval_seconds=0.0, stop_event=stop_event,
+        interval_seconds=0.0, stop_event=stop_event, **sync_options,
     )
 
 
@@ -2530,10 +2531,10 @@ class _VouchPair:
     async def issuer_pass(self, session):
         await _one_pass(self.issuer_node, session, [], self.issuer_hello, self.issuer.lane)
 
-    async def subscriber_pass(self, session):
+    async def subscriber_pass(self, session, **sync_options):
         await _one_pass(
             self.subscriber_node, session, self.seeds,
-            lambda: _hello_for(self.subscriber_node), self.subscriber.lane,
+            lambda: _hello_for(self.subscriber_node), self.subscriber.lane, **sync_options,
         )
 
     def held(self, subject):
@@ -2635,13 +2636,16 @@ def test_an_object_the_previous_key_signed_does_not_wedge_a_new_subscriber(tmp_p
     """A subscriber resolves only the issuer's current operational key. After a
     rotation the issuer's stream still holds what the old key signed, and a
     page parsed all-or-nothing turned that one object into a subscription
-    that could never start."""
+    that could never start. The subscriber knows the old key from the issuer's
+    own transition chain, which is what lets it skip the object for good."""
     pair = _VouchPair(tmp_path, "rotated")
     record_vouch_intent(pair.issuer.db, pair.NODE_SUBJECT, explanation="known operator")
-    previous_key = bootstrap_node_identity("rotated-previous").signing_key
     reconcile_issued_vouches(
-        pair.issuer.db, previous_key, home_node_fingerprint=pair.issuer_identity.fingerprint,
+        pair.issuer.db, pair.issuer_identity.signing_key,
+        home_node_fingerprint=pair.issuer_identity.fingerprint,
     )
+    pair.issuer_identity = rotate_operational_key(pair.issuer_identity, purpose="signing")
+    pair.issuer_node.identity = pair.issuer_identity
 
     async def scenario():
         server = await pair.start()
@@ -2659,5 +2663,196 @@ def test_an_object_the_previous_key_signed_does_not_wedge_a_new_subscriber(tmp_p
         ).fetchone()[0] == 2
         assert [row[0] for row in pair.held(pair.NODE_SUBJECT)] == [None]
         assert pair.cursor() == pair.last_served()
+    finally:
+        pair.close()
+
+
+def test_a_probationary_reporter_is_neither_pulled_nor_counted_under_the_production_policy(tmp_path):
+    """`netbbs.__main__` runs the loop with `enforce_trust_policy=True`, where a
+    reporter this node has not established is not pulled at all, and a vouch
+    from one would not count. Naming a reporter is therefore not enough: the
+    subscriber's SysOp has to establish it, and everything above this test
+    runs with the flag off."""
+    from netbbs.link.trust import TrustDimension, TrustState, set_trust_override
+
+    pair = _VouchPair(tmp_path, "enforced")
+    record_vouch_intent(pair.issuer.db, pair.NODE_SUBJECT, explanation="known operator")
+    reporter = TrustSubject.node(pair.issuer_identity.fingerprint)
+
+    async def scenario():
+        server = await pair.start()
+        try:
+            async with aiohttp.ClientSession() as session:
+                await pair.issuer_pass(session)
+                await pair.subscriber_pass(session, enforce_trust_policy=True)
+                assert pair.held(pair.NODE_SUBJECT) == []
+
+                for dimension in (TrustDimension.IDENTITY_INTEGRITY, TrustDimension.RESOURCE_BEHAVIOR):
+                    set_trust_override(
+                        pair.subscriber.db, reporter, dimension, TrustState.ESTABLISHED,
+                        reason="operator known in person", actor_user_id=None,
+                    )
+                await pair.subscriber_pass(session, enforce_trust_policy=True)
+        finally:
+            await server.stop()
+
+    try:
+        asyncio.run(scenario())
+        assert [row[0] for row in pair.held(pair.NODE_SUBJECT)] == [None]
+        explanation = json.loads(pair.subscriber.db.connection.execute(
+            """SELECT explanation_json FROM link_trust_effective_states
+               WHERE subject_id = ? AND dimension = 'identity_integrity'""",
+            (pair.NODE_SUBJECT.subject_id,),
+        ).fetchone()[0])
+        assert explanation["vouch_domains"] == ["friends"]
+    finally:
+        pair.close()
+
+
+def _served_vouch(identity, vouch_id):
+    from netbbs.link.trust_wire import build_trust_vouch
+
+    return build_trust_vouch(
+        signing_identity=identity.signing_key, issuer_fingerprint=identity.fingerprint,
+        vouch_id=vouch_id, subject=TrustSubject.node("some-subject"),
+        issued_at="2026-09-18T12:00:00.000000Z", expires_at="2026-12-17T12:00:00.000000Z",
+    ).to_dict()
+
+
+def test_an_object_signed_by_a_key_this_node_has_not_learned_stops_the_page_instead_of_being_skipped():
+    """The mirror image of a rotated issuer, and the dangerous one: *this* node
+    is the stale party. The issuer rotated and re-signed everything, and this
+    node has not completed a hello with it since. Skipping what does not
+    verify would move the cursor past every re-issued vouch and every
+    revocation, and none of them would ever be offered again."""
+    from netbbs.link.events import event_content_id
+    from netbbs.link.sync import _parse_trust_page
+
+    known = bootstrap_node_identity("issuer-as-this-node-knows-it")
+    rotated = rotate_operational_key(known, purpose="signing")
+    before = _served_vouch(known, "signed-by-the-key-this-node-knows")
+    after = _served_vouch(rotated, "signed-by-a-key-it-has-not-learned")
+    known_key = LinkNode(identity=known).identity.signing_key.verify_key
+
+    parsed, cursor, stalled = _parse_trust_page([before, after, before], known_key, [], known.fingerprint)
+
+    assert stalled
+    assert [obj.payload["vouch_id"] for obj in parsed] == ["signed-by-the-key-this-node-knows"]
+    assert cursor == event_content_id(before["envelope"])
+
+
+def test_an_object_signed_by_a_superseded_key_is_skipped_for_good():
+    from netbbs.link.events import event_content_id
+    from netbbs.link.sync import _parse_trust_page
+
+    old = bootstrap_node_identity("issuer-before-rotation")
+    new = rotate_operational_key(old, purpose="signing")
+    stale = _served_vouch(old, "signed-before-the-rotation")
+    fresh = _served_vouch(new, "signed-after-it")
+    node = LinkNode(identity=bootstrap_node_identity("subscriber"))
+    node.peers[new.fingerprint] = PeerRecord(
+        fingerprint=new.fingerprint, root_public_key=bytes(new.root.verify_key),
+        transitions=new.transitions, descriptor=_hello_for(LinkNode(identity=new)).descriptor,
+    )
+
+    superseded = node.resolve_peer_superseded_signing_keys(new.fingerprint)
+    assert len(superseded) == 1
+    parsed, cursor, stalled = _parse_trust_page(
+        [stale, fresh], node.resolve_peer_signing_key(new.fingerprint), superseded, new.fingerprint
+    )
+
+    assert not stalled
+    assert [obj.payload["vouch_id"] for obj in parsed] == ["signed-after-it"]
+    assert cursor == event_content_id(fresh["envelope"])
+
+
+def test_a_page_entry_that_cannot_be_canonicalized_rejects_the_page_rather_than_escaping():
+    """`event_content_id` raises a bare `Exception` subclass for a float, which
+    the pull's own handler does not catch; one such entry would otherwise end
+    the whole background sync task instead of one reporter's pull."""
+    from netbbs.link.sync import _parse_trust_page
+    from netbbs.link.trust_wire import TrustWireError
+
+    identity = bootstrap_node_identity("issuer")
+    poisoned = _served_vouch(identity, "poisoned")
+    poisoned["envelope"]["payload"]["explanation"] = 1.5
+
+    with pytest.raises(TrustWireError, match="malformed entry"):
+        _parse_trust_page([poisoned], identity.signing_key.verify_key, [], identity.fingerprint)
+    with pytest.raises(TrustWireError, match="malformed entry"):
+        _parse_trust_page(["not-a-dict"], identity.signing_key.verify_key, [], identity.fingerprint)
+
+
+def test_an_object_naming_another_issuer_rejects_the_page_before_its_signature_is_tried():
+    from netbbs.link.sync import _parse_trust_page
+    from netbbs.link.trust_wire import TrustWireError
+
+    asked = bootstrap_node_identity("the-issuer-asked-for")
+    other = bootstrap_node_identity("someone-else")
+
+    with pytest.raises(TrustWireError, match="another issuer"):
+        _parse_trust_page(
+            [_served_vouch(other, "theirs")], asked.signing_key.verify_key, [], asked.fingerprint
+        )
+
+
+# -- a cursor the responder no longer knows (issue #621) -----------------------
+
+
+def test_a_trust_subscription_recovers_when_the_reporter_no_longer_knows_its_cursor(tmp_path):
+    """The reporter was restored from an older backup, or recreated: the object
+    this subscriber's cursor names will never exist there again. The
+    subscriber used to send the same cursor on every pass, for good."""
+    from netbbs.link.trust_wire import save_trust_pull_cursor
+
+    pair = _VouchPair(tmp_path, "restored")
+    record_vouch_intent(pair.issuer.db, pair.NODE_SUBJECT, explanation="known operator")
+    fingerprint = pair.issuer_identity.fingerprint
+    save_trust_pull_cursor(pair.subscriber.db, fingerprint, fingerprint, "f" * 64)
+
+    async def scenario():
+        server = await pair.start()
+        try:
+            async with aiohttp.ClientSession() as session:
+                await pair.issuer_pass(session)
+                # A pass reaches a reporter that is also its seed twice, so the
+                # second attempt may already succeed; what matters is that the
+                # subscription is moving again, which it never used to.
+                await pair.subscriber_pass(session)
+                await pair.subscriber_pass(session)
+        finally:
+            await server.stop()
+
+    try:
+        asyncio.run(scenario())
+        assert [row[0] for row in pair.held(pair.NODE_SUBJECT)] == [None]
+        assert pair.cursor() == pair.last_served()
+    finally:
+        pair.close()
+
+
+def test_an_attestation_subscription_recovers_when_the_authority_no_longer_knows_its_cursor(tmp_path):
+    """The same defect on the other pull, where nothing at all could recover it
+    short of editing the cursor table by hand."""
+    from netbbs.link.remote_attestation import save_attestation_pull_cursor
+
+    pair = _AttestationPair(tmp_path, "restored-authority")
+    fingerprint = pair.issuer_identity.fingerprint
+    save_attestation_pull_cursor(pair.subscriber.db, fingerprint, fingerprint, "f" * 64)
+
+    async def scenario():
+        server = await pair.start()
+        try:
+            async with aiohttp.ClientSession() as session:
+                await pair.issuer_pass(session)
+                await pair.subscriber_pass(session)
+                assert not remote_meets_age(pair.subscriber.db, pair.subject, 18)
+                await pair.subscriber_pass(session)
+        finally:
+            await server.stop()
+
+    try:
+        asyncio.run(scenario())
+        assert remote_meets_age(pair.subscriber.db, pair.subject, 18)
     finally:
         pair.close()

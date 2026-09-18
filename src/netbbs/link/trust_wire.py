@@ -207,6 +207,36 @@ def build_trust_pull_request(
     return TrustPullRequest(**unsigned.payload, signature=signing_identity.sign(canonical_bytes(envelope)))
 
 
+# What either subscription pull answers when the cursor it was sent names
+# nothing it holds. Wire-visible, in the `reason_code` field a policy rejection
+# already carries, so a subscriber can tell this apart from a malformed request
+# and recover from it (issue #621).
+UNKNOWN_PULL_CURSOR_REASON_CODE = "unknown_pull_cursor"
+
+
+class UnknownTrustPullCursor(TrustWireError):
+    """The requester's cursor names an object this node does not hold for that issuer.
+
+    Not the requester's fault and not something retrying fixes: the responder
+    was restored from an older backup, or recreated, or the cursor was saved
+    from something it never stored. The subscriber drops the cursor and
+    re-reads from the start, where everything it holds is a replay.
+    """
+
+
+class TrustPayloadError(TrustWireError):
+    """The signature verified; the payload is not one this node accepts."""
+
+
+class TrustSignatureError(TrustWireError):
+    """The object is well formed and its signature does not verify under the key tried.
+
+    Its own type because a subscriber has to treat this one refusal
+    differently from every other: whether it is permanent depends on *which*
+    key would have verified it, which only the caller can find out.
+    """
+
+
 def _timestamp(value: Any, name: str) -> datetime:
     if not isinstance(value, str):
         raise TrustWireError(f"{name} must be an ISO 8601 string")
@@ -317,9 +347,15 @@ class SignedTrustObject:
         except (TypeError, ValueError) as exc:
             raise TrustWireError("invalid trust signature encoding") from exc
         if not verify_signature(issuer_verify_key, canonical_bytes(envelope), signature):
-            raise TrustWireError("trust signature does not verify")
+            raise TrustSignatureError("trust signature does not verify")
         obj = cls(envelope=envelope, signature=signature)
-        _validate_payload(obj.object_type, obj.payload)
+        try:
+            _validate_payload(obj.object_type, obj.payload)
+        except TrustWireError as exc:
+            # Genuinely the issuer's -- the signature verified -- and not an
+            # object this node can use. A subscriber may move its cursor past
+            # this; it may not move it past anything it could not authenticate.
+            raise TrustPayloadError(str(exc)) from exc
         return obj
 
 
@@ -575,7 +611,12 @@ def ingest_trust_objects(
                     if row[1] != expected_type:
                         raise TrustWireError("revocation target belongs to another object family")
                     if row[2] is not None:
-                        raise TrustWireError("revocation target is already revoked")
+                        # A second revocation of something already retired
+                        # changes nothing here. An issuer restored from a
+                        # backup taken before a withdrawal signs exactly this,
+                        # and treating it as fatal wedged every subscriber
+                        # that already held the first one.
+                        raise TrustObjectOutOfScope("revocation target is already revoked")
                     if obj.object_type == TRUST_VOUCH_REVOCATION_OBJECT_TYPE:
                         revoke_vouch(db, target, revocation_content_id=obj.content_id, now_iso=now)
                     elif db.connection.execute(
@@ -620,7 +661,7 @@ def load_trust_object_page(
             (after_content_id, issuer_fingerprint),
         ).fetchone()
         if row is None:
-            raise TrustWireError("unknown trust pull cursor")
+            raise UnknownTrustPullCursor("unknown trust pull cursor")
         after_rowid = row[0]
     type_filter = (
         "AND object_type IN ('trust_revocation', 'trust_vouch_revocation')"
@@ -669,6 +710,16 @@ def load_trust_pull_cursor(
         (responder_fingerprint, issuer_fingerprint),
     ).fetchone()
     return row[0] if row else None
+
+
+def clear_trust_pull_cursor(db: Database, responder_fingerprint: str, issuer_fingerprint: str) -> None:
+    """Forget where this node was in one responder's stream for one issuer (issue #621)."""
+    with db.connection:
+        db.connection.execute(
+            """DELETE FROM link_trust_pull_cursors
+               WHERE responder_fingerprint = ? AND issuer_fingerprint = ?""",
+            (responder_fingerprint, issuer_fingerprint),
+        )
 
 
 def save_trust_pull_cursor(

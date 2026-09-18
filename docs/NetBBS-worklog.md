@@ -2698,8 +2698,27 @@ right when only local configuration could change it, because aborting there
 wedges the subscription for good. Skipped objects are not stored, so
 `configure_trusted_reporter` deletes that issuer's pull cursor. The sync loop
 likewise parses a served page per object and takes its cursor from the last
-object *served*, computed from the envelope, so that skipping the last object
-of a page still advances past it. `ingest_trust_objects` still returns a
+object with a *settled* outcome, computed from the envelope, so that skipping
+the last object of a page still advances past it. One outcome is deliberately
+not settled: a signature that verifies under no key this node knows for the
+issuer. Whether an unverifiable object is permanent depends on which key
+signed it, so `LinkNode.resolve_peer_superseded_signing_keys` supplies the
+issuer's replaced keys from its transition chain; a superseded key's object is
+skipped, an unknown key's stops the page, because the usual cause is this
+node's own stale copy of the issuer's key and skipping would lose everything
+re-signed after a rotation. `event_content_id` on a served envelope is
+guarded, since `ContentIdError` is a bare `Exception` that the pull's handler
+does not catch. `SignedTrustObject.from_dict` raises three distinguishable
+refusals for that reason: a plain `TrustWireError` before the signature could
+be checked (the page is refused), `TrustSignatureError`, and
+`TrustPayloadError` for an authentic object this node does not accept (skipped,
+and the cursor may pass it). Both subscription pulls answer an unresolvable
+cursor with `reason_code` `unknown_pull_cursor`, still HTTP 400, and the
+subscriber clears the cursor (issue #621); a pass reaches a reporter that is
+also a seed twice, so recovery can complete within the pass that discovers it.
+And the loop tests run with `enforce_trust_policy` off unless
+they say otherwise; production runs with it on, where an unestablished
+reporter is neither pulled nor counted. `ingest_trust_objects` still returns a
 two-tuple for every existing caller; `.skipped` rides on it.
 
 **Remote attestations do not turn Link identities into local users.** The

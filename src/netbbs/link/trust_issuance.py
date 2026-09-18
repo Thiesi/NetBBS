@@ -99,7 +99,9 @@ class VouchIntent:
     - `published`: a live signed vouch exists;
     - `suspended`: the intent stands, but the subject is quarantined or blocked
       here, so this node is not vouching for it. A live vouch is revoked on the
-      next pass, and one is signed again if the restriction is lifted.
+      next pass, and one is signed again if the restriction is lifted;
+    - `refused`: the subject is this node or one of its own users, recorded
+      where this node's fingerprint was not known. It is never signed.
     """
 
     subject: TrustSubject
@@ -305,7 +307,16 @@ def reconcile_issued_vouches(
             row["subject_id"]: (row["explanation"], _subject_from_row(row))
             for row in _active_intents(db)
         }
-        restricted = {subject_id for subject_id in intents if _restricted_here(db, subject_id)}
+        # `record_vouch_intent` refuses a vouch for this node or its own users
+        # only where its caller knew this node's fingerprint, and the offline
+        # console on a node that has not started since the fingerprint cache
+        # existed does not. Here it is always known, and here is where an
+        # intent becomes a published object, so the rule is enforced again.
+        restricted = {
+            subject_id
+            for subject_id, (_explanation, subject) in intents.items()
+            if _restricted_here(db, subject_id) or subject.node_fingerprint == home_node_fingerprint
+        }
         current: dict[str, object] = {}
         for row in _live_own_vouches(db, home_node_fingerprint, now_value):
             subject_id = row["subject_id"]
@@ -381,7 +392,9 @@ def list_vouch_intents(
     result: list[VouchIntent] = []
     for row in _active_intents(db):
         key = (row["subject_id"], row["explanation"])
-        if _restricted_here(db, row["subject_id"]):
+        if home_node_fingerprint is not None and row["node_fingerprint"] == home_node_fingerprint:
+            status = "refused"
+        elif _restricted_here(db, row["subject_id"]):
             status = "suspended"
         elif key in live:
             status = "published"

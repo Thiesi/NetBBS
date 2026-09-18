@@ -2361,7 +2361,9 @@ def _trust_subject_stable_id(subject: TrustSubject) -> int:
     return int(subject.subject_id[:12], 16)
 
 
-_VOUCH_STATUS_TONE = {"published": "success", "pending": "warning", "suspended": "error"}
+_VOUCH_STATUS_TONE = {
+    "published": "success", "pending": "warning", "suspended": "error", "refused": "error",
+}
 
 
 def _own_fingerprint(db: Database, link_context: LinkContext | None) -> str | None:
@@ -2378,6 +2380,8 @@ def _vouch_status_line(intent, *, unicode_style: bool) -> str:
         detail = f"signed and served until {sanitize_text((intent.expires_at or '')[:10])}"
     elif intent.status == "pending":
         detail = "signed on the next Link sync pass"
+    elif intent.status == "refused":
+        detail = "a node cannot vouch for itself or its own users; withdraw this"
     else:
         detail = "this node has the identity quarantined or blocked, so it is not vouching for it"
     return f"{badge_text} -- {detail}"
@@ -2400,7 +2404,7 @@ async def _reconcile_vouches_now(
         )
         return
     try:
-        await lane.run(
+        changes = await lane.run(
             reconcile_issued_vouches,
             link_context.node_identity.signing_key,
             home_node_fingerprint=link_context.node_identity.fingerprint,
@@ -2409,6 +2413,11 @@ async def _reconcile_vouches_now(
         await session.write_line(
             colored(f"{done} It was not signed ({exc}); the next Link sync pass retries it.", fg_color=WARNING_COLOR)
         )
+        return
+    if not changes:
+        # Withdrawing an intent that was never signed, for one: there is
+        # nothing to revoke, and saying "signed" would claim otherwise.
+        await session.write_line(colored(f"{done} Nothing had been published, so nothing needed signing.", fg_color=SUCCESS_COLOR))
         return
     await session.write_line(
         colored(f"{done} Signed; subscribers pick it up on their next pull.", fg_color=SUCCESS_COLOR)
@@ -2556,7 +2565,11 @@ async def _published_vouches_screen(
             continue
         selected = await pick_item(
             session, intents,
-            name_of=lambda intent: names[intent.subject.subject_id],
+            # `refresh` re-queries, so an intent recorded from another session
+            # while this picker is open is not in `names`.
+            name_of=lambda intent: names.get(
+                intent.subject.subject_id, _trust_subject_name(intent.subject)
+            ),
             stable_id_of=lambda intent: _trust_subject_stable_id(intent.subject),
             description_of=lambda intent: f"{intent.status} -- {intent.explanation}",
             title="Stop vouching for which identity?",

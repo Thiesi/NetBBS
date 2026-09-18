@@ -9454,3 +9454,37 @@ def test_trust_history_shows_vouches_recorded_and_withdrawn(db, lane, sysop):
     text = " ".join(_visible(_written_text(session)).split())
     assert "vouch recorded for node:abcdefghijklmnopqrstuvwxyz234567: known operator" in text
     assert "vouch withdrawn for node:abcdefghijklmnopqrstuvwxyz234567" in text
+
+
+def test_the_console_signs_a_vouch_at_once_when_it_runs_inside_a_link_node(db, lane, sysop):
+    """The path the design document advertises and no other test here reaches:
+    with a `LinkContext` the console runs the sync pass's own reconcile."""
+    from netbbs.link.trust_wire import load_trust_object_page
+
+    subject = _vouchable_subject(db)
+    link_context = _link_context()
+    session = FakeSession(
+        ["s", "p", "s", "0", "1", "v", "i", "met them at the 2026 meet", "y", "w", "y", "b", "b", "b", "b", "b"]
+    )
+
+    asyncio.run(admin_menu(session, lane, sysop, node_controls=None, link_context=link_context))
+
+    text = " ".join(_visible(_written_text(session)).split())
+    assert "Vouch recorded. Signed; subscribers pick it up on their next pull." in text
+    assert "published -- signed and served until" in text
+    assert "Vouch withdrawn. Signed; subscribers pick it up on their next pull." in text
+    served, _ = load_trust_object_page(db, issuer_fingerprint=link_context.node_identity.fingerprint)
+    assert [item["envelope"]["object_type"] for item in served] == ["trust_vouch", "trust_vouch_revocation"]
+    assert served[0]["envelope"]["payload"]["subject"]["node_fingerprint"] == subject.node_fingerprint
+
+
+def test_withdrawing_a_vouch_that_was_never_signed_does_not_claim_a_signature(db, lane, sysop):
+    from netbbs.link.trust_issuance import record_vouch_intent
+
+    record_vouch_intent(db, _vouchable_subject(db), explanation="known operator")
+    session = FakeSession(["s", "p", "s", "0", "1", "v", "w", "y", "b", "b", "b", "b", "b"])
+
+    asyncio.run(admin_menu(session, lane, sysop, node_controls=None, link_context=_link_context()))
+
+    text = " ".join(_visible(_written_text(session)).split())
+    assert "Vouch withdrawn. Nothing had been published, so nothing needed signing." in text

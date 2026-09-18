@@ -193,6 +193,7 @@ from netbbs.link.store import build_inventory_request, delete_relay_consent, sav
 from netbbs.link.remote_attestation import (
     UnknownAttestationSubject,
     build_attestation_pull_request,
+    clear_attestation_pull_cursor,
     forget_retired_remote_attestations,
     ingest_remote_attestation,
     list_attestation_authority_fingerprints,
@@ -204,6 +205,7 @@ from netbbs.link.trust_issuance import reconcile_issued_vouches
 from netbbs.link.transport import (
     AttestationRecipientRefused,
     LinkTransportError,
+    PullCursorUnknown,
     deposit_into_relay_mailbox,
     dial_hello,
     persist_accepted_events,
@@ -217,6 +219,9 @@ from netbbs.link.transport import (
 )
 from netbbs.link.trust_wire import (
     SignedTrustObject,
+    TrustPayloadError,
+    TrustSignatureError,
+    clear_trust_pull_cursor,
     TrustWireError,
     build_trust_pull_request,
     ingest_trust_objects,
@@ -846,38 +851,87 @@ async def _reconcile_own_vouches(node: LinkNode, lane: DatabaseLane) -> None:
         )
 
 
-def _parse_trust_page(raw_objects: list, verify_key, issuer: str) -> tuple[list[SignedTrustObject], str | None]:
-    """The usable objects of one served page, and the cursor for the whole page.
+def _parse_trust_page(
+    raw_objects: list, verify_key, superseded_keys: list, issuer: str
+) -> tuple[list[SignedTrustObject], str | None, bool]:
+    """The usable objects of one served page, the cursor to save, and whether to stop.
 
-    Per object, not per page. An object whose signature does not verify under
-    the issuer's *current* key is one this node cannot use -- and the ordinary
-    way to meet one is an issuer that has rotated its operational key, whose
-    stream still holds what the previous key signed. Parsing the page in one
-    comprehension turned that into a rejected page, and since the cursor then
-    never moved, into a subscription that could not get past it, ever. The
-    attestation pull already parses this way.
+    Per object, not per page: parsing the page in one comprehension turned one
+    unusable object into a rejected page, and since the cursor then never
+    moved, into a subscription that could not get past it, ever.
 
-    The cursor is the content ID of the last object *served*, computed here
-    from its envelope rather than taken from a parsed object, so that skipping
-    the last object of a page still advances past it. An object that names
-    another issuer is not skipped: that is a responder serving something it
-    was not asked for, and it rejects the page.
+    An object whose signature does not verify under the issuer's current key
+    is one of two very different things, and the keys the issuer used before
+    tell them apart:
+
+    - A *superseded* key signed it. That is what an issuer's stream holds after
+      it rotates, it will never verify again, and it is skipped for good.
+    - No key this node knows signed it. The ordinary cause is that *this* node
+      is the stale one: the issuer rotated, re-signed everything, and this
+      node has not completed a hello with it since. Skipping would move the
+      cursor past every re-issued vouch and every revocation, none of which
+      would ever be offered again. So the page stops here: what came before is
+      kept, the cursor stays on the last object with a settled outcome, and the
+      next pass, after the next hello, re-reads from there.
+
+    The cursor is the content ID of the last *settled* object served, computed
+    here from its envelope rather than taken from a parsed object, so that a
+    skipped last object still advances it. An object naming another issuer
+    rejects the page, and is checked before the signature so that it cannot
+    pass for a mere verification failure: that is a responder serving
+    something it was not asked for.
     """
     parsed: list[SignedTrustObject] = []
-    last: str | None = None
+    settled: str | None = None
     for raw in raw_objects:
-        if not isinstance(raw, dict) or not isinstance(raw.get("envelope"), dict):
-            raise TrustWireError("trust response contains a malformed entry")
-        last = event_content_id(raw["envelope"])
         try:
-            obj = SignedTrustObject.from_dict(raw, issuer_verify_key=verify_key)
-        except TrustWireError as exc:
-            _logger.info("Link trust pull: skipped an object from %s: %s", issuer, exc)
-            continue
-        if obj.issuer_fingerprint != issuer:
+            envelope = raw["envelope"]
+            claimed_issuer = envelope["payload"]["issuer_fingerprint"]
+            content_id = event_content_id(envelope)
+        except Exception as exc:  # noqa: BLE001 -- unvalidated peer input; see below
+            # `event_content_id` canonicalizes input nothing has validated yet
+            # and raises `ContentIdError`, which is a bare `Exception`, for a
+            # float or an unsafe integer. Without a cursor for this object
+            # nothing after it can be settled either, so the page is refused
+            # as malformed rather than allowed to escape the pull's handler.
+            raise TrustWireError(f"trust response contains a malformed entry: {exc}") from exc
+        if claimed_issuer != issuer:
             raise TrustWireError("trust response contains an object from another issuer")
-        parsed.append(obj)
-    return parsed, last
+        try:
+            parsed.append(SignedTrustObject.from_dict(raw, issuer_verify_key=verify_key))
+        except TrustPayloadError as exc:
+            # The issuer's own, and not one this node accepts: settled.
+            _logger.info("Link trust pull: skipped an unusable object from %s: %s", issuer, exc)
+        except TrustSignatureError:
+            if not any(_verifies_under(raw, key) for key in superseded_keys):
+                _logger.warning(
+                    "Link trust pull: an object from %s verifies under no key this node knows "
+                    "for it, so this node may be holding a stale key. Stopped there; the next "
+                    "pass retries after the next hello.", issuer,
+                )
+                return parsed, settled, True
+            _logger.info(
+                "Link trust pull: skipped an object from %s signed by a key it has since replaced",
+                issuer,
+            )
+        # Any other `TrustWireError` is a shape this node could not even check
+        # a signature on, and propagates: the page is refused and retried.
+        # Moving the cursor past something unauthenticated would let a
+        # responder plant a cursor that names nothing it holds.
+        settled = content_id
+    return parsed, settled, False
+
+
+def _verifies_under(raw: dict, verify_key) -> bool:
+    try:
+        SignedTrustObject.from_dict(raw, issuer_verify_key=verify_key)
+    except TrustPayloadError:
+        # Signed by this key and unusable for another reason: still not an
+        # object a newer key is going to make good.
+        return True
+    except TrustWireError:
+        return False
+    return True
 
 
 async def _pull_one_trust_reporter(
@@ -891,6 +945,7 @@ async def _pull_one_trust_reporter(
 ) -> None:
     responder = responder_fingerprint or issuer
     verify_key = node.resolve_peer_signing_key(issuer, "trust object")
+    superseded_keys = node.resolve_peer_superseded_signing_keys(issuer)
     completed = False
     for base_url in addresses:
         cursor = None if revocations_only else await lane.run(load_trust_pull_cursor, responder, issuer)
@@ -905,7 +960,9 @@ async def _pull_one_trust_reporter(
                     revocations_only=revocations_only,
                 )
                 raw_objects, more = await request_trust_objects(node, session, base_url, pull)
-                parsed, last_served = _parse_trust_page(raw_objects, verify_key, issuer)
+                parsed, last_served, stalled = _parse_trust_page(
+                    raw_objects, verify_key, superseded_keys, issuer
+                )
                 if parsed:
                     result = await lane.run(ingest_trust_objects, parsed)
                     for skipped in result.skipped:
@@ -917,6 +974,9 @@ async def _pull_one_trust_reporter(
                     cursor = last_served
                     if not revocations_only:
                         await lane.run(save_trust_pull_cursor, responder, issuer, cursor)
+                if stalled:
+                    completed = True
+                    break
                 if not more:
                     completed = True
                     break
@@ -929,6 +989,18 @@ async def _pull_one_trust_reporter(
                     _MAX_TRUST_PULL_PAGES_PER_PASS,
                 )
             break
+        except PullCursorUnknown:
+            # Issue #621, as for the attestation pull. It also undoes a cursor
+            # saved from something the responder never stored, so a buggy or
+            # hostile responder cannot wedge this subscription for longer than
+            # one pass.
+            _logger.warning(
+                "Link trust pull: reporter %s no longer knows this node's place in its stream; "
+                "starting over from the beginning on the next pass.", issuer,
+            )
+            if not revocations_only:
+                await lane.run(clear_trust_pull_cursor, responder, issuer)
+            return
         except (LinkTransportError, LinkProtocolError, TrustWireError, ValueError) as exc:
             _logger.warning(
                 "Link trust pull: rejected response for reporter %s from direct peer %s: %s",
@@ -1095,6 +1167,17 @@ async def _pull_one_attestation_authority(
                     issuer, _MAX_TRUST_PULL_PAGES_PER_PASS,
                 )
             break
+        except PullCursorUnknown:
+            # Issue #621: the authority was restored from an older backup or
+            # recreated, and the object this cursor names no longer exists
+            # there. Sending it again can never work. Forgotten, the next pass
+            # re-reads from the start, where ingest is idempotent.
+            _logger.warning(
+                "Link attestation pull: authority %s no longer knows this node's place in its "
+                "stream; starting over from the beginning on the next pass.", issuer,
+            )
+            await lane.run(clear_attestation_pull_cursor, issuer, issuer)
+            return
         except AttestationRecipientRefused:
             # Not a fault and not worth another address: the authority's SysOp
             # has not named this node. A WARNING so it reaches the bounded

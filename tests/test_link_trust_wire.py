@@ -360,3 +360,26 @@ def test_the_page_is_ordered_by_insertion_not_by_the_receipt_clock(db, reporter)
         db, issuer_fingerprint=reporter.fingerprint, after_content_id=vouch.content_id
     )
     assert after_vouch == [revocation.to_dict()]
+
+
+def test_a_second_revocation_of_the_same_object_is_skipped_not_fatal(db, reporter):
+    """An issuer restored from a backup taken before a withdrawal signs the
+    revocation again. Every subscriber already holding the first one used to
+    reject the batch on it, on every pass, for good."""
+    configure_reporter(db, reporter.fingerprint)
+    vouch = _vouch_for(reporter, TrustSubject.node("subject-node"))
+    first, second = (
+        build_trust_revocation(
+            signing_identity=reporter, issuer_fingerprint=reporter.fingerprint,
+            revocation_id=revocation_id, revoked_content_id=vouch.content_id,
+            issued_at=stamp(NOW), vouch=True,
+        )
+        for revocation_id in ("first", "second")
+    )
+    ingest_trust_objects(db, [vouch, first], now_iso=stamp(NOW))
+    later = _vouch_for(reporter, TrustSubject.node("another-node"), "later")
+
+    result = ingest_trust_objects(db, [second, later], now_iso=stamp(NOW))
+
+    assert result.skipped == [second.content_id]
+    assert result[0] == [later.content_id]

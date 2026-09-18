@@ -492,7 +492,10 @@ To stand behind an identity for the benefit of other nodes, open it under
 which is published with the vouch, and confirm once. Your node signs the vouch
 and serves it to nodes that have named yours a trusted reporter, where it
 counts toward ending that identity's probation. It changes nothing on your own
-node; to establish an identity locally, use **Override**. **Policy trust →
+node; to establish an identity locally, use **Override**. The other side of
+that: naming a node a trusted reporter is not enough for its vouches to reach
+you. Your node pulls and counts a reporter only once that reporter is
+established here, by override or by graduating from probation. **Policy trust →
 Vouches** lists everything your node vouches for and withdraws any of it.
 Vouches renew themselves. If you quarantine or block an identity, your node
 stops vouching for it on its own and resumes if you lift the restriction. Your
