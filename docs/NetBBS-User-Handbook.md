@@ -133,5 +133,11 @@ A name requirement may also disclose the verified name beside contributions
 in that resource. Ask the SysOp what is required before sharing identity
 information. You cannot grant yourself access by editing your profile.
 
+A SysOp-verified age or name stays on this BBS unless you switch on sharing
+over Link for it under **Profile**. Shared, it goes only to the other BBSes
+your SysOp has chosen, and the number shown beside "on" is how many that is
+now. Switching it off makes this BBS stop giving it out and tells those BBSes
+to forget it. One that already copied it cannot be forced to.
+
 To finish, return to the main menu and choose **Log off**. When reporting
 a problem, tell the SysOp which screen, connection method, and action caused it.

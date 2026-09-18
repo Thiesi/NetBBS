@@ -475,6 +475,19 @@ independent votes. Quarantine restricts exchange; it does not erase previously
 accepted content. A sole-authority exception deliberately weakens the usual
 multi-source policy and is marked as a safety deviation.
 
+Verified ages and names cross the Link only when three people agree. The
+caller switches sharing on in their Profile. You name the receiving node under
+**Settings → Policy trust → Published identity → Recipients**; the list starts
+empty, and until you add a node nothing leaves yours whatever callers have
+switched on. The other SysOp names your node under **Identity authorities** on
+their side. If you have named an authority and nothing arrives, look in
+**Diagnostics**: a refusal there means its SysOp has not added your node as a
+recipient yet. Removing a recipient stops future sharing only. That node keeps
+what it already pulled until each attestation expires, within 90 days, and it
+receives no further withdrawals. When a caller switches sharing off, your node
+stops serving the value, deletes its signed copy, and tells its recipients to
+forget it. Backups you took while it was shared still contain it.
+
 A familiar name attached to a new fingerprint produces an identity warning.
 Confirm the full **Technical identity** with the other operator before trusting
 it; renaming a node does not transfer its reputation. Managed DNS changes and

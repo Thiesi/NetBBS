@@ -142,7 +142,9 @@ def test_ctrl_h_shows_real_help_text_for_every_field(db, lane, alice):
     # Dogfood feature request: this screen's five fields previously had
     # no help= authored at all, so Ctrl-H was a discoverable dead end
     # ("No help is available for ... yet" for every one of them).
-    session = FakeSession([HELP_KEY, " ", "b"])
+    # One more page than before issue #596: the two Link-sharing entries now
+    # say who receives the value and what withdrawal can and cannot do.
+    session = FakeSession([HELP_KEY, " ", " ", "b"])
     asyncio.run(profile_flow._identity_details_screen(session, lane, alice))
     text = _visible(session)
     assert "No help is available" not in text
@@ -157,7 +159,18 @@ def test_ctrl_h_shows_real_help_text_for_every_field(db, lane, alice):
     assert "trust/vouch policy" not in text
     assert "an age gate can let you in" in text
     assert "requires a verified name can let you in" in text
-    assert "accept this node's verifications" in text
+    # Issue #596 replaced v7.7.0's honest-but-unenforced wording ("any node
+    # this one has linked with ... a decision you cannot reverse") with what
+    # the node now enforces, and the limit it cannot: a recipient list, and a
+    # withdrawal that a node which already copied the value may ignore.
+    # The help is drawn in a box, so a sentence is interrupted by the frame
+    # at every wrap; drop the frame before reading it as prose.
+    flowed = " ".join("".join(ch if ch.isascii() else " " for ch in text).split())
+    assert "only to the nodes your SysOp has named" in flowed
+    assert "nothing can force a node that already copied the date to" in flowed
+    assert "nothing can force a node that already copied the name to" in flowed
+    assert "you cannot reverse" not in flowed
+    assert "any node this one has linked with" not in flowed
 
 
 def test_display_name_edit_sets_only_the_value(db, lane, alice):
@@ -258,7 +271,9 @@ def test_remote_sharing_toggles_both_ways_without_a_question(db, lane, alice):
     session = FakeSession(["h", "b"])
     asyncio.run(profile_flow._identity_details_screen(session, lane, alice))
     assert get_attestation(db, alice, "name").link_visible is True
-    assert "Share verified name over Link: on" in squeezed(_visible(session))
+    # Issue #596: "on" with nobody named to receive it shares nothing, and
+    # the caller is shown that beside the value rather than left to wonder.
+    assert "Share verified name over Link: on (your SysOp shares with no node yet)" in squeezed(_visible(session))
     assert "Allow this verified" not in _written_text(session)
 
     # Turning it off is the same single keystroke -- previously the
@@ -334,3 +349,23 @@ def test_remote_sharing_reports_an_attestation_removed_since_the_draw(db, lane, 
     assert "was removed since this screen was drawn" in text
     assert "Share verified name over Link: (not verified)" in squeezed(text)
     assert get_attestation(db, alice, "name") is None
+
+
+def test_remote_sharing_shows_how_many_nodes_it_reaches(db, lane, alice):
+    """Issue #596, Decision 4: the caller is told how many, never which."""
+    from netbbs.link.remote_attestation import configure_attestation_recipient
+
+    verifier = create_user(db, "sysop", password="hunter2", user_level=255)
+    attest_name(db, alice, "Alice Wonderland", verifier=verifier)
+    configure_attestation_recipient(db, "a" * 32, reason="first")
+
+    session = FakeSession(["h", "b"])
+    asyncio.run(profile_flow._identity_details_screen(session, lane, alice))
+    text = squeezed(_visible(session))
+    assert "Share verified name over Link: on (reaches 1 node)" in text
+    assert "a" * 32 not in text
+
+    configure_attestation_recipient(db, "b" * 32, reason="second")
+    session = FakeSession(["b"])
+    asyncio.run(profile_flow._identity_details_screen(session, lane, alice))
+    assert "Share verified name over Link: on (reaches 2 nodes)" in squeezed(_visible(session))

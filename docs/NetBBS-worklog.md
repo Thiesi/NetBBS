@@ -2656,9 +2656,10 @@ attestation rather than trusting a caller-supplied consent flag. On receipt,
 signature verification precedes persistence, while acceptance separately
 checks the local attestation-authority/attribute grant, current issuer trust,
 expiry/revocation, and any reasoned local override. General trust reporters are
-never identity verifiers. Removing or distrusting an authority, expiring or
-revoking a record, and clearing an override recompute future gate satisfaction
-without deleting signed history. A SysOp accept override still requires a
+never identity verifiers. Removing or distrusting an authority and clearing an
+override recompute future gate satisfaction without deleting signed history;
+expiring or revoking a record does the same and then blanks that record's value
+and envelope (issue #596). A SysOp accept override still requires a
 current cryptographically valid record; it cannot revive expired or revoked
 bytes. Remote real-name values are composed only by the resource-scoped trusted
 renderer for `verified_and_displayed`, never placed in general identity labels.
@@ -3488,12 +3489,43 @@ of a signed trust pull spend its one-shot nonce against the attestation
 endpoint and make the trust pull fail as a replay. Two endpoints serving
 different object families need two signed request types.
 
-An issuer's served stream includes expired and revoked objects. A subscriber
-returning after an absence needs the revocation that retired an object it still
-holds, and filtering by current validity would make the stream depend on *when*
-it is read -- a cursor into a stream like that skips objects instead of resuming
-from them. Filtering belongs at the receiver's projection
-(`_recompute` already ignores both), never in the page.
+An issuer's served stream is every revocation plus the attestations live at
+the moment of the read (issue #596). It used to be served whole, on the
+reasoning that a stream which depends on *when* it is read cannot be resumed
+from a cursor. That reasoning confuses a position with a set. The cursor is a
+content ID resolved to a rowid, so omitting a row does not move any other row;
+what a returning subscriber needs from history is the revocation of anything it
+holds, and a revocation is always inserted after the object it retires. What
+does break the cursor is serving *part* of the stream to someone not entitled
+to the rest: any page advances the subscriber's cursor, so a node served only
+revocations before it was named a recipient would never be offered the
+attestations it had already stepped over. Hence a non-recipient is refused
+outright, and hence recipients are per node: a per-attribute grant is the same
+trap one level down.
+
+Two details of that page are load-bearing. The liveness filter is in the query
+that sizes the page, not applied to its result, because the subscriber treats
+"more available, no objects" as a protocol error and a page of retired rows
+would be exactly that. And the recipient check runs before the cursor lookup,
+or the difference between "unknown cursor" and a refusal tells a stranger which
+content IDs exist.
+
+A retired attestation is redacted, not deleted, on both sides of the wire.
+`envelope_json` and `signature_b64` are `NOT NULL` in both tables, so a
+redacted row holds empty strings there and `redacted_at` is what says so; never
+test the envelope for truthiness to decide anything else. The issuer's row has
+to stay because a subscriber's cursor may name it. The receiver's has to stay
+because `link_remote_attestation_revocations`, the effective projection and
+the audit trail reference it, and because its content ID is what turns a
+re-offered copy of the withdrawn object into an `INSERT OR IGNORE` no-op rather
+than a way to get the value back. Expiry has no event to hang redaction on, so
+the issuer sweeps inside `reconcile_issued_attestations` and the receiver in
+its own step of the sync pass; neither sweep is what keeps an expired value off
+the wire, the read-time filter is, so a node whose Link was down for a year
+does not come back serving last year's values. Redaction is logical, not
+forensic: the connection does not set `secure_delete`, so freed pages, the WAL
+until its next checkpoint, and any earlier backup can still hold the bytes. The
+threat this answers is a peer pulling a value, not someone reading the disk.
 
 `link_issued_remote_attestations.user_id` is `ON DELETE SET NULL`, not
 `CASCADE`. A signed object has to outlive the account it is about long enough

@@ -237,13 +237,16 @@ from netbbs.link.reliability import reliability_score
 from netbbs.link.remote_attestation import (
     clear_remote_attestation_override,
     configure_attestation_authority,
+    configure_attestation_recipient,
     get_remote_attestation_state,
     list_attestation_authorities,
+    list_attestation_recipients,
     list_issued_attestations,
     list_remote_attestation_audit,
     list_remote_attestation_overrides,
     reconcile_issued_attestations,
     remove_attestation_authority,
+    remove_attestation_recipient,
     set_remote_attestation_override,
 )
 from netbbs.link.onboarding import Participation, get_configured_link_enabled, get_participation, set_participation
@@ -3284,7 +3287,11 @@ async def _attestation_authorities_screen(
                 render=_node_render("node"),
                 prompt=_node_then_seed,
                 brief="Which linked node may attest",
-                help="A stored peer, or a name/DNS name/technical identity typed in.",
+                help=(
+                    "A stored peer, or a name/DNS name/technical identity typed in. Nothing "
+                    "arrives until that node's SysOp has also named this node as a recipient "
+                    "of its attestations; until then its refusal shows in the Link diagnostics."
+                ),
             ),
             FieldSpec(
                 key="attributes", hotkey="a", menu_text=menu_key("A", "ttributes"), label="Attributes",
@@ -3318,6 +3325,140 @@ async def _attestation_authorities_screen(
 
         await _trust_editor(
             session, lane, actor, title="Attestation authority", fields=fields, draft=draft, save=save,
+            node_key="node",
+        )
+
+
+async def _attestation_recipients_screen(
+    session: Session, lane: DatabaseLane, actor: User
+) -> None:
+    """Which nodes this node gives its signed attestations to (issue #596).
+
+    The issuing mirror of `_attestation_authorities_screen`, in the same
+    issue #282 shape: a listing, `[A]dd/update` as a draft editor (node,
+    reason), `[R]emove` as a picker and one confirm, `[B]ack`. There is no
+    attribute field on purpose: a recipient is a node, and which attributes
+    leave at all is each caller's own pair of toggles (design doc §16,
+    issue #596, Decision 2).
+    """
+    redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
+    unicode_style = await lane.run(unicode_style_enabled, actor)
+    collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
+    while True:
+        recipients = await lane.run(list_attestation_recipients)
+        labels = {r.fingerprint: (await lane.run(identity_for_fingerprint, r.fingerprint)).label for r in recipients}
+        await session.write_line(
+            colored(
+                "\r\nNodes that receive this node's identity attestations:",
+                fg_color=await lane.run(effective_header_color_256), bold=True,
+            )
+        )
+        for recipient in recipients:
+            await session.write_line(
+                f"{sanitize_text(labels[recipient.fingerprint])} -- {sanitize_text(recipient.reason)}"
+            )
+        if not recipients:
+            await session.write_line(
+                colored(
+                    "None. No verified age or name leaves this node, whatever its callers "
+                    "have switched on.",
+                    fg_color=SUCCESS_COLOR,
+                )
+            )
+        choice = await _trust_list_choice(session, ["a", "r"])
+        if choice == "b":
+            return
+        if choice == "r":
+            selected = await pick_item(
+                session, recipients,
+                name_of=lambda r: labels[r.fingerprint], stable_id_of=lambda r: _stable_id_for(r.fingerprint),
+                description_of=lambda r: f"{r.fingerprint} -- {r.reason}",
+                title="Stop sharing with which node?", empty_message="No attestation recipients are named.",
+                redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
+                accent_color=await lane.run(effective_accent_color_256),
+                header_color=await lane.run(effective_header_color_256),
+            )
+            if selected is None:
+                continue
+            await session.write_line(
+                colored(
+                    "This stops future sharing. What the node already holds stays with it "
+                    "until each attestation expires, within 90 days, and it receives no "
+                    "further revocations.",
+                    fg_color=MUTED_COLOR,
+                )
+            )
+            if not await prompt_yes_no(
+                session,
+                f"Stop sharing attestations with {sanitize_text(labels[selected.fingerprint])} "
+                f"[{sanitize_text(selected.fingerprint)}]?",
+                default=False,
+            ):
+                continue
+            try:
+                await lane.run(remove_attestation_recipient, selected.fingerprint, actor_user_id=actor.id)
+            except ValueError as exc:
+                await session.write_line(
+                    colored(f"Attestation recipient not changed: {exc}", fg_color=ERROR_COLOR)
+                )
+                continue
+            await session.write_line(
+                colored("Attestation recipient removed and audited.", fg_color=SUCCESS_COLOR)
+            )
+            continue
+
+        draft: dict = {"node": None, "node_label": None, "reason": ""}
+        existing_recipients = {r.fingerprint: r for r in recipients}
+        node_field = _node_reference_field(
+            "node", redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
+        )
+
+        async def _node_then_seed(session: Session, lane: DatabaseLane, draft: dict) -> None:
+            # A changed node takes that node's stored reason, or none, so an
+            # update cannot silently keep the reason typed for another node.
+            before = draft["node"]
+            await node_field(session, lane, draft)
+            if draft["node"] == before:
+                return
+            existing = existing_recipients.get(draft["node"])
+            draft["reason"] = existing.reason if existing is not None else ""
+
+        fields = [
+            FieldSpec(
+                key="node", hotkey="n", menu_text=menu_key("N", "ode"), label="Node",
+                render=_node_render("node"),
+                prompt=_node_then_seed,
+                brief="Which linked node receives them",
+                help=(
+                    "A stored peer, or a name/DNS name/technical identity typed in. That node "
+                    "can then pull every verified age and name a caller here has chosen to "
+                    "share over Link. It still has to name this node as an identity authority "
+                    "on its own side before it asks."
+                ),
+            ),
+            FieldSpec(
+                key="reason", hotkey="r", menu_text=menu_key("R", "eason"), label="Reason",
+                render=lambda d: sanitize_text(d["reason"]) if d["reason"] else "(required)",
+                prompt=text_field("reason", required=True),
+                brief="Mandatory audit note",
+                help="Why this node is trusted with callers' verified birthdates and real names. Recorded in the audit trail.",
+            ),
+        ]
+
+        async def save(draft: dict) -> bool | None:
+            if draft["node"] is None or not draft["reason"]:
+                raise ValueError("choose a [N]ode and give a [R]eason first")
+            await lane.run(
+                configure_attestation_recipient, draft["node"],
+                reason=draft["reason"], actor_user_id=actor.id,
+            )
+            await session.write_line(
+                colored("Attestation recipient changed and audited.", fg_color=SUCCESS_COLOR)
+            )
+            return True
+
+        await _trust_editor(
+            session, lane, actor, title="Attestation recipient", fields=fields, draft=draft, save=save,
             node_key="node",
         )
 
@@ -3386,10 +3527,16 @@ async def _published_identity_screen(
     this is the only one about what leaves it, which is the half a SysOp is
     accountable for.
 
-    `[W]ithdraw` is the only action, deliberately. A SysOp may stop their node
-    asserting something -- they verified it, and can un-verify it outright --
-    but §5.5 makes propagation conditional on the subject's own opt-in, so
-    there is no way to switch sharing *on* for a caller from here.
+    `[W]ithdraw` is the only action on an object, deliberately. A SysOp may
+    stop their node asserting something -- they verified it, and can un-verify
+    it outright -- but §5.5 makes propagation conditional on the subject's own
+    opt-in, so there is no way to switch sharing *on* for a caller from here.
+
+    `[R]ecipients` is the other half of "what leaves this node": which nodes
+    may read any of it (issue #596). The count is on this screen because a
+    list of published objects beside an empty recipient list publishes
+    nothing, and a SysOp looking at the first should not have to infer the
+    second.
     """
     redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
     unicode_style = await lane.run(unicode_style_enabled, actor)
@@ -3426,6 +3573,22 @@ async def _published_identity_screen(
                     fg_color=SUCCESS_COLOR,
                 )
             )
+        recipient_count = len(await lane.run(list_attestation_recipients))
+        if recipient_count:
+            await session.write_line(
+                colored(
+                    f"Given to {recipient_count} recipient node{'s' if recipient_count != 1 else ''}.",
+                    fg_color=METADATA_COLOR,
+                )
+            )
+        else:
+            await session.write_line(
+                colored(
+                    "No recipient nodes are named, so none of this leaves the node. "
+                    "[R]ecipients names them.",
+                    fg_color=WARNING_COLOR,
+                )
+            )
         pending = [record for record in live if record.status == "withdrawing"]
         if pending:
             await session.write_line(
@@ -3445,7 +3608,7 @@ async def _published_identity_screen(
         await write_prompt(
             session,
             action_bar(
-                [menu_key("W", "ithdraw"), toggle, menu_key("B", "ack")],
+                [menu_key("W", "ithdraw"), menu_key("R", "ecipients"), toggle, menu_key("B", "ack")],
                 width=session.terminal_width,
             )
             + ": ",
@@ -3456,6 +3619,9 @@ async def _published_identity_screen(
             return
         if choice == ("c" if show_all else "s"):
             show_all = not show_all
+            continue
+        if choice == "r":
+            await _attestation_recipients_screen(session, lane, actor)
             continue
         if choice != "w":
             await session.write(reject_unhandled_key(choice))

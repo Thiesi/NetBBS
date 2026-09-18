@@ -2738,4 +2738,43 @@ MIGRATIONS = [
         );
         """,
     ),
+    Migration(
+        description=(
+            "Issue #596: the issuer-side attestation recipient list, and redaction of a "
+            "retired attestation's value. `link_attestation_recipients` is the set of "
+            "nodes this node serves its signed attestations to; it starts empty and is "
+            "seeded from nothing, so an upgraded node shares with nobody until its SysOp "
+            "names someone. `redacted_at` marks a row whose value-bearing columns have been "
+            "blanked: the row itself stays, on the issuer so a pull cursor naming it "
+            "still resolves to a position, on the receiver because its revocation, "
+            "effective-projection and audit rows reference it. The envelope and signature "
+            "columns are NOT NULL in both tables, so a redacted row holds empty strings "
+            "there rather than NULL. Rows already revoked are redacted here; rows that "
+            "have merely expired are left to the first sync pass, which knows what time "
+            "it is, and are not served in the meantime because the page query filters on "
+            "liveness when it is read."
+        ),
+        sql="""
+        CREATE TABLE link_attestation_recipients (
+            fingerprint    TEXT PRIMARY KEY,
+            reason         TEXT NOT NULL,
+            actor_user_id  INTEGER REFERENCES users(id) ON DELETE SET NULL,
+            created_at     TEXT NOT NULL,
+            updated_at     TEXT NOT NULL
+        );
+
+        ALTER TABLE link_issued_remote_attestations ADD COLUMN redacted_at TEXT;
+        ALTER TABLE link_remote_attestations ADD COLUMN redacted_at TEXT;
+
+        UPDATE link_issued_remote_attestations
+           SET attested_value = NULL, envelope_json = '', signature_b64 = '',
+               redacted_at = revoked_at
+         WHERE object_type = 'remote_identity_attestation' AND revoked_at IS NOT NULL;
+
+        UPDATE link_remote_attestations
+           SET attested_value = '', envelope_json = '', signature_b64 = '',
+               redacted_at = revoked_at
+         WHERE revoked_at IS NOT NULL;
+        """,
+    ),
 ]

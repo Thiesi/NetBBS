@@ -183,7 +183,9 @@ from netbbs.link.store import (
 from netbbs.link.remote_attestation import (
     MAX_ATTESTATION_OBJECTS_PER_RESPONSE,
     MAX_ATTESTATION_RESPONSE_BYTES,
+    NOT_AN_ATTESTATION_RECIPIENT_REASON_CODE,
     AttestationPullRequest,
+    NotAnAttestationRecipient,
     load_issued_attestation_page,
 )
 from netbbs.link.trust_wire import (
@@ -506,6 +508,16 @@ async def persist_accepted_events(
                 )
             except FileAreaCarryLimitError as exc:
                 _logger.warning("Link sync: %s", exc)
+
+
+class AttestationRecipientRefused(Exception):
+    """An attestation authority answered that this node is not one of its recipients.
+
+    Its own type rather than a `LinkTransportError`, because nothing about the
+    transport failed and trying the authority's next address would only ask
+    the same question again. `netbbs.link.sync` turns it into the one log line
+    that tells the SysOp what to do about it.
+    """
 
 
 class LinkTransportError(Exception):
@@ -1902,6 +1914,14 @@ class LinkServer:
         bounded nonce cache, `LinkPolicyAction.TRUST` gate -- because the two
         expose the same class of thing: bounded, already-signed objects a
         subscriber has explicitly configured this node to supply.
+
+        And one gate the trust pull does not have (issue #596): the requester
+        must be on this node's own recipient list. Trust objects are meant to
+        travel; an attestation carries a caller's birthdate or real name, and
+        the subscriber configuring this node as an authority is a decision made
+        on the *other* node, which this one never sees. The check runs last, so
+        only an authenticated, policy-admitted peer learns the answer, and
+        inside the same lane call as the read, so the two cannot disagree.
         """
         fingerprint = request.match_info["fingerprint"]
         try:
@@ -1913,8 +1933,18 @@ class LinkServer:
                 return self._policy_rejection(decision)
             objects, more = await self._lane.run(
                 load_issued_attestation_page,
+                requester_fingerprint=fingerprint,
                 after_content_id=pull.after_content_id,
                 limit=pull.limit,
+            )
+        except NotAnAttestationRecipient as exc:
+            # Visible, in the shape a policy rejection already has: what it
+            # discloses is a relationship between two nodes that the other
+            # SysOp has to act on, not a per-user gate (design doc §16,
+            # issue #596, Decision 3).
+            return web.json_response(
+                {"error": str(exc), "reason_code": NOT_AN_ATTESTATION_RECIPIENT_REASON_CODE},
+                status=403,
             )
         except (KeyError, TypeError, ValueError) as exc:
             return web.json_response({"error": f"malformed attestation pull: {exc}"}, status=400)
@@ -2446,6 +2476,18 @@ async def _read_bounded(response, limit: int, *, label: str = "response body") -
     return bytes(buffered).decode("utf-8", errors="replace")
 
 
+def _is_recipient_refusal(text: str | bytes) -> bool:
+    """Whether a 403 body is the issuer-side recipient refusal (issue #596)."""
+    try:
+        body = strict_json_loads(text)
+    except ValueError:
+        return False
+    return (
+        isinstance(body, dict)
+        and body.get("reason_code") == NOT_AN_ATTESTATION_RECIPIENT_REASON_CODE
+    )
+
+
 async def request_remote_attestations(
     node: LinkNode,
     session: ClientSession,
@@ -2462,6 +2504,8 @@ async def request_remote_attestations(
         ) as response:
             if response.status != 200:
                 text = await _read_bounded(response, _MAX_ERROR_BODY_BYTES)
+                if response.status == 403 and _is_recipient_refusal(text):
+                    raise AttestationRecipientRefused(url)
                 raise LinkTransportError(
                     f"attestation pull from {url} failed: HTTP {response.status}: {text}"
                 )

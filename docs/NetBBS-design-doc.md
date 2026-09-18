@@ -1073,6 +1073,7 @@ not cause the real name to leak into unrelated screens.
 Remote propagation of attestations requires:
 
 - the subject’s explicit opt-in;
+- the issuing node's SysOp having named the receiving node as a recipient;
 - Phase-4 trust rules allowing the receiving node to decide whether to trust the
   remote verifier.
 
@@ -1085,7 +1086,10 @@ stable issuer fingerprint, the subject's `node_vouched_user` identity pair,
 attribute/value, explicit opt-in assertion, issuance time, and expiry. The
 maximum active lifetime is 365 days. Revocation is a separate signed
 `remote_identity_attestation_revocation` object naming the exact original
-content ID; neither expiry nor revocation deletes the signed historical row.
+content ID. Expiry and revocation both retire an attestation, and a retired
+attestation has the columns that carry its value blanked (the stored value,
+the envelope and the signature) while its row stays, on the issuer and on
+every receiver running this software (issue #596).
 
 Issuance is reconciled once per sync pass against current local consent, not
 performed by the screen that records it: the signature must be made by the
@@ -1126,17 +1130,50 @@ subscription set is the receiver's configured attestation authorities, never
 its trust reporters. A node serves only the objects it signed itself: unlike a
 trust signal, which any carrier may re-serve unchanged, an attestation is a
 statement about the issuer's own users, so a pull naming a third-party issuer
-is refused rather than answered. The served stream includes expired and revoked
-objects, so a subscriber returning after an absence still receives the
-revocation that retired an object it holds; a stream that depended on when it
-was read could not be resumed from a cursor. There is no `revocations_only`
-containment mode: an attestation only ever loosens a local gate, so a
-quarantined authority is simply not pulled.
+is refused rather than answered.
+
+Who may pull is the issuer's decision, and separate from every decision the
+receiver makes. A node serves its attestations only to the nodes its SysOp has
+named as recipients, a list that starts empty, is seeded from nothing, and is
+per node rather than per attribute: the caller's two toggles already decide
+which attributes leave at all. A requester that is not a recipient is refused
+outright, with HTTP 403 and `reason_code` `not_an_attestation_recipient`,
+after it has authenticated and passed trust policy. It is not served the
+value-free part of the stream instead, because any page advances the
+requester's cursor and a cursor that has moved past attestations it was not
+shown would deliver none of them after a later grant. A node removed from the
+list therefore receives no further revocations; what it holds lapses at its
+own expiry.
+
+The served stream is every revocation, plus the attestations that are live
+when the page is read. A subscriber returning after an absence still receives
+the revocation that retired an object it holds, and that is all it needs from
+history. The stream stays resumable although it omits retired attestations,
+because a cursor names a position and a retired row keeps its position; only
+its value is gone. There is no `revocations_only` containment mode: an
+attestation only ever loosens a local gate, so a quarantined authority is
+simply not pulled.
+
+A receiver forgets what it is told is withdrawn. Ingesting a revocation blanks
+the stored value and envelope of the attestation it names, and each sync pass
+does the same for attestations that have expired. The rows stay, because the
+revocation, the effective projection and the audit trail reference them, and
+because a retained content ID makes a re-offered copy of the same object a
+no-op. This is the whole of what opting out can promise: the issuer stops
+serving the value and removes its signed copy from its live database, a
+receiver running NetBBS does the same, and nothing forces a node that copied
+it to. Removal is from the live, served database and is not forensic erasure:
+the write-ahead log until its next checkpoint, freed pages, and backups taken
+while the value was shared can still hold the bytes.
 
 A SysOp can see everything their node currently asserts about its own users,
-and stop any of it. That listing names the subject, the attribute, and the
-expiry, but never the attested value: it is a screen about what leaves the
-node, not a place a verified real name belongs. Withdrawal clears the
+which nodes any of it is given to, and stop any of it. The same screen holds
+the recipient list and says so plainly when that list is empty, since
+published objects beside no recipients publish nothing. A caller sees how many
+recipients there are beside their own sharing toggle, never which. The listing
+names the subject, the attribute, and the expiry, but never the attested
+value: it is a screen about what leaves the node, not a place a verified real
+name belongs. Withdrawal clears the
 subject's consent and lets the ordinary reconcile sign the revocation, so the
 operator action and the sync pass can never disagree about whether an object
 should exist. There is deliberately no operator way to switch sharing *on*:
@@ -9537,6 +9574,191 @@ other live sessions; a caller who suspects a compromise asks the SysOp to
 disable the account, which does. No self-service recovery exists: there is no
 email or other out-of-band channel to send anything through, so "forgot my
 password" is a SysOp action, and the Profile help text says so.
+
+### Issue #596 — who may pull an attestation, and what opting out retracts — closed
+
+Found by the review of the v7.7.0 release. Two facets of one gap between what
+a caller is told when they share a SysOp-verified birthdate or real name over
+Link and what the node does.
+
+*Disclosure scope.* `_handle_attestation_pull` admits any completed peer whose
+signed request is fresh and whom `LinkPolicyAction.TRUST` allows, and
+`load_issued_attestation_page` takes no requester at all. The receiver's
+`link_attestation_authorities` is a list the issuer never sees. So every
+federated peer can read every attestation this node has signed, while §5.5
+will not show the same value to the node's own SysOp.
+
+*Retraction.* `_revoke_issued` stamps the row and leaves `envelope_json`, which
+carries `attested_value`, in place; the page query filters on nothing. A peer
+that links next year and pulls from the start reads a value whose subject
+opted out this year.
+
+v7.7.0 shipped consent text that says both things honestly and enforces
+neither. These decisions replace that text with enforcement. Normative
+description: §5.5.
+
+**Decision 1 — an issuer-side recipient list, and it starts empty.** A new
+SysOp-configured, audited set of node fingerprints: the nodes this node tells.
+The pull handler keeps every gate it has and adds one: the requester must be
+on the list. An empty list means nothing leaves the node whatever its callers
+have toggled. An upgrade seeds the list from nothing. In particular not from
+the attestation authorities: whose verifications a SysOp accepts says nothing
+about whom they are willing to tell, and the two lists point in opposite
+directions. Rejected: correcting the consent text and enforcing nothing, which
+is what v7.7.0 did as a stopgap and which leaves a value §5.5 withholds from
+the local SysOp readable by every peer.
+
+**Decision 2 — a recipient is a node, not a node and an attribute.** The
+receiving side scopes an authority to `age` and `name` separately, and the
+mirror image was considered. Rejected for two reasons. The caller already
+scopes per attribute, with two separate toggles, so the finer knob exists
+where the consent is. And a per-attribute grant makes each requester's stream
+a function of its grant history, which the protocol cannot express: the pull
+cursor is the subscriber's, it names a position, and a requester whose scope
+widens has already moved past the rows it was not entitled to last week.
+With a per-node list that cannot happen, because of Decision 3.
+
+**Decision 3 — a node that is not a recipient is refused outright, and told
+so.** HTTP 403 with `reason_code` `not_an_attestation_recipient`, in the shape
+a policy rejection already has. Not a revocations-only stream, although a
+revocation carries no value: serving part of the stream advances the
+requester's cursor past the attestations it was not shown, and a later grant
+would then deliver none of them until each came up for renewal. A refused
+requester's cursor does not move, so a grant, a removal and a re-grant all
+resume from the right place with no cleverness on either side. The refusal is
+visible rather than silent because what it discloses is a relationship between
+two nodes that the other SysOp has to act on, by asking to be added. §12.8's
+silence protects a per-user gate decision; this is not one.
+
+The cost, accepted: a node removed from the list stops receiving revocations
+too. What it already holds lapses at its own expiry, at most 90 days out,
+which is the window §5.5 already accepts for an issuer that goes dark.
+Removing a recipient is a statement about the future. Nothing makes a node
+that has a value forget it.
+
+**Decision 4 — the caller is told how many, the SysOp sees which.** The
+consent text says the value reaches only the nodes the SysOp has named, that
+the SysOp may name more later, and the toggle shows how many that currently
+is, so a caller can see that sharing to nobody shares nothing. Rejected:
+per-caller approval of each recipient. A caller cannot evaluate a node
+fingerprint, and re-asking every sharing caller at every grant would make the
+list unusable by the one person who can evaluate it. The SysOp is already the
+party the caller trusted with the verified value itself; choosing where the
+node's assertion of it goes is the same trust, not a new one.
+
+**Decision 5 — a retired attestation stops being served and loses its
+value.** When an issued attestation is revoked or expires, the issuer blanks
+the columns that carry the value (`attested_value`, the envelope, the
+signature) and keeps the row: content ID, attribute, timestamps, what revoked
+it. That removes the value from the live, served database; it is not forensic
+erasure, and "Not done" below says what it leaves. The
+page query serves only live attestations and every revocation, and filters on
+liveness at read time so that what is served never depends on when a sweep
+last ran. The migration redacts rows already revoked. This supersedes two
+sentences of §5.5: "neither expiry nor revocation deletes the signed
+historical row" and "the served stream includes expired and revoked objects".
+
+Resumability survives, which was the stated reason for serving history whole.
+A cursor names a position, and the tombstone keeps that position resolvable
+for a subscriber whose last object was the one redacted. What a returning
+subscriber needs from history is the revocation of anything it holds, and
+every revocation is still in the stream, after the object it retires. A
+retired attestation the subscriber never received is nothing it needs:
+acceptance already ignores it, and serving it would hand over a value whose
+subject has withdrawn it. A revocation whose target the subscriber never
+received is skipped per object, as it is today.
+
+**Decision 6 — a receiver forgets what it is told is withdrawn.** On ingesting
+a revocation, and once an attestation it holds has expired, a node blanks the
+stored value and envelope and keeps the row, which its revocation, effective
+projection and audit rows reference. This is what "switching it off withdraws
+it" can honestly mean between two nodes running this software, and the consent
+text says the rest: a node that already copied the value cannot be forced to
+forget it.
+
+**Not done, deliberately.** No per-caller recipient choice and no
+per-attribute recipient scope, for the reasons above. No revocation delivery
+to a removed recipient. No way for an issuer to learn what a recipient did
+with a value. No secure erasure: redaction blanks columns in the live
+database, so the write-ahead log until its next checkpoint, freed pages, and
+any backup taken while a value was shared can still hold it, and the issuing
+node's own verification record keeps the value for as long as the SysOp keeps
+the verification. The threat answered is a peer pulling a value, not someone
+reading the disk; turning on SQLite's `secure_delete` for the whole node to
+narrow that further was not judged worth its write cost.
+
+**On upgrade.** Attestation sharing stops until the SysOp names recipients.
+That is the intended default, and the release notes have to say it, because a
+node that was sharing will otherwise read as broken.
+
+### Issue #594 — a deleted account's username stays retired on a Link node — decided
+
+`local_user_id` is the username, and `users.username` is unique only among
+live rows, so deleting an account frees its Link identity for the next
+registrant. Link mail sends and delivers by it (`deliver_link_message` resolves
+the recipient with `get_user_by_username`), a carried post's `author_label` is
+`username@home-node-fingerprint` and `link_events` keeps it, the trust subject
+is derived from it, and a remote identity attestation names it. A
+re-registered name inherits all of that: authorship, trust state, a live
+attestation until its revocation propagates, and mail a remote sender wrote to
+the previous holder. Decided here and not yet implemented; §4 changes when the
+code does.
+
+**Decision 1 — retire the name; do not change the identifier.** A stable,
+never-reissued per-account identifier was the alternative. It needs a
+migration assigning one to every account, a wire decision about the
+`node_vouched_user` payload every peer already has on disk, a display
+decision because an opaque ID is exactly what must not be shown, and a
+compatibility story for labels peers retain. It also would not be enough: a
+Link mail address is `name@node` by design, so whoever holds the name gets
+the mail whatever identifier sits underneath. Retiring the name is the part
+every answer needs, so it is the part built.
+
+**Decision 2 — recorded at deletion, on a node that has ever run Link.**
+`delete_user` writes the retired name in the transaction that deletes the
+account, when the node runs Link now or has at any time before. "Ever" is a
+sticky marker the node sets the first time it starts with Link effectively
+on, with stored peers standing in for the marker on a node that ran Link
+before the marker existed. A node that has never run Link records nothing and
+its names stay reusable, which is both BBS tradition and the cost the issue
+names: a small board should not lose names forever to a network it is not on.
+A recorded name stays retired whatever the Link setting does afterwards.
+Registration checks the record case-insensitively, as the uniqueness index
+does.
+
+The test is "ever", not "now", because what peers hold does not evaporate
+when Link is switched off. Keying on the setting at the moment of deletion
+would let an account that was Link-visible be deleted during a maintenance
+window with Link off, re-registered, and then carried back onto the network
+under an identity its peers already know. The price is over-reservation on a
+node that once ran Link and no longer does, where an account that never
+federated is retired anyway; the SysOp can release it (Decision 3), and the
+alternative is tracking per account whether it was ever Link-visible, which
+every Link subsystem would have to feed.
+
+**Decision 3 — the SysOp can release a name, on purpose.** A list of retired
+names reachable from user administration, with release as a confirmed,
+audited action. A SysOp who deleted a test account, or whose caller comes
+back after asking to be removed, is making the trust decision this project
+leaves with the SysOp. Without a release the only repair is editing the
+database.
+
+**Decision 4 — a remote caller is told the name is unavailable; a SysOp is
+told why.** Self-service registration refuses a retired name in the words it
+uses for a taken one, so registration is no oracle for who used to have an
+account. The create-user screen and the admin CLI say that the name belonged
+to a deleted account, that it is held because the node is on Link, and where
+to release it.
+
+**Decision 5 — forward only.** The migration creates an empty table. The
+moderation log names past deletions, but in free text, and reconstructing
+reservations from a log line is the kind of inference that retires the wrong
+name. Names already freed stay freed.
+
+**Not done, deliberately.** Nothing repairs an identity a peer already holds
+for a name reused before this ships. Nothing in the codebase renames an
+account; a rename, if one is ever built, frees a name the same way a deletion
+does and has to retire it the same way.
 
 ### SFTP over the SSH transport — declined
 
