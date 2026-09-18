@@ -3060,10 +3060,10 @@ class _ThreeNodes:
             self.dbs[name].lane, enforce_trust_policy=self.enforce,
         )
 
-    def post(self, name, subject):
+    def post(self, name, subject, board_name="general"):
         from netbbs.boards.boards import get_board_by_name
 
-        board = get_board_by_name(self.dbs[name].db, "general")
+        board = get_board_by_name(self.dbs[name].db, board_name)
         post = create_post(self.dbs[name].db, board, author=self.sysops[name], subject=subject, body="hi")
         assert queue_board_post_if_linked(self.dbs[name].db, post, board, node_identity=self.ids[name])
 
@@ -3187,5 +3187,81 @@ def test_a_carrier_that_cannot_introduce_an_author_costs_that_post_and_nothing_e
         asyncio.run(scenario())
         assert net.subjects_on("B") == ["hello from R"]
         assert len(net.nodes["B"].deferred_events.entries) == 1
+    finally:
+        net.close()
+
+
+def test_a_board_whose_origin_is_on_probation_is_not_downloaded_again_on_every_pass(tmp_path, caplog):
+    """The board is not carried *because* its genesis was withheld, so nothing
+    about it is in what this node declares as held. Its genesis and everything
+    posted to it used to be downloaded, refused and logged on every pass, and
+    two hundred such events were the last thing the node received."""
+    from netbbs.boards.boards import create_board
+    from netbbs.link.store import load_link_node
+
+    net = _ThreeNodes(tmp_path, enforce=True)
+    board = create_board(net.dbs["A"].db, "from-a", creator=net.sysops["A"])
+    link_board(net.dbs["A"].db, board, node_identity=net.ids["A"])
+    net.nodes["A"] = load_link_node(net.dbs["A"].db, net.ids["A"])
+
+    async def scenario():
+        server = await net.start()
+        try:
+            async with aiohttp.ClientSession() as session:
+                await net.dial("A", session)
+                net.post("A", "on A's own board", board_name="from-a")
+                await net.dial("A", session)
+                with caplog.at_level(logging.WARNING, logger="netbbs.link.sync"):
+                    for _ in range(3):
+                        await net.dial("B", session)
+                net.post("R", "hello from R")
+                await net.dial("B", session)
+        finally:
+            await server.stop()
+
+    try:
+        asyncio.run(scenario())
+        carried_on_r = net.dbs["R"].db.connection.execute(
+            "SELECT COUNT(*) FROM boards WHERE name = 'from-a'"
+        ).fetchone()[0]
+        assert carried_on_r == 1, "the scenario needs R to carry A's board"
+        refusals = [r for r in caplog.records if "rejected inventory event" in r.getMessage()]
+        # The genesis and the post, once each, and not once per pass.
+        assert len(refusals) == 2
+        assert net.subjects_on("B") == ["hello from R"]
+    finally:
+        net.close()
+
+
+def test_a_carrier_is_not_asked_again_on_every_pass_for_an_identity_it_could_not_supply(tmp_path, monkeypatch):
+    from netbbs.link import sync as sync_module
+
+    asked: list[tuple[str, ...]] = []
+
+    async def _knows_nobody(node, session, base_url, identity_request):
+        asked.append(identity_request.subjects)
+        return []
+
+    monkeypatch.setattr(sync_module, "request_identities", _knows_nobody)
+    net = _ThreeNodes(tmp_path, enforce=False)
+
+    async def scenario():
+        server = await net.start()
+        try:
+            async with aiohttp.ClientSession() as session:
+                for name in ("A", "B"):
+                    await net.dial(name, session)
+                net.post("A", "hello from A")
+                await net.dial("A", session)
+                for _ in range(3):
+                    await net.dial("B", session)
+                    # As the retry interval would: the event is offered again.
+                    net.nodes["B"].deferred_events.entries.clear()
+        finally:
+            await server.stop()
+
+    try:
+        asyncio.run(scenario())
+        assert asked == [(net.ids["A"].fingerprint,)]
     finally:
         net.close()

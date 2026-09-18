@@ -203,11 +203,14 @@ def _recheck_stored_peers_against_local_claims(db: Database) -> None:
     descriptor once per local-claim change; unchanged, non-colliding peers
     are a no-op and an identical already-recorded collision is deduplicated."""
     rows = db.connection.execute(
-        "SELECT fingerprint, descriptor_json FROM link_known_identities"
+        """SELECT fingerprint, descriptor_json,
+                  fingerprint IN (SELECT fingerprint FROM link_peers) AS met
+           FROM link_known_identities"""
     ).fetchall()
     for row in rows:
         _record_identity_observation(
-            db, _identity_from_descriptor_json(row["fingerprint"], row["descriptor_json"])
+            db, _identity_from_descriptor_json(row["fingerprint"], row["descriptor_json"]),
+            met=bool(row["met"]),
         )
 
 
@@ -268,15 +271,25 @@ def present_link_author_label(db: Database, label: str) -> str:
     return rendered
 
 
-def resolve_stored_peer_reference(db: Database, reference: str) -> str | list[str]:
-    """Resolve a UI-entered DNS/friendly/technical reference from persisted peers."""
+def resolve_stored_peer_reference(
+    db: Database, reference: str, *, met_only: bool = False
+) -> str | list[str]:
+    """Resolve a UI-entered DNS/friendly/technical reference from persisted peers.
+
+    `met_only` leaves out nodes this one has only been introduced to (issue
+    #630). Addressing mail asks for it: mail goes to completed peers alone, and
+    a node nobody here has met must not be able to make a real peer's name
+    ambiguous by wearing it. Trust administration does not, since a node
+    learned from a carrier is exactly what a SysOp goes there to look up.
+    """
     name_needle = name_key(reference.strip())
     if not name_needle:
         return []
     dns_needle = name_needle.rstrip(".")
+    source = "link_peers" if met_only else "link_known_identities"
     identities = [
         _identity_from_descriptor_json(row["fingerprint"], row["descriptor_json"])
-        for row in db.connection.execute("SELECT fingerprint, descriptor_json FROM link_known_identities")
+        for row in db.connection.execute(f"SELECT fingerprint, descriptor_json FROM {source}")
     ]
     exact_fingerprint = [item.fingerprint for item in identities if item.fingerprint.lower() == name_needle]
     if exact_fingerprint:
@@ -289,12 +302,23 @@ def resolve_stored_peer_reference(db: Database, reference: str) -> str | list[st
     return matches[0] if len(matches) == 1 else matches
 
 
-def record_peer_identity_observation(db: Database, peer) -> None:
-    """Record authenticated presentation changes before ``save_peer`` overwrites them."""
-    _record_identity_observation(db, identity_for_peer(peer))
+def record_peer_identity_observation(db: Database, peer, *, met: bool = True) -> None:
+    """Record authenticated presentation changes before ``save_peer`` overwrites them.
+
+    `met=False` for an identity a carrier introduced (issue #630)."""
+    _record_identity_observation(db, identity_for_peer(peer), met=met)
 
 
-def _record_identity_observation(db: Database, current: NodeDisplayIdentity) -> None:
+def _record_identity_observation(db: Database, current: NodeDisplayIdentity, *, met: bool = True) -> None:
+    """`met` is whether this node has completed a hello with `current`.
+
+    A node it has met is compared only with other nodes it has met. One it was
+    merely introduced to is compared with everyone. Otherwise anybody could
+    have a real peer flagged as an impostor on every node that carries a shared
+    board, by naming a node after it and posting once: the introduction would
+    put the name on file first, and the real peer's next hello would be the
+    one that collides. This way round it is the newcomer that gets the warning.
+    """
     existing_row = db.connection.execute(
         "SELECT descriptor_json FROM link_known_identities WHERE fingerprint = ?", (current.fingerprint,)
     ).fetchone()
@@ -338,8 +362,9 @@ def _record_identity_observation(db: Database, current: NodeDisplayIdentity) -> 
             get_node_fingerprint(db) or "local-node", get_node_display_name(db),
             normalize_dns_name(get_config(db, _OWN_CANONICAL_DNS_CONFIG_KEY)),
         )
+    compared_with = "link_peers" if met else "link_known_identities"
     for row in db.connection.execute(
-        "SELECT fingerprint, descriptor_json FROM link_known_identities WHERE fingerprint <> ?",
+        f"SELECT fingerprint, descriptor_json FROM {compared_with} WHERE fingerprint <> ?",
         (current.fingerprint,),
     ):
         known = _identity_from_descriptor_json(row["fingerprint"], row["descriptor_json"])
@@ -361,9 +386,12 @@ def _record_identity_observation(db: Database, current: NodeDisplayIdentity) -> 
                    canonical_dns_name, previous_dns_name
             FROM link_node_identity_observations
             WHERE node_fingerprint <> ?
+              AND (? = 0 OR node_fingerprint NOT IN (
+                    SELECT fingerprint FROM link_introduced_identities
+                    WHERE fingerprint NOT IN (SELECT fingerprint FROM link_peers)))
             ORDER BY id DESC
             """,
-            (current.fingerprint,),
+            (current.fingerprint, 1 if met else 0),
         ):
             historical_claims = {
                 name_key(value) for value in (

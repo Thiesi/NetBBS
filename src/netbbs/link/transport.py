@@ -1893,6 +1893,8 @@ class LinkServer:
             file_area_events, file_area_truncated = [], True
         events = board_events + channel_events + file_area_events
         more_available = board_truncated or channel_truncated or file_area_truncated
+        # Issue #630: whose identity a requester may then ask this node for.
+        self._node.note_served_signers(events)
         # Issue #478: the other half of the same exchange. The request
         # already declares everything the requester holds, so answering
         # "and here is what *I* am missing from that" costs no extra

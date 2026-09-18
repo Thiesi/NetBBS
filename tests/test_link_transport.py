@@ -3182,6 +3182,7 @@ def test_the_identity_endpoint_serves_a_peer_and_refuses_everyone_else(tmp_path)
     carrier = _NodeDb(tmp_path, "identity-carrier")
     asker = _NodeDb(tmp_path, "identity-asker")
     carrier_node.handle_hello(_hello_for(LinkNode(identity=author_identity)))
+    carrier_node.served_signers[author_identity.fingerprint] = None
 
     def _ask(node, identity, subjects):
         return build_identity_request(

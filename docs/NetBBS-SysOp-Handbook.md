@@ -493,8 +493,8 @@ two outgoing-only nodes cannot. Your node learns who such an author's node is
 from the node that carried the post, checks that identity for itself, and
 lists it under **Settings → Policy trust → Subjects**, where its screen says
 which node it was learned from. Like every new identity it starts on
-probation, so its content is withheld until you establish it with
-**Override**. If a board looks quieter than you expect, look there first.
+probation, so its content is withheld until you set both its identity
+integrity and its resource behavior to established with **Override**. If a board looks quieter than you expect, look there first.
 Such a node never leaves probation by itself, because your node has no direct
 dealings with it to judge. A name you recognise under a different technical
 identity is flagged exactly as it would be for a node you had met.

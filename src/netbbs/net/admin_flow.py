@@ -2665,14 +2665,17 @@ async def _trust_subjects_screen(
         await _warn_about_changed_node_identity(
             session, lane, selected.node_fingerprint, role="This subject's"
         )
-        carrier = await lane.run(introduced_by, selected.node_fingerprint)
+        carrier = (
+            await lane.run(introduced_by, selected.node_fingerprint) if selected.kind == "node" else None
+        )
         if carrier is not None:
             carrier_label = (await lane.run(identity_for_fingerprint, carrier)).label
             await session.write_line(
                 colored(
                     f"This node has never exchanged a hello with that one. Its identity was learned "
                     f"from {sanitize_text(carrier_label)}, and verifies on its own. It stays on "
-                    "probation, and its content is withheld, until you establish it with [O]verride.",
+                    "probation, and its content is withheld, until you set both its identity "
+                    "integrity and its resource behavior to established with [O]verride.",
                     fg_color=MUTED_COLOR,
                 )
             )

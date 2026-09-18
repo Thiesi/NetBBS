@@ -331,3 +331,23 @@ def test_fetch_reports_a_withdrawn_file_instead_of_a_generic_transfer_error(
     output = _written(session)
     assert "no longer has" in output
     assert "Removed from this area's catalogue" in output
+
+
+def test_fetch_says_so_when_the_origin_is_known_only_by_introduction(
+    db, lane, alice, node_identity, remote_node_identity
+):
+    """Issue #630: the catalogue arrived through a node that carries the area.
+    "Try again later" would be a promise nothing keeps."""
+    area, remote_file = _carried_area_with_one_remote_file(db, node_identity, remote_node_identity)
+    link_context = _link_context_for(node_identity)
+    origin = LinkNode(identity=remote_node_identity)
+    link_context.link_node.handle_introduction(
+        origin.build_hello(addresses=None, outgoing_only=True, created_at="2026-01-01T00:00:00+00:00")
+    )
+    session = FakeSession(["/remote", "0", "1", "y"])
+
+    asyncio.run(file_flow._show_area(session, lane, area, alice, link_context=link_context))
+
+    output = _written(session)
+    assert "never been in direct contact with this file's origin" in output
+    assert "try again later" not in output

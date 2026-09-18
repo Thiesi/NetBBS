@@ -86,6 +86,7 @@ def test_an_introduced_identity_verifies_what_it_signed_and_is_not_a_peer(cast):
         b.handle_events(r.identity.fingerprint, [post])
     assert refused.value.missing_identity == a.identity.fingerprint
 
+    r.note_served_signers([post])
     [bundle] = r.build_identity_response((a.identity.fingerprint,))
     record = b.handle_introduction(HelloMessage.from_dict(bundle))
 
@@ -131,6 +132,9 @@ def test_a_newer_bundle_replaces_an_older_one_and_an_older_one_does_not(cast):
     b.handle_introduction(hello(a, created_at="2026-02-01T00:00:00+00:00"))
 
     assert b.handle_introduction(hello(a, created_at="2026-01-01T00:00:00+00:00")) is None
+    # The same bundle again is not news: reporting it as learned would release
+    # and download again everything that waited for the node, on every refresh.
+    assert b.handle_introduction(hello(a, created_at="2026-02-01T00:00:00+00:00")) is None
     rotated = LinkNode(identity=rotate_operational_key(a.identity, purpose="signing"))
     assert b.handle_introduction(hello(rotated, created_at="2026-03-01T00:00:00+00:00")) is not None
     assert len(b.introduced[a.identity.fingerprint].transitions) > len(hello(a).transitions)
@@ -157,20 +161,54 @@ def test_an_event_by_an_unknown_node_is_set_aside_and_the_rest_are_accepted(cast
     genesis, from_r = genesis_by(r), post_by(r, "from R")
     batch = [genesis.to_dict(), post_by(a).to_dict(), from_r.to_dict()]
 
-    accepted, deferred = b.handle_events_tolerantly(r.identity.fingerprint, batch)
+    accepted, deferred, refusal = b.handle_events_tolerantly(r.identity.fingerprint, batch)
 
+    assert refusal is None
     assert accepted == [genesis.content_id, from_r.content_id]
     assert [(raw, exc.missing_identity) for raw, exc in deferred] == [(batch[1], a.identity.fingerprint)]
 
 
-def test_an_event_that_is_wrong_still_rejects_a_batch_from_a_peer(cast):
+def test_an_event_that_is_wrong_still_ends_a_response_and_what_came_before_it_is_kept(cast):
+    """The refusal is returned, not raised, because of what was accepted before
+    it: that is in this node's memory already and counts as known, so a caller
+    that never heard of it would persist none of it and never be sent it again."""
     r, b = cast["R"], cast["B"]
-    b.handle_events(r.identity.fingerprint, [genesis_by(r).to_dict()])
+    genesis, good, never_reached = genesis_by(r), post_by(r, "before"), post_by(r, "after")
     forged = post_by(r).to_dict()
     forged["signature"] = base64.b64encode(b"x" * 64).decode("ascii")
 
-    with pytest.raises(LinkProtocolError):
-        b.handle_events_tolerantly(r.identity.fingerprint, [forged])
+    accepted, deferred, refusal = b.handle_events_tolerantly(
+        r.identity.fingerprint, [genesis.to_dict(), good.to_dict(), forged, never_reached.to_dict()]
+    )
+
+    assert isinstance(refusal, LinkProtocolError) and not isinstance(refusal, MissingDependency)
+    assert accepted == [genesis.content_id, good.content_id] and deferred == []
+    assert never_reached.content_id not in b.known_event_ids
+
+
+def test_a_stale_identity_is_recognized_even_when_the_event_does_not_name_its_signer(cast):
+    """A closure, a tombstone or a file descriptor is signed by an origin its
+    payload does not name. After that origin rotates, such an event must cost
+    one event and a refresh like any other, not the carrier's response."""
+    from netbbs.link.events import build_board_closure
+
+    r, a, b = cast["R"], cast["A"], cast["B"]
+    b.handle_introduction(hello(a))
+    genesis = genesis_by(a)
+    b.handle_events(r.identity.fingerprint, [genesis.to_dict()])
+    rotated = rotate_operational_key(a.identity, purpose="signing")
+    closure = build_board_closure(
+        signing_identity=rotated.signing_key, board_id=BOARD,
+        previous_event_id=genesis.content_id, reason=None, created_at=WHEN,
+    ).to_dict()
+    assert referenced_identities(closure) == []
+
+    accepted, deferred, refusal = b.handle_events_tolerantly(
+        r.identity.fingerprint, [closure, post_by(r, "still arrives").to_dict()]
+    )
+
+    assert refusal is None and len(accepted) == 1
+    assert deferred[0][1].missing_identity == a.identity.fingerprint
 
 
 def test_an_introduced_identity_gone_stale_is_set_aside_and_named_for_a_fresh_bundle(cast):
@@ -184,7 +222,7 @@ def test_an_introduced_identity_gone_stale_is_set_aside_and_named_for_a_fresh_bu
     signed = post_by(rotated)
     post = signed.to_dict()
 
-    accepted, deferred = b.handle_events_tolerantly(r.identity.fingerprint, [post])
+    accepted, deferred, _refusal = b.handle_events_tolerantly(r.identity.fingerprint, [post])
     assert accepted == [] and deferred[0][1].missing_identity == a.identity.fingerprint
 
     b.handle_introduction(hello(rotated, created_at="2026-03-01T00:00:00+00:00"))
@@ -194,7 +232,7 @@ def test_an_introduced_identity_gone_stale_is_set_aside_and_named_for_a_fresh_bu
 def test_what_an_event_builds_on_being_missing_is_also_a_deferral(cast):
     r, b = cast["R"], cast["B"]
 
-    accepted, deferred = b.handle_events_tolerantly(r.identity.fingerprint, [post_by(r).to_dict()])
+    accepted, deferred, _refusal = b.handle_events_tolerantly(r.identity.fingerprint, [post_by(r).to_dict()])
 
     assert accepted == [] and len(deferred) == 1 and deferred[0][1].missing_identity is None
 
@@ -240,6 +278,7 @@ def test_the_response_holds_what_the_carrier_knows_and_omits_the_rest(cast):
     r, a, b = cast["R"], cast["A"], cast["B"]
     far = LinkNode(identity=bootstrap_node_identity("two-hops-away"))
     r.handle_introduction(hello(far))
+    r.note_served_signers([post_by(a).to_dict(), post_by(far).to_dict()])
 
     bundles = r.build_identity_response(
         (a.identity.fingerprint, far.identity.fingerprint, "nobody-r-has-heard-of")
@@ -250,6 +289,30 @@ def test_the_response_holds_what_the_carrier_knows_and_omits_the_rest(cast):
     # and refusing would only break a board carried across two hops.
     learned = [b.handle_introduction(HelloMessage.from_dict(bundle)).fingerprint for bundle in bundles]
     assert learned == [a.identity.fingerprint, far.identity.fingerprint]
+
+
+def test_a_carrier_answers_only_for_nodes_whose_content_it_has_served(cast):
+    """A requester needs the identity of whoever signed what it was just sent.
+    Answering for any fingerprint a peer names would give a peer on probation,
+    which is refused the peer list, a way to read this node's peer set one
+    guess at a time, descriptors and addresses included."""
+    r, a = cast["R"], cast["A"]
+
+    assert r.build_identity_response((a.identity.fingerprint,)) == []
+    r.note_served_signers([post_by(a).to_dict()])
+    assert len(r.build_identity_response((a.identity.fingerprint,))) == 1
+
+
+def test_what_a_carrier_remembers_having_served_is_bounded(cast, monkeypatch):
+    from netbbs.link import protocol as protocol_module
+
+    monkeypatch.setattr(protocol_module, "_MAX_SERVED_SIGNERS", 2)
+    r = cast["R"]
+    authors = [LinkNode(identity=bootstrap_node_identity(f"author-{i}")) for i in range(3)]
+    for author in authors:
+        r.note_served_signers([post_by(author).to_dict()])
+
+    assert list(r.served_signers) == [author.identity.fingerprint for author in authors[1:]]
 
 
 def test_a_malformed_request_is_refused_before_anything_is_signed_or_served(cast):
@@ -395,7 +458,11 @@ def test_an_introduced_node_with_a_familiar_name_under_another_key_raises_the_sa
     assert observation is not None and observation.severity == "security"
 
 
-def test_the_inventory_request_declares_set_aside_events_only_for_resources_this_node_carries(db, cast):
+def test_the_inventory_request_declares_set_aside_events_for_resources_not_carried_yet_too(db, cast):
+    """The case that matters most. A board whose origin is on probation here is
+    not carried *because* its genesis was set aside, so declaring only under
+    carried boards left the genesis and every post on it to be downloaded and
+    refused on every pass."""
     from netbbs.auth.users import SYSOP_LEVEL, create_user
     from netbbs.link.boards import materialize_carried_board
 
@@ -411,4 +478,84 @@ def test_the_inventory_request_declares_set_aside_events_only_for_resources_this
     )
 
     assert set_aside in request.boards[BOARD]
-    assert "b" * 64 not in request.boards
+    assert request.boards["b" * 64] == ("not-carried",)
+    # The envelope another pull route borrows for its authorization stays empty.
+    bare = build_inventory_request(
+        db, signing_identity=b.identity.signing_key, requester_fingerprint=b.identity.fingerprint,
+        responder_fingerprint=r.identity.fingerprint, include_inventory=False,
+        also_declare={"boards": {BOARD: {set_aside}}},
+    )
+    assert bare.boards == {}
+
+
+# -- a node this one has met outranks one it was only told about ------------------------------------
+
+
+def _named(label, friendly):
+    node = LinkNode(identity=bootstrap_node_identity(label))
+    return node, node.build_hello(
+        addresses=None, outgoing_only=True, created_at="2026-01-01T00:00:00+00:00",
+        friendly_name=friendly,
+    )
+
+
+def test_a_node_nobody_here_has_met_cannot_get_a_real_peer_flagged_by_wearing_its_name(db):
+    """Anybody can name a node after a well-known one and post once on a shared
+    board; every subscriber is then introduced to it. The real peer's next
+    hello must not be the one that reads as the impostor."""
+    from netbbs.link.node_profiles import latest_identity_observation, resolve_stored_peer_reference
+
+    receiver = LinkNode(identity=bootstrap_node_identity("receiver"))
+    genuine, genuine_hello = _named("genuine", "Roanoke")
+    impostor, impostor_hello = _named("impostor", "Roanoke")
+    carrier, carrier_hello = _named("carrier", "Carrier")
+    save_peer(db, receiver.handle_hello(carrier_hello))
+
+    # The impostor's name is on file first this time.
+    save_introduced_identity(
+        db, receiver.handle_introduction(impostor_hello), introduced_by=carrier.identity.fingerprint
+    )
+    save_peer(db, receiver.handle_hello(genuine_hello))
+
+    observation = latest_identity_observation(db, genuine.identity.fingerprint)
+    assert observation is None or observation.severity != "security"
+    # Mail is addressed among the nodes this one has met, so the name stays unambiguous.
+    assert resolve_stored_peer_reference(db, "Roanoke", met_only=True) == genuine.identity.fingerprint
+    assert len(resolve_stored_peer_reference(db, "Roanoke")) == 2
+
+
+# -- bounded on disk as in memory -----------------------------------------------------------------------
+
+
+def test_the_table_of_introduced_identities_is_bounded_and_takes_its_untouched_subjects_with_it(
+    db, cast, monkeypatch
+):
+    from netbbs.link import store as store_module
+    from netbbs.link.trust import (
+        TrustDimension, TrustState, TrustSubject, list_trust_subjects, set_trust_override,
+    )
+
+    monkeypatch.setattr(store_module, "MAX_INTRODUCED_IDENTITIES", 2)
+    r, b = cast["R"], cast["B"]
+    strangers = [LinkNode(identity=bootstrap_node_identity(f"stranger-{i}")) for i in range(4)]
+    fingerprints = [s.identity.fingerprint for s in strangers]
+
+    save_introduced_identity(db, b.handle_introduction(hello(strangers[0])), introduced_by=r.identity.fingerprint)
+    save_introduced_identity(db, b.handle_introduction(hello(strangers[1])), introduced_by=r.identity.fingerprint)
+    # A decision the SysOp made outlives the identity it was made about.
+    set_trust_override(
+        db, TrustSubject.node(fingerprints[1]), TrustDimension.IDENTITY_INTEGRITY,
+        TrustState.ESTABLISHED, reason="known operator", actor_user_id=None,
+    )
+    for stranger in strangers[2:]:
+        save_introduced_identity(db, b.handle_introduction(hello(stranger)), introduced_by=r.identity.fingerprint)
+
+    on_file = [row[0] for row in db.connection.execute("SELECT fingerprint FROM link_introduced_identities")]
+    assert sorted(on_file) == sorted(fingerprints[2:])
+    subjects = {s.node_fingerprint for s in list_trust_subjects(db)}
+    assert fingerprints[0] not in subjects and fingerprints[1] in subjects
+    assert db.connection.execute(
+        "SELECT COUNT(*) FROM link_node_identity_observations WHERE node_fingerprint = ?", (fingerprints[0],)
+    ).fetchone()[0] == 0
+    # And a restart loads no more than the bound, whatever the table holds.
+    assert len(load_link_node(db, b.identity).introduced) == 2

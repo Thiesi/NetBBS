@@ -61,7 +61,7 @@ from netbbs.link.events import (
     sign_inventory_request,
 )
 from netbbs.link.node_identity import NodeIdentity
-from netbbs.link.protocol import InventoryRequest, LinkNode, PeerRecord
+from netbbs.link.protocol import MAX_INTRODUCED_IDENTITIES, InventoryRequest, LinkNode, PeerRecord
 from netbbs.storage.database import Database
 from netbbs.timeutil import utc_now_iso
 
@@ -129,10 +129,13 @@ def load_link_node(db: Database, identity: NodeIdentity) -> LinkNode:
     # Issue #630: identities learned from a carrier. Loaded after the peers so
     # that a fingerprint present in both -- a hello completed since -- stays a
     # peer and nothing else.
-    for row in db.connection.execute(
+    introduced_rows = db.connection.execute(
         """SELECT fingerprint, root_public_key, transitions_json, descriptor_json
-           FROM link_introduced_identities ORDER BY updated_at, fingerprint"""
-    ):
+           FROM link_introduced_identities ORDER BY updated_at DESC, fingerprint LIMIT ?""",
+        (MAX_INTRODUCED_IDENTITIES,),
+    ).fetchall()
+    # Oldest first, so that memory displaces them in the order the table does.
+    for row in reversed(introduced_rows):
         if row["fingerprint"] in node.peers:
             continue
         node.introduced[row["fingerprint"]] = PeerRecord(
@@ -418,7 +421,7 @@ def save_introduced_identity(db: Database, record: PeerRecord, *, introduced_by:
         "SELECT 1 FROM link_peers WHERE fingerprint = ?", (record.fingerprint,)
     ).fetchone() is not None:
         return
-    record_peer_identity_observation(db, record)
+    record_peer_identity_observation(db, record, met=False)
     db.connection.execute(
         """
         INSERT INTO link_introduced_identities
@@ -442,6 +445,34 @@ def save_introduced_identity(db: Database, record: PeerRecord, *, introduced_by:
     )
     db.connection.commit()
     ensure_node_subject(db, record.fingerprint)
+    _displace_oldest_introduced_identities(db)
+
+
+def _displace_oldest_introduced_identities(db: Database) -> None:
+    """Keep the table within the bound memory has (`PeerDirectory.introduce`).
+
+    What a carrier serves is remotely influenced, and a carrier can mint
+    identities as fast as it can name them. A displaced identity takes with it
+    what its introduction alone created: its name observations, and its trust
+    subject unless somebody has made a decision about it or holds evidence on
+    it. One that is needed again is simply asked for again.
+    """
+    from netbbs.link.trust import forget_untouched_node_subject
+
+    displaced = [
+        row["fingerprint"] for row in db.connection.execute(
+            """SELECT fingerprint FROM link_introduced_identities
+               ORDER BY updated_at DESC, fingerprint LIMIT -1 OFFSET ?""",
+            (MAX_INTRODUCED_IDENTITIES,),
+        )
+    ]
+    for fingerprint in displaced:
+        db.connection.execute("DELETE FROM link_introduced_identities WHERE fingerprint = ?", (fingerprint,))
+        db.connection.execute(
+            "DELETE FROM link_node_identity_observations WHERE node_fingerprint = ?", (fingerprint,)
+        )
+        db.connection.commit()
+        forget_untouched_node_subject(db, fingerprint)
 
 
 def save_candidate_descriptor(db: Database, fingerprint: str, descriptor: EndpointDescriptor) -> None:
@@ -718,12 +749,20 @@ def build_inventory_request(
         if include_inventory else {}
     )
     # Issue #630: events this node was offered and could not use yet, declared
-    # as seen so that they are not sent again on every pass. Only for resources
-    # this node carries; see `protocol.DeferredEvents` for why this is safe.
-    for kind, mapping in (("boards", boards), ("channels", channels), ("file_areas", file_areas)):
-        for resource_id, content_ids in (also_declare or {}).get(kind, {}).items():
-            if resource_id in mapping:
-                mapping[resource_id] = tuple(dict.fromkeys([*mapping[resource_id], *sorted(content_ids)]))
+    # as seen so that they are not sent again on every pass; see
+    # `protocol.DeferredEvents` for why this is safe. Also under a resource this
+    # node does not carry, which is the case that matters most: a board whose
+    # origin is a node on probation here is not carried *because* its genesis
+    # was set aside, and everything posted to it would otherwise be downloaded
+    # and refused on every pass. A responder walks the union of what is
+    # requested and what it carries, so a resource it has never heard of costs
+    # it nothing.
+    if include_inventory:
+        for kind, mapping in (("boards", boards), ("channels", channels), ("file_areas", file_areas)):
+            for resource_id, content_ids in (also_declare or {}).get(kind, {}).items():
+                mapping[resource_id] = tuple(
+                    dict.fromkeys([*mapping.get(resource_id, ()), *sorted(content_ids)])
+                )
     created_at = utc_now_iso()
     nonce = secrets.token_hex(16)
     signature = sign_inventory_request(

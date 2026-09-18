@@ -9571,4 +9571,4 @@ def test_the_subject_screen_says_when_a_node_was_learned_from_a_carrier(db, lane
     assert "Author Node" in text
     assert "has never exchanged a hello with that one" in text
     assert "learned from Carrier Node" in text
-    assert "until you establish it with [O]verride" in text
+    assert "identity integrity and its resource behavior to established with [O]verride" in text

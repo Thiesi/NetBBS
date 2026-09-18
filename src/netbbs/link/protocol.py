@@ -64,6 +64,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from string import hexdigits
+from typing import NamedTuple
 
 import nacl.signing
 
@@ -168,7 +169,8 @@ _MAX_EVENTS_PER_REQUEST = MAX_EVENTS_PER_REQUEST
 # Bounded like every other remotely influenced collection here. Generous beside
 # any real network this project expects, and cheap to exceed: an identity
 # displaced at the cap is asked for again the next time it is needed.
-_MAX_INTRODUCED_IDENTITIES = 1024
+MAX_INTRODUCED_IDENTITIES = 1024
+_MAX_INTRODUCED_IDENTITIES = MAX_INTRODUCED_IDENTITIES
 
 # Issue #124: inventory is a potentially expensive enumeration route,
 # so a captured signed request must not remain reusable. Five minutes
@@ -1368,8 +1370,17 @@ DEFERRED_EVENT_RETRY_SECONDS = 3600
 
 # Remotely influenced, so bounded. At the cap the oldest entry goes, which only
 # means that event is offered, and set aside, once more. Each entry adds one
-# content ID to every inventory request, which has a body limit of its own.
-_MAX_DEFERRED_EVENTS = 2000
+# content ID to every inventory request, whose body fits about 30,000 of them
+# (`transport._LINK_CLIENT_MAX_SIZE_BYTES`) and has to fit what this node holds
+# as well, so this is a third of that and not more. Past it the oldest are
+# offered again and, a page being 200 events, can crowd out the rest: the
+# remedy then is the SysOp's, establishing or blocking the nodes concerned.
+_MAX_DEFERRED_EVENTS = 10_000
+
+# A carrier answers an identity request only for nodes named by content it
+# recently served (see `LinkNode.note_served_signers`). Bounded; at the cap the
+# least recently served goes, and is back the next time its content is served.
+_MAX_SERVED_SIGNERS = 4096
 
 
 @dataclass
@@ -1455,6 +1466,16 @@ class MissingDependency(LinkProtocolError):
         self.missing_identity = missing_identity
 
 
+class TolerantOutcome(NamedTuple):
+    """What `LinkNode.handle_events_tolerantly` made of one carrier's response."""
+
+    accepted: list[str]
+    deferred: list[tuple[dict, MissingDependency]]
+    # The refusal that ended the response early, if one did. Everything in
+    # `accepted` was accepted before it and still has to be persisted.
+    refusal: LinkProtocolError | None
+
+
 @dataclass
 class PeerRecord:
     """What this node has learned about one peer via a completed hello
@@ -1525,6 +1546,14 @@ class PeerDirectory:
         if existing is not None:
             older = record.descriptor.payload.get("created_at", "") < existing.descriptor.payload.get("created_at", "")
             if older or len(record.transitions) < len(existing.transitions):
+                return False
+            # The same bundle again is not news. Reporting it as learned made
+            # every refresh write to the database, release everything that
+            # waited for the node and download it all once more.
+            if (
+                record.descriptor.to_dict() == existing.descriptor.to_dict()
+                and [t.to_dict() for t in record.transitions] == [t.to_dict() for t in existing.transitions]
+            ):
                 return False
         elif len(self.introduced) >= max_introduced:
             self.introduced.pop(next(iter(self.introduced)))
@@ -1825,6 +1854,14 @@ class LinkNode:
     attestation_pull_requests: InventoryRequestState = field(default_factory=InventoryRequestState)
     identity_requests: InventoryRequestState = field(default_factory=InventoryRequestState)
     deferred_events: DeferredEvents = field(default_factory=DeferredEvents)
+    # Issue #630: fingerprints named by content this node recently served, in
+    # least-recently-served order; and (carrier, fingerprint) pairs a carrier
+    # could not answer for, with the time to ask again.
+    served_signers: dict[str, None] = field(default_factory=dict)
+    unanswered_identities: dict[tuple[str, str], float] = field(default_factory=dict)
+    # The identity whose signing key the event in hand was last checked
+    # against; see `handle_events_tolerantly`.
+    _last_key_resolved_for: str | None = field(default=None, repr=False)
     # Design doc §9.6, issue #87.
     channel_events: ChannelEventState = field(default_factory=ChannelEventState)
     # Design doc §11, issue #89.
@@ -2038,8 +2075,8 @@ class LinkNode:
         Raises `LinkProtocolError` for a bundle that does not verify.
 
         What this grants is narrow on purpose. The identity can be used to
-        verify carried content and signed objects, and appears to the SysOp
-        as a probationary trust subject. It is not a peer: it cannot push
+        verify carried content, and appears to the SysOp as a probationary
+        trust subject. It is not a peer: it cannot push
         events, pull, relay, or be mailed, all of which still require a
         completed hello.
         """
@@ -2052,19 +2089,19 @@ class LinkNode:
 
     def handle_events_tolerantly(
         self, sender_fingerprint: str, raw_events: list[dict]
-    ) -> tuple[list[str], list[tuple[dict, MissingDependency]]]:
+    ) -> "TolerantOutcome":
         """`handle_events`, for a batch a carrier assembled (issue #630).
 
         Events are handled one at a time, in order. One this node cannot use
         *yet* -- its signer unknown, or what it builds on not received -- is
-        set aside and returned with the reason, and the rest are handled. Any
-        other refusal still propagates: an event that is *wrong* rejects the
-        response, as before.
+        set aside and returned with the reason, and the rest are handled. An
+        event that is *wrong* still ends the response, as before: handling
+        stops there and the refusal is returned.
 
-        Handling them singly also closes a quieter loss. A batch that raised
-        half-way had already put its earlier events into this node's memory,
-        the caller then persisted none of them, and since they now counted as
-        known they were never accepted, and so never persisted, again.
+        Returned and not raised, because what was accepted before it has to
+        reach the caller. It is already in this node's memory and so counts as
+        known; a caller that never heard of it would persist none of it, and
+        it would never be accepted, and so never persisted, again.
         """
         if len(raw_events) > _MAX_EVENTS_PER_REQUEST:
             raise LinkProtocolError(
@@ -2074,24 +2111,47 @@ class LinkNode:
         accepted: list[str] = []
         deferred: list[tuple[dict, MissingDependency]] = []
         for raw in raw_events:
+            self._last_key_resolved_for = None
             try:
                 accepted.extend(self.handle_events(sender_fingerprint, [raw]))
             except MissingDependency as exc:
                 deferred.append((raw, exc))
             except LinkProtocolError as exc:
-                # An event signed by an *introduced* identity that does not
-                # verify is, in the ordinary case, this node holding a bundle
-                # from before that node rotated its key: a third node's
+                # An event checked against an *introduced* identity that does
+                # not verify is, in the ordinary case, this node holding a
+                # bundle from before that node rotated its key: a third node's
                 # transitions are never gossiped, so a fresher bundle is the
                 # only way to learn them. Set aside and named, so the caller
-                # asks for one. It also means an identity this node merely
-                # heard of can never cost it a carrier's whole response, which
-                # a peer it has actually met still can.
-                stale = [fp for fp in referenced_identities(raw) if fp in self.introduced]
+                # asks for one. Which identity that was is what the key
+                # resolution itself recorded, since a tombstone, a closure or
+                # a file descriptor does not name its signer in its payload;
+                # the payload is the fallback for a refusal raised before any
+                # key was resolved.
+                signer = self._last_key_resolved_for
+                stale = [signer] if signer in self.introduced else [
+                    fp for fp in referenced_identities(raw) if fp in self.introduced
+                ]
                 if not stale:
-                    raise
+                    return TolerantOutcome(accepted, deferred, exc)
                 deferred.append((raw, MissingDependency(str(exc), missing_identity=stale[0])))
-        return accepted, deferred
+        return TolerantOutcome(accepted, deferred, None)
+
+    def note_served_signers(self, raw_events: list[dict]) -> None:
+        """Remember whose content this node just served (issue #630).
+
+        An identity request is answered only for these. A requester needs the
+        identity of whoever signed what it was just sent and of nobody else, so
+        answering for any fingerprint a peer cares to name would hand a peer
+        still on probation, which is refused the peer list, a way to read this
+        node's peer set one guess at a time, descriptors and addresses
+        included.
+        """
+        for raw in raw_events:
+            for fingerprint in referenced_identities(raw):
+                self.served_signers.pop(fingerprint, None)
+                self.served_signers[fingerprint] = None
+        while len(self.served_signers) > _MAX_SERVED_SIGNERS:
+            self.served_signers.pop(next(iter(self.served_signers)))
 
     def build_peer_list(self) -> PeerListMessage:
         """This node's own currently-verified peers' endpoint
@@ -2210,7 +2270,7 @@ class LinkNode:
         directly once this method returns without raising.
         """
         if sender_fingerprint not in self.peers:
-            raise MissingDependency(
+            raise LinkProtocolError(
                 f"received a relay_consent_request from {sender_fingerprint}, which has no "
                 "completed hello -- refusing (no relay from a stranger yet)"
             )
@@ -2255,7 +2315,7 @@ class LinkNode:
         after this returns without raising.
         """
         if sender_fingerprint not in self.peers:
-            raise MissingDependency(
+            raise LinkProtocolError(
                 f"received a relay_consent_response from {sender_fingerprint}, which has no "
                 "completed hello -- refusing (no relay from a stranger yet)"
             )
@@ -2483,7 +2543,8 @@ class LinkNode:
         seen[replay_key] = received_at
 
     def build_identity_response(self, subjects: tuple[str, ...]) -> list[dict]:
-        """The hello bundles this node holds for `subjects`; unknown ones are simply absent.
+        """The hello bundles this node holds for `subjects`, among the nodes whose
+        content it recently served (`note_served_signers`); the rest are simply absent.
 
         Peers and introduced identities alike. The peer list shares only what
         this node learned first-hand, because a secondhand *address* is a
@@ -2494,7 +2555,7 @@ class LinkNode:
         """
         bundles: list[dict] = []
         for fingerprint in subjects:
-            record = self.known_identity(fingerprint)
+            record = self.known_identity(fingerprint) if fingerprint in self.served_signers else None
             if record is None:
                 continue
             bundles.append(
@@ -2626,6 +2687,7 @@ class LinkNode:
         transition chain — the same verification shape `handle_hello`
         already uses for a descriptor, applied here to a gossiped
         event instead."""
+        self._last_key_resolved_for = sender_fingerprint
         signing_key_b64 = resolve_current_operational_key(
             sender.transitions,
             root_verify_key=sender.root_verify_key,
@@ -3587,7 +3649,7 @@ class LinkNode:
                     )
                 home_node_fingerprint = sender_info.get("home_node_fingerprint")
                 if home_node_fingerprint != sender_fingerprint:
-                    raise MissingDependency(
+                    raise LinkProtocolError(
                         f"{sender_fingerprint} sent a link_message vouching for a different "
                         f"home node ({home_node_fingerprint!r}) -- refusing (no relay from a "
                         "stranger yet)"

@@ -184,7 +184,9 @@ from netbbs.link.mail import (
     get_link_mail_acknowledgement,
     get_link_message_for_delivery,
 )
-from netbbs.link.protocol import MAX_EVENTS_PER_REQUEST, HelloMessage, LinkNode, LinkProtocolError
+from netbbs.link.protocol import (
+    DEFERRED_EVENT_RETRY_SECONDS, MAX_EVENTS_PER_REQUEST, HelloMessage, LinkNode, LinkProtocolError,
+)
 from netbbs.link.relay_mailbox import RelayableEnvelope
 from netbbs.link.relay_selection import relays_needing_replacement, select_relay_candidates
 from netbbs.link.reliability import record_dial_outcome
@@ -211,7 +213,9 @@ from netbbs.link.remote_attestation import (
 import nacl.signing
 
 from netbbs.identity.keys import fingerprint_from_verify_key
-from netbbs.link.introduction import build_identity_request, referenced_identities
+from netbbs.link.introduction import (
+    MAX_IDENTITIES_PER_REQUEST, build_identity_request, referenced_identities,
+)
 from netbbs.link.node_identity import NodeIdentityError
 from netbbs.link.trust_issuance import reconcile_issued_vouches
 from netbbs.link.transport import (
@@ -781,16 +785,19 @@ async def _sync_one_seed(
                         )
                         continue
                 allowed_events.append(event)
+            accepted: list[str] = []
             try:
-                accepted, deferred = node.handle_events_tolerantly(seed_peer.fingerprint, allowed_events)
+                accepted, deferred, refusal = node.handle_events_tolerantly(
+                    seed_peer.fingerprint, allowed_events
+                )
                 needed = [exc.missing_identity for _raw, exc in deferred if exc.missing_identity]
-                if needed and await _introduce_identities(
+                if refusal is None and needed and await _introduce_identities(
                     node, session, seed_url, seed_peer.fingerprint, lane, needed, refresh=True
                 ):
                     # In order, once: an event set aside for want of its
                     # signer may be what a later one in the same response
                     # builds on.
-                    retried, deferred = node.handle_events_tolerantly(
+                    retried, deferred, refusal = node.handle_events_tolerantly(
                         seed_peer.fingerprint, [raw for raw, _exc in deferred]
                     )
                     accepted.extend(retried)
@@ -801,11 +808,19 @@ async def _sync_one_seed(
                         "Link sync: set aside %d event(s) from seed %s that this node cannot use yet",
                         len(deferred), seed_url,
                     )
+                if refusal is not None:
+                    _logger.warning(
+                        "Link sync: rejected the rest of an inventory response from seed %s: %s",
+                        seed_url, refusal,
+                    )
             except LinkProtocolError as exc:
                 _logger.warning(
                     "Link sync: rejected an inventory response from seed %s: %s", seed_url, exc
                 )
-            else:
+            # Whatever ended the response, what was accepted before it is in
+            # this node's memory and counts as known: persist it, or it is
+            # never accepted, and so never persisted, again.
+            if accepted:
                 await persist_accepted_events(
                     lane, node, accepted,
                     sender_fingerprint=seed_peer.fingerprint, max_carried_boards=max_carried_boards,
@@ -878,25 +893,69 @@ async def _introduce_identities(
     A failure here costs nothing but the introduction; the events that needed
     it are set aside by the caller and offered again later.
     """
+    now = time.time()
+    unanswered = node.unanswered_identities
+    for key, retry_at in list(unanswered.items()):
+        if retry_at <= now:
+            del unanswered[key]
     wanted = [
         fp for fp in dict.fromkeys(fingerprints)
         if fp != node.identity.fingerprint and fp not in node.peers
         and (refresh or fp not in node.introduced)
+        # What this carrier could not answer an hour ago it is not asked
+        # again before then, or one event it keeps offering and this node
+        # cannot verify would buy a request on every pass.
+        and (carrier_fingerprint, fp) not in unanswered
     ]
-    if not wanted:
-        return False
-    try:
-        request = build_identity_request(
-            signing_identity=node.identity.signing_key,
-            requester_fingerprint=node.identity.fingerprint,
-            responder_fingerprint=carrier_fingerprint,
-            subjects=wanted,
-        )
-        bundles = await request_identities(node, session, base_url, request)
-    except (LinkTransportError, ValueError) as exc:
-        _logger.warning("Link sync: could not ask %s who its content is from: %s", base_url, exc)
-        return False
     learned = False
+    # A page of events can name more nodes than one request may. A few
+    # requests, then, and not one: what is left unasked is set aside with its
+    # events and would otherwise wait out the retry interval.
+    for start in range(0, min(len(wanted), _MAX_IDENTITY_REQUESTS_PER_PAGE * MAX_IDENTITIES_PER_REQUEST),
+                       MAX_IDENTITIES_PER_REQUEST):
+        asked = wanted[start:start + MAX_IDENTITIES_PER_REQUEST]
+        try:
+            learned_now = await _introduce_identities_once(
+                node, session, base_url, carrier_fingerprint, lane, asked
+            )
+        except (LinkTransportError, ValueError) as exc:
+            _logger.warning("Link sync: could not ask %s who its content is from: %s", base_url, exc)
+            break
+        except Exception:  # noqa: BLE001 -- an escape here ends the whole background sync task
+            _logger.exception("Link sync: learning identities from %s failed", base_url)
+            break
+        for fingerprint in asked:
+            if fingerprint not in learned_now:
+                while len(unanswered) >= _MAX_UNANSWERED_IDENTITIES:
+                    unanswered.pop(next(iter(unanswered)))
+                unanswered[(carrier_fingerprint, fingerprint)] = now + DEFERRED_EVENT_RETRY_SECONDS
+        learned = learned or bool(learned_now)
+    return learned
+
+
+# Requests per page of events, and carrier/fingerprint pairs remembered as
+# unanswered. Both remotely influenced, so both bounded.
+_MAX_IDENTITY_REQUESTS_PER_PAGE = 4
+_MAX_UNANSWERED_IDENTITIES = 4096
+
+
+async def _introduce_identities_once(
+    node: LinkNode,
+    session: ClientSession,
+    base_url: str,
+    carrier_fingerprint: str,
+    lane: DatabaseLane,
+    asked: list[str],
+) -> set[str]:
+    """One identity request. Returns the fingerprints learned, or learned afresh."""
+    request = build_identity_request(
+        signing_identity=node.identity.signing_key,
+        requester_fingerprint=node.identity.fingerprint,
+        responder_fingerprint=carrier_fingerprint,
+        subjects=asked,
+    )
+    bundles = await request_identities(node, session, base_url, request)
+    learned: set[str] = set()
     for bundle in bundles:
         try:
             # Only what was asked for. Checked before the bundle is handled,
@@ -913,7 +972,7 @@ async def _introduce_identities(
             continue
         await lane.run(save_introduced_identity, record, introduced_by=carrier_fingerprint)
         node.deferred_events.release_identity(record.fingerprint)
-        learned = True
+        learned.add(record.fingerprint)
         _logger.info(
             "Link sync: learned the identity of %s from %s; it starts on probation",
             record.fingerprint, carrier_fingerprint,

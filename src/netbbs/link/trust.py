@@ -248,6 +248,42 @@ def register_subject(
         _recompute_subject(db, subject, now_value, now, actor_user_id=None)
 
 
+_TABLES_THAT_MAKE_A_SUBJECT_WORTH_KEEPING = (
+    "link_trust_signals", "link_trust_local_observations", "link_trust_vouches",
+    "link_trust_overrides", "link_trust_vouch_intents", "link_trust_activity_days",
+    "link_remote_attestations", "link_remote_attestation_overrides",
+    "link_remote_attestation_effective",
+)
+
+
+def forget_untouched_node_subject(db: Database, fingerprint: str) -> bool:
+    """Remove a node subject that exists only because it was registered.
+
+    For an identity a carrier introduced and the bound then displaced (issue
+    #630): without this the SysOp's subject list is as unbounded as what a
+    carrier cares to serve. Anything a person or a reporter has said about the
+    subject keeps it: an override, an observation, a signal, a vouch, an
+    attestation, a day of activity, or an audit row that records a change
+    rather than the registration itself.
+    """
+    subject_id = TrustSubject.node(fingerprint).subject_id
+    for table in _TABLES_THAT_MAKE_A_SUBJECT_WORTH_KEEPING:
+        if db.connection.execute(
+            f"SELECT 1 FROM {table} WHERE subject_id = ? LIMIT 1", (subject_id,)
+        ).fetchone() is not None:
+            return False
+    if db.connection.execute(
+        """SELECT 1 FROM link_trust_decision_audit
+           WHERE subject_id = ? AND (previous_state IS NOT NULL OR actor_user_id IS NOT NULL) LIMIT 1""",
+        (subject_id,),
+    ).fetchone() is not None:
+        return False
+    with db.connection:
+        db.connection.execute("DELETE FROM link_trust_decision_audit WHERE subject_id = ?", (subject_id,))
+        db.connection.execute("DELETE FROM link_trust_subjects WHERE subject_id = ?", (subject_id,))
+    return True
+
+
 def record_activity(
     db: Database,
     subject: TrustSubject,
