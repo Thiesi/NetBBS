@@ -7700,7 +7700,11 @@ without teaching native chat anything about MRC. Decisions:
   the background, also on reconnect and roster refresh, at most once per
   five minutes per connection without spending callers' message allowance;
   `/rooms` refreshes it
-  explicitly and shows a readable listing. Discovery never opens the
+  explicitly and shows a readable listing. The first MRC room of a
+  session answers the background listing with one line -- how many more
+  rooms there are, and that `/rooms` lists them and `/join <room>` moves
+  there -- from the listing already in hand when the five-minute floor
+  suppresses the request; never the table. Discovery never opens the
   listed rooms. Local access rules and the blocklist still gate entry.
   Refusals stay in the picker's header through redraws. Open rooms appear
   in this section, not the ordinary channel list. Inside MRC, `/join <name>`
@@ -7711,10 +7715,31 @@ without teaching native chat anything about MRC. Decisions:
   use supplies the parser's anchored rows. Only replies to recent `LIST`
   requests populate the bounded cache; unfamiliar output remains text,
   never guessed room names. Counts and topics are advisory snapshots, with
-  stale readings labeled. Reconfiguring the hub clears its directory and
-  observed room names, then reloads locally retained mappings. Unknown
+  stale readings labeled with their age. Reconfiguring the hub clears its
+  directory and observed room names, then reloads locally retained
+  mappings. Unknown
   generic-client LIST lines stay scoped to explicit requesters and are
   suppressed for automatic requests, never broadcast to other callers.
+- **The directory outlives the run (issue #636).** The hub lists rooms
+  only to a user who is already in one: `LIST` is a session-context verb
+  (MRCDoc protocol page, rev 1.26), and a probe of the development hub on
+  2026-09-18 met both a client-context `LIST` and a `LIST` from a nick
+  never announced with `NEWROOM` with silence. So the node never asks by
+  itself -- no caller-less request, and no service nick parked in a room,
+  which would put a fake user on the network from every NetBBS node.
+  Instead the last *complete* listing (rows closed by the hub's footer)
+  is kept in `node_config`, bound to the hub's host and port, bounded to
+  the directory's own cap, every field validated again on load, and
+  readings older than seven days dropped; after a restart the section
+  shows those rooms at once, each with its real age, until a caller's
+  entry refreshes them. A complete listing replaces rather than only
+  adds: a room the hub no longer lists has emptied (an MRC room exists
+  only while someone is in it) and leaves the directory, unless chatter
+  or a caller named it after the listing was asked for. A footer with no
+  row before it proves nothing and changes nothing.
+- **MRC on, nothing reachable.** Decision 2 stands: switching MRC on
+  bridges nothing. With open rooms off and no active mapping, saving the
+  settings says that no caller can reach MRC yet and names both ways out.
 - **Occupancy.** The status line separates local participants and their
   local away count from the hub's remote roster count. An absent roster
   reads `?`, not zero; stale snapshots are marked. MRC roster replies do

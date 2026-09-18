@@ -1507,6 +1507,21 @@ session needs the same treatment.
   whichever of send (`_handle_mrc_private`, through the command context's
   `mrc_session_state`) or receive (the chat loop's notice branch) comes
   first.
+- The room directory (issue #636): the hub answers `LIST` only for an
+  announced user, so every directory and `STATS` request rides a nick from
+  `_announced` and nothing can be asked before a caller is in a room. Do
+  not build node-level polling: on 2026-09-18 the development hub met a
+  client-context `LIST` and a `LIST` from an unannounced nick with
+  silence, and stopped answering the probing address afterwards. The last
+  complete listing is kept in `node_config` (`mrc_directory_snapshot`, JSON,
+  bound to `host:port`) and seeded by `_reload_from_db`; the bridge's
+  clock is monotonic, so a kept reading's age is carried as
+  `clock() - wall-clock age` and written back the same way. Pruning and
+  saving happen only in `_complete_directory_pass`, on a footer preceded
+  by at least one parsed row, and compare against the *request's* send
+  time -- tests that run two listings back to back must let the clock
+  advance between them. The development hub's TLS port is self-signed and
+  its handshake refuses a client version below `1.2.9` with `OLDVERSION`.
 
 ### Read cursors and follows (issue #56)
 

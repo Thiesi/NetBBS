@@ -6687,13 +6687,29 @@ async def _mrc_settings_screen(
     )
     if saved is None:
         return
+    unreachable = await lane.run(_mrc_unreachable_note) if saved.enabled else None
     if mrc_bridge is None:
         await session.write_line("Saved. Applies the next time the node runs.")
-        return
-    status = mrc_bridge.status()
-    await session.write_line("Saved and applied. Link now: " + _mrc_state_line(status, unicode_style=unicode_style))
-    if status.last_error:
-        await session.write_line(colored(f"Last error: {sanitize_text(status.last_error)}", fg_color=MUTED_COLOR))
+    else:
+        status = mrc_bridge.status()
+        await session.write_line("Saved and applied. Link now: " + _mrc_state_line(status, unicode_style=unicode_style))
+        if status.last_error:
+            await session.write_line(colored(f"Last error: {sanitize_text(status.last_error)}", fg_color=MUTED_COLOR))
+    if unreachable is not None:
+        await session.write_line(colored(unreachable, fg_color=WARNING_COLOR))
+
+
+def _mrc_unreachable_note(db: Database) -> str | None:
+    """MRC switched on bridges nothing by itself (design doc section 16,
+    Decision 2): with open rooms off and no channel mapped, the hub link
+    comes up and no caller can see any of it. Say so at the one moment
+    the SysOp is looking, and name both ways out."""
+    if load_open_room_settings(db).enabled or any(mapping.active for mapping in list_mrc_mappings(db)):
+        return None
+    return (
+        "No caller can reach MRC yet: turn on [O]pen rooms here so Chat shows the network's rooms, "
+        "or bridge a channel to a room from that channel's own screen."
+    )
 
 
 def _toggle_draft_field(key: str) -> Callable[[Session, DatabaseLane, dict], Awaitable[None]]:

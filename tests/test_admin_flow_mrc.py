@@ -100,6 +100,27 @@ def test_mrc_settings_screen_shows_defaults_and_applies_without_a_node(db, lane,
     assert any(a.action == "set_mrc_settings" for a in list_recent_actions(db, limit=10))
 
 
+def test_saving_mrc_on_with_nothing_reachable_warns_the_sysop(db, lane, sysop):
+    # MRC on bridges nothing by itself: with open rooms off and no channel
+    # mapped the link comes up and no caller can see any of it.
+    warning = "No caller can reach MRC yet"
+    session = FakeSession(["s", "i", "e", "y", "s", "b", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop))
+    assert warning in _visible(_written_text(session))
+    # o: open rooms on -- callers have a way in, and nothing is said.
+    session = FakeSession(["s", "i", "o", "s", "b", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop))
+    assert load_mrc_settings(db).enabled and warning not in _visible(_written_text(session))
+
+
+def test_saving_mrc_on_with_a_mapped_channel_says_nothing(db, lane, sysop, lobby):
+    set_mrc_room(db, lobby, "lobby")
+    session = FakeSession(["s", "i", "e", "y", "s", "b", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop))
+    assert load_mrc_settings(db).enabled
+    assert "No caller can reach MRC yet" not in _visible(_written_text(session))
+
+
 def test_mrc_settings_tls_toggle_follows_the_well_known_port(db, lane, sysop):
     session = FakeSession(["s", "i", "t", "n", "s", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop))
