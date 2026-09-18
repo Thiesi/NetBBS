@@ -132,7 +132,12 @@ WORKERS = 4  # panels are independent subprocesses; a gallery is 150+ of them.
 WALKS: dict[str, list[tuple[str, bytes]]] = {
     "voidrunner": [
         # (label, keys) or (label, keys, fixture). The default fixture is "base".
-        ("Combat", b"", "combat"),
+        # A career saved mid-fight opens on the notice that says so, and waits
+        # for a key before it draws the fight (issue #641).
+        ("Journey Resumed", b"", "combat"),
+        ("Combat", b" ", "combat"),
+        # The first deck of a session, so this is also where a returning pilot's
+        # welcome and recap are reviewed (issue #641).
         ("Command Deck", b""),
         ("Command Deck, expanded", b"X"),
         ("Commodity Market", b"M"),

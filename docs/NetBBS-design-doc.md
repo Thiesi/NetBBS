@@ -5786,6 +5786,16 @@ returning pilots. Reading or declining it neither writes a save nor advances tim
 Accepting First Flight returns straight to the station deck, which shows the next
 step (market, quantity, chart destination) as a result line (issue #415).
 
+What the game has to say before its first screen is part of that screen, never a
+line written ahead of it: every screen begins by clearing the terminal, so a line
+printed first is erased before it can be read (issue #641). The first Command
+Deck of a session therefore opens with the pointer to the Pilot Guide for a new
+pilot, or with a welcome and the recap of commitments for a returning one, shown
+once in the place results are shown. A pilot whose last session ended
+mid-journey is told so on a screen that waits for a key, since the encounter's
+own first panel follows it. A new career after retirement announces itself on its
+first deck the same way.
+
 Escape answers No at every yes/no confirmation and cancels a quantity field,
 erasing what was typed (issue #413); prompts say so. Unsupported keys still do
 nothing at either prompt.
