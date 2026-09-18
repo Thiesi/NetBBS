@@ -1,4 +1,4 @@
-"""`netbbs.rendering.pipe_codes` (issue #298): Mystic `|NN` colour
+"""`netbbs.rendering.pipe_codes` (issue #298): Mystic `|NN` color
 codes become SGR after sanitization, everything else after a pipe is
 dropped, and a rendered span always resets after itself."""
 
@@ -43,8 +43,8 @@ def test_black_background_is_the_terminal_default_not_painted_black():
     assert rendered.endswith(f"x{RESET}")
 
 
-def test_non_colour_tokens_are_dropped_and_plain_pipes_survive():
-    # `|UN` (an MCI variable), `|99` (no such colour) and `|9x` (two
+def test_non_color_tokens_are_dropped_and_plain_pipes_survive():
+    # `|UN` (an MCI variable), `|99` (no such color) and `|9x` (two
     # alphanumerics, the token grammar every client strips) all go; a
     # pipe followed by a space, a single digit, or nothing stays text.
     assert render_pipe_codes("|UNname |99 |9x | end|") == "name   | end|"
@@ -56,7 +56,7 @@ def test_a_code_inside_a_word_splits_the_word_without_adding_spaces():
     assert strip_ansi(render_pipe_codes("wo|12rd")) == "word"
 
 
-def test_rendering_never_emits_a_reset_without_a_colour():
+def test_rendering_never_emits_a_reset_without_a_color():
     assert RESET not in render_pipe_codes("|UN only")
 
 

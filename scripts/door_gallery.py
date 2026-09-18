@@ -1174,7 +1174,7 @@ def painted(screen: str, width: int, height: int) -> str:
     """The panel's text as one line, read back through the emulator that paints it.
 
     Checking the door's bytes would not do: a heading is styled, so in the byte
-    stream its words are separated by the sequences that colour them, and a
+    stream its words are separated by the sequences that color them, and a
     screen drawn with cursor moves says nothing in the order it was written.
     """
     canvas = term.Screen(width, height)

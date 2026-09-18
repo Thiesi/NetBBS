@@ -130,7 +130,7 @@ def record_message(
     `external_source` marks a line that arrived from an outside network
     (issue #275's MRC bridge records `"mrc"`); see `ChannelMessage`.
     `index_body`, when given, is what the search index receives instead
-    of `body` -- an MRC body keeps its `|NN` colour codes (issue #298),
+    of `body` -- an MRC body keeps its `|NN` color codes (issue #298),
     and a search hit should show and match the words, not the codes.
 
     `body` is required for `kind="message"` and `kind="daybreak"`

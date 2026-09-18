@@ -407,7 +407,7 @@ def test_picker_highlight_cursor_styling():
     # noticeable, not least because it uses the same color as some
     # elements of the line do". The row is a reverse-video bar now, so
     # the assertion is that the highlighted row carries no foreground
-    # colour of its own at all: any colour inside it would end the
+    # color of its own at all: any color inside it would end the
     # inverted run at its reset and stripe the bar.
     assert "> 01. " in output
     assert str(ACCENT_COLOR) in output  # still the accent for the rows around it

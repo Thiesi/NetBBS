@@ -73,7 +73,7 @@ hub each announced caller's connecting IP address (`USERIP`, which the hub
 uses to ban one caller rather than a whole board, and without which it may
 drop a caller from room routing) and their security level with the SysOp's
 name (`BBSMETA`). Terminal sizes are always sent so the hub can format wide
-replies. The node now advertises the capabilities it really has (colour,
+replies. The node now advertises the capabilities it really has (color,
 CTCP, hub-directed room moves, graceful goodbye), and the bridge status
 screen shows the round trip to the hub, measured from each keepalive.
 

@@ -533,7 +533,7 @@ def test_upgrade_from_released_mrc_schema_preserves_rooms_and_doors(tmp_path, mo
             # Every column the old schema had, with the value it had. Not
             # `dict(row) == rows`: an additive migration is *allowed* to put a
             # new column on these tables, and one that does (65 -> 66, the MRC
-            # sender colour) would fail an equality that also asserts no
+            # sender color) would fail an equality that also asserts no
             # column was added. What an upgrade must not do is lose a value.
             columns = list(rows[0]) if rows else []
             kept = [{name: row[name] for name in columns}

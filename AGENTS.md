@@ -119,12 +119,12 @@ The standing principle is:
   on because nothing could photograph the screen it lives on; `SETUP` plays a
   panel's world into the state a screen needs; and each walk says in `SHOWS` what
   its screen must show, with the build refusing a panel that does not show it. What the tests *can* assert, and do:
-  that colour reaches every body row, that a hotkey, a label, a value and the
-  frame are four different colours, that one thing reads the same colour on every
+  that color reaches every body row, that a hotkey, a label, a value and the
+  frame are four different colors, that one thing reads the same color on every
   screen that shows it, and that a table's columns do not wander from row to row.
   A screen is built from components that return already-styled rows; a renderer
   that flattens a row to plain text is how both games became grey walls -- War
-  Dialer by colouring the whole line from outside, Voidrunner by stripping the
+  Dialer by coloring the whole line from outside, Voidrunner by stripping the
   row in its paginator before it was ever printed. Each door's contract is
   normative for that door: see "the War Dialer presentation contract" and "The
   Voidrunner presentation contract" in the design document.

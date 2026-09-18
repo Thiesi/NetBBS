@@ -1100,7 +1100,7 @@ session needs the same treatment.
   ANSI and control bytes from every field at the parse boundary; nothing
   downstream may assume otherwise. Pipe codes (`|NN`) are stripped from the
   identity fields at parse time and never translated there; what a body
-  keeps is the colour rule below (issue #298).
+  keeps is the color rule below (issue #298).
 - Inbound room lines are recorded through the ordinary `record_message`
   (author label `user@site (MRC)`, `author_fingerprint=NULL`,
   `external_source='mrc'`) and so are bounded by the scrollback limit and
@@ -1158,7 +1158,7 @@ session needs the same treatment.
   chat-flow, admin-screen and `run()` lifecycle tests all drive it over real
   sockets; there is no in-memory transport stub.
 - Body convention (issue #298): an MRC body carries the *sender's own*
-  handle, in colour, and every client displays a body verbatim -- the hub
+  handle, in color, and every client displays a body verbatim -- the hub
   adds no name. Outbound, every chunk is `protocol.format_room_body` /
   `format_action_body` and `split_body(reserve=...)` pays for the prefix out
   of the 140-character budget. Inbound, `split_sender_prefix` peels a prefix
@@ -1172,7 +1172,7 @@ session needs the same treatment.
   use one of the four reference templates.
 - Pipe codes have two fates at the parse boundary: identity fields lose every
   `|XX`; a body keeps `|00`-`|23` and loses the rest. Nothing after
-  `parse_line` may strip colour from a body it will store; nothing may render
+  `parse_line` may strip color from a body it will store; nothing may render
   a body without `sanitize_text` first. `netbbs.rendering.pipe_codes.
   render_pipe_codes` is the only producer of pipe-derived SGR and always
   resets after itself; `_render_channel_message` composes it beside the label
@@ -1184,8 +1184,8 @@ session needs the same treatment.
   account name -- the hub knows nicks only, and `USERNICK` can change one
   mid-session. `MrcNotice` (text with codes, kind, created_at) is the one
   object the bridge hands `ChatHub` for ephemeral lines; the receive loop
-  renders it per viewer. A shared pre-coloured string would defeat the
-  per-viewer colour preference.
+  renders it per viewer. A shared pre-colored string would defeat the
+  per-viewer color preference.
 - Bounds added: reply lines per caller (`REPLY_BURST`/`REPLY_RATE_PER_SECOND`,
   one "cut short" notice per burst), CTCP replies per remote sender
   (`CTCP_BURST`), `USERROOM` re-announce at most once per keepalive tick
@@ -1313,7 +1313,7 @@ session needs the same treatment.
   anything is recorded, and `InputHistory.forget` drops the raw line
   `read_line` had already recorded (raw, since the loop strips what it
   matches), so Up cannot bring the password back; the LASTSEEN choice is a tri-state Profile preference (never
-  chosen / on / off) read with the nick colour and opt-in (`load_lastseen`,
+  chosen / on / off) read with the nick color and opt-in (`load_lastseen`,
   cached and pruned like them, and part of `_ensure_nick_color`'s guard so a
   failed read is retried -- and a choice read after the caller was already
   announced is sent at once, `_send_lastseen_choice`) and sent as
@@ -1412,7 +1412,7 @@ session needs the same treatment.
   the credential verbatim; never through `sanitize_body`, which would
   silently rewrite a pipe-code-shaped substring and change the credential.
   Nothing stores them and the diagnostic log never carries packet bodies.
-- The nick colour is read per username on the lane (`load_nick_color`,
+- The nick color is read per username on the lane (`load_nick_color`,
   injectable) when a caller is announced and cached only while they are
   announced somewhere: `local_leave` drops it with their last announcement
   and a new connection starts empty, so "applies the next time you enter an
@@ -1466,7 +1466,7 @@ session needs the same treatment.
   redraws. Regression checks must inspect output after the latest clear,
   including a subsequent Ctrl-L, rather than the entire transcript.
 - Private messages (issue #305): the opt-in is read on the lane with the
-  nick colour (`load_private_optin`, injectable) by `_ensure_nick_color`,
+  nick color (`load_private_optin`, injectable) by `_ensure_nick_color`,
   which caches each value it could read; a failed opt-in read is logged and
   left unread (the caller shows "not read yet", inbound takes the opt-out
   path, the next announcement or send retries). Both caches hold only
@@ -5649,11 +5649,11 @@ resizes loses nothing. `scripts/door_gallery.py` renders every screen at every
 supported size into one page, and is how a presentation change is reviewed --
 the suite can assert that a screen fits, never that it looks like anything.
 
-**Colour has to reach the body row, and that is a structural property, not a
+**Color has to reach the body row, and that is a structural property, not a
 coat of paint (issue #494).** War Dialer's screens used to be built as plain
 sentences, wrapped by a flattener that stripped ANSI by construction, and then
-coloured one colour per row from outside the frame -- so nothing inside a row
-could ever be a different colour from anything else, and the whole game read as
+colored one color per row from outside the frame -- so nothing inside a row
+could ever be a different color from anything else, and the whole game read as
 one grey block inside a green box. The fix is that a component returns *styled*
 rows and the frame leaves a row that already carries SGR exactly as it arrived.
 Three invariants hold it in place, and each one is a test that can fail:
@@ -5661,13 +5661,13 @@ Three invariants hold it in place, and each one is a test that can fail:
 - Every body row a screen prints carries at least one SGR sequence. Check the
   row *between* the frame's sides: a screen that is grey inside a green box
   passes any assertion that looks at the whole row.
-- A hotkey, a label, a value and the frame are four different colours, and an
-  exchange's owner colour is the same on the ring, in the table and in the feed,
+- A hotkey, a label, a value and the frame are four different colors, and an
+  exchange's owner color is the same on the ring, in the table and in the feed,
   because one function (`owner_node`) decides it for all three.
 - Segments are composed independently and each closes its own style. An SGR
-  reset does not restore an outer colour, so passing an already-styled value
-  into a helper that wraps it in another colour colours its head and then loses
-  the colour entirely at the first internal reset. `label_value` and `table`
+  reset does not restore an outer color, so passing an already-styled value
+  into a helper that wraps it in another color colors its head and then loses
+  the color entirely at the first internal reset. `label_value` and `table`
   detect an already-styled argument and leave it alone for exactly this reason;
   a styled table cell also cannot be truncated (the cut would land inside an
   escape sequence), so its own width is the floor its column can shrink to.
@@ -5919,7 +5919,7 @@ makes a former rival's raids read as their own work if they take that handle.
 Self-authored receipts record no actor at all, and `hostile` is "an actor is
 named".
 
-**A schema version is not a colour correction.** Bumping one makes older game
+**A schema version is not a color correction.** Bumping one makes older game
 binaries refuse the world outright, which is a real cost to a SysOp and a one-way
 door; paying it to re-tone historical rows was not worth it, and any backfill that
 reads a stored actor against a caller's current handle would erase the record that
@@ -5944,14 +5944,14 @@ have published a garrison preview under the service's caption. The `$` suffix
 pages to the last page and presses the last key offered there, which is what the
 door actually guarantees about that entry.
 
-Voidrunner's colour lived and died in one function (issue #493). `wrapped_group`
+Voidrunner's color lived and died in one function (issue #493). `wrapped_group`
 wrapped every body row of every paged screen through `_mission_plain`, which is
 `ANSI.sub("")`, *before* it was printed; the frame restored in #486 was the only
 styled thing a page could have, because it is added afterwards. Two rules keep
 that from recurring, and both are asserted. First, the wrap is styled:
 `wrap_styled` carries the active SGR across a break -- `_wrap_output` is
 ANSI-aware about width but leaves a broken span's continuation in the terminal's
-default foreground -- and `style_body_line` colours by role anything that
+default foreground -- and `style_body_line` colors by role anything that
 arrives plain. Second, `draw_page` applies that same styling to rows a screen
 built itself and handed straight to it, because a rule that held for most pages
 and not the rest is how the design was lost one slice at a time. A component's
@@ -7263,14 +7263,14 @@ paths for the same string.
 
 Voidrunner's `style_body_line` returns a row that already carries SGR untouched:
 a component's decision beats a pattern's guess. So a row needing one token
-coloured differently from the rest of it cannot get that from the tokeniser --
+colored differently from the rest of it cannot get that from the tokeniser --
 it has to be composed that way where it is built. The service menu's preview
 count is the case that matters: `menu_grid` styles its own cells, so the count
 inside `Board: 4 offers` is picked out there rather than by any later pass.
 
 The door clears the terminal in exactly one place, `draw_page`, which every
 paged screen already routes through. A clear added per screen is the same shape
-of mistake as a colour rule applied per screen: it holds for most of them and
+of mistake as a color rule applied per screen: it holds for most of them and
 silently not the rest. A test asserts the file contains one clear sequence.
 
 Because a screen now replaces what preceded it, the launch banner is wiped by

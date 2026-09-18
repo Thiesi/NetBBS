@@ -11332,7 +11332,7 @@ def _parse_rgb(raw: str) -> tuple[int, int, int] | None:
 
 
 def _theme_color_field(slot: str) -> Callable[[Session, DatabaseLane, dict], Awaitable[None]]:
-    """One branding slot on the node-colours editor: an R,G,B triple,
+    """One branding slot on the node-colors editor: an R,G,B triple,
     'default' to clear the override, blank to keep. Validation happens
     here, with the draft untouched on a bad entry; nothing is written
     until [S]ave."""

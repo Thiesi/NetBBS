@@ -1,5 +1,5 @@
 """Tests for netbbs.net.mrc_nick_color_preference (issue #304), the CGA
-colour a caller's handle wears on MRC -- and the Profile field that
+color a caller's handle wears on MRC -- and the Profile field that
 sets it."""
 
 from __future__ import annotations
@@ -52,7 +52,7 @@ def test_round_trips_and_rejects_non_cga_values(db, alice):
     assert mrc_nick_color(db, alice) == 14
 
 
-def test_profile_screen_cycles_the_colour(db, alice, tmp_path):
+def test_profile_screen_cycles_the_color(db, alice, tmp_path):
     from netbbs.net import profile_flow
     from netbbs.storage.execution import DatabaseLane
     from tests.test_admin_flow import FakeSession, _visible, _written_text
@@ -65,7 +65,7 @@ def test_profile_screen_cycles_the_colour(db, alice, tmp_path):
         session = FakeSession(["y", "y", "b"])
         asyncio.run(profile_flow._edit_profile(session, lane, alice))
         text = _visible(_written_text(session))
-        assert "MRC nick colour" in text and "white (|15)" in text and "black (|00)" in text
+        assert "MRC nick color" in text and "white (|15)" in text and "black (|00)" in text
         assert mrc_nick_color(db, alice) == 0
     finally:
         lane.close()

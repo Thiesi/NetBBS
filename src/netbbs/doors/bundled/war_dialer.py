@@ -190,21 +190,21 @@ class Palette:
     """The War Dialer presentation palette (design doc: the War Dialer
     presentation contract, issue #494).
 
-    Nine roles, each with a deliberate 256-colour fallback rather than whatever
+    Nine roles, each with a deliberate 256-color fallback rather than whatever
     a converter would pick, degrading again to monochrome and then to plain
-    ASCII. Chrome never shares a colour with content: `phosphor_dim` draws
+    ASCII. Chrome never shares a color with content: `phosphor_dim` draws
     the frame, the ring links and every gauge track, and everything a caller
     reads is `phosphor`, `ink`, `grey`, `amber`, `cyan`, `magenta`, `alarm` or
     `mint`.
     """
 
-    #: role -> (truecolour RGB, 256-colour index)
+    #: role -> (truecolor RGB, 256-color index)
     ROLES = {
         "phosphor": ((0x39, 0xFF, 0x14), 82),
         # The chrome role (issue #519, the chrome half). The frame used to be
         # drawn in `phosphor` itself, so the brightest green on the screen was
         # 36.7% of the switchboard's visible characters and most of it was
-        # border -- chrome sharing a colour with content, which the contract
+        # border -- chrome sharing a color with content, which the contract
         # forbids, and outshouting it. The frame now wears this role, retuned
         # from `#1f7a3f` (a dark, fully saturated green) to a desaturated
         # mid green so a border is legible but recedes, and `phosphor` is
@@ -358,7 +358,7 @@ _GLYPHS = {
     # The scanline's own ramp: block elements, deliberately not the frame's
     # glyph. Blocks are full-cell by construction, so they cannot show the
     # seams heavy box-drawing does, and they fade in density as well as
-    # colour -- which is the only fade left under the monochrome preset.
+    # color -- which is the only fade left under the monochrome preset.
     "scan_hi": ("▓", "#"), "scan_mid": ("▒", "+"), "scan_lo": ("░", "."),
     "brand": ("▚", "#"), "cursor": ("█", "_"),
     "bullet": ("●", "*"), "rise": ("▲", "^"), "fall": ("▼", "v"),
@@ -2597,7 +2597,7 @@ HOST_EPILOGUE_ROWS = 3
 def sty(style: str, text: str) -> str:
     """One styled segment, closed by its own reset.
 
-    SGR reset does not restore an outer colour, so segments are composed
+    SGR reset does not restore an outer color, so segments are composed
     independently rather than nested -- the same rule the host's renderers
     follow. `style` is empty under monochrome, where this is the identity.
     """
@@ -2624,12 +2624,12 @@ def _fit(text: str, width: int) -> str:
 
 
 def label_value(p: Palette, label: str, value: str, *, style: str = "") -> str:
-    """A label/value chip: grey label, coloured value. Labels never share a
-    colour with the values beside them, which is what makes a row scannable.
+    """A label/value chip: grey label, colored value. Labels never share a
+    color with the values beside them, which is what makes a row scannable.
 
     A value that is already styled -- a gauge, a row of pips -- is left alone:
-    wrapping a completed ANSI string in another colour would colour only its
-    head and then lose the colour entirely at its first internal reset.
+    wrapping a completed ANSI string in another color would color only its
+    head and then lose the color entirely at its first internal reset.
     """
     return sty(p.grey, label) + " " + (value if ESC in value else sty(style or p.ink, value))
 
@@ -2717,7 +2717,7 @@ def progress_chain(p: Palette, stages: list[str], current: int) -> str:
 
 
 def owner_node(p: Palette, exchange: Exchange, viewer_id: int | None) -> tuple[str, str, str]:
-    """The glyph, colour and one-word owner class for one exchange.
+    """The glyph, color and one-word owner class for one exchange.
 
     Every screen that shows an exchange calls this -- the ring map, the table
     under it, the root picker and the feed -- so an exchange can never read as
@@ -2826,7 +2826,7 @@ def table(p: Palette, headers: list[str], rows: list[list], aligns: str,
 
     A cell is plain text, or `(text, style)`, or a cell a component already
     styled -- a row of pips, a hotkey in amber. A styled cell is padded but never
-    re-coloured or re-cut (a truncation inside an escape sequence would print the
+    re-colored or re-cut (a truncation inside an escape sequence would print the
     escape), so its own width is the floor its column can shrink to; plain
     columns give up characters from the widest one first. Alignment is the point:
     a table whose columns move from row to row is a list of sentences again.
@@ -2869,7 +2869,7 @@ def feed(p: Palette, events: list[GameEvent], width: int, *, limit: int = 6) -> 
     """The latest receipts, toned by who caused them.
 
     A raid or a capture attempt against you records the attacker's handle; your
-    own moves and the season machinery record none -- so the row's colour comes
+    own moves and the season machinery record none -- so the row's color comes
     from the event itself, not from reading its words or from comparing a handle
     the caller is free to change.
     """
@@ -2961,7 +2961,7 @@ _PROSE_TOKEN = re.compile(
 
 
 def prose_rows(p: Palette, text: str, width: int, *, style: str = "") -> list[str]:
-    """Wrap a sentence and colour what a caller actually scans it for.
+    """Wrap a sentence and color what a caller actually scans it for.
 
     Hotkeys are amber and bold, money is amber, odds are cyan and other figures
     are mint -- the same roles they carry in every gauge and table on the
@@ -2970,8 +2970,8 @@ def prose_rows(p: Palette, text: str, width: int, *, style: str = "") -> list[st
     a rival crew, and the wrapper measures what it is given.
 
     Every hotkey this door has is one character, so only a single-character
-    bracket is amber. A bracketed word is a state tag, not a key, and colouring
-    `[ON]` or `[HELD]` the way `[T]` is coloured invites a caller to press it.
+    bracket is amber. A bracketed word is a state tag, not a key, and coloring
+    `[ON]` or `[HELD]` the way `[T]` is colored invites a caller to press it.
     """
     base = style or p.ink
     rows: list[str] = []
@@ -3035,9 +3035,9 @@ def scanline(p: Palette, width: int, *, trailing: str = "") -> str:
     to draw. And it was not a fade: three flat blocks of a third of the width
     each, with hard edges at the thirds.
 
-    It fades twice now, in density and in colour, and the density half is the
+    It fades twice now, in density and in color, and the density half is the
     one that matters most -- the monochrome preset returns no SGR at all, so a
-    colour-only fade is perfectly flat for those callers.
+    color-only fade is perfectly flat for those callers.
     """
     span = max(3, width - (_dlen(trailing) + 2 if trailing else 0))
     stops = ((p.mint, gl("scan_hi")), (p.phosphor, gl("scan_mid")),
@@ -3132,9 +3132,9 @@ def _panel_width(p: "Palette", width: int) -> int:
 def _frame_rule(p: Palette, left: str, right: str, label: str, trailing, inner: int) -> str:
     """One border row, with an optional heading on the left and notes on the right.
 
-    Chrome is phosphor-dim (issue #519: it was phosphor, the same colour as a
+    Chrome is phosphor-dim (issue #519: it was phosphor, the same color as a
     holding or a gain, and the brightest thing on the screen); a heading is
-    mint and a note is grey, so the frame never shares a colour with what it is
+    mint and a note is grey, so the frame never shares a color with what it is
     labelling. `trailing` may be several notes in
     priority order: the first one is always drawn, truncated if it has to be,
     and the rest are added only while they fit whole. That is what keeps a page
@@ -3169,9 +3169,9 @@ def _frame_row(p: Palette, row: str, inner: int) -> str:
     """One body row between the frame's sides.
 
     A row that already carries SGR is left exactly as its component built it.
-    Wrapping every row through a plain-text flattener and then colouring the
-    whole line one colour from outside is what turned this game into a grey
-    block: nothing inside a row could ever be coloured differently from anything
+    Wrapping every row through a plain-text flattener and then coloring the
+    whole line one color from outside is what turned this game into a grey
+    block: nothing inside a row could ever be colored differently from anything
     else (issue #494).
 
     An over-wide row is clipped rather than wrapped, deliberately: a row that
@@ -3673,7 +3673,7 @@ def show_text_pages(p: Palette, title: str, paragraphs: list[str], width: int, h
 
     `cards` is how a rebuilt screen hands over rows its own components already
     styled; `paragraphs` is the prose path, which styles what it wraps instead
-    of flattening it and colouring the whole row from outside.
+    of flattening it and coloring the whole row from outside.
     """
     width = max(1, width - 1)
     inner = _panel_width(p, width)
@@ -4092,7 +4092,7 @@ def apply_display(p: Palette, values: dict[str, bool]) -> None:
 def do_display(p: Palette, conn: sqlite3.Connection, user_id: int, width: int, height: int) -> None:
     labels = ('ASCII decorations', 'Monochrome', 'Fast mode')
     notes = ('Authored box art becomes ASCII; caller names are untouched.',
-             'Removes every colour; every status, stake and outcome stays readable.',
+             'Removes every color; every status, stake and outcome stays readable.',
              'Drops optional art, flavour and motion; keeps every stake and result.')
     while True:
         values = read_display(conn, user_id)
@@ -4300,7 +4300,7 @@ def territory_columns(width: int) -> tuple[list[str], str, list[str]]:
 
 def territory_cards(p: Palette, exchanges: list[Exchange], viewer_id: int | None,
                     player: Player | None, width: int) -> list[tuple[str, list[str]]]:
-    """The scene as a ring and a table, with owner colour on both."""
+    """The scene as a ring and a table, with owner color on both."""
     ring = scene_map(p, exchanges, viewer_id, width)
     legend = scene_legend(p, exchanges, viewer_id)
     beside = compose([ring[0]] + legend, width)
@@ -4437,7 +4437,7 @@ def exchange_detail_cards(p: Palette, exchange: Exchange, player: Player | None,
 
 def exchange_entry_rows(p: Palette, exchange: Exchange, player: Player | None,
                         width: int) -> list[str]:
-    """One exchange as a picker entry: owner colour, defence dots, price, odds."""
+    """One exchange as a picker entry: owner color, defence dots, price, odds."""
     glyph, style, kind = owner_node(p, exchange, player.user_id if player else None)
     role, _, base_heat, _, _ = exchange_terms(exchange)
     defence = exchange_defense(exchange)
@@ -4860,7 +4860,7 @@ def pick_record_page(p: Palette, title: str, records: list[tuple[list[str], bool
     under it are the terms, in prose roles. `before` is a screen's own cards --
     a progress chain, a gauge, a summary -- drawn above the entries on the first
     page and charged to that page's budget. `rendered` replaces the prose path
-    with rows a screen's own components built (owner colour, gauges, badges),
+    with rows a screen's own components built (owner color, gauges, badges),
     already wrapped to the entry width, keeping exactly this selection contract.
     """
     width = max(1, width - 1)

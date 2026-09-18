@@ -124,7 +124,7 @@ def test_the_status_starts_at_the_same_column_on_every_row(tmp_path):
 
 
 def test_a_hidden_name_occupies_the_same_column_as_a_real_one(tmp_path):
-    """"(name hidden)" is rendered in a different colour and is a
+    """"(name hidden)" is rendered in a different color and is a
     different length; it must still be a cell."""
     db, viewer = _setup(tmp_path, ["visible_one"])
     hidden = create_user(db, "hidden_one", password="hunter2", user_level=10)
@@ -213,22 +213,22 @@ def test_the_gradient_covers_the_name_not_its_padding(tmp_path):
     asyncio.run(_show_previous_callers_screen(session, db, viewer, current_history_id=None))
     db.close()
 
-    # The name is gradient-coloured one character at a time, so "bob"
+    # The name is gradient-colored one character at a time, so "bob"
     # never appears as a literal run in the raw output: the row has to
     # be found on the stripped text and then read back raw.
     row = next(
         line for line in session.output.split("\n") if "bob" in _SGR.sub("", line)
     )
-    coloured = re.findall(r"\x1b\[38;2;\d+;\d+;\d+m(.)", row)
-    assert "".join(coloured).count("b") == 2 and "o" in coloured, coloured
+    colored = re.findall(r"\x1b\[38;2;\d+;\d+;\d+m(.)", row)
+    assert "".join(colored).count("b") == 2 and "o" in colored, colored
 
     # The real assertion is how *many* characters carry a gradient stop.
     # The name column is dozens wide at 80 columns; with the padding
     # inside the gradient every one of those columns took a stop. Now
     # only the three letters do, plus the frame's own rail characters,
-    # which are coloured separately by `_framed`/`_rule` and legitimately
+    # which are colored separately by `_framed`/`_rule` and legitimately
     # include a space.
-    assert len(coloured) < 10, coloured
+    assert len(colored) < 10, colored
 
 
 def test_a_tab_in_the_timestamp_format_does_not_break_the_columns(tmp_path, monkeypatch):

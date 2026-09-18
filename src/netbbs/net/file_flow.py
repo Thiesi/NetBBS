@@ -1436,12 +1436,12 @@ def _uploader_display_name(db: Database, entry, *, name_requirement: str | None)
 
 def _uploader_cell(padded: str) -> str:
     """AUTHOR_COLOR over an uploader label that may already carry a
-    colour of its own.
+    color of its own.
 
     A verified real name arrives pre-styled from
     `netbbs.attestation.format_name_for_resource`, and an SGR reset
-    restores no outer colour -- so wrapping the whole cell would colour
-    the name, then leave everything after the verified unit uncoloured.
+    restores no outer color -- so wrapping the whole cell would color
+    the name, then leave everything after the verified unit uncolored.
     Composed beside it instead of around it, the same way
     `netbbs.net.chat_flow._colored_around` already handles an author
     label that may or may not bring its own styling (issue #298).
@@ -1549,12 +1549,12 @@ async def _render_file_page(
             # therefore go out plain inside a single inverted run, which
             # is also what makes the bar solid rather than striped.
             # `strip_ansi`, not the raw cells (Codex review): a verified
-            # uploader name brings its own colour and its own reset, and
+            # uploader name brings its own color and its own reset, and
             # that reset would end the reverse run partway along the
             # column -- striping the bar this commit exists to make
             # solid. The `(=...=)` markers survive stripping, and
             # `set_display_name` refuses `=` at write time, so the
-            # unforgeability the colour also signals is still on screen
+            # unforgeability the color also signals is still on screen
             # while the row is under the cursor.
             await session.write_line(colored(strip_ansi(" ".join(cells)), reverse=True))
         else:
