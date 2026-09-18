@@ -6461,9 +6461,33 @@ version 1 dropped a bracing starter Shuttle from a 99% win at tier 2 to none at
 tier 3 between adjacent danger ratings; under version 2 that Shuttle wins about
 half its tier-3 fights with Guard (and almost none without), a Cutter guards
 through tier 4 about half the time, and a maxed Carrier still loses about 40%
-of its hull to a tier-4 squadron, so heavy hulls keep paying for fights. A fight
-keeps the ruleset it started with; both versions load, others are unsupported.
-Automated trials establish the curve; human playtesting still decides its feel. Existing rewards,
+of its hull to a tier-4 squadron, so heavy hulls keep paying for fights.
+
+Ruleset version 3 (issue #647) keeps version 2's damage and adds a way out of a
+fight the ship cannot win. A raider *outclasses* a ship when two unguarded
+volleys would break its full hull; for a Shuttle on its factory hull that is tier
+4 and nothing below it, and hull reinforcement is a real answer to it. An
+outclassing raider is after the cargo, not the wreck: Dump gives up half the hold,
+chosen at random, and breaks contact three times in four, and Evade has a floor
+of 30%. Harry still takes ten points off either. The combat panel marks the
+contact OUTCLASSED and prices the Dump it will actually make, and the chart's
+departure prompt says "Raiders there can outclass this hull" when the
+destination's worst raider (its danger plus one) would. Found in play: the first
+profitable market of a career sat in a danger-4 system one jump from the First
+Flight destination, and under version 2 a starter Shuttle there had Evade at
+5-14% and Dump at 24-34% against an attack worth two thirds of its hull and a
+volley worth all of it, so the only available lesson was never to go. The rules
+are for raiders: a Concord patrol is not after the cargo, takes no Dump and has
+Surrender as its way out, so its odds are unchanged and its panel is not marked. In trials a Shuttle with a full hold that
+dumps and runs now survives a tier-4 contact 94 times in 100, giving up thirteen
+units on average, against 48 under version 2; with an empty hold it is still a
+coin toss, which is what the departure warning is for. Rejected: lowering tier-4
+damage (it is what keeps a Carrier honest), and moving dangerous systems away
+from the opening neighbourhood, which needs a new galaxy version and would make
+the risk rarer without making it any more survivable.
+
+A fight keeps the ruleset it started with; every listed version loads, others
+are unsupported. Automated trials establish the curve; human playtesting still decides its feel. Existing rewards,
 ship upgrades, faction consequences and squadron sequencing remain in force. Newly
 generated raiders use destination danger for both squadron chance and tier; stored
 opponents retain their stats, and tier/name RNG draw ordering stays unchanged.
