@@ -5793,8 +5793,9 @@ Deck of a session therefore opens with the pointer to the Pilot Guide for a new
 pilot, or with a welcome and the recap of commitments for a returning one, shown
 once in the place results are shown. A pilot whose last session ended
 mid-journey is told so on a screen that waits for a key, since the encounter's
-own first panel follows it. A new career after retirement announces itself on its
-first deck the same way.
+own first panel follows it. A new career after retirement, and a career rolled
+back to its previous checkpoint by the recovery screen, announce themselves on
+their first deck the same way.
 
 Escape answers No at every yes/no confirmation and cancels a quantity field,
 erasing what was typed (issue #413); prompts say so. Unsupported keys still do

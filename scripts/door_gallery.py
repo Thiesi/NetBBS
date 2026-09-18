@@ -136,10 +136,13 @@ WALKS: dict[str, list[tuple[str, bytes]]] = {
         # for a key before it draws the fight (issue #641).
         ("Journey Resumed", b"", "combat"),
         ("Combat", b" ", "combat"),
-        # The first deck of a session, so this is also where a returning pilot's
-        # welcome and recap are reviewed (issue #641).
-        ("Command Deck", b""),
-        ("Command Deck, expanded", b"X"),
+        # The first deck of a session carries a returning pilot's welcome and
+        # recap above its gauges (issue #641), which at forty columns is most of
+        # page one. It is reviewed as itself; the deck a pilot sees for the rest
+        # of the session is reached by leaving a screen and coming back.
+        ("Command Deck, first of a session", b""),
+        ("Command Deck", b"OB"),
+        ("Command Deck, expanded", b"OBX"),
         ("Commodity Market", b"M"),
         ("Engineering Yard", b"Y"),
         # The crew roster is behind the yard, not the deck: `K` from `Y`.
