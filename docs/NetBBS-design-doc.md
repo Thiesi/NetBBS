@@ -589,11 +589,12 @@ it was a deliberate trade and not an oversight:
   weaker half of that screen all along. It is offered only when the
   transport can carry a Zmodem send or the node can mint a browser link,
   the same rule the caller-facing screens follow (issue #475).
-- **An expired file.** Expiry is a delisting rather than an access
-  restriction (§11), and `get_file_by_name` still honours that, but no
-  terminal path now reaches an expired file: the listing and `[F]ind` are
-  both approved-and-current only. This only bites areas that set a maximum
-  file age.
+- **An expired file.** Nothing, and that is now the decided answer rather
+  than a loss: expiry ends a file's reach to callers entirely (§5.3, issue
+  #639). The listing and `[F]ind` are approved-and-current only, and a caller
+  who knows a name has no way to spend it. A SysOp reaches an expired file
+  from the file area's admin detail screen while the grace period lasts.
+  Only areas that set a maximum file age have expired files at all.
 
 ### 3.6 Resource lists (issue #528)
 
@@ -1062,6 +1063,30 @@ visible. Local maintenance follows:
 with a grace period between expiration and deletion. Pin and expiry-exemption
 currently use the existing edit permission. Local pruning never becomes a
 network-wide deletion instruction.
+
+**Expiry is a caller-facing boundary, not only a delisting** (issue #639).
+Once a post or a file is `expired`, no keystroke a caller can press reaches
+it: listings, `[F]ind` and the file area's own screens are
+approved-and-current only, and knowing an exact name buys nothing. This
+holds for both boards and file areas, and it is the whole of what a caller
+may rely on.
+
+Two consumers inside the node still resolve an expired row, and neither is a
+caller-facing surface:
+
+- **Reply-parent resolution.** `get_post` is deliberately unfiltered so a
+  reply to a thread that expired mid-conversation still finds its parent
+  (§6.1's edit chains depend on the same lookup).
+- **SysOp recovery.** A file's bytes survive in content-addressed storage
+  until the grace period ends. The file area's admin detail screen lists its
+  expired files with `[D]ownload`, the same action the pending-file review
+  screen carries, so recovering an upload does not need shell access. Posts
+  have no equivalent screen: a post's content is its text, and the recovery
+  case that justifies the file screen does not arise.
+
+A domain function returning an expired row is therefore a statement about
+the domain, not a promise to callers, and the contracts of `list_files_page`,
+`get_file_by_name`, `list_posts_page` and `get_post` say so in those terms.
 
 ### 5.4 Channel visibility and membership
 
@@ -10332,6 +10357,63 @@ to read its own copy by the depositor's descriptor and not by its own record
 of whom it agreed to relay for. A
 subscriber does not try relays it has not met. SysOp-written trust signals
 remain #589's next slice.
+
+### Issue #639 — what expiry means to a caller — closed
+
+Found when issue #638 made the file area keystroke-only and took
+`/download <filename>` with it, which was the last path to a file that had
+expired. The contract of `list_files_page` promised expired files were
+"delisted from normal browsing though still individually reachable", and
+`get_file_by_name` kept returning them, so the promise survived its only
+surface. Normative description: §5.3.
+
+Two things found while deciding it, which changed the shape of the answer:
+
+- **`posts.py` makes the same promise and never had a surface either.**
+  `get_post`'s contract says "expired content stays individually reachable,
+  only delisted from normal browsing", and `netbbs.net.board_flow` contains
+  no reference to an expired post and no call to `get_post`. So this was not
+  a regression #638 introduced in file areas; it was one sentence written in
+  two subsystems, of which files happened to hold an accidental instance.
+- **`get_file_by_name` had no production caller left.** Every remaining
+  mention was a docstring in the past tense. The promise was being kept by a
+  function nothing called.
+
+**Decision 1 — expiry ends a caller's reach, in both subsystems.** A caller
+may rely on this: expired means gone. Rejected: a `show expired` toggle on
+the file listing, and returning expired rows from `[F]ind` labelled. Both put
+delisted content back in front of callers, which is the one thing expiry
+exists to stop, and the second costs the most to build — the expiry sweep
+calls `reindex_file`, which *deletes* a row from `file_search` as soon as it
+stops being `approved`, so search would need a status dimension carried
+through every consumer in order to re-expose what it had just removed.
+
+**Decision 2 — the domain keeps its unfiltered lookups, for two named
+consumers.** Reply-parent resolution needs an expired thread to resolve, and
+SysOp recovery needs an expired file's row to reach its bytes. What changes is
+the contracts, which stop describing either as something a caller can do.
+Rejected: filtering expired rows out of the domain, which would break replies
+to a thread that expired mid-conversation.
+
+**Decision 3 — the SysOp recovery surface is a file-area screen, not a
+caller-facing one.** Expired files are listed on the file area's admin detail
+screen with `[D]ownload`, mirroring the pending-file review screen #638
+already gave that action to, and offered under the same transport rule
+(issue #475). This is also what gives `get_file_by_name` a production caller
+again; if this decision had gone the other way the function should have been
+deleted rather than left as another implemented, tested and unreachable name.
+
+**Decision 4 — posts get no equivalent screen.** A file is an artifact that
+is unrecoverable once the grace period ends; a post is text in a board. The
+recovery case that justifies decision 3 does not arise, and inventing a
+screen for symmetry would be building for nobody.
+
+**Not done, deliberately.** `test_expired_file_still_reachable_by_name` stays
+and is renamed for what it now guards, since the domain behaviour it pins is
+still true and still load-bearing — what was wrong was the promise about
+callers, not the return value. The §3.5 bullet recording #638's trade also
+cited §11 for the delisting rule, which §11 does not state; it now points at
+§5.3, which does.
 
 ### SFTP over the SSH transport — declined
 
