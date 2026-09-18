@@ -254,8 +254,16 @@ What this release does **not** establish:
   five receive-side wedges — is exercised in the suite, several of them
   through real sync passes over a real HTTP server on loopback, and on no
   node on the internet. The three-node dogfood run (#83) is step 5 of the
-  tracker and is what will test this against real clocks, real key
-  rotations and two operators.
+  tracker and is what will test this against real clocks and two
+  operators.
+- **Nothing rotates an operational key yet (#624).** Rotation is
+  described in the design document as a guided SysOp action, and this
+  release's handling of it — reissuing a vouch under a new key, telling a
+  superseded key from an unknown one, re-signing orphaned revocations —
+  is real code with real tests. But no screen, command or task produces
+  a rotation, so every rotation path here is preparation that production
+  cannot reach, exercised only by tests that call `rotate_operational_key`
+  themselves.
 - **#589 stays open.** Only vouches are issued. Trust *signals* — what a
   node says when it accuses another, which observations become a signed
   signal, and whether any of that is automatic — remain undesigned, and
@@ -265,8 +273,9 @@ What this release does **not** establish:
 - **A key rotation still orphans attestation revocations (#623).** The
   vouch side re-signs them; the attestation side does not, so a
   subscriber that missed a revocation issued just before a rotation will
-  not see it afterwards. It is open, it is known, and step 5's recovery
-  exercise rotates a key on purpose.
+  not see it afterwards. It is open and it is known; it becomes
+  reachable the day #624 gives a SysOp a way to rotate, which is why the
+  tracker holds both in the same step.
 - **Redaction is not forensic erasure**, as above: the live rows are
   blanked, backups and freed pages are not.
 - **The POSIX-only door tests have executed once**, on ReLink's host for
