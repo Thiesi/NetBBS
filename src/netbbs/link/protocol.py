@@ -61,7 +61,7 @@ import base64
 import json
 import secrets
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from string import hexdigits
 from typing import NamedTuple
@@ -2023,9 +2023,44 @@ class LinkNode:
                 f"hello from {claimed_fingerprint} refused: already at this node's own "
                 f"max_peers limit ({max_peers})"
             )
+        if existing is not None:
+            record = self._merge_known_chain(existing, record)
 
         self.peer_directory.admit(record)
         return record
+
+    def _merge_known_chain(self, existing: "PeerRecord", record: "PeerRecord") -> "PeerRecord":
+        """A repeated hello's record, keeping every transition already on file.
+
+        A bundle verifies against itself alone, so an older prefix of a node's
+        chain -- one that ends before a compromise revoke -- verifies too, and
+        would make the compromised key current again for whoever holds it
+        (issue #624). Transitions are append-only history: what this node has
+        verified stays, the hello can only add to it, and the descriptor must
+        verify against the current key of the merged chain. The merge also
+        keeps the transport transitions a hello bundle never carries.
+        """
+        known = {t.content_id for t in existing.transitions}
+        merged = existing.transitions + tuple(t for t in record.transitions if t.content_id not in known)
+        if merged == record.transitions:
+            return record
+        try:
+            current = resolve_current_operational_key(
+                merged, root_verify_key=existing.root_verify_key,
+                subject_fingerprint=existing.fingerprint, purpose="signing",
+            )
+        except NodeIdentityError as exc:
+            raise LinkProtocolError(
+                f"hello from {existing.fingerprint} conflicts with the key history on file: {exc}"
+            ) from exc
+        if current is None or not verify_endpoint_descriptor(
+            record.descriptor, nacl.signing.VerifyKey(base64.b64decode(current))
+        ):
+            raise LinkProtocolError(
+                f"hello from {existing.fingerprint} is signed by a key its own key history on file "
+                "has replaced -- refusing an older chain"
+            )
+        return replace(record, transitions=merged)
 
     def _verify_hello_bundle(self, message: HelloMessage, *, what: str) -> PeerRecord:
         """Check a hello bundle against nothing but itself, and return its record.

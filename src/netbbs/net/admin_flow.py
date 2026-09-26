@@ -7989,14 +7989,16 @@ async def _node_key_detail(
         )
         if not await prompt_yes_no(session, question, default=False):
             continue
+        async def _audit(committed) -> None:
+            await lane.run(lambda db: record_action(
+                db, actor=actor, action="rotate_node_key", detail=committed.audit_detail(),
+            ))
+
         try:
-            outcome = await key_rotation.rotate(purpose, compromised=compromised)
+            outcome = await key_rotation.rotate(purpose, compromised=compromised, on_committed=_audit)
         except (KeyRotationError, OSError) as exc:
             listing.say(f"The {purpose} key was not rotated: {exc}", error=True)
             return
-        await lane.run(lambda db: record_action(
-            db, actor=actor, action="rotate_node_key", detail=outcome.audit_detail(),
-        ))
         said = f"{title} replaced: now {outcome.new_key_fingerprint}."
         if outcome.resigned:
             said += f" Re-signed {outcome.resigned} object(s)."

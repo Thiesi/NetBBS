@@ -197,14 +197,11 @@ async def run_rotate_key(
             return 1
         try:
             outcome = await lane.run(
-                rotate_offline, identity_dir, purpose=purpose, compromised=compromised
+                rotate_offline, identity_dir, purpose=purpose, compromised=compromised, actor=actor,
             )
         except (KeyRotationError, OSError) as exc:
             await session.write_line(f"The {purpose} key was not rotated: {exc}")
             return 1
-        await lane.run(lambda db: record_action(
-            db, actor=actor, action="rotate_node_key", detail=outcome.audit_detail(),
-        ))
         await session.write_line(f"The {purpose} key is now {outcome.new_key_fingerprint}.")
         if outcome.resigned:
             await session.write_line(f"Re-signed {outcome.resigned} object(s) under it.")

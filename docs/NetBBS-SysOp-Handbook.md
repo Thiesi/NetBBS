@@ -610,8 +610,10 @@ replace the key:
   your content keep their copies. A node fetching your older content from one
   of them skips it and gets it from yours instead.
 
-Replacing the transport key ends every live chat session at once; peers
-reconnect on their own. To act with the node stopped, run `python -m
+Replacing the transport key ends every live chat session at once. Peers
+reconnect on their own, but a caller watching a channel linked from another
+node is told the live link dropped and gets it back by re-entering the
+channel. To act with the node stopped, run `python -m
 netbbs.admin rotate-key signing` (or `transport`), adding `--compromised`
 where it applies and `--identity-dir` if yours is not the default. It refuses
 while the node is running. Back up the node after a rotation: an older backup

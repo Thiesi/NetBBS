@@ -578,3 +578,27 @@ def test_a_session_keyed_to_a_retired_transport_key_is_not_admitted():
     # A handshake begun before the rotation, finishing after it.
     assert asyncio.run(registry.admit(_Session())) is False
     assert closed == ["transport_key_rotated"] and registry.all_sessions() == []
+
+
+def test_a_repeated_hello_cannot_roll_a_compromise_back():
+    """Codex review of #673: a hello bundle verifies against itself alone, so
+    the pre-compromise prefix of a chain, with a descriptor the leaked key
+    signed, used to replace the longer chain on file and make that key
+    current again."""
+    alice = bootstrap_node_identity("alice")
+    bob_node = _met(alice, bootstrap_node_identity("bob"))
+    rotated = rotate_operational_key(alice, purpose="signing", compromised=True)
+    _learn_rotation(bob_node, rotated)
+
+    # The leaked key's holder replays the old prefix with a fresh descriptor.
+    rollback = LinkNode(identity=alice).build_hello(addresses=None, outgoing_only=True, created_at=utc_now_iso())
+    with pytest.raises(LinkProtocolError, match="older chain"):
+        bob_node.handle_hello(rollback)
+    history = {t.content_id for t in bob_node.peers[alice.fingerprint].transitions}
+    assert {t.content_id for t in rotated.transitions[-2:]} <= history
+
+    # The real node's next hello is accepted, with the whole signing history.
+    genuine = LinkNode(identity=rotated).build_hello(addresses=None, outgoing_only=True, created_at=utc_now_iso())
+    record = bob_node.handle_hello(genuine)
+    signing = {t.content_id for t in rotated.transitions if t.payload["purpose"] == "signing"}
+    assert signing <= {t.content_id for t in record.transitions}

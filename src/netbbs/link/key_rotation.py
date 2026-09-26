@@ -35,9 +35,9 @@ import asyncio
 import base64
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
 import nacl.signing
 
@@ -190,33 +190,43 @@ def _outcome(before: NodeIdentity, after: NodeIdentity, purpose: str, compromise
 
 
 def rotate_offline(
-    db: Database, identity_dir: Path, *, purpose: str, compromised: bool,
+    db: Database, identity_dir: Path, *, purpose: str, compromised: bool, actor: Any = None,
 ) -> RotationOutcome:
     """Rotate a key on a node that is not running.
 
     The caller has already made sure no node process holds `identity_dir`;
     a running node would go on signing with, and advertising, the key this
-    replaces, and would overwrite nothing to say so.
+    replaces, and would overwrite nothing to say so. `actor`, when given, is
+    written to the audit log as soon as the rotation is saved, before the
+    re-signing that may take a while: a stop in between must not leave a
+    done rotation with no record.
     """
     _check_purpose(purpose)
     try:
         before = NodeIdentity.load(identity_dir)
     except NodeIdentityError as exc:
         raise KeyRotationError(str(exc)) from exc
-    finish_interrupted_rotation(identity_dir, before)
     # Each node records its own fingerprint in its database at startup. A
     # different one there means the two paths name two nodes: rotating one
-    # while auditing and re-signing in the other would damage both.
+    # while auditing and re-signing in the other would damage both. Checked
+    # before anything on disk is touched, including a staged rotation.
     recorded = get_node_fingerprint(db)
     if recorded is not None and recorded != before.fingerprint:
         raise KeyRotationError(
             f"{identity_dir} holds node {before.fingerprint}, but this database belongs to node "
             f"{recorded} -- pass the identity directory of the node this database belongs to"
         )
+    finish_interrupted_rotation(identity_dir, before)
     after = rotate_operational_key(before, purpose=purpose, compromised=compromised)
     after.save_rotation(identity_dir, purpose=purpose)
-    resigned = resign_own_content(db, after) if purpose == "signing" and compromised else 0
-    return _outcome(before, after, purpose, compromised, resigned=resigned)
+    outcome = _outcome(before, after, purpose, compromised)
+    if actor is not None:
+        from netbbs.moderation.log import record_action
+
+        record_action(db, actor=actor, action="rotate_node_key", detail=outcome.audit_detail())
+    if purpose == "signing" and compromised:
+        outcome = replace(outcome, resigned=resign_own_content(db, after))
+    return outcome
 
 
 class KeyRotator:
@@ -258,7 +268,16 @@ class KeyRotator:
             return self._link_node.identity
         return NodeIdentity.load(self._identity_dir)
 
-    async def rotate(self, purpose: str, *, compromised: bool) -> RotationOutcome:
+    async def rotate(
+        self, purpose: str, *, compromised: bool,
+        on_committed: Callable[[RotationOutcome], Awaitable[None]] | None = None,
+    ) -> RotationOutcome:
+        """Rotate, swap, and -- for a compromised signing key -- re-sign.
+
+        `on_committed` runs once the rotation is saved and live, before the
+        re-signing: the console writes its audit entry there, so a stop during
+        a long re-sign cannot lose the record of a rotation that happened.
+        """
         _check_purpose(purpose)
         async with self._lock:
             try:
@@ -280,15 +299,20 @@ class KeyRotator:
                     persist=lambda rotated: asyncio.to_thread(_persist, rotated),
                     on_rotated=self._swap,
                 )
-                return _outcome(before, after, purpose, compromised, sessions_closed=closing)
+                outcome = _outcome(before, after, purpose, compromised, sessions_closed=closing)
+                if on_committed is not None:
+                    await on_committed(outcome)
+                return outcome
 
             after = rotate_operational_key(before, purpose=purpose, compromised=compromised)
             await asyncio.to_thread(_persist, after)
             self._swap(after)
-            resigned = 0
+            outcome = _outcome(before, after, purpose, compromised)
+            if on_committed is not None:
+                await on_committed(outcome)
             if purpose == "signing" and compromised:
-                resigned = await self._lane.run(resign_own_content, after)
-            return _outcome(before, after, purpose, compromised, resigned=resigned)
+                outcome = replace(outcome, resigned=await self._lane.run(resign_own_content, after))
+            return outcome
 
     def _swap(self, after: NodeIdentity) -> None:
         if self._link_node is not None:
