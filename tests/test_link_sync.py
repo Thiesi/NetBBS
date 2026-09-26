@@ -3859,8 +3859,23 @@ def test_a_curated_node_is_offered_a_board_and_accepting_it_pulls_its_content(tm
     from netbbs.link.carry import OFFERED, accept_offer, list_carry_decisions
 
     net = _ThreeNodes(tmp_path, enforce=False)
-    r_board_id = get_board_by_name(net.dbs["R"].db, "general").board_id
+    r_board = get_board_by_name(net.dbs["R"].db, "general")
+    r_board_id = r_board.board_id
     net.post("R", "before accepting")
+    # And an edit of it, which `handle_events` also records in an in-memory
+    # edit chain that must not keep it once it was not stored.
+    original = net.dbs["R"].db.connection.execute(
+        "SELECT post_id FROM posts WHERE subject = 'before accepting'"
+    ).fetchone()["post_id"]
+    from netbbs.boards.posts import get_post
+
+    edited = edit_post(
+        net.dbs["R"].db, get_post(net.dbs["R"].db, original), r_board,
+        subject="before accepting (edited)", body="hi", edited_by=net.sysops["R"],
+    )
+    assert queue_board_post_edit_if_linked(
+        net.dbs["R"].db, edited, r_board, node_identity=net.ids["R"], edited_by=net.sysops["R"]
+    )
 
     async def dial_b(session):
         await _one_pass(
@@ -3877,14 +3892,14 @@ def test_a_curated_node_is_offered_a_board_and_accepting_it_pulls_its_content(tm
                 [offer] = list_carry_decisions(net.dbs["B"].db, OFFERED)
                 assert offer.resource_id == r_board_id
                 assert net.subjects_on("B") == []
-                accept_offer(net.dbs["B"].db, "boards", r_board_id, actor_user_id=net.sysops["B"].id)
+                accept_offer(net.dbs["B"].db, "boards", r_board_id, actor=net.sysops["B"])
                 await dial_b(session)
         finally:
             await server.stop()
 
     try:
         asyncio.run(scenario())
-        assert net.subjects_on("B") == ["before accepting"]
+        assert net.subjects_on("B") == ["before accepting", "before accepting (edited)"]
         assert list_carry_decisions(net.dbs["B"].db, OFFERED) == []
     finally:
         net.close()

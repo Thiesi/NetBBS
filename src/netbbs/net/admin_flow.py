@@ -59,6 +59,7 @@ import sqlite3
 import sys
 import weakref
 from pathlib import Path
+import dataclasses
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Sequence
 from zoneinfo import available_timezones
@@ -271,6 +272,7 @@ from netbbs.link.carry import (
     CarryDecisionError,
     accept_offer,
     carry_decision_counts,
+    count_carry_decisions,
     exclude_offer,
     list_carry_decisions,
 )
@@ -7841,20 +7843,30 @@ async def _carry_decisions_screen(
     title = "Offered to this node" if state == OFFERED else "Excluded from this node"
     message = None
     while True:
-        decisions = await lane.run(list_carry_decisions, state)
+        # A resource's name and description come from a remote node's genesis:
+        # sanitized once here, before anything below styles them.
+        decisions = [
+            dataclasses.replace(
+                d, name=sanitize_text(d.name),
+                description=sanitize_text(d.description) if d.description else None,
+            )
+            for d in await lane.run(list_carry_decisions, state)
+        ]
+        total = await lane.run(count_carry_decisions, state)
         display_format, display_timezone = await lane.run(resolve_display_preferences)
         chrome = await _load_chrome(lane, actor)
 
         def _origin_label(fingerprint: str) -> str:
             peer = node.peers.get(fingerprint)
-            return identity_for_peer(peer).label if peer is not None else (fingerprint or "unknown")
+            label = identity_for_peer(peer).label if peer is not None else (fingerprint or "unknown")
+            return sanitize_text(label)
 
         selected = await pick_item(
             session, decisions,
             name_of=lambda d: d.name,
-            stable_id_of=lambda d: d.resource_id[:8],
+            stable_id_of=lambda d: d.ref,
             description_of=lambda d: f"{KIND_LABELS[d.kind]} from {_origin_label(d.origin_fingerprint)}",
-            title=title,
+            title=title if total <= len(decisions) else f"{title} (newest {len(decisions)} of {total})",
             empty_message="Nothing here.",
             redraw_in_place=chrome.redraw_in_place,
             unicode_style=chrome.unicode_style,
@@ -7885,7 +7897,7 @@ async def _carry_decisions_screen(
         message = None
         if choice == "a":
             try:
-                await lane.run(accept_offer, selected.kind, selected.resource_id, actor_user_id=actor.id)
+                await lane.run(accept_offer, selected.kind, selected.resource_id, actor=actor)
             except CarryDecisionError as exc:
                 _announce_line(session, colored(f"Could not accept {selected.name!r}: {exc}", fg_color=ERROR_COLOR))
             else:
@@ -7897,7 +7909,7 @@ async def _carry_decisions_screen(
                     return
         elif choice == "x":
             try:
-                await lane.run(exclude_offer, selected.kind, selected.resource_id, actor_user_id=actor.id)
+                await lane.run(exclude_offer, selected.kind, selected.resource_id, actor=actor)
             except CarryDecisionError as exc:
                 _announce_line(session, colored(f"Could not exclude {selected.name!r}: {exc}", fg_color=ERROR_COLOR))
             else:

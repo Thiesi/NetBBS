@@ -336,17 +336,25 @@ async def _rate_limit_middleware(request: web.Request, handler):
     return await handler(request)
 
 
-async def _forget_unless_stored(lane: DatabaseLane, node: LinkNode, content_id: str) -> None:
+async def _forget_unless_stored(
+    lane: DatabaseLane, node: LinkNode, content_id: str, *, edit_root: str | None = None
+) -> None:
     """Issue #683: an event `handle_events` accepted but that was neither
     projected nor stored -- the board, channel or file area it belongs to has
     no local copy here, typically because it is only offered -- must not stay
     in `known_event_ids`. It would then be dropped as a duplicate when it is
     sent again after the SysOp accepts the resource, and the accepted copy
     would stay empty until a restart. An event that was stored and only its
-    projection refused (identity policy, a trimmed scrollback) stays known."""
+    projection refused (identity policy, a trimmed scrollback) stays known.
+
+    An edit, moderator edit or tombstone is also in an in-memory edit chain,
+    which `handle_events` consults before `known_event_ids`; `edit_root` names
+    its root post so it is dropped from there too."""
     if not await lane.run(event_is_stored, content_id):
         node.known_event_ids.discard(content_id)
         node.events.pop(content_id, None)
+        if edit_root is not None:
+            node.board_events.forget_edit(edit_root, content_id)
 
 
 async def persist_accepted_events(
@@ -416,7 +424,9 @@ async def persist_accepted_events(
                 materialize_carried_post_edit, BoardPostEdit.from_dict(envelope), sender_fingerprint=sender_fingerprint
             )
             if projected is None:
-                await _forget_unless_stored(lane, node, content_id)
+                await _forget_unless_stored(
+                    lane, node, content_id, edit_root=envelope["envelope"]["payload"]["root_post_id"]
+                )
             continue
         elif object_type == BOARD_POST_MODERATOR_EDIT_OBJECT_TYPE:
             # Design doc §9.5, issue #88: same "skip the generic save_
@@ -426,7 +436,9 @@ async def persist_accepted_events(
                 BoardPostModeratorEdit.from_dict(envelope), sender_fingerprint=sender_fingerprint,
             )
             if projected is None:
-                await _forget_unless_stored(lane, node, content_id)
+                await _forget_unless_stored(
+                    lane, node, content_id, edit_root=envelope["envelope"]["payload"]["root_post_id"]
+                )
             continue
         elif object_type == BOARD_POST_TOMBSTONE_OBJECT_TYPE:
             projected = await lane.run(
@@ -434,7 +446,9 @@ async def persist_accepted_events(
                 BoardPostTombstone.from_dict(envelope), sender_fingerprint=sender_fingerprint,
             )
             if projected is None:
-                await _forget_unless_stored(lane, node, content_id)
+                await _forget_unless_stored(
+                    lane, node, content_id, edit_root=envelope["envelope"]["payload"]["root_post_id"]
+                )
             continue
         elif object_type == CHANNEL_MESSAGE_OBJECT_TYPE:
             # Design doc §9.6, issue #87: same "skip the generic save_

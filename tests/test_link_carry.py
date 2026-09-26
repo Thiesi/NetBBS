@@ -117,7 +117,7 @@ def test_channels_and_file_areas_are_offered_the_same_way(db, remote, own, kind,
     )
     assert _accept(db, genesis, own, kind=kind, cap=0) == "cap"
     assert carry_decision_counts(db) == {(kind, OFFERED): 1}
-    accept_offer(db, kind, "c" * 64, actor_user_id=None)
+    accept_offer(db, kind, "c" * 64, actor=None)
     assert carry_decision_counts(db) == {}
 
 
@@ -138,7 +138,7 @@ def test_the_genesis_and_its_outcome_are_one_transaction(db, remote, own, monkey
 def test_accepting_an_offer_carries_it_uncapped_and_clears_the_offer(db, remote, own, alice):
     _accept(db, _board_genesis(remote), own, cap=0)
 
-    accept_offer(db, "boards", BOARD_ID, actor_user_id=alice.id)
+    accept_offer(db, "boards", BOARD_ID, actor=alice)
 
     assert get_board_by_name(db, "Remote Discussion").board_id == BOARD_ID
     assert carry_decision_state(db, "boards", BOARD_ID) is None
@@ -171,7 +171,7 @@ def test_accepting_applies_the_lifecycle_accepted_while_it_was_offered(db, remot
         save_event(db, sender_fingerprint=remote.fingerprint, content_id=event.content_id,
                    object_type=object_type, envelope=event.to_dict())
 
-    accept_offer(db, "boards", BOARD_ID, actor_user_id=None)
+    accept_offer(db, "boards", BOARD_ID, actor=None)
 
     board = get_board_by_name(db, "Remote Discussion")
     assert board_origin_fingerprint(db, board) == new_origin.fingerprint
@@ -182,7 +182,7 @@ def test_an_accepted_offer_whose_name_is_taken_gets_a_free_one(db, remote, own, 
     create_board(db, "Remote Discussion", creator=alice)
     _accept(db, _board_genesis(remote), own, cap=0)
 
-    accept_offer(db, "boards", BOARD_ID, actor_user_id=alice.id)
+    accept_offer(db, "boards", BOARD_ID, actor=alice)
 
     assert get_board_by_name(db, f"Remote Discussion-{BOARD_ID[:8]}").board_id == BOARD_ID
 
@@ -190,14 +190,14 @@ def test_an_accepted_offer_whose_name_is_taken_gets_a_free_one(db, remote, own, 
 def test_excluding_an_offer_keeps_it_out_and_it_can_no_longer_be_accepted(db, remote, own, alice):
     _accept(db, _board_genesis(remote), own, cap=0)
 
-    exclude_offer(db, "boards", BOARD_ID, actor_user_id=alice.id)
+    exclude_offer(db, "boards", BOARD_ID, actor=alice)
 
     assert carry_decision_state(db, "boards", BOARD_ID) == EXCLUDED
     [decision] = list_carry_decisions(db, EXCLUDED)
     assert (decision.name, decision.reason, decision.actor_user_id) == ("Remote Discussion", "sysop", alice.id)
     assert uncarried_resource_ids(db) == {"boards": (BOARD_ID,)}
     with pytest.raises(CarryDecisionError):
-        accept_offer(db, "boards", BOARD_ID, actor_user_id=alice.id)
+        accept_offer(db, "boards", BOARD_ID, actor=alice)
 
 
 def test_listing_shows_what_the_stored_genesis_says(db, remote, own):
@@ -270,3 +270,45 @@ def test_the_migration_offers_every_genesis_held_without_a_local_copy(tmp_path, 
         assert carry_decision_state(migrated, "boards", "a" * 64) is None
     finally:
         migrated.close()
+
+
+def test_accepting_and_excluding_are_audit_logged_in_the_same_transaction(db, remote, own, alice):
+    from netbbs.moderation.log import list_recent_actions
+
+    _accept(db, _board_genesis(remote), own, cap=0)
+    _accept(db, _board_genesis(remote, board_id="e" * 64, name="Other"), own, cap=0)
+    accept_offer(db, "boards", BOARD_ID, actor=alice)
+    exclude_offer(db, "boards", "e" * 64, actor=alice)
+
+    actions = {(entry.action, entry.object_type) for entry in list_recent_actions(db)}
+    assert ("accept_link_offer", "board") in actions
+    assert ("exclude_link_offer", "board") in actions
+
+
+def test_a_stale_decision_is_neither_listed_nor_counted(db, remote, own):
+    """An interrupted deletion can leave `excluded` beside a carried row; the
+    row wins everywhere, not only in what is declared to peers."""
+    from netbbs.link.carry import count_carry_decisions
+
+    _accept(db, _board_genesis(remote), own)
+    db.connection.execute(
+        "INSERT INTO link_carry_decisions (kind, resource_id, state, reason, decided_at) "
+        "VALUES ('boards', ?, 'excluded', 'deleted', '2026-01-01T00:00:00+00:00')",
+        (BOARD_ID,),
+    )
+    db.connection.commit()
+
+    assert list_carry_decisions(db, EXCLUDED) == []
+    assert count_carry_decisions(db, EXCLUDED) == 0
+    assert carry_decision_counts(db) == {}
+
+
+def test_a_listing_is_bounded_and_newest_first(db, remote, own):
+    from netbbs.link.carry import count_carry_decisions
+
+    for i in range(5):
+        _accept(db, _board_genesis(remote, board_id=f"{i:x}" * 64, name=f"Board {i}"), own, cap=0)
+
+    listed = list_carry_decisions(db, OFFERED, limit=3)
+    assert len(listed) == 3 and count_carry_decisions(db, OFFERED) == 5
+    assert len({decision.ref for decision in listed}) == 3

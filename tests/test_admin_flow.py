@@ -10034,3 +10034,26 @@ def test_link_status_offers_an_uncarried_board_and_accepting_it_carries_it(db, l
     assert "Nothing here." not in text
     assert get_board_by_name(db, "Retro Hardware").board_id == "d" * 64
     assert carry_decision_counts(db) == {}
+
+
+def test_an_offered_resource_name_from_a_peer_is_sanitized_before_it_is_styled(db, lane, sysop):
+    """The name is the remote node's to choose; a control sequence in it must
+    not reach the SysOp's terminal."""
+    from netbbs.link.carry import accept_genesis
+    from netbbs.link.events import build_board_genesis
+    from netbbs.link.node_identity import bootstrap_node_identity
+
+    remote = bootstrap_node_identity("hostile-origin")
+    genesis = build_board_genesis(
+        signing_identity=remote.signing_key, origin_fingerprint=remote.fingerprint,
+        board_id="f" * 64, name="Evil\x1b[2J\x1b[HBoard", created_at="2026-01-01T00:00:00Z",
+    )
+    accept_genesis(
+        db, kind="boards", envelope=genesis.to_dict(), sender_fingerprint=remote.fingerprint,
+        content_id=genesis.content_id, own_fingerprint="own", cap=0,
+    )
+
+    session = FakeSession(["s", "l", "o", "0", "1", "b", "b", "b", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop, link_context=_link_context()))
+
+    assert "\x1b[2J" not in _written_text(session)

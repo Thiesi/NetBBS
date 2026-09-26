@@ -49,6 +49,8 @@ from netbbs.link.events import (
 )
 from netbbs.link.files import FileAreaCarryLimitError, materialize_carried_file_area
 from netbbs.link.store import save_event
+from netbbs.auth.users import User
+from netbbs.moderation.log import record_action_without_commit
 from netbbs.storage.database import Database
 from netbbs.timeutil import utc_now_iso
 
@@ -83,6 +85,14 @@ class CarryDecision:
     name: str
     description: str | None
     origin_fingerprint: str
+    ref: int = 0
+    """A small, stable number for the SysOp's picker (the row's rowid)."""
+
+
+MAX_LISTED_DECISIONS = 500
+"""The most decisions one listing loads. The offered set grows with what peers
+send a node past its cap -- bounded only by the geneses it already stores -- so
+the screen shows the newest this many and says how many there are."""
 
 
 def genesis_kind(object_type: str) -> str | None:
@@ -119,11 +129,13 @@ def carry_decision_state(db: Database, kind: str, resource_id: str) -> str | Non
 
 
 def carry_decision_counts(db: Database) -> dict[tuple[str, str], int]:
-    """`{(kind, state): count}` for the Link status readout."""
+    """`{(kind, state): count}` for the Link status readout, not counting a
+    stale decision whose resource has a carried local row."""
     return {
         (row["kind"], row["state"]): row["n"]
         for row in db.connection.execute(
-            "SELECT kind, state, COUNT(*) AS n FROM link_carry_decisions GROUP BY kind, state"
+            f"SELECT d.kind, d.state, COUNT(*) AS n FROM link_carry_decisions AS d "
+            f"WHERE NOT {_CARRIED_ROW} GROUP BY d.kind, d.state"
         )
     }
 
@@ -138,17 +150,45 @@ def _stored_genesis(db: Database, kind: str, resource_id: str) -> dict | None:
     return None if row is None else json.loads(row["envelope_json"])
 
 
-def list_carry_decisions(db: Database, state: str) -> list[CarryDecision]:
+def count_carry_decisions(db: Database, state: str) -> int:
+    """How many resources are in `state`, not counting any with a carried
+    local row (a decision left stale by an interrupted deletion)."""
+    return db.connection.execute(
+        f"SELECT COUNT(*) FROM link_carry_decisions AS d WHERE d.state = ? AND NOT {_CARRIED_ROW}",
+        (state,),
+    ).fetchone()[0]
+
+
+# A decision whose resource has a carried local row is stale -- an interrupted
+# deletion, say -- and the row wins, as it does in `uncarried_resource_ids`.
+_CARRIED_ROW = """(
+    (d.kind = 'boards' AND d.resource_id IN (SELECT board_id FROM boards WHERE link_genesis_json IS NOT NULL))
+    OR (d.kind = 'channels' AND d.resource_id IN (SELECT channel_id FROM channels WHERE link_genesis_json IS NOT NULL))
+    OR (d.kind = 'file_areas' AND d.resource_id IN (SELECT area_id FROM file_areas WHERE link_genesis_json IS NOT NULL))
+)"""
+
+
+def list_carry_decisions(db: Database, state: str, *, limit: int = MAX_LISTED_DECISIONS) -> list[CarryDecision]:
     """The resources in `state`, newest decision first, with what their stored
-    genesis says about them."""
+    genesis says about them: at most `limit`, in one query."""
     decisions: list[CarryDecision] = []
     for row in db.connection.execute(
-        """SELECT kind, resource_id, state, reason, decided_at, actor_user_id
-             FROM link_carry_decisions WHERE state = ?
-            ORDER BY decided_at DESC, kind, resource_id""",
-        (state,),
+        f"""SELECT d.rowid AS ref, d.kind, d.resource_id, d.state, d.reason, d.decided_at, d.actor_user_id,
+                   (SELECT e.envelope_json FROM link_events AS e
+                     WHERE e.object_type = CASE d.kind WHEN 'boards' THEN 'board_genesis'
+                                                       WHEN 'channels' THEN 'channel_genesis'
+                                                       ELSE 'file_area_genesis' END
+                       AND CASE d.kind WHEN 'boards' THEN e.board_id
+                                       WHEN 'channels' THEN e.channel_id
+                                       ELSE e.file_area_id END = d.resource_id
+                     ORDER BY e.received_at LIMIT 1) AS genesis_json
+              FROM link_carry_decisions AS d
+             WHERE d.state = ? AND NOT {_CARRIED_ROW}
+             ORDER BY d.decided_at DESC, d.kind, d.resource_id
+             LIMIT ?""",
+        (state, limit),
     ).fetchall():
-        genesis = _stored_genesis(db, row["kind"], row["resource_id"])
+        genesis = json.loads(row["genesis_json"]) if row["genesis_json"] else None
         payload = genesis["envelope"]["payload"] if genesis is not None else {}
         decisions.append(CarryDecision(
             kind=row["kind"], resource_id=row["resource_id"], state=row["state"],
@@ -156,6 +196,7 @@ def list_carry_decisions(db: Database, state: str) -> list[CarryDecision]:
             name=str(payload.get("name") or row["resource_id"]),
             description=payload.get("description"),
             origin_fingerprint=str(payload.get("origin_fingerprint") or ""),
+            ref=row["ref"],
         ))
     return decisions
 
@@ -221,6 +262,14 @@ def _id_field(kind: str) -> str:
     return {"boards": "board_id", "channels": "channel_id", "file_areas": "area_id"}[kind]
 
 
+_OBJECT_TYPES = {"boards": "board", "channels": "channel", "file_areas": "file_area"}
+
+
+def _audit_detail(envelope: dict | None, resource_id: str) -> str:
+    payload = envelope["envelope"]["payload"] if envelope is not None else {}
+    return f"{resource_id} {payload.get('name')!r} from {payload.get('origin_fingerprint')}"
+
+
 def _replay_board_lifecycle(db: Database, board_id: str) -> None:
     """Apply the origin transfers and closure this node accepted for a board
     while it had no local row: each was saved, and each was a silent no-op
@@ -242,11 +291,12 @@ def _replay_board_lifecycle(db: Database, board_id: str) -> None:
             materialize_carried_board_closure(db, BoardClosure.from_dict(envelope), commit=False)
 
 
-def accept_offer(db: Database, kind: str, resource_id: str, *, actor_user_id: int | None) -> None:
+def accept_offer(db: Database, kind: str, resource_id: str, *, actor: User | None) -> None:
     """Carry an offered resource: materialize it from the stored genesis (not
     capped -- the SysOp chose it), apply what was accepted for it meanwhile,
-    and clear the offer, in one transaction. The next sync pass declares it as
-    carried and pulls its content like any newly carried resource."""
+    and clear the offer, in one transaction with its moderation-log entry. The
+    next sync pass declares it as carried and pulls its content like any newly
+    carried resource."""
     db.connection.execute("BEGIN IMMEDIATE")
     try:
         if carry_decision_state(db, kind, resource_id) != OFFERED:
@@ -255,7 +305,7 @@ def accept_offer(db: Database, kind: str, resource_id: str, *, actor_user_id: in
         if envelope is None:
             raise CarryDecisionError("this node no longer holds that resource's genesis")
         try:
-            _materialize(db, kind, envelope, own_fingerprint=None, cap=None)
+            materialized = _materialize(db, kind, envelope, own_fingerprint=None, cap=None)
         except _CARRY_LIMIT_ERRORS as exc:
             raise CarryDecisionError(str(exc)) from exc
         except sqlite3.IntegrityError as exc:
@@ -265,19 +315,32 @@ def accept_offer(db: Database, kind: str, resource_id: str, *, actor_user_id: in
         db.connection.execute(
             "DELETE FROM link_carry_decisions WHERE kind = ? AND resource_id = ?", (kind, resource_id)
         )
+        if actor is not None:
+            record_action_without_commit(
+                db, actor=actor, action="accept_link_offer", object_type=_OBJECT_TYPES[kind],
+                object_id=materialized.id, detail=_audit_detail(envelope, resource_id),
+            )
     except BaseException:
         db.connection.rollback()
         raise
     db.connection.commit()
 
 
-def exclude_offer(db: Database, kind: str, resource_id: str, *, actor_user_id: int | None) -> None:
+def exclude_offer(db: Database, kind: str, resource_id: str, *, actor: User | None) -> None:
     """Decline an offered resource without ever carrying it."""
     db.connection.execute("BEGIN IMMEDIATE")
     try:
         if carry_decision_state(db, kind, resource_id) != OFFERED:
             raise CarryDecisionError("that resource is no longer on offer")
-        record_carry_decision(db, kind, resource_id, EXCLUDED, "sysop", actor_user_id=actor_user_id, commit=False)
+        record_carry_decision(
+            db, kind, resource_id, EXCLUDED, "sysop",
+            actor_user_id=actor.id if actor is not None else None, commit=False,
+        )
+        if actor is not None:
+            record_action_without_commit(
+                db, actor=actor, action="exclude_link_offer", object_type=_OBJECT_TYPES[kind],
+                detail=_audit_detail(_stored_genesis(db, kind, resource_id), resource_id),
+            )
     except BaseException:
         db.connection.rollback()
         raise
