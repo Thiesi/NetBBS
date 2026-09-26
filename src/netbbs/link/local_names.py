@@ -43,10 +43,11 @@ def free_local_name(db: Database, table: str, name: str, resource_id: str) -> st
     candidates = [name] + [
         f"{name}-{resource_id if length is None else resource_id[:length]}" for length in _SUFFIX_LENGTHS
     ]
+    # Folded in Python: SQLite's `lower()` folds ASCII only, so `Ärea` and
+    # `ärea` would otherwise pass as different names. One read of the table's
+    # names, which the carry caps keep small.
+    taken = {row["name"].casefold() for row in db.connection.execute(f"SELECT name FROM {table}")}
     for candidate in dict.fromkeys(candidates):
-        taken = db.connection.execute(
-            f"SELECT 1 FROM {table} WHERE lower(name) = lower(?)", (candidate,)
-        ).fetchone()
-        if taken is None:
+        if candidate.casefold() not in taken:
             return candidate
     return None

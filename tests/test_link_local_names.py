@@ -98,6 +98,16 @@ def test_names_collide_regardless_of_case(db, alice, remote, kind):
 
 
 @pytest.mark.parametrize("kind", KINDS)
+def test_names_collide_regardless_of_non_ascii_case(db, alice, remote, kind):
+    """SQLite's `lower()` folds ASCII only."""
+    KINDS[kind]["create"](db, "Ärea", creator=alice)
+
+    KINDS[kind]["materialize"](db, _genesis(kind, remote, "ärea"))
+
+    assert _name_of(db, kind) == f"ärea-{RESOURCE_ID[:8]}"
+
+
+@pytest.mark.parametrize("kind", KINDS)
 def test_a_free_name_is_kept_as_it_is(db, remote, kind):
     KINDS[kind]["materialize"](db, _genesis(kind, remote, "general"))
 
