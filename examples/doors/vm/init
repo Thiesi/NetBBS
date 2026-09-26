@@ -67,7 +67,6 @@ if [ -n "$stopping" ]; then
     # keep a second of that for flushing and powering down.
     grace=$(cat /mnt/node/stop_grace 2>/dev/null)
     ticks=$(( (${grace:-5} - 1) * 5 ))
-    [ $ticks -lt 5 ] && ticks=5
     while [ $ticks -gt 0 ] && kill -0 $door 2>/dev/null; do
         sleep 0.2
         ticks=$((ticks - 1))

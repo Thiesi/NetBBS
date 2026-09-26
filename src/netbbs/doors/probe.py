@@ -124,6 +124,7 @@ async def probe_vm(lane, door, actor):
                 return "The guest could not write to the installation export."
             return ""
 
-        timeout = profile.options.get("boot_timeout_seconds", 60) + 30
-        return await run_door(session, lane, candidate, actor, wall_time_limit_seconds=timeout,
+        # The caller's limit starts once the guest has booted (boot has its own
+        # watchdog), so this bounds only the fixture's few exchanges.
+        return await run_door(session, lane, candidate, actor, wall_time_limit_seconds=30,
                               output_check=check_output, rehearsal=True)

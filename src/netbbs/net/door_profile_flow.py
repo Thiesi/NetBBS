@@ -175,7 +175,7 @@ async def edit_door_profile(session, lane, actor, door, *, door_services=None):
             return
         result = await run_door(session, lane, candidate, actor, rehearsal=True)
         await _heading(session, "Test result")
-        passed = result.exit_code == 0
+        passed = result.reason == "exited" and result.exit_code == 0
         await _labelled(session, "Outcome", str(result.reason), color=SUCCESS_COLOR if passed else ERROR_COLOR)
         await _labelled(session, "Exit code", str(result.exit_code), color=VALUE_COLOR if passed else ERROR_COLOR)
         if result.diagnostic:
@@ -201,7 +201,7 @@ async def edit_door_profile(session, lane, actor, door, *, door_services=None):
                 from netbbs.doors.probe import probe_dosbox, probe_vm
                 result = await (probe_dosbox if adapter == "dosbox" else probe_vm)(lane, candidate, actor)
                 await _heading(session, "Capability probe")
-                passed = result.exit_code == 0
+                passed = result.reason == "exited" and result.exit_code == 0
                 await _labelled(session, "Outcome", str(result.reason), color=SUCCESS_COLOR if passed else ERROR_COLOR)
                 await _labelled(session, "Exit code", str(result.exit_code), color=VALUE_COLOR if passed else ERROR_COLOR)
                 if result.diagnostic:

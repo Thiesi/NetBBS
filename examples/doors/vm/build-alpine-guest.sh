@@ -20,6 +20,7 @@ here=$(cd "$(dirname "$0")" && pwd)
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 mkdir -p "$out"
+out=$(cd "$out" && pwd)
 cd "$work"
 
 repo=$mirror/$branch/main/x86_64

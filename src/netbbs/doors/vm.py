@@ -377,7 +377,11 @@ async def power_down(qmp_socket, proc, grace: float) -> None:
                     if not line:
                         raise ConnectionError("QMP closed")
                     message = json.loads(line)
-                    if "return" in message or "error" in message:
+                    if "error" in message:
+                        # Refused: waiting out the grace for a shutdown that
+                        # will not happen would only delay the kill.
+                        raise ConnectionError(f"QMP refused: {message['error']}")
+                    if "return" in message:
                         return message
 
             await reader.readline()  # greeting

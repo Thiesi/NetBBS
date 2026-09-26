@@ -292,6 +292,14 @@ FAKE_QEMU = '''
     open(os.path.join(game, "argv.json"), "w").write(json.dumps(argv))
     open(os.path.join(node, "booted"), "w").close()
     door.sendall(b"READY")
+    if mode == "refuse":
+        stream = qmp.makefile("rwb")
+        for line in stream:
+            command = json.loads(line)["execute"]
+            if command == "system_powerdown":
+                stream.write(b'{"error": {"class": "GenericError", "desc": "no"}}\\n'); stream.flush()
+                time.sleep(60)
+            stream.write(b'{"return": {}}\\n'); stream.flush()
     if mode == "hangup":
         stream = qmp.makefile("rwb")
         for line in stream:
@@ -413,6 +421,17 @@ def test_a_guest_which_dies_before_its_door_says_so(tmp_path):
     """A panic under -no-reboot exits qemu 0; it must not read as a door that ran."""
     code, problem = vm.guest_exit_code(_profile(tmp_path), tmp_path)
     assert code == 1 and "stopped before its door started" in problem
+
+
+@posix_only
+def test_a_refused_power_down_falls_back_to_the_kill_at_once(db, lane, player, tmp_path):
+    """Waiting out a 20 s grace for a shutdown qemu refused would only delay it."""
+    door = _fake_qemu_door(db, player, tmp_path, "refuse", stop_grace_seconds=20)
+    started = time.monotonic()
+    result = _play(lane, door, player, disconnect=True)
+    assert result.reason == "caller_disconnected", result
+    # SIGTERM ends the fake at once; only the refused wait could take longer.
+    assert time.monotonic() - started < 12
 
 
 @posix_only
