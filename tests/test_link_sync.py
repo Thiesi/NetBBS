@@ -3705,3 +3705,29 @@ def test_a_blocked_reporter_is_not_asked_about(tmp_path, monkeypatch):
         assert asked == [(a,)]
     finally:
         net.close()
+
+
+def test_one_seed_failing_unexpectedly_does_not_end_the_sync_task(monkeypatch):
+    """Issue #703: an exception from one seed's pass propagated out of
+    `run_link_sync` and ended outbound Link for the node's whole uptime."""
+    import asyncio
+
+    import netbbs.link.sync as sync
+    from netbbs.link.protocol import LinkProtocolError
+
+    async def boom(*_args, **_kwargs):
+        raise LinkProtocolError("peer list carries 495 descriptors")
+
+    monkeypatch.setattr(sync, "_sync_one_seed", boom)
+    assert asyncio.run(sync._sync_seed_safely(None, None, "http://seed.example")) is False
+
+    async def cancelled(*_args, **_kwargs):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(sync, "_sync_one_seed", cancelled)
+    try:
+        asyncio.run(sync._sync_seed_safely(None, None, "http://seed.example"))
+    except asyncio.CancelledError:
+        pass
+    else:
+        raise AssertionError("cancellation must still propagate")
