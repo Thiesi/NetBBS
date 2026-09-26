@@ -179,19 +179,23 @@ netbbs_running()
 	esac
 }
 
-# Whether the node this start just launched is still alive (issue #693).
-# During start the pid is this script's own child, published seconds ago:
-# it cannot have been recycled, so being alive is the whole question and
-# netbbs_running's command-text check has nothing to guard against. That
-# check reads `ps -o command=`, which is not stable while the child is
-# still exec'ing nohup -> env -> the interpreter; a single poll that caught
-# it mid-exec used to report "failed to start", delete the pidfile, and
-# leave a healthy node running untracked -- so the next start would launch
-# a second one against the same database.
+# Whether the node this start just launched is still alive and still ours
+# (issue #693). netbbs_running's identity check reads `ps -o command=`,
+# which is not stable while the child is still exec'ing nohup -> env ->
+# the interpreter; a single poll that caught it mid-exec used to report
+# "failed to start", delete the pidfile, and leave a healthy node running
+# untracked -- so the next start would launch a second one against the
+# same database. The check still matters here: a child that died early is
+# orphaned, and its pid can be recycled. So a dead pid fails at once, but a
+# live one whose text does not match is looked at again a second later: an
+# exec transient is over by then, a recycled pid is not.
 netbbs_launched_alive()
 {
 	netbbs_read_pid || return 1
-	kill -0 "${_pid}" 2>/dev/null
+	kill -0 "${_pid}" 2>/dev/null || return 1
+	netbbs_running && return 0
+	sleep 1
+	netbbs_running
 }
 
 netbbs_start()
