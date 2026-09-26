@@ -172,9 +172,11 @@ class NodeIdentity:
         silently operate under the wrong key" stance `Identity.load`'s
         own fingerprint check already takes.
 
-        The one mismatch it repairs rather than refuses is an interrupted
-        `save_rotation`: the replacement key staged beside its file, and
-        the chain already naming it (issue #624).
+        Read-only: an interrupted `save_rotation` (issue #624) is resolved in
+        memory -- the staged key used when the chain already names it,
+        ignored when it does not -- and left on disk for
+        `finish_interrupted_rotation`. A backup's identity directory is
+        validated through here and must stay byte-identical.
         """
         transitions_path = directory / _TRANSITIONS_FILENAME
         try:
@@ -229,7 +231,7 @@ def _load_operational(
     directory: Path, filename: str, purpose: str, root: Identity,
     transitions: tuple[KeyTransition, ...], passphrase: bytes | None,
 ) -> Identity:
-    """One operational key file, finishing or discarding a staged rotation first."""
+    """One operational key file, preferring a staged rotation the chain already names."""
     path = directory / filename
     staged = directory / (filename + _NEXT_SUFFIX)
     if staged.exists():
@@ -239,10 +241,29 @@ def _load_operational(
             subject_fingerprint=root.fingerprint, purpose=purpose,
         )
         if current == base64.b64encode(bytes(candidate.verify_key)).decode("ascii"):
-            staged.replace(path)
             return candidate
-        staged.unlink()
     return Identity.load(path, passphrase=passphrase)
+
+
+def finish_interrupted_rotation(directory: Path, identity: NodeIdentity) -> None:
+    """Make the directory match `identity`, as `NodeIdentity.load` resolved it.
+
+    Moves a staged key the chain names into place and deletes one it does
+    not. Called where the directory belongs to the node itself: at startup
+    (`load_or_bootstrap_node_identity`) and before an offline rotation. Never
+    on a backup, whose validation must not change it.
+    """
+    for filename, key in (
+        (_SIGNING_FILENAME, identity.signing_key), (_TRANSPORT_FILENAME, identity.transport_key)
+    ):
+        staged = directory / (filename + _NEXT_SUFFIX)
+        if not staged.exists():
+            continue
+        # Compared by public key, so an encrypted staged file needs no passphrase.
+        if json.loads(staged.read_text()).get("fingerprint") == key.fingerprint:
+            staged.replace(directory / filename)
+        else:
+            staged.unlink()
 
 
 def bootstrap_node_identity(label: str) -> NodeIdentity:
@@ -297,7 +318,9 @@ def load_or_bootstrap_node_identity(
     "auto-generate silently at first node bootstrap").
     """
     if (directory / _ROOT_FILENAME).exists():
-        return NodeIdentity.load(directory, passphrase=passphrase)
+        identity = NodeIdentity.load(directory, passphrase=passphrase)
+        finish_interrupted_rotation(directory, identity)
+        return identity
     identity = bootstrap_node_identity(label)
     identity.save(directory, passphrase=passphrase)
     return identity

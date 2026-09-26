@@ -46,6 +46,7 @@ from netbbs.link.events import canonical_bytes
 from netbbs.link.node_identity import (
     NodeIdentity,
     NodeIdentityError,
+    finish_interrupted_rotation,
     operational_key_history,
     rotate_operational_key,
 )
@@ -202,6 +203,7 @@ def rotate_offline(
         before = NodeIdentity.load(identity_dir)
     except NodeIdentityError as exc:
         raise KeyRotationError(str(exc)) from exc
+    finish_interrupted_rotation(identity_dir, before)
     # Each node records its own fingerprint in its database at startup. A
     # different one there means the two paths name two nodes: rotating one
     # while auditing and re-signing in the other would damage both.

@@ -26,6 +26,7 @@ from netbbs.link.mail import _open_sealed
 from netbbs.link.node_identity import (
     NodeIdentity,
     bootstrap_node_identity,
+    load_or_bootstrap_node_identity,
     operational_key_history,
     rotate_operational_key,
     verifying_operational_keys,
@@ -205,7 +206,11 @@ def test_a_rotation_interrupted_after_its_commit_is_finished_by_load(tmp_path):
     rotated.transport_key.save(tmp_path / "transport.identity.next")
     rotated._write_transitions(tmp_path)
 
-    loaded = NodeIdentity.load(tmp_path)
+    # `load` is read-only (a backup is validated through it) ...
+    assert NodeIdentity.load(tmp_path).transport_key.fingerprint == rotated.transport_key.fingerprint
+    assert (tmp_path / "transport.identity.next").exists()
+    # ... and startup finishes the job.
+    loaded = load_or_bootstrap_node_identity(tmp_path, label="n")
     assert loaded.transport_key.fingerprint == rotated.transport_key.fingerprint
     assert not (tmp_path / "transport.identity.next").exists()
 
@@ -217,7 +222,7 @@ def test_a_rotation_interrupted_before_its_commit_is_discarded_by_load(tmp_path)
     rotated._save_retired(tmp_path, passphrase=None)
     rotated.signing_key.save(tmp_path / "signing.identity.next")
 
-    loaded = NodeIdentity.load(tmp_path)
+    loaded = load_or_bootstrap_node_identity(tmp_path, label="n")
     assert loaded.signing_key.fingerprint == base.signing_key.fingerprint
     # The key it had set aside to retire is still the current one.
     assert loaded.retired_signing_keys == ()
@@ -540,3 +545,36 @@ def test_a_malformed_key_in_a_peers_chain_refuses_cleanly(compromised):
     forged["envelope"]["payload"]["origin_fingerprint"] = alice.fingerprint
     _accepted, _deferred, refusal, skipped = bob_node.handle_events_tolerantly(alice.fingerprint, [forged])
     assert refusal is not None and skipped == ()
+
+
+def test_a_backup_checksums_the_retired_keys(db, tmp_path):
+    from netbbs.backup import create_backup
+
+    base = bootstrap_node_identity("n")
+    identity_dir = tmp_path / "identity"
+    base.save(identity_dir)
+    rotate_offline(db, identity_dir, purpose="signing", compromised=False)
+
+    destination = create_backup(db_path=db.path, identity_dir=identity_dir, destination=tmp_path / "bk")
+    manifest = json.loads((destination / "manifest.json").read_text())
+    assert any(name.startswith("identity/retired/") for name in manifest["checksums"])
+
+
+def test_a_session_keyed_to_a_retired_transport_key_is_not_admitted():
+    from netbbs.link.transport import LinkRealtimeSessionRegistry
+
+    closed = []
+
+    class _Session:
+        remote_fingerprint = "peer"
+        is_initiator = True
+        local_transport_key = b"old-key"
+
+        async def close(self, *, reason, send_close_frame):
+            closed.append(reason)
+
+    registry = LinkRealtimeSessionRegistry(own_fingerprint="me")
+    registry.retire_transport_key(b"old-key")
+    # A handshake begun before the rotation, finishing after it.
+    assert asyncio.run(registry.admit(_Session())) is False
+    assert closed == ["transport_key_rotated"] and registry.all_sessions() == []

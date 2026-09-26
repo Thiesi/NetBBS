@@ -1180,9 +1180,13 @@ def create_backup(*, db_path: Path, identity_dir: Path, destination: Path,
 
     if identity_dir.is_dir():
         shutil.copytree(identity_dir, destination / _IDENTITY_DIRNAME)
-        for entry in sorted((destination / _IDENTITY_DIRNAME).iterdir()):
+        identity_copy = destination / _IDENTITY_DIRNAME
+        # Recursive since issue #624: retired signing keys live in a
+        # subdirectory, and losing one loses mail sealed to it.
+        for entry in sorted(identity_copy.rglob("*")):
             if entry.is_file():
-                checksums[f"{_IDENTITY_DIRNAME}/{entry.name}"] = _sha256_of_file(entry)
+                relative = entry.relative_to(identity_copy).as_posix()
+                checksums[f"{_IDENTITY_DIRNAME}/{relative}"] = _sha256_of_file(entry)
 
     for extra_path in _extra_artifact_paths(db_path):
         if extra_path.exists():
