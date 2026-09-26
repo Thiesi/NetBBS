@@ -482,3 +482,61 @@ def test_the_command_checks_for_a_running_node_before_opening_the_database(tmp_p
     with pytest.raises(SystemExit, match="Stop it first"):
         main(["rotate-key", "signing", "--db", str(db_path)])
     assert not db_path.exists()
+
+
+def _chain_with_malformed_retired_key(alice: NodeIdentity, *, compromised: bool) -> NodeIdentity:
+    """A root-signed revoke naming a 'key' that is not one: root-signed, so
+    the chain verifies, but nothing ever checked the value decodes."""
+    from dataclasses import replace
+
+    from netbbs.link.events import KEY_TRANSITION_OBJECT_TYPE, KeyTransition, build_envelope
+    from netbbs.link.node_identity import _chain_head_id
+
+    rotated = rotate_operational_key(alice, purpose="signing")
+    payload = {
+        "subject_fingerprint": alice.fingerprint, "purpose": "signing", "action": "authorize",
+        "operational_key": "not base64 at all!", "created_at": utc_now_iso(),
+        "previous_transition_id": _chain_head_id(
+            rotated.transitions, root_verify_key=rotated.root.verify_key,
+            subject_fingerprint=rotated.fingerprint, purpose="signing",
+        ),
+    }
+    bogus = KeyTransition(
+        envelope=build_envelope(KEY_TRANSITION_OBJECT_TYPE, payload),
+        signature=b"",
+    )
+    envelope = bogus.envelope
+    bogus = KeyTransition(envelope=envelope, signature=rotated.root.sign(canonical_bytes(envelope)))
+    revoke_payload = {
+        "subject_fingerprint": alice.fingerprint, "purpose": "signing", "action": "revoke",
+        "operational_key": "not base64 at all!", "created_at": utc_now_iso(),
+        "previous_transition_id": bogus.content_id,
+    }
+    if compromised:
+        revoke_payload["compromised"] = True
+    revoke_env = build_envelope(KEY_TRANSITION_OBJECT_TYPE, revoke_payload)
+    revoke = KeyTransition(envelope=revoke_env, signature=rotated.root.sign(canonical_bytes(revoke_env)))
+    reauth_payload = {
+        "subject_fingerprint": alice.fingerprint, "purpose": "signing", "action": "authorize",
+        "operational_key": base64.b64encode(bytes(rotated.signing_key.verify_key)).decode("ascii"),
+        "created_at": utc_now_iso(), "previous_transition_id": revoke.content_id,
+    }
+    reauth_env = build_envelope(KEY_TRANSITION_OBJECT_TYPE, reauth_payload)
+    reauth = KeyTransition(envelope=reauth_env, signature=rotated.root.sign(canonical_bytes(reauth_env)))
+    return replace(rotated, transitions=rotated.transitions + (bogus, revoke, reauth))
+
+
+@pytest.mark.parametrize("compromised", [False, True])
+def test_a_malformed_key_in_a_peers_chain_refuses_cleanly(compromised):
+    alice = bootstrap_node_identity("alice")
+    bob_node = _met(alice, bootstrap_node_identity("bob"))
+    odd = _chain_with_malformed_retired_key(alice, compromised=compromised)
+    bob_node.handle_events(alice.fingerprint, [t.to_dict() for t in odd.transitions[2:]])
+
+    # A valid event still verifies under the current key; a forged one is
+    # refused (or reported) as a protocol matter, never a decode error.
+    assert bob_node.handle_events(alice.fingerprint, [_genesis(odd, "b").to_dict()])
+    forged = _genesis(bootstrap_node_identity("mallory"), "x").to_dict()
+    forged["envelope"]["payload"]["origin_fingerprint"] = alice.fingerprint
+    _accepted, _deferred, refusal, skipped = bob_node.handle_events_tolerantly(alice.fingerprint, [forged])
+    assert refusal is not None and skipped == ()

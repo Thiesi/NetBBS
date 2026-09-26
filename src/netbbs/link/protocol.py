@@ -2201,10 +2201,16 @@ class LinkNode:
             signature = base64.b64decode(raw["signature"])
         except Exception:  # noqa: BLE001 -- unvalidated input
             return False
-        return any(
-            verify_signature(nacl.signing.VerifyKey(base64.b64decode(r.key_b64)), message, signature)
-            for r in history if r.status == "compromised"
-        )
+        for record in history:
+            if record.status != "compromised":
+                continue
+            try:
+                key = nacl.signing.VerifyKey(base64.b64decode(record.key_b64))
+            except Exception:  # noqa: BLE001 -- unvalidated input, see _superseded_signing_keys
+                continue
+            if verify_signature(key, message, signature):
+                return True
+        return False
 
     def _set_aside_predecessor(
         self, raw: dict, set_aside_here: dict[str, str | None]
@@ -2939,7 +2945,16 @@ class LinkNode:
             subject_fingerprint=sender_fingerprint, purpose="signing",
         ):
             raise LinkProtocolError(f"rejected {kind} from {sender_fingerprint}: no currently-authorized signing key")
-        return [nacl.signing.VerifyKey(base64.b64decode(key)) for key in keys]
+        # A key in a peer's chain is root-signed but never checked to be a
+        # key at all; one that is not must refuse the event, not escape as a
+        # decode error past every caller that catches only protocol errors.
+        resolved: list[nacl.signing.VerifyKey] = []
+        for key in keys:
+            try:
+                resolved.append(nacl.signing.VerifyKey(base64.b64decode(key)))
+            except Exception:  # noqa: BLE001 -- unvalidated input, see _superseded_signing_keys
+                continue
+        return resolved
 
     def _check_board_post_content_size(self, payload: dict, sender_fingerprint: str, kind: str) -> None:
         """Shared by the `board_post`/`board_post_edit` branches below
