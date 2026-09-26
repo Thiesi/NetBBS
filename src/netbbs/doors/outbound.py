@@ -36,6 +36,7 @@ a result file saying what happened and why.
 from __future__ import annotations
 
 import datetime
+import hashlib
 import json
 import logging
 import os
@@ -495,7 +496,10 @@ def _claim(request: Path) -> Path | None:
     request that was processed anyway is exactly the one a later drain would
     process again.
     """
-    claimed = request.with_name(request.name + _CLAIMED_SUFFIX)
+    # Hashed, not appended to: a door's request name may already be near the
+    # filesystem's 255-byte limit, and a claim that cannot be named is a
+    # request that can never be answered.
+    claimed = request.with_name(_short(request.name) + _CLAIMED_SUFFIX)
     try:
         os.replace(request, claimed)
     except OSError as exc:
@@ -513,6 +517,20 @@ def _release(claimed: Path) -> None:
 
 def _stem(request: Path) -> str:
     return request.name[: -len(_REQUEST_SUFFIX)]
+
+
+#: Longest piece of a door's own request name that NetBBS puts into a name of
+#: its own. The receipt payload always carries the full name; the file name
+#: only has to be unique and readable.
+_NAME_PIECE_CHARS = 64
+
+
+def _short(name: str) -> str:
+    """`name` if it is short, else a readable prefix plus a hash of all of it."""
+    if len(name.encode("utf-8")) <= _NAME_PIECE_CHARS:
+        return name
+    digest = hashlib.sha256(name.encode("utf-8", errors="surrogateescape")).hexdigest()[:16]
+    return name[:_NAME_PIECE_CHARS // 2] + "-" + digest
 
 
 def _refuse_all(db: Database, door, launch: str, requests: list[Path], reason: str,
@@ -610,7 +628,7 @@ def _write_result(db: Database, door_id: int, launch: str, stem: str, payload: d
         payload = {"status": "rehearsal", "would": payload["status"],
                    **{key: value for key, value in payload.items() if key != "status"}}
     payload = {**payload, "request": stem, "at": utc_now_iso()}
-    result = directory / f"{launch}.{time.time_ns()}.{stem}{RESULT_SUFFIX}"
+    result = directory / f"{launch}.{time.time_ns()}.{_short(stem)}{RESULT_SUFFIX}"
     staging = result.with_name(result.name + ".part")
     try:
         directory.mkdir(parents=True, exist_ok=True)
@@ -655,7 +673,7 @@ def drain(db: Database, door, workdir: Path, *, node_identity=None, rehearsal: b
 
     config = outbound_config(db, door.id)
     if config is None:
-        return 0, _discard_all(requests)
+        return 0, _discard_all(requests if final else requests[:limit])
     if not requests:
         return 0, 0
 
@@ -671,13 +689,18 @@ def drain(db: Database, door, workdir: Path, *, node_identity=None, rehearsal: b
                                   "a SysOp must switch it on again", rehearsal=rehearsal)
 
         posted = refused = 0
+        # What a rehearsal would have spent so far in this drain. Never
+        # persisted, but counted, so the fifth rehearsed request under a
+        # ceiling of one is told what a real session would tell it.
+        rehearsed = {"posts": 0}
         for request in requests[:limit]:
             claimed = _claim(request)
             if claimed is None:
                 continue
             try:
                 reason = _handle_one(db, door, config, actor, launch, _stem(request), claimed,
-                                     node_identity=node_identity, rehearsal=rehearsal)
+                                     node_identity=node_identity, rehearsal=rehearsal,
+                                     rehearsed=rehearsed)
             finally:
                 _release(claimed)
             if reason is None:
@@ -703,7 +726,8 @@ def drain(db: Database, door, workdir: Path, *, node_identity=None, rehearsal: b
 
 
 def _handle_one(db: Database, door, config: OutboundConfig, actor: User, launch: str,
-                stem: str, request: Path, *, node_identity=None, rehearsal: bool = False) -> str | None:
+                stem: str, request: Path, *, node_identity=None, rehearsal: bool = False,
+                rehearsed: dict | None = None) -> str | None:
     """Post one claimed request, or return the reason it was refused.
 
     `request` is the claimed file; `stem` is the name the door gave it, which
@@ -761,17 +785,11 @@ def _handle_one(db: Database, door, config: OutboundConfig, actor: User, launch:
         answer({"status": "rejected", "reason": problem})
         return problem
 
-    if _recent_post_count(db, door.id) >= config.posts_per_hour:
+    spent = _recent_post_count(db, door.id) + (rehearsed or {}).get("posts", 0)
+    if spent >= config.posts_per_hour:
         reason = f"rate limit reached ({config.posts_per_hour} posts per hour)"
         answer({"status": "rejected", "reason": reason})
         return reason
-
-    if rehearsal:
-        # Everything a real post would pass has passed. Say so, and stop: no
-        # post, no rate debit, no audit entry -- a SysOp trying the door out
-        # must not spend its budget or publish its content.
-        answer({"status": "posted", "board": board.name, "moderated": board.moderated})
-        return None
 
     # One transaction for the post, the rate debit and the audit entry. The
     # same shape `netbbs.auth.users` uses for a key removal and its audit
@@ -783,6 +801,16 @@ def _handle_one(db: Database, door, config: OutboundConfig, actor: User, launch:
     db.connection.execute("BEGIN IMMEDIATE")
     try:
         post = create_labelled_post(db, board, config.label, subject, body, commit=False)
+        if rehearsal:
+            # The real post, rolled back: a rehearsal is judged by exactly the
+            # checks a real one meets -- content limits, a closed board --
+            # rather than by a copy of them that can drift. No post, no rate
+            # debit, no audit entry survives.
+            db.connection.rollback()
+            if rehearsed is not None:
+                rehearsed["posts"] += 1
+            answer({"status": "posted", "board": board.name, "moderated": board.moderated})
+            return None
         db.connection.execute(
             "INSERT INTO door_outbound_history (door_id, created_at) VALUES (?, ?)",
             (door.id, utc_now_iso()),
