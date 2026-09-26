@@ -3818,7 +3818,14 @@ def test_a_linked_board_whose_name_is_taken_locally_is_carried_and_receives_post
     from netbbs.boards.boards import get_board_by_name
 
     net = _ThreeNodes(tmp_path, enforce=False)
-    create_board(net.dbs["B"].db, "general", creator=net.sysops["B"])
+    # A creator of its own, not B's `sysop`: a board id hashes name, creator
+    # and `created_at`, both nodes' sysops are a fingerprint-less `sysop`,
+    # and on Windows two boards made within one 15.6 ms clock tick share a
+    # timestamp -- so B's `general` came out with R's board id about one run
+    # in four, and was then mistaken for R's board rather than colliding
+    # with it by name.
+    local = create_user(net.dbs["B"].db, "local-owner", password="password1", user_level=SYSOP_LEVEL)
+    create_board(net.dbs["B"].db, "general", creator=local)
     r_board_id = get_board_by_name(net.dbs["R"].db, "general").board_id
 
     async def scenario():

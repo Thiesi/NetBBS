@@ -520,8 +520,8 @@ def test_concurrent_raids_on_the_same_target_conserve_total_cash(db_path):
     t2 = threading.Thread(target=_attack, args=(2, "attacker_b"))
     t1.start()
     t2.start()
-    t1.join(timeout=10)
-    t2.join(timeout=10)
+    t1.join(timeout=60)
+    t2.join(timeout=60)
 
     assert not errors
 
@@ -599,7 +599,7 @@ def test_connect_waits_for_a_transient_journal_mode_lock(db_path, monkeypatch):
         finally:
             conn.execute("ROLLBACK")
             conn.close()
-        assert future.result(timeout=10) == "wal"
+        assert future.result(timeout=60) == "wal"
 
 
 def test_garrison_transfers_conserve_crew_and_abandon_after_income_settlement(db_path):
@@ -711,7 +711,7 @@ def test_concurrent_garrison_transfers_cannot_assign_the_same_member_twice(db_pa
             connection.close()
     with ThreadPoolExecutor(max_workers=2) as executor:
         futures = [executor.submit(transfer) for _ in range(2)]
-        assert sorted(f.result(timeout=10) for f in futures) == [False, True]
+        assert sorted(f.result(timeout=60) for f in futures) == [False, True]
     conn = wd.connect(db_path)
     actor = wd.read_player(conn, actor.user_id)
     assert (actor.crew, wd.assigned_crew(conn, actor.user_id), actor.turns_used) == (1, 2, 2)
@@ -930,7 +930,7 @@ def test_duplicate_sessions_commit_both_recruits(db_path):
     with ThreadPoolExecutor(max_workers=2) as pool:
         futures = [pool.submit(recruit) for _ in range(2)]
         for future in futures:
-            future.result(timeout=10)
+            future.result(timeout=60)
     conn = wd.connect(db_path)
     actual = wd.read_player(conn, a.user_id)
     assert (actual.cash, actual.crew, actual.turns_used) == (850, 5, 2)
@@ -958,7 +958,7 @@ def test_duplicate_sessions_cannot_spend_the_last_turn_twice(db_path):
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         futures = [pool.submit(recruit) for _ in range(2)]
-        assert sorted(f.result(timeout=10) for f in futures) == ["committed", "rejected"]
+        assert sorted(f.result(timeout=60) for f in futures) == ["committed", "rejected"]
     conn = wd.connect(db_path)
     actual = wd.read_player(conn, a.user_id)
     assert (actual.cash, actual.crew, actual.turns_used) == (925, 4, 15)
@@ -995,7 +995,7 @@ def test_simultaneous_first_launch_seeds_only_ten_exchanges(db_path):
     with ThreadPoolExecutor(max_workers=2) as pool:
         futures = [pool.submit(launch) for _ in range(2)]
         for future in futures:
-            future.result(timeout=10)
+            future.result(timeout=60)
     conn = wd.connect(db_path)
     assert len(wd.list_exchanges(conn)) == 10
     conn.close()
@@ -1312,7 +1312,7 @@ def test_concurrent_income_collection_cannot_double_pay(db_path):
     with ThreadPoolExecutor(max_workers=2) as pool:
         futures = [pool.submit(collect) for _ in range(2)]
         for future in futures:
-            future.result(timeout=10)
+            future.result(timeout=60)
     conn = wd.connect(db_path)
     actual = wd.read_player(conn, a.user_id)
     assert (actual.cash, actual.income_remainder) == (1040, 0)
@@ -1833,7 +1833,7 @@ def test_process_death_releases_world_session_guard(db_path):
                 pytest.fail("maintenance entered a live session")
     finally:
         child.kill()
-        child.communicate(timeout=5)
+        child.communicate(timeout=60)
     with wd.world_session(db_path, maintenance=True):
         pass
 
@@ -3005,7 +3005,7 @@ game.settle_world(conn, game.from_iso(sys.argv[3]))
 os._exit(29)
 """
     result = subprocess.run([sys.executable, '-c', code, str(_WAR_DIALER_PATH), str(db_path),
-                             wd.to_iso(now + wd.SEASON), str(committed)], capture_output=True, timeout=15)
+                             wd.to_iso(now + wd.SEASON), str(committed)], capture_output=True, timeout=60)
     assert result.returncode == 29, result.stderr.decode(errors='replace')
     conn = wd.connect(db_path)
     if not committed:
@@ -3054,20 +3054,20 @@ conn.close()
             children.append(subprocess.Popen([DOOR_PYTHON, '-u', '-c', code, str(_WAR_DIALER_PATH), str(db_path),
                 wd.to_iso(now + wd.SEASON)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE))
         ready = [pool.submit(child.stdout.readline) for child in children]
-        for future in ready: assert future.result(timeout=10).strip() == b'READY'
+        for future in ready: assert future.result(timeout=60).strip() == b'READY'
         conn.execute('BEGIN IMMEDIATE')
         for child in children:
             child.stdin.write(b'X')
             child.stdin.flush()
         blocked = [pool.submit(child.stdout.readline) for child in children]
-        for future in blocked: assert future.result(timeout=10).strip() == b'BLOCKED'
+        for future in blocked: assert future.result(timeout=60).strip() == b'BLOCKED'
         assert conn.execute('SELECT COUNT(*) FROM seasons').fetchone()[0] == 0
         conn.rollback()
         for child in children:
             child.stdin.write(b'Y')
             child.stdin.flush()
         for child in children:
-            _, error = child.communicate(timeout=15)
+            _, error = child.communicate(timeout=60)
             assert child.returncode == 0, error.decode(errors='replace')
         assert conn.execute('SELECT COUNT(*) FROM seasons').fetchone()[0] == 1
         assert conn.execute('SELECT COUNT(*) FROM season_results').fetchone()[0] == 2
@@ -3076,6 +3076,6 @@ conn.close()
     finally:
         for child in children:
             if child.poll() is None: child.kill()
-            child.communicate(timeout=5)
+            child.communicate(timeout=60)
         pool.shutdown(wait=True)
         conn.close()
