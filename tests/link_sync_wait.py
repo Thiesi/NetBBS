@@ -35,7 +35,14 @@ async def run_sync_briefly(
     loop = asyncio.get_running_loop()
     await asyncio.sleep(settle)
     deadline = loop.time() + pass_timeout
-    while not coro_task.done() and not parked_between_passes(coro_task) and loop.time() < deadline:
+    while not coro_task.done() and not parked_between_passes(coro_task):
+        if loop.time() >= deadline:
+            coro_task.cancel()
+            await asyncio.gather(coro_task, return_exceptions=True)
+            raise AssertionError(
+                f"run_link_sync did not finish its pass within {pass_timeout}s -- "
+                "a hung pass, not a slow machine"
+            )
         await asyncio.sleep(0.01)
     coro_task.cancel()
     try:

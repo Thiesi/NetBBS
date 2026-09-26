@@ -146,7 +146,9 @@ async def _run(lane, hub, presence, channel, user, lines, *, link_context=None):
         chat_flow._chat_loop(
             session, lane, hub, presence, mailbox, history, channel, user, link_context=link_context
         ),
-        timeout=2,
+        # A deadlock guard, not a pace: generous so a loaded parallel run
+        # cannot cut short a scripted session that would have finished.
+        timeout=30,
     )
     return session, action
 
@@ -475,7 +477,7 @@ def test_a_second_local_caller_still_watching_keeps_the_origin_subscription_aliv
         assert sent_frames[0].type == "unsubscribe"
         assert sent_frames[0].payload == {"channel_id": channel.channel_id}
 
-    asyncio.run(asyncio.wait_for(scenario(), timeout=5))
+    asyncio.run(asyncio.wait_for(scenario(), timeout=60))
 
 
 def test_chat_loop_announces_the_real_time_link_coming_up_and_going_down(

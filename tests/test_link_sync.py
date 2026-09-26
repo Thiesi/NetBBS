@@ -842,7 +842,13 @@ def test_sync_runs_a_second_pass_after_the_interval_elapses(tmp_path):
                         lambda: _hello_for(dialer_node), dialer.lane, interval_seconds=0.05,
                     )
                 )
-                await _run_sync_briefly(task, settle=0.3)
+                # Until the second hello lands, not for a fixed 0.3s: two
+                # passes over a real transport can take longer than that on
+                # a loaded parallel run.
+                deadline = asyncio.get_running_loop().time() + 60
+                while hello_count < 2 and asyncio.get_running_loop().time() < deadline:
+                    await asyncio.sleep(0.01)
+                await _run_sync_briefly(task, settle=0)
         finally:
             await seed_server.stop()
 

@@ -235,7 +235,7 @@ def test_hub_replies_reach_only_the_asker_and_are_bounded_per_caller(db, lane, l
             got = []
             deadline = asyncio.get_running_loop().time() + 30.0
             while len(got) < 4 and asyncio.get_running_loop().time() < deadline:
-                got.append(await asyncio.wait_for(alice_queue.get(), timeout=2))
+                got.append(await asyncio.wait_for(alice_queue.get(), timeout=30))
             texts = [n.text for n in got]
             assert texts[:3] == ["line 0", "line 1", "line 2"]
             assert "cut short" in texts[3]
