@@ -282,6 +282,11 @@ _MAX_CANDIDATE_FALLBACK_ATTEMPTS = 5
 # get past a few reachable nodes that decline, without dialing a whole peer
 # list's worth of strangers every pass.
 _MAX_RELAY_CONSENT_ATTEMPTS_PER_PASS = 6
+
+# How long a relay candidate that declined consent waits behind the others,
+# and how many such declines are remembered (remotely influenced, so bounded).
+_RELAY_DECLINE_MEMORY_SECONDS = 3600
+_MAX_REMEMBERED_RELAY_DECLINES = 1024
 _MAX_TRUST_PULL_PAGES_PER_PASS = 10
 
 # Issue #313: consecutive passes reaching nothing at all -- no seed, no
@@ -392,6 +397,9 @@ async def run_link_sync(
     # Per-peer starting point for the push when an inventory exchange
     # fails, for the lifetime of this loop -- see `_push_own_events`.
     fallback_offsets: dict[str, int] = {}
+    # Issue #712: relay candidates that declined consent, with when, for the
+    # lifetime of this loop. In memory, like `fallback_offsets`.
+    relay_declines: dict[str, float] = {}
     while stop_event is None or not stop_event.is_set():
         refresh = getattr(own_hello_provider, "refresh", None)
         if refresh is not None:
@@ -503,6 +511,7 @@ async def run_link_sync(
             await _maintain_relay_selection(
                 node, session, own_hello_provider, lane,
                 enforce_trust_policy=enforce_trust_policy,
+                declines=relay_declines,
             )
             # A relay that answers -- even holding nothing -- is a
             # working path to the network that the seed loop above
@@ -2008,6 +2017,7 @@ async def _maintain_relay_selection(
     own_hello_provider: Callable[[], HelloMessage],
     lane: DatabaseLane,
     *, enforce_trust_policy: bool = False,
+    declines: dict[str, float] | None = None,
 ) -> None:
     """
     Issue #58's automatic relay selection. `run_link_sync`
@@ -2048,7 +2058,20 @@ async def _maintain_relay_selection(
 
     needed = TARGET_RELAY_COUNT - len(node.relays_serving_me)
     attempted = 0
-    for candidate_fingerprint in await lane.run(select_relay_candidates, node):
+    # A candidate that declined recently goes to the back (Codex review of
+    # #713): reachable decliners score as well as any relay, so with the
+    # per-pass bound the same few would otherwise be asked every pass and the
+    # willing one below them never reached. Moved back, not skipped, so a
+    # decliner whose SysOp has since said yes is asked again once the others
+    # have had their turn.
+    declines = declines if declines is not None else {}
+    now = time.time()
+    for fingerprint, declined_at in list(declines.items()):
+        if now - declined_at >= _RELAY_DECLINE_MEMORY_SECONDS:
+            del declines[fingerprint]
+    ranked = await lane.run(select_relay_candidates, node)
+    ordered = [fp for fp in ranked if fp not in declines] + [fp for fp in ranked if fp in declines]
+    for candidate_fingerprint in ordered:
         # Only a grant fills a slot (Codex review of #713): a reachable node
         # that declines -- serving off, full, or not accepting this requester
         # -- ranks high on reachability and would otherwise take a slot's
@@ -2082,6 +2105,13 @@ async def _maintain_relay_selection(
         await lane.run(record_dial_outcome, candidate_fingerprint, succeeded=candidate_fingerprint in reached)
         if granted:
             needed -= 1
+            declines.pop(candidate_fingerprint, None)
+        elif candidate_fingerprint in reached:
+            # Reached but declined -- serving off, full, or not accepting this
+            # requester. Unreachable ones need no entry: their score sinks.
+            while len(declines) >= _MAX_REMEMBERED_RELAY_DECLINES:
+                declines.pop(next(iter(declines)))
+            declines[candidate_fingerprint] = now
 
 
 async def _pickup_one_relay_mailbox(
