@@ -242,3 +242,131 @@ def test_inventory_security_fields_are_covered_by_the_signature(tmp_path, clock)
 
     alice.close()
     bob.close()
+
+
+# -- Issue #669: `not_carried` ---------------------------------------------------
+
+
+def _signed_request_with_not_carried(alice, bob, clock, not_carried):
+    from netbbs.link.events import sign_inventory_request as sign
+
+    nonce = "fedcba9876543210fedcba9876543210"
+    signature = sign(
+        signing_identity=alice.identity.signing_key,
+        requester_fingerprint=alice.fingerprint,
+        responder_fingerprint=bob.fingerprint,
+        created_at=clock.now_iso(),
+        nonce=nonce,
+        boards={}, channels={}, file_areas={},
+        not_carried=not_carried,
+    )
+    return InventoryRequest(
+        requester_fingerprint=alice.fingerprint,
+        responder_fingerprint=bob.fingerprint,
+        created_at=clock.now_iso(),
+        nonce=nonce,
+        signature=signature,
+        boards={}, channels={}, file_areas={},
+        not_carried=not_carried,
+    )
+
+
+def test_a_request_naming_nothing_not_carried_signs_exactly_as_before(tmp_path, clock):
+    """An empty `not_carried` stays out of the signed payload and the wire
+    form, so an older requester and a newer responder still agree on what
+    was signed."""
+    alice, bob, _alice_node, _bob_node = _two_nodes_with_completed_hello(tmp_path, clock)
+    old = _signed_empty_request(
+        signing_identity=alice.identity.signing_key,
+        requester_fingerprint=alice.fingerprint,
+        responder_fingerprint=bob.fingerprint,
+        created_at=clock.now_iso(),
+        nonce="fedcba9876543210fedcba9876543210",
+    )
+    new = _signed_request_with_not_carried(alice, bob, clock, {"boards": ()})
+    assert new.signature == old.signature
+    assert "not_carried" not in new.to_dict()
+    alice.close()
+    bob.close()
+
+
+def test_not_carried_is_signed_and_verifies_round_trip(tmp_path, clock):
+    alice, bob, _alice_node, bob_node = _two_nodes_with_completed_hello(tmp_path, clock)
+    request = _signed_request_with_not_carried(alice, bob, clock, {"boards": ("b1",), "file_areas": ("f1",)})
+
+    wire = InventoryRequest.from_dict(request.to_dict())
+    assert wire.not_carried == {"boards": ("b1",), "file_areas": ("f1",)}
+    bob_node.handle_inventory_request(alice.fingerprint, wire, now_iso=clock.now_iso())  # does not raise
+
+    # A responder that does not know the field verifies without it and
+    # refuses -- which is why it is sent only where it is advertised.
+    from netbbs.link.events import verify_inventory_request
+
+    assert not verify_inventory_request(
+        requester_fingerprint=wire.requester_fingerprint,
+        responder_fingerprint=wire.responder_fingerprint,
+        created_at=wire.created_at,
+        nonce=wire.nonce,
+        boards={}, channels={}, file_areas={},
+        signature=wire.signature,
+        signing_verify_key=alice.identity.signing_key.verify_key,
+    )
+    alice.close()
+    bob.close()
+
+
+def test_not_carried_cannot_be_added_after_signing(tmp_path, clock):
+    """It steers what the responder leaves out, so a third party must not be
+    able to suppress content by inserting it into someone else's request."""
+    alice, bob, _alice_node, bob_node = _two_nodes_with_completed_hello(tmp_path, clock)
+    request = _signed_empty_request(
+        signing_identity=alice.identity.signing_key,
+        requester_fingerprint=alice.fingerprint,
+        responder_fingerprint=bob.fingerprint,
+        created_at=clock.now_iso(),
+    )
+    data = request.to_dict()
+    data["not_carried"] = {"boards": ["b1"]}
+    with pytest.raises(LinkProtocolError):
+        bob_node.handle_inventory_request(alice.fingerprint, InventoryRequest.from_dict(data), now_iso=clock.now_iso())
+    alice.close()
+    bob.close()
+
+
+@pytest.mark.parametrize(
+    "not_carried",
+    [["b1"], {"posts": ["b1"]}, {"boards": "b1"}, {"boards": [1]}],
+    ids=["not-an-object", "unknown-kind", "not-a-list", "not-strings"],
+)
+def test_a_malformed_not_carried_is_a_malformed_request(tmp_path, clock, not_carried):
+    alice, bob, _alice_node, _bob_node = _two_nodes_with_completed_hello(tmp_path, clock)
+    data = _signed_empty_request(
+        signing_identity=alice.identity.signing_key,
+        requester_fingerprint=alice.fingerprint,
+        responder_fingerprint=bob.fingerprint,
+        created_at=clock.now_iso(),
+    ).to_dict()
+    data["not_carried"] = not_carried
+    with pytest.raises(ValueError):
+        InventoryRequest.from_dict(data)
+    alice.close()
+    bob.close()
+
+
+def test_the_not_carried_declaration_is_bounded_and_sampled_fresh():
+    """A peer can keep sending geneses to a node past its carry cap; declaring
+    every one would grow each request until the responder refused it (413)."""
+    from netbbs.link.store import bound_not_carried
+
+    many = {"boards": tuple(f"b{i:05d}" for i in range(30)), "channels": tuple(f"c{i:05d}" for i in range(30))}
+    small = {"boards": ("b1",)}
+    assert bound_not_carried(small, limit=10) is small
+
+    samples = [bound_not_carried(many, limit=10) for _ in range(20)]
+    for sample in samples:
+        assert sum(len(ids) for ids in sample.values()) == 10
+        assert set(sample) <= {"boards", "channels"}
+        for kind, ids in sample.items():
+            assert set(ids) <= set(many[kind])
+    # A fresh sample each time, so no fixed subset is left out on every pass.
+    assert len({tuple(sorted((k, i) for k, ids in s.items() for i in ids)) for s in samples}) > 1

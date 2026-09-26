@@ -2162,6 +2162,12 @@ resolve the current signing key, plus a signed endpoint descriptor.
 Endpoint descriptors may advertise ordered addresses and relay information.
 The newest valid descriptor wins; stale repeats are harmless.
 
+A descriptor also lists `capabilities`: the optional Link behaviours the
+signing node's code understands (issue #669). A peer uses such a behaviour only
+with a node that advertises it; a descriptor without the list advertises
+nothing. It describes the software, not a setting, so every descriptor a given
+version signs carries the same list.
+
 The protocol logic remains transport-independent. The `aiohttp` adapter is the
 boundary translating protocol messages to real HTTP requests and responses.
 
@@ -2492,6 +2498,30 @@ has not taken on, and would not terminate: such a board's posts never reach
 `link_events` at all, so they would be wanted every pass forever and occupy the
 requester's whole push page. A resource never seen is the opposite case and
 still wants everything declared for it, which is how a genesis arrives by push.
+
+The same resource needs the mirror rule on the other side of the exchange
+(issue #669). It is absent from the requester's maps, and absent means "never
+seen" (issue #94), so every responder carrying it would send its genesis and
+every event under it on every pass, under the one `_MAX_EVENTS_PER_REQUEST`
+budget all three kinds share: a declined board with a couple of hundred posts,
+sorting early, would be the only thing the requester ever received from anyone
+carrying it. So the request carries a signed `not_carried` list, by kind, of
+the resources the requester holds a genesis for and has no local copy of, and
+the responder leaves them out. Deleting a Linked resource keeps its genesis on
+file for this, including one this node originated, whose genesis otherwise
+lives only in its own row. The list is capped at 5,000 IDs per request: the stored
+genesis set is not bounded by anything the node controls, since a peer can keep
+sending geneses to a node past its cap, and an unbounded list would grow until
+every request was refused. Over the cap each request declares a fresh random
+sample, so what goes undeclared costs a resend, never a fixed starvation. The existing maps cannot say this, since their
+values are known-ID sets and an offered board's posts were never received. The
+field is part of the signed payload only when it names something, so a request
+without it signs exactly as before; and it is sent only to a responder whose
+descriptor advertises `inventory_not_carried` (§8.2), because an older
+responder would rebuild the payload without it and refuse the whole request.
+Against an older responder the old behaviour remains. Until issue #683 records
+carry states, the list is inferred from `link_events` the same way as "seen and
+not taken on" above.
 
 **The cap goes on the push, not on `wanted`.** `wanted` is returned whole:
 it can never exceed the content IDs the requester itself just declared, which

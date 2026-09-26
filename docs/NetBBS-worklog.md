@@ -3810,6 +3810,25 @@ isolation. Any future call site that constructs its own
 easy to add a new session and forget this, since everything works
 identically in every environment except one with no direct egress.
 
+### Adding a field to a signed request needs a capability, not a version bump (issue #669)
+
+Signed Link requests are verified by rebuilding the payload from the parsed
+fields (`_inventory_request_payload`), and `from_dict` ignores keys it does not
+know. So a new field that is signed breaks every older responder, which drops
+it, rebuilds a payload without it, and refuses the whole request. Bumping the
+protocol version is no way out either: hello requires an exact match, so the
+peers would stop talking altogether. What works, and what `not_carried` does:
+
+- the field enters the signed payload only when it is non-empty, so a request
+  that does not use it signs byte-for-byte as before and older requesters keep
+  working against newer responders;
+- the responder advertises the capability in its signed endpoint descriptor
+  (`capabilities`, `LINK_CAPABILITIES`), and the requester sends the field only
+  to a peer whose current descriptor lists it (`descriptor_has_capability`).
+
+The capability is fixed per software version, not configurable, because it
+describes what the code can verify.
+
 ### Remote identity attestation: the issuing half, and what it exposed (issue #584)
 
 `LinkNode.identity.signing_key` is an `Identity`, not a
