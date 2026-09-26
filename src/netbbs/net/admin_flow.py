@@ -203,6 +203,8 @@ from netbbs.files.entries import (
     approve_file,
     count_visible_files,
     delete_file,
+    expired_file_purge_at,
+    list_expired_files,
     list_pending_files,
     set_file_exempt,
     set_file_pinned,
@@ -14842,6 +14844,10 @@ async def _area_detail_screen(
                 session, lane, actor, area, link_context=link_context, transfers=transfers,
             )
             await _draw_area_detail(session, lane, area, linked=linked, link_context=link_context, description_level=description_level, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed)
+        elif choice == "x":
+            await session.write_line("")
+            await _expired_files_screen(session, lane, actor, area, transfers=transfers)
+            await _draw_area_detail(session, lane, area, linked=linked, link_context=link_context, description_level=description_level, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed)
         elif choice == "l" and link_context is not None and not linked:
             await session.write_line("")
             await _link_area_screen(session, lane, actor, area, link_context)
@@ -14903,6 +14909,7 @@ async def _draw_area_detail(
         MenuEntry(label=menu_key("E", "dit"), brief="Change this area's settings"),
         MenuEntry(label=menu_key("D", "elete"), brief="Permanently remove this area"),
         MenuEntry(label=menu_key("P", "ending files"), brief="Review uploads awaiting approval"),
+        MenuEntry(label=menu_key("x", "pired files", prefix="E"), brief="Recover files before they are purged"),
     ]
     if link_context is not None and not linked:
         options.append(MenuEntry(label=menu_key("L", "ink this file area"), brief="Share it via NetBBS Link"))
@@ -15077,30 +15084,26 @@ async def _pending_files_screen(
         )
 
 
-async def _draw_file_action(
-    session: Session, entry: FileEntry, description_level: str, redraw_in_place: bool,
+async def _write_file_record(
+    session: Session, entry: FileEntry, *,
+    heading: str,
+    fields: list[Field],
+    status_line: str,
+    redraw_in_place: bool,
     unicode_style: bool,
     collapsed: bool,
-    header_color: int | tuple[int, int, int] = HEADER_COLOR,
-    *,
-    status_line: str,
-    when: str,
-    can_download: bool = False,
-) -> None:
+    header_color: int | tuple[int, int, int],
+) -> int:
+    """Title, status line, the file's panel and its description -- what
+    the pending review and the expired-file recovery screens both show
+    above their action bars. Returns the rows used, for `_fitted_menu`."""
     await session.write_line(
         "\r\n" + screen_title(sanitize_text(entry.filename),
             breadcrumb=(session.node_display_name,), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
             header_color=header_color, node_name_gradient=session.node_name_gradient)
     )
     await session.write_line(status_line)
-    panel_rows = await _write_sections(session, [Section("Pending file", [
-        Field("By", entry.uploader_label, color=AUTHOR_COLOR),
-        Field("Uploaded", when, color=DATE_COLOR),
-        Field("Size", f"{_format_bytes(entry.size_bytes)} ({entry.size_bytes} bytes)"),
-        Field("SHA-256", entry.sha256, color=METADATA_COLOR),
-        Field("Pinned", _yes_no(entry.pinned)),
-        Field("Exempt from auto-purge", _yes_no(entry.exempt_from_expiry)),
-    ])], unicode_style=unicode_style)
+    panel_rows = await _write_sections(session, [Section(heading, fields)], unicode_style=unicode_style)
     # Line by line (issue #463): a description may be a FILE_ID.DIZ
     # block now, and running its ten lines together into one is exactly
     # what a moderator deciding whether to approve the upload should not
@@ -15112,6 +15115,31 @@ async def _draw_file_action(
         await session.write_line(
             colored(sanitize_text(description_line), fg_color=VALUE_COLOR if description_lines else MUTED_COLOR)
         )
+    return panel_rows + 6 + max(1, len(description_lines))
+
+
+async def _draw_file_action(
+    session: Session, entry: FileEntry, description_level: str, redraw_in_place: bool,
+    unicode_style: bool,
+    collapsed: bool,
+    header_color: int | tuple[int, int, int] = HEADER_COLOR,
+    *,
+    status_line: str,
+    when: str,
+    can_download: bool = False,
+) -> None:
+    used_rows = await _write_file_record(
+        session, entry, heading="Pending file", fields=[
+            Field("By", entry.uploader_label, color=AUTHOR_COLOR),
+            Field("Uploaded", when, color=DATE_COLOR),
+            Field("Size", f"{_format_bytes(entry.size_bytes)} ({entry.size_bytes} bytes)"),
+            Field("SHA-256", entry.sha256, color=METADATA_COLOR),
+            Field("Pinned", _yes_no(entry.pinned)),
+            Field("Exempt from auto-purge", _yes_no(entry.exempt_from_expiry)),
+        ],
+        status_line=status_line, redraw_in_place=redraw_in_place, unicode_style=unicode_style,
+        collapsed=collapsed, header_color=header_color,
+    )
     entries = [
         MenuEntry(label=menu_key("A", "pprove"), brief="Publish this pending file"),
         MenuEntry(label=menu_key("R", "eject"), brief="Delete this pending file"),
@@ -15131,10 +15159,7 @@ async def _draw_file_action(
         MenuEntry(label=menu_key("X", "empt toggle"), brief="Toggle exempt from auto-purge"),
         MenuEntry(label=menu_key("B", "ack"), brief="Return to the pending list"),
     ]
-    options = _fitted_menu(
-        entries, description_level, session=session,
-        used_rows=panel_rows + 6 + max(1, len(description_lines)),
-    )
+    options = _fitted_menu(entries, description_level, session=session, used_rows=used_rows)
     await session.write_line(f"\r\n{options}")
     await _choice_prompt(session)
 
@@ -15215,6 +15240,99 @@ async def _file_action_screen(
         elif choice == "x":
             await session.write_line("")
             entry = await lane.run(set_file_exempt, entry, not entry.exempt_from_expiry, changed_by=actor)
+            await _draw()
+        else:
+            await session.write(reject_unhandled_key(choice))
+
+
+async def _expired_files_screen(
+    session: Session, lane: DatabaseLane, actor: User, area: FileArea, *, transfers: Any = None,
+) -> None:
+    """`E[x]pired files` (design doc §5.3, issue #639): SysOp recovery.
+    Expiry ends a caller's reach, but an expired file's bytes stay in
+    storage until the grace period ends, and this is where they are
+    fetched back without shell access. Listed oldest first, which is
+    also the order they will be purged in."""
+    while True:
+        files = await lane.run(list_expired_files, area, requesting_user=actor)
+        selected = await pick_item(
+            session, files,
+            name_of=lambda f: f.filename,
+            stable_id_of=lambda f: f.id,
+            description_of=lambda f: f"by {f.uploader_label}",
+            title=f"Expired files in {area.name!r}",
+            empty_message="No expired files.",
+            redraw_in_place=await lane.run(redraw_in_place_enabled, actor),
+            unicode_style=await lane.run(unicode_style_enabled, actor),
+            collapsed=await lane.run(breadcrumb_collapsed_enabled, actor),
+            accent_color=await lane.run(effective_accent_color_256),
+            header_color=await lane.run(effective_header_color_256),
+        )
+        if selected is None:
+            return
+        await _expired_file_screen(session, lane, actor, selected, area, transfers=transfers)
+
+
+async def _expired_file_screen(
+    session: Session, lane: DatabaseLane, actor: User, entry: FileEntry, area: FileArea, *,
+    transfers: Any = None,
+) -> None:
+    """One expired file, with `[D]ownload` under the same transport rule
+    as the pending review (issue #475). Recovery is the whole of it:
+    putting the file back in the listing is not an action here, since
+    expired means gone to callers and a re-upload is how a SysOp who
+    wants it back says so."""
+    description_level = await lane.run(menu_description_level, actor)
+    unicode_style = await lane.run(unicode_style_enabled, actor)
+    collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
+    redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
+    header_color = await lane.run(effective_header_color_256)
+    status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
+    display_format, display_timezone = await lane.run(resolve_display_preferences)
+    when = format_for_display(entry.created_at, override_format=display_format, override_timezone=display_timezone)
+    purge_at = await lane.run(expired_file_purge_at, area, entry)
+    purged = (
+        format_for_display(purge_at, override_format=display_format, override_timezone=display_timezone)
+        if purge_at is not None else "not scheduled"
+    )
+    from netbbs.net.file_flow import send_file_to_caller, supports_zmodem
+
+    can_download = supports_zmodem(session) or transfers is not None
+
+    async def _draw() -> None:
+        used_rows = await _write_file_record(
+            session, entry, heading="Expired file", fields=[
+                Field("By", entry.uploader_label, color=AUTHOR_COLOR),
+                Field("Uploaded", when, color=DATE_COLOR),
+                Field("Purge date", purged, color=DATE_COLOR),
+                Field("Size", f"{_format_bytes(entry.size_bytes)} ({entry.size_bytes} bytes)"),
+                Field("SHA-256", entry.sha256, color=METADATA_COLOR),
+            ],
+            status_line=status_line, redraw_in_place=redraw_in_place, unicode_style=unicode_style,
+            collapsed=collapsed, header_color=header_color,
+        )
+        entries = []
+        if can_download:
+            entries.append(MenuEntry(label=menu_key("D", "ownload"), brief="Recover it before it is purged"))
+        entries.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to the expired list"))
+        options = _fitted_menu(entries, description_level, session=session, used_rows=used_rows)
+        await session.write_line(f"\r\n{options}")
+        await _choice_prompt(session)
+
+    await _draw()
+    while True:
+        choice = (await session.read_key()).lower()
+
+        if choice == "b":
+            await session.write_line("")
+            return
+        elif choice == "d" and can_download:
+            await session.write_line("")
+            # Same stand-in as the pending review: the outcome
+            # `send_file_to_caller` writes lands on the redrawn screen.
+            flow = _TrailingOutput(session)
+            await send_file_to_caller(flow, lane, area, entry, actor, transfers=transfers)
+            flow.announce_rest()
             await _draw()
         else:
             await session.write(reject_unhandled_key(choice))

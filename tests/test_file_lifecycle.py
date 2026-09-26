@@ -1,8 +1,8 @@
 """
 Tests for the moderated-area approval flow and file maintenance/expiry
 state machine (design doc §13/§15) in netbbs.files.entries — the
-file-area mirror of tests/test_post_lifecycle.py's coverage, plus
-get_file_by_name's own pending-visibility check (files only, no post
+file-area mirror of tests/test_post_lifecycle.py's coverage, plus the
+SysOp's expired-file recovery listing (issue #639, files only, no post
 equivalent).
 """
 
@@ -20,8 +20,9 @@ from netbbs.files.entries import (
     approve_file,
     count_visible_files,
     delete_file,
+    expired_file_purge_at,
     get_file,
-    get_file_by_name,
+    list_expired_files,
     list_files_page,
     list_pending_files,
     list_pinned_files,
@@ -346,60 +347,76 @@ def test_default_grace_period_is_seven_days(db):
     assert get_expiry_grace_period_days(db) == 7
 
 
-# -- expired files stay reachable via get_file_by_name ----------------------
+# -- expired files: gone to callers, recoverable by the SysOp (issue #639) --
 
 
-def test_expired_file_still_reachable_by_name(db, alice, bob):
+def test_expired_file_keeps_its_row_until_purged(db, alice, bob):
+    """Renamed from test_expired_file_still_reachable_by_name (issue
+    #639). Expiry ends a *caller's* reach, but the row -- and the bytes
+    behind it -- stay until the grace period ends, and SysOp recovery
+    depends on exactly that. What changed was the promise about callers,
+    not this return value."""
     area = create_file_area(db, "docs", max_file_age_days=30, creator=alice)
     entry = upload_file(db, area, bob, "hello.txt", b"data")
     _age_file(db, entry, days_old=31)
     list_files_page(db, area, bob)  # sweep -> entry becomes 'expired'
 
-    found = get_file_by_name(db, area, "hello.txt")
-    assert found is not None
+    found = get_file(db, entry.file_id)
     assert found.status == "expired"
 
 
-# -- get_file_by_name pending-visibility check (files only) -----------------
-
-
-def test_get_file_by_name_hides_pending_file_from_stranger(db, alice, bob):
-    area = create_file_area(db, "reviewed", moderated=True, creator=alice)
-    upload_file(db, area, bob, "hello.txt", b"data")
-
-    found = get_file_by_name(db, area, "hello.txt", requesting_user=alice)
-    assert found is None
-
-
-def test_get_file_by_name_hides_pending_file_with_no_requesting_user(db, alice, bob):
-    area = create_file_area(db, "reviewed", moderated=True, creator=alice)
-    upload_file(db, area, bob, "hello.txt", b"data")
-
-    assert get_file_by_name(db, area, "hello.txt") is None
-
-
-def test_get_file_by_name_shows_pending_file_to_its_own_uploader(db, alice, bob):
-    area = create_file_area(db, "reviewed", moderated=True, creator=alice)
-    upload_file(db, area, bob, "hello.txt", b"data")
-
-    found = get_file_by_name(db, area, "hello.txt", requesting_user=bob)
-    assert found is not None
-    assert found.status == "pending"
-
-
-def test_get_file_by_name_shows_pending_file_to_approve_holder(db, sysop, alice, bob):
-    area = create_file_area(db, "reviewed", moderated=True, creator=alice)
-    upload_file(db, area, bob, "hello.txt", b"data")
+def test_list_expired_files_is_the_sysops_recovery_listing(db, sysop, alice, bob):
+    area = create_file_area(db, "docs", max_file_age_days=30, creator=alice)
+    expired = upload_file(db, area, bob, "old.txt", b"old")
+    upload_file(db, area, bob, "new.txt", b"new")
+    _age_file(db, expired, days_old=31)
     grant_permissions(db, sysop, object_type="file_area", object_id=area.id, permissions=BoardPermission.APPROVE, granted_by=sysop)
 
-    found = get_file_by_name(db, area, "hello.txt", requesting_user=sysop)
-    assert found is not None
+    # No listing has swept the area yet: list_expired_files sweeps itself,
+    # so a file that expired since the area was last browsed is there.
+    found = list_expired_files(db, area, requesting_user=sysop)
+    assert [f.filename for f in found] == ["old.txt"]
 
 
-def test_get_file_by_name_shows_approved_file_to_anyone(db, alice, bob):
-    area = create_file_area(db, "docs", creator=alice)
-    upload_file(db, area, bob, "hello.txt", b"data")
+def test_list_expired_files_refuses_the_uploader(db, alice, bob):
+    """An uploader whose file expired has lost it the same as every other
+    caller -- there is no own-uploads view as the pending queue has."""
+    area = create_file_area(db, "docs", max_file_age_days=30, creator=alice)
+    entry = upload_file(db, area, bob, "hello.txt", b"data")
+    _age_file(db, entry, days_old=31)
 
-    found = get_file_by_name(db, area, "hello.txt")
-    assert found is not None
-    assert found.status == "approved"
+    with pytest.raises(FileEntryError):
+        list_expired_files(db, area, requesting_user=bob)
+
+
+def test_list_expired_files_drops_a_file_once_its_grace_period_ends(db, sysop, alice, bob):
+    area = create_file_area(db, "docs", max_file_age_days=30, creator=alice)
+    set_expiry_grace_period_days(db, 5)
+    entry = upload_file(db, area, bob, "hello.txt", b"data")
+    _age_file(db, entry, days_old=40)
+    grant_permissions(db, sysop, object_type="file_area", object_id=area.id, permissions=BoardPermission.APPROVE, granted_by=sysop)
+
+    assert list_expired_files(db, area, requesting_user=sysop) == []
+
+
+def test_expired_file_purge_at_is_age_plus_grace(db, alice, bob):
+    area = create_file_area(db, "docs", max_file_age_days=30, creator=alice)
+    set_expiry_grace_period_days(db, 5)
+    entry = upload_file(db, area, bob, "hello.txt", b"data")
+    db.connection.execute(
+        "UPDATE files SET created_at = ? WHERE id = ?", ("2026-01-01T00:00:00.000000Z", entry.id)
+    )
+    db.connection.commit()
+
+    assert expired_file_purge_at(db, area, get_file(db, entry.file_id)) == "2026-02-05T00:00:00.000000Z"
+
+
+def test_expired_file_purge_at_is_none_when_no_sweep_will_purge_it(db, sysop, alice, bob):
+    no_limit = create_file_area(db, "archive", creator=alice)
+    entry = upload_file(db, no_limit, bob, "hello.txt", b"data")
+    assert expired_file_purge_at(db, no_limit, entry) is None
+
+    limited = create_file_area(db, "docs", max_file_age_days=30, creator=alice)
+    grant_permissions(db, sysop, object_type="file_area", object_id=limited.id, permissions=BoardPermission.EDIT, granted_by=sysop)
+    exempt = set_file_exempt(db, upload_file(db, limited, bob, "keep.txt", b"keep"), True, changed_by=sysop)
+    assert expired_file_purge_at(db, limited, exempt) is None

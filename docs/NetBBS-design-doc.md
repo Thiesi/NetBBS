@@ -1144,18 +1144,29 @@ caller-facing surface:
   reply to a thread that expired mid-conversation still finds its parent
   (§6.1's edit chains depend on the same lookup).
 - **SysOp recovery.** A file's bytes survive in content-addressed storage
-  until the grace period ends. The file area's admin detail screen is to list
-  its expired files with `[D]ownload`, the same action the pending-file review
-  screen carries, so recovering an upload does not need shell access. The
-  screen is decided but not yet built (issue #639). Posts
-  have no equivalent screen: a post's content is its text, and the recovery
-  case that justifies the file screen does not arise.
+  until the grace period ends. The file area's admin detail screen lists its
+  expired files under `E[x]pired files`, oldest first, each with its purge
+  date and `[D]ownload`: the same action the pending-file review screen
+  carries, offered under the same transport rule (issue #475), so recovering
+  an upload does not need shell access. The listing requires `APPROVE` on the
+  area; the uploader has no view of their own, since an expired file is gone
+  for them as for every other caller. Recovery is the whole of the screen:
+  putting a file back in the listing is not an action, and a re-upload is how
+  a SysOp who wants it listed again says so. Posts have no equivalent screen:
+  a post's content is its text, and the recovery case that justifies the file
+  screen does not arise.
+
+A browser transfer link (§6.2) follows the same boundary. A download link
+minted while a file was listed is refused once the file expires, its own
+uploader included, and serves an expired file only to a holder of `APPROVE`
+on the area, which is who the recovery screen mints it for.
 
 A domain function returning an expired row is therefore a statement about
 the domain, not a promise to callers, and the contracts of `list_files_page`,
-`get_file_by_name`, `list_posts_page` and `get_post` are to say so in those
-terms. Today `get_post` and `list_files_page` still describe expired content as
-"individually reachable"; issue #639 carries that edit.
+`get_file`, `list_posts_page` and `get_post` say so in those terms. There is
+no by-name file lookup: `get_file_by_name` had no caller once
+`/download <filename>` was gone, and the recovery screen hands over the row
+the SysOp picked rather than a name, which is not unique within an area.
 
 ### 5.4 Channel visibility and membership
 
@@ -10570,19 +10581,36 @@ to a thread that expired mid-conversation.
 caller-facing one.** Expired files are listed on the file area's admin detail
 screen with `[D]ownload`, mirroring the pending-file review screen #638
 already gave that action to, and offered under the same transport rule
-(issue #475). This is also what gives `get_file_by_name` a production caller
-again; if this decision had gone the other way the function should have been
-deleted rather than left as another implemented, tested and unreachable name.
+(issue #475).
+
+**Decision 5 — `get_file_by_name` is deleted.** Decision 3 was first expected
+to give it a production caller again. Building the screen showed it does not:
+the recovery screen is a picker, which hands over the row the SysOp chose, and
+#638 had already moved `send_file_to_caller` off re-reading a file by name
+because a filename is not unique within an area. Routing recovery through the
+by-name lookup would have handed back the oldest row of that name, possibly an
+approved file rather than the expired one picked. With no caller the function
+went, rather than stay as another implemented, tested and unreachable name. Its
+pending rule lives on where it is enforced: `list_pending_files` and the
+transfer path.
+
+**Decision 6 — a transfer link does not outlive expiry.** A download link
+minted while a file was listed is refused once the file expires, its uploader
+included, the same way an outstanding link does not outlive a lockout. It
+serves an expired file only to a holder of `APPROVE` on the area, which is who
+the recovery screen mints it for.
 
 **Decision 4 — posts get no equivalent screen.** A file is an artifact that
 is unrecoverable once the grace period ends; a post is text in a board. The
 recovery case that justifies decision 3 does not arise, and inventing a
 screen for symmetry would be building for nobody.
 
-**Not done, deliberately.** `test_expired_file_still_reachable_by_name` stays
-and is renamed for what it now guards, since the domain behaviour it pins is
-still true and still load-bearing — what was wrong was the promise about
-callers, not the return value. The §3.5 bullet recording #638's trade also
+**Not done, deliberately.** `test_expired_file_still_reachable_by_name` stays,
+renamed `test_expired_file_keeps_its_row_until_purged` and pinned through
+`get_file` now that the by-name lookup is gone, since the domain behaviour it
+guards is still true and still load-bearing: what was wrong was the promise
+about callers, not the return value. The recovery screen has no restore
+action; a re-upload is how a SysOp puts a file back. The §3.5 bullet recording #638's trade also
 cited §11 for the delisting rule, which §11 does not state; it now points at
 §5.3, which does.
 
