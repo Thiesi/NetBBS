@@ -643,9 +643,9 @@ it was a deliberate trade and not an oversight:
 - **An expired file.** Nothing, and that is now the decided answer rather
   than a loss: expiry ends a file's reach to callers entirely (§5.3, issue
   #639). The listing and `[F]ind` are approved-and-current only, and a caller
-  who knows a name has no way to spend it. A SysOp is to reach an expired
-  file from the file area's admin detail screen while the grace period lasts;
-  that screen is decided but not yet built (issue #639).
+  who knows a name has no way to spend it. A SysOp reaches an expired file
+  while the grace period lasts through `E[x]pired files` on the file area's
+  admin detail screen, which carries the same `[D]ownload` (§5.3).
   Only areas that set a maximum file age have expired files at all.
 
 ### 3.6 Resource lists (issue #528)
