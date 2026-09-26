@@ -99,6 +99,7 @@ def upload_file(
     resolved, and `list_pending_files` for the moderation queue view.
     """
     require_level(uploader, area.min_write_level)
+    _refuse_hidden_area(db, area)
     # Before the bytes are stored, not after (Codex review): a
     # description this node will refuse should never leave a blob in
     # content-addressed storage with no row referencing it, waiting for
@@ -109,6 +110,16 @@ def upload_file(
         db, area, uploader, filename,
         sha256=sha256, size_bytes=len(data), storage_path=path, description=description,
     )
+
+
+def _refuse_hidden_area(db: Database, area: FileArea) -> None:
+    """Issue #683: a caller who opened the area before the SysOp excluded it
+    still holds the `FileArea`; an upload into it is refused here."""
+    # `SELECT *` and a key check, so a database migrated only partway (the
+    # legacy-schema tests) still takes uploads.
+    row = db.connection.execute("SELECT * FROM file_areas WHERE id = ?", (area.id,)).fetchone()
+    if row is not None and "link_hidden_at" in row.keys() and row["link_hidden_at"] is not None:
+        raise FileEntryError(f"file area {area.name!r} is no longer available on this node")
 
 
 def upload_file_from_temp(
@@ -139,6 +150,7 @@ def upload_file_from_temp(
     """
     try:
         require_level(uploader, area.min_write_level)
+        _refuse_hidden_area(db, area)
         # Validated before the move, for the same reason `upload_file`
         # validates before storing (Codex review) -- and here a refusal
         # after the move would strand the staging file's content in

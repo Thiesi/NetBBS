@@ -3223,7 +3223,10 @@ genesis a node has accepted is in exactly one recorded state (issue #561):
 **carried** (a local row), **offered** (it arrived past the automatic-intake
 cap `max_carried_*` and waits for the SysOp to accept it) or **excluded** (the
 SysOp declined it, or deleted it while carried, and it stays out until the SysOp
-restores it). The genesis save and its carry outcome are one transaction. The
+restores it). Deleting a carried resource whose current origin is another node
+hides it rather than destroying it: its row and content are kept but invisible
+to callers and administration, not carried, and closed to new content, until
+Restore un-hides it exactly as it was or Purge deletes it for real. The genesis save and its carry outcome are one transaction. The
 caps bound automatic intake only: lowering one sheds nothing, a SysOp's accept
 or restore is not capped, and a cap of 0 offers everything new. Offered and
 excluded resources want nothing further (§8.8), are declared to peers so that
@@ -11181,25 +11184,29 @@ by an exclusion is not filled from the offered list: once a resource has been
 put in front of the SysOp, accepting it is theirs to do, and an offer that can
 silently turn into a carried resource later makes the list untrustworthy.
 
-**Decision 5 — deleting a carried resource excludes it, and exclusion lasts
-until the SysOp reverses it.** The delete screen of a carried resource says that
-it will not come back and where to restore it. An `Excluded` list shows each
-excluded resource with `[R]estore`, which materializes it from the stored
-genesis and then replays the events this node still holds for it — a deleted
-resource's posts, messages and descriptors stay in `link_events`, are declared
-as known, and would never be sent again — before pull fetches what it is
-genuinely missing. Two things an exclusion must keep for that to be true, both
-written in the exclusion's transaction:
+**Decision 5 — deleting a carried resource hides it; Restore un-hides it; Purge
+deletes it (amended 2026-09-26, the maintainer's decision).** Deleting a carried
+resource keeps its local row and everything in it and sets `link_hidden_at`:
+callers and content administration no longer see it, it is not carried or
+declared as carried, no new content is projected into it, and it is recorded as
+excluded (`deleted`) -- all in one transaction with its audit entry. An
+`Excluded` list under Link status shows it with `[R]estore`, which clears the
+mark so the resource is back exactly as it was, and the next sync pass pulls
+what arrived meanwhile; and `[P]urge`, behind a typed-name confirmation, which
+deletes it for real and leaves it excluded (`purged`). After a purge, and for an
+offer declined without ever being carried, `[R]estore` takes the resource on
+again from its stored genesis, like an accepted offer. A hidden resource's name
+stays taken, and creating or renaming onto it says which excluded resource
+holds it.
 
-- **what this node's own users wrote there.** Self-originated envelopes live in
-  `posts.link_event_json` and `channel_messages.link_event_json`, not in
-  `link_events`, and the delete helpers remove those rows; they move to durable
-  event storage first, or excluding a resource destroys this node's signed
-  history and restoring it depends on some peer having kept a copy;
-- **this node's own moderation of it.** A carrying node's moderator edits and
-  tombstones on a remotely originated board are local and are not in the
-  signed history, so replay alone would bring back content the SysOp removed.
-  They are kept as an overlay and reapplied on restore.
+The first form of this decision deleted the rows and restored by replaying
+`link_events`, keeping this node's own users' envelopes and a local-moderation
+overlay so the replay could be faithful. Mapping the code showed it could not
+be: this node's own posts are keyed by a local content hash rather than their
+event's content ID, so replayed they come back detached from their local
+accounts; and a carrying node's moderation is not in the signed history at all.
+Hiding keeps both exactly, costs one column, and leaves reclaiming the space to
+an explicit Purge.
 
 Exclusion applies only to a resource whose *current* origin, resolved as §9.4
 resolves it, is another node — not merely one whose genesis came from
@@ -11209,8 +11216,8 @@ resource this node is the current origin of is not a carry choice and is outside
 this decision: for boards it goes through closure or origin transfer (§9.5, §9.4);
 linked channels and file areas have no transfer or closure events yet, so their
 delete path stays as it is today, a gap this decision records rather than
-closes. The SysOp can also exclude an offered
-resource without ever carrying it. This answers scenario 5 (it stays gone, and
+closes -- deleting such a resource stays a real delete. The SysOp can also
+exclude an offered resource without ever carrying it. This answers scenario 5 (it stays gone, and
 visibly so) and scenario 3 (pruning frees slots for automatic intake; nothing
 that was offered is lost). Excluded and offered resources are never visible to
 callers.

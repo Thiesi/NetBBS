@@ -10160,6 +10160,41 @@ def test_approving_a_file_approved_meanwhile_reports_it_and_stays_on_screen(db, 
     assert get_file(db, entry.file_id).status == "approved"
 
 
+def test_deleting_a_carried_board_from_elsewhere_hides_it_and_excluded_restores_it(db, lane, sysop):
+    """Issue #683: the delete screen of a carried board whose origin is
+    another node hides it (data kept); Link status -> Excluded restores it."""
+    from netbbs.boards.boards import BoardError, get_board_by_name
+    from netbbs.link.carry import accept_genesis, carry_decision_counts
+    from netbbs.link.events import build_board_genesis
+    from netbbs.link.node_identity import bootstrap_node_identity
+    from netbbs.net.admin_flow import _delete_board_screen
+
+    remote = bootstrap_node_identity("hiding-origin")
+    genesis = build_board_genesis(
+        signing_identity=remote.signing_key, origin_fingerprint=remote.fingerprint,
+        board_id="e" * 64, name="Retro Hardware", created_at="2026-01-01T00:00:00Z",
+    )
+    accept_genesis(
+        db, kind="boards", envelope=genesis.to_dict(), sender_fingerprint=remote.fingerprint,
+        content_id=genesis.content_id, own_fingerprint="own", cap=None,
+    )
+    board = get_board_by_name(db, "Retro Hardware")
+
+    session = FakeSession(["Retro Hardware"])
+    assert asyncio.run(_delete_board_screen(session, lane, sysop, board, own_fingerprint="own")) is True
+    assert "carried from another node" in _normalized_visible(_written_text(session))
+    with pytest.raises(BoardError):
+        get_board_by_name(db, "Retro Hardware")
+    assert db.connection.execute("SELECT COUNT(*) FROM boards").fetchone()[0] == 1
+
+    session = FakeSession(["s", "l", "PAGE_DOWN", "x", "0", "1", "r", "b", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop, link_context=_link_context()))
+    text = _normalized_visible(_written_text(session))
+    assert "'Retro Hardware' restored" in text
+    assert get_board_by_name(db, "Retro Hardware").board_id == "e" * 64
+    assert carry_decision_counts(db) == {}
+
+
 def test_a_closed_boards_detail_shows_the_closure_reason(db, lane, sysop):
     """Issue #680: the reason is part of the signed closure, and the board
     detail screen -- the one place a SysOp looks at a closed board -- never

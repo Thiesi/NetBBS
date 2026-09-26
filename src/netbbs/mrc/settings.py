@@ -219,7 +219,7 @@ def get_mrc_mapping(db: Database, channel: Channel) -> MrcChannelMapping | None:
 
 def list_mrc_mappings(db: Database) -> list[MrcChannelMapping]:
     rows = db.connection.execute(
-        "SELECT * FROM channels WHERE mrc_room IS NOT NULL ORDER BY lower(name)"
+        "SELECT * FROM channels WHERE mrc_room IS NOT NULL AND link_hidden_at IS NULL ORDER BY lower(name)"
     ).fetchall()
     return [mapping for mapping in (_mapping_from_row(row) for row in rows) if mapping is not None]
 
@@ -468,6 +468,10 @@ def materialize_open_room(db: Database, room: str, *, open_settings: OpenRoomSet
     existing = db.connection.execute(
         "SELECT * FROM channels WHERE lower(mrc_room) = lower(?)", (normalized,)
     ).fetchone()
+    if existing is not None and "link_hidden_at" in existing.keys() and existing["link_hidden_at"] is not None:
+        # Issue #683: the room is mapped to a carried channel the SysOp has
+        # excluded; opening it must not walk a caller into that channel.
+        raise MrcSettingsError(f"MRC room #{normalized} belongs to a channel excluded from this node.")
     if existing is not None:
         mapping = _mapping_from_row(existing)
         assert mapping is not None

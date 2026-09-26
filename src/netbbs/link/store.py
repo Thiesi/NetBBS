@@ -710,11 +710,11 @@ def uncarried_resource_ids(db: Database) -> dict[str, tuple[str, ...]]:
     # whose id a refused genesis claimed (issue #300) -- is not a copy of it.
     queries = (
         ("boards", "board_id", BOARD_GENESIS_OBJECT_TYPE,
-         "SELECT board_id FROM boards WHERE link_genesis_json IS NOT NULL"),
+         "SELECT board_id FROM boards WHERE link_genesis_json IS NOT NULL AND link_hidden_at IS NULL"),
         ("channels", "channel_id", CHANNEL_GENESIS_OBJECT_TYPE,
-         "SELECT channel_id FROM channels WHERE link_genesis_json IS NOT NULL"),
+         "SELECT channel_id FROM channels WHERE link_genesis_json IS NOT NULL AND link_hidden_at IS NULL"),
         ("file_areas", "file_area_id", FILE_AREA_GENESIS_OBJECT_TYPE,
-         "SELECT area_id FROM file_areas WHERE link_genesis_json IS NOT NULL"),
+         "SELECT area_id FROM file_areas WHERE link_genesis_json IS NOT NULL AND link_hidden_at IS NULL"),
     )
     result: dict[str, tuple[str, ...]] = {}
     for kind, column, object_type, local_ids in queries:
@@ -856,7 +856,7 @@ def carried_board_ids(db: Database) -> list[str]:
     this issue closes)."""
     return [
         row["board_id"]
-        for row in db.connection.execute("SELECT board_id FROM boards WHERE link_genesis_json IS NOT NULL")
+        for row in db.connection.execute("SELECT board_id FROM boards WHERE link_genesis_json IS NOT NULL AND link_hidden_at IS NULL")
     ]
 
 
@@ -865,7 +865,7 @@ def carried_channel_ids(db: Database) -> list[str]:
     -- mirrors `carried_board_ids` exactly (design doc §9.6, issue #87)."""
     return [
         row["channel_id"]
-        for row in db.connection.execute("SELECT channel_id FROM channels WHERE link_genesis_json IS NOT NULL")
+        for row in db.connection.execute("SELECT channel_id FROM channels WHERE link_genesis_json IS NOT NULL AND link_hidden_at IS NULL")
     ]
 
 
@@ -875,7 +875,7 @@ def carried_file_area_ids(db: Database) -> list[str]:
     §11, issue #93)."""
     return [
         row["area_id"]
-        for row in db.connection.execute("SELECT area_id FROM file_areas WHERE link_genesis_json IS NOT NULL")
+        for row in db.connection.execute("SELECT area_id FROM file_areas WHERE link_genesis_json IS NOT NULL AND link_hidden_at IS NULL")
     ]
 
 
@@ -1005,9 +1005,12 @@ def _all_board_events(db: Database, board_id: str) -> dict[str, dict]:
     events: dict[str, dict] = {}
 
     board_row = db.connection.execute(
-        "SELECT id, link_genesis_json, link_lifecycle_json FROM boards WHERE board_id = ?", (board_id,)
+        "SELECT id, link_genesis_json, link_lifecycle_json, link_hidden_at FROM boards WHERE board_id = ?",
+        (board_id,),
     ).fetchone()
-    if board_row is None:
+    if board_row is None or board_row["link_hidden_at"] is not None:
+        # Issue #683: a hidden (excluded) board is not carried; it has
+        # nothing to declare and nothing to serve.
         return events
     if board_row["link_genesis_json"] is not None:
         raw = json.loads(board_row["link_genesis_json"])
@@ -1127,9 +1130,9 @@ def _all_channel_events(db: Database, channel_id: str) -> dict[str, dict]:
     events: dict[str, dict] = {}
 
     channel_row = db.connection.execute(
-        "SELECT id, link_genesis_json FROM channels WHERE channel_id = ?", (channel_id,)
+        "SELECT id, link_genesis_json, link_hidden_at FROM channels WHERE channel_id = ?", (channel_id,)
     ).fetchone()
-    if channel_row is None:
+    if channel_row is None or channel_row["link_hidden_at"] is not None:
         return events
     if channel_row["link_genesis_json"] is not None:
         raw = json.loads(channel_row["link_genesis_json"])
@@ -1212,9 +1215,9 @@ def _all_file_area_events(db: Database, area_id: str) -> dict[str, dict]:
     events: dict[str, dict] = {}
 
     area_row = db.connection.execute(
-        "SELECT id, link_genesis_json FROM file_areas WHERE area_id = ?", (area_id,)
+        "SELECT id, link_genesis_json, link_hidden_at FROM file_areas WHERE area_id = ?", (area_id,)
     ).fetchone()
-    if area_row is None:
+    if area_row is None or area_row["link_hidden_at"] is not None:
         return events
     if area_row["link_genesis_json"] is not None:
         raw = json.loads(area_row["link_genesis_json"])

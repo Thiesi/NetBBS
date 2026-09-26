@@ -2759,6 +2759,24 @@ or an `offered` row in `link_carry_decisions` -- in one transaction, using the
 `commit=False` variants of `save_event` and the three materializers. "It's
 accepted" still does not imply "it's carried": the decision table says which.
 
+**Hidden rows (issue #683).** `boards`, `channels` and `file_areas` carry
+`link_hidden_at`, set when the SysOp deletes a carried resource whose origin is
+elsewhere. Every caller-facing and admin helper filters it: `list_boards`,
+`get_board_by_name`, `list_channels`, `get_channel_by_name`, `list_file_areas`,
+`get_file_area_by_name`, `get_file_area_by_area_id`, the Link
+`get_channel_by_channel_id` and the MRC mapping lookups, plus three queries that
+bypass them (`unread_replies_to`, `list_pending_invitations_for_user`, door
+outbound `targets`). Search, new-scan and the menus inherit it through those
+helpers. A new query that reads these tables for a caller must filter it too.
+On the Link side a hidden resource is not carried (`carried_*_ids`,
+`carried_*_count`, `_all_*_events` treat it as absent), is declared not carried,
+takes no new content (the materializers return `None`), and pushes nothing of
+its own (`load_own_*_events`). Two things deliberately do *not* filter it: the
+UNIQUE `name` (a hidden resource's name stays taken; the create/rename error
+says so) and `load_link_node` (its events stay known). The create/update
+read-backs look their row up unfiltered, so the write paths do not depend on
+the column.
+
 **"Known" means stored (issue #683).** `handle_events` adds every accepted
 content ID to `LinkNode.known_event_ids`, and a later copy of a known ID is
 dropped as a duplicate. An event under a board, channel or file area with no

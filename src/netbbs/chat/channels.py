@@ -151,9 +151,11 @@ def create_channel(
         )
         db.connection.commit()
     except sqlite3.IntegrityError as exc:
+        if _name_held_by_hidden(db, name):
+            raise ChannelError(f"the name {name!r} is held by a Link resource excluded from this node (Link status -> Excluded): restore or purge it there first") from exc
         raise ChannelError(f"could not create channel {name!r} — name already in use?") from exc
 
-    new_channel = get_channel_by_name(db, name)
+    new_channel = _read_back_by_name(db, name)
     record_action(
         db, actor=creator, action="create_channel", object_type="channel", object_id=new_channel.id,
         detail=f"created channel {name!r}",
@@ -161,8 +163,29 @@ def create_channel(
     return new_channel
 
 
-def get_channel_by_name(db: Database, name: str) -> Channel:
+def _name_held_by_hidden(db: Database, name: str) -> bool:
+    """Issue #683: whether a hidden (excluded) carried channel holds `name`."""
+    return db.connection.execute(
+        "SELECT 1 FROM channels WHERE name = ? AND link_hidden_at IS NOT NULL", (name,)
+    ).fetchone() is not None
+
+
+def _read_back_by_name(db: Database, name: str):
+    """A row this module has just written, read back by name. Not filtered on
+    `link_hidden_at` (issue #683): a row just created or renamed is never
+    hidden, and this keeps the write paths free of the newer column."""
     row = db.connection.execute("SELECT * FROM channels WHERE name = ?", (name,)).fetchone()
+    if row is None:
+        raise ChannelError(f"no such channel: {name!r}")
+    return _row_to_channel(row)
+
+
+def get_channel_by_name(db: Database, name: str) -> Channel:
+    # Issue #683: a hidden (excluded) carried channel is invisible here and in
+    # `list_channels`.
+    row = db.connection.execute(
+        "SELECT * FROM channels WHERE name = ? AND link_hidden_at IS NULL", (name,)
+    ).fetchone()
     if row is None:
         raise ChannelError(f"no such channel: {name!r}")
     return _row_to_channel(row)
@@ -205,7 +228,7 @@ def list_channels(db: Database, *, order_by: str = "alphabetical") -> list[Chann
         rows = db.connection.execute(
             "SELECT * FROM channels ORDER BY pinned DESC, name COLLATE NOCASE ASC"
         ).fetchall()
-    return [_row_to_channel(row) for row in rows]
+    return [_row_to_channel(row) for row in rows if row["link_hidden_at"] is None]
 
 
 def update_channel(
@@ -261,9 +284,11 @@ def update_channel(
         )
         db.connection.commit()
     except sqlite3.IntegrityError as exc:
+        if _name_held_by_hidden(db, name):
+            raise ChannelError(f"the name {name!r} is held by a Link resource excluded from this node (Link status -> Excluded): restore or purge it there first") from exc
         raise ChannelError(f"could not update channel {channel.name!r} — name already in use?") from exc
 
-    updated = get_channel_by_name(db, name)
+    updated = _read_back_by_name(db, name)
     record_action(
         db, actor=changed_by, action="update_channel", object_type="channel", object_id=channel.id,
         detail=f"updated channel {channel.name!r}",
@@ -342,7 +367,7 @@ def set_topic(db: Database, channel: Channel, topic: str | None, *, set_by: User
     record_action(
         db, actor=set_by, action="topic", object_type="channel", object_id=channel.id, detail=topic
     )
-    return get_channel_by_name(db, channel.name)
+    return _read_back_by_name(db, channel.name)
 
 
 def _row_to_channel(row: sqlite3.Row) -> Channel:

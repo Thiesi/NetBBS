@@ -161,9 +161,11 @@ def create_file_area(
         )
         db.connection.commit()
     except sqlite3.IntegrityError as exc:
+        if _name_held_by_hidden(db, name):
+            raise FileAreaError(f"the name {name!r} is held by a Link resource excluded from this node (Link status -> Excluded): restore or purge it there first") from exc
         raise FileAreaError(f"could not create file area {name!r} — name already in use?") from exc
 
-    new_area = get_file_area_by_name(db, name)
+    new_area = _read_back_by_name(db, name)
     record_action(
         db, actor=creator, action="create_file_area", object_type="file_area", object_id=new_area.id,
         detail=f"created file area {name!r}",
@@ -171,8 +173,29 @@ def create_file_area(
     return new_area
 
 
-def get_file_area_by_name(db: Database, name: str) -> FileArea:
+def _name_held_by_hidden(db: Database, name: str) -> bool:
+    """Issue #683: whether a hidden (excluded) carried file area holds `name`."""
+    return db.connection.execute(
+        "SELECT 1 FROM file_areas WHERE name = ? AND link_hidden_at IS NOT NULL", (name,)
+    ).fetchone() is not None
+
+
+def _read_back_by_name(db: Database, name: str):
+    """A row this module has just written, read back by name. Not filtered on
+    `link_hidden_at` (issue #683): a row just created or renamed is never
+    hidden, and this keeps the write paths free of the newer column."""
     row = db.connection.execute("SELECT * FROM file_areas WHERE name = ?", (name,)).fetchone()
+    if row is None:
+        raise FileAreaError(f"no such file area: {name!r}")
+    return _row_to_file_area(row)
+
+
+def get_file_area_by_name(db: Database, name: str) -> FileArea:
+    # Issue #683: a hidden (excluded) carried file area is invisible here, in
+    # `get_file_area_by_area_id` (transfer grants) and in `list_file_areas`.
+    row = db.connection.execute(
+        "SELECT * FROM file_areas WHERE name = ? AND link_hidden_at IS NULL", (name,)
+    ).fetchone()
     if row is None:
         raise FileAreaError(f"no such file area: {name!r}")
     return _row_to_file_area(row)
@@ -192,7 +215,9 @@ def get_file_area_by_area_id(db: Database, area_id: str) -> FileArea | None:
     and never repeats. `None` rather than raising, because "the area
     went away while a caller had a link open" is an ordinary outcome
     for that caller, not an error in the lookup."""
-    row = db.connection.execute("SELECT * FROM file_areas WHERE area_id = ?", (area_id,)).fetchone()
+    row = db.connection.execute(
+        "SELECT * FROM file_areas WHERE area_id = ? AND link_hidden_at IS NULL", (area_id,)
+    ).fetchone()
     return _row_to_file_area(row) if row is not None else None
 
 
@@ -281,7 +306,7 @@ def list_file_areas(db: Database, *, order_by: str = "activity") -> list[FileAre
             (now,),
         ).fetchall()
 
-    return [_row_to_file_area(row) for row in rows]
+    return [_row_to_file_area(row) for row in rows if row["link_hidden_at"] is None]
 
 
 def update_file_area(
@@ -327,9 +352,11 @@ def update_file_area(
         )
         db.connection.commit()
     except sqlite3.IntegrityError as exc:
+        if _name_held_by_hidden(db, name):
+            raise FileAreaError(f"the name {name!r} is held by a Link resource excluded from this node (Link status -> Excluded): restore or purge it there first") from exc
         raise FileAreaError(f"could not update file area {area.name!r} — name already in use?") from exc
 
-    updated = get_file_area_by_name(db, name)
+    updated = _read_back_by_name(db, name)
     record_action(
         db, actor=changed_by, action="update_file_area", object_type="file_area", object_id=area.id,
         detail=f"updated file area {area.name!r}",
@@ -357,52 +384,59 @@ def delete_file_area(db: Database, area: FileArea, *, deleted_by: User) -> None:
     """
     db.connection.execute("BEGIN IMMEDIATE")
     try:
-        # Read under the write lock, so the paths removed below are exactly
-        # those of the rows deleted here -- another connection cannot start or
-        # advance a transfer in between.
-        transfers = db.connection.execute(
-            """SELECT t.transfer_id, t.temp_path FROM link_file_transfers AS t
-                 JOIN remote_files AS r ON r.file_id = t.remote_file_id
-                WHERE r.area_id = ?""",
-            (area.id,),
-        ).fetchall()
         record_action_without_commit(
             db, actor=deleted_by, action="delete_file_area", object_type="file_area", object_id=area.id,
             detail=f"deleted file area {area.name!r} (id {area.id})",
         )
-        for row in transfers:
-            db.connection.execute(
-                "DELETE FROM link_file_transfer_chunks WHERE transfer_id = ?", (row["transfer_id"],)
-            )
-            db.connection.execute("DELETE FROM link_file_transfers WHERE transfer_id = ?", (row["transfer_id"],))
-        db.connection.execute("DELETE FROM remote_files WHERE area_id = ?", (area.id,))
-        db.connection.execute("DELETE FROM files WHERE area_id = ?", (area.id,))
-        db.connection.execute(
-            "DELETE FROM moderator_grants WHERE object_type = 'file_area' AND object_id = ?", (area.id,)
-        )
-        db.connection.execute(
-            "DELETE FROM user_read_cursors WHERE object_type = 'file_area' AND object_id = ?", (area.id,)
-        )
-        db.connection.execute(
-            "DELETE FROM user_follows WHERE object_type = 'file_area' AND object_id = ?", (area.id,)
-        )
-        db.connection.execute("DELETE FROM file_areas WHERE id = ?", (area.id,))
+        staging = delete_file_area_rows(db, area.id)
     except BaseException:
         db.connection.rollback()
         raise
     db.connection.commit()
+    remove_staging_files(staging)
+
+
+def delete_file_area_rows(db: Database, area_local_id: int) -> list[str]:
+    """Delete a file area and everything that references it, inside the
+    caller's open transaction, without committing; returns the staging files
+    of its partial transfers, for `remove_staging_files` once the caller has
+    committed. Shared by `delete_file_area` and the Link Purge of an excluded
+    area (issue #683), so the foreign-key order lives in one place (#696).
+
+    Run it under the write lock (`BEGIN IMMEDIATE`): the transfer rows are read
+    here, so the paths returned are exactly those of the rows deleted -- no
+    other connection can start or advance a transfer in between."""
+    transfers = db.connection.execute(
+        """SELECT t.transfer_id, t.temp_path FROM link_file_transfers AS t
+             JOIN remote_files AS r ON r.file_id = t.remote_file_id
+            WHERE r.area_id = ?""",
+        (area_local_id,),
+    ).fetchall()
     for row in transfers:
-        if row["temp_path"]:
-            try:
-                os.remove(row["temp_path"])
-            except FileNotFoundError:
-                pass  # never written, or already gone: nothing left to reclaim
-            except OSError as exc:
-                # The rows naming it are committed away, so nothing would ever
-                # come back for it: say so, as `withdraw_remote_file` does.
-                _logger.warning(
-                    "could not remove staging file %s of a deleted file area: %s", row["temp_path"], exc
-                )
+        db.connection.execute("DELETE FROM link_file_transfer_chunks WHERE transfer_id = ?", (row["transfer_id"],))
+        db.connection.execute("DELETE FROM link_file_transfers WHERE transfer_id = ?", (row["transfer_id"],))
+    db.connection.execute("DELETE FROM remote_files WHERE area_id = ?", (area_local_id,))
+    db.connection.execute("DELETE FROM files WHERE area_id = ?", (area_local_id,))
+    for scoped in ("moderator_grants", "user_read_cursors", "user_follows"):
+        db.connection.execute(
+            f"DELETE FROM {scoped} WHERE object_type = 'file_area' AND object_id = ?", (area_local_id,)
+        )
+    db.connection.execute("DELETE FROM file_areas WHERE id = ?", (area_local_id,))
+    return [row["temp_path"] for row in transfers if row["temp_path"]]
+
+
+def remove_staging_files(paths: list[str]) -> None:
+    """Remove the staging files `delete_file_area_rows` returned, after the
+    commit. A failure other than "already gone" is logged: the rows naming the
+    file are committed away, so nothing would ever come back for it, the same
+    reasoning as `withdraw_remote_file`."""
+    for path in paths:
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass  # never written, or already gone: nothing left to reclaim
+        except OSError as exc:
+            _logger.warning("could not remove staging file %s of a deleted file area: %s", path, exc)
 
 
 def _row_to_file_area(row: sqlite3.Row) -> FileArea:

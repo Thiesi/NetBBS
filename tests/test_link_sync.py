@@ -3925,3 +3925,40 @@ def test_a_curated_node_is_offered_a_board_and_accepting_it_pulls_its_content(tm
         assert list_carry_decisions(net.dbs["B"].db, OFFERED) == []
     finally:
         net.close()
+
+
+def test_a_hidden_board_is_left_alone_by_sync_and_restore_pulls_what_it_missed(tmp_path):
+    """Issue #683: B hides R's board. What R posts meanwhile is neither sent
+    (B declares it not carried) nor projected; Restore brings the board back
+    as it was, and the next pass pulls the post it missed."""
+    from netbbs.boards.boards import get_board_by_name
+    from netbbs.link.carry import hide_carried_resource, restore_excluded
+
+    net = _ThreeNodes(tmp_path, enforce=False)
+    r_board_id = get_board_by_name(net.dbs["R"].db, "general").board_id
+    net.post("R", "before hiding")
+
+    async def scenario():
+        server = await net.start()
+        try:
+            async with aiohttp.ClientSession() as session:
+                await net.dial("B", session)
+                assert net.subjects_on("B") == ["before hiding"]
+                hide_carried_resource(
+                    net.dbs["B"].db, "boards", r_board_id, actor=net.sysops["B"],
+                    own_fingerprint=net.ids["B"].fingerprint,
+                )
+                net.post("R", "while hidden")
+                await net.dial("B", session)
+                hidden_count = net.dbs["B"].db.connection.execute("SELECT COUNT(*) FROM posts").fetchone()[0]
+                assert hidden_count == 1
+                restore_excluded(net.dbs["B"].db, "boards", r_board_id, actor=net.sysops["B"])
+                await net.dial("B", session)
+        finally:
+            await server.stop()
+
+    try:
+        asyncio.run(scenario())
+        assert net.subjects_on("B") == ["before hiding", "while hidden"]
+    finally:
+        net.close()

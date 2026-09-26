@@ -2963,4 +2963,18 @@ MIGRATIONS = [
                AND file_area_id NOT IN (SELECT area_id FROM file_areas WHERE link_genesis_json IS NOT NULL);
         """,
     ),
+    Migration(
+        description=(
+            "Issue #683: `link_hidden_at` on boards, channels and file areas. Set when the "
+            "SysOp deletes a carried Link resource whose origin is another node: the row and "
+            "everything in it are kept, but it is invisible to callers and content "
+            "administration, not carried, and takes no new content, until Restore clears it "
+            "again or Purge deletes it for real. Its name stays taken meanwhile."
+        ),
+        sql="""
+        ALTER TABLE boards ADD COLUMN link_hidden_at TEXT;
+        ALTER TABLE channels ADD COLUMN link_hidden_at TEXT;
+        ALTER TABLE file_areas ADD COLUMN link_hidden_at TEXT;
+        """,
+    ),
 ]

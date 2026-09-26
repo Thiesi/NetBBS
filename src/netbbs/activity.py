@@ -238,6 +238,7 @@ def unread_replies_to(db: Database, user: User) -> list[Post]:
         """
         SELECT root.*, e.envelope_json AS link_envelope_json FROM posts root
         JOIN posts parent ON parent.post_id = root.parent_post_id
+        JOIN boards b ON b.id = root.board_id AND b.link_hidden_at IS NULL
         LEFT JOIN link_events e ON e.content_id = root.post_id
         WHERE parent.author_user_id = ?
           AND root.post_id = root.root_post_id
