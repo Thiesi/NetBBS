@@ -20,7 +20,7 @@ from netbbs.chat.channels import (
     set_topic,
 )
 from netbbs.chat.direct_invites import DirectChatInvite, DirectChatInvites
-from netbbs.chat.hub import ChatHub, ParticipantId, QueueOverflowNotice
+from netbbs.chat.hub import ChannelClosed, ChatHub, ParticipantId, QueueOverflowNotice
 from netbbs.chat.mailbox import MessageMailbox
 from netbbs.chat.membership import (
     ChannelInvitation,
@@ -85,6 +85,7 @@ __all__ = [
     "set_topic",
     "DirectChatInvite",
     "DirectChatInvites",
+    "ChannelClosed",
     "ChatHub",
     "ParticipantId",
     "QueueOverflowNotice",

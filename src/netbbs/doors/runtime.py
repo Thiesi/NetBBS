@@ -50,6 +50,12 @@ _DIAGNOSTIC_BYTES = 8192
 # A human dragging a window edge; fine-grained enough to feel immediate
 # without waking the event loop for a size which almost never changes.
 _RESIZE_POLL_SECONDS = 0.5
+#: How often a running door's outbound requests are picked up (issue #520,
+#: decision A2), and how many one pick-up answers. The rate ceiling, not the
+#: tick, bounds how much a door publishes; the tick bounds how late it
+#: appears, and the cap keeps each pick-up a short job on the shared lane.
+_OUTBOUND_TICK_SECONDS = 2.0
+_OUTBOUND_TICK_LIMIT = 16
 
 
 @dataclass(frozen=True)
@@ -466,6 +472,38 @@ async def _forward_resize(session, proc, info_path, info, *, published, pty_fd=N
             return
 
 
+async def _drain_while_running(lane, door, workdir, node_identity, rehearsal, *, rehearsed=None,
+                               guest_receipts=False,
+                               interval=None):
+    """Answer a door's outbound requests while it is still running (#520).
+
+    A post made at the moment something happens is the point of a live hook;
+    one made when the player leaves is a Chronicle. Each pass is bounded and
+    non-final, so leftovers wait for the next one and only the drain at exit
+    refuses anything. A failure is logged and the next pass tries again: it
+    must never end the caller's session.
+    """
+    from netbbs.doors.outbound import RESULTS_KEPT, has_requests, results_dir
+
+    receipts = await lane.run(lambda db: results_dir(db, door.id)) if guest_receipts else None
+    while True:
+        await asyncio.sleep(interval or _OUTBOUND_TICK_SECONDS)
+        try:
+            if await asyncio.to_thread(has_requests, workdir):
+                await lane.run(drain_outbound, door, workdir,
+                               node_identity=node_identity() if callable(node_identity) else node_identity,
+                               rehearsal=rehearsal, rehearsed=rehearsed,
+                               limit=_OUTBOUND_TICK_LIMIT, final=False)
+            if receipts is not None:
+                # Every tick, not only after this session drained: another
+                # session of the same door may have been answered, and a native
+                # door would see that receipt in the shared directory at once.
+                from netbbs.doors.vm import copy_receipts
+                await asyncio.to_thread(copy_receipts, receipts, workdir, RESULTS_KEPT)
+        except Exception as exc:
+            _logger.warning("door %r in-session outbound drain failed: %s", door.name, exc)
+
+
 async def _diagnostics(reader, tail):
     while chunk := await reader.read(4096):
         tail.extend(chunk)
@@ -566,6 +604,7 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
     slave = workdir = None
     diagnostic_tasks = []
     resize_task = None
+    outbound_task = None
     tail = bytearray()
     reason, exit_code = "failed_to_start", None
     mode_entered = False
@@ -685,6 +724,10 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
                 from netbbs.doors.vm import options as vm_options, watch_boot
                 diagnostic_tasks.append(asyncio.create_task(watch_boot(
                     workdir, proc, vm_options(profile)["boot_timeout_seconds"], tail)))
+            if "outbound" in info:
+                outbound_task = asyncio.create_task(_drain_while_running(
+                    lane, door, workdir, node_identity, rehearsal, rehearsed=rehearsal_spend,
+                    guest_receipts=bool(profile and profile.adapter == "vm")))
             mode = resize_mode(profile, kind, bundled_follows_resize=vouched)
             if os.name == "posix" and mode is not None:
                 resize_task = asyncio.create_task(_forward_resize(
@@ -759,6 +802,12 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
             if resize_task is not None:
                 resize_task.cancel()
                 await asyncio.gather(resize_task, return_exceptions=True)
+            # Before the final drain below. A pick-up already running in the
+            # lane's worker thread finishes first -- the lane runs one job at
+            # a time, in order -- and claiming makes an overlap harmless anyway.
+            if outbound_task is not None:
+                outbound_task.cancel()
+                await asyncio.gather(outbound_task, return_exceptions=True)
             # A full StreamReader can pause the underlying pipe. After timeout
             # or disconnect the terminal pump is gone; drain without forwarding
             # so process reaping/pipe closure cannot depend on that slow caller.
