@@ -2064,8 +2064,8 @@ async def _maintain_relay_selection(
 
     needed = TARGET_RELAY_COUNT - len(node.relays_serving_me)
     attempted = 0
-    # A candidate that declined recently goes to the back (Codex review of
-    # #713): reachable decliners score as well as any relay, so with the
+    # A candidate that recently failed to grant goes to the back (Codex review
+    # of #713): reachable decliners score as well as any relay, so with the
     # per-pass bound the same few would otherwise be asked every pass and the
     # willing one below them never reached. Moved back, not skipped, so a
     # decliner whose SysOp has since said yes is asked again once the others
@@ -2112,9 +2112,12 @@ async def _maintain_relay_selection(
         if granted:
             needed -= 1
             declines.pop(candidate_fingerprint, None)
-        elif candidate_fingerprint in reached:
-            # Reached but declined -- serving off, full, or not accepting this
-            # requester. Unreachable ones need no entry: their score sinks.
+        else:
+            # Declined -- serving off, full, not accepting this requester -- or
+            # not reached at all. Either way it goes to the back: a peer with a
+            # long record of seed successes that has since gone away keeps a
+            # high score for a long time, and must not hold its place ahead of
+            # untried candidates pass after pass (Codex review of #713).
             while len(declines) >= _MAX_REMEMBERED_RELAY_DECLINES:
                 declines.pop(next(iter(declines)))
             declines[candidate_fingerprint] = now

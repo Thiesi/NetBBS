@@ -396,3 +396,51 @@ def test_decliners_move_to_the_back_so_a_later_pass_reaches_the_willing_relay(tm
     finally:
         lane.close()
         database.close()
+
+
+def test_an_unreachable_high_scorer_also_goes_to_the_back(tmp_path, monkeypatch):
+    """Codex review of #713: a peer with a long record of seed successes that
+    has gone away keeps its score; it must not keep its place ahead of an
+    untried candidate pass after pass."""
+    import asyncio
+    from types import SimpleNamespace
+
+    import netbbs.link.sync as sync
+    from netbbs.link.transport import LinkTransportError
+    from netbbs.storage.execution import DatabaseLane
+
+    database = Database(tmp_path / "gone.db")
+    lane = DatabaseLane(database.path)
+    node = LinkNode(identity=bootstrap_node_identity("alice"))
+    names = [f"gone-{i}" for i in range(6)] + ["willing"]
+    for name in names:
+        _add_peer(node, name)
+    asked = []
+
+    async def dial(_node, _session, _url, _hello, _lane, **_kwargs):
+        if asked[-1] != "willing":
+            raise LinkTransportError("connection refused")
+        return SimpleNamespace(fingerprint="willing")
+
+    async def consent(*_args, **_kwargs):
+        return SimpleNamespace(payload={"accepted": True})
+
+    original = sync._request_one_relay_consent
+
+    async def tracking(node_, session, url, relay_fingerprint, *args, **kwargs):
+        asked.append(relay_fingerprint)
+        return await original(node_, session, url, relay_fingerprint, *args, **kwargs)
+
+    monkeypatch.setattr(sync, "dial_hello", dial)
+    monkeypatch.setattr(sync, "request_relay_consent", consent)
+    monkeypatch.setattr(sync, "_request_one_relay_consent", tracking)
+    monkeypatch.setattr(sync, "select_relay_candidates", lambda db, n: list(names))
+    declines: dict[str, float] = {}
+    try:
+        asyncio.run(sync._maintain_relay_selection(node, None, lambda: None, lane, declines=declines))
+        asked.clear()
+        asyncio.run(sync._maintain_relay_selection(node, None, lambda: None, lane, declines=declines))
+        assert asked[0] == "willing"
+    finally:
+        lane.close()
+        database.close()
