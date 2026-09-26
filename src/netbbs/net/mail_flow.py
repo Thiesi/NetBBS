@@ -72,14 +72,15 @@ from netbbs.net.unicode_style_preference import unicode_style_enabled
 from netbbs.net.node_theme import effective_accent_color_256, effective_header_color_256
 from netbbs.net.picker import pick_item
 from netbbs.net.prose_editor import edit_prose
-from netbbs.net.notices import announce, announce_styled, write_notices
+from netbbs.net.detail_view import show_detail
+from netbbs.net.notices import announce, announce_styled, take_notices, write_notices
 from netbbs.net.session import Session, write_prompt
+from netbbs.rendering.detail import Section, Styled
 from netbbs.signature import append_signature, get_signature
 from netbbs.rendering import (
     ERROR_COLOR,
     LABEL_COLOR,
     METADATA_COLOR,
-    RULE_COLOR,
     MUTED_COLOR,
     SUCCESS_COLOR,
     VALUE_COLOR,
@@ -273,59 +274,80 @@ async def _show_sent(session: Session, lane: DatabaseLane, user: User) -> None:
         await _show_sent_message(session, lane, user, message)
 
 
-async def _render_message(
+async def _message_view(
     session: Session,
     lane: DatabaseLane,
     user: User,
     *,
     message: MailMessage,
     to_label: str | None,
-    redraw_in_place: bool = False,
     unicode_style: bool = False,
     collapsed: bool = False,
-) -> None:
+) -> tuple[str, list[str], list[str]]:
+    """The title, the header rows (From or To, Date, any identity warning)
+    and the body rows of one message, for `show_detail` to draw a page at a
+    time (issue #679: a long message used to scroll its own header away)."""
     mailbox = "Sent" if to_label is not None else "Inbox"
-    header = screen_title(
+    title = screen_title(
         sanitize_text(message.subject),
         breadcrumb=(session.node_display_name, "Mail", mailbox),
         width=session.terminal_width,
-        clear=redraw_in_place,
+        clear=False,
         unicode_style=unicode_style, collapsed=collapsed,
         header_color=await lane.run(effective_header_color_256),
-    node_name_gradient=session.node_name_gradient)
-    await session.write_line(f"\r\n{header}")
+        node_name_gradient=session.node_name_gradient,
+    )
     accent = await lane.run(effective_accent_color_256)
+    preamble: list[str] = []
     if to_label is not None:
-        await session.write_line(
-            colored("To: ", fg_color=LABEL_COLOR)
-            + colored(sanitize_text(to_label), fg_color=accent)
-        )
+        preamble.append(colored("To: ", fg_color=LABEL_COLOR) + colored(sanitize_text(to_label), fg_color=accent))
     else:
         sender_label = await _display_sender_label(lane, message)
-        await session.write_line(
-            colored("From: ", fg_color=LABEL_COLOR)
-            + colored(sanitize_text(sender_label), fg_color=accent)
+        preamble.append(
+            colored("From: ", fg_color=LABEL_COLOR) + colored(sanitize_text(sender_label), fg_color=accent)
         )
         warning = await _link_mail_identity_warning(lane, message.sender_label)
         if warning is not None:
-            await session.write_line(colored(warning, fg_color=MUTED_COLOR, bold=True))
+            preamble.append(colored(warning, fg_color=MUTED_COLOR, bold=True))
     display_format, display_timezone = await lane.run(resolve_display_preferences)
     displayed_date = format_for_display(
         message.created_at, override_format=display_format, override_timezone=display_timezone
     )
-    await session.write_line(
-        colored("Date: ", fg_color=LABEL_COLOR)
-        + colored(displayed_date, fg_color=METADATA_COLOR)
-    )
-    await session.write_line("")
-    rule_char = "─" if unicode_style else "-"
-    truecolor = await lane.run(lambda db: effective_truecolor(session, db, user))
-    divider_color = 238 if truecolor else RULE_COLOR
-    divider = colored(rule_char * min(session.terminal_width, 78), fg_color=divider_color)
-    await session.write_line(divider)
+    preamble.append(colored("Date: ", fg_color=LABEL_COLOR) + colored(displayed_date, fg_color=METADATA_COLOR))
     body = reflow(sanitize_text(message.body, allow_newlines=True), width=session.terminal_width)
-    await session.write_line(colored(body, fg_color=VALUE_COLOR))
-    await session.write_line(divider)
+    body_rows = [colored(line, fg_color=VALUE_COLOR) if line else "" for line in body.splitlines()]
+    return title, preamble, body_rows
+
+
+async def _show_message(
+    session: Session,
+    lane: DatabaseLane,
+    user: User,
+    message: MailMessage,
+    *,
+    to_label: str | None,
+    actions: list[tuple[str, str]],
+    page: int,
+) -> tuple[str, int]:
+    """One message on `show_detail`: returns the action key and the page
+    it was pressed on."""
+    unicode_style = await lane.run(unicode_style_enabled, user)
+    title, preamble, body_rows = await _message_view(
+        session, lane, user, message=message, to_label=to_label,
+        unicode_style=unicode_style,
+        collapsed=await lane.run(breadcrumb_collapsed_enabled, user),
+    )
+    return await show_detail(
+        session,
+        title=title,
+        sections=[Section(None, [Styled(body_rows)])],
+        actions=actions,
+        redraw_in_place=await lane.run(redraw_in_place_enabled, user),
+        unicode_style=unicode_style,
+        page=page,
+        preamble=preamble,
+        message="\r\n".join(take_notices(session)) or None,
+    )
 
 
 async def _display_sender_label(lane: DatabaseLane, message: MailMessage) -> str:
@@ -354,90 +376,48 @@ async def _link_mail_identity_warning(
 
 async def _show_inbox_message(session: Session, lane: DatabaseLane, user: User, message: MailMessage) -> None:
     message = await lane.run(mark_read, user, message)
-    await _render_message(
-        session, lane, user, message=message, to_label=None,
-        redraw_in_place=await lane.run(redraw_in_place_enabled, user),
-        unicode_style=await lane.run(unicode_style_enabled, user),
-        collapsed=await lane.run(breadcrumb_collapsed_enabled, user),
-    )
-    description_level = await lane.run(menu_description_level, user)
-
+    actions = [
+        ("r", menu_key("R", "eply")),
+        ("d", menu_key("D", "elete")),
+        ("b", menu_key("B", "ack")),
+    ]
+    page = 0
     while True:
-        options = [
-            MenuEntry(label=menu_key("R", "eply"), brief="Reply to the sender"),
-            MenuEntry(label=menu_key("D", "elete"), brief="Delete this message"),
-            MenuEntry(label=menu_key("B", "ack"), brief="Return to the inbox"),
-        ]
-        await session.write_line(
-            f"\r\n{_menu_row(options, width=session.terminal_width, height=session.terminal_height, description_level=description_level)}"
-        )
-        await write_notices(session)
-        await session.write("Choice: ")
-        choice = (await session.read_key()).lower()
-
+        choice, page = await _show_message(session, lane, user, message, to_label=None, actions=actions, page=page)
         if choice == "b":
-            await session.write_line("")
             return
-        elif choice == "d":
-            await session.write_line("")
+        if choice == "d":
             if not await prompt_yes_no(session, "Delete this message?", default=False):
                 continue
             await lane.run(delete_for_recipient, user, message)
             announce(session, "Message deleted.")
             return
-        elif choice == "r":
-            await session.write_line("")
-            sender = (
-                await lane.run(get_user_by_id, message.sender_user_id)
-                if message.sender_user_id is not None
-                else None
-            )
-            if sender is None:
-                await session.write_line(
-                    colored("That sender's account no longer exists -- can't reply.", fg_color=ERROR_COLOR)
-                )
-                continue
-            reply_subject = message.subject if message.subject.lower().startswith("re:") else f"Re: {message.subject}"
-            await _compose_mail(session, lane, user, prefill_recipient=sender, prefill_subject=reply_subject)
-        else:
-            await session.write(reject_unhandled_key(choice))
+        sender = (
+            await lane.run(get_user_by_id, message.sender_user_id)
+            if message.sender_user_id is not None
+            else None
+        )
+        if sender is None:
+            announce(session, "That sender's account no longer exists -- can't reply.", tone="error")
+            continue
+        reply_subject = message.subject if message.subject.lower().startswith("re:") else f"Re: {message.subject}"
+        await _compose_mail(session, lane, user, prefill_recipient=sender, prefill_subject=reply_subject)
 
 
 async def _show_sent_message(session: Session, lane: DatabaseLane, user: User, message: MailMessage) -> None:
     recipient = await lane.run(get_user_by_id, message.recipient_user_id)
     to_label = recipient.username if recipient is not None else "(deleted account)"
-    await _render_message(
-        session, lane, user, message=message, to_label=to_label,
-        redraw_in_place=await lane.run(redraw_in_place_enabled, user),
-        unicode_style=await lane.run(unicode_style_enabled, user),
-        collapsed=await lane.run(breadcrumb_collapsed_enabled, user),
-    )
-    description_level = await lane.run(menu_description_level, user)
-
+    actions = [("d", menu_key("D", "elete")), ("b", menu_key("B", "ack"))]
+    page = 0
     while True:
-        options = [
-            MenuEntry(label=menu_key("D", "elete"), brief="Delete this message"),
-            MenuEntry(label=menu_key("B", "ack"), brief="Return to sent mail"),
-        ]
-        await session.write_line(
-            f"\r\n{_menu_row(options, width=session.terminal_width, height=session.terminal_height, description_level=description_level)}"
-        )
-        await write_notices(session)
-        await session.write("Choice: ")
-        choice = (await session.read_key()).lower()
-
+        choice, page = await _show_message(session, lane, user, message, to_label=to_label, actions=actions, page=page)
         if choice == "b":
-            await session.write_line("")
             return
-        elif choice == "d":
-            await session.write_line("")
-            if not await prompt_yes_no(session, "Delete this message?", default=False):
-                continue
-            await lane.run(delete_for_sender, user, message)
-            announce(session, "Message deleted.")
-            return
-        else:
-            await session.write(reject_unhandled_key(choice))
+        if not await prompt_yes_no(session, "Delete this message?", default=False):
+            continue
+        await lane.run(delete_for_sender, user, message)
+        announce(session, "Message deleted.")
+        return
 
 
 async def _compose_mail(

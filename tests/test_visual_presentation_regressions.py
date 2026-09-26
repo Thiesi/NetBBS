@@ -21,8 +21,9 @@ from netbbs.mail import send_mail
 from netbbs.net.char_input import EditorKey, EditorKeyKind
 from netbbs.net.composition import ReviewAction, review_composition
 from netbbs.net.help_overlay import show_help
-from netbbs.net.board_flow import _render_post_page, _render_quoted_body
-from netbbs.net.mail_flow import _render_message
+from netbbs.net.board_flow import _post_list_rows, _render_quoted_body
+from netbbs.net.mail_flow import _show_message
+from netbbs.rendering.width import display_width
 from netbbs.net.picker import pick_item
 from netbbs.net.session import Session
 from netbbs.rendering import ACCENT_COLOR, HEADER_COLOR, MUTED_COLOR, RULE_COLOR, colored
@@ -159,73 +160,78 @@ def test_quoted_body_multiple_consecutive_blank_lines_preserved():
 
 
 # ============================================================================
-# 2. Board Post Page Dividers (_render_post_page)
+# 2. Board post list rows (_post_list_rows, issue #679)
 # ============================================================================
 
-def test_render_post_page_single_post_has_no_divider(tmp_path):
+def _list_rows(db, board, user, *, width, highlighted=None, new_ids=frozenset()):
+    page = list_posts_page(db, board, user)
+    return page, _post_list_rows(
+        db, page.posts, width=width, highlighted=highlighted, new_ids=set(new_ids),
+        name_requirement=None, accent=ACCENT_COLOR,
+    )
+
+
+def test_every_post_list_row_stops_short_of_the_last_column(tmp_path):
+    """A row that reaches the last column makes many terminals wrap the
+    cursor onto the next row; each row keeps one column free."""
     db = Database(tmp_path / "node.db")
     try:
-        user = create_user(db, "alice", password="pwd", user_level=10)
-        board = create_board(db, "announcements", creator=user)
-        create_post(db, board, user, "First Post", "Post content")
-        page = list_posts_page(db, board, user)
-
-        session = FakeSession(width=80)
-        asyncio.run(
-            _render_post_page(session, db, "announcements", page, user, name_requirement=None)
-        )
-        output = _raw_text(session)
-
-        # No post divider between 1 post
-        assert "─" * 78 not in output
-        assert "-" * 78 not in output
+        user = create_user(db, "a-rather-long-username", password="pwd", user_level=10)
+        board = create_board(db, "general", creator=user)
+        create_post(db, board, user, "An unusually long subject line " * 4, "Body")
+        create_post(db, board, user, "Short", "Body")
+        for width in (80, 100, 60, 59, 40):
+            _page, rows = _list_rows(db, board, user, width=width)
+            for row in rows:
+                assert display_width(_visible(row)) <= width - 1, (width, _visible(row))
     finally:
         db.close()
 
 
-def test_render_post_page_multiple_posts_divider_unicode(tmp_path):
+def test_the_highlighted_row_is_reverse_video_and_marked(tmp_path):
     db = Database(tmp_path / "node.db")
     try:
         user = create_user(db, "alice", password="pwd", user_level=10)
         board = create_board(db, "general", creator=user)
         create_post(db, board, user, "Post 1", "Content 1")
         create_post(db, board, user, "Post 2", "Content 2")
-        page = list_posts_page(db, board, user)
-
-        session = FakeSession(width=80)
-        asyncio.run(
-            _render_post_page(
-                session, db, "general", page, user, name_requirement=None, unicode_style=True
-            )
-        )
-        output = _raw_text(session)
-
-        expected_rule = colored("─" * 78, fg_color=RULE_COLOR)
-        assert expected_rule in output
+        _page, rows = _list_rows(db, board, user, width=80, highlighted=1)
+        assert "\x1b[7m" in rows[1]
+        assert _visible(rows[1]).startswith(">")
+        assert "\x1b[7m" not in rows[0]
     finally:
         db.close()
 
 
-def test_render_post_page_multiple_posts_divider_ascii_fallback(tmp_path):
+def test_a_new_post_carries_the_new_marker(tmp_path):
     db = Database(tmp_path / "node.db")
     try:
         user = create_user(db, "alice", password="pwd", user_level=10)
         board = create_board(db, "general", creator=user)
-        create_post(db, board, user, "Post 1", "Content 1")
-        create_post(db, board, user, "Post 2", "Content 2")
-        page = list_posts_page(db, board, user)
+        create_post(db, board, user, "Seen", "x")
+        create_post(db, board, user, "Fresh", "y")
+        page, _rows = _list_rows(db, board, user, width=80)
+        fresh = next(post for post in page.posts if post.subject == "Fresh")
+        _page, rows = _list_rows(db, board, user, width=80, new_ids={fresh.id})
+        # Found by subject: the two posts can share a timestamp, so their
+        # order on the page is not something to rely on.
+        fresh_row = next(_visible(row) for row in rows if "Fresh" in _visible(row))
+        seen_row = next(_visible(row) for row in rows if "Seen" in _visible(row))
+        assert " new " in fresh_row
+        assert " new " not in seen_row
+    finally:
+        db.close()
 
-        session = FakeSession(width=80)
-        asyncio.run(
-            _render_post_page(
-                session, db, "general", page, user, name_requirement=None, unicode_style=False
-            )
-        )
-        output = _raw_text(session)
 
-        expected_rule = colored("-" * 78, fg_color=RULE_COLOR)
-        assert expected_rule in output
-        assert "─" not in output
+def test_a_narrow_list_falls_back_to_prose_rows(tmp_path):
+    """Design doc §3.6: a table that does not fit becomes prose again."""
+    db = Database(tmp_path / "node.db")
+    try:
+        user = create_user(db, "alice", password="pwd", user_level=10)
+        board = create_board(db, "general", creator=user)
+        create_post(db, board, user, "Hello", "x")
+        _page, rows = _list_rows(db, board, user, width=40)
+        assert _visible(rows[0]) == "1 Hello -- alice"
     finally:
         db.close()
 
@@ -339,30 +345,34 @@ def test_review_composition_dividers_ascii_fallback():
 
 
 # ============================================================================
-# 5. Mail Message Body Framing (_render_message)
+# 5. Mail message reader (_show_message on show_detail, issue #679)
 # ============================================================================
 
-def test_render_mail_message_dividers(tmp_path):
+def test_a_long_mail_message_pages_under_its_header(tmp_path):
+    """A long message used to scroll its From/Date header away; on the
+    reader the header and action bar stay while the body pages."""
     db_path = tmp_path / "node.db"
     db = Database(db_path)
     sender = create_user(db, "sender", password="pwd", user_level=10)
     recipient = create_user(db, "receiver", password="pwd", user_level=10)
-    msg = send_mail(db, sender, recipient, "Subject", "Message payload text")
+    body = "\n\n".join(f"Paragraph {i}: " + "words " * 60 for i in range(10))
+    msg = send_mail(db, sender, recipient, "Subject", body)
     db.close()
 
     lane = DatabaseLane(db_path)
     try:
-        session = FakeSession(width=80)
+        session = FakeSession(editor_keys=[EditorKey(EditorKeyKind.CHAR, char="b")], width=80, height=24)
         asyncio.run(
-            _render_message(
-                session, lane, recipient, message=msg, to_label=None, unicode_style=True
+            _show_message(
+                session, lane, recipient, msg, to_label=None,
+                actions=[("b", "[B]ack")], page=0,
             )
         )
-        output = _raw_text(session)
-
-        # Body should be framed by horizontal divider rules
-        expected_rule = colored("─" * 78, fg_color=RULE_COLOR)
-        assert output.count(expected_rule) == 2
+        text = _visible(_raw_text(session))
+        assert "From: sender" in text
+        assert "Paragraph 0" in text
+        assert "Paragraph 9" not in text
+        assert "Page 1 of" in text
     finally:
         lane.close()
 

@@ -197,6 +197,16 @@ def board_read_cursor(db: Database, user: User, board: Board) -> tuple[str, str]
     return cursor.created_at, cursor.stable_id
 
 
+def board_seen_arrival_id(db: Database, user: User, board: Board) -> int | None:
+    """The newest post `user` has been shown on `board`, as a node-local
+    arrival id (issue #72) -- what a post list compares against to mark a
+    post `new` (issue #679). `None` for a board never visited, or a legacy
+    cursor with no arrival id: nothing is marked new on either, matching
+    §6.6's "never visited is not a count"."""
+    cursor = _get_cursor(db, user, _BOARD, board.id)
+    return cursor.arrival_id if cursor is not None else None
+
+
 def unread_post_count(db: Database, user: User, board: Board) -> int | None:
     """`None` if `user` has never visited `board` (no baseline cursor
     yet -- distinct from `0`, which means visited and fully caught up).

@@ -87,6 +87,15 @@ class Note:
 
 
 @dataclass(frozen=True)
+class Styled:
+    """Rows that are already styled and already fit the panel's width -- text
+    whose own layout the panel must not redo, such as a message body with
+    muted quote lines (issue #679). Written as given, one row each."""
+
+    rows: Sequence[str]
+
+
+@dataclass(frozen=True)
 class Table:
     """Aligned columns under a header row. A cell is text or `(text, color)`.
 
@@ -104,7 +113,7 @@ class Section:
     """A titled group of rows -- one paragraph of the panel."""
 
     title: str | None
-    rows: Sequence[Field | Note | Table]
+    rows: Sequence[Field | Note | Table | Styled]
     # Lay short fields out side by side, two to a row, where the terminal is
     # wide enough and every value fits its half; otherwise one to a row.
     paired: bool = False
@@ -306,6 +315,8 @@ def render_section(
             rows.extend(_field_lines(row, column=column, width=width))
         elif isinstance(row, Note):
             rows.extend(_note_lines(row, width=width))
+        elif isinstance(row, Styled):
+            rows.extend(row.rows)
         else:
             rows.extend(_table_lines(row, width=width, unicode_style=unicode_style))
     return Block(heading, rows)

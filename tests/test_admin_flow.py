@@ -10115,11 +10115,19 @@ class _ActsBeforeKey(FakeSession):
         self._key = key
         self._before = before
 
-    async def read_key(self, echo: bool = True) -> str:
+    def _maybe_act(self) -> None:
         if self._inputs and self._inputs[0] == self._key and self._before is not None:
             before, self._before = self._before, None
             before()
+
+    async def read_key(self, echo: bool = True) -> str:
+        self._maybe_act()
         return await super().read_key(echo)
+
+    async def read_editor_key(self, *args, **kwargs):
+        # The pending-post screen reads through `show_detail` (issue #679).
+        self._maybe_act()
+        return await super().read_editor_key(*args, **kwargs)
 
 
 def test_approving_a_post_approved_meanwhile_reports_it_and_stays_on_screen(db, lane, sysop):

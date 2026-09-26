@@ -1431,6 +1431,40 @@ A visible edit is a revision, not destructive replacement of history. Any
 threading or revision semantics which affect Link event IDs or propagation must
 be settled in Phase 3; only presentation refinements may wait until Phase 7.
 
+**A board is a list of posts; a post is read on its own screen** (issue #679).
+
+The list:
+- Shows one row per post: number, subject, a `new` marker, author and date.
+- Fits as many rows as the terminal holds and pages with
+  `[O]lder`/`[N]ewer`/`[R]ecent`.
+- Has a cursor: Up/Down, and Enter or a digit to open a post.
+- Follows §3.6: display-width columns. Below readable width, a row becomes
+  "subject -- author". Author gives way to subject first, because the reader
+  shows the author in full.
+- Has a header that says where the caller is and what they can do: the path
+  they came through (Community, "Message boards", category), newest or older
+  posts, how many were new on arrival, and "Linked" or "linked from X".
+- Shows the board's description and, for a caller who can read but not post,
+  why ("Read only: posting needs level N", or a name that needs
+  verification).
+- Marks a post `new` against the read position the caller had when they
+  arrived, so the markers survive the visit.
+- Opens a `[N]ew scan` or `[F]ind` jump with the cursor on its target.
+
+A post opens on `show_detail`:
+- The title, a byline (author, date, `edited`, `new`, the post it replies to)
+  and the action bar stay on screen while a long body pages with PgUp/PgDn.
+- The post's own actions live there, offered only when they would succeed:
+  `[E]dit`, `Remove pos[t]`, and `[N]ext post`/`[P]revious post`, which cross
+  page boundaries.
+- `[B]ack` returns to the list with the cursor on the post last read.
+- The mail message view and the SysOp's pending-post review use the same
+  reader.
+
+The board picker adds an activity column ("N new", "caught up", "not visited
+yet", in §6.6's terms) and an "about" column that leads with `[LINK]` and a
+name-gate note before the description.
+
 ### 6.2 File areas
 
 Local file metadata lives in SQLite; file bytes use content-addressed filesystem

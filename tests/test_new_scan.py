@@ -201,9 +201,11 @@ def test_selecting_a_board_jumps_to_the_first_unread_post(db, lane, alice, monke
 
     session = _run_main_menu(db, lane, alice, ["n", "0", "1", "b", "l", "y"])
 
-    text = _written_text(session)
-    assert "first --" not in text
-    assert "second --" in text
+    # The board opens as its post list (issue #679), on the page after the
+    # cursor, with the list's cursor on the first unread post.
+    text = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", _written_text(session))
+    assert re.search(r">\s+1\s+second\b", text)
+    assert not re.search(r"\d\s+first\b", text)
 
 
 def test_selecting_a_file_area_jumps_to_the_first_unread_file(db, lane, alice, monkeypatch):
