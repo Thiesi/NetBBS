@@ -4233,13 +4233,17 @@ the page that lists it (issue #677):
 - A board page is filled from visible posts only. Its older/newer links count
   only visible posts, so hidden posts neither shorten a page nor produce an
   empty one.
-- Post counts, `[N]ew scan` unread counts and "replies to you" exclude hidden
-  posts.
+- Post counts, `[N]ew scan` unread counts for boards and channels, and
+  "replies to you" exclude hidden content.
 - Local search excludes hidden posts and hidden channel messages.
 
-Visibility is decided per event in Python rather than in SQL. Paging over a
-long run of hidden posts therefore costs further query batches rather than
-returning a short page.
+Visibility is decided per event in Python rather than in SQL, but it depends
+only on the event's author. A count therefore looks up each distinct author
+once, not each post. Paging over a long run of hidden posts costs further
+query batches rather than returning a short page.
+
+A local tombstone stays terminal once the expiry sweep has aged it: the check
+is for any tombstone revision in the chain, whatever its status.
 
 ### 12.9 Recovery, partitions, and explainability
 

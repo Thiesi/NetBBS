@@ -478,3 +478,93 @@ def test_removing_a_post_on_the_origin_node_is_not_called_local(db, sysop, alice
     assert 'Remove "Local subject"? This cannot be undone.' in text
     assert "Post removed." in text
     assert "keep the original" not in text
+
+
+# -- Codex review round 1 ----------------------------------------------------
+
+
+def _queued_envelope(db, post_id):
+    row = db.connection.execute("SELECT link_event_json FROM posts WHERE post_id = ?", (post_id,)).fetchone()
+    return None if row["link_event_json"] is None else json.loads(row["link_event_json"])["envelope"]
+
+
+def _two_pending_edits(db, sysop, alice, node_identity):
+    from netbbs.link.boards import queue_approved_board_post_if_linked
+
+    board = _moderated_origin_board(db, sysop, node_identity)
+    root = approve_post(db, create_post(db, board, alice, "Subject", "Body"), approved_by=sysop)
+    queue_approved_board_post_if_linked(db, root, board, node_identity=node_identity)
+    first = edit_post(db, root, board, subject="Subject", body="first revision", edited_by=alice)
+    db.connection.execute("UPDATE posts SET created_at = ? WHERE post_id = ?", ("2099-01-01T00:00:01Z", first.post_id))
+    second = edit_post(db, root, board, subject="Subject", body="second revision", edited_by=alice)
+    db.connection.execute("UPDATE posts SET created_at = ? WHERE post_id = ?", ("2099-01-01T00:00:02Z", second.post_id))
+    db.connection.commit()
+    return board, get_post(db, first.post_id), get_post(db, second.post_id)
+
+
+def test_the_second_of_two_pending_edits_is_signed_against_the_first(db, sysop, alice, node_identity):
+    """Both pending edits were written against the same head. Once the
+    first is approved and sent, the network's head is the first edit; the
+    second must name it, or every peer refuses the event."""
+    from netbbs.link.boards import queue_approved_board_post_if_linked
+
+    board, first, second = _two_pending_edits(db, sysop, alice, node_identity)
+    for pending in (first, second):
+        queue_approved_board_post_if_linked(
+            db, approve_post(db, pending, approved_by=sysop), board, node_identity=node_identity
+        )
+
+    first_event = _queued_envelope(db, first.post_id)
+    second_event = _queued_envelope(db, second.post_id)
+    from netbbs.link.events import event_content_id
+
+    assert second_event["payload"]["previous_event_id"] == event_content_id(first_event)
+
+
+def test_an_edit_approved_after_a_newer_one_is_not_sent(db, sysop, alice, node_identity):
+    """Approving in the other order: this node shows the newer text, so
+    sending the older edit afterwards would leave peers on older text."""
+    from netbbs.link.boards import queue_approved_board_post_if_linked
+
+    board, first, second = _two_pending_edits(db, sysop, alice, node_identity)
+    for pending in (second, first):
+        queue_approved_board_post_if_linked(
+            db, approve_post(db, pending, approved_by=sysop), board, node_identity=node_identity
+        )
+
+    assert _queued_envelope(db, second.post_id) is not None
+    assert _queued_envelope(db, first.post_id) is None
+    assert list_posts_page(db, board, alice).posts[0].body == "second revision"
+
+
+def test_an_expired_local_tombstone_still_refuses_a_later_remote_edit(db, remote, alice, sysop):
+    """The expiry sweep ages a tombstone revision like any other; it is no
+    less a removal once expired."""
+    board = _carried_board(db, remote)
+    root = _carry(db, remote)
+    tombstone = tombstone_post(db, root, board, tombstoned_by=sysop)
+    db.connection.execute("UPDATE posts SET status = 'expired' WHERE post_id = ?", (tombstone.post_id,))
+    db.connection.commit()
+
+    edit = _remote_edit(remote, root, previous=root.post_id, body="it is back")
+
+    assert materialize_carried_post_edit(db, edit, sender_fingerprint=remote.fingerprint) is None
+
+
+def test_counting_a_board_asks_trust_once_per_author(db, remote, alice, monkeypatch):
+    """A board with a long carried history must not cost one trust lookup
+    per post on every [N]ew scan or admin view."""
+    from netbbs.link import enforcement
+
+    board = _carried_board(db, remote)
+    for minute in range(20):
+        _carry(db, remote, user="wanderer" if minute % 2 else "rover", subject=f"post {minute}", minute=minute)
+    calls = []
+    real = enforcement.content_visible_for_subject
+    monkeypatch.setattr(
+        enforcement, "content_visible_for_subject",
+        lambda db_, subject: calls.append(subject) or real(db_, subject),
+    )
+
+    assert count_visible_posts(db, board)[0] == 20
+    assert len(calls) == 2

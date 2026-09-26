@@ -674,7 +674,10 @@ def _carried_revision_status(
     - `None` when this node has tombstoned the chain. Removing a post is
       terminal on the node that did it; without this a later revision
       would sort above the tombstone and bring the content back (issue
-      #677). The signed event is still retained for relay.
+      #677). The signed event is still retained for relay. A tombstone
+      counts whatever its status: the expiry sweep ages a tombstone
+      revision like any other, and an expired tombstone is no less a
+      removal.
     - `'pending'` when no revision of the chain is approved here yet (a
       root held for review, or rejected-and-rematerialized): a revision
       must not publish a post nobody approved.
@@ -686,7 +689,7 @@ def _carried_revision_status(
     tombstoned = db.connection.execute(
         """
         SELECT 1 FROM posts
-        WHERE root_post_id = ? AND status = 'approved' AND tombstoned_at IS NOT NULL
+        WHERE root_post_id = ? AND tombstoned_at IS NOT NULL
         """,
         (root_post_id,),
     ).fetchone()
@@ -1273,11 +1276,35 @@ def queue_approved_board_post_if_linked(
     if post.edit_of_post_id is None:
         queue_board_post_if_linked(db, post, board, node_identity=node_identity)
         return
+    if _superseded_by_a_newer_approved_revision(db, post):
+        # Approved after a newer edit of the same post already was: readers
+        # here see the newer text, so sending this one would leave the
+        # network's head on older text than this node shows.
+        return
     editor = _revision_editor(db, post)
     if editor is None:
         return
     queue_board_post_edit_if_linked(db, post, board, node_identity=node_identity, edited_by=editor)
     queue_board_post_moderator_edit_if_linked(db, post, board, node_identity=node_identity, edited_by=editor)
+
+
+def _superseded_by_a_newer_approved_revision(db: Database, revision: Post) -> bool:
+    """Whether an approved revision of `revision`'s post sorts after it, in
+    `_resolve_current_version`'s own order."""
+    row = db.connection.execute(
+        "SELECT created_at, id FROM posts WHERE post_id = ?", (revision.post_id,)
+    ).fetchone()
+    if row is None:
+        return False
+    return db.connection.execute(
+        """
+        SELECT 1 FROM posts
+        WHERE root_post_id = ? AND board_id = ? AND status = 'approved' AND post_id != ?
+          AND (created_at > ? OR (created_at = ? AND id > ?))
+        LIMIT 1
+        """,
+        (revision.root_post_id, revision.board_id, revision.post_id, row["created_at"], row["created_at"], row["id"]),
+    ).fetchone() is not None
 
 
 def _revision_editor(db: Database, revision: Post) -> User | None:
@@ -1376,14 +1403,21 @@ def queue_board_post_edit_if_linked(
 
 def _resolve_edit_chain_predecessors(db: Database, edited_post: Post) -> tuple[BoardPost, str] | None:
     """
-    `edited_post`'s own root `BoardPost` and the `content_id` its own
-    immediate local predecessor (`edited_post.edit_of_post_id`) was
-    queued under -- the shared "requires an unbroken local chain back to
-    a Linked root" lookup `queue_board_post_edit_if_linked`/`_moderator_
-    edit_if_linked`/`_tombstone_if_linked` all need identically. Returns
-    `None` if either isn't queued locally yet (see `queue_board_post_
-    edit_if_linked`'s own docstring for why that's a real, accepted gap,
-    not an error).
+    `edited_post`'s own root `BoardPost` and the `content_id` the chain's
+    current head was queued under -- the shared "requires an unbroken
+    local chain back to a Linked root" lookup `queue_board_post_edit_if_
+    linked`/`_moderator_edit_if_linked`/`_tombstone_if_linked` all need
+    identically. Returns `None` if either isn't queued locally yet (see
+    `queue_board_post_edit_if_linked`'s own docstring for why that's a
+    real, accepted gap, not an error).
+
+    The head is the newest *other* approved revision, the same ordering
+    `edit_post` uses to pick `edit_of_post_id`, so for an edit queued as
+    it is saved the two are the same row. They differ when an edit waited
+    for approval (issue #677): two pending edits both name the head they
+    were written against, and once the first is approved and sent the
+    network's head has moved. Signing the second against its stored
+    `edit_of_post_id` would give peers a `previous_event_id` they refuse.
     """
     root_row = db.connection.execute(
         "SELECT link_event_json FROM posts WHERE post_id = ?", (edited_post.root_post_id,)
@@ -1393,7 +1427,13 @@ def _resolve_edit_chain_predecessors(db: Database, edited_post: Post) -> tuple[B
     root_post = BoardPost.from_dict(json.loads(root_row["link_event_json"]))
 
     predecessor_row = db.connection.execute(
-        "SELECT link_event_json FROM posts WHERE post_id = ?", (edited_post.edit_of_post_id,)
+        """
+        SELECT link_event_json FROM posts
+        WHERE root_post_id = ? AND board_id = ? AND status = 'approved' AND post_id != ?
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1
+        """,
+        (edited_post.root_post_id, edited_post.board_id, edited_post.post_id),
     ).fetchone()
     if predecessor_row is None or predecessor_row["link_event_json"] is None:
         return None

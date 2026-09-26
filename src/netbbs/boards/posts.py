@@ -26,7 +26,7 @@ from netbbs.boards.boards import Board
 from netbbs.boards.content_id import compute_content_id
 from netbbs.boards.limits import MAX_BODY_BYTES, MAX_SUBJECT_BYTES
 from netbbs.config import get_expiry_grace_period_days
-from netbbs.link.enforcement import link_content_visible
+from netbbs.link.enforcement import envelope_content_visible
 from netbbs.moderation import BoardPermission, has_permission, record_action
 from netbbs.permissions import require_level
 from netbbs.search import reindex_post
@@ -656,6 +656,7 @@ def _visible_roots(
     ascending = newer_than is not None
     boundary = newer_than if ascending else older_than
     found: list[sqlite3.Row] = []
+    author_cache: dict = {}
     while len(found) < limit:
         if boundary is None:
             position_sql, params = "", ()
@@ -665,7 +666,8 @@ def _visible_roots(
         order = "ASC" if ascending else "DESC"
         rows = db.connection.execute(
             f"""
-            SELECT root.* FROM posts root
+            SELECT root.*, e.envelope_json AS link_envelope_json FROM posts root
+            LEFT JOIN link_events e ON e.content_id = root.post_id
             WHERE root.board_id = ? AND root.post_id = root.root_post_id
               {position_sql}
               AND {_HAS_APPROVED_VERSION_SQL}
@@ -675,7 +677,8 @@ def _visible_roots(
             (board.id, *params, _VISIBLE_ROOTS_BATCH),
         ).fetchall()
         for row in rows:
-            if link_content_visible(db, row["post_id"]):
+            envelope_json = row["link_envelope_json"]
+            if envelope_json is None or envelope_content_visible(db, envelope_json, author_cache=author_cache):
                 found.append(row)
                 if len(found) == limit:
                     break
@@ -726,18 +729,22 @@ def count_visible_roots(
         (board_id, *extra_params),
     ).fetchone()
     count, newest = local[0], local[1]
+    # Streamed rather than fetched whole, with each root's envelope joined
+    # in: the trust decision depends only on the author, so it is looked up
+    # once per distinct author, not once per carried post.
+    author_cache: dict = {}
     carried = db.connection.execute(
         f"""
-        SELECT root.post_id, root.created_at FROM posts root
+        SELECT root.created_at, e.envelope_json FROM posts root
+        JOIN link_events e ON e.content_id = root.post_id
         WHERE root.board_id = ? AND root.post_id = root.root_post_id
-          AND EXISTS (SELECT 1 FROM link_events e WHERE e.content_id = root.post_id)
           {extra_sql}
           AND {_HAS_APPROVED_VERSION_SQL}
         """,
         (board_id, *extra_params),
-    ).fetchall()
+    )
     for row in carried:
-        if link_content_visible(db, row["post_id"]):
+        if envelope_content_visible(db, row["envelope_json"], author_cache=author_cache):
             count += 1
             if newest is None or row["created_at"] > newest:
                 newest = row["created_at"]

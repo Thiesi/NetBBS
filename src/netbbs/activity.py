@@ -62,7 +62,7 @@ from netbbs.chat.channels import Channel
 from netbbs.chat.scrollback import ChannelMessage
 from netbbs.files.areas import FileArea
 from netbbs.files.entries import FileEntry
-from netbbs.link.enforcement import link_content_visible
+from netbbs.link.enforcement import envelope_content_visible, link_content_visible
 from netbbs.storage.database import Database
 from netbbs.timeutil import utc_now_iso
 
@@ -349,14 +349,23 @@ def unread_channel_count(db: Database, user: User, channel: Channel) -> int | No
         return None
     last_message_id = int(cursor.stable_id)
     placeholders = ",".join("?" for _ in _CHANNEL_CONTENT_KINDS)
-    row = db.connection.execute(
+    # A carried message trust suppresses is hidden from scrollback, so it
+    # is not unread activity either (issue #677). The retained ring bounds
+    # the rows; the trust decision is made once per author.
+    rows = db.connection.execute(
         f"""
-        SELECT COUNT(*) AS n FROM channel_messages
-        WHERE channel_id = ? AND id > ? AND kind IN ({placeholders})
+        SELECT e.envelope_json FROM channel_messages m
+        LEFT JOIN link_events e ON e.content_id = m.link_content_id
+        WHERE m.channel_id = ? AND m.id > ? AND m.kind IN ({placeholders})
         """,
         (channel.id, last_message_id, *_CHANNEL_CONTENT_KINDS),
-    ).fetchone()
-    return row["n"]
+    )
+    author_cache: dict = {}
+    return sum(
+        1 for row in rows
+        if row["envelope_json"] is None
+        or envelope_content_visible(db, row["envelope_json"], author_cache=author_cache)
+    )
 
 
 def is_following(db: Database, user: User, object_type: str, object_id: int) -> bool:
