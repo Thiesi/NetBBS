@@ -144,6 +144,11 @@ class AnchorState:
 
     def __init__(self) -> None:
         self.anchored: set[str] = set()
+        # Issue #624: the connectors `run_reliable_anchor_connectors` has
+        # running, by fingerprint, so a transport-key rotation can hand each
+        # the new identity before it closes their sessions. Each would
+        # otherwise redial with the key being retired.
+        self.connectors: dict[str, object] = {}
 
     def live(self, registry: LinkRealtimeSessionRegistry) -> list[str]:
         return sorted(fp for fp in self.anchored if registry.get(fp) is not None)
@@ -160,10 +165,15 @@ class LiveDirectChat:
     alongside the `LiveChannelBridge`, which routes `direct_message`
     frames here via `owns_frame`/`handle_frame`."""
 
+    @property
+    def _identity(self) -> NodeIdentity:
+        # Read through the node, never held: every dial after a
+        # transport-key rotation must present the new key (issue #624).
+        return self._node.identity
+
     def __init__(
         self,
         *,
-        node_identity: NodeIdentity,
         link_node: LinkNode,
         lane: DatabaseLane,
         registry: LinkRealtimeSessionRegistry,
@@ -173,7 +183,6 @@ class LiveDirectChat:
         deliver: Callable[[IncomingDirectMessage], Awaitable[bool]] | None,
         dial_timeout_seconds: float = DIRECT_CHAT_DEFAULT_DIAL_TIMEOUT_SECONDS,
     ) -> None:
-        self._identity = node_identity
         self._node = link_node
         self._lane = lane
         self._registry = registry
@@ -448,7 +457,6 @@ class LiveDirectChat:
 
 async def run_reliable_anchor_connectors(
     *,
-    node_identity: NodeIdentity,
     link_node: LinkNode,
     lane: DatabaseLane,
     registry: LinkRealtimeSessionRegistry,
@@ -493,6 +501,8 @@ async def run_reliable_anchor_connectors(
                     if desired.get(fingerprint) != address:
                         await connector.stop()  # type: ignore[attr-defined]
                         del started[fingerprint]
+                        if state is not None:
+                            state.connectors.pop(fingerprint, None)
                         _logger.info("no longer standing by at %s for live relay", fingerprint[:12])
                 if state is not None:
                     state.anchored = set(desired)
@@ -501,11 +511,13 @@ async def run_reliable_anchor_connectors(
                         continue
                     host, port = addresses[0]
                     connector = start_connector(
-                        host=host, port=port, identity=node_identity, on_frame=on_frame, registry=registry,
+                        host=host, port=port, identity=link_node.identity, on_frame=on_frame, registry=registry,
                         lane=lane, enforce_trust_policy=True, expected_fingerprint=fingerprint,
                         track_session=track_session, addresses=list(addresses),
                     )
                     started[fingerprint] = (connector, addresses)
+                    if state is not None:
+                        state.connectors[fingerprint] = connector
                     _logger.info(
                         "standing by at reliable node %s (%s:%d, %d address(es)) for live relay",
                         fingerprint[:12], host, port, len(addresses),
@@ -518,6 +530,7 @@ async def run_reliable_anchor_connectors(
     finally:
         if state is not None:
             state.anchored = set()
+            state.connectors = {}
         for connector, _address in started.values():
             try:
                 await connector.stop()  # type: ignore[attr-defined]

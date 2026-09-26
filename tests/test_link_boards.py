@@ -1522,3 +1522,45 @@ def test_a_carried_board_applies_the_gate_it_inherits_from_its_community(
 
     _accept_remote_attestation(db, remote_node_identity)
     assert rebuild_carried_post_materialization(db) == 1
+
+
+# -- issue #669: a deleted Linked resource stays declared as not carried ------
+
+
+def test_a_deleted_board_this_node_originated_is_declared_not_carried(db, alice, node_identity):
+    """Its genesis lived only in the board's own row, so after a plain delete
+    it was declared as neither carried nor not carried, and peers carrying it
+    resent it on every pass. `retain_linked_genesis` keeps it on file first."""
+    from netbbs.boards.boards import delete_board
+    from netbbs.link.store import load_link_node, retain_linked_genesis, uncarried_resource_ids
+
+    board = create_board(db, "general", creator=alice)
+    genesis = link_board(db, board, node_identity=node_identity)
+    assert uncarried_resource_ids(db) == {}
+
+    retain_linked_genesis(db, "boards", board.board_id)
+    delete_board(db, board, deleted_by=alice)
+
+    assert uncarried_resource_ids(db) == {"boards": (board.board_id,)}
+    # And a restart reads it back like any other accepted genesis.
+    assert genesis.content_id in load_link_node(db, node_identity).known_event_ids
+
+
+def test_retaining_a_board_that_was_never_linked_keeps_nothing(db, alice):
+    from netbbs.link.store import retain_linked_genesis
+
+    board = create_board(db, "local-only", creator=alice)
+    retain_linked_genesis(db, "boards", board.board_id)
+
+    assert db.connection.execute("SELECT COUNT(*) FROM link_events").fetchone()[0] == 0
+
+
+def test_retaining_a_carried_board_twice_is_harmless(db, remote_node_identity):
+    from netbbs.link.store import retain_linked_genesis
+
+    genesis = _remote_genesis(remote_node_identity)
+    materialize_carried_board(db, genesis)
+    retain_linked_genesis(db, "boards", genesis.payload["board_id"])
+    retain_linked_genesis(db, "boards", genesis.payload["board_id"])
+
+    assert db.connection.execute("SELECT COUNT(*) FROM link_events").fetchone()[0] == 1

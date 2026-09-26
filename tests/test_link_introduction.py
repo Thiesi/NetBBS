@@ -161,7 +161,7 @@ def test_an_event_by_an_unknown_node_is_set_aside_and_the_rest_are_accepted(cast
     genesis, from_r = genesis_by(r), post_by(r, "from R")
     batch = [genesis.to_dict(), post_by(a).to_dict(), from_r.to_dict()]
 
-    accepted, deferred, refusal = b.handle_events_tolerantly(r.identity.fingerprint, batch)
+    accepted, deferred, refusal, _skipped = b.handle_events_tolerantly(r.identity.fingerprint, batch)
 
     assert refusal is None
     assert accepted == [genesis.content_id, from_r.content_id]
@@ -177,7 +177,7 @@ def test_an_event_that_is_wrong_still_ends_a_response_and_what_came_before_it_is
     forged = post_by(r).to_dict()
     forged["signature"] = base64.b64encode(b"x" * 64).decode("ascii")
 
-    accepted, deferred, refusal = b.handle_events_tolerantly(
+    accepted, deferred, refusal, _skipped = b.handle_events_tolerantly(
         r.identity.fingerprint, [genesis.to_dict(), good.to_dict(), forged, never_reached.to_dict()]
     )
 
@@ -203,7 +203,7 @@ def test_a_stale_identity_is_recognized_even_when_the_event_does_not_name_its_si
     ).to_dict()
     assert referenced_identities(closure) == []
 
-    accepted, deferred, refusal = b.handle_events_tolerantly(
+    accepted, deferred, refusal, _skipped = b.handle_events_tolerantly(
         r.identity.fingerprint, [closure, post_by(r, "still arrives").to_dict()]
     )
 
@@ -222,7 +222,7 @@ def test_an_introduced_identity_gone_stale_is_set_aside_and_named_for_a_fresh_bu
     signed = post_by(rotated)
     post = signed.to_dict()
 
-    accepted, deferred, _refusal = b.handle_events_tolerantly(r.identity.fingerprint, [post])
+    accepted, deferred, _refusal, _skipped = b.handle_events_tolerantly(r.identity.fingerprint, [post])
     assert accepted == [] and deferred[0][1].missing_identity == a.identity.fingerprint
 
     b.handle_introduction(hello(rotated, created_at="2026-03-01T00:00:00+00:00"))
@@ -252,7 +252,7 @@ def test_an_event_that_builds_on_one_set_aside_is_set_aside_with_it(cast):
     second = edit(first.content_id, "second edit")
     unrelated = post_by(r, "still arrives")
 
-    accepted, deferred, refusal = b.handle_events_tolerantly(
+    accepted, deferred, refusal, _skipped = b.handle_events_tolerantly(
         r.identity.fingerprint, [first.to_dict(), second.to_dict(), unrelated.to_dict()]
     )
 
@@ -262,7 +262,7 @@ def test_an_event_that_builds_on_one_set_aside_is_set_aside_with_it(cast):
     # And on a later pass, when the first edit is declared as seen and only the
     # second is offered: it still waits with its predecessor.
     b.deferred_events.defer(first.to_dict(), waiting_for=a.identity.fingerprint, now=0.0)
-    accepted, deferred, refusal = b.handle_events_tolerantly(r.identity.fingerprint, [second.to_dict()])
+    accepted, deferred, refusal, _skipped = b.handle_events_tolerantly(r.identity.fingerprint, [second.to_dict()])
     assert refusal is None and accepted == [] and len(deferred) == 1
 
 
@@ -275,7 +275,7 @@ def test_an_event_that_cannot_even_be_parsed_ends_the_response_and_nothing_more(
     junk = post_by(r).to_dict()
     junk["envelope"]["netbbs_protocol"] = 1.0
 
-    accepted, deferred, refusal = b.handle_events_tolerantly(
+    accepted, deferred, refusal, _skipped = b.handle_events_tolerantly(
         r.identity.fingerprint, [genesis.to_dict(), junk, {"envelope": []}]
     )
 
@@ -286,7 +286,7 @@ def test_an_event_that_cannot_even_be_parsed_ends_the_response_and_nothing_more(
 def test_what_an_event_builds_on_being_missing_is_also_a_deferral(cast):
     r, b = cast["R"], cast["B"]
 
-    accepted, deferred, _refusal = b.handle_events_tolerantly(r.identity.fingerprint, [post_by(r).to_dict()])
+    accepted, deferred, _refusal, _skipped = b.handle_events_tolerantly(r.identity.fingerprint, [post_by(r).to_dict()])
 
     assert accepted == [] and len(deferred) == 1 and deferred[0][1].missing_identity is None
 

@@ -541,7 +541,9 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
     door made through its outbound hook (issue #520) reach the peers a
     Linked board is linked to -- the same `queue_board_post_if_linked` call
     the interactive posting path makes. `None` (Link off, or the standalone
-    admin CLI) simply keeps the post local.
+    admin CLI) simply keeps the post local. It may be a callable returning
+    the identity, read when the drain runs, so a run that outlasts a key
+    rotation signs with the new key (issue #624).
 
     `rehearsal` marks a launch a SysOp made to *check* the door -- the
     compatibility screen's test launch, or the DOS probe -- rather than a
@@ -813,7 +815,10 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
                     # reported as having crashed because its drop directory
                     # was unreadable.
                     try:
-                        await lane.run(drain_outbound, door, workdir, node_identity=node_identity)
+                        await lane.run(
+                            drain_outbound, door, workdir,
+                            node_identity=node_identity() if callable(node_identity) else node_identity,
+                        )
                     except Exception as exc:
                         _logger.warning("door %r outbound drain failed: %s", door.name, exc)
                 if workdir is not None:

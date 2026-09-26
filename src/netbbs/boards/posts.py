@@ -422,8 +422,10 @@ def get_post(db: Database, post_id: str) -> Post:
     Unbounded by-ID lookup — deliberately not status-filtered, unlike
     `list_posts_page`. Used for `create_post`'s own return path and
     reply-parent lookup, both of which need to work regardless of
-    status (including replying to an `'expired'` thread: expired content
-    stays individually reachable, only delisted from normal browsing).
+    status: a reply to a thread that expired mid-conversation must still
+    find its parent. That is a statement about the domain, not a promise
+    to callers (design doc §5.3, issue #639) -- expiry ends a caller's
+    reach, and no caller screen may use this to show an expired post.
     Reaching a
     `'pending'` post this way requires already knowing its exact
     `post_id`, which isn't discoverable through any listing a
@@ -583,8 +585,9 @@ def list_posts_page(
     `'pending'` posts/edits belong to the moderation queue
     (`list_pending_posts`, unchanged -- it already returns exact,
     unresolved rows regardless of root/edit status), and `'expired'`
-    content is delisted from normal browsing, though still individually
-    reachable (see `get_post`). Sweeps the board's own posts for
+    content is gone as far as a caller is concerned (design doc §5.3,
+    issue #639) -- `get_post` still resolves it for reply-parent lookup,
+    which is not a caller-facing surface. Sweeps the board's own posts for
     expiry/deletion first (`_sweep_expired_posts`) so this always
     reflects an up-to-date view, given there's no background job doing
     that separately.

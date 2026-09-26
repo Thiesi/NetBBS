@@ -115,7 +115,7 @@ def test_who_annotates_a_remote_participant_with_its_linked_node(lane, hub, pres
         hub, lane, presence, channel_id=channel.channel_id,
         roster={"remoteuser": "Remote User"}, origin_fingerprint=origin_fingerprint,
     )
-    link_context = LinkContext(node_identity=node_identity, link_node=LinkNode(identity=node_identity), realtime_bridge=bridge)
+    link_context = LinkContext(link_node=LinkNode(identity=node_identity), realtime_bridge=bridge)
 
     session = asyncio.run(_run(lane, hub, presence, channel, alice, ["/who", "/quit"], link_context=link_context))
     text = _written_text(session)
@@ -147,7 +147,7 @@ def test_names_includes_a_remote_participant_unannotated(lane, hub, presence, al
         hub, lane, presence, channel_id=channel.channel_id,
         roster={"remoteuser": "Remote User"}, origin_fingerprint="abcdef0123456789abcdef0123456789",
     )
-    link_context = LinkContext(node_identity=node_identity, link_node=LinkNode(identity=node_identity), realtime_bridge=bridge)
+    link_context = LinkContext(link_node=LinkNode(identity=node_identity), realtime_bridge=bridge)
 
     session = asyncio.run(_run(lane, hub, presence, channel, alice, ["/names", "/quit"], link_context=link_context))
     text = _written_text(session)
@@ -162,7 +162,7 @@ def test_who_with_no_remote_roster_shows_only_local_participants(lane, hub, pres
     bridge = _bridge_with_roster(
         hub, lane, presence, channel_id=channel.channel_id, roster={}, origin_fingerprint="",
     )
-    link_context = LinkContext(node_identity=node_identity, link_node=LinkNode(identity=node_identity), realtime_bridge=bridge)
+    link_context = LinkContext(link_node=LinkNode(identity=node_identity), realtime_bridge=bridge)
 
     session = asyncio.run(_run(lane, hub, presence, channel, alice, ["/who", "/quit"], link_context=link_context))
     text = _written_text(session)

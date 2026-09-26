@@ -656,6 +656,28 @@ or mismatched key state.
 Keep root-key use narrow. Ordinary Link content uses the current operational
 signing key.
 
+Rotation (issue #624) lives in `netbbs.link.key_rotation`. Traps it had to
+avoid:
+
+- **Pick the verification rule per object family.** A new signature check on
+  a long-lived event goes through `LinkNode._resolve_sender_content_keys`,
+  which accepts keys the chain retired routinely. A check on something signed
+  fresh, or re-issued on rotation, goes through `_resolve_sender_signing_key`.
+  Using the strict one on content makes a routine rotation strand the node's
+  history. Using the lenient one on a request lets a replaced key act.
+- **Never keep a copy of the node identity in something that outlives a
+  rotation.** Read `link_node.identity` when you sign or dial.
+  `LinkContext.node_identity` is a property for exactly this reason. The
+  real-time listener and connectors do keep a copy, so a transport rotation
+  must `update_identity` on each before it closes sessions.
+- **Save with `save_rotation`, not `save`, on a running node.** `save` writes
+  the key files before the chain, so a crash between them leaves a directory
+  `load` refuses. `save_rotation` stages the key and commits with the chain.
+- **A per-object skip, not a refusal, for anything a known-dead key signed.**
+  In `handle_events_tolerantly`, an event that verifies only under a
+  compromised key is skipped. Refusing it would end every carrier response
+  it appears in, which is the wedge #622 removed for trust pulls.
+
 ---
 
 ## 5. Permissions, moderation, and Communities
@@ -3788,6 +3810,25 @@ isolation. Any future call site that constructs its own
 easy to add a new session and forget this, since everything works
 identically in every environment except one with no direct egress.
 
+### Adding a field to a signed request needs a capability, not a version bump (issue #669)
+
+Signed Link requests are verified by rebuilding the payload from the parsed
+fields (`_inventory_request_payload`), and `from_dict` ignores keys it does not
+know. So a new field that is signed breaks every older responder, which drops
+it, rebuilds a payload without it, and refuses the whole request. Bumping the
+protocol version is no way out either: hello requires an exact match, so the
+peers would stop talking altogether. What works, and what `not_carried` does:
+
+- the field enters the signed payload only when it is non-empty, so a request
+  that does not use it signs byte-for-byte as before and older requesters keep
+  working against newer responders;
+- the responder advertises the capability in its signed endpoint descriptor
+  (`capabilities`, `LINK_CAPABILITIES`), and the requester sends the field only
+  to a peer whose current descriptor lists it (`descriptor_has_capability`).
+
+The capability is fixed per software version, not configurable, because it
+describes what the code can verify.
+
 ### Remote identity attestation: the issuing half, and what it exposed (issue #584)
 
 `LinkNode.identity.signing_key` is an `Identity`, not a
@@ -4513,6 +4554,19 @@ the script's `-m netbbs --config <path>` identity match, causing start/status/
 stop to reject the correct live process and delete or ignore its service
 pidfile. Do not remove the wide-output flag while PID ownership is established
 from the full invocation string.
+
+While `start` waits for readiness, a failed identity match is not proof of
+failure (issue #693). As the child execs `nohup` → `env` → the interpreter,
+`ps -o command=` can show text that fails the match, for longer than any
+fixed interval on a loaded boot. Treating one such poll as "failed to start"
+deleted the pidfile of a node that came up moments later, leaving it
+untracked for the next `start` to duplicate. The match cannot be dropped
+either: a child that died early is orphaned and its pid can be recycled. So
+during `start` a dead pid fails at once, an unrecognised live one means
+"keep waiting", and only a pid still unrecognised when
+`netbbs_start_timeout` runs out is declared someone else's. It is never
+signalled, only untracked. A stand-in child that execs into a shell before
+carrying the real argv reproduces the old failure on NetBSD.
 
 `rc.subr`'s `run_rc_command` ends with `[ ! -x $command ] && return 0`. A
 `$command` that does not exist is therefore not an error: `service netbbs

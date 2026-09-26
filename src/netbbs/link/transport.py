@@ -136,7 +136,6 @@ from netbbs.link.files import (
     FileAreaCarryLimitError,
     RemoteFile,
     RemoteFileCatalogueLimitError,
-    get_remote_file,
     materialize_carried_file_area,
     materialize_carried_file_descriptor,
     withdraw_remote_file,
@@ -925,9 +924,13 @@ class LinkRealtimeSession:
         max_frames_per_window: int = REALTIME_DEFAULT_MAX_FRAMES_PER_WINDOW,
         frame_window_seconds: float = REALTIME_DEFAULT_FRAME_WINDOW_SECONDS,
         max_protocol_strikes: int = REALTIME_DEFAULT_MAX_PROTOCOL_STRIKES,
+        local_transport_key: bytes | None = None,
     ) -> None:
         self.remote_fingerprint = remote_fingerprint
         self.is_initiator = is_initiator
+        # Issue #624: which of this node's transport keys the handshake used,
+        # so the registry can refuse a session a rotation has retired.
+        self.local_transport_key = local_transport_key
         self._reader = reader
         self._writer = writer
         self._send_cipher = ciphers.sending
@@ -1112,6 +1115,13 @@ class LinkRealtimeSessionRegistry:
         self._own_fingerprint = own_fingerprint
         self._sessions: dict[str, LinkRealtimeSession] = {}
         self._watchers: set[asyncio.Task] = set()
+        # Issue #624: transport keys a rotation retired. A handshake that
+        # began before the rotation completes after it with the old key;
+        # `admit` closes such a session instead of registering it.
+        self._retired_transport_keys: set[bytes] = set()
+
+    def retire_transport_key(self, key: bytes) -> None:
+        self._retired_transport_keys.add(key)
 
     def get(self, fingerprint: str) -> LinkRealtimeSession | None:
         return self._sessions.get(fingerprint)
@@ -1124,6 +1134,9 @@ class LinkRealtimeSessionRegistry:
         fingerprint. Returns whether it survived -- if not, `session`
         has already been closed with reason `"duplicate_session"` and
         the caller must not use it further."""
+        if session.local_transport_key in self._retired_transport_keys:
+            await session.close(reason="transport_key_rotated", send_close_frame=True)
+            return False
         fingerprint = session.remote_fingerprint
         existing = self._sessions.get(fingerprint)
         if existing is None or existing is session:
@@ -1169,6 +1182,9 @@ async def rotate_realtime_transport_key(
     registry: LinkRealtimeSessionRegistry,
     server: LinkRealtimeServer | None = None,
     connectors: Sequence[LinkRealtimeConnector] = (),
+    compromised: bool = False,
+    persist: Callable[[NodeIdentity], Awaitable[None]] | None = None,
+    on_rotated: Callable[[NodeIdentity], None] | None = None,
 ) -> NodeIdentity:
     """
     Rotates `identity`'s transport key and makes the rotation actually take
@@ -1196,11 +1212,18 @@ async def rotate_realtime_transport_key(
     identity, if any -- their automatic reconnect after `close_all` closes
     their current session must dial with the new key too.
 
-    Does not save `identity` to disk -- same contract as
-    `rotate_operational_key` itself; the caller persists the returned
-    identity.
+    `persist` (issue #624, `netbbs.link.key_rotation.KeyRotator`) saves the
+    rotated identity before anything live changes, so a save that fails
+    leaves the running node exactly as it was; without it the caller
+    persists the returned identity. `on_rotated` is where the caller swaps
+    its own reference (`LinkNode.identity`), also before any session closes.
     """
-    rotated = rotate_operational_key(identity, purpose="transport")
+    rotated = rotate_operational_key(identity, purpose="transport", compromised=compromised)
+    if persist is not None:
+        await persist(rotated)
+    if on_rotated is not None:
+        on_rotated(rotated)
+    registry.retire_transport_key(bytes(identity.transport_key.verify_key))
     if server is not None:
         server.update_identity(rotated)
     for connector in connectors:
@@ -1318,9 +1341,10 @@ class LinkRealtimeServer:
             if not accepted:
                 await _reject_before_session(writer)
             return
+        identity = self._identity
         try:
             remote, ciphers = await establish_noise_xx_responder(
-                reader, writer, self._identity, first_message=first
+                reader, writer, identity, first_message=first
             )
         except (LinkTransportError, LinkProtocolError):
             await _reject_before_session(writer)
@@ -1335,6 +1359,7 @@ class LinkRealtimeServer:
         session = LinkRealtimeSession(
             remote_fingerprint=fingerprint, reader=reader, writer=writer, ciphers=ciphers,
             is_initiator=False, on_frame=self._on_frame,
+            local_transport_key=bytes(identity.transport_key.verify_key),
         )
         session.start()
         await self._registry.admit(session)
@@ -1389,6 +1414,7 @@ async def dial_realtime_session(
         session = LinkRealtimeSession(
             remote_fingerprint=fingerprint, reader=reader, writer=writer, ciphers=ciphers,
             is_initiator=True, on_frame=on_frame,
+            local_transport_key=bytes(identity.transport_key.verify_key),
         )
         session.start()
         survived = await registry.admit(session)
@@ -1463,6 +1489,7 @@ async def attach_relayed_session(
         session = LinkRealtimeSession(
             remote_fingerprint=fingerprint, reader=reader, writer=writer, ciphers=ciphers,
             is_initiator=(role == "initiator"), on_frame=on_frame,
+            local_transport_key=bytes(identity.transport_key.verify_key),
         )
         session.start()
         survived = await registry.admit(session)
@@ -1887,20 +1914,27 @@ class LinkServer:
         # requester with nothing carried yet sends an all-empty request).
         # Still gated on `remaining > 0`: that's the shared response-size
         # budget, unrelated to whether the request itself was empty.
+        # Issue #669: what the requester holds a genesis for and does not
+        # carry is left out of all three diffs. Only a requester that saw
+        # this node advertise the capability sends it.
+        not_carried = inventory_request.not_carried
         board_events, board_truncated = await self._lane.run(
-            board_event_diff, inventory_request.boards, limit=response_limit
+            board_event_diff, inventory_request.boards, limit=response_limit,
+            not_carried=not_carried.get("boards", ()),
         )
         remaining = response_limit - len(board_events)
         if remaining > 0:
             channel_events, channel_truncated = await self._lane.run(
-                channel_event_diff, inventory_request.channels, limit=remaining
+                channel_event_diff, inventory_request.channels, limit=remaining,
+                not_carried=not_carried.get("channels", ()),
             )
         else:
             channel_events, channel_truncated = [], True
         remaining -= len(channel_events)
         if remaining > 0:
             file_area_events, file_area_truncated = await self._lane.run(
-                file_area_event_diff, inventory_request.file_areas, limit=remaining
+                file_area_event_diff, inventory_request.file_areas, limit=remaining,
+                not_carried=not_carried.get("file_areas", ()),
             )
         else:
             file_area_events, file_area_truncated = [], True

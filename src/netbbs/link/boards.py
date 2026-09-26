@@ -61,6 +61,7 @@ from netbbs.link.events import (
     build_board_post_tombstone,
     event_content_id,
 )
+from netbbs.link.local_names import free_local_name
 from netbbs.link.node_identity import NodeIdentity, resolve_current_operational_key
 from netbbs.link.protocol import LinkNode, PeerRecord
 from netbbs.link.remote_attestation import (
@@ -137,9 +138,13 @@ class LinkContext:
     both only ever matter together with `link_node`/`node_identity`
     (`ensure_live_subscription` needs all four at once). `None` under
     the exact same conditions as `link_node` -- a node with Link
-    disabled constructs neither."""
+    disabled constructs neither.
 
-    node_identity: NodeIdentity
+    `node_identity` is read through `link_node` rather than held, because
+    a session lives across a key rotation (issue #624): a caller who
+    opened a screen before the SysOp rotated the signing key would
+    otherwise go on signing posts with the key just revoked."""
+
     link_node: LinkNode
     link_config: LinkConfigSnapshot | None = None
     realtime_registry: LinkRealtimeSessionRegistry | None = None
@@ -149,6 +154,10 @@ class LinkContext:
     # online) -- `None` under the same conditions as the two above.
     relay: RealtimeRelay | None = None
     direct_chat: LiveDirectChat | None = None
+
+    @property
+    def node_identity(self) -> NodeIdentity:
+        return self.link_node.identity
 
 
 class LinkBoardsError(Exception):
@@ -169,6 +178,12 @@ class BoardCarryLimitError(Exception):
     outcome (design doc §9.3's own already-specified shape for a local
     exclusion), never a silent, indistinguishable drop of the event
     itself."""
+
+
+class BoardCarryRefusedError(BoardCarryLimitError):
+    """Raised by `materialize_carried_board` when no local name is free for
+    the board (issue #671; see `netbbs.link.local_names`). A subclass of
+    `BoardCarryLimitError` so the caller's existing tolerance applies."""
 
 
 def is_board_linked(db: Database, board: Board) -> bool:
@@ -358,6 +373,12 @@ def materialize_carried_board(
         )
 
     payload = genesis.payload
+    # Issue #671: a name already in use here would make the insert fail.
+    local_name = free_local_name(db, "boards", str(payload["name"]), payload["board_id"])
+    if local_name is None:
+        raise BoardCarryRefusedError(
+            f"cannot carry board {payload['board_id']!r}: no free local name for {payload['name']!r}"
+        )
     db.connection.execute(
         """
         INSERT INTO boards
@@ -368,7 +389,7 @@ def materialize_carried_board(
         """,
         (
             payload["board_id"],
-            payload["name"],
+            local_name,
             payload.get("description"),
             payload.get("default_min_read_level", 0),
             payload.get("default_min_write_level", 0),
