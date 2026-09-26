@@ -118,6 +118,9 @@ class NodeIdentity:
         into place. `load` finishes a rotation it finds half done and
         discards one that never reached the chain.
 
+        Raises only before the commit point, so a caller that sees no
+        exception must treat the rotation as done.
+
         The key being retired is kept first (signing only), since a crash
         after the commit must not lose the one key that opens mail already
         on its way.
@@ -130,7 +133,14 @@ class NodeIdentity:
         staged = directory / (filename + _NEXT_SUFFIX)
         new_key.save(staged, passphrase=passphrase)
         self._write_transitions(directory)
-        staged.replace(directory / filename)
+        try:
+            staged.replace(directory / filename)
+        except OSError:
+            # Past the commit point: the chain already names the new key and
+            # `load` moves the staged file into place. Raising here would
+            # tell the caller nothing changed while the disk says otherwise,
+            # and a running node would keep the key its own chain revoked.
+            pass
 
     def _save_retired(self, directory: Path, *, passphrase: bytes | None) -> None:
         if not self.retired_signing_keys:

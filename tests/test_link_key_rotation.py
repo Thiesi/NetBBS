@@ -425,3 +425,60 @@ def test_without_a_running_node_the_keys_screen_says_where_rotation_is_done(db, 
     text = run(["s", "l", "k", "b", "b", "b", "b"])
     assert "Rotation needs the running node" in text and "rotate-key" in text
     assert "[S]igning key" not in text
+
+
+# -- review of #673 -----------------------------------------------------------
+
+
+def test_the_re_sign_scan_pages_through_a_table(db, monkeypatch):
+    import netbbs.link.key_rotation as key_rotation
+
+    monkeypatch.setattr(key_rotation, "_RESIGN_PAGE", 1)
+    base = bootstrap_node_identity("n")
+    _linked_post(db, base)
+    assert resign_own_content(db, rotate_operational_key(base, purpose="signing", compromised=True)) == 2
+
+
+def test_a_failure_after_the_commit_point_counts_as_a_rotation(tmp_path, monkeypatch):
+    import pathlib
+
+    base = bootstrap_node_identity("n")
+    base.save(tmp_path)
+    rotated = rotate_operational_key(base, purpose="signing")
+    real_replace = pathlib.Path.replace
+
+    def failing_replace(self, target):
+        if self.name == "signing.identity.next":
+            raise OSError("disk went away")
+        return real_replace(self, target)
+
+    monkeypatch.setattr(pathlib.Path, "replace", failing_replace)
+    rotated.save_rotation(tmp_path, purpose="signing")  # does not raise
+    monkeypatch.undo()
+    assert NodeIdentity.load(tmp_path).signing_key.fingerprint == rotated.signing_key.fingerprint
+
+
+def test_offline_rotation_refuses_a_database_from_another_node(db, tmp_path):
+    from netbbs.link.key_rotation import KeyRotationError
+    from netbbs.managed_dns.state import set_node_fingerprint
+
+    base = bootstrap_node_identity("n")
+    identity_dir = tmp_path / "identity"
+    base.save(identity_dir)
+    set_node_fingerprint(db, bootstrap_node_identity("other").fingerprint)
+
+    with pytest.raises(KeyRotationError, match="belongs to node"):
+        rotate_offline(db, identity_dir, purpose="signing", compromised=False)
+    assert NodeIdentity.load(identity_dir).signing_key.fingerprint == base.signing_key.fingerprint
+
+
+def test_the_command_checks_for_a_running_node_before_opening_the_database(tmp_path):
+    import os
+
+    from netbbs.admin.__main__ import main
+
+    db_path = tmp_path / "netbbs.db"
+    (tmp_path / "netbbs.pid").write_text(str(os.getpid()))
+    with pytest.raises(SystemExit, match="Stop it first"):
+        main(["rotate-key", "signing", "--db", str(db_path)])
+    assert not db_path.exists()

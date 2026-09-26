@@ -7958,7 +7958,7 @@ async def _node_key_detail(
             Field("[R]otate", "Retire the key. What it signed stays valid everywhere."),
             Field(
                 "[C]ompromised",
-                "Peers stop trusting anything the old key signed. "
+                "Peers refuse anything the old key signed that they do not already hold. "
                 + ("This node re-signs its own boards, posts, files and mail." if purpose == "signing"
                    else "Live sessions end at once."),
                 color=WARNING_COLOR,
@@ -7981,7 +7981,8 @@ async def _node_key_detail(
             return
         compromised = choice == "c"
         question = (
-            f"Replace the {purpose} key and tell every peer the old one is compromised?"
+            f"Replace the {purpose} key and tell every peer the old one is compromised? "
+            "Peers refuse anything it signed that they have not already accepted."
             if compromised else f"Retire the {purpose} key and replace it?"
         )
         if not await prompt_yes_no(session, question, default=False):

@@ -49,6 +49,7 @@ from netbbs.link.node_identity import (
     operational_key_history,
     rotate_operational_key,
 )
+from netbbs.managed_dns.state import get_node_fingerprint
 from netbbs.storage.database import Database
 
 _logger = logging.getLogger(__name__)
@@ -69,6 +70,9 @@ _OWN_SIGNED_COLUMNS: tuple[tuple[str, str], ...] = (
     ("mail_messages", "link_event_json"),
     ("link_mail_acknowledgements", "ack_event_json"),
 )
+
+
+_RESIGN_PAGE = 500
 
 
 class KeyRotationError(Exception):
@@ -130,26 +134,42 @@ def resign_own_content(db: Database, identity: NodeIdentity) -> int:
         return 0
     signer = identity.signing_key
     resigned = 0
-    with db.connection:
-        for table, column in _OWN_SIGNED_COLUMNS:
+    for table, column in _OWN_SIGNED_COLUMNS:
+        after_id = 0
+        while True:
+            # Paged by id, one transaction per page: a node with a long
+            # history must not hold every signed row in memory at startup.
             rows = db.connection.execute(
-                f"SELECT id, {column} AS raw FROM {table} WHERE {column} IS NOT NULL"  # noqa: S608 -- fixed names
+                f"SELECT id, {column} AS raw FROM {table} "  # noqa: S608 -- fixed names
+                f"WHERE {column} IS NOT NULL AND id > ? ORDER BY id LIMIT ?",
+                (after_id, _RESIGN_PAGE),
             ).fetchall()
-            for row in rows:
-                try:
-                    raw = json.loads(row["raw"])
-                    message = canonical_bytes(raw["envelope"])
-                    signature = base64.b64decode(raw["signature"])
-                except (ValueError, KeyError, TypeError):
-                    continue
-                if not any(verify_signature(key, message, signature) for key in compromised):
-                    continue
-                raw["signature"] = base64.b64encode(signer.sign(message)).decode("ascii")
-                db.connection.execute(
-                    f"UPDATE {table} SET {column} = ? WHERE id = ?",  # noqa: S608 -- fixed names
-                    (json.dumps(raw), row["id"]),
-                )
-                resigned += 1
+            if not rows:
+                break
+            after_id = rows[-1]["id"]
+            with db.connection:
+                resigned += _resign_page(db, table, column, rows, compromised, signer)
+    return resigned
+
+
+def _resign_page(db: Database, table: str, column: str, rows, compromised, signer) -> int:
+    """Re-sign the rows of one page that a compromised key signed; returns how many."""
+    resigned = 0
+    for row in rows:
+        try:
+            raw = json.loads(row["raw"])
+            message = canonical_bytes(raw["envelope"])
+            signature = base64.b64decode(raw["signature"])
+        except (ValueError, KeyError, TypeError):
+            continue
+        if not any(verify_signature(key, message, signature) for key in compromised):
+            continue
+        raw["signature"] = base64.b64encode(signer.sign(message)).decode("ascii")
+        db.connection.execute(
+            f"UPDATE {table} SET {column} = ? WHERE id = ?",  # noqa: S608 -- fixed names
+            (json.dumps(raw), row["id"]),
+        )
+        resigned += 1
     return resigned
 
 
@@ -182,6 +202,15 @@ def rotate_offline(
         before = NodeIdentity.load(identity_dir)
     except NodeIdentityError as exc:
         raise KeyRotationError(str(exc)) from exc
+    # Each node records its own fingerprint in its database at startup. A
+    # different one there means the two paths name two nodes: rotating one
+    # while auditing and re-signing in the other would damage both.
+    recorded = get_node_fingerprint(db)
+    if recorded is not None and recorded != before.fingerprint:
+        raise KeyRotationError(
+            f"{identity_dir} holds node {before.fingerprint}, but this database belongs to node "
+            f"{recorded} -- pass the identity directory of the node this database belongs to"
+        )
     after = rotate_operational_key(before, purpose=purpose, compromised=compromised)
     after.save_rotation(identity_dir, purpose=purpose)
     resigned = resign_own_content(db, after) if purpose == "signing" and compromised else 0

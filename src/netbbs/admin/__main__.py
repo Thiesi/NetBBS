@@ -187,7 +187,8 @@ async def run_rotate_key(
         if compromised:
             question = (
                 f"Replace the {purpose} key in {identity_dir} and tell every peer the old one is "
-                "compromised? Nothing it ever signed will be trusted again."
+                "compromised? Peers refuse anything it signed that they have not already "
+                "accepted; copies they already hold stay."
             )
         else:
             question = f"Retire the {purpose} key in {identity_dir} and replace it?"
@@ -411,6 +412,18 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
+
+    if args.command == "rotate-key":
+        # Before the database opens, since opening it applies this build's
+        # migrations: a newer tool must not migrate a live older node's
+        # database only to refuse afterwards.
+        pid = running_node_pid(args.db)
+        if pid is not None:
+            raise SystemExit(terminal_wrapped(
+                f"A node process (PID {pid}) is running on {args.db}. Stop it first, or rotate "
+                "from its console: Link status, then [K]eys.",
+                stream=sys.stderr,
+            ))
 
     try:
         db = Database(args.db)
