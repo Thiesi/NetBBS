@@ -460,3 +460,82 @@ def test_a_carried_genesis_recommending_a_max_file_age_below_one_day_is_stored_w
     area = materialize_carried_file_area(db, genesis)
 
     assert area.max_file_age_days is None
+
+
+# -- issue #696: deleting a carried file area with a remote catalogue ---------
+
+
+def _carried_area_with_a_transfer(db, remote_node_identity, tmp_path):
+    area = materialize_carried_file_area(db, _remote_genesis(remote_node_identity))
+    materialize_carried_file_descriptor(
+        db, _remote_descriptor(remote_node_identity), sender_fingerprint=remote_node_identity.fingerprint
+    )
+    staging = tmp_path / "partial.bin"
+    staging.write_bytes(b"half a file")
+    db.connection.execute(
+        """INSERT INTO link_file_transfers
+               (transfer_id, remote_file_id, total_size, chunk_size, bytes_received, status, temp_path,
+                created_at, updated_at)
+           VALUES ('t-1', 'remote-file-id', 100, 10, 10, 'in_progress', ?, '2026-01-01', '2026-01-01')""",
+        (str(staging),),
+    )
+    db.connection.execute(
+        "INSERT INTO link_file_transfer_chunks (transfer_id, chunk_index, chunk_id, received_at) "
+        "VALUES ('t-1', 0, 'c-0', '2026-01-01')"
+    )
+    db.connection.commit()
+    return area, staging
+
+
+def test_deleting_a_carried_file_area_takes_its_remote_catalogue_and_staging_with_it(db, alice, remote_node_identity, tmp_path):
+    from netbbs.files.areas import delete_file_area
+    from netbbs.moderation.log import list_recent_actions
+
+    area, staging = _carried_area_with_a_transfer(db, remote_node_identity, tmp_path)
+
+    delete_file_area(db, area, deleted_by=alice)
+
+    for table in ("file_areas", "remote_files", "link_file_transfers", "link_file_transfer_chunks"):
+        assert db.connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0, table
+    assert not staging.exists()
+    assert [entry.action for entry in list_recent_actions(db)] == ["delete_file_area"]
+
+
+def test_a_failed_file_area_delete_leaves_everything_and_no_audit_entry(db, alice, remote_node_identity, tmp_path):
+    """The audit entry used to commit before the deletes, so a delete that
+    then failed was recorded as having happened."""
+    import sqlite3
+
+    from netbbs.files.areas import delete_file_area
+    from netbbs.moderation.log import list_recent_actions
+
+    area, staging = _carried_area_with_a_transfer(db, remote_node_identity, tmp_path)
+    db.connection.execute(
+        "CREATE TRIGGER refuse BEFORE DELETE ON file_areas BEGIN SELECT RAISE(ABORT, 'refused'); END"
+    )
+    db.connection.commit()
+
+    with pytest.raises(sqlite3.IntegrityError):
+        delete_file_area(db, area, deleted_by=alice)
+
+    assert db.connection.execute("SELECT COUNT(*) FROM remote_files").fetchone()[0] == 1
+    assert staging.exists()
+    assert list_recent_actions(db) == []
+
+
+def test_a_staging_file_that_cannot_be_removed_is_reported(db, alice, remote_node_identity, tmp_path, monkeypatch, caplog):
+    import logging
+
+    from netbbs.files import areas as areas_module
+    from netbbs.files.areas import delete_file_area
+
+    area, staging = _carried_area_with_a_transfer(db, remote_node_identity, tmp_path)
+
+    def refuse(path):
+        raise PermissionError(13, "Permission denied", path)
+
+    monkeypatch.setattr(areas_module.os, "remove", refuse)
+    with caplog.at_level(logging.WARNING, logger="netbbs.files.areas"):
+        delete_file_area(db, area, deleted_by=alice)
+
+    assert any(str(staging) in record.getMessage() for record in caplog.records)
