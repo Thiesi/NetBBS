@@ -694,13 +694,16 @@ def uncarried_resource_ids(db: Database) -> dict[str, tuple[str, ...]]:
     them out. One resource ID each, and bounded by the geneses this node has
     already stored.
     """
+    # "Carried" is a row with a Link genesis, the same test `carried_board_ids`
+    # uses: a local-only row sharing an id -- an MRC room a caller opened,
+    # whose id a refused genesis claimed (issue #300) -- is not a copy of it.
     queries = (
         ("boards", "board_id", BOARD_GENESIS_OBJECT_TYPE,
-         "SELECT board_id FROM boards WHERE board_id IS NOT NULL"),
+         "SELECT board_id FROM boards WHERE link_genesis_json IS NOT NULL"),
         ("channels", "channel_id", CHANNEL_GENESIS_OBJECT_TYPE,
-         "SELECT channel_id FROM channels WHERE channel_id IS NOT NULL"),
+         "SELECT channel_id FROM channels WHERE link_genesis_json IS NOT NULL"),
         ("file_areas", "file_area_id", FILE_AREA_GENESIS_OBJECT_TYPE,
-         "SELECT area_id FROM file_areas WHERE area_id IS NOT NULL"),
+         "SELECT area_id FROM file_areas WHERE link_genesis_json IS NOT NULL"),
     )
     result: dict[str, tuple[str, ...]] = {}
     for kind, column, object_type, local_ids in queries:
