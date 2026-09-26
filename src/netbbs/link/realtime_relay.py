@@ -1077,15 +1077,10 @@ class RealtimeRelayClient:
             await asyncio.gather(*tasks, return_exceptions=True)
 
 
-def frame_is_relay_traffic(frame: RealtimeFrame) -> bool:
-    return frame.type in RELAY_FRAME_TYPES
-
-
 __all__ = [
     "RELAY_FRAME_TYPES",
     "RealtimeRelay",
     "RealtimeRelayClient",
     "RelayRendezvousError",
-    "frame_is_relay_traffic",
 ]
 

@@ -95,30 +95,23 @@ def _cutoff_iso(seconds: float) -> str:
     return cutoff.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
-def enqueue_work_item(db: Database, *, kind: str, reference_id: str, target_fingerprint: str) -> WorkItem:
+def enqueue_work_item_without_commit(
+    db: Database, *, kind: str, reference_id: str, target_fingerprint: str
+) -> WorkItem:
     """Schedule a new work item for immediate first attempt, or return
     the existing one unchanged if this exact `(kind, reference_id,
     target_fingerprint)` is already tracked -- idempotent, matching
     `INSERT ... ON CONFLICT DO NOTHING`'s own established shape
-    elsewhere in this codebase (`netbbs.activity.follow`)."""
-    item = enqueue_work_item_without_commit(
-        db, kind=kind, reference_id=reference_id, target_fingerprint=target_fingerprint
-    )
-    db.connection.commit()
-    return item
+    elsewhere in this codebase (`netbbs.activity.follow`).
 
-
-def enqueue_work_item_without_commit(
-    db: Database, *, kind: str, reference_id: str, target_fingerprint: str
-) -> WorkItem:
-    """Like `enqueue_work_item`, but for a caller (`netbbs.link.mail.
-    compose_link_message`/`_queue_acknowledgement`) that needs this
-    insert to be part of the same already-open transaction as the row
-    it's scheduling delivery for -- a crash between the two inserts must
-    never leave a message with no work item ever tracking it. The
-    caller is responsible for eventually committing (or rolling back);
-    see `netbbs.moderation.log.record_action_without_commit`'s own
-    docstring for the identical reasoning."""
+    Deliberately leaves the commit to the caller (`netbbs.link.mail.
+    compose_link_message`/`_queue_acknowledgement`): the insert has to be
+    part of the same already-open transaction as the row it schedules
+    delivery for, since a crash between the two inserts must never leave
+    a message with no work item tracking it. There is no committing
+    variant because no production caller enqueues on its own; see
+    `netbbs.moderation.log.record_action_without_commit`'s own docstring
+    for the identical reasoning."""
     created_at = utc_now_iso()
     db.connection.execute(
         """

@@ -213,6 +213,41 @@ def test_someone_elses_pending_upload_is_not_downloadable(db, alice):
         resolve(db, _download_grant(db, grants, bob, area, entry))
 
 
+def _expire(db, entry) -> None:
+    db.connection.execute("UPDATE files SET status = 'expired' WHERE id = ?", (entry.id,))
+    db.connection.commit()
+
+
+def test_a_link_stops_serving_a_file_that_expires_under_it(db, alice):
+    """Issue #639: expiry ends a caller's reach. A link minted while the
+    file was listed is refused once it expires -- its own uploader
+    included, since an expired file is gone for them too."""
+    grants = TransferGrants()
+    area = create_file_area(db, "docs", creator=alice)
+    entry = upload_file(db, area, alice, "game.zip", b"payload")
+    grant = _download_grant(db, grants, alice, area, entry)
+    _expire(db, entry)
+
+    with pytest.raises(TransferError, match="expired"):
+        resolve(db, grant)
+
+
+def test_an_expired_file_is_still_served_to_the_sysop_recovering_it(db, alice):
+    """The recovery screen's `[D]ownload` goes through this same path
+    when the transport cannot carry Zmodem (issue #475)."""
+    grants = TransferGrants()
+    bob = create_user(db, "bob", password="hunter2", user_level=10)
+    area = create_file_area(db, "docs", creator=bob)
+    grant_permissions(
+        db, bob, object_type="file_area", object_id=area.id,
+        permissions=BoardPermission.APPROVE, granted_by=bob,
+    )
+    entry = upload_file(db, area, alice, "game.zip", b"payload")
+    _expire(db, entry)
+
+    assert resolve(db, _download_grant(db, grants, bob, area, entry)).entry.file_id == entry.file_id
+
+
 def test_an_approved_file_is_downloadable_by_anyone_who_may_read_the_area(db, alice):
     grants = TransferGrants()
     bob = create_user(db, "bob", password="hunter2", user_level=10)
