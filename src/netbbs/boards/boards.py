@@ -195,9 +195,11 @@ def create_board(
         )
         db.connection.commit()
     except sqlite3.IntegrityError as exc:
+        if _name_held_by_hidden(db, name):
+            raise BoardError(f"the name {name!r} is held by a Link resource excluded from this node (Link status -> Excluded): restore or purge it there first") from exc
         raise BoardError(f"could not create board {name!r} — name already in use?") from exc
 
-    new_board = get_board_by_name(db, name)
+    new_board = _read_back_by_name(db, name)
     record_action(
         db, actor=creator, action="create_board", object_type="board", object_id=new_board.id,
         detail=f"created board {name!r}",
@@ -205,8 +207,30 @@ def create_board(
     return new_board
 
 
-def get_board_by_name(db: Database, name: str) -> Board:
+def _name_held_by_hidden(db: Database, name: str) -> bool:
+    """Issue #683: whether a hidden (excluded) carried board holds `name` --
+    it stays taken while hidden, and a SysOp must be told why."""
+    return db.connection.execute(
+        "SELECT 1 FROM boards WHERE name = ? AND link_hidden_at IS NOT NULL", (name,)
+    ).fetchone() is not None
+
+
+def _read_back_by_name(db: Database, name: str):
+    """A row this module has just written, read back by name. Not filtered on
+    `link_hidden_at` (issue #683): a row just created or renamed is never
+    hidden, and this keeps the write paths free of the newer column."""
     row = db.connection.execute("SELECT * FROM boards WHERE name = ?", (name,)).fetchone()
+    if row is None:
+        raise BoardError(f"no such board: {name!r}")
+    return _row_to_board(row)
+
+
+def get_board_by_name(db: Database, name: str) -> Board:
+    # Issue #683: a hidden (excluded) carried board is invisible here and in
+    # `list_boards`, which every caller-facing and admin listing goes through.
+    row = db.connection.execute(
+        "SELECT * FROM boards WHERE name = ? AND link_hidden_at IS NULL", (name,)
+    ).fetchone()
     if row is None:
         raise BoardError(f"no such board: {name!r}")
     return _row_to_board(row)
@@ -320,7 +344,7 @@ def list_boards(db: Database, *, order_by: str = "activity") -> list[Board]:
             (now,),
         ).fetchall()
 
-    return [_row_to_board(row) for row in rows]
+    return [_row_to_board(row) for row in rows if row["link_hidden_at"] is None]
 
 
 def update_board(
@@ -372,9 +396,11 @@ def update_board(
         )
         db.connection.commit()
     except sqlite3.IntegrityError as exc:
+        if _name_held_by_hidden(db, name):
+            raise BoardError(f"the name {name!r} is held by a Link resource excluded from this node (Link status -> Excluded): restore or purge it there first") from exc
         raise BoardError(f"could not update board {board.name!r} — name already in use?") from exc
 
-    updated = get_board_by_name(db, name)
+    updated = _read_back_by_name(db, name)
     record_action(
         db, actor=changed_by, action="update_board", object_type="board", object_id=board.id,
         detail=f"updated board {board.name!r}",

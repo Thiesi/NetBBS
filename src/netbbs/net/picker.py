@@ -48,6 +48,7 @@ from netbbs.net.char_input import CANCEL_KEY, HELP_KEY, REDRAW_KEY, REFRESH_KEY,
 from netbbs.net.help_overlay import show_help
 from netbbs.rendering.ansi import strip_ansi
 from netbbs.rendering.reflow import wrap_terminal_text
+from netbbs.net.notices import announce, with_notices
 from netbbs.net.session import Session, write_preformatted_line
 from netbbs.rendering import (
     ACCENT_COLOR,
@@ -679,6 +680,11 @@ async def pick_item(
     # it kept reporting "Backup: never" while another session completed
     # a backup -- stale precisely on a screen that had just advertised
     # Ctrl-R as a way to see current reality.
+    #
+    # An outcome the caller's last action announced (`netbbs.net.notices`,
+    # issue #680) rides along the same way: a picker is often the screen a
+    # finished action returns to, and its redraw would erase a written line.
+    masthead = with_notices(session, masthead)
     masthead_text = "" if callable(masthead) else masthead
 
     async def _refresh_masthead() -> None:
@@ -712,16 +718,13 @@ async def pick_item(
     # and the SysOp was bounced out to create one elsewhere and
     # come back -- the dead end issue #530 was filed about.
     if not items and refresh is None and on_create is None:
-        # Resolved first: a callable masthead is empty until something
-        # awaits it, and this return happens before the render that
-        # normally would (Codex review) -- so the screen that shows
-        # nothing else would have shown no masthead either, unlike the
-        # identical case with a plain string.
-        await _refresh_masthead()
-        prefix = _masthead_prefix()
-        if prefix:
-            await write_preformatted_line(session, prefix)
-        await session.write_line(colored(f"\r\n{empty_message}", fg_color=MUTED_COLOR))
+        # Nothing to pick and nothing to do but leave: the empty message is
+        # announced (issue #680) for the screen this returns to, instead of
+        # being written just before that screen's redraw erases it -- the
+        # same answer the SysOp console's own picker wrapper gives. Any
+        # outcome already pending stays pending for that screen too; the
+        # masthead is not drawn onto a screen nobody will see.
+        announce(session, empty_message, tone="muted")
         return None
 
     working_set: Sequence[T] = items

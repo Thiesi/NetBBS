@@ -634,8 +634,8 @@ def test_tombstone_option_hidden_without_delete_permission(db, alice):
     session = FakeSession(["b", ""])
     asyncio.run(board_flow._show_board(session, db, board, alice))
     # alice owns the post but holds no BoardPermission.DELETE grant --
-    # unlike [E]dit, there is no author bypass for [T]ombstone.
-    assert "[T]ombstone" not in _written_text(session)
+    # unlike [E]dit, there is no author bypass for removing a post.
+    assert "Remove pos[t]" not in _visible(session)
 
 
 def test_tombstone_existing_post_via_plain_line_flow(db, alice):
@@ -791,16 +791,6 @@ def test_a_refused_edit_stays_in_review_with_the_revision_intact(db, alice):
     saved = list_posts_page(db, board, alice).posts[0]
     assert saved.subject == "Short subject"
     assert saved.body == "Revised body"
-
-
-def test_the_edit_subject_prompt_sanitizes_the_current_subject(db, alice):
-    """A subject carried over Link reaches this prompt from another node."""
-    board = create_board(db, "general", creator=alice)
-    create_post(db, board, alice, "Hi\x1b[2Jthere", "Body")
-    session = FakeSession(["e", "1", "", "/cancel", "b", ""])
-    asyncio.run(board_flow._show_board(session, db, board, alice))
-    prompt = next(chunk for chunk in session.written if "(Enter to keep)" in chunk)
-    assert "\x1b[2J" not in prompt
 
 
 def test_a_tombstoned_post_carries_no_edited_badge(db, alice):

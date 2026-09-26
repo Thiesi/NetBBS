@@ -71,7 +71,13 @@ class FakeSession:
 
     @property
     def visible_output(self) -> str:
-        return re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", "".join(self.written))
+        """What was written, plus any outcome still queued for the next
+        screen (`netbbs.net.notices`, issue #680): these tests stop where
+        the real flow would draw the area list that shows it."""
+        from netbbs.net.notices import pending_notices
+
+        shown = "".join(self.written) + "\r\n".join(pending_notices(self))
+        return re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", shown)
 
 
 class BrowserSession(FakeSession):

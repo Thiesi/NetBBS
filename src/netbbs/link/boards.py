@@ -113,6 +113,12 @@ class LinkConfigSnapshot:
     # lives in netbbs.net.nodeconfig.LinkConfig" split as max_carried_
     # boards above, the channel-side counterpart.
     max_carried_channels: int
+    # Issue #683: the Link status readout covers file areas too. Defaulted so
+    # older constructions keep working; the real value comes from LinkConfig.
+    max_carried_file_areas: int = 500
+    # Issue #683: accepting a file area reprojects its stored catalogue under
+    # the same per-area cap intake applies.
+    max_remote_files_per_area: int = 5000
 
 
 @dataclass(frozen=True)
@@ -307,7 +313,7 @@ def carried_board_count(db: Database, own_fingerprint: str) -> int:
     migrations`), and cheap enough at this project's declared small-
     network scale (design doc §14)."""
     count = 0
-    for row in db.connection.execute("SELECT link_genesis_json FROM boards WHERE link_genesis_json IS NOT NULL"):
+    for row in db.connection.execute("SELECT link_genesis_json FROM boards WHERE link_genesis_json IS NOT NULL AND link_hidden_at IS NULL"):
         genesis = json.loads(row["link_genesis_json"])
         if genesis["envelope"]["payload"].get("origin_fingerprint") != own_fingerprint:
             count += 1
@@ -315,7 +321,8 @@ def carried_board_count(db: Database, own_fingerprint: str) -> int:
 
 
 def materialize_carried_board(
-    db: Database, genesis: BoardGenesis, *, own_fingerprint: str | None = None, max_carried_boards: int | None = None
+    db: Database, genesis: BoardGenesis, *, own_fingerprint: str | None = None, max_carried_boards: int | None = None,
+    commit: bool = True,
 ) -> Board:
     """
     Turn a *received* (not self-originated) `board_genesis` into a real,
@@ -406,7 +413,10 @@ def materialize_carried_board(
             json.dumps(genesis.to_dict()),
         ),
     )
-    db.connection.commit()
+    # Issue #683: `commit=False` lets `netbbs.link.carry` write this and the
+    # carry decision it belongs with in one transaction.
+    if commit:
+        db.connection.commit()
 
     return _board_from_row(
         db.connection.execute("SELECT * FROM boards WHERE board_id = ?", (payload["board_id"],)).fetchone()
@@ -484,7 +494,9 @@ def materialize_carried_post(
     board_row = db.connection.execute(
         "SELECT * FROM boards WHERE board_id = ?", (payload["board_id"],)
     ).fetchone()
-    if board_row is None:
+    if board_row is None or board_row["link_hidden_at"] is not None:
+        # Issue #683: a hidden board takes nothing new; Restore lets pull
+        # bring what arrived meanwhile.
         return None
     board_local_id = board_row["id"]
     if board_row["moderated"]:
@@ -626,7 +638,7 @@ def materialize_carried_post_edit(
     root_row = db.connection.execute(
         "SELECT * FROM posts WHERE post_id = ?", (payload["root_post_id"],)
     ).fetchone()
-    if root_row is None:
+    if root_row is None or _board_is_hidden(db, root_row["board_id"]):
         return None
     # An author's own edit follows local moderation and the author's
     # trust decision, as a new post does (issue #677).
@@ -754,7 +766,7 @@ def materialize_carried_board_post_moderator_edit(
     root_row = db.connection.execute(
         "SELECT * FROM posts WHERE post_id = ?", (payload["root_post_id"],)
     ).fetchone()
-    if root_row is None:
+    if root_row is None or _board_is_hidden(db, root_row["board_id"]):
         return None
     # The origin's moderator edit is the origin's own moderation, so this
     # node's "Moderated" flag does not hold it -- but it may neither undo
@@ -821,7 +833,7 @@ def materialize_carried_board_post_tombstone(
     root_row = db.connection.execute(
         "SELECT * FROM posts WHERE post_id = ?", (payload["root_post_id"],)
     ).fetchone()
-    if root_row is None:
+    if root_row is None or _board_is_hidden(db, root_row["board_id"]):
         return None
     predecessor_exists = db.connection.execute(
         "SELECT 1 FROM posts WHERE post_id = ?", (payload["previous_event_id"],)
@@ -863,7 +875,13 @@ def materialize_carried_board_post_tombstone(
     )
 
 
-def materialize_carried_board_closure(db: Database, closure: BoardClosure) -> None:
+def _board_is_hidden(db: Database, board_local_id: int) -> bool:
+    """Issue #683: whether the local board a post row belongs to is hidden."""
+    row = db.connection.execute("SELECT link_hidden_at FROM boards WHERE id = ?", (board_local_id,)).fetchone()
+    return row is not None and row["link_hidden_at"] is not None
+
+
+def materialize_carried_board_closure(db: Database, closure: BoardClosure, *, commit: bool = True) -> None:
     """
     Record a *received* `board_closure` locally (design doc §9.5, issue
     #88) -- sets `boards.link_closed_at` so `netbbs.boards.posts.
@@ -879,10 +897,11 @@ def materialize_carried_board_closure(db: Database, closure: BoardClosure) -> No
         "UPDATE boards SET link_closed_at = ? WHERE board_id = ? AND link_closed_at IS NULL",
         (closure.payload["created_at"], board_id),
     )
-    db.connection.commit()
+    if commit:
+        db.connection.commit()
 
 
-def rebuild_carried_post_materialization(db: Database) -> int:
+def rebuild_carried_post_materialization(db: Database, *, board_id: str | None = None) -> int:
     """
     Repair pass (design doc §9.3, issue #73's own "supported rebuild
     path" acceptance criterion): materializes every accepted
@@ -902,7 +921,14 @@ def rebuild_carried_post_materialization(db: Database) -> int:
     node never carried), the same "derived state rebuildable from
     authoritative data" principle issue #74 applies to FTS indexes.
     Returns how many rows were newly materialized.
+
+    `board_id` limits the pass to one board (issue #683: accepting an offer
+    reprojects only that board's stored content). The unscoped pass would also
+    recreate posts a moderator removed or the expiry sweep deleted on every
+    other carried board, whose events are kept on purpose.
     """
+    scope = "" if board_id is None else " AND board_id = ?"
+    scope_args = () if board_id is None else (board_id,)
     rebuilt = 0
     while True:
         progressed = 0
@@ -910,12 +936,14 @@ def rebuild_carried_post_materialization(db: Database) -> int:
             """
             SELECT content_id, sender_fingerprint, object_type, envelope_json
             FROM link_events
-            WHERE object_type IN (?, ?, ?, ?) AND content_id NOT IN (SELECT post_id FROM posts)
+            WHERE object_type IN (?, ?, ?, ?) AND content_id NOT IN (SELECT post_id FROM posts)"""
+            + scope + """
             ORDER BY received_at ASC
             """,
             (
                 BOARD_POST_OBJECT_TYPE, BOARD_POST_EDIT_OBJECT_TYPE,
                 BOARD_POST_MODERATOR_EDIT_OBJECT_TYPE, BOARD_POST_TOMBSTONE_OBJECT_TYPE,
+                *scope_args,
             ),
         ).fetchall()
         for row in gaps:
@@ -1081,7 +1109,9 @@ def accept_board_origin_transfer(
     return accepted
 
 
-def record_board_origin_change(db: Database, board_id: str, new_origin_fingerprint: str) -> None:
+def record_board_origin_change(
+    db: Database, board_id: str, new_origin_fingerprint: str, *, commit: bool = True
+) -> None:
     """
     Update the locally-materialized board's own `link_origin_fingerprint`
     override to `new_origin_fingerprint` (design doc §13, issue
@@ -1107,7 +1137,8 @@ def record_board_origin_change(db: Database, board_id: str, new_origin_fingerpri
         "UPDATE boards SET link_origin_fingerprint = ? WHERE board_id = ?",
         (new_origin_fingerprint, board_id),
     )
-    db.connection.commit()
+    if commit:
+        db.connection.commit()
 
 
 def close_board_if_linked(
@@ -1652,7 +1683,7 @@ def load_own_board_events(db: Database, own_fingerprint: str) -> list[_OwnBoardE
     """
     events: list[_OwnBoardEvent] = []
     for row in db.connection.execute(
-        "SELECT link_genesis_json, link_lifecycle_json FROM boards WHERE link_genesis_json IS NOT NULL"
+        "SELECT link_genesis_json, link_lifecycle_json FROM boards WHERE link_genesis_json IS NOT NULL AND link_hidden_at IS NULL"
     ):
         genesis = BoardGenesis.from_dict(json.loads(row["link_genesis_json"]))
         if genesis.payload["origin_fingerprint"] == own_fingerprint:
@@ -1666,8 +1697,10 @@ def load_own_board_events(db: Database, own_fingerprint: str) -> list[_OwnBoardE
                 events.append(BoardClosure.from_dict(raw))
             else:
                 events.append(BoardOriginTransferAccepted.from_dict(raw))
+    # Issue #683: nothing is pushed for a board this node has hidden.
     for row in db.connection.execute(
-        "SELECT link_event_json FROM posts WHERE link_event_json IS NOT NULL"
+        """SELECT p.link_event_json FROM posts AS p JOIN boards AS b ON b.id = p.board_id
+            WHERE p.link_event_json IS NOT NULL AND b.link_hidden_at IS NULL"""
     ):
         raw = json.loads(row["link_event_json"])
         post_object_type = raw["envelope"]["object_type"]
