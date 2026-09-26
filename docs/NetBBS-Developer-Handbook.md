@@ -317,11 +317,14 @@ has already created it. To post, write one JSON file there:
   one, a request that names none is refused rather than guessed at.
 - `subject` must be non-empty; `body` may be empty.
 
-Requests are processed when the door exits. For each one, NetBBS removes the
-request and writes a result into the directory named by `outbound.results` —
-an absolute path outside the working directory, because the working directory
-is deleted the moment the run ends and a result left there could never be read
-by anyone.
+Requests are picked up while the door runs -- up to 16 every two seconds, so
+a single request is answered within about two seconds and a burst of 100 takes
+about 13 seconds -- and once more when it exits. For each one, NetBBS
+removes the request and writes a result into the directory named by
+`outbound.results` -- an absolute path outside the working directory, because
+the working directory is deleted the moment the run ends and a result left
+there could never be read after it. A running door can poll that directory for
+the outcome of what it just posted.
 
 Each request is answered exactly once: NetBBS takes it out of the drop
 directory before reading it, so reusing a request name for a later request is
@@ -349,7 +352,7 @@ block is how you learn the hook is off.
 
 A refusal is never queued for later — a post held back and published after a
 SysOp revoked the allowlist is the surprise the switch exists to prevent. Your
-door can read the result on its next launch if it wants to know what happened;
+door can read the result later in the same session, or on its next launch;
 `"moderated": true` means the post is waiting for the SysOp's approval rather
 than already visible.
 
