@@ -239,7 +239,7 @@ def test_drop_files_name_the_guest_node_directory(tmp_path):
     (None, [0], (1, None)),
     ("garbage", [0], (1, None)),
     # A hostile guest's status is read bounded, never whole.
-    ("0" * 100_000, [0], (1, None)),
+    pytest.param("0" * 100_000, [0], (1, None), id="oversized"),
 ])
 def test_the_status_file_is_the_only_verdict(tmp_path, written, success, expected):
     (tmp_path / "booted").touch()
