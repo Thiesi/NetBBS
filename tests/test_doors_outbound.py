@@ -922,3 +922,56 @@ def test_an_idle_door_costs_the_lane_nothing(db, lane, sysop, board, tmp_path, m
     assert asyncio.run(_run(FakeSession(), lane, door, sysop)).reason == "exited"
     assert [call.get("final", True) for call in drains] == [True], "only the drain at exit ran"
     assert outbound.has_requests(tmp_path) is False
+
+
+# -- slice 2 groundwork, review round 1 -------------------------------------
+
+
+def test_a_rehearsal_meets_the_same_checks_as_a_real_post(db, door, sysop, board, tmp_path):
+    """Judged by the real post, rolled back -- not by a copy of its checks."""
+    from netbbs.boards.limits import MAX_BODY_BYTES
+
+    _enable(db, door, sysop, board)
+    oversized = _request(tmp_path, name="big", subject="Big", body="x" * (MAX_BODY_BYTES + 1))
+
+    assert drain(db, door, tmp_path, rehearsal=True) == (0, 1)
+    receipt = _result(db, door, oversized)
+    assert (receipt["status"], receipt["would"]) == ("rehearsal", "rejected")
+    assert _posts(db, board, sysop) == []
+
+
+def test_a_rehearsal_spends_its_budget_within_the_drain(db, door, sysop, board, tmp_path):
+    """Five rehearsed requests under a ceiling of one: one would post."""
+    _enable(db, door, sysop, board, posts_per_hour=1)
+    requests = [_request(tmp_path, name=f"r{index}", subject="Hi", body="...") for index in range(5)]
+
+    assert drain(db, door, tmp_path, rehearsal=True) == (1, 4)
+    verdicts = [_result(db, door, request)["would"] for request in requests]
+    assert verdicts == ["posted", "rejected", "rejected", "rejected", "rejected"]
+    assert db.connection.execute(
+        "SELECT COUNT(*) FROM door_outbound_history WHERE door_id = ?", (door.id,)).fetchone()[0] == 0
+
+
+def test_a_switched_off_hook_still_honours_a_ticks_limit(db, door, sysop, board, tmp_path):
+    _enable(db, door, sysop, board)
+    disable_outbound(db, door, disabled_by=sysop)
+    for index in range(5):
+        _request(tmp_path, name=f"p{index}", subject="Hi", body="...")
+
+    assert drain(db, door, tmp_path, limit=2, final=False) == (0, 2)
+    assert len(list((tmp_path / OUTBOUND_DIRNAME).glob("*.json"))) == 3
+
+
+@pytest.mark.skipif(__import__("os").name != "posix", reason="Windows MAX_PATH, not the 255-byte limit")
+def test_a_long_request_name_can_still_be_claimed_and_answered(db, door, sysop, board, tmp_path):
+    """A request name near the 255-byte limit must not become a claim or a
+    receipt name the filesystem refuses -- after the post has committed."""
+    _enable(db, door, sysop, board)
+    name = "n" * 200
+    request = _request(tmp_path, name=name, subject="Long", body="...")
+
+    assert drain(db, door, tmp_path) == (1, 0)
+    (receipt,) = [json.loads(path.read_text()) for path in results_dir(db, door.id).glob("*.result.json")]
+    assert receipt["request"] == name and receipt["status"] == "posted"
+    assert all(len(path.name) < 200 for path in results_dir(db, door.id).iterdir())
+    assert not request.exists()
