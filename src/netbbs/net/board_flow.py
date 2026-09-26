@@ -32,10 +32,10 @@ from netbbs.boards import (
     PostPage,
     create_post,
     edit_post,
-    get_post,
     list_boards,
     list_posts_page,
     tombstone_post,
+    visible_post,
 )
 from netbbs.boards.categories import Category, list_subcategories, list_top_level_categories
 from netbbs.boards.categories import get_category_by_id as get_board_category_by_id
@@ -465,6 +465,13 @@ _ROW_FURNITURE = 2 + 4 * 2 + 1
 _AUTHOR_MAX_WIDTH = 24
 _SUBJECT_MIN_WIDTH = 8
 _HINT_MIN_HEIGHT = 20
+# A list with fewer rows than this is worth trading the action bar's
+# descriptions for.
+_COMFORTABLE_LIST_ROWS = 6
+# Rows around the list that are neither header nor action bar: the blank
+# row, the column heading, the two rules, the blank row after, the hint
+# and the prompt.
+_LIST_FURNITURE_ROWS = 7
 
 
 def _read_only_reason(db: Database, user: User, board: Board, *, closed: bool) -> str | None:
@@ -495,8 +502,12 @@ def _linked_note(db: Database, board: Board, link_context: LinkContext | None) -
 
 
 def _post_row_cells(db: Database, post: Post, *, name_requirement: str | None) -> tuple[str, str, str]:
-    subject = sanitize_text(post.subject)
-    author = strip_ansi(_author_display_name(db, post, name_requirement=name_requirement))
+    """Subject, author and date as plain cells. Tabs become spaces before
+    anything is measured: `sanitize_text` keeps a tab, the width helpers
+    count it as no column, and the transport writes it as one -- a subject
+    full of tabs would otherwise overrun its column and the page budget."""
+    subject = sanitize_text(post.subject).replace("\t", " ")
+    author = strip_ansi(_author_display_name(db, post, name_requirement=name_requirement)).replace("\t", " ")
     when = format_for_display(post.created_at, db)
     return subject, author, when
 
@@ -741,7 +752,7 @@ async def _show_board(
             return set()
         return {post.id for post in current_page.posts if post.id > seen_floor}
 
-    def _frame(current_page: PostPage) -> tuple[str, str]:
+    def _frame(current_page: PostPage, *, row_count: int | None = None) -> tuple[str, str]:
         """Everything above the list's rows and everything below them."""
         subtitle = ["Older posts" if current_page.has_newer else "Newest posts"]
         if unread_on_entry:
@@ -770,14 +781,26 @@ async def _show_board(
             notes.append(colored(_SAVED_DRAFT_NOTICE, fg_color=MUTED_COLOR))
         above = "\r\n".join(["", header, *notes])
         options = _list_options(
-            current_page, can_post=can_post, has_draft=has_draft, row_count=len(current_page.posts)
+            current_page, can_post=can_post, has_draft=has_draft,
+            row_count=len(current_page.posts) if row_count is None else row_count,
         )
-        below_rows = [
-            menu_row(
+        menu = menu_row(
+            options, width=session.terminal_width, height=session.terminal_height,
+            description_level=description_level,
+        )
+        # Descriptions double the action bar. Where they would leave the
+        # list fewer rows than a page worth having, the bar goes compact:
+        # the posts are what the caller came for (Codex review on #719).
+        room = (
+            session.terminal_height - _count_rows(above, session.terminal_width)
+            - _count_rows(menu, session.terminal_width) - _LIST_FURNITURE_ROWS
+        )
+        if description_level != "off" and room < _COMFORTABLE_LIST_ROWS:
+            menu = menu_row(
                 options, width=session.terminal_width, height=session.terminal_height,
-                description_level=description_level,
-            ),
-        ]
+                description_level="off",
+            )
+        below_rows = [menu]
         # A hint is the first thing a short terminal can spare: the list's
         # rows are what the caller came for.
         if session.terminal_height >= _HINT_MIN_HEIGHT:
@@ -790,7 +813,9 @@ async def _show_board(
         busiest frame this board can draw -- a page does not change size
         because [N]ewer appeared on it."""
         width = session.terminal_width
-        above, below = _frame(PostPage(posts=[], has_older=True, has_newer=True))
+        # Nine rows, so the read entry is in the action bar exactly as a
+        # populated page draws it (Codex review on #719).
+        above, below = _frame(PostPage(posts=[], has_older=True, has_newer=True), row_count=9)
         fixed = (
             _count_rows(above, width) + 1 + (1 if width >= _TABLE_MIN_WIDTH else 0) + 2 + 1
             + _count_rows(below, width) + pending_notice_rows(session) + 1
@@ -934,7 +959,9 @@ async def _show_board(
                 page_anchor = None
                 page = _refetch_current_page()
                 return 0
-            record_board_seen(db, user, board, page.posts[-1])
+            # Only the post now on screen was seen, not the rest of the page
+            # it was fetched with (Codex review on #719).
+            record_board_seen(db, user, board, page.posts[index])
 
     async def _compose_new_post(*, initial_body: str | None = None) -> None:
         # `[P]ost` is a hotkey followed straight by a line prompt: an Enter
@@ -1596,10 +1623,9 @@ def _post_byline(
     if is_new:
         parts.append(badge("new", tone="success"))
     if post.parent_post_id is not None:
-        try:
-            parent = get_post(db, post.parent_post_id)
-        except PostError:
-            parent = None
+        # As the feed shows the parent now: its current subject, and nothing
+        # at all for a parent that is expired, pending or trust-hidden.
+        parent = visible_post(db, post.parent_post_id)
         if parent is not None:
             parts.append(colored(f'reply to "{sanitize_text(parent.subject)}"', fg_color=METADATA_COLOR))
     return colored(separator, fg_color=METADATA_COLOR).join(parts)

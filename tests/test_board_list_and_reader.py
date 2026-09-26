@@ -319,3 +319,91 @@ def test_the_board_list_shows_activity_and_linked_and_gate_notes(db, alice):
     assert re.search(r"Busy\s+2 new\s+\[LINK\]", text)
     assert re.search(r"Quiet\s+caught up", text)
     assert re.search(r"Unvisited\s+not visited yet\s+needs verification", text)
+
+
+# -- Codex review on #719 ------------------------------------------------------
+
+
+@pytest.mark.parametrize(("width", "height"), [(60, 24), (70, 24), (80, 24)])
+def test_a_middle_page_fits_the_terminal_with_every_action_shown(db, alice, monkeypatch, width, height):
+    """The page budget was measured without the read entry, so a page with
+    [O]lder, [N]ewer, [R]ecent *and* the read entry overran the terminal."""
+    board = create_board(db, "general", creator=alice)
+    _posts(db, board, alice, 80, monkeypatch)
+    session = FakeSession(["o", "b"], width=width, height=height)
+
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+
+    middle = session.screens()[1]
+    assert "ewer" in middle and "lder" in middle
+    rows = middle.replace("\r\n", "\n").rstrip("\n").split("\n")
+    assert len(rows) <= height
+
+
+def test_stepping_into_the_next_page_marks_only_the_post_shown(db, alice, monkeypatch):
+    board = create_board(db, "general", creator=alice)
+    _posts(db, board, alice, 60, monkeypatch)
+    recorded = []
+    real = board_flow.record_board_seen
+    monkeypatch.setattr(
+        board_flow, "record_board_seen",
+        lambda db_, user, board_, post: recorded.append(post.subject) or real(db_, user, board_, post),
+    )
+    # Older page, cursor to its last row, open it, then [N]ext post across
+    # the page boundary.
+    session = FakeSession(["o", "UP", "ENTER", "n", "b", "b"])
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+
+    readers = [screen for screen in session.screens() if "Body of post" in screen]
+    shown_after_crossing = re.search(r"Body of post (\d+)", readers[-1]).group(1)
+    # The record made while reading across the boundary names that post, not
+    # the newest post of the page it was fetched with.
+    assert f"Subject {shown_after_crossing}" in recorded
+    crossing_index = recorded.index(f"Subject {shown_after_crossing}")
+    assert recorded[crossing_index] == f"Subject {shown_after_crossing}"
+
+
+def test_a_reply_does_not_name_a_parent_the_feed_hides(db, alice, monkeypatch):
+    board = create_board(db, "general", creator=alice)
+    stamps = iter(["2026-01-01T00:00:00.000000Z", "2026-01-01T00:00:01.000000Z"])
+    monkeypatch.setattr(posts_module, "utc_now_iso", lambda: next(stamps))
+    question = create_post(db, board, alice, "A secret question", "?")
+    create_post(db, board, alice, "Re: it", "!", parent_post_id=question.post_id)
+    db.connection.execute("UPDATE posts SET status = 'expired' WHERE post_id = ?", (question.post_id,))
+    db.connection.commit()
+    session = FakeSession(["1", "b", "b"])
+
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+
+    assert "Re: it" in session.visible()
+    assert "reply to" not in session.visible()
+    assert "A secret question" not in session.visible()
+
+
+def test_a_reply_names_its_parents_current_subject(db, alice, monkeypatch):
+    from netbbs.boards.posts import edit_post
+
+    board = create_board(db, "general", creator=alice)
+    stamps = iter(f"2026-01-01T00:00:0{i}.000000Z" for i in range(3))
+    monkeypatch.setattr(posts_module, "utc_now_iso", lambda: next(stamps))
+    question = create_post(db, board, alice, "Old wording", "?")
+    create_post(db, board, alice, "Re: it", "!", parent_post_id=question.post_id)
+    edit_post(db, question, board, subject="New wording", body="?", edited_by=alice)
+    session = FakeSession(["2", "b", "b"])
+
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+
+    assert 'reply to "New wording"' in session.visible()
+
+
+def test_a_subject_full_of_tabs_keeps_its_row_inside_the_terminal(db, alice):
+    from netbbs.rendering.width import display_width
+
+    board = create_board(db, "general", creator=alice)
+    create_post(db, board, alice, "\t".join(["tabbed"] * 20), "x")
+    rows = board_flow._post_list_rows(
+        db, list_posts_page(db, board, alice).posts, width=80, highlighted=None,
+        new_ids=set(), name_requirement=None, accent=220,
+    )
+    assert all(display_width(_SGR.sub("", row)) <= 79 for row in rows)
+    assert "\t" not in "".join(rows)
