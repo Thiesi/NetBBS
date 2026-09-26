@@ -2654,16 +2654,16 @@ Asynchronous linked-channel events continue to work regardless.
 A node whose only way out is an HTTP proxy opens every real-time socket as a
 `CONNECT` tunnel through the proxy asynchronous Link uses (`HTTP_PROXY`, else
 `HTTPS_PROXY`, subject to `NO_PROXY`) and runs the same bytes over it: the
-attach preamble, the Noise handshake and the session are unchanged, and of
-the Link traffic the proxy sees no more than an on-path observer of a direct
+attach preamble, the Noise handshake and the session are unchanged, and of the
+Link traffic the proxy sees no more than an on-path observer of a direct
 connection would (Basic proxy credentials, where used, are the proxy's own and
-cross to it in the clear). The
-target authority is validated strictly before it is sent. The tunnel is the
-only attempt when a proxy applies, an unsupported proxy URL fails the dial
-rather than dialling direct, authentication is Basic from the proxy URL or
-`~/.netrc`, and a refused tunnel or a failed handshake over an open one is
-recorded for the Link status screen. A proxy that inspects TLS
-inside the tunnel cannot carry Noise. Decisions and rationale: §16, issue #628.
+cross to it in the clear). The target authority is validated strictly before it
+is sent. The tunnel is the only attempt when a proxy applies, an unsupported
+proxy URL fails the dial rather than dialling direct, authentication is Basic
+from the proxy URL or `~/.netrc`, and a refused tunnel or a failed handshake
+over an open one is recorded for the Link status screen. A proxy that inspects
+TLS inside the tunnel cannot carry Noise. Decisions and rationale: §16, issue
+#628.
 
 #### 8.10.1 Session framing and ownership
 
