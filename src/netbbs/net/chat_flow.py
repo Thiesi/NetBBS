@@ -1161,6 +1161,16 @@ _NO_LONGER_QUALIFIES_MESSAGE = (
 )
 
 
+def _fresh_channel(db: Database, channel: Channel) -> Channel | None:
+    """`channel` re-read by name, or `None` once it is gone -- deleted, or a
+    carried channel the SysOp has hidden (issue #683), which the lookup no
+    longer returns. A session sitting in it must degrade, not crash."""
+    try:
+        return get_channel_by_name(db, channel.name)
+    except ChannelError:
+        return None
+
+
 def _meets_live_participation_requirements(db: Database, channel: Channel, user: User) -> bool:
     """
     Re-checks the age/name-verification gates a long-lived chat
@@ -1188,7 +1198,11 @@ def _meets_live_participation_requirements(db: Database, channel: Channel, user:
     live eviction, since an attestation is a mutable row a verifier can
     revoke or replace at any time.
     """
-    current = get_channel_by_name(db, channel.name)
+    current = _fresh_channel(db, channel)
+    if current is None:
+        # Issue #683: the channel was hidden (or deleted) while this session
+        # sat in it. Nothing more is sent into it.
+        return False
     return meets_age(db, user, get_effective_min_age(db, current)) and meets_name_requirement(
         db, user, get_effective_name_requirement(db, current)
     )
@@ -1860,7 +1874,8 @@ async def _handle_topic(ctx: ChatCommandContext, args: str) -> None:
         # sent as NEWTOPIC and the hub decides -- its reply reaches the
         # caller through the ordinary per-caller path.
         if not args:
-            current = (await ctx.lane.run(get_channel_by_name, ctx.channel.name)).topic
+            fresh = await ctx.lane.run(_fresh_channel, ctx.channel)
+            current = (fresh or ctx.channel).topic
             if current:
                 await ctx.session.write_line(f"Topic of #{sanitize_text(mapping.room)}: {sanitize_text(current)}")
             else:
@@ -4091,7 +4106,7 @@ def _render_chat_status_line(
     re-joined, even though `/topic` with no arguments (which already
     re-fetches) shows it correctly right away.
     """
-    channel = get_channel_by_name(db, channel.name)
+    channel = _fresh_channel(db, channel) or channel
     channel_type = "INVITE" if channel.members_only else ("HIDDEN" if channel.hidden else "PUBLIC")
     accent = effective_accent_color_256(db)
     header = effective_header_color_256(db)

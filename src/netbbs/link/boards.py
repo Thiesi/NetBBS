@@ -313,7 +313,7 @@ def carried_board_count(db: Database, own_fingerprint: str) -> int:
     migrations`), and cheap enough at this project's declared small-
     network scale (design doc §14)."""
     count = 0
-    for row in db.connection.execute("SELECT link_genesis_json FROM boards WHERE link_genesis_json IS NOT NULL"):
+    for row in db.connection.execute("SELECT link_genesis_json FROM boards WHERE link_genesis_json IS NOT NULL AND link_hidden_at IS NULL"):
         genesis = json.loads(row["link_genesis_json"])
         if genesis["envelope"]["payload"].get("origin_fingerprint") != own_fingerprint:
             count += 1
@@ -494,7 +494,9 @@ def materialize_carried_post(
     board_row = db.connection.execute(
         "SELECT * FROM boards WHERE board_id = ?", (payload["board_id"],)
     ).fetchone()
-    if board_row is None:
+    if board_row is None or board_row["link_hidden_at"] is not None:
+        # Issue #683: a hidden board takes nothing new; Restore lets pull
+        # bring what arrived meanwhile.
         return None
     board_local_id = board_row["id"]
     if board_row["moderated"]:
@@ -636,7 +638,7 @@ def materialize_carried_post_edit(
     root_row = db.connection.execute(
         "SELECT * FROM posts WHERE post_id = ?", (payload["root_post_id"],)
     ).fetchone()
-    if root_row is None:
+    if root_row is None or _board_is_hidden(db, root_row["board_id"]):
         return None
     # An author's own edit follows local moderation and the author's
     # trust decision, as a new post does (issue #677).
@@ -764,7 +766,7 @@ def materialize_carried_board_post_moderator_edit(
     root_row = db.connection.execute(
         "SELECT * FROM posts WHERE post_id = ?", (payload["root_post_id"],)
     ).fetchone()
-    if root_row is None:
+    if root_row is None or _board_is_hidden(db, root_row["board_id"]):
         return None
     # The origin's moderator edit is the origin's own moderation, so this
     # node's "Moderated" flag does not hold it -- but it may neither undo
@@ -831,7 +833,7 @@ def materialize_carried_board_post_tombstone(
     root_row = db.connection.execute(
         "SELECT * FROM posts WHERE post_id = ?", (payload["root_post_id"],)
     ).fetchone()
-    if root_row is None:
+    if root_row is None or _board_is_hidden(db, root_row["board_id"]):
         return None
     predecessor_exists = db.connection.execute(
         "SELECT 1 FROM posts WHERE post_id = ?", (payload["previous_event_id"],)
@@ -871,6 +873,12 @@ def materialize_carried_board_post_tombstone(
     return _post_from_row(
         db.connection.execute("SELECT * FROM posts WHERE post_id = ?", (tombstone.content_id,)).fetchone()
     )
+
+
+def _board_is_hidden(db: Database, board_local_id: int) -> bool:
+    """Issue #683: whether the local board a post row belongs to is hidden."""
+    row = db.connection.execute("SELECT link_hidden_at FROM boards WHERE id = ?", (board_local_id,)).fetchone()
+    return row is not None and row["link_hidden_at"] is not None
 
 
 def materialize_carried_board_closure(db: Database, closure: BoardClosure, *, commit: bool = True) -> None:
@@ -1675,7 +1683,7 @@ def load_own_board_events(db: Database, own_fingerprint: str) -> list[_OwnBoardE
     """
     events: list[_OwnBoardEvent] = []
     for row in db.connection.execute(
-        "SELECT link_genesis_json, link_lifecycle_json FROM boards WHERE link_genesis_json IS NOT NULL"
+        "SELECT link_genesis_json, link_lifecycle_json FROM boards WHERE link_genesis_json IS NOT NULL AND link_hidden_at IS NULL"
     ):
         genesis = BoardGenesis.from_dict(json.loads(row["link_genesis_json"]))
         if genesis.payload["origin_fingerprint"] == own_fingerprint:
@@ -1689,8 +1697,10 @@ def load_own_board_events(db: Database, own_fingerprint: str) -> list[_OwnBoardE
                 events.append(BoardClosure.from_dict(raw))
             else:
                 events.append(BoardOriginTransferAccepted.from_dict(raw))
+    # Issue #683: nothing is pushed for a board this node has hidden.
     for row in db.connection.execute(
-        "SELECT link_event_json FROM posts WHERE link_event_json IS NOT NULL"
+        """SELECT p.link_event_json FROM posts AS p JOIN boards AS b ON b.id = p.board_id
+            WHERE p.link_event_json IS NOT NULL AND b.link_hidden_at IS NULL"""
     ):
         raw = json.loads(row["link_event_json"])
         post_object_type = raw["envelope"]["object_type"]

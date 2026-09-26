@@ -25,6 +25,8 @@ new.
 from __future__ import annotations
 
 import json
+import logging
+import os
 import sqlite3
 from dataclasses import dataclass
 
@@ -62,11 +64,14 @@ from netbbs.link.files import (
     materialize_carried_file_descriptor,
     RemoteFileCatalogueLimitError,
 )
+from netbbs.link.events import event_content_id
 from netbbs.link.store import save_event
 from netbbs.auth.users import User
 from netbbs.moderation.log import record_action_without_commit
 from netbbs.storage.database import Database
 from netbbs.timeutil import utc_now_iso
+
+_logger = logging.getLogger(__name__)
 
 OFFERED = "offered"
 EXCLUDED = "excluded"
@@ -100,6 +105,8 @@ class CarryDecision:
     description: str | None
     origin_fingerprint: str
     ref: int = 0
+    hidden: bool = False
+    """Issue #683: the resource's local row is kept, hidden (so Purge applies)."""
     """A small, stable number for the SysOp's picker (the row's rowid)."""
 
 
@@ -176,9 +183,9 @@ def count_carry_decisions(db: Database, state: str) -> int:
 # A decision whose resource has a carried local row is stale -- an interrupted
 # deletion, say -- and the row wins, as it does in `uncarried_resource_ids`.
 _CARRIED_ROW = """(
-    (d.kind = 'boards' AND d.resource_id IN (SELECT board_id FROM boards WHERE link_genesis_json IS NOT NULL))
-    OR (d.kind = 'channels' AND d.resource_id IN (SELECT channel_id FROM channels WHERE link_genesis_json IS NOT NULL))
-    OR (d.kind = 'file_areas' AND d.resource_id IN (SELECT area_id FROM file_areas WHERE link_genesis_json IS NOT NULL))
+    (d.kind = 'boards' AND d.resource_id IN (SELECT board_id FROM boards WHERE link_genesis_json IS NOT NULL AND link_hidden_at IS NULL))
+    OR (d.kind = 'channels' AND d.resource_id IN (SELECT channel_id FROM channels WHERE link_genesis_json IS NOT NULL AND link_hidden_at IS NULL))
+    OR (d.kind = 'file_areas' AND d.resource_id IN (SELECT area_id FROM file_areas WHERE link_genesis_json IS NOT NULL AND link_hidden_at IS NULL))
 )"""
 
 
@@ -195,7 +202,15 @@ def list_carry_decisions(db: Database, state: str, *, limit: int = MAX_LISTED_DE
                        AND CASE d.kind WHEN 'boards' THEN e.board_id
                                        WHEN 'channels' THEN e.channel_id
                                        ELSE e.file_area_id END = d.resource_id
-                     ORDER BY e.received_at LIMIT 1) AS genesis_json
+                     ORDER BY e.received_at LIMIT 1) AS genesis_json,
+                   CASE d.kind
+                     WHEN 'boards' THEN EXISTS (SELECT 1 FROM boards
+                                                 WHERE board_id = d.resource_id AND link_hidden_at IS NOT NULL)
+                     WHEN 'channels' THEN EXISTS (SELECT 1 FROM channels
+                                                   WHERE channel_id = d.resource_id AND link_hidden_at IS NOT NULL)
+                     ELSE EXISTS (SELECT 1 FROM file_areas
+                                   WHERE area_id = d.resource_id AND link_hidden_at IS NOT NULL)
+                   END AS hidden
               FROM link_carry_decisions AS d
              WHERE d.state = ? AND NOT {_CARRIED_ROW}
              ORDER BY d.decided_at DESC, d.kind, d.resource_id
@@ -211,6 +226,7 @@ def list_carry_decisions(db: Database, state: str, *, limit: int = MAX_LISTED_DE
             description=payload.get("description"),
             origin_fingerprint=str(payload.get("origin_fingerprint") or ""),
             ref=row["ref"],
+            hidden=bool(row["hidden"]),
         ))
     return decisions
 
@@ -257,19 +273,33 @@ def accept_genesis(
             db, sender_fingerprint=sender_fingerprint, content_id=content_id,
             object_type=_GENESIS_TYPES[kind], envelope=envelope, commit=False,
         )
-        try:
-            _materialize(db, kind, envelope, own_fingerprint=own_fingerprint, cap=cap)
-            outcome = "carried"
-        except _CARRY_LIMIT_ERRORS as exc:
-            outcome = _refusal_reason(exc)
-            record_carry_decision(
-                db, kind, str(envelope["envelope"]["payload"][_id_field(kind)]), OFFERED, outcome, commit=False,
-            )
+        resource_id = str(envelope["envelope"]["payload"][_id_field(kind)])
+        if _hidden_row(db, kind, resource_id) is not None:
+            # Issue #683: the SysOp hid this resource. It stays excluded;
+            # returning its row would count it as carried.
+            outcome = "hidden"
+        else:
+            try:
+                _materialize(db, kind, envelope, own_fingerprint=own_fingerprint, cap=cap)
+                outcome = "carried"
+            except _CARRY_LIMIT_ERRORS as exc:
+                outcome = _refusal_reason(exc)
+                record_carry_decision(db, kind, resource_id, OFFERED, outcome, commit=False)
     except BaseException:
         db.connection.rollback()
         raise
     db.connection.commit()
     return outcome
+
+
+_LOCAL = {"boards": ("boards", "board_id"), "channels": ("channels", "channel_id"), "file_areas": ("file_areas", "area_id")}
+
+
+def _hidden_row(db: Database, kind: str, resource_id: str):
+    table, column = _LOCAL[kind]
+    return db.connection.execute(
+        f"SELECT * FROM {table} WHERE {column} = ? AND link_hidden_at IS NOT NULL", (resource_id,)
+    ).fetchone()
 
 
 def _id_field(kind: str) -> str:
@@ -436,3 +466,195 @@ def exclude_offer(db: Database, kind: str, resource_id: str, *, actor: User | No
         db.connection.rollback()
         raise
     db.connection.commit()
+
+
+# -- hide, restore, purge (issue #683; Thiesi's decision of 2026-09-26) -------
+#
+# Deleting a carried resource whose origin is another node hides it: the row
+# and everything in it are kept, invisible to callers and to content
+# administration, not carried, and taking no new content. Restore clears the
+# mark and the resource is back exactly as it was -- this node's own users'
+# posts with their authorship, and this node's own moderation, neither of which
+# a replay of signed events could reproduce (own posts are keyed by a local
+# hash, and a carrying node's moderation is not in the signed history). Purge
+# deletes it for real; after that, Restore can only take it on again from its
+# genesis, like an offer.
+
+
+def carried_from_elsewhere(db: Database, kind: str, resource_id: str, own_fingerprint: str | None) -> bool:
+    """Whether deleting this local resource should hide it rather than delete
+    it: it is Linked, and its current origin is another node (a board's origin
+    can move, §9.4; channels and file areas have no succession). Without this
+    node's own fingerprint -- a console with no Link identity loaded -- a
+    genesis this node received from a peer counts: one it originated is kept
+    only on its own row until it is deleted."""
+    table, column = _LOCAL[kind]
+    row = db.connection.execute(f"SELECT * FROM {table} WHERE {column} = ?", (resource_id,)).fetchone()
+    if row is None or row["link_genesis_json"] is None:
+        return False
+    genesis = json.loads(row["link_genesis_json"])
+    origin = genesis["envelope"]["payload"].get("origin_fingerprint")
+    if kind == "boards" and row["link_origin_fingerprint"]:
+        origin = row["link_origin_fingerprint"]
+    if own_fingerprint is not None:
+        return origin != own_fingerprint
+    return db.connection.execute(
+        "SELECT 1 FROM link_events WHERE content_id = ?", (event_content_id(genesis["envelope"]),)
+    ).fetchone() is not None
+
+
+def hide_carried_resource(db: Database, kind: str, resource_id: str, *, actor: User | None) -> None:
+    """Hide a carried resource in one transaction: keep its genesis in
+    `link_events`, set `link_hidden_at`, record it excluded (`deleted`) and
+    audit it."""
+    table, column = _LOCAL[kind]
+    db.connection.execute("BEGIN IMMEDIATE")
+    try:
+        row = db.connection.execute(f"SELECT * FROM {table} WHERE {column} = ?", (resource_id,)).fetchone()
+        if row is None or row["link_genesis_json"] is None:
+            raise CarryDecisionError("that is not a carried Link resource")
+        if row["link_hidden_at"] is not None:
+            raise CarryDecisionError("that resource is already excluded")
+        genesis = json.loads(row["link_genesis_json"])
+        save_event(
+            db, sender_fingerprint=genesis["envelope"]["payload"]["origin_fingerprint"],
+            content_id=event_content_id(genesis["envelope"]), object_type=_GENESIS_TYPES[kind],
+            envelope=genesis, commit=False,
+        )
+        db.connection.execute(f"UPDATE {table} SET link_hidden_at = ? WHERE id = ?", (utc_now_iso(), row["id"]))
+        record_carry_decision(
+            db, kind, resource_id, EXCLUDED, "deleted",
+            actor_user_id=actor.id if actor is not None else None, commit=False,
+        )
+        if actor is not None:
+            record_action_without_commit(
+                db, actor=actor, action="hide_link_resource", object_type=_OBJECT_TYPES[kind],
+                object_id=row["id"], detail=_audit_detail(genesis, resource_id),
+            )
+    except BaseException:
+        db.connection.rollback()
+        raise
+    db.connection.commit()
+
+
+def restore_excluded(
+    db: Database, kind: str, resource_id: str, *, actor: User | None,
+    max_remote_files_per_area: int | None = None,
+) -> None:
+    """Take an excluded resource back. A hidden one is un-hidden exactly as it
+    was; one with no local row (declined while offered, or purged) is taken on
+    from its genesis like an accepted offer. Either way the next sync pass
+    declares it carried again and pulls what arrived meanwhile."""
+    table, column = _LOCAL[kind]
+    db.connection.execute("BEGIN IMMEDIATE")
+    reproject = False
+    try:
+        if carry_decision_state(db, kind, resource_id) != EXCLUDED:
+            raise CarryDecisionError("that resource is not excluded")
+        row = db.connection.execute(f"SELECT * FROM {table} WHERE {column} = ?", (resource_id,)).fetchone()
+        envelope = _stored_genesis(db, kind, resource_id)
+        if row is not None:
+            db.connection.execute(f"UPDATE {table} SET link_hidden_at = NULL WHERE id = ?", (row["id"],))
+            db.connection.execute(
+                "DELETE FROM link_carry_decisions WHERE kind = ? AND resource_id = ?", (kind, resource_id)
+            )
+            object_id = row["id"]
+        else:
+            if envelope is None:
+                raise CarryDecisionError("this node no longer holds that resource's genesis")
+            try:
+                materialized = _materialize(db, kind, envelope, own_fingerprint=None, cap=None)
+            except _CARRY_LIMIT_ERRORS as exc:
+                raise CarryDecisionError(str(exc)) from exc
+            except sqlite3.IntegrityError as exc:
+                raise CarryDecisionError(f"could not create the local copy: {exc}") from exc
+            if kind == "boards":
+                _replay_board_lifecycle(db, resource_id)
+            db.connection.execute(
+                "UPDATE link_carry_decisions SET state = 'offered', reason = 'accepting' "
+                "WHERE kind = ? AND resource_id = ?",
+                (kind, resource_id),
+            )
+            object_id = materialized.id
+            reproject = True
+        if actor is not None:
+            record_action_without_commit(
+                db, actor=actor, action="restore_link_resource", object_type=_OBJECT_TYPES[kind],
+                object_id=object_id, detail=_audit_detail(envelope, resource_id),
+            )
+    except BaseException:
+        db.connection.rollback()
+        raise
+    db.connection.commit()
+    if reproject:
+        _finish_acceptance(db, kind, resource_id, max_remote_files_per_area=max_remote_files_per_area)
+
+
+def purge_excluded(db: Database, kind: str, resource_id: str, *, actor: User | None) -> None:
+    """Delete a hidden resource for real, in one transaction with its audit
+    entry. It stays excluded (`purged`), so it is not carried again unasked;
+    Restore can still take it on from its genesis."""
+    table, column = _LOCAL[kind]
+    db.connection.execute("BEGIN IMMEDIATE")
+    staging: list[str] = []
+    try:
+        row = db.connection.execute(
+            f"SELECT * FROM {table} WHERE {column} = ? AND link_hidden_at IS NOT NULL", (resource_id,)
+        ).fetchone()
+        if row is None:
+            raise CarryDecisionError("only a hidden resource can be purged")
+        local_id = row["id"]
+        object_type = _OBJECT_TYPES[kind]
+        if kind == "boards":
+            db.connection.execute("DELETE FROM posts WHERE board_id = ?", (local_id,))
+        elif kind == "channels":
+            db.connection.execute("DELETE FROM channel_messages WHERE channel_id = ?", (local_id,))
+            db.connection.execute("DELETE FROM channel_message_search WHERE channel_id = ?", (local_id,))
+            for child in ("channel_restrictions", "channel_members", "channel_invitations"):
+                db.connection.execute(f"DELETE FROM {child} WHERE channel_id = ?", (local_id,))
+        else:
+            # The remote catalogue references the area and, through
+            # `fetched_file_id`, its files: it goes first (issue #696).
+            transfers = db.connection.execute(
+                """SELECT t.transfer_id, t.temp_path FROM link_file_transfers AS t
+                     JOIN remote_files AS r ON r.file_id = t.remote_file_id
+                    WHERE r.area_id = ?""",
+                (local_id,),
+            ).fetchall()
+            for transfer in transfers:
+                db.connection.execute(
+                    "DELETE FROM link_file_transfer_chunks WHERE transfer_id = ?", (transfer["transfer_id"],)
+                )
+                db.connection.execute(
+                    "DELETE FROM link_file_transfers WHERE transfer_id = ?", (transfer["transfer_id"],)
+                )
+                if transfer["temp_path"]:
+                    staging.append(transfer["temp_path"])
+            db.connection.execute("DELETE FROM remote_files WHERE area_id = ?", (local_id,))
+            db.connection.execute("DELETE FROM files WHERE area_id = ?", (local_id,))
+        for scoped in ("moderator_grants", "user_read_cursors", "user_follows"):
+            db.connection.execute(
+                f"DELETE FROM {scoped} WHERE object_type = ? AND object_id = ?", (object_type, local_id)
+            )
+        db.connection.execute(f"DELETE FROM {table} WHERE id = ?", (local_id,))
+        db.connection.execute(
+            "UPDATE link_carry_decisions SET reason = 'purged', decided_at = ?, actor_user_id = ? "
+            "WHERE kind = ? AND resource_id = ?",
+            (utc_now_iso(), actor.id if actor is not None else None, kind, resource_id),
+        )
+        if actor is not None:
+            record_action_without_commit(
+                db, actor=actor, action="purge_link_resource", object_type=object_type, object_id=local_id,
+                detail=_audit_detail(_stored_genesis(db, kind, resource_id), resource_id),
+            )
+    except BaseException:
+        db.connection.rollback()
+        raise
+    db.connection.commit()
+    for path in staging:
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            _logger.warning("could not remove staging file %s of a purged file area: %s", path, exc)

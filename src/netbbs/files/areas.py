@@ -157,9 +157,11 @@ def create_file_area(
         )
         db.connection.commit()
     except sqlite3.IntegrityError as exc:
+        if _name_held_by_hidden(db, name):
+            raise FileAreaError(f"the name {name!r} is held by a Link resource excluded from this node (Link status -> Excluded): restore or purge it there first") from exc
         raise FileAreaError(f"could not create file area {name!r} — name already in use?") from exc
 
-    new_area = get_file_area_by_name(db, name)
+    new_area = _read_back_by_name(db, name)
     record_action(
         db, actor=creator, action="create_file_area", object_type="file_area", object_id=new_area.id,
         detail=f"created file area {name!r}",
@@ -167,8 +169,29 @@ def create_file_area(
     return new_area
 
 
-def get_file_area_by_name(db: Database, name: str) -> FileArea:
+def _name_held_by_hidden(db: Database, name: str) -> bool:
+    """Issue #683: whether a hidden (excluded) carried file area holds `name`."""
+    return db.connection.execute(
+        "SELECT 1 FROM file_areas WHERE name = ? AND link_hidden_at IS NOT NULL", (name,)
+    ).fetchone() is not None
+
+
+def _read_back_by_name(db: Database, name: str):
+    """A row this module has just written, read back by name. Not filtered on
+    `link_hidden_at` (issue #683): a row just created or renamed is never
+    hidden, and this keeps the write paths free of the newer column."""
     row = db.connection.execute("SELECT * FROM file_areas WHERE name = ?", (name,)).fetchone()
+    if row is None:
+        raise FileAreaError(f"no such file area: {name!r}")
+    return _row_to_file_area(row)
+
+
+def get_file_area_by_name(db: Database, name: str) -> FileArea:
+    # Issue #683: a hidden (excluded) carried file area is invisible here, in
+    # `get_file_area_by_area_id` (transfer grants) and in `list_file_areas`.
+    row = db.connection.execute(
+        "SELECT * FROM file_areas WHERE name = ? AND link_hidden_at IS NULL", (name,)
+    ).fetchone()
     if row is None:
         raise FileAreaError(f"no such file area: {name!r}")
     return _row_to_file_area(row)
@@ -188,7 +211,9 @@ def get_file_area_by_area_id(db: Database, area_id: str) -> FileArea | None:
     and never repeats. `None` rather than raising, because "the area
     went away while a caller had a link open" is an ordinary outcome
     for that caller, not an error in the lookup."""
-    row = db.connection.execute("SELECT * FROM file_areas WHERE area_id = ?", (area_id,)).fetchone()
+    row = db.connection.execute(
+        "SELECT * FROM file_areas WHERE area_id = ? AND link_hidden_at IS NULL", (area_id,)
+    ).fetchone()
     return _row_to_file_area(row) if row is not None else None
 
 
@@ -277,7 +302,7 @@ def list_file_areas(db: Database, *, order_by: str = "activity") -> list[FileAre
             (now,),
         ).fetchall()
 
-    return [_row_to_file_area(row) for row in rows]
+    return [_row_to_file_area(row) for row in rows if row["link_hidden_at"] is None]
 
 
 def update_file_area(
@@ -323,9 +348,11 @@ def update_file_area(
         )
         db.connection.commit()
     except sqlite3.IntegrityError as exc:
+        if _name_held_by_hidden(db, name):
+            raise FileAreaError(f"the name {name!r} is held by a Link resource excluded from this node (Link status -> Excluded): restore or purge it there first") from exc
         raise FileAreaError(f"could not update file area {area.name!r} — name already in use?") from exc
 
-    updated = get_file_area_by_name(db, name)
+    updated = _read_back_by_name(db, name)
     record_action(
         db, actor=changed_by, action="update_file_area", object_type="file_area", object_id=area.id,
         detail=f"updated file area {area.name!r}",

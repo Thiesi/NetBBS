@@ -298,7 +298,7 @@ def targets(db: Database, door_id: int) -> list[Board]:
     rows = db.connection.execute(
         """
         SELECT b.* FROM door_outbound_targets t
-        JOIN boards b ON b.id = t.board_id
+        JOIN boards b ON b.id = t.board_id AND b.link_hidden_at IS NULL
         WHERE t.door_id = ?
         ORDER BY t.id
         """,

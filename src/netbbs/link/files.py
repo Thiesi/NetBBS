@@ -172,7 +172,7 @@ def carried_file_area_count(db: Database, own_fingerprint: str) -> int:
     `netbbs.link.boards.carried_board_count` exactly."""
     count = 0
     for row in db.connection.execute(
-        "SELECT link_genesis_json FROM file_areas WHERE link_genesis_json IS NOT NULL"
+        "SELECT link_genesis_json FROM file_areas WHERE link_genesis_json IS NOT NULL AND link_hidden_at IS NULL"
     ):
         genesis = json.loads(row["link_genesis_json"])
         if genesis["envelope"]["payload"].get("origin_fingerprint") != own_fingerprint:
@@ -448,9 +448,10 @@ def materialize_carried_file_descriptor(
         return existing
 
     area_row = db.connection.execute(
-        "SELECT id, link_genesis_json FROM file_areas WHERE area_id = ?", (descriptor.payload["area_id"],)
+        "SELECT id, link_genesis_json, link_hidden_at FROM file_areas WHERE area_id = ?",
+        (descriptor.payload["area_id"],),
     ).fetchone()
-    if area_row is None:
+    if area_row is None or area_row["link_hidden_at"] is not None:
         return None
     area_local_id = area_row["id"]
     # The area's own origin, resolved from its locally-materialized
@@ -670,13 +671,15 @@ def load_own_file_area_events(db: Database, own_fingerprint: str) -> list[FileAr
     """
     events: list[FileAreaGenesis | FileDescriptor] = []
     for row in db.connection.execute(
-        "SELECT link_genesis_json FROM file_areas WHERE link_genesis_json IS NOT NULL"
+        "SELECT link_genesis_json FROM file_areas WHERE link_genesis_json IS NOT NULL AND link_hidden_at IS NULL"
     ):
         genesis = FileAreaGenesis.from_dict(json.loads(row["link_genesis_json"]))
         if genesis.payload["origin_fingerprint"] == own_fingerprint:
             events.append(genesis)
+    # Issue #683: nothing is pushed for a file area this node has hidden.
     for row in db.connection.execute(
-        "SELECT link_event_json FROM files WHERE link_event_json IS NOT NULL"
+        """SELECT f.link_event_json FROM files AS f JOIN file_areas AS a ON a.id = f.area_id
+            WHERE f.link_event_json IS NOT NULL AND a.link_hidden_at IS NULL"""
     ):
         events.append(FileDescriptor.from_dict(json.loads(row["link_event_json"])))
     return events

@@ -487,9 +487,14 @@ channels and file areas from other nodes are carried automatically up to the
 (500 each). Past a cap, a new one is not lost: it waits under **Link status →
 Offered**, with its origin and why, until you **Accept** it (not limited by the
 cap) or **Exclude** it. Set a cap to 0 to carry only what you accept. Lowering a
-cap removes nothing already carried. Deleting a carried resource excludes it:
-it does not come back on the next sync, and **Link status → Excluded** lists
-it. Link status shows `carried/cap` for all three kinds and how many are
+cap removes nothing already carried. Deleting a carried resource that another
+node originated excludes it without destroying it: callers stop seeing it and
+this node stops carrying it, but everything in it -- your users' posts, your
+moderation -- is kept. **Link status → Excluded** lists it: **Restore** brings it
+back exactly as it was (what arrived meanwhile follows with the next sync), and
+**Purge** deletes it for good. Its name stays taken until you do one or the
+other. Deleting a board, channel or file area this node originated is still a
+real delete. Link status shows `carried/cap` for all three kinds and how many are
 offered and excluded.
 
 To carry a remote resource, use its Link browsing/carry actions. Carrying a message board
