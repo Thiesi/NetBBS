@@ -10824,8 +10824,10 @@ the state that loses nothing and forces nothing.
 cap bounds what the node takes on automatically; it no longer decides what the
 node can ever have. An offered resource is listed for the SysOp with its name,
 description and origin node, and `[A]ccept` materializes it from the stored
-genesis, after which the next pass backfills it by ordinary inventory pull, as
-for any newly carried resource. Accepting is the SysOp's choice and is not
+genesis, replays any other events this node already holds for it (a migrated
+resource, or lifecycle events accepted beside a genesis past the cap, would
+otherwise be declared as known and never projected), and then the next pass
+backfills the rest by ordinary inventory pull. Accepting is the SysOp's choice and is not
 itself capped. A genesis whose name is already taken locally is carried under a
 disambiguated local name, on automatic intake and on accept alike, and the SysOp
 can rename it as any carried resource; names are not identities in Link.
@@ -10854,11 +10856,28 @@ excluded resource with `[R]estore`, which materializes it from the stored
 genesis and then replays the events this node still holds for it — a deleted
 resource's posts, messages and descriptors stay in `link_events`, are declared
 as known, and would never be sent again — before pull fetches what it is
-genuinely missing. Exclusion applies only to a resource originated elsewhere.
-Deleting a linked resource this node originated is not a carry choice: peers
-still hold this node as its only authority for closure, moderator edits and
-origin transfer, so that path goes through closure or origin transfer (§9.5)
-and is outside this decision. The SysOp can also exclude an offered
+genuinely missing. Two things an exclusion must keep for that to be true, both
+written in the exclusion's transaction:
+
+- **what this node's own users wrote there.** Self-originated envelopes live in
+  `posts.link_event_json` and `channel_messages.link_event_json`, not in
+  `link_events`, and the delete helpers remove those rows; they move to durable
+  event storage first, or excluding a resource destroys this node's signed
+  history and restoring it depends on some peer having kept a copy;
+- **this node's own moderation of it.** A carrying node's moderator edits and
+  tombstones on a remotely originated board are local and are not in the
+  signed history, so replay alone would bring back content the SysOp removed.
+  They are kept as an overlay and reapplied on restore.
+
+Exclusion applies only to a resource whose *current* origin, resolved as §9.5
+resolves it, is another node — not merely one whose genesis came from
+elsewhere, since a board transferred to this node makes it the authority peers
+depend on for closure, moderator edits and further transfer. Removing a linked
+resource this node is the current origin of is not a carry choice and is outside
+this decision: for boards it goes through closure or origin transfer (§9.5);
+linked channels and file areas have no transfer or closure events yet, so their
+delete path stays as it is today, a gap this decision records rather than
+closes. The SysOp can also exclude an offered
 resource without ever carrying it. This answers scenario 5 (it stays gone, and
 visibly so) and scenario 3 (pruning frees slots for automatic intake; nothing
 that was offered is lost). Excluded and offered resources are never visible to
@@ -10871,10 +10890,17 @@ sending events under them, which is the fix for #669 and the #630 precedent
 say it: their values are known-ID sets, and a responder sends every event whose
 ID is absent, so declaring an offered resource's genesis alone still brings
 every post. The fix therefore needs an explicit "not carried here" field,
-signed, and version-gated so that an older responder still verifies the
-request. Against an older responder the fallback is the #630 shape: declare the
-content IDs already received under the resource, so each is sent once rather
-than on every pass. The declaration costs one resource ID per offered or
+signed, and sent only to a responder that has said it understands it: an older
+responder rebuilds the signature payload without an unknown field and would
+reject the whole request, and bumping the protocol version would stop hello
+from completing, since versions must match exactly. So the responder advertises
+an inventory capability — in its hello or descriptor — and the requester sends
+the field only where it is advertised. Against an older responder there is no
+suppression: nothing it understands can express it, and declaring received IDs
+the #630 way would need a retained-ID store for events this node never keeps,
+since posts, messages and descriptors under a resource without a local row are
+dropped without reaching `link_events`. Mixed versions keep today's behaviour
+until the responder upgrades. The declaration costs one resource ID per offered or
 excluded resource; the carried maps beside it list every content ID of every
 carried resource and are far larger, so keeping the whole request under the
 responder's size limit is one problem for both, and #669 owns it rather than a
