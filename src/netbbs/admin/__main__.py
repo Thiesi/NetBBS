@@ -43,6 +43,9 @@ from pathlib import Path
 
 import nacl.signing
 
+from netbbs.backup import running_node_pid
+from netbbs.link.key_rotation import KeyRotationError, rotate_offline
+from netbbs.net.confirm import prompt_yes_no
 from netbbs.auth.users import (
     SYSOP_LEVEL,
     AuthError,
@@ -70,6 +73,9 @@ from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 
 _DEFAULT_DB_PATH = Path("netbbs.db")
+# The same default `netbbs.net.nodeconfig.NodeConfig.identity_dir` and
+# `python -m netbbs.backup` use.
+_DEFAULT_IDENTITY_DIR = Path("netbbs_identity")
 
 
 async def run_admin_session(session: Session, db: Database, as_username: str | None) -> None:
@@ -142,6 +148,66 @@ async def run_reset_password(session: Session, db: Database, as_username: str | 
             await session.write_line(str(exc))
             return 1
         await session.write_line(f"Password set for {target.username!r}. It applies to their next sign-in.")
+        return 0
+    finally:
+        lane.close()
+
+
+async def run_rotate_key(
+    session: Session, db: Database, as_username: str | None, *,
+    purpose: str, compromised: bool, identity_dir: Path,
+) -> int:
+    """
+    `python -m netbbs.admin rotate-key {signing,transport}` (issue #624):
+    replace one of this node's operational keys while the node is stopped.
+    Returns the process exit status.
+
+    The running node's console does the same from Link status -> `[K]eys`.
+    This is for the SysOp who does not want the node up while responding to
+    a leak, or cannot reach its console. It refuses while a node process
+    holds the database, since that node would go on signing with -- and
+    advertising -- the key replaced here, and the next save of its identity
+    would say nothing about it.
+
+    `--compromised` marks the old key compromised: peers stop believing
+    anything it signed, and this node's own boards, posts, files and mail
+    are signed again here, before the node next starts. Without it the old
+    key is retired and what it signed stays valid.
+    """
+    lane = DatabaseLane(db.path)
+    try:
+        pid = running_node_pid(db.path)
+        if pid is not None:
+            await session.write_line(
+                f"A node process (PID {pid}) is running on {db.path}. Stop it first, or rotate "
+                "from its console: Link status, then [K]eys."
+            )
+            return 1
+        actor = await _resolve_actor(session, lane, as_username)
+        if compromised:
+            question = (
+                f"Replace the {purpose} key in {identity_dir} and tell every peer the old one is "
+                "compromised? Nothing it ever signed will be trusted again."
+            )
+        else:
+            question = f"Retire the {purpose} key in {identity_dir} and replace it?"
+        if not await prompt_yes_no(session, question, default=False):
+            await session.write_line("Cancelled -- nothing changed.")
+            return 1
+        try:
+            outcome = await lane.run(
+                rotate_offline, identity_dir, purpose=purpose, compromised=compromised
+            )
+        except (KeyRotationError, OSError) as exc:
+            await session.write_line(f"The {purpose} key was not rotated: {exc}")
+            return 1
+        await lane.run(lambda db: record_action(
+            db, actor=actor, action="rotate_node_key", detail=outcome.audit_detail(),
+        ))
+        await session.write_line(f"The {purpose} key is now {outcome.new_key_fingerprint}.")
+        if outcome.resigned:
+            await session.write_line(f"Re-signed {outcome.resigned} object(s) under it.")
+        await session.write_line("Peers learn the new key when the node next syncs.")
         return 0
     finally:
         lane.close()
@@ -285,7 +351,8 @@ def build_parser() -> argparse.ArgumentParser:
     """The tool's argument parser, separate from `main()` so its shape
     can be tested without a terminal. With no subcommand the tool opens
     the interactive admin menu, as it always has; `reset-password` is
-    the one non-interactive-menu command (issue #611)."""
+    the first non-interactive-menu command (issue #611), and
+    `rotate-key` (issue #624) the second."""
     def _add_common(target: argparse.ArgumentParser, *, defaults: bool) -> None:
         # The same two options before or after the subcommand, so both
         # `--db x.db reset-password bob` and `reset-password bob --db
@@ -318,6 +385,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
     reset.add_argument("username", help="the account to set a new password on")
     _add_common(reset, defaults=False)
+    rotate = subcommands.add_parser(
+        "rotate-key",
+        help="replace one of this node's Link operational keys while the node is stopped",
+        description=(
+            "Replace this node's signing or transport key. The node's fingerprint and address "
+            "do not change. Refuses while the node is running; the running node does the same "
+            "from its console (Link status, then [K]eys). By default the old key is retired and "
+            "what it signed stays valid. With --compromised, peers stop trusting anything the "
+            "old key signed and this node signs its own content again under the new key."
+        ),
+    )
+    rotate.add_argument("purpose", choices=("signing", "transport"), help="which key to replace")
+    rotate.add_argument(
+        "--compromised", action="store_true",
+        help="the old key may be in someone else's hands: withdraw belief in everything it signed",
+    )
+    rotate.add_argument(
+        "--identity-dir", type=Path, default=_DEFAULT_IDENTITY_DIR,
+        help=f"the node's identity directory (default: {_DEFAULT_IDENTITY_DIR})",
+    )
+    _add_common(rotate, defaults=False)
     return parser
 
 
@@ -345,6 +433,11 @@ def main(argv: list[str] | None = None) -> None:
         with raw_terminal():
             if args.command == "reset-password":
                 status = asyncio.run(run_reset_password(LocalCLISession(), db, args.as_username, args.username))
+            elif args.command == "rotate-key":
+                status = asyncio.run(run_rotate_key(
+                    LocalCLISession(), db, args.as_username, purpose=args.purpose,
+                    compromised=args.compromised, identity_dir=args.identity_dir,
+                ))
             else:
                 asyncio.run(run_admin_session(LocalCLISession(), db, args.as_username))
                 status = 0

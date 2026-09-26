@@ -208,6 +208,35 @@ def test_expiry_and_revocation_remove_future_gate_satisfaction_without_deleting_
     ).fetchone()[0] == 2
 
 
+def test_a_repeated_revocation_is_stored_and_changes_nothing_else(db, subject, authority_key):
+    """Issue #623: an issuer that rotates its key signs an unexpired target's
+    revocation again, so a subscriber that already holds the first receives
+    a second. It is a repeat, not a second withdrawal: one audit entry."""
+    configure_attestation_authority(
+        db, "identity-authority", attributes=["name"], reason="reviewed", now_iso=stamp(NOW)
+    )
+    target = ingest_remote_attestation(
+        db, attestation_wire(authority_key, subject, expires_at=NOW + timedelta(days=2)),
+        issuer_verify_key=authority_key.verify_key, now_iso=stamp(NOW),
+    )
+    for minutes in (1, 2):
+        ingest_remote_attestation(
+            db,
+            build_remote_attestation_revocation(
+                authority_key, issuer_fingerprint="identity-authority",
+                revoked_content_id=target, issued_at=stamp(NOW + timedelta(minutes=minutes)),
+            ),
+            issuer_verify_key=authority_key.verify_key, now_iso=stamp(NOW + timedelta(minutes=minutes)),
+        )
+    assert db.connection.execute(
+        "SELECT COUNT(*) FROM link_remote_attestation_revocations WHERE revoked_content_id = ?", (target,)
+    ).fetchone()[0] == 2
+    assert db.connection.execute(
+        "SELECT COUNT(*) FROM link_remote_attestation_audit WHERE object_id = ? AND action = 'revoked'",
+        (target,),
+    ).fetchone()[0] == 1
+
+
 def test_locally_distrusted_authority_stops_satisfying_gates(db, subject, authority_key):
     authority_subject = TrustSubject.node("identity-authority")
     register_subject(

@@ -154,7 +154,7 @@ def test_msg_resolves_a_friendly_node_name_containing_spaces(
         addresses=None, outgoing_only=True, created_at="2026-09-03T12:00:00+00:00",
         friendly_name="The Rusty Anchor",
     ))
-    context = LinkContext(node_identity=own_identity, link_node=link_node)
+    context = LinkContext(link_node=link_node)
     sent = []
 
     async def fake_send(session, lane_arg, user, address, body, *, link_context):
@@ -563,7 +563,7 @@ def test_private_accepts_a_friendly_node_name_containing_spaces(
     ))
     direct = _FakeDirectChat()
     context = LinkContext(
-        node_identity=own_identity, link_node=link_node,
+        link_node=link_node,
         realtime_bridge=_FakeBridge({remote_identity.fingerprint: {"bob": "bob"}}),
         direct_chat=direct,
     )

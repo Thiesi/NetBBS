@@ -136,7 +136,6 @@ from netbbs.link.files import (
     FileAreaCarryLimitError,
     RemoteFile,
     RemoteFileCatalogueLimitError,
-    get_remote_file,
     materialize_carried_file_area,
     materialize_carried_file_descriptor,
     withdraw_remote_file,
@@ -1169,6 +1168,9 @@ async def rotate_realtime_transport_key(
     registry: LinkRealtimeSessionRegistry,
     server: LinkRealtimeServer | None = None,
     connectors: Sequence[LinkRealtimeConnector] = (),
+    compromised: bool = False,
+    persist: Callable[[NodeIdentity], Awaitable[None]] | None = None,
+    on_rotated: Callable[[NodeIdentity], None] | None = None,
 ) -> NodeIdentity:
     """
     Rotates `identity`'s transport key and makes the rotation actually take
@@ -1196,11 +1198,17 @@ async def rotate_realtime_transport_key(
     identity, if any -- their automatic reconnect after `close_all` closes
     their current session must dial with the new key too.
 
-    Does not save `identity` to disk -- same contract as
-    `rotate_operational_key` itself; the caller persists the returned
-    identity.
+    `persist` (issue #624, `netbbs.link.key_rotation.KeyRotator`) saves the
+    rotated identity before anything live changes, so a save that fails
+    leaves the running node exactly as it was; without it the caller
+    persists the returned identity. `on_rotated` is where the caller swaps
+    its own reference (`LinkNode.identity`), also before any session closes.
     """
-    rotated = rotate_operational_key(identity, purpose="transport")
+    rotated = rotate_operational_key(identity, purpose="transport", compromised=compromised)
+    if persist is not None:
+        await persist(rotated)
+    if on_rotated is not None:
+        on_rotated(rotated)
     if server is not None:
         server.update_identity(rotated)
     for connector in connectors:

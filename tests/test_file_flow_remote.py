@@ -91,7 +91,7 @@ def remote_node_identity():
 
 
 def _link_context_for(node_identity) -> LinkContext:
-    return LinkContext(node_identity=node_identity, link_node=LinkNode(identity=node_identity))
+    return LinkContext(link_node=LinkNode(identity=node_identity))
 
 
 def _written(session: FakeSession) -> str:

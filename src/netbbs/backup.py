@@ -1437,18 +1437,30 @@ def _require_node_not_running(db_path: Path) -> None:
     "operator responsibility, not a load-bearing distributed lock"
     framing this module already applies to a second instance running
     on an entirely different machine."""
+    pid = running_node_pid(db_path)
+    if pid is not None:
+        raise BackupError(
+            f"refusing to restore over {db_path}: a node process (PID {pid}) appears to still "
+            f"be running, per {_pid_file_path_for(db_path)} -- stop it first"
+        )
+
+
+def running_node_pid(db_path: Path) -> int | None:
+    """The PID of the node process serving `db_path`, or `None` if none is running.
+
+    Same best-effort reading as `_require_node_not_running`, for the other
+    offline tools that must not act under a live node -- `python -m
+    netbbs.admin rotate-key` (issue #624), whose running node would go on
+    signing with the key being replaced.
+    """
     pid_file = _pid_file_path_for(db_path)
     if not pid_file.exists():
-        return
+        return None
     try:
         pid = int(pid_file.read_text().strip())
     except ValueError:
-        return
-    if _process_is_running(pid):
-        raise BackupError(
-            f"refusing to restore over {db_path}: a node process (PID {pid}) appears to still "
-            f"be running, per {pid_file} -- stop it first"
-        )
+        return None
+    return pid if _process_is_running(pid) else None
 
 
 def _restore_state_path_for(db_path: Path) -> Path:
