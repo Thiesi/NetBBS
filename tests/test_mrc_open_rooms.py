@@ -413,3 +413,30 @@ def test_a_legacy_overlength_blocklist_entry_is_dropped_on_load(db):
     saved = save_open_room_settings(db, OpenRoomSettings(enabled=loaded.enabled, blocklist=loaded.blocklist, cap=16))
     assert saved.cap == 16
     assert "x" * 25 not in get_config(db, OPEN_ROOMS_BLOCKLIST_KEY)
+
+
+def test_a_genesis_refused_for_an_open_rooms_id_is_declared_not_carried(db):
+    """Issue #669: the room shares the id but has no Link genesis, so it is
+    not a copy of the refused resource. Counting it as carried left the
+    resource in neither set, and capable peers resent it on every pass."""
+    from netbbs.link.channels import ChannelCarryRefusedError, materialize_carried_channel
+    from netbbs.link.events import build_channel_genesis
+    from netbbs.link.store import save_event, uncarried_resource_ids
+    from netbbs.timeutil import utc_now_iso
+
+    peer = bootstrap_node_identity("peer-669")
+    opened = materialize_open_room(db, "lobby", open_settings=_on()).channel
+    genesis = build_channel_genesis(
+        signing_identity=peer.signing_key, origin_fingerprint=peer.fingerprint, channel_id=opened.channel_id,
+        name="innocent", created_at=utc_now_iso(), description=None, default_min_level=0,
+        default_min_age=None, default_name_requirement=None,
+    )
+    # As `persist_accepted_events` does: saved first, then refused.
+    save_event(
+        db, sender_fingerprint=peer.fingerprint, content_id=genesis.content_id,
+        object_type="channel_genesis", envelope=genesis.to_dict(),
+    )
+    with pytest.raises(ChannelCarryRefusedError):
+        materialize_carried_channel(db, genesis)
+
+    assert uncarried_resource_ids(db) == {"channels": (opened.channel_id,)}
