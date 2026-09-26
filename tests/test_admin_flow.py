@@ -10004,6 +10004,105 @@ def test_the_vouch_screen_says_when_a_relay_did_not_take_this_nodes_vouches(db, 
     assert "1 of them did not take them at the last attempt; the Link log says why." in text
 
 
+def test_link_status_offers_an_uncarried_board_and_accepting_it_carries_it(db, lane, sysop):
+    """Issue #683: past the cap a board is offered, not declined; the SysOp
+    sees it under [O]ffered with its origin and why, and [A]ccept carries it."""
+    from netbbs.boards.boards import get_board_by_name
+    from netbbs.link.carry import accept_genesis, carry_decision_counts
+    from netbbs.link.events import build_board_genesis
+    from netbbs.link.node_identity import bootstrap_node_identity
+
+    remote = bootstrap_node_identity("offering-origin")
+    genesis = build_board_genesis(
+        signing_identity=remote.signing_key, origin_fingerprint=remote.fingerprint,
+        board_id="d" * 64, name="Retro Hardware", created_at="2026-01-01T00:00:00Z",
+    )
+    accept_genesis(
+        db, kind="boards", envelope=genesis.to_dict(), sender_fingerprint=remote.fingerprint,
+        content_id=genesis.content_id, own_fingerprint="own", cap=0,
+    )
+
+    # The Content section is on the status screen's second page.
+    session = FakeSession(["s", "l", "PAGE_DOWN", "o", "0", "1", "a", "b", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop, link_context=_link_context()))
+
+    text = _normalized_visible(_written_text(session))
+    assert "Offered: 1 waiting to be accepted" in text
+    assert "Name: Retro Hardware" in text
+    assert "Why: arrived when this node was already at its carry cap" in text
+    assert "'Retro Hardware' is carried now" in text
+    assert "Nothing here." not in text
+    assert get_board_by_name(db, "Retro Hardware").board_id == "d" * 64
+    assert carry_decision_counts(db) == {}
+
+
+def test_an_offered_resource_name_from_a_peer_is_sanitized_before_it_is_styled(db, lane, sysop):
+    """The name is the remote node's to choose; a control sequence in it must
+    not reach the SysOp's terminal."""
+    from netbbs.link.carry import accept_genesis
+    from netbbs.link.events import build_board_genesis
+    from netbbs.link.node_identity import bootstrap_node_identity
+
+    remote = bootstrap_node_identity("hostile-origin")
+    genesis = build_board_genesis(
+        signing_identity=remote.signing_key, origin_fingerprint=remote.fingerprint,
+        board_id="f" * 64, name="Evil\x1b[2J\x1b[HBoard", created_at="2026-01-01T00:00:00Z",
+    )
+    accept_genesis(
+        db, kind="boards", envelope=genesis.to_dict(), sender_fingerprint=remote.fingerprint,
+        content_id=genesis.content_id, own_fingerprint="own", cap=0,
+    )
+
+    session = FakeSession(["s", "l", "o", "0", "1", "b", "b", "b", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop, link_context=_link_context()))
+
+    assert "\x1b[2J" not in _written_text(session)
+def test_link_status_screen_shows_the_live_proxy_outcome(db, lane, sysop, monkeypatch):
+    """Issue #628: the anchor connector swallows dial failures and callers see
+    a reason-free message, so a refused tunnel is visible here or nowhere."""
+    from netbbs.link.realtime_proxy import REALTIME_PROXY_STATUS, ProxyEndpoint
+
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    REALTIME_PROXY_STATUS.reset()
+    try:
+        REALTIME_PROXY_STATUS.record(
+            ProxyEndpoint("squid.example", 3128, "Basic c2VjcmV0"),
+            "tunnel refused: 407 Proxy Authentication Required", ok=False,
+        )
+        session = FakeSession(["s", "l", "b", "b", "b"])
+        asyncio.run(admin_menu(session, lane, sysop, link_context=_link_context()))
+    finally:
+        REALTIME_PROXY_STATUS.reset()
+
+    text = _normalized_visible(_written_text(session))
+    assert "Live proxy: squid.example:3128 -- tunnel refused: 407 Proxy Authentication Required" in text
+
+
+def test_link_status_screen_names_a_configured_proxy_without_its_credentials(db, lane, sysop, monkeypatch):
+    from netbbs.link.realtime_proxy import REALTIME_PROXY_STATUS
+
+    for name in ("HTTPS_PROXY", "http_proxy", "https_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("HTTP_PROXY", "http://carrier:hunter2@squid.example:3128")
+    REALTIME_PROXY_STATUS.reset()
+    session = FakeSession(["s", "l", "b", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop, link_context=_link_context()))
+
+    text = _normalized_visible(_written_text(session))
+    assert "Live proxy: http://squid.example:3128 -- configured, not used by a live connection yet" in text
+    assert "hunter2" not in text and "carrier" not in text
+
+
+def test_link_status_screen_has_no_proxy_line_without_a_proxy(db, lane, sysop, monkeypatch):
+    from netbbs.link import realtime_proxy
+
+    monkeypatch.setattr(realtime_proxy.urllib.request, "getproxies", lambda: {})
+    realtime_proxy.REALTIME_PROXY_STATUS.reset()
+    session = FakeSession(["s", "l", "b", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop, link_context=_link_context()))
+
+    assert "Live proxy" not in _normalized_visible(_written_text(session))
 # -- issue #676: approving something no longer pending reports, not crashes --
 
 
@@ -10059,3 +10158,22 @@ def test_approving_a_file_approved_meanwhile_reports_it_and_stays_on_screen(db, 
     text = _visible(_written_text(session))
     assert "no longer waiting for approval" in text
     assert get_file(db, entry.file_id).status == "approved"
+
+
+def test_a_closed_boards_detail_shows_the_closure_reason(db, lane, sysop):
+    """Issue #680: the reason is part of the signed closure, and the board
+    detail screen -- the one place a SysOp looks at a closed board -- never
+    showed it."""
+    from netbbs.boards.boards import create_board
+    from netbbs.link.boards import close_board_if_linked, link_board
+
+    board = create_board(db, "General", creator=sysop)
+    link_context = _link_context()
+    link_board(db, board, node_identity=link_context.node_identity)
+    closure = close_board_if_linked(db, board, node_identity=link_context.node_identity, reason="archived")
+    link_context.link_node.board_closures[board.board_id] = closure
+
+    session = FakeSession(["m", "m", "l", "0", "1", "b", "b", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
+
+    assert "Closure reason: archived" in _normalized_visible(_written_text(session))

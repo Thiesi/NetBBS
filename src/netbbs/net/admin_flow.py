@@ -57,8 +57,8 @@ import re
 import shlex
 import sqlite3
 import sys
-import weakref
 from pathlib import Path
+import dataclasses
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Sequence
 from zoneinfo import available_timezones
@@ -226,7 +226,7 @@ from netbbs.link.boards import (
     queue_approved_board_post_if_linked,
     rebuild_carried_post_materialization,
 )
-from netbbs.link.channels import LinkChannelsError, is_channel_linked, link_channel
+from netbbs.link.channels import LinkChannelsError, carried_channel_count, is_channel_linked, link_channel
 from netbbs.link.diagnostics import (
     DiagnosticLogEntry,
     list_diagnostic_log_entries,
@@ -234,6 +234,7 @@ from netbbs.link.diagnostics import (
 )
 from netbbs.link.files import (
     LinkFilesError,
+    carried_file_area_count,
     is_area_linked,
     link_file_area,
     queue_file_descriptor_if_linked,
@@ -263,7 +264,20 @@ from netbbs.link.remote_attestation import (
     remove_attestation_recipient,
     set_remote_attestation_override,
 )
-from netbbs.link.store import introduced_by, retain_linked_genesis
+from netbbs.link.carry import (
+    EXCLUDED,
+    KIND_LABELS,
+    OFFERED,
+    CarryDecision,
+    CarryDecisionError,
+    accept_offer,
+    carry_decision_counts,
+    count_carry_decisions,
+    exclude_offer,
+    list_carry_decisions,
+)
+from netbbs.link.realtime_proxy import describe_proxy_status
+from netbbs.link.store import clear_deletion_record, introduced_by, retain_linked_genesis
 from netbbs.link.trust_carriage import relays_refusing_trust_deposits
 from netbbs.link.onboarding import (
     Participation,
@@ -549,6 +563,7 @@ from netbbs.rendering import (
 )
 from netbbs.rendering.detail import Field, Note, Section, Table, render_sections
 from netbbs.rendering.reflow import wrap_terminal_text
+from netbbs.net import notices as _notices
 from netbbs.guest import (
     guest_user,
     pre_login_notice,
@@ -744,24 +759,17 @@ async def _load_condensed_status_line(lane: DatabaseLane, *, unicode_style: bool
 
 # -- outcomes carried into the next redraw ------------------------------------
 #
-# With redraw-in-place on (the default for a new account), a line written just
-# before a screen returns is never seen: the screen it returns to clears the
-# terminal in the same burst of output. So an action does not *write* its
-# outcome; it `_announce`s it, and whichever console screen is drawn next shows
-# it directly above its prompt -- `_choice_prompt` for a screen that draws
-# itself, `show_detail` for a paged one. No keypress is asked for: the outcome
-# is simply on the screen the SysOp lands on, where the eye already is.
-#
-# Keyed weakly by session, so a notice can never outlive the connection it was
-# meant for or reach another SysOp's console.
-_pending_notices: "weakref.WeakKeyDictionary[Session, list[str]]" = weakref.WeakKeyDictionary()
+# The mechanism lives in `netbbs.net.notices` (issue #680 shared it with the
+# caller-facing screens); these names are the console's own spelling of it.
+# An action does not *write* its outcome; it `_announce`s it, and whichever
+# console screen is drawn next shows it directly above its prompt --
+# `_choice_prompt` for a screen that draws itself, `show_detail` for a paged
+# one.
 
 
 def _announce(session: Session, text: str, *, error: bool = False, color: int | None = None) -> None:
     """Queue one outcome line for the next console screen drawn on `session`."""
-    if color is None:
-        color = ERROR_COLOR if error else SUCCESS_COLOR
-    _pending_notices.setdefault(session, []).append(colored(sanitize_text(text), fg_color=color))
+    _notices.announce(session, text, tone="error" if error else "success", color=color)
 
 
 _CLEAR_SEQUENCE = "\x1b[2J"
@@ -788,23 +796,20 @@ def _announce_line(session: Session, line: str) -> None:
         else:
             color = SUCCESS_COLOR
         line = colored(line, fg_color=color)
-    _pending_notices.setdefault(session, []).append(line)
+    _notices.announce_styled(session, line)
 
 
 def _announce_styled(session: Session, line: str) -> None:
     """Queue a line that is already sanitized and styled (a badge, a captured row)."""
-    _pending_notices.setdefault(session, []).append(line)
+    _notices.announce_styled(session, line)
 
 
 def _pending_notice_rows(session: Session) -> int:
-    width = max(1, session.terminal_width)
-    return sum(
-        wrap_terminal_text(line, width).count("\r\n") + 1 for line in _pending_notices.get(session, ())
-    )
+    return _notices.pending_notice_rows(session)
 
 
 def _take_notices(session: Session) -> list[str]:
-    return _pending_notices.pop(session, [])
+    return _notices.take_notices(session)
 
 
 class _TrailingOutput:
@@ -827,6 +832,9 @@ class _TrailingOutput:
     def __init__(self, session: Session) -> None:
         self._session = session
         self._held: list[str] = []
+        # A flow that announces its outcome (`netbbs.net.notices`) instead
+        # of writing it reaches the real session's queue through this.
+        self.notice_session = session
 
     def __getattr__(self, name: str):
         return getattr(self._session, name)
@@ -7634,6 +7642,15 @@ async def _link_status_sections(
         peers.append(Field("Sync interval", f"{config.sync_interval_seconds:.0f}s"))
     live_sessions = link_context.realtime_registry.all_sessions() if link_context.realtime_registry is not None else []
     peers.append(Field("Live sessions", str(len(live_sessions))))
+    proxy_line = describe_proxy_status()
+    if proxy_line is not None:
+        # Issue #628: live chat tunnels through the proxy the environment
+        # names; its last outcome is the one place a refusal is visible.
+        text, ok = proxy_line
+        peers.append(Field(
+            "Live proxy", text,
+            color=MUTED_COLOR if ok is None else (SUCCESS_COLOR if ok else WARNING_COLOR),
+        ))
     sections.append(Section("Peers and seeds", peers))
 
     relays: list[Field | Note] = []
@@ -7673,8 +7690,20 @@ async def _link_status_sections(
 
     content = [Field("Linked boards", str(len(node.boards)))]
     if config is not None:
-        carried = await lane.run(carried_board_count, link_context.node_identity.fingerprint)
-        content.append(Field("Carried boards", f"{carried}/{config.max_carried_boards}"))
+        # Issue #683: every kind the carry caps govern, not boards alone.
+        own = link_context.node_identity.fingerprint
+        for label, counter, cap in (
+            ("Carried boards", carried_board_count, config.max_carried_boards),
+            ("Carried channels", carried_channel_count, config.max_carried_channels),
+            ("Carried file areas", carried_file_area_count, config.max_carried_file_areas),
+        ):
+            content.append(Field(label, f"{await lane.run(counter, own)}/{cap}"))
+    offered, excluded = await _carry_decision_totals(lane)
+    content.append(Field(
+        "Offered", f"{offered} waiting to be accepted" if offered else "none",
+        color=WARNING_COLOR if offered else MUTED_COLOR,
+    ))
+    content.append(Field("Excluded", str(excluded) if excluded else "none", color=VALUE_COLOR if excluded else MUTED_COLOR))
     content.append(Field("Known events", str(len(node.known_event_ids))))
     content.append(Field("Post-edit chains", str(len(node.post_edits))))
     sections.append(Section("Content", content))
@@ -7768,6 +7797,137 @@ async def _link_peer_detail(
     )
 
 
+# -- carry decisions: offered and excluded resources (design doc §9.3, --------
+# -- issue #683) ---------------------------------------------------------------
+
+
+_CARRY_REASONS = {
+    "cap": "arrived when this node was already at its carry cap",
+    "refused": "cannot be carried as it stands here (its name or id is taken)",
+    "deleted": "deleted here while it was carried",
+    "sysop": "declined by a SysOp",
+    "migrated": "held without a local copy before carry decisions were recorded",
+}
+
+
+async def _carry_decision_totals(lane: DatabaseLane) -> tuple[int, int]:
+    counts = await lane.run(carry_decision_counts)
+    offered = sum(n for (_kind, state), n in counts.items() if state == OFFERED)
+    excluded = sum(n for (_kind, state), n in counts.items() if state == EXCLUDED)
+    return offered, excluded
+
+
+def _carry_decision_sections(decision: CarryDecision, *, origin_label: str, decided: str) -> list[Section]:
+    rows: list[Field | Note] = [
+        Field("Kind", KIND_LABELS[decision.kind]),
+        Field("Name", decision.name),
+    ]
+    if decision.description:
+        rows.append(Field("Description", decision.description))
+    rows.append(Field("Origin", origin_label))
+    rows.append(Field("Why", _CARRY_REASONS.get(decision.reason, decision.reason)))
+    rows.append(Field("Since", decided))
+    if decision.state == OFFERED:
+        rows.append(Note(
+            "Accepting carries it here: a local copy is created now and its content arrives with "
+            "the next sync passes. The carry cap limits only what arrives on its own, not what "
+            "you accept."
+        ))
+    else:
+        rows.append(Note("Not carried on this node. Its events are not fetched, and peers are told so."))
+    return [Section("Link resource", rows)]
+
+
+async def _carry_decisions_screen(
+    session: Session, lane: DatabaseLane, actor: User, *, link_context: LinkContext, state: str,
+) -> None:
+    """Picker over the offered (or excluded) resources, then one resource's
+    screen, with `[A]ccept` and `E[x]clude` for an offer (issue #683)."""
+    node = link_context.link_node
+    title = "Offered to this node" if state == OFFERED else "Excluded from this node"
+    message = None
+    while True:
+        # A resource's name and description come from a remote node's genesis:
+        # sanitized once here, before anything below styles them.
+        decisions = [
+            dataclasses.replace(
+                d, name=sanitize_text(d.name),
+                description=sanitize_text(d.description) if d.description else None,
+            )
+            for d in await lane.run(list_carry_decisions, state)
+        ]
+        total = await lane.run(count_carry_decisions, state)
+        display_format, display_timezone = await lane.run(resolve_display_preferences)
+        chrome = await _load_chrome(lane, actor)
+
+        def _origin_label(fingerprint: str) -> str:
+            peer = node.peers.get(fingerprint)
+            label = identity_for_peer(peer).label if peer is not None else (fingerprint or "unknown")
+            return sanitize_text(label)
+
+        selected = await pick_item(
+            session, decisions,
+            name_of=lambda d: d.name,
+            stable_id_of=lambda d: d.ref,
+            description_of=lambda d: f"{KIND_LABELS[d.kind]} from {_origin_label(d.origin_fingerprint)}",
+            title=title if total <= len(decisions) else f"{title} (newest {len(decisions)} of {total})",
+            empty_message="Nothing here.",
+            redraw_in_place=chrome.redraw_in_place,
+            unicode_style=chrome.unicode_style,
+            collapsed=chrome.collapsed,
+            accent_color=chrome.accent_color,
+            header_color=chrome.header_color,
+        )
+        if selected is None:
+            return
+        decided = format_for_display(
+            selected.decided_at, override_format=display_format, override_timezone=display_timezone
+        )
+        actions = []
+        if state == OFFERED:
+            actions += [("a", menu_key("A", "ccept")), ("x", menu_key("x", "clude", prefix="E"))]
+        actions.append(_BACK_ACTION)
+        choice, _page = await show_detail(
+            session,
+            title=_detail_title(
+                session, chrome, selected.name, breadcrumb=("SysOp", "Operations", "Link status", title),
+            ),
+            sections=_carry_decision_sections(
+                selected, origin_label=_origin_label(selected.origin_fingerprint), decided=decided
+            ),
+            actions=actions, message=message,
+            redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+        )
+        message = None
+        if choice == "a":
+            try:
+                await lane.run(
+                    accept_offer, selected.kind, selected.resource_id, actor=actor,
+                    max_remote_files_per_area=(
+                        link_context.link_config.max_remote_files_per_area
+                        if link_context.link_config is not None else None
+                    ),
+                )
+            except CarryDecisionError as exc:
+                _announce_line(session, colored(f"Could not accept {selected.name!r}: {exc}", fg_color=ERROR_COLOR))
+            else:
+                _announce_line(
+                    session,
+                    f"{selected.name!r} is carried now; its content arrives with the next sync passes.",
+                )
+                if not await lane.run(list_carry_decisions, state):
+                    return
+        elif choice == "x":
+            try:
+                await lane.run(exclude_offer, selected.kind, selected.resource_id, actor=actor)
+            except CarryDecisionError as exc:
+                _announce_line(session, colored(f"Could not exclude {selected.name!r}: {exc}", fg_color=ERROR_COLOR))
+            else:
+                _announce_line(session, f"{selected.name!r} excluded; it is not carried on this node.")
+                if not await lane.run(list_carry_decisions, state):
+                    return
+
+
 async def _link_status_screen(
     session: Session, lane: DatabaseLane, actor: User, *, link_context: LinkContext,
     node_controls: NodeControls | None = None,
@@ -7815,6 +7975,12 @@ async def _link_status_screen(
             actions.append(("a", menu_key("A", "cknowledge identity changes")))
         # Issue #624: the node's own keys and their rotation.
         actions.append(("k", menu_key("K", "eys")))
+        # Issue #683: what this node holds and does not carry.
+        offered, excluded = await _carry_decision_totals(lane)
+        if offered:
+            actions.append(("o", menu_key("O", "ffered")))
+        if excluded:
+            actions.append(("x", menu_key("x", "cluded", prefix="E")))
         actions.append(_BACK_ACTION)
         choice, page = await show_detail(
             session,
@@ -7842,6 +8008,10 @@ async def _link_status_screen(
             for notice in identity_notices[:5]:
                 await lane.run(dismiss_identity_observation, notice.id)
             message = colored("Identity changes acknowledged.", fg_color=SUCCESS_COLOR)
+        elif choice == "o":
+            await _carry_decisions_screen(session, lane, actor, link_context=link_context, state=OFFERED)
+        elif choice == "x":
+            await _carry_decisions_screen(session, lane, actor, link_context=link_context, state=EXCLUDED)
 
 
 # -- node keys: guided operational-key rotation (design doc §4.5, ------------
@@ -14246,7 +14416,7 @@ async def _close_board_screen(session: Session, lane: DatabaseLane, board: Board
             fg_color=MUTED_COLOR,
         )
     )
-    await session.write("Optional reason (blank for none): ")
+    await write_prompt(session, "Optional reason (blank for none): ")
     reason = (await session.read_line()).strip() or None
     if not await prompt_yes_no(session, f"Close {board.name!r}?", default=False):
         _announce_line(session, "Cancelled.")
@@ -14409,6 +14579,13 @@ async def _draw_board_detail(
             is_closed = await lane.run(is_board_closed, board)
             if is_closed:
                 link_rows.append(Field("Closed", "yes -- no longer accepts new posts", color=WARNING_COLOR))
+                # The reason is part of the signed closure; without this the
+                # one place a SysOp looks at a closed board never showed it
+                # (issue #680).
+                closure = link_context.link_node.board_closures.get(board.board_id)
+                closure_reason = closure.payload.get("reason") if closure is not None else None
+                if closure_reason:
+                    link_rows.append(Field("Closure reason", sanitize_text(closure_reason)))
             origin_fingerprint = await lane.run(board_origin_fingerprint, board)
             is_origin = origin_fingerprint == link_context.node_identity.fingerprint
             origin_label = (
@@ -14482,11 +14659,20 @@ async def _delete_board_screen(session: Session, lane: DatabaseLane, actor: User
     if confirmation != board.name:
         _announce_line(session, "Cancelled.")
         return False
-    # Issue #669: so a Linked board stays declared as not carried here.
-    await lane.run(retain_linked_genesis, "boards", board.board_id)
-    await lane.run(delete_board, board, deleted_by=actor)
-    _announce_line(session, f"{board.name!r} deleted.")
+    # Issues #669/#683: a Linked board keeps its genesis and is recorded as
+    # excluded, so it stays declared as not carried and does not come back.
+    kept = await lane.run(retain_linked_genesis, "boards", board.board_id, actor_user_id=actor.id)
+    try:
+        await lane.run(delete_board, board, deleted_by=actor)
+    except BaseException:
+        if kept:
+            await lane.run(clear_deletion_record, "boards", board.board_id)
+        raise
+    _announce_line(session, f"{board.name!r} deleted." + (_EXCLUDED_AFTER_DELETE if kept else ""))
     return True
+
+
+_EXCLUDED_AFTER_DELETE = " It is excluded from Link here and will not come back; Link status lists it."
 
 
 async def _pending_posts_screen(
@@ -15236,10 +15422,16 @@ async def _delete_area_screen(session: Session, lane: DatabaseLane, actor: User,
     if confirmation != area.name:
         _announce_line(session, "Cancelled.")
         return False
-    # Issue #669: so a Linked file area stays declared as not carried here.
-    await lane.run(retain_linked_genesis, "file_areas", area.area_id)
-    await lane.run(delete_file_area, area, deleted_by=actor)
-    _announce_line(session, f"{area.name!r} deleted.")
+    # Issues #669/#683: a Linked file area keeps its genesis and is recorded as
+    # excluded, so it stays declared as not carried and does not come back.
+    kept = await lane.run(retain_linked_genesis, "file_areas", area.area_id, actor_user_id=actor.id)
+    try:
+        await lane.run(delete_file_area, area, deleted_by=actor)
+    except BaseException:
+        if kept:
+            await lane.run(clear_deletion_record, "file_areas", area.area_id)
+        raise
+    _announce_line(session, f"{area.name!r} deleted." + (_EXCLUDED_AFTER_DELETE if kept else ""))
     return True
 
 
@@ -15394,14 +15586,13 @@ async def _file_action_screen(
             return
         elif choice == "d" and can_download:
             await session.write_line("")
-            # `send_file_to_caller` belongs to the caller-facing file screens
-            # and writes its own outcome -- "Sent 'x.zip'.", a failure, or the
-            # browser link the moderator is meant to open -- and this screen
-            # redraws straight after it. Held behind the stand-in, what it
-            # wrote last is on the redrawn screen instead of under its clear.
-            flow = _TrailingOutput(session)
-            await send_file_to_caller(flow, lane, area, entry, actor, transfers=transfers)
-            flow.announce_rest()
+            # `send_file_to_caller` announces its own outcome -- "Sent
+            # 'x.zip'.", a failure, or the browser link the moderator is
+            # meant to open (`netbbs.net.notices`, issue #680) -- so the
+            # redraw below shows it. Its setup lines (the heading, "Starting
+            # Zmodem send") are progress, not outcomes, and are meant to be
+            # cleared: no stand-in session is needed to hold them.
+            await send_file_to_caller(session, lane, area, entry, actor, transfers=transfers)
             await _draw()
         elif choice == "a":
             await session.write_line("")
@@ -15523,11 +15714,9 @@ async def _expired_file_screen(
             return
         elif choice == "d" and can_download:
             await session.write_line("")
-            # Same stand-in as the pending review: the outcome
-            # `send_file_to_caller` writes lands on the redrawn screen.
-            flow = _TrailingOutput(session)
-            await send_file_to_caller(flow, lane, area, entry, actor, transfers=transfers)
-            flow.announce_rest()
+            # As on the pending review: `send_file_to_caller` announces its
+            # outcome, and the redraw below shows it.
+            await send_file_to_caller(session, lane, area, entry, actor, transfers=transfers)
             await _draw()
         else:
             await session.write(reject_unhandled_key(choice))
@@ -17273,10 +17462,16 @@ async def _delete_channel_screen(session: Session, lane: DatabaseLane, actor: Us
     if confirmation != channel.name:
         _announce_line(session, "Cancelled.")
         return False
-    # Issue #669: so a Linked channel stays declared as not carried here.
-    await lane.run(retain_linked_genesis, "channels", channel.channel_id)
-    await lane.run(delete_channel, channel, deleted_by=actor)
-    _announce_line(session, f"{channel.name!r} deleted.")
+    # Issues #669/#683: a Linked channel keeps its genesis and is recorded as
+    # excluded, so it stays declared as not carried and does not come back.
+    kept = await lane.run(retain_linked_genesis, "channels", channel.channel_id, actor_user_id=actor.id)
+    try:
+        await lane.run(delete_channel, channel, deleted_by=actor)
+    except BaseException:
+        if kept:
+            await lane.run(clear_deletion_record, "channels", channel.channel_id)
+        raise
+    _announce_line(session, f"{channel.name!r} deleted." + (_EXCLUDED_AFTER_DELETE if kept else ""))
     return True
 
 

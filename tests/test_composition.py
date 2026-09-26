@@ -330,3 +330,81 @@ def test_a_body_over_the_byte_cap_can_still_be_shortened():
     )
     assert body == "y" * 40
     assert "cannot exceed" not in _text(session)
+
+
+# -- read_prefilled_field (issue #680: §3.5's prefilled field for subjects) --
+
+
+class _PrefillSession(FakeSession):
+    """Records what the line editor was seeded with; a scripted `None`
+    stands for Esc."""
+
+    def __init__(self, *, lines=()):
+        super().__init__(lines=lines)
+        self.initial = None
+
+    async def read_line(self, **kwargs) -> str:
+        from netbbs.net.char_input import InputCancelled
+
+        self.initial = kwargs.get("initial")
+        value = await super().read_line(**kwargs)
+        if value is None:
+            raise InputCancelled()
+        return value
+
+
+def _prefilled(lines, current):
+    from netbbs.net.composition import read_prefilled_field
+
+    session = _PrefillSession(lines=lines)
+    return session, asyncio.run(read_prefilled_field(session, "Subject", current))
+
+
+def test_a_prefilled_field_opens_on_its_current_value_and_saves_the_edit():
+    session, value = _prefilled(["New subject"], "Old subject")
+    assert session.initial == "Old subject"
+    assert value == "New subject"
+    assert "Subject: " in _text(session)
+    assert "Enter to keep" not in _text(session)
+
+
+def test_esc_keeps_the_current_value():
+    _, value = _prefilled([None], "Old subject")
+    assert value == "Old subject"
+
+
+def test_an_emptied_required_field_keeps_its_value():
+    _, value = _prefilled([""], "Old subject")
+    assert value == "Old subject"
+
+
+def test_a_carried_subject_is_shown_sanitized_and_kept_raw_when_untouched():
+    """A subject carried over Link can hold control sequences; the editor
+    echoes its initial buffer, so it is seeded sanitized -- and saving it
+    unchanged must not rewrite the stored subject."""
+    raw = "Hi\x1b[2Jthere"
+    session, value = _prefilled([None], raw)
+    assert "\x1b" not in session.initial
+    assert value == raw
+
+    shown = session.initial
+    session, value = _prefilled([shown], raw)
+    assert value == raw  # the sanitized text, saved as shown, is "unchanged"
+
+
+def test_a_prefilled_fields_viewport_is_the_width_left_after_its_label():
+    """The line editor measures its viewport from the cursor, which sits
+    after "Subject: "; a full-width one soft-wraps a long subject and then
+    edits against the wrong row (Codex review on #701)."""
+    from netbbs.net.composition import read_prefilled_field
+
+    seen = {}
+
+    class _Session(_PrefillSession):
+        async def read_line(self, **kwargs):
+            seen["viewport"] = kwargs["viewport"]()
+            return await super().read_line(**kwargs)
+
+    session = _Session(lines=["x"])
+    asyncio.run(read_prefilled_field(session, "Subject", "old"))
+    assert seen["viewport"] == 80 - len("Subject: ")

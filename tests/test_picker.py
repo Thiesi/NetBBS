@@ -88,18 +88,19 @@ def test_empty_list_shows_message_and_returns_none():
     result = {}
 
     async def handler(session: Session):
+        from netbbs.net.notices import take_notices
+
         result["value"] = await pick_item(
             session, [], name_of=lambda x: x, stable_id_of=lambda x: 0, title="Test", empty_message="Nothing here."
         )
+        result["notices"] = take_notices(session)
 
     async def scenario():
         server = await _run_server(handler)
         try:
             reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
             await skip_initial_negotiation(reader)
-            data = await _read_until_quiet(reader)
-            assert b"Nothing here." in data
-            assert fg(MUTED_COLOR).encode() in data
+            await _read_until_quiet(reader)
             writer.close()
             await writer.wait_closed()
         finally:
@@ -107,6 +108,11 @@ def test_empty_list_shows_message_and_returns_none():
 
     asyncio.run(scenario())
     assert result["value"] is None
+    # Announced, muted, for the screen the caller returns to (issue #680),
+    # rather than written just before that screen's redraw erases it.
+    assert len(result["notices"]) == 1
+    assert "Nothing here." in result["notices"][0]
+    assert fg(MUTED_COLOR) in result["notices"][0]
 
 
 def test_name_segments_of_colors_each_field_independently():

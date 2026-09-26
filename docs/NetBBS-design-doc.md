@@ -608,6 +608,22 @@ itself, and a draft editor would have to hold the plaintext across redraws to
 offer anything more. Each prompt cancels on a blank line and nothing is
 written before the last one.
 
+**An action's outcome is shown on the screen the caller lands on** (issue
+#680). With redraw-in-place on, a line written just before a screen redraws
+is erased by that redraw's clear. So an action does not write its outcome
+("Posted.", "Could not send: ...", "Sent 'game.zip'.", a one-time transfer
+link); it announces it through `netbbs.net.notices`. Whichever screen is drawn
+next shows it directly above its prompt, and a picker shows it above its
+list. No keypress is asked for. This started in the SysOp console and now
+applies to every screen: boards, file areas, the composition review screen
+shared by posts and mail, every picker, and the main and mail menus that
+flows unwind back to.
+
+A screen with a nothing-to-do state still draws a `[B]ack` bar and waits,
+rather than returning straight into its parent's redraw, where it would flash
+and vanish. The one exception is a picker with nothing to pick: it announces
+its empty message and returns, so the screen it returns to says it.
+
 No *menu* has a typed command language. A caller's options are the keys the
 action bar shows, and a prompt reading `Choice: ` accepts exactly those. The
 file-area listing was the last menu that read whole *lines* instead: it
@@ -1441,6 +1457,19 @@ redeemed, against live rows. It is single-use, expires in minutes, names its are
 and file by content-addressed ids that no deletion can recycle, and lives in
 memory only. A node that cannot say how it is reached (`[web] public_url` unset,
 listener on a wildcard address) says so rather than printing a URL that fails.
+
+`max_upload_bytes` bounds the *file*, identically over Zmodem and HTTP. An HTTP
+upload as a whole may cost the node that plus a small fixed framing allowance,
+whatever its shape: preamble, part headers and every part before or after the
+file count, and a request past the bound is refused (issue #511).
+
+A `HEAD` on a transfer link answers with the status a `GET` would, the reason in
+`X-NetBBS-Transfer-Message`, and spends nothing. The browser page relies on it:
+it probes a download first and starts it only on a yes, so a refused download is
+shown to the caller rather than saved under the filename. The answer is advice,
+not a reservation. The page addresses the link on its own origin, under the path
+it was loaded from, so a `public_url` naming another origin or a reverse-proxy
+prefix does not break the transfer (issue #511).
 
 **A JavaScript Zmodem implementation for the browser terminal is not planned.**
 It was listed as a possible follow-on while issue #475 was open, on the reasoning
@@ -3095,10 +3124,8 @@ same thing" precedent `materialize_carried_board` already established for
 `posts.root_post_id`/`edit_of_post_id` resolve directly from the Link
 payload with no separate ID-translation table.
 
-Unlike `materialize_carried_board` (a separate `lane.run` call from the
-`save_event` that persists the underlying signed event — a real, pre-existing
-crash-window gap for genesis materialization, not newly introduced but not
-closed here either), the new functions perform the `link_events` insert and
+Like genesis intake since issue #683 (which writes the genesis and its carry
+outcome in one transaction), the new functions perform the `link_events` insert and
 the `posts` projection in the same call, one transaction, one commit: a crash
 between them is no longer possible for posts/edits specifically. `LinkServer.
 _handle_events` calls the combined function once per accepted `board_post`/
@@ -5111,7 +5138,7 @@ let one peer impose unbounded cost on another node:
 | `LinkNode.peers`/`link_peers` — any node that completes a hello becomes a permanent peer, no cap (mirror-image gap to candidate descriptors, which *are* capped) | New `LinkConfig.max_peers` (default 1000 — generous relative to §14's declared small-network scale, but no longer infinite) | Same shape as candidate descriptors: admitting a genuinely *new* fingerprint past the cap is refused; a hello from an *already-known* peer (key rotation, descriptor refresh) is always accepted regardless of the count. Implemented as `handle_hello`'s own optional `max_peers` keyword (`None` default, unbounded, preserving every prior caller) rather than `handle_relay_consent_request`'s "caller decides" split — that idiom exists specifically for relay-consent's in-band `accepted=False` reply shape, which `handle_hello` has no equivalent of; refusing a hello is a whole-request failure either way, the same shape peer-list's own internal cap already uses. Only threaded into the *inbound* path (`LinkServer._handle_hello`/`_handle_relay_mailbox_pickup`) — `dial_hello` (outbound) is left unbounded by this cap, already indirectly bounded by `_MAX_CANDIDATE_DESCRIPTORS` plus the operator's own small configured seed list. |
 | `handle_events` batch size — no per-request cap, unlike peer-list's own `_MAX_PEER_LIST_ENTRIES_PER_REQUEST` from the same design round | New `_MAX_EVENTS_PER_REQUEST = 200` beside the existing constant in `protocol.py` | Reject the whole batch with `LinkProtocolError`, identical to the peer-list precedent — a genuine sync backlog still drains over several passes rather than one unbounded request. |
 | `board_post`/`board_post_edit` content size — zero validation on receive, unlike locally created posts (`netbbs.boards.posts.MAX_SUBJECT_BYTES`/`MAX_BODY_BYTES`) | Apply the same two constants inside `handle_events`'s `board_post`/`board_post_edit` branches | `LinkProtocolError`, matching every other malformed-event rejection already in that method. |
-| Carried-board count — `materialize_carried_board` turns any verified `board_genesis` into a local `Board` row unconditionally | New `LinkConfig.max_carried_boards` | The `board_genesis` event is still verified, accepted, and gossiped on past this node (dedup and chain integrity for *other* nodes must not depend on this node's own local storage choices) — only *materializing* a local, browsable `Board` row is refused once the cap is hit. Issue #561 decided that past the cap the resource will be recorded as *offered* for the SysOp to accept rather than left declined (§9.3); until that is implemented it is refused as described here. |
+| Carried-board count — `materialize_carried_board` turns any verified `board_genesis` into a local `Board` row unconditionally | New `LinkConfig.max_carried_boards` | The `board_genesis` event is still verified, accepted, and gossiped on past this node (dedup and chain integrity for *other* nodes must not depend on this node's own local storage choices) — only *materializing* a local, browsable `Board` row is refused once the cap is hit. Past the cap the resource is recorded as *offered* for the SysOp to accept, not declined (issue #561, §9.3). |
 | Link HTTP request body size — neither `LinkServer` nor `WebServer` sets `client_max_size`, so both silently inherit aiohttp's implicit 1 MiB default | Set `client_max_size` explicitly on `LinkServer`'s `web.Application()`, sized to comfortably fit `_MAX_EVENTS_PER_REQUEST` worth of events (2 MiB) | Turns an accidental library default into a deliberate, documented value; aiohttp's own 413 response is unchanged (not worth reshaping into a `LinkProtocolError` payload for a request that was rejected before any handler ran). |
 | Link HTTP request rate — no throttling on any Link route at all, including the two unauthenticated ones (`/hello`, `/peers`) | New `netbbs.net.throttle.LinkRequestThrottle` (a small public wrapper around the existing `_KeyedTokenBuckets` machinery `LoginThrottle` already uses internally), keyed by source address, applied via an aiohttp middleware on every route -- constructed once in `netbbs.__main__` from three new flat `LinkConfig` fields (`request_rate_capacity`/`request_rate_refill_per_minute`/`request_rate_max_tracked_sources`, not a nested sub-dataclass) and passed into `LinkServer`, the same "build once, node-lifetime, threaded into the one real server" shape `_build_throttle` already uses for `LoginThrottle` | Exceeding it returns a plain HTTP 429, no signed payload needed (an unauthenticated-route response can't be signed meaningfully anyway). `None` throttle (every caller predating this) is a middleware no-op, not a hard requirement. |
 
@@ -5143,9 +5170,8 @@ scope:
 
 **SysOp visibility.** `[L]ink status` gains a peer-count line showing
 `current/max_peers` (matching the existing `relaying_for`-slots-in-use
-display precedent) and a carried-boards `current/max_carried_boards` line
-(issue #561 decided to extend it to channels and file areas, with offered and
-excluded counts; not yet built);
+display precedent) and `current/max_carried_*` lines for boards, channels
+and file areas, with offered and excluded counts (issue #683);
 rate-limit rejections are logged the same way `LoginThrottle` rejections
 already are, not surfaced as a separate screen in this slice.
 
@@ -11247,6 +11273,33 @@ genesis intake as a whole is a separate question, and this decision does not
 change it. Bulk actions on the offered list (exclude everything from one
 origin) wait until a list long enough to need them exists. Implementation is its
 own issue, after #669.
+
+### Issue #511 — HTTP transfer hardening — closed
+
+Split out of PR #508, whose fixes did not converge. Normative description: §6.2.
+
+**Decision 1 — two ceilings on an HTTP upload.** `max_upload_bytes` keeps
+meaning file bytes, as over Zmodem; the request gets that plus a fixed framing
+allowance. Rejected: one ceiling on the whole body, which makes a browser's own
+framing refuse files within the configured maximum and, with a small enough
+setting, makes browser upload impossible.
+
+**Decision 2 — `HEAD` tells the truth.** It answers as a `GET` would, without
+spending the grant. It used to answer 204 for every token so as not to be an
+oracle for guessing them; with 256-bit tokens an oracle offers a guesser
+nothing, and the page needs the answer. Rejected: a separate check route, which
+exposes the same information on a second path.
+
+**Decision 3 — probe, then stream.** The page probes with `HEAD` and saves
+through `<a download>` only on a yes. Rejected: `fetch` plus `blob()`, which
+buffers the whole file in the page; a CORS header on the endpoint, which widens
+who may read a transfer response; and the `public_url` link as given, which
+fails cross-origin. The page resolves the token against its own address
+instead, which is same-origin and keeps a reverse-proxy prefix.
+
+**Not done, deliberately.** The probe is not a reservation: a file deleted, or a
+slot taken, between probe and `GET` still saves that `GET`'s error body. The
+window is one round trip.
 
 ### SFTP over the SSH transport — declined
 

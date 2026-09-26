@@ -1677,6 +1677,21 @@ class BoardEventState:
     ) -> None:
         self.post_edits[root_post_id] = self.edit_chain(root_post_id) + (edit,)
 
+    def forget_edit(self, root_post_id: str, content_id: str) -> None:
+        """Issue #683: drop an edit that was accepted but never stored (its
+        board has no local copy yet), with every edit after it in the chain,
+        since each of those extends it and none was stored either. Otherwise a
+        resend after the SysOp accepts the board is taken for a duplicate and
+        never reaches persistence."""
+        chain = self.edit_chain(root_post_id)
+        for index, edit in enumerate(chain):
+            if edit.content_id == content_id:
+                if index:
+                    self.post_edits[root_post_id] = chain[:index]
+                else:
+                    self.post_edits.pop(root_post_id, None)
+                return
+
 
 @dataclass
 class ChannelEventState:
@@ -2327,8 +2342,19 @@ class LinkNode:
         hello) -- never re-shares a candidate this node itself learned
         secondhand, so a claim's provenance never grows past one hop of
         "someone I've actually talked to vouches this address is worth
-        trying.\""""
-        return PeerListMessage(descriptors=tuple(peer.descriptor for peer in self.peer_directory.peers.values()))
+        trying.\"
+
+        At most `_MAX_PEER_LIST_ENTRIES_PER_REQUEST` of them, the most recently
+        signed first (issue #703): a receiver refuses a longer list outright, so
+        a node that had met more peers than that sent every requester a list it
+        would reject. The freshest descriptors are the ones most worth dialing.
+        """
+        descriptors = sorted(
+            (peer.descriptor for peer in self.peer_directory.peers.values()),
+            key=lambda descriptor: str(descriptor.payload.get("created_at", "")),
+            reverse=True,
+        )
+        return PeerListMessage(descriptors=tuple(descriptors[:_MAX_PEER_LIST_ENTRIES_PER_REQUEST]))
 
     def handle_peer_list(self, sender_fingerprint: str, message: PeerListMessage) -> list[str]:
         """

@@ -2922,4 +2922,45 @@ MIGRATIONS = [
         );
         """,
     ),
+    Migration(
+        description=(
+            "Issue #683: what this node decided about each Link resource it holds a "
+            "genesis for and does not carry. Before this, 'declined' was inferred from a "
+            "genesis in `link_events` with no local row, which a carry-cap refusal, a "
+            "SysOp's deletion and a crash between saving and materializing all produced "
+            "alike. `offered` waits for the SysOp to accept it; `excluded` stays out until "
+            "the SysOp reverses it; a carried resource has a local row and no entry here. "
+            "`reason` says how it got here (`cap`, `refused`, `deleted`, `sysop`, `migrated`) "
+            "and `actor_user_id` is the SysOp who decided, NULL when the node did. Every "
+            "genesis already without a local copy becomes `offered`: its history cannot be "
+            "recovered, and offered is the state that loses nothing and forces nothing."
+        ),
+        sql="""
+        CREATE TABLE link_carry_decisions (
+            kind          TEXT NOT NULL CHECK (kind IN ('boards', 'channels', 'file_areas')),
+            resource_id   TEXT NOT NULL,
+            state         TEXT NOT NULL CHECK (state IN ('offered', 'excluded')),
+            reason        TEXT NOT NULL,
+            decided_at    TEXT NOT NULL,
+            actor_user_id INTEGER,
+            PRIMARY KEY (kind, resource_id)
+        );
+
+        INSERT OR IGNORE INTO link_carry_decisions (kind, resource_id, state, reason, decided_at)
+            SELECT DISTINCT 'boards', board_id, 'offered', 'migrated', strftime('%Y-%m-%dT%H:%M:%S+00:00', 'now')
+              FROM link_events
+             WHERE object_type = 'board_genesis' AND board_id IS NOT NULL
+               AND board_id NOT IN (SELECT board_id FROM boards WHERE link_genesis_json IS NOT NULL);
+        INSERT OR IGNORE INTO link_carry_decisions (kind, resource_id, state, reason, decided_at)
+            SELECT DISTINCT 'channels', channel_id, 'offered', 'migrated', strftime('%Y-%m-%dT%H:%M:%S+00:00', 'now')
+              FROM link_events
+             WHERE object_type = 'channel_genesis' AND channel_id IS NOT NULL
+               AND channel_id NOT IN (SELECT channel_id FROM channels WHERE link_genesis_json IS NOT NULL);
+        INSERT OR IGNORE INTO link_carry_decisions (kind, resource_id, state, reason, decided_at)
+            SELECT DISTINCT 'file_areas', file_area_id, 'offered', 'migrated', strftime('%Y-%m-%dT%H:%M:%S+00:00', 'now')
+              FROM link_events
+             WHERE object_type = 'file_area_genesis' AND file_area_id IS NOT NULL
+               AND file_area_id NOT IN (SELECT area_id FROM file_areas WHERE link_genesis_json IS NOT NULL);
+        """,
+    ),
 ]

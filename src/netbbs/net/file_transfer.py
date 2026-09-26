@@ -91,6 +91,24 @@ large file on a slow line, and finite -- which is the point: without it
 a caller can hold a request, a staging file and a handler task open for
 as long as they care to."""
 
+MULTIPART_FRAMING_ALLOWANCE = 64 * 1024
+"""What a multipart upload may cost *beyond* its file, in bytes (issue #511).
+
+`max_upload_bytes` bounds the file, identically on the Zmodem and HTTP
+paths, so it cannot also bound the request: a browser's body includes its
+own boundaries and part headers, and a ceiling on the whole body would
+refuse files within the configured maximum. This is the second ceiling --
+room for a browser's framing (a few hundred bytes) and a handful of small
+form fields, and nothing like room for a preamble or a skipped part big
+enough to matter."""
+
+MAX_CONCURRENT_PROBES = 16
+"""How many `HEAD` probes may be resolving against the database at once.
+
+A probe spends nothing and holds no transfer slot, so without its own bound
+anyone with one live link could queue unlimited work on the foreground lane
+(Codex review of #702). Past it a probe answers 429, as a busy node does."""
+
 DEFAULT_MAX_OUTSTANDING_GRANTS = 128
 """A ceiling on unredeemed grants across the whole node. Every caller
 can mint these, so the table is remotely influenced and needs a bound
@@ -400,6 +418,7 @@ class TransferGateway:
         self._lane = lane
         self._uploads_in_flight = 0
         self._downloads_in_flight = 0
+        self._probes_in_flight = 0
         self._max_concurrent_uploads = max_concurrent_uploads
         # A callable, not a value: a node builds its listeners before it
         # loads its Link identity, so asking at construction time would
@@ -422,13 +441,57 @@ class TransferGateway:
         app.router.add_post("/transfer/{token}", self.handle_upload)
 
     async def handle_head(self, request):
-        """Answer a probe without spending anything. Deliberately says
-        nothing about whether the token is real: a HEAD that 404s for
-        unknown tokens and 200s for live ones is an oracle for guessing
-        them."""
+        """Say whether a GET would succeed, without spending anything
+        (issue #511).
+
+        The browser page probes a download with this before starting it:
+        an `<a download>` saves whatever body comes back under the
+        requested filename, so a refused download would otherwise land on
+        disk as a file that looks like the one asked for. The probe runs
+        the checks a GET runs -- the link, every live gate `resolve`
+        applies, a free download slot -- and answers with the status a GET
+        would, the reason in `X-NetBBS-Transfer-Message` because HEAD has
+        no body.
+
+        This used to answer 204 for every token so as not to be an oracle
+        for guessing them. A token is 256 bits of `secrets`, so an oracle
+        offers a guesser nothing, and the page needs the answer. It still
+        spends nothing: a link scanner or proxy probing the URL does not
+        burn the caller's one use.
+
+        A probe is advice, not a reservation: the file can go, or the last
+        slot be taken, between it and the GET.
+        """
         from aiohttp import web
 
-        return web.Response(status=204)
+        grant = self._grants.peek(request.match_info["token"])
+        if grant is None:
+            return _head_refusal(404, "This transfer link is not valid. Ask the BBS for a new one.")
+        if grant.direction == UPLOAD:
+            # A GET serves the upload form, so a GET would succeed.
+            return web.Response(status=200, headers={"Cache-Control": "no-store"})
+        if self._probes_in_flight >= MAX_CONCURRENT_PROBES:
+            return _head_refusal(429, "This node is already busy sending files. Try again in a moment.")
+        self._probes_in_flight += 1
+        try:
+            resolved = await self._lane.run(resolve, grant)
+        except TransferError as exc:
+            return _head_refusal(403, str(exc))
+        finally:
+            self._probes_in_flight -= 1
+        if self._downloads_in_flight >= self._max_concurrent_uploads:
+            return _head_refusal(429, "This node is already busy sending files. Try again in a moment.")
+        # A StreamResponse, so Content-Length can be the file's size rather
+        # than the empty body's; a HEAD sends no body either way.
+        response = web.StreamResponse(status=200, headers={
+            "Content-Disposition": _content_disposition(resolved.entry.filename),
+            "Content-Type": "application/octet-stream",
+            "Cache-Control": "no-store, no-cache, must-revalidate, private",
+        })
+        response.content_length = resolved.entry.size_bytes
+        await response.prepare(request)
+        await response.write_eof()
+        return response
 
     async def _redeem(self, request):
         """Take the grant named by the URL and resolve it against live
@@ -707,11 +770,22 @@ async def _receive_upload(request, temp_path: Path, *, max_bytes: int) -> tuple[
     """
     from aiohttp import web
 
+    from aiohttp import MultipartReader
+
     filename = request.query.get("filename") or "unnamed"
     written = 0
     with temp_path.open("wb") as handle:
         if request.content_type == "multipart/form-data":
-            reader = await request.multipart()
+            # Two counters, deliberately (issue #511): `written` is file
+            # bytes and is what `max_bytes` and the caller's empty-file
+            # check read; the stream counts the whole request. Built
+            # around the counted stream rather than via
+            # `request.multipart()`, because `reader.next()` consumes the
+            # preamble and a part's headers before it returns, and
+            # `client_max_size` bounds only `read()`/`post()`, not a
+            # streamed parse.
+            counted = _CountingStream(request.content, limit=max_bytes + MULTIPART_FRAMING_ALLOWANCE)
+            reader = MultipartReader(request.headers, counted)
             part = await reader.next()
             while part is not None and part.name != "file":
                 part = await reader.next()
@@ -726,6 +800,14 @@ async def _receive_upload(request, temp_path: Path, *, max_bytes: int) -> tuple[
                 if written > max_bytes:
                     raise web.HTTPRequestEntityTooLarge(max_size=max_bytes, actual_size=written)
                 handle.write(chunk)
+            # Whatever follows the file -- the closing boundary, trailing
+            # parts, an epilogue -- is read here, through the counted
+            # stream, inside this upload's slot, deadline and request bound
+            # (Codex review of #702). Left unread, aiohttp reads and
+            # discards it anyway after the handler returns, for up to its
+            # ten-second lingering time and outside all three.
+            while await counted.read(64 * 1024):
+                pass
         else:
             async for chunk in request.content.iter_chunked(64 * 1024):
                 written += len(chunk)
@@ -733,6 +815,74 @@ async def _receive_upload(request, temp_path: Path, *, max_bytes: int) -> tuple[
                     raise web.HTTPRequestEntityTooLarge(max_size=max_bytes, actual_size=written)
                 handle.write(chunk)
     return safe_filename(filename), written
+
+
+class _CountingStream:
+    """The request body as `MultipartReader` reads it, refusing the request
+    once more than `limit` bytes have been taken from the socket (issue #511).
+
+    Counts what the parser actually consumes -- preamble, boundaries, part
+    headers, skipped parts and the file alike -- and checks after every
+    read. Each read is itself bounded (aiohttp caps a `readline` at the
+    stream's high-water mark and a `read` at the size asked for), so
+    checking afterwards overshoots by at most one read. Data the parser
+    pushes back with `unread_data` is subtracted, so a byte it reads twice
+    is counted once.
+
+    The handler drains whatever follows the `file` part through this too,
+    so trailing parts count like any other byte of the request.
+    """
+
+    def __init__(self, content, *, limit: int) -> None:
+        self._content = content
+        self._limit = limit
+        self.total = 0
+
+    def _count(self, data: bytes) -> bytes:
+        from aiohttp import web
+
+        self.total += len(data)
+        if self.total > self._limit:
+            raise web.HTTPRequestEntityTooLarge(max_size=self._limit, actual_size=self.total)
+        return data
+
+    async def read(self, n: int = -1) -> bytes:
+        return self._count(await self._content.read(n))
+
+    async def readline(self, **kwargs) -> bytes:
+        from aiohttp import web
+        from aiohttp.http_exceptions import LineTooLong
+
+        try:
+            line = await self._content.readline(**kwargs)
+        except (LineTooLong, ValueError) as exc:
+            # One line past aiohttp's own per-line ceiling: a request this
+            # handler would refuse as too large anyway, so say that rather
+            # than let it surface as a 500 (Codex review of #702).
+            raise web.HTTPRequestEntityTooLarge(
+                max_size=self._limit, actual_size=self.total + 1,
+            ) from exc
+        return self._count(line)
+
+    def at_eof(self) -> bool:
+        return self._content.at_eof()
+
+    def unread_data(self, data: bytes) -> None:
+        self.total -= len(data)
+        self._content.unread_data(data)
+
+
+def _head_refusal(status: int, message: str):
+    """A HEAD answer carrying its reason in a header, since it has no body.
+    Header values are Latin-1 on the wire, so anything else is replaced
+    rather than allowed to fail the response."""
+    from aiohttp import web
+
+    safe = message.encode("ascii", errors="replace").decode("ascii").replace("\r", " ").replace("\n", " ")
+    return web.Response(status=status, headers={
+        "X-NetBBS-Transfer-Message": safe,
+        "Cache-Control": "no-store",
+    })
 
 
 def _content_disposition(filename: str) -> str:
