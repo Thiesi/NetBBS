@@ -10,6 +10,7 @@ import contextlib
 import io
 import random
 import sys
+from tests.door_python import DOOR_PYTHON
 import time
 
 import pytest
@@ -1830,7 +1831,7 @@ def test_acknowledged_station_action_survives_forced_termination(
     info.write_text(json.dumps({"user_id": 77, "handle": "Tester"}), encoding="utf-8")
     env = dict(os.environ, VOIDRUNNER_SAVE_DIR=str(tmp_path), NETBBS_DOOR_INFO=str(info))
     proc = subprocess.Popen(
-        [sys.executable, str(_VOIDRUNNER_PATH)], stdin=subprocess.PIPE,
+        [DOOR_PYTHON, str(_VOIDRUNNER_PATH)], stdin=subprocess.PIPE,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
     )
     reached = threading.Event()
@@ -1846,7 +1847,7 @@ def test_acknowledged_station_action_survives_forced_termination(
                 time.sleep(max(0.25, vr._INPUT_TIMEOUT * 5))
             proc.stdin.write(part)
             proc.stdin.flush()
-        assert reached.wait(10), bytes(output).decode("utf-8", errors="replace")
+        assert reached.wait(60), bytes(output).decode("utf-8", errors="replace")
         # Deliberately no menu-exit input, EOF or graceful quit.
         proc.kill()
         proc.wait(timeout=5)

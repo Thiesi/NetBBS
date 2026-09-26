@@ -37,7 +37,7 @@ async def _run_server(session_handler):
     return server
 
 
-async def _read_until_quiet(reader, quiet_time: float = 0.2) -> bytes:
+async def _read_until_quiet(reader, quiet_time: float = 0.2, first_byte_timeout: float = 30.0) -> bytes:
     """
     Read whatever's available until the connection goes quiet for
     `quiet_time`, rather than a single fixed-size read — a single read
@@ -46,8 +46,20 @@ async def _read_until_quiet(reader, quiet_time: float = 0.2) -> bytes:
     letter, then a free-text follow-up prompt). Established as the
     reliable pattern after a single-read version of an early test in
     this file caught only a partial response and failed misleadingly.
+
+    Quiet only counts once the reply has started: the first read waits up
+    to `first_byte_timeout`, because under a loaded parallel run the
+    server can take longer than `quiet_time` just to begin answering, and
+    returning then handed the test the screen from before its keypress.
     """
     chunks = []
+    try:
+        first = await asyncio.wait_for(reader.read(4096), timeout=first_byte_timeout)
+    except asyncio.TimeoutError:
+        return b""
+    if not first:
+        return b""
+    chunks.append(first)
     while True:
         try:
             chunk = await asyncio.wait_for(reader.read(4096), timeout=quiet_time)

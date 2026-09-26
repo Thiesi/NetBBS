@@ -386,7 +386,14 @@ def test_tab_completion_candidate_list_does_not_land_on_the_status_row(
         alice_session.feed("/whois ")
         await asyncio.sleep(0.05)
         alice_session.feed("\t")  # multiple registered users -> candidate list
-        await asyncio.sleep(0.05)
+        # Until the list is on screen rather than for a fixed 50ms: under
+        # a parallel run the completion can take longer than that, and
+        # cancelling first left nothing to assert on.
+        scroll_bottom = alice_session.terminal_height - chat_flow._PINNED_ROWS
+        candidates_drawn = set_scroll_region(1, scroll_bottom) + move_cursor(scroll_bottom, 1)
+        deadline = asyncio.get_running_loop().time() + 30
+        while candidates_drawn not in alice_session.output and asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0.01)
 
         alice_task.cancel()
         try:

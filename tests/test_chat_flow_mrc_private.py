@@ -41,7 +41,7 @@ async def _run_session(lane, hub, presence, channel, user, lines, *, mrc_bridge,
     task = asyncio.create_task(chat_flow._chat_loop(
         session, lane, hub, presence, mailbox, history, channel, user, mrc_bridge=mrc_bridge, mrc_session_state=state,
     ))
-    deadline = asyncio.get_running_loop().time() + 2
+    deadline = asyncio.get_running_loop().time() + 30.0
     while hub.participant_count(channel.name) == 0:
         assert asyncio.get_running_loop().time() < deadline, "caller never joined"
         await asyncio.sleep(0.01)

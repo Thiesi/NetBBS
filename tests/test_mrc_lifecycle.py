@@ -90,7 +90,7 @@ def test_mrc_warnings_reach_the_diagnostic_log_without_link(tmp_path):
         task = asyncio.create_task(run(config, shutdown_event=shutdown_event))
         row = None
         try:
-            deadline = asyncio.get_event_loop().time() + 5.0
+            deadline = asyncio.get_event_loop().time() + 30.0
             while row is None:
                 assert asyncio.get_event_loop().time() < deadline, "no MRC diagnostic row appeared"
                 conn = sqlite3.connect(str(config.db_path))
