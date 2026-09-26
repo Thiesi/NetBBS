@@ -32,7 +32,7 @@ import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from netbbs.auth.users import User
+from netbbs.auth.users import User, get_user_by_id
 from netbbs.boards.boards import Board, usable_max_age_days
 from netbbs.boards.posts import Post
 from netbbs.communities import get_effective_min_age, get_effective_name_requirement
@@ -465,6 +465,11 @@ def materialize_carried_post(
     if board_row is None:
         return None
     board_local_id = board_row["id"]
+    if board_row["moderated"]:
+        # This node's own "Moderated" setting holds carried posts for
+        # review exactly as it holds local ones: an origin recommendation
+        # never overrides local moderation (design doc §9.3, issue #677).
+        initial_status = "pending"
 
     parent_post_id = payload.get("parent_post_id")
     if parent_post_id is not None:
@@ -558,7 +563,9 @@ def _remote_author_meets_board_identity_policy(db: Database, author: dict, board
     )
 
 
-def materialize_carried_post_edit(db: Database, edit: BoardPostEdit, *, sender_fingerprint: str) -> Post | None:
+def materialize_carried_post_edit(
+    db: Database, edit: BoardPostEdit, *, sender_fingerprint: str, initial_status: str = "approved"
+) -> Post | None:
     """
     Turn a *received* `board_post_edit` into a new `posts` revision row
     (design doc §9.3, issue #73) -- the edit-side counterpart of
@@ -608,6 +615,11 @@ def materialize_carried_post_edit(db: Database, edit: BoardPostEdit, *, sender_f
     board_local_id = root_row["board_id"]
     author = payload["author"]
     author_label = f"{author['local_user_id']}@{author['home_node_fingerprint']}"
+    # An author's own edit follows local moderation and the author's
+    # trust decision, as a new post does (issue #677).
+    status = _carried_revision_status(
+        db, payload["root_post_id"], local_moderation=True, requested=initial_status
+    )
 
     db.connection.execute(
         """
@@ -620,17 +632,20 @@ def materialize_carried_post_edit(db: Database, edit: BoardPostEdit, *, sender_f
             payload["board_id"],
         ),
     )
+    if status is None:
+        db.connection.commit()
+        return None
     db.connection.execute(
         """
         INSERT INTO posts
             (post_id, board_id, parent_post_id, author_user_id, author_label,
              author_fingerprint, subject, body, created_at, status,
              root_post_id, edit_of_post_id)
-        VALUES (?, ?, ?, NULL, ?, NULL, ?, ?, ?, 'approved', ?, ?)
+        VALUES (?, ?, ?, NULL, ?, NULL, ?, ?, ?, ?, ?, ?)
         """,
         (
             edit.content_id, board_local_id, root_row["parent_post_id"], author_label,
-            payload["subject"], payload["body"], payload["created_at"],
+            payload["subject"], payload["body"], payload["created_at"], status,
             payload["root_post_id"], payload["previous_event_id"],
         ),
     )
@@ -640,6 +655,48 @@ def materialize_carried_post_edit(db: Database, edit: BoardPostEdit, *, sender_f
     return _post_from_row(
         db.connection.execute("SELECT * FROM posts WHERE post_id = ?", (edit.content_id,)).fetchone()
     )
+
+
+def _carried_revision_status(
+    db: Database, root_post_id: str, *, local_moderation: bool, requested: str = "approved"
+) -> str | None:
+    """The status a received revision of `root_post_id`'s chain is stored
+    with here, or `None` when it must not replace what readers see.
+
+    - `None` when this node has tombstoned the chain. Removing a post is
+      terminal on the node that did it; without this a later revision
+      would sort above the tombstone and bring the content back (issue
+      #677). The signed event is still retained for relay.
+    - `'pending'` when no revision of the chain is approved here yet (a
+      root held for review, or rejected-and-rematerialized): a revision
+      must not publish a post nobody approved.
+    - `'pending'` when `local_moderation` applies and this node's copy of
+      the board is moderated, the same rule `edit_post` applies to a
+      local edit.
+    - `requested` otherwise (the transport passes `'pending'` for an
+      author trust holds for approval)."""
+    tombstoned = db.connection.execute(
+        """
+        SELECT 1 FROM posts
+        WHERE root_post_id = ? AND status = 'approved' AND tombstoned_at IS NOT NULL
+        """,
+        (root_post_id,),
+    ).fetchone()
+    if tombstoned is not None:
+        return None
+    approved = db.connection.execute(
+        "SELECT 1 FROM posts WHERE root_post_id = ? AND status = 'approved'", (root_post_id,)
+    ).fetchone()
+    if approved is None:
+        return "pending"
+    if local_moderation:
+        moderated = db.connection.execute(
+            "SELECT b.moderated FROM posts p JOIN boards b ON b.id = p.board_id WHERE p.post_id = ?",
+            (root_post_id,),
+        ).fetchone()
+        if moderated is not None and moderated["moderated"]:
+            return "pending"
+    return requested
 
 
 def materialize_carried_board_post_moderator_edit(
@@ -684,18 +741,25 @@ def materialize_carried_board_post_moderator_edit(
             json.dumps(edit.to_dict()), utc_now_iso(), payload["board_id"],
         ),
     )
+    # The origin's moderator edit is the origin's own moderation, so this
+    # node's "Moderated" flag does not hold it -- but it may neither undo
+    # a local tombstone nor publish a chain nobody approved here.
+    status = _carried_revision_status(db, payload["root_post_id"], local_moderation=False)
+    if status is None:
+        db.connection.commit()
+        return None
     db.connection.execute(
         """
         INSERT INTO posts
             (post_id, board_id, parent_post_id, author_user_id, author_label,
              author_fingerprint, subject, body, created_at, status,
              root_post_id, edit_of_post_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'approved', ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             edit.content_id, root_row["board_id"], root_row["parent_post_id"],
             root_row["author_user_id"], root_row["author_label"], root_row["author_fingerprint"],
-            payload["subject"], payload["body"], payload["created_at"],
+            payload["subject"], payload["body"], payload["created_at"], status,
             payload["root_post_id"], payload["previous_event_id"],
         ),
     )
@@ -1127,6 +1191,12 @@ def queue_board_post_if_linked(
         return None
     if not is_board_linked(db, board):
         return None
+    if is_carried_post(db, post):
+        # Received from another node, so it already exists on the network
+        # under its author's own signed event. Signing it again here would
+        # publish a second copy attributed to this node (issue #677) -- the
+        # path a moderator's approval of a held carried post used to take.
+        return None
 
     existing = db.connection.execute(
         "SELECT link_event_json FROM posts WHERE post_id = ?", (post.post_id,)
@@ -1161,6 +1231,63 @@ def queue_board_post_if_linked(
     db.connection.commit()
 
     return board_post
+
+
+def is_carried_post(db: Database, post: Post) -> bool:
+    """Whether `post` (any revision) was materialized from another node's
+    signed event rather than written here. A carried row's local `post_id`
+    is its event's `content_id` (`materialize_carried_post`), so the
+    retained event is found under the same key; a locally written row's
+    `post_id` is a local content hash no event shares."""
+    return db.connection.execute(
+        "SELECT 1 FROM link_events WHERE content_id = ?", (post.post_id,)
+    ).fetchone() is not None
+
+
+def queue_approved_board_post_if_linked(
+    db: Database, post: Post, board: Board, *, node_identity: NodeIdentity
+) -> None:
+    """Queue the Link event for a revision a moderator just approved out of
+    the pending queue (issue #677).
+
+    Approval publishes whatever the pending row is, and a pending row is
+    not always a new post: on a moderated board every edit waits too
+    (`edit_post`). A root is a `board_post`. An edit is a `board_post_edit`
+    when its author made it and a `board_post_moderator_edit` when a
+    moderator did -- and only the moderation log records who made it,
+    since `edit_post` carries the author forward onto every revision.
+    Treating every approval as a new post signed a duplicate top-level
+    post for an approved edit and never sent the edit itself.
+
+    A carried revision is never queued: it is already on the network."""
+    if is_carried_post(db, post):
+        return
+    if post.edit_of_post_id is None:
+        queue_board_post_if_linked(db, post, board, node_identity=node_identity)
+        return
+    editor = _revision_editor(db, post)
+    if editor is None:
+        return
+    queue_board_post_edit_if_linked(db, post, board, node_identity=node_identity, edited_by=editor)
+    queue_board_post_moderator_edit_if_linked(db, post, board, node_identity=node_identity, edited_by=editor)
+
+
+def _revision_editor(db: Database, revision: Post) -> User | None:
+    """Who made edit revision `revision`, from the "edit" entry
+    `edit_post` logs with the new revision's `post_id` as its detail.
+    `None` if the entry or the account is gone, in which case the edit
+    stays local rather than being signed under a guessed identity."""
+    row = db.connection.execute(
+        """
+        SELECT actor_user_id FROM moderation_log
+        WHERE action = 'edit' AND object_type = 'board' AND detail = ?
+        ORDER BY id DESC LIMIT 1
+        """,
+        (revision.post_id,),
+    ).fetchone()
+    if row is None or row["actor_user_id"] is None:
+        return None
+    return get_user_by_id(db, row["actor_user_id"])
 
 
 def queue_board_post_edit_if_linked(

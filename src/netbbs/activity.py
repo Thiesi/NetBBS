@@ -57,11 +57,12 @@ from dataclasses import dataclass
 
 from netbbs.auth.users import User
 from netbbs.boards.boards import Board
-from netbbs.boards.posts import Post
+from netbbs.boards.posts import Post, count_visible_roots
 from netbbs.chat.channels import Channel
 from netbbs.chat.scrollback import ChannelMessage
 from netbbs.files.areas import FileArea
 from netbbs.files.entries import FileEntry
+from netbbs.link.enforcement import link_content_visible
 from netbbs.storage.database import Database
 from netbbs.timeutil import utc_now_iso
 
@@ -211,35 +212,19 @@ def unread_post_count(db: Database, user: User, board: Board) -> int | None:
     if cursor is None:
         return None
     if cursor.arrival_id is not None:
-        row = db.connection.execute(
-            """
-            SELECT COUNT(*) AS n FROM posts root
-            WHERE root.board_id = ? AND root.post_id = root.root_post_id
-              AND root.id > ?
-              AND EXISTS (
-                  SELECT 1 FROM posts v
-                  WHERE v.root_post_id = root.root_post_id AND v.board_id = root.board_id
-                    AND v.status = 'approved'
-              )
-            """,
-            (board.id, cursor.arrival_id),
-        ).fetchone()
+        count, _ = count_visible_roots(
+            db, board.id, extra_sql="AND root.id > ?", extra_params=(cursor.arrival_id,)
+        )
     else:
         # Legacy fallback -- see _Cursor's own docstring for when this applies.
-        row = db.connection.execute(
-            """
-            SELECT COUNT(*) AS n FROM posts root
-            WHERE root.board_id = ? AND root.post_id = root.root_post_id
-              AND (root.created_at, root.post_id) > (?, ?)
-              AND EXISTS (
-                  SELECT 1 FROM posts v
-                  WHERE v.root_post_id = root.root_post_id AND v.board_id = root.board_id
-                    AND v.status = 'approved'
-              )
-            """,
-            (board.id, cursor.created_at, cursor.stable_id),
-        ).fetchone()
-    return row["n"]
+        count, _ = count_visible_roots(
+            db, board.id,
+            extra_sql="AND (root.created_at, root.post_id) > (?, ?)",
+            extra_params=(cursor.created_at, cursor.stable_id),
+        )
+    # Trust-hidden carried posts are excluded (issue #677): [N]ew scan
+    # must not report posts the board page will never show.
+    return count
 
 
 def unread_replies_to(db: Database, user: User) -> list[Post]:
@@ -263,7 +248,7 @@ def unread_replies_to(db: Database, user: User) -> list[Post]:
         """,
         (user.id,),
     ).fetchall()
-    replies = [_root_row_to_post(row) for row in rows]
+    replies = [_root_row_to_post(row) for row in rows if link_content_visible(db, row["post_id"])]
 
     unread = []
     for reply in replies:

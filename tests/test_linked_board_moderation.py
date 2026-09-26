@@ -1,0 +1,480 @@
+"""Moderation and trust on Linked boards (issue #677, from the #674 audit).
+
+Each test pins one way a carried or Linked post used to escape the
+moderation or trust decision that was supposed to govern it:
+
+- approving a held carried post re-signed it as this node's own post;
+- approving a pending edit signed a duplicate *new* post instead of the edit;
+- the carrying node's own "Moderated" flag never held a remote post;
+- a remote edit published a post nobody here had approved;
+- a remote edit brought a locally tombstoned post back;
+- an author trust holds for approval had their *edits* published unreviewed;
+- trust-hidden posts emptied pages, and still showed in counts and search;
+- a closed board still offered [P]ost;
+- a carrying node's moderator was not told their change stays local.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import re
+
+import pytest
+
+from netbbs.activity import record_board_seen, unread_post_count
+from netbbs.auth.users import SYSOP_LEVEL, create_user
+from netbbs.boards.boards import create_board, get_board_by_name
+from netbbs.boards.posts import (
+    approve_post,
+    count_visible_posts,
+    create_post,
+    edit_post,
+    get_post,
+    list_posts_page,
+    tombstone_post,
+)
+from netbbs.link.boards import (
+    LinkContext,
+    link_board,
+    materialize_carried_board,
+    materialize_carried_board_post_moderator_edit,
+    materialize_carried_post,
+    materialize_carried_post_edit,
+    queue_board_post_if_linked,
+)
+from netbbs.link.events import (
+    build_board_genesis,
+    build_board_post,
+    build_board_post_edit,
+    build_board_post_moderator_edit,
+)
+from netbbs.link.node_identity import bootstrap_node_identity
+from netbbs.link.protocol import LinkNode
+from netbbs.link.transport import persist_accepted_events
+from netbbs.link.trust import TrustDimension, TrustState, TrustSubject, register_subject, set_trust_override
+from netbbs.moderation.roles import BoardPermission, grant_permissions
+from netbbs.net import board_flow
+from netbbs.search import search_posts
+from netbbs.storage.database import Database
+from netbbs.storage.execution import DatabaseLane
+
+NOW = "2026-08-14T12:00:00+00:00"
+BOARD_ID = "remote-board-id"
+
+
+@pytest.fixture
+def db(tmp_path):
+    database = Database(tmp_path / "node.db")
+    yield database
+    database.close()
+
+
+@pytest.fixture
+def sysop(db):
+    return create_user(db, "sysop", password="hunter2", user_level=SYSOP_LEVEL)
+
+
+@pytest.fixture
+def alice(db):
+    return create_user(db, "alice", password="hunter2", user_level=10)
+
+
+@pytest.fixture
+def node_identity():
+    return bootstrap_node_identity("roanoke")
+
+
+@pytest.fixture
+def remote():
+    return bootstrap_node_identity("elsewhere")
+
+
+def _carried_board(db, remote, *, moderated=False):
+    genesis = build_board_genesis(
+        signing_identity=remote.signing_key,
+        origin_fingerprint=remote.fingerprint,
+        board_id=BOARD_ID,
+        name="Remote Discussion",
+        created_at="2026-01-01T00:00:00Z",
+    )
+    materialize_carried_board(db, genesis)
+    if moderated:
+        db.connection.execute("UPDATE boards SET moderated = 1 WHERE board_id = ?", (BOARD_ID,))
+        db.connection.commit()
+    return get_board_by_name(db, "Remote Discussion")
+
+
+def _remote_post(remote, *, user="wanderer", subject="hello", body="first post", minute=0):
+    return build_board_post(
+        signing_identity=remote.signing_key,
+        home_node_fingerprint=remote.fingerprint,
+        local_user_id=user,
+        board_id=BOARD_ID,
+        subject=subject,
+        body=body,
+        created_at=f"2026-01-01T{minute // 60:02d}:{minute % 60:02d}:00Z",
+    )
+
+
+def _carry(db, remote, **kwargs):
+    initial_status = kwargs.pop("initial_status", "approved")
+    return materialize_carried_post(
+        db, _remote_post(remote, **kwargs), sender_fingerprint=remote.fingerprint, initial_status=initial_status
+    )
+
+
+def _remote_edit(remote, root, *, previous, body="edited body", user="wanderer"):
+    return build_board_post_edit(
+        signing_identity=remote.signing_key,
+        author={"home_node_fingerprint": remote.fingerprint, "local_user_id": user},
+        board_id=BOARD_ID,
+        root_post_id=root.post_id,
+        previous_event_id=previous,
+        subject="hello",
+        body=body,
+        created_at="2026-01-02T00:00:00Z",
+    )
+
+
+def _set_trust(db, remote, user, state):
+    subject = TrustSubject.user(remote.fingerprint, user)
+    register_subject(db, subject, first_accepted_at=NOW, now_iso=NOW)
+    set_trust_override(db, subject, TrustDimension.CONTENT_CONDUCT, state, reason="test", now_iso=NOW)
+
+
+def _quarantine(db, remote, user):
+    _set_trust(db, remote, user, TrustState.QUARANTINED)
+
+
+def _link_events_count(db):
+    return db.connection.execute("SELECT COUNT(*) FROM link_events").fetchone()[0]
+
+
+# -- approving out of the queue --------------------------------------------
+
+
+def test_approving_a_held_carried_post_does_not_sign_it_as_this_nodes_own(db, sysop, remote, node_identity):
+    from netbbs.link.boards import is_carried_post, queue_approved_board_post_if_linked
+
+    board = _carried_board(db, remote)
+    held = _carry(db, remote, initial_status="pending")
+    assert is_carried_post(db, held)
+    events_before = _link_events_count(db)
+
+    approved = approve_post(db, held, approved_by=sysop)
+    queue_approved_board_post_if_linked(db, approved, board, node_identity=node_identity)
+
+    assert queue_board_post_if_linked(db, approved, board, node_identity=node_identity) is None
+    row = db.connection.execute("SELECT link_event_json FROM posts WHERE post_id = ?", (held.post_id,)).fetchone()
+    assert row["link_event_json"] is None
+    assert _link_events_count(db) == events_before
+
+
+def _moderated_origin_board(db, owner, node_identity):
+    board = create_board(db, "general", creator=owner, moderated=True)
+    link_board(db, board, node_identity=node_identity)
+    return board
+
+
+def _queued_object_type(db, post_id):
+    row = db.connection.execute("SELECT link_event_json FROM posts WHERE post_id = ?", (post_id,)).fetchone()
+    if row["link_event_json"] is None:
+        return None
+    return json.loads(row["link_event_json"])["envelope"]["object_type"]
+
+
+def test_approving_an_authors_pending_edit_queues_the_edit_not_a_new_post(db, sysop, alice, node_identity):
+    from netbbs.link.boards import queue_approved_board_post_if_linked
+
+    board = _moderated_origin_board(db, sysop, node_identity)
+    root = approve_post(db, create_post(db, board, alice, "Subject", "Body"), approved_by=sysop)
+    queue_approved_board_post_if_linked(db, root, board, node_identity=node_identity)
+    assert _queued_object_type(db, root.post_id) == "board_post"
+
+    pending_edit = edit_post(db, root, board, subject="Subject", body="Body, revised", edited_by=alice)
+    assert pending_edit.status == "pending"
+    approved_edit = approve_post(db, pending_edit, approved_by=sysop)
+    queue_approved_board_post_if_linked(db, approved_edit, board, node_identity=node_identity)
+
+    assert _queued_object_type(db, approved_edit.post_id) == "board_post_edit"
+
+
+def test_approving_a_moderators_pending_edit_queues_a_moderator_edit(db, sysop, alice, node_identity):
+    from netbbs.link.boards import queue_approved_board_post_if_linked
+
+    board = _moderated_origin_board(db, sysop, node_identity)
+    moderator = create_user(db, "mod", password="hunter2", user_level=10)
+    grant_permissions(
+        db, moderator, object_type="board", object_id=board.id, permissions=BoardPermission.EDIT, granted_by=sysop
+    )
+    root = approve_post(db, create_post(db, board, alice, "Subject", "Body"), approved_by=sysop)
+    queue_approved_board_post_if_linked(db, root, board, node_identity=node_identity)
+
+    pending_edit = edit_post(db, root, board, subject="Subject", body="[edited by a moderator]", edited_by=moderator)
+    approved_edit = approve_post(db, pending_edit, approved_by=sysop)
+    queue_approved_board_post_if_linked(db, approved_edit, board, node_identity=node_identity)
+
+    assert _queued_object_type(db, approved_edit.post_id) == "board_post_moderator_edit"
+
+
+# -- what a received post or revision is stored as ---------------------------
+
+
+def test_a_moderated_carrying_node_holds_remote_posts_for_review(db, remote, alice):
+    board = _carried_board(db, remote, moderated=True)
+
+    post = _carry(db, remote)
+
+    assert post.status == "pending"
+    assert list_posts_page(db, board, alice).posts == []
+
+
+def test_an_unmoderated_carrying_node_publishes_remote_posts(db, remote, alice):
+    board = _carried_board(db, remote)
+    assert _carry(db, remote).status == "approved"
+    assert len(list_posts_page(db, board, alice).posts) == 1
+
+
+def test_a_remote_edit_does_not_publish_a_post_still_awaiting_approval(db, remote, alice):
+    board = _carried_board(db, remote)
+    held = _carry(db, remote, initial_status="pending")
+
+    edit = materialize_carried_post_edit(
+        db, _remote_edit(remote, held, previous=held.post_id), sender_fingerprint=remote.fingerprint
+    )
+
+    assert edit.status == "pending"
+    assert list_posts_page(db, board, alice).posts == []
+
+
+def test_a_remote_edit_on_a_moderated_carrying_node_awaits_approval(db, remote, alice, sysop):
+    board = _carried_board(db, remote)
+    root = _carry(db, remote)
+    db.connection.execute("UPDATE boards SET moderated = 1 WHERE id = ?", (board.id,))
+    db.connection.commit()
+
+    edit = materialize_carried_post_edit(
+        db, _remote_edit(remote, root, previous=root.post_id), sender_fingerprint=remote.fingerprint
+    )
+
+    assert edit.status == "pending"
+    assert list_posts_page(db, board, alice).posts[0].body == "first post"
+
+
+def test_a_remote_edit_does_not_undo_a_local_tombstone(db, remote, alice, sysop):
+    board = _carried_board(db, remote)
+    root = _carry(db, remote)
+    tombstone_post(db, root, board, tombstoned_by=sysop)
+
+    edit = _remote_edit(remote, root, previous=root.post_id, body="it is back")
+    result = materialize_carried_post_edit(db, edit, sender_fingerprint=remote.fingerprint)
+
+    assert result is None
+    shown = list_posts_page(db, board, alice).posts[0]
+    assert shown.subject == "[removed by moderator]"
+    # The signed event itself is retained for relay; only the projection is refused.
+    assert db.connection.execute(
+        "SELECT 1 FROM link_events WHERE content_id = ?", (edit.content_id,)
+    ).fetchone() is not None
+
+
+def test_an_origin_moderator_edit_does_not_undo_a_local_tombstone(db, remote, alice, sysop):
+    board = _carried_board(db, remote)
+    root = _carry(db, remote)
+    tombstone_post(db, root, board, tombstoned_by=sysop)
+    moderator_edit = build_board_post_moderator_edit(
+        signing_identity=remote.signing_key,
+        board_id=BOARD_ID,
+        root_post_id=root.post_id,
+        previous_event_id=root.post_id,
+        subject="hello",
+        body="restored by the origin",
+        created_at="2026-01-03T00:00:00Z",
+    )
+
+    result = materialize_carried_board_post_moderator_edit(
+        db, moderator_edit, sender_fingerprint=remote.fingerprint
+    )
+
+    assert result is None
+    assert list_posts_page(db, board, alice).posts[0].subject == "[removed by moderator]"
+
+
+def test_an_edit_by_an_author_trust_holds_for_approval_is_held_too(tmp_path, remote):
+    """Transport level: `persist_accepted_events` asked trust about new
+    posts but never about edits, so a probationary author's approved post
+    could be rewritten with unreviewed text."""
+    db = Database(tmp_path / "node.db")
+    try:
+        board = _carried_board(db, remote)
+        root = _carry(db, remote)
+        # An established home node, so the decision reaches the author,
+        # who is on probation: allowed, but held for approval.
+        home = TrustSubject.node(remote.fingerprint)
+        register_subject(db, home, first_accepted_at=NOW, now_iso=NOW)
+        for dimension in TrustDimension:
+            set_trust_override(db, home, dimension, TrustState.ESTABLISHED, reason="test", now_iso=NOW)
+        _set_trust(db, remote, "wanderer", TrustState.PROBATIONARY)
+        edit = _remote_edit(remote, root, previous=root.post_id, body="unreviewed text")
+        node = LinkNode(identity=bootstrap_node_identity("roanoke"))
+        node.events[edit.content_id] = edit.to_dict()
+        lane = DatabaseLane(db.path)
+        try:
+            asyncio.run(
+                persist_accepted_events(
+                    lane, node, [edit.content_id], sender_fingerprint=remote.fingerprint,
+                    max_carried_boards=None, enforce_trust_policy=True,
+                )
+            )
+        finally:
+            lane.close()
+        assert get_post(db, edit.content_id).status == "pending"
+        reader = create_user(db, "reader", password="hunter2", user_level=10)
+        assert list_posts_page(db, board, reader).posts[0].body == "first post"
+    finally:
+        db.close()
+
+
+# -- trust-hidden posts: pages, counts, search -------------------------------
+
+
+def test_hidden_newest_posts_do_not_empty_the_page(db, remote, alice):
+    board = _carried_board(db, remote)
+    for minute in range(3):
+        _carry(db, remote, subject=f"visible {minute}", minute=minute)
+    for minute in range(10, 16):
+        _carry(db, remote, user="troll", subject=f"hidden {minute}", minute=minute)
+    _quarantine(db, remote, "troll")
+
+    page = list_posts_page(db, board, alice)
+
+    assert [p.subject for p in page.posts] == ["visible 0", "visible 1", "visible 2"]
+    assert page.has_older is False and page.has_newer is False
+
+
+def test_paging_skips_a_run_of_hidden_posts_longer_than_one_batch(db, remote, alice):
+    board = _carried_board(db, remote)
+    for minute in range(6):
+        _carry(db, remote, subject=f"visible {minute}", minute=minute)
+    for minute in range(100, 170):  # more hidden roots than one query batch
+        _carry(db, remote, user="troll", subject=f"hidden {minute}", minute=minute)
+    _carry(db, remote, subject="visible newest", minute=500)
+    _quarantine(db, remote, "troll")
+
+    newest = list_posts_page(db, board, alice)
+    assert [p.subject for p in newest.posts] == ["visible 2", "visible 3", "visible 4", "visible 5", "visible newest"]
+    assert newest.has_older is True and newest.has_newer is False
+
+    oldest = newest.posts[0]
+    older = list_posts_page(db, board, alice, before=(oldest.created_at, oldest.post_id))
+    assert [p.subject for p in older.posts] == ["visible 0", "visible 1"]
+    assert older.has_older is False and older.has_newer is True
+
+
+def test_hidden_posts_are_not_counted(db, remote, alice):
+    board = _carried_board(db, remote)
+    _carry(db, remote, subject="visible", minute=0)
+    _carry(db, remote, user="troll", subject="hidden", minute=1)
+    _quarantine(db, remote, "troll")
+
+    assert count_visible_posts(db, board)[0] == 1
+
+
+def test_hidden_posts_are_not_reported_as_unread(db, remote, alice):
+    board = _carried_board(db, remote)
+    first = _carry(db, remote, subject="seen", minute=0)
+    record_board_seen(db, alice, board, first)
+    _carry(db, remote, user="troll", subject="hidden", minute=1)
+    _carry(db, remote, subject="new and visible", minute=2)
+    _quarantine(db, remote, "troll")
+
+    assert unread_post_count(db, alice, board) == 1
+
+
+def test_hidden_posts_do_not_appear_in_search(db, remote, alice):
+    _carried_board(db, remote)
+    _carry(db, remote, subject="shared keyword visible", minute=0)
+    _carry(db, remote, user="troll", subject="shared keyword hidden", minute=1)
+    _quarantine(db, remote, "troll")
+
+    hits = search_posts(db, alice, "keyword")
+
+    assert [hit.subject for hit in hits] == ["shared keyword visible"]
+
+
+# -- caller-facing: closed boards and local-only moderation ------------------
+
+
+class _Session:
+    """Scripted input; one queue for keys and lines."""
+
+    def __init__(self, inputs):
+        self._inputs = list(inputs)
+        self.written: list[str] = []
+        self.terminal_width = 80
+        self.terminal_height = 24
+        self.node_display_name = "NetBBS"
+        self.node_name_gradient = None
+
+    async def write(self, text):
+        self.written.append(text)
+
+    async def write_line(self, text=""):
+        self.written.append(text + "\r\n")
+
+    async def read_key(self, **kwargs):
+        if not self._inputs:
+            raise AssertionError("ran out of scripted input")
+        return self._inputs.pop(0)
+
+    async def read_line(self, **kwargs):
+        return await self.read_key()
+
+    def visible(self):
+        """Printed text without SGR codes, whitespace runs (prompt wrapping) collapsed."""
+        return re.sub(r"\s+", " ", re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", "".join(self.written)))
+
+
+def test_a_closed_board_offers_no_post_action_and_says_why(db, remote, alice):
+    board = _carried_board(db, remote)
+    _carry(db, remote)
+    db.connection.execute("UPDATE boards SET link_closed_at = ? WHERE id = ?", (NOW, board.id))
+    db.connection.commit()
+
+    session = _Session(["p", "b"])
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+
+    text = session.visible()
+    assert "This message board is closed. It can be read, but it takes no new posts." in text
+    assert "[P]ost" not in text
+    assert "Subject" not in text  # "p" was refused, not taken as [P]ost
+
+
+def test_removing_a_carried_post_on_a_non_origin_node_says_it_stays_local(db, remote, sysop):
+    board = _carried_board(db, remote)
+    _carry(db, remote, subject="Carried subject")
+
+    session = _Session(["t", "1", "y", "b"])
+    asyncio.run(board_flow._show_board(session, db, board, sysop))
+
+    text = session.visible()
+    assert 'Remove "Carried subject" on this node only?' in text
+    assert "cannot be undone" not in text
+    assert "Post removed on this node." in text
+    assert "Other nodes carrying this board keep the original" in text
+
+
+def test_removing_a_post_on_the_origin_node_is_not_called_local(db, sysop, alice, node_identity):
+    board = create_board(db, "general", creator=sysop)
+    link_board(db, board, node_identity=node_identity)
+    create_post(db, board, alice, "Local subject", "Body")
+    link_context = LinkContext(node_identity=node_identity, link_node=LinkNode(identity=node_identity))
+
+    session = _Session(["t", "1", "y", "b"])
+    asyncio.run(board_flow._show_board(session, db, board, sysop, link_context=link_context))
+
+    text = session.visible()
+    assert 'Remove "Local subject"? This cannot be undone.' in text
+    assert "Post removed." in text
+    assert "keep the original" not in text

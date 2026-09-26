@@ -603,82 +603,83 @@ def list_posts_page(
 
     _sweep_expired_posts(db, board)
 
-    _has_approved_version = _HAS_APPROVED_VERSION_SQL
-
     if after is not None:
-        created_at, post_id = after
-        rows = db.connection.execute(
-            f"""
-            SELECT root.* FROM posts root
-            WHERE root.board_id = ? AND root.post_id = root.root_post_id
-              AND (root.created_at, root.post_id) > (?, ?)
-              AND {_has_approved_version}
-            ORDER BY root.created_at ASC, root.post_id ASC
-            LIMIT ?
-            """,
-            (board.id, created_at, post_id, limit),
-        ).fetchall()
-        roots = list(rows)
+        roots = _visible_roots(db, board, newer_than=after, limit=limit)
     elif before is not None:
-        created_at, post_id = before
-        rows = db.connection.execute(
-            f"""
-            SELECT root.* FROM posts root
-            WHERE root.board_id = ? AND root.post_id = root.root_post_id
-              AND (root.created_at, root.post_id) < (?, ?)
-              AND {_has_approved_version}
-            ORDER BY root.created_at DESC, root.post_id DESC
-            LIMIT ?
-            """,
-            (board.id, created_at, post_id, limit),
-        ).fetchall()
-        roots = list(reversed(rows))
+        roots = list(reversed(_visible_roots(db, board, older_than=before, limit=limit)))
     else:
-        rows = db.connection.execute(
-            f"""
-            SELECT root.* FROM posts root
-            WHERE root.board_id = ? AND root.post_id = root.root_post_id
-              AND {_has_approved_version}
-            ORDER BY root.created_at DESC, root.post_id DESC
-            LIMIT ?
-            """,
-            (board.id, limit),
-        ).fetchall()
-        roots = list(reversed(rows))
+        roots = list(reversed(_visible_roots(db, board, limit=limit)))
 
-    posts = [
-        _resolve_current_version(db, row)
-        for row in roots
-        if link_content_visible(db, row["post_id"])
-    ]
-
+    posts = [_resolve_current_version(db, row) for row in roots]
     if not posts:
         return PostPage(posts=[], has_older=False, has_newer=False)
 
     oldest, newest = posts[0], posts[-1]
-    has_older = db.connection.execute(
-        f"""
-        SELECT EXISTS(
-            SELECT 1 FROM posts root
+    has_older = bool(_visible_roots(db, board, older_than=(oldest.created_at, oldest.post_id), limit=1))
+    has_newer = bool(_visible_roots(db, board, newer_than=(newest.created_at, newest.post_id), limit=1))
+    return PostPage(posts=posts, has_older=has_older, has_newer=has_newer)
+
+
+# How many candidate roots `_visible_roots` reads per query. Hidden roots
+# are skipped in Python, so a run of them costs further batches rather
+# than a short page.
+_VISIBLE_ROOTS_BATCH = 50
+
+
+def _visible_roots(
+    db: Database,
+    board: Board,
+    *,
+    newer_than: PostCursor | None = None,
+    older_than: PostCursor | None = None,
+    limit: int,
+) -> list[sqlite3.Row]:
+    """Up to `limit` root rows of `board` that a reader may see, nearest
+    the cursor first: ascending after `newer_than`, descending before
+    `older_than`, or descending from the newest root when neither is
+    given.
+
+    "May see" is the feed's whole rule: some revision in the chain is
+    approved (`_HAS_APPROVED_VERSION_SQL`) *and* the root's signed Link
+    event is not suppressed by trust (`link_content_visible`, design doc
+    §12.8). The second half is decided per event in Python, so it cannot
+    sit in the `LIMIT`ed query: filtering a page after fetching it let
+    five hidden roots produce an empty page on a board with posts, and
+    let `has_older`/`has_newer` count roots no reader could reach
+    (issue #677). Batches continue past hidden roots until `limit`
+    visible ones are found or the board runs out."""
+    if newer_than is not None and older_than is not None:
+        raise ValueError("specify at most one of newer_than/older_than")
+    ascending = newer_than is not None
+    boundary = newer_than if ascending else older_than
+    found: list[sqlite3.Row] = []
+    while len(found) < limit:
+        if boundary is None:
+            position_sql, params = "", ()
+        else:
+            position_sql = f"AND (root.created_at, root.post_id) {'>' if ascending else '<'} (?, ?)"
+            params = boundary
+        order = "ASC" if ascending else "DESC"
+        rows = db.connection.execute(
+            f"""
+            SELECT root.* FROM posts root
             WHERE root.board_id = ? AND root.post_id = root.root_post_id
-              AND (root.created_at, root.post_id) < (?, ?)
-              AND {_has_approved_version}
-        )
-        """,
-        (board.id, oldest.created_at, oldest.post_id),
-    ).fetchone()[0]
-    has_newer = db.connection.execute(
-        f"""
-        SELECT EXISTS(
-            SELECT 1 FROM posts root
-            WHERE root.board_id = ? AND root.post_id = root.root_post_id
-              AND (root.created_at, root.post_id) > (?, ?)
-              AND {_has_approved_version}
-        )
-        """,
-        (board.id, newest.created_at, newest.post_id),
-    ).fetchone()[0]
-    return PostPage(posts=posts, has_older=bool(has_older), has_newer=bool(has_newer))
+              {position_sql}
+              AND {_HAS_APPROVED_VERSION_SQL}
+            ORDER BY root.created_at {order}, root.post_id {order}
+            LIMIT ?
+            """,
+            (board.id, *params, _VISIBLE_ROOTS_BATCH),
+        ).fetchall()
+        for row in rows:
+            if link_content_visible(db, row["post_id"]):
+                found.append(row)
+                if len(found) == limit:
+                    break
+        if len(rows) < _VISIBLE_ROOTS_BATCH:
+            break
+        boundary = (rows[-1]["created_at"], rows[-1]["post_id"])
+    return found
 
 
 def count_visible_posts(db: Database, board: Board) -> tuple[int, str | None]:
@@ -692,19 +693,52 @@ def count_visible_posts(db: Database, board: Board) -> tuple[int, str | None]:
     admin and browsing it as an ordinary reader) -- not gated by
     `min_read_level` since only a SysOp already inside the admin
     console reaches this. Uses the same root-eligibility rule as
-    `list_posts_page` (`_HAS_APPROVED_VERSION_SQL`) so the count
-    matches what an actual reader would see.
+    `list_posts_page` (`count_visible_roots`) so the count matches what
+    an actual reader would see, trust-hidden carried posts excluded.
     """
     _sweep_expired_posts(db, board)
-    row = db.connection.execute(
+    return count_visible_roots(db, board.id)
+
+
+def count_visible_roots(
+    db: Database, board_id: int, *, extra_sql: str = "", extra_params: tuple = ()
+) -> tuple[int, str | None]:
+    """How many roots of board `board_id` a reader may see, and the newest
+    one's `created_at` -- the counting form of `_visible_roots`' rule,
+    for every surface that reports a number instead of a page
+    (`count_visible_posts`, `netbbs.activity.unread_post_count`).
+
+    `extra_sql` narrows the roots further (an `AND ...` clause over the
+    `root` alias). Roots with no retained Link event are local and always
+    visible, so SQL counts those; only carried roots pay the per-event
+    trust check (issue #677)."""
+    local = db.connection.execute(
         f"""
         SELECT COUNT(*), MAX(root.created_at) FROM posts root
         WHERE root.board_id = ? AND root.post_id = root.root_post_id
+          AND NOT EXISTS (SELECT 1 FROM link_events e WHERE e.content_id = root.post_id)
+          {extra_sql}
           AND {_HAS_APPROVED_VERSION_SQL}
         """,
-        (board.id,),
+        (board_id, *extra_params),
     ).fetchone()
-    return row[0], row[1]
+    count, newest = local[0], local[1]
+    carried = db.connection.execute(
+        f"""
+        SELECT root.post_id, root.created_at FROM posts root
+        WHERE root.board_id = ? AND root.post_id = root.root_post_id
+          AND EXISTS (SELECT 1 FROM link_events e WHERE e.content_id = root.post_id)
+          {extra_sql}
+          AND {_HAS_APPROVED_VERSION_SQL}
+        """,
+        (board_id, *extra_params),
+    ).fetchall()
+    for row in carried:
+        if link_content_visible(db, row["post_id"]):
+            count += 1
+            if newest is None or row["created_at"] > newest:
+                newest = row["created_at"]
+    return count, newest
 
 
 def approve_post(db: Database, post: Post, *, approved_by: User) -> Post:

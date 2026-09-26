@@ -3090,6 +3090,24 @@ required. Origin recommendations (§9.1) never override this local policy,
 exactly as they never override any other local access/moderation/retention
 decision on a carried board.
 
+Concretely, since issue #677:
+- A carrying node whose copy of a board is **moderated** holds every received
+  `board_post` in its own pending queue, as it holds local posts.
+- A received `board_post_edit` is held there too when:
+  - this node's copy is moderated;
+  - the author's trust requires approval (§12.8); or
+  - no revision of that post is approved here yet.
+- An origin's `board_post_moderator_edit` is not held for local moderation,
+  since it is the origin's own moderation. It is still held while no revision
+  of the post is approved here, because a revision must never publish a post
+  nobody here approved.
+- Approving a held carried post only publishes it locally. It is already on
+  the network under its author's signed event, and it is never re-signed as
+  this node's own. Approving a held *edit* signs the edit event matching
+  whoever made it: `board_post_edit` for the author, `board_post_moderator_edit`
+  for a moderator on the origin. The editor is read from the moderation log,
+  because `edit_post` carries the author forward onto every revision.
+
 **Idempotency, New Scan, and search.** Duplicate delivery of an
 already-materialized event is a no-op (existing `post_id` found, row returned
 unchanged) — no duplicate local posts or revisions. `[N]ew scan`/unread
@@ -3213,6 +3231,20 @@ specifically unsafe) marks the terminal revision; `edit_post`/`tombstone_
 post` both refuse to extend a chain whose current head is already
 tombstoned. Requires `BoardPermission.DELETE`, no author bypass, matching
 `delete_post`'s existing rule exactly.
+
+**A local tombstone is terminal on the node that made it** (issue #677). A
+carrying node's moderator may remove a post locally even though the removal
+is never propagated. A `board_post_edit` or `board_post_moderator_edit`
+received afterwards is retained as a signed event, so relay and inventory
+are unaffected, but it is never projected over the tombstone. Otherwise a
+later revision would sort above the tombstone and bring the removed content
+back. Removing or editing someone else's post on a non-origin node therefore
+changes this node's copy only, and the moderator is told so: the confirmation
+asks to remove the post "on this node only", and the outcome says that other
+nodes carrying the board keep the original. On the origin, the confirmation
+still says the removal cannot be undone. A closed board offers callers no
+`[P]ost` action and says it is closed, rather than letting a caller write a
+post that `create_post` would then refuse.
 
 All three share `board_origin_transfer_offer`'s verification shape: resolve
 the board's current origin (`current_board_origin`, not the genesis's
@@ -4158,14 +4190,28 @@ verification have one existing definition rather than a second near-identical
 request type. The URL fingerprint is routing information, never attribution.
 Probationary inventory responses use one quarter of the established event
 budget. Valid board posts from probationary users enter the local pending
-approval queue; services without an approval projection, including Link mail,
-refuse them with a stable reason code.
+approval queue, and so do their edits: an approved post must not be rewritten
+with unreviewed text. Services without an approval projection, including Link
+mail, refuse such content with a stable reason code.
 
 Enforcement attributes independently signed content to its author/home node,
 not to a carrier recorded in `link_events.sender_fingerprint`. Current display
 suppression is evaluated from retained signed authorship at read time; changing
 or clearing local policy therefore hides or restores projections without
 rewriting or deleting the accepted event bytes.
+
+Suppression applies to every surface that shows or counts content, not only
+the page that lists it (issue #677):
+- A board page is filled from visible posts only. Its older/newer links count
+  only visible posts, so hidden posts neither shorten a page nor produce an
+  empty one.
+- Post counts, `[N]ew scan` unread counts and "replies to you" exclude hidden
+  posts.
+- Local search excludes hidden posts and hidden channel messages.
+
+Visibility is decided per event in Python rather than in SQL. Paging over a
+long run of hidden posts therefore costs further query batches rather than
+returning a short page.
 
 ### 12.9 Recovery, partitions, and explainability
 
