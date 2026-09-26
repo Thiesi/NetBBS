@@ -821,7 +821,25 @@ SQLite rowid can redirect a live grant.
 Two traps worth keeping:
 
 - `aiohttp`'s `add_get` registers HEAD as well, so a link scanner's probe spends
-  a single-use token unless HEAD is handled separately.
+  a single-use token unless HEAD is handled separately. HEAD peeks the grant and
+  runs `resolve` read-only (issue #511); it once answered 204 for everything to
+  avoid being a token oracle, which 256-bit tokens make moot.
+
+Multipart accounting (issue #511), established the hard way in #508:
+
+- `client_max_size` bounds `read()`/`post()`, not a streamed parse, and
+  `reader.next()` consumes the preamble and a part's headers before returning.
+  The bound has to sit under the parser: `_CountingStream` wraps the request
+  body, counts net of `unread_data`, and checks after each (bounded) read.
+- Two counters, never merged: the stream's total against
+  `max_upload_bytes + MULTIPART_FRAMING_ALLOWANCE`, and the file's own bytes
+  against `max_upload_bytes`, which is also what the empty-file check reads.
+- Parts after `file` are never read, so they are neither counted nor drained.
+
+The page's transfer JavaScript has a Node harness,
+`tests/fixtures/transfer_web_shim.cjs`, with DOM, `fetch`, `FormData` and
+`AbortController` doubles; `door_web_shim.cjs` covers door mode. Both skip
+without `node` on the PATH.
 - The grant table is event-loop state that touches no database. Minting it
   through `DatabaseLane` puts issuance on a worker thread while redemption runs
   on the loop — two threads in one dict.

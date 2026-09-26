@@ -1442,6 +1442,19 @@ and file by content-addressed ids that no deletion can recycle, and lives in
 memory only. A node that cannot say how it is reached (`[web] public_url` unset,
 listener on a wildcard address) says so rather than printing a URL that fails.
 
+`max_upload_bytes` bounds the *file*, identically over Zmodem and HTTP. An HTTP
+upload as a whole may cost the node that plus a small fixed framing allowance,
+whatever its shape: preamble, skipped fields and part headers all count, and a
+request past the bound is refused (issue #511).
+
+A `HEAD` on a transfer link answers with the status a `GET` would, the reason in
+`X-NetBBS-Transfer-Message`, and spends nothing. The browser page relies on it:
+it probes a download first and starts it only on a yes, so a refused download is
+shown to the caller rather than saved under the filename. The answer is advice,
+not a reservation. The page addresses the link on its own origin, under the path
+it was loaded from, so a `public_url` naming another origin or a reverse-proxy
+prefix does not break the transfer (issue #511).
+
 **A JavaScript Zmodem implementation for the browser terminal is not planned.**
 It was listed as a possible follow-on while issue #475 was open, on the reasoning
 that keeping one transfer protocol everywhere would be simpler than maintaining
@@ -11242,6 +11255,33 @@ genesis intake as a whole is a separate question, and this decision does not
 change it. Bulk actions on the offered list (exclude everything from one
 origin) wait until a list long enough to need them exists. Implementation is its
 own issue, after #669.
+
+### Issue #511 — HTTP transfer hardening — closed
+
+Split out of PR #508, whose fixes did not converge. Normative description: §6.2.
+
+**Decision 1 — two ceilings on an HTTP upload.** `max_upload_bytes` keeps
+meaning file bytes, as over Zmodem; the request gets that plus a fixed framing
+allowance. Rejected: one ceiling on the whole body, which makes a browser's own
+framing refuse files within the configured maximum and, with a small enough
+setting, makes browser upload impossible.
+
+**Decision 2 — `HEAD` tells the truth.** It answers as a `GET` would, without
+spending the grant. It used to answer 204 for every token so as not to be an
+oracle for guessing them; with 256-bit tokens an oracle offers a guesser
+nothing, and the page needs the answer. Rejected: a separate check route, which
+exposes the same information on a second path.
+
+**Decision 3 — probe, then stream.** The page probes with `HEAD` and saves
+through `<a download>` only on a yes. Rejected: `fetch` plus `blob()`, which
+buffers the whole file in the page; a CORS header on the endpoint, which widens
+who may read a transfer response; and the `public_url` link as given, which
+fails cross-origin. The page resolves the token against its own address
+instead, which is same-origin and keeps a reverse-proxy prefix.
+
+**Not done, deliberately.** The probe is not a reservation: a file deleted, or a
+slot taken, between probe and `GET` still saves that `GET`'s error body. The
+window is one round trip.
 
 ### SFTP over the SSH transport — declined
 
