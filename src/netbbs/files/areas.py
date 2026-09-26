@@ -20,12 +20,13 @@ settings actually change file behavior.
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from dataclasses import dataclass
 
 from netbbs.auth.users import User
 from netbbs.boards.content_id import compute_content_id
-from netbbs.moderation.log import record_action
+from netbbs.moderation.log import record_action, record_action_without_commit
 from netbbs.storage.database import Database
 from netbbs.timeutil import utc_now_iso
 
@@ -339,23 +340,57 @@ def delete_file_area(db: Database, area: FileArea, *, deleted_by: User) -> None:
     it (issue #56) -- mirrors `netbbs.boards.boards.delete_board`
     exactly, see that function's docstring for the full reasoning
     (including why this is handled at the application level rather
-    than via a schema ON DELETE clause)."""
-    record_action(
-        db, actor=deleted_by, action="delete_file_area", object_type="file_area", object_id=area.id,
-        detail=f"deleted file area {area.name!r} (id {area.id})",
-    )
-    db.connection.execute("DELETE FROM files WHERE area_id = ?", (area.id,))
-    db.connection.execute(
-        "DELETE FROM moderator_grants WHERE object_type = 'file_area' AND object_id = ?", (area.id,)
-    )
-    db.connection.execute(
-        "DELETE FROM user_read_cursors WHERE object_type = 'file_area' AND object_id = ?", (area.id,)
-    )
-    db.connection.execute(
-        "DELETE FROM user_follows WHERE object_type = 'file_area' AND object_id = ?", (area.id,)
-    )
-    db.connection.execute("DELETE FROM file_areas WHERE id = ?", (area.id,))
+    than via a schema ON DELETE clause).
+
+    Issue #696: a carried area also owns its remote catalogue --
+    `remote_files`, and the fetch state that exists only to serve it,
+    `link_file_transfers` and their chunks. They reference this area and,
+    through `remote_files.fetched_file_id`, its `files` rows, so they go
+    first, in foreign-key order; before this the delete failed on the
+    constraint. The audit entry is written in the same transaction, so a
+    delete that fails leaves no record claiming it happened. Staging files
+    of partial transfers are removed only after the commit, as
+    `netbbs.link.files.withdraw_remote_file` does.
+    """
+    transfers = db.connection.execute(
+        """SELECT t.transfer_id, t.temp_path FROM link_file_transfers AS t
+             JOIN remote_files AS r ON r.file_id = t.remote_file_id
+            WHERE r.area_id = ?""",
+        (area.id,),
+    ).fetchall()
+    db.connection.execute("BEGIN IMMEDIATE")
+    try:
+        record_action_without_commit(
+            db, actor=deleted_by, action="delete_file_area", object_type="file_area", object_id=area.id,
+            detail=f"deleted file area {area.name!r} (id {area.id})",
+        )
+        for row in transfers:
+            db.connection.execute(
+                "DELETE FROM link_file_transfer_chunks WHERE transfer_id = ?", (row["transfer_id"],)
+            )
+            db.connection.execute("DELETE FROM link_file_transfers WHERE transfer_id = ?", (row["transfer_id"],))
+        db.connection.execute("DELETE FROM remote_files WHERE area_id = ?", (area.id,))
+        db.connection.execute("DELETE FROM files WHERE area_id = ?", (area.id,))
+        db.connection.execute(
+            "DELETE FROM moderator_grants WHERE object_type = 'file_area' AND object_id = ?", (area.id,)
+        )
+        db.connection.execute(
+            "DELETE FROM user_read_cursors WHERE object_type = 'file_area' AND object_id = ?", (area.id,)
+        )
+        db.connection.execute(
+            "DELETE FROM user_follows WHERE object_type = 'file_area' AND object_id = ?", (area.id,)
+        )
+        db.connection.execute("DELETE FROM file_areas WHERE id = ?", (area.id,))
+    except BaseException:
+        db.connection.rollback()
+        raise
     db.connection.commit()
+    for row in transfers:
+        if row["temp_path"]:
+            try:
+                os.remove(row["temp_path"])
+            except OSError:
+                pass  # already gone, or never written: nothing left to reclaim
 
 
 def _row_to_file_area(row: sqlite3.Row) -> FileArea:
