@@ -3095,10 +3095,8 @@ same thing" precedent `materialize_carried_board` already established for
 `posts.root_post_id`/`edit_of_post_id` resolve directly from the Link
 payload with no separate ID-translation table.
 
-Unlike `materialize_carried_board` (a separate `lane.run` call from the
-`save_event` that persists the underlying signed event — a real, pre-existing
-crash-window gap for genesis materialization, not newly introduced but not
-closed here either), the new functions perform the `link_events` insert and
+Like genesis intake since issue #683 (which writes the genesis and its carry
+outcome in one transaction), the new functions perform the `link_events` insert and
 the `posts` projection in the same call, one transaction, one commit: a crash
 between them is no longer possible for posts/edits specifically. `LinkServer.
 _handle_events` calls the combined function once per accepted `board_post`/
@@ -5111,7 +5109,7 @@ let one peer impose unbounded cost on another node:
 | `LinkNode.peers`/`link_peers` — any node that completes a hello becomes a permanent peer, no cap (mirror-image gap to candidate descriptors, which *are* capped) | New `LinkConfig.max_peers` (default 1000 — generous relative to §14's declared small-network scale, but no longer infinite) | Same shape as candidate descriptors: admitting a genuinely *new* fingerprint past the cap is refused; a hello from an *already-known* peer (key rotation, descriptor refresh) is always accepted regardless of the count. Implemented as `handle_hello`'s own optional `max_peers` keyword (`None` default, unbounded, preserving every prior caller) rather than `handle_relay_consent_request`'s "caller decides" split — that idiom exists specifically for relay-consent's in-band `accepted=False` reply shape, which `handle_hello` has no equivalent of; refusing a hello is a whole-request failure either way, the same shape peer-list's own internal cap already uses. Only threaded into the *inbound* path (`LinkServer._handle_hello`/`_handle_relay_mailbox_pickup`) — `dial_hello` (outbound) is left unbounded by this cap, already indirectly bounded by `_MAX_CANDIDATE_DESCRIPTORS` plus the operator's own small configured seed list. |
 | `handle_events` batch size — no per-request cap, unlike peer-list's own `_MAX_PEER_LIST_ENTRIES_PER_REQUEST` from the same design round | New `_MAX_EVENTS_PER_REQUEST = 200` beside the existing constant in `protocol.py` | Reject the whole batch with `LinkProtocolError`, identical to the peer-list precedent — a genuine sync backlog still drains over several passes rather than one unbounded request. |
 | `board_post`/`board_post_edit` content size — zero validation on receive, unlike locally created posts (`netbbs.boards.posts.MAX_SUBJECT_BYTES`/`MAX_BODY_BYTES`) | Apply the same two constants inside `handle_events`'s `board_post`/`board_post_edit` branches | `LinkProtocolError`, matching every other malformed-event rejection already in that method. |
-| Carried-board count — `materialize_carried_board` turns any verified `board_genesis` into a local `Board` row unconditionally | New `LinkConfig.max_carried_boards` | The `board_genesis` event is still verified, accepted, and gossiped on past this node (dedup and chain integrity for *other* nodes must not depend on this node's own local storage choices) — only *materializing* a local, browsable `Board` row is refused once the cap is hit. Issue #561 decided that past the cap the resource will be recorded as *offered* for the SysOp to accept rather than left declined (§9.3); until that is implemented it is refused as described here. |
+| Carried-board count — `materialize_carried_board` turns any verified `board_genesis` into a local `Board` row unconditionally | New `LinkConfig.max_carried_boards` | The `board_genesis` event is still verified, accepted, and gossiped on past this node (dedup and chain integrity for *other* nodes must not depend on this node's own local storage choices) — only *materializing* a local, browsable `Board` row is refused once the cap is hit. Past the cap the resource is recorded as *offered* for the SysOp to accept, not declined (issue #561, §9.3). |
 | Link HTTP request body size — neither `LinkServer` nor `WebServer` sets `client_max_size`, so both silently inherit aiohttp's implicit 1 MiB default | Set `client_max_size` explicitly on `LinkServer`'s `web.Application()`, sized to comfortably fit `_MAX_EVENTS_PER_REQUEST` worth of events (2 MiB) | Turns an accidental library default into a deliberate, documented value; aiohttp's own 413 response is unchanged (not worth reshaping into a `LinkProtocolError` payload for a request that was rejected before any handler ran). |
 | Link HTTP request rate — no throttling on any Link route at all, including the two unauthenticated ones (`/hello`, `/peers`) | New `netbbs.net.throttle.LinkRequestThrottle` (a small public wrapper around the existing `_KeyedTokenBuckets` machinery `LoginThrottle` already uses internally), keyed by source address, applied via an aiohttp middleware on every route -- constructed once in `netbbs.__main__` from three new flat `LinkConfig` fields (`request_rate_capacity`/`request_rate_refill_per_minute`/`request_rate_max_tracked_sources`, not a nested sub-dataclass) and passed into `LinkServer`, the same "build once, node-lifetime, threaded into the one real server" shape `_build_throttle` already uses for `LoginThrottle` | Exceeding it returns a plain HTTP 429, no signed payload needed (an unauthenticated-route response can't be signed meaningfully anyway). `None` throttle (every caller predating this) is a middleware no-op, not a hard requirement. |
 
@@ -5143,9 +5141,8 @@ scope:
 
 **SysOp visibility.** `[L]ink status` gains a peer-count line showing
 `current/max_peers` (matching the existing `relaying_for`-slots-in-use
-display precedent) and a carried-boards `current/max_carried_boards` line
-(issue #561 decided to extend it to channels and file areas, with offered and
-excluded counts; not yet built);
+display precedent) and `current/max_carried_*` lines for boards, channels
+and file areas, with offered and excluded counts (issue #683);
 rate-limit rejections are logged the same way `LoginThrottle` rejections
 already are, not surfaced as a separate screen in this slice.
 

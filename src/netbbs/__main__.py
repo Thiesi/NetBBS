@@ -43,6 +43,7 @@ from netbbs.link.onboarding import (
     mark_link_has_run, record_link_reachability, resolve_link_enabled, set_configured_link_enabled,
 )
 from netbbs.link.reliable_nodes import run_scheduled_reliable_nodes_refresh
+from netbbs.link.carry import finish_pending_acceptances
 from netbbs.link.store import load_link_node
 from netbbs.link.trust import maintain_trust_state
 from netbbs.managed_dns.state import (
@@ -995,6 +996,10 @@ async def run(
         # same reasoning node_identity/count_sysops(db) already read
         # synchronously at this point in startup.
         link_node = load_link_node(db, node_identity) if config.link.enabled else None
+        if link_node is not None:
+            # Issue #683: an Accept the last run committed but did not finish
+            # reprojecting is completed before anything is served.
+            finish_pending_acceptances(db, max_remote_files_per_area=config.link.max_remote_files_per_area)
 
         # Design doc §8.10.2, issue #148: this node's one shared real-
         # time session registry/live-channel bridge, constructed once
@@ -1166,6 +1171,8 @@ async def run(
                 max_peers=config.link.max_peers,
                 max_carried_boards=config.link.max_carried_boards,
                 max_carried_channels=config.link.max_carried_channels,
+                max_carried_file_areas=config.link.max_carried_file_areas,
+                max_remote_files_per_area=config.link.max_remote_files_per_area,
             )
             if link_node is not None else None
         )

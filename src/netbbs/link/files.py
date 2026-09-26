@@ -186,6 +186,7 @@ def materialize_carried_file_area(
     *,
     own_fingerprint: str | None = None,
     max_carried_file_areas: int | None = None,
+    commit: bool = True,
 ) -> FileArea:
     """
     Turn a *received* (not self-originated) `file_area_genesis` into a
@@ -240,7 +241,10 @@ def materialize_carried_file_area(
             json.dumps(genesis.to_dict()),
         ),
     )
-    db.connection.commit()
+    # Issue #683: `commit=False` lets `netbbs.link.carry` write this and the
+    # carry decision it belongs with in one transaction.
+    if commit:
+        db.connection.commit()
 
     return _file_area_from_row(
         db.connection.execute("SELECT * FROM file_areas WHERE area_id = ?", (payload["area_id"],)).fetchone()

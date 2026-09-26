@@ -208,6 +208,7 @@ def materialize_carried_channel(
     *,
     own_fingerprint: str | None = None,
     max_carried_channels: int | None = None,
+    commit: bool = True,
 ) -> Channel:
     """
     Turn a *received* (not self-originated) `channel_genesis` into a
@@ -284,7 +285,10 @@ def materialize_carried_channel(
             json.dumps(genesis.to_dict()),
         ),
     )
-    db.connection.commit()
+    # Issue #683: `commit=False` lets `netbbs.link.carry` write this and the
+    # carry decision it belongs with in one transaction.
+    if commit:
+        db.connection.commit()
 
     return _channel_from_row(
         db.connection.execute("SELECT * FROM channels WHERE channel_id = ?", (payload["channel_id"],)).fetchone()

@@ -3844,3 +3844,58 @@ def test_a_linked_board_whose_name_is_taken_locally_is_carried_and_receives_post
         ]
     finally:
         net.close()
+
+
+def test_a_curated_node_is_offered_a_board_and_accepting_it_pulls_its_content(tmp_path):
+    """Issue #683. With a cap of 0 B carries nothing unasked: R's board is
+    offered, and nothing under it is fetched meanwhile. Accepting it creates
+    the local copy, and the next pass brings its posts like any newly carried
+    board's."""
+    from netbbs.boards.boards import get_board_by_name
+    from netbbs.link.carry import OFFERED, accept_offer, list_carry_decisions
+
+    net = _ThreeNodes(tmp_path, enforce=False)
+    r_board = get_board_by_name(net.dbs["R"].db, "general")
+    r_board_id = r_board.board_id
+    net.post("R", "before accepting")
+    # And an edit of it, which `handle_events` also records in an in-memory
+    # edit chain that must not keep it once it was not stored.
+    original = net.dbs["R"].db.connection.execute(
+        "SELECT post_id FROM posts WHERE subject = 'before accepting'"
+    ).fetchone()["post_id"]
+    from netbbs.boards.posts import get_post
+
+    edited = edit_post(
+        net.dbs["R"].db, get_post(net.dbs["R"].db, original), r_board,
+        subject="before accepting (edited)", body="hi", edited_by=net.sysops["R"],
+    )
+    assert queue_board_post_edit_if_linked(
+        net.dbs["R"].db, edited, r_board, node_identity=net.ids["R"], edited_by=net.sysops["R"]
+    )
+
+    async def dial_b(session):
+        await _one_pass(
+            net.nodes["B"], session, net.seeds, lambda: _hello_for(net.nodes["B"]),
+            net.dbs["B"].lane, max_carried_boards=0,
+        )
+
+    async def scenario():
+        server = await net.start()
+        try:
+            async with aiohttp.ClientSession() as session:
+                await dial_b(session)
+                await dial_b(session)
+                [offer] = list_carry_decisions(net.dbs["B"].db, OFFERED)
+                assert offer.resource_id == r_board_id
+                assert net.subjects_on("B") == []
+                accept_offer(net.dbs["B"].db, "boards", r_board_id, actor=net.sysops["B"])
+                await dial_b(session)
+        finally:
+            await server.stop()
+
+    try:
+        asyncio.run(scenario())
+        assert net.subjects_on("B") == ["before accepting", "before accepting (edited)"]
+        assert list_carry_decisions(net.dbs["B"].db, OFFERED) == []
+    finally:
+        net.close()
