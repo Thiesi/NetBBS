@@ -4536,19 +4536,18 @@ stop to reject the correct live process and delete or ignore its service
 pidfile. Do not remove the wide-output flag while PID ownership is established
 from the full invocation string.
 
-While `start` waits for readiness, a mismatch of that identity check is not
-proof of failure (issue #693). As the child execs `nohup` → `env` → the
-interpreter, `ps -o command=` can briefly show text that fails the match.
-`start` used to treat one such poll as "failed to start" and delete the
-pidfile of a node that came up a moment later, leaving it untracked for the
-next `start` to duplicate. The check cannot simply be dropped there either: a
-child that died early is orphaned, and its pid can be recycled. So
-`netbbs_launched_alive` fails at once on a dead pid, and on a live one that
-does not match it looks again a second later. An exec transient is over by
-then; a recycled pid still fails. Reproduced on NetBSD 11 with a stand-in
-whose `ps` text matches only after ~0.3 s: the old script failed 2 of 13
-starts and dropped the pidfile each time, and the fixed one passed all 13. A
-stand-in that never matches is still refused.
+While `start` waits for readiness, a failed identity match is not proof of
+failure (issue #693). As the child execs `nohup` → `env` → the interpreter,
+`ps -o command=` can show text that fails the match, for longer than any
+fixed interval on a loaded boot. Treating one such poll as "failed to start"
+deleted the pidfile of a node that came up moments later, leaving it
+untracked for the next `start` to duplicate. The match cannot be dropped
+either: a child that died early is orphaned and its pid can be recycled. So
+during `start` a dead pid fails at once, an unrecognised live one means
+"keep waiting", and only a pid still unrecognised when
+`netbbs_start_timeout` runs out is declared someone else's. It is never
+signalled, only untracked. A stand-in child that execs into a shell before
+carrying the real argv reproduces the old failure on NetBSD.
 
 `rc.subr`'s `run_rc_command` ends with `[ ! -x $command ] && return 0`. A
 `$command` that does not exist is therefore not an error: `service netbbs

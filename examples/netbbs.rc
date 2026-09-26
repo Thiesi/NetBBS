@@ -179,23 +179,25 @@ netbbs_running()
 	esac
 }
 
-# Whether the node this start just launched is still alive and still ours
-# (issue #693). netbbs_running's identity check reads `ps -o command=`,
-# which is not stable while the child is still exec'ing nohup -> env ->
-# the interpreter; a single poll that caught it mid-exec used to report
-# "failed to start", delete the pidfile, and leave a healthy node running
-# untracked -- so the next start would launch a second one against the
-# same database. The check still matters here: a child that died early is
-# orphaned, and its pid can be recycled. So a dead pid fails at once, but a
-# live one whose text does not match is looked at again a second later: an
-# exec transient is over by then, a recycled pid is not.
-netbbs_launched_alive()
+# What has become of the node this start just launched (issue #693):
+#   0  alive and recognisably ours (netbbs_running's identity check),
+#   1  gone,
+#   2  alive but not recognisable *yet*.
+# The identity check reads `ps -o command=`, which is not stable while the
+# child is still exec'ing nohup -> env -> the interpreter, and a loaded boot
+# can stretch that out. Treating one unrecognisable poll as failure used to
+# report "failed to start", delete the pidfile, and leave a healthy node
+# running untracked, so the next start would launch a second one against the
+# same database. The check cannot simply be dropped either: a child that
+# died early is orphaned and its pid can be recycled. So state 2 means "keep
+# waiting", and only a pid still unrecognisable when netbbs_start_timeout
+# runs out is taken to be someone else's.
+netbbs_launched_state()
 {
 	netbbs_read_pid || return 1
 	kill -0 "${_pid}" 2>/dev/null || return 1
 	netbbs_running && return 0
-	sleep 1
-	netbbs_running
+	return 2
 }
 
 netbbs_start()
@@ -363,44 +365,57 @@ netbbs_start()
 	# out the full timeout and then report an unconfirmed start, delaying
 	# boot for no reason. Fall back to the weaker liveness check and say
 	# which one was used, rather than silently doing either.
-	if [ "${_readiness_observable}" = no ]; then
-		sleep 3
-		if netbbs_launched_alive; then
-			echo "netbbs started as pid ${_pid} (readiness unconfirmed:"
-			echo "${netbbs_logfile} is not a regular file, so the node's"
-			echo "ready marker cannot be read back)."
-			return 0
-		fi
-		echo "netbbs failed to start -- ${netbbs_logfile} is not a regular" >&2
-		echo "file, so there is no captured output to show." >&2
-		rm -f "${pidfile}"
-		return 1
-	fi
+	# Without a regular logfile there is no marker to read back, so the
+	# loop below settles for "alive and recognisably ours" instead.
 	_waited=0
 	while :; do
-		if ! netbbs_launched_alive; then
-			echo "netbbs failed to start -- see ${netbbs_logfile}." >&2
-			# Strip terminal control characters (keeping tab, LF and CR,
-			# and leaving UTF-8 alone). This file is deliberately owned
-			# and writable by netbbs_user, and this replay usually lands
-			# in a root terminal -- a compromised node, door, or any
-			# same-UID process could otherwise plant escape sequences
-			# that the operator's terminal executes on the next failed
-			# start.
-			tail -20 "${netbbs_logfile}" | tr -d '\000-\010\013\014\016-\037\177' >&2
+		netbbs_launched_state
+		_state=$?
+		if [ "${_state}" -eq 1 ]; then
+			if [ "${_readiness_observable}" = no ]; then
+				echo "netbbs failed to start -- ${netbbs_logfile} is not a regular" >&2
+				echo "file, so there is no captured output to show." >&2
+			else
+				echo "netbbs failed to start -- see ${netbbs_logfile}." >&2
+				# Strip terminal control characters (keeping tab, LF and
+				# CR, and leaving UTF-8 alone). This file is deliberately
+				# owned and writable by netbbs_user, and this replay
+				# usually lands in a root terminal -- a compromised node,
+				# door, or any same-UID process could otherwise plant
+				# escape sequences that the operator's terminal executes
+				# on the next failed start.
+				tail -20 "${netbbs_logfile}" | tr -d '\000-\010\013\014\016-\037\177' >&2
+			fi
 			rm -f "${pidfile}"
 			return 1
 		fi
-		if tail -c "+$((_log_from + 1))" "${netbbs_logfile}" 2>/dev/null |
-		   grep -q "${netbbs_ready_marker}"; then
-			echo "netbbs started as pid ${_pid}."
-			return 0
+		if [ "${_state}" -eq 0 ]; then
+			if [ "${_readiness_observable}" = no ]; then
+				echo "netbbs started as pid ${_pid} (readiness unconfirmed:"
+				echo "${netbbs_logfile} is not a regular file, so the node's"
+				echo "ready marker cannot be read back)."
+				return 0
+			fi
+			if tail -c "+$((_log_from + 1))" "${netbbs_logfile}" 2>/dev/null |
+			   grep -q "${netbbs_ready_marker}"; then
+				echo "netbbs started as pid ${_pid}."
+				return 0
+			fi
 		fi
 		if [ "${_waited}" -ge "${_start_timeout}" ]; then
-			# Alive but unconfirmed. Not a failure we can assert -- a
-			# very slow start looks the same from here -- so leave it
-			# running and make the uncertainty the operator's to judge
-			# rather than claiming either outcome.
+			if [ "${_state}" -eq 2 ]; then
+				# Alive the whole time yet never recognisable: a child
+				# that died early and whose pid something else now holds.
+				# Not ours to track, and certainly not ours to signal.
+				echo "netbbs failed to start -- pid ${_pid} is alive but is not" >&2
+				echo "this node's process; see ${netbbs_logfile}." >&2
+				rm -f "${pidfile}"
+				return 1
+			fi
+			# Ours and alive, but unconfirmed. Not a failure we can
+			# assert -- a very slow start looks the same from here -- so
+			# leave it running and make the uncertainty the operator's to
+			# judge rather than claiming either outcome.
 			echo "netbbs is running as pid ${_pid} but has not reported readiness" >&2
 			echo "within ${_start_timeout}s -- check ${netbbs_logfile}." >&2
 			return 0
