@@ -293,6 +293,20 @@ FAKE_QEMU = '''
         os.rename(os.path.join(node, "outbound", "post.part"), os.path.join(node, "outbound", "post.json"))
     open(os.path.join(game, "argv.json"), "w").write(json.dumps(argv))
     open(os.path.join(node, "booted"), "w").close()
+    if mode == "outbound-live":
+        info = json.load(open(os.path.join(node, "door_info.json")))
+        results = info["outbound"]["results"].replace("/mnt/node", node)
+        os.makedirs(os.path.join(node, "outbound"), exist_ok=True)
+        with open(os.path.join(node, "outbound", "live.part"), "w") as request:
+            json.dump({"subject": "Sector 7", "body": "From the guest, live."}, request)
+        os.rename(os.path.join(node, "outbound", "live.part"), os.path.join(node, "outbound", "live.json"))
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            found = [json.load(open(os.path.join(results, name))) for name in os.listdir(results)]
+            if any(receipt.get("request") == "live" for receipt in found):
+                open(os.path.join(game, "live-receipt"), "w").write(json.dumps(found))
+                break
+            time.sleep(0.1)
     door.sendall(b"READY")
     if mode == "refuse":
         stream = qmp.makefile("rwb")
@@ -461,3 +475,24 @@ def test_the_guest_init_honours_every_step_of_the_contract():
         assert f"/mnt/node/{name}" in init
     # A stop requested during boot must not start a door that is then cut off.
     assert init.index('if [ -n "$stopping" ]; then\n    echo 129') < init.index("sh /mnt/node/run.sh")
+
+
+@posix_only
+def test_a_vm_door_sees_its_receipt_during_the_session(db, lane, player, tmp_path, monkeypatch):
+    """The guest's receipts are a copy; an in-session drain must top it up, or
+    a VM door would learn its outcome only on its next launch."""
+    from netbbs.auth.users import create_user
+    from netbbs.boards.boards import create_board
+    from netbbs.doors import runtime
+    from netbbs.doors.outbound import allow_target, enable_outbound
+
+    monkeypatch.setattr(runtime, "_OUTBOUND_TICK_SECONDS", 0.2)
+    sysop = create_user(db, "sysop", password="hunter2", user_level=255)
+    board = create_board(db, "Chronicle", creator=sysop)
+    door = _fake_qemu_door(db, player, tmp_path, "outbound-live")
+    enable_outbound(db, door, enabled_by=sysop)
+    allow_target(db, door, board, allowed_by=sysop)
+
+    assert _play(lane, door, player).reason == "exited"
+    receipts = json.loads((tmp_path / "game" / "live-receipt").read_text())
+    assert [receipt["status"] for receipt in receipts if receipt["request"] == "live"] == ["posted"]

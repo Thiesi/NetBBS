@@ -856,3 +856,69 @@ def test_a_rehearsal_is_judged_against_the_real_rate_budget(db, door, sysop, boa
     assert drain(db, door, tmp_path, rehearsal=True) == (0, 1)
     receipt = _result(db, door, rehearsed)
     assert receipt["would"] == "rejected" and "rate limit" in receipt["reason"]
+
+
+# -- slice 2: answered while the door runs ------------------------------------
+
+
+def test_a_running_door_reads_its_receipt_before_it_exits(db, lane, sysop, board, tmp_path, monkeypatch):
+    """The point of the live hook: a post at the moment something happens,
+    and an answer the door can act on in the same session. Exit-only
+    draining cannot pass this -- the door waits for its receipt before
+    exiting."""
+    import asyncio
+    import sys
+
+    from netbbs.doors import runtime
+    from tests.test_doors_runtime import FakeSession, _run, _write_script
+
+    monkeypatch.setattr(runtime, "_OUTBOUND_TICK_SECONDS", 0.2)
+    script = _write_script(tmp_path, "live.py", """
+        import json, os, pathlib, sys, time
+        info = json.load(open(os.environ["NETBBS_DOOR_INFO"]))
+        hook = info["outbound"]
+        drop = pathlib.Path(os.environ["NETBBS_DOOR_INFO"]).parent / hook["directory"]
+        (drop / "live.part").write_text(json.dumps({"subject": "Sector 7 taken", "body": "..."}))
+        (drop / "live.part").replace(drop / "live.json")
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            for path in pathlib.Path(hook["results"]).glob("*.result.json"):
+                receipt = json.loads(path.read_text())
+                if receipt["request"] == "live":
+                    print("RECEIPT", receipt["status"], flush=True)
+                    sys.exit(0)
+            time.sleep(0.1)
+        print("NO RECEIPT", flush=True)
+        sys.exit(1)
+    """)
+    door = create_door(db, "Blacksite", sys.executable, args=(str(script),), creator=sysop)
+    _enable(db, door, sysop, board)
+    session = FakeSession()
+
+    result = asyncio.run(_run(session, lane, door, sysop))
+
+    assert result.reason == "exited", result
+    assert b"RECEIPT posted" in session.written
+    assert len(_posts(db, board, sysop)) == 1, "answered live, and not again at exit"
+
+
+def test_an_idle_door_costs_the_lane_nothing(db, lane, sysop, board, tmp_path, monkeypatch):
+    """Most ticks of most sessions find no request; they must not queue a
+    database job each time."""
+    import asyncio
+    import sys
+
+    from netbbs.doors import outbound, runtime
+    from tests.test_doors_runtime import FakeSession, _run, _write_script
+
+    monkeypatch.setattr(runtime, "_OUTBOUND_TICK_SECONDS", 0.05)
+    drains = []
+    real_drain = runtime.drain_outbound
+    monkeypatch.setattr(runtime, "drain_outbound", lambda *a, **k: drains.append(k) or real_drain(*a, **k))
+    script = _write_script(tmp_path, "idle.py", "import time; time.sleep(1.5)\n")
+    door = create_door(db, "Blacksite", sys.executable, args=(str(script),), creator=sysop)
+    _enable(db, door, sysop, board)
+
+    assert asyncio.run(_run(FakeSession(), lane, door, sysop)).reason == "exited"
+    assert [call.get("final", True) for call in drains] == [True], "only the drain at exit ran"
+    assert outbound.has_requests(tmp_path) is False

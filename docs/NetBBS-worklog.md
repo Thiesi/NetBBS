@@ -5778,7 +5778,13 @@ run in-session. Receipt names carry a `time.time_ns()` sequence because an
 in-session door reuses request names; doors are contractually forbidden to
 construct them. `_prune_results` runs once per drain (it globs, stats and
 sorts the whole directory), and `limit`/`final` let an in-session tick take a
-few requests while only the final drain refuses leftovers.
+few requests while only the final drain refuses leftovers. The ticker
+(`runtime._drain_while_running`) asks `has_requests` in a worker thread before
+queueing a lane job, so an idle door costs the shared lane nothing; it is
+cancelled before the final drain, and a lane job it already queued still runs
+first because the lane is one FIFO worker. A VM door's guest-visible receipt
+copy is topped up after each tick (`vm.copy_receipts`, finished
+`*.result.json` only, never a `.part`).
 
 Legacy configuration parsers need byte-level validation against the actual
 program. LORD 4.07 silently ignores LF-only node files; install its NODE1.DAT

@@ -515,6 +515,26 @@ def _stem(request: Path) -> str:
     return request.name[: -len(_REQUEST_SUFFIX)]
 
 
+def has_requests(workdir: Path) -> bool:
+    """Whether a finished request is waiting, without touching the database.
+
+    What the in-session ticker asks before it spends a job on the shared lane:
+    most ticks of most sessions find nothing. Bounded the same way a drain's
+    scan is, so a door flooding its drop directory with other names cannot make
+    the question expensive.
+    """
+    try:
+        with os.scandir(workdir / OUTBOUND_DIRNAME) as entries:
+            for scanned, entry in enumerate(entries):
+                if scanned >= _MAX_REQUESTS_SCANNED:
+                    return True  # let the drain's own bound deal with it
+                if _is_request(entry.name):
+                    return True
+    except OSError:
+        return False
+    return False
+
+
 def _refuse_all(db: Database, door, launch: str, requests: list[Path], reason: str,
                 *, rehearsal: bool = False) -> int:
     """Answer every request in `requests` with the same refusal."""

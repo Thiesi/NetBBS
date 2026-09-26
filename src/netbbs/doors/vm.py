@@ -286,30 +286,44 @@ def publish_guest_info(directory: Path, info_path: Path, info: dict, results_kep
 
     The outbound hook's receipts live beside the node database, outside both
     exports, so a guest could submit a request and never learn its outcome.
-    Receipts are only written when a run drains, after the door has exited,
-    so a copy taken now holds exactly what the live directory would show the
-    door for its whole session. Copied, not exported: the guest must not be
-    able to rewrite the node's record of what it was told.
+    The guest gets a copy in its node export instead, taken now and topped up
+    by `copy_receipts` after every in-session drain. Copied, not exported: the
+    guest must not be able to rewrite the node's record of what it was told.
     """
     outbound = info.get("outbound")
     if not outbound:
         return info
-    source = Path(outbound["results"])
+    copy_receipts(Path(outbound["results"]), directory, results_kept)
+    info = dict(info, outbound=dict(outbound, results=f"{GUEST_NODE}/{GUEST_RESULTS_DIRNAME}"))
+    info_path.write_text(json.dumps(info), encoding="utf-8")
+    return info
+
+
+def copy_receipts(source: Path, directory: Path, results_kept: int) -> None:
+    """Bring the guest's copy of the door's receipts up to date.
+
+    Only finished receipts (a `.part` is still being written), only the newest
+    the node keeps anyway, and only those the guest does not have yet, so a
+    tick costs a directory listing when nothing has changed.
+    """
+    from netbbs.doors.outbound import RESULT_SUFFIX
+
     target = directory / GUEST_RESULTS_DIRNAME
-    target.mkdir(exist_ok=True)
     try:
+        target.mkdir(exist_ok=True)
+        have = {entry.name for entry in target.iterdir()}
         receipts = sorted(entry for entry in source.iterdir()
-                          if entry.is_file() and not entry.is_symlink())[-results_kept:]
+                          if entry.name.endswith(RESULT_SUFFIX) and entry.is_file()
+                          and not entry.is_symlink())[-results_kept:]
     except OSError:
-        receipts = []
+        return
     for receipt in receipts:
+        if receipt.name in have:
+            continue
         try:
             (target / receipt.name).write_bytes(receipt.read_bytes())
         except OSError:
             continue
-    info = dict(info, outbound=dict(outbound, results=f"{GUEST_NODE}/{GUEST_RESULTS_DIRNAME}"))
-    info_path.write_text(json.dumps(info), encoding="utf-8")
-    return info
 
 
 async def wait_booted(directory: Path, relay: asyncio.Task) -> None:
