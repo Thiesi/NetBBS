@@ -868,11 +868,13 @@ async def _show_board(
         if current_page.posts:
             record_board_seen(db, user, board, current_page.posts[-1])
 
-    async def _read_post(index: int) -> int:
+    async def _read_post(index: int) -> int | None:
         """Read `page.posts[index]`, one post to a screen, and step to the
         post before or after it -- across page boundaries -- until
         `[B]ack`. Returns the index, on the page now current, of the post
-        last read, so the list comes back with the cursor on it.
+        last read, so the list comes back with the cursor on it -- or
+        `None` when the page emptied while the caller read (a removal, a
+        trust change, the expiry sweep) and there is no post to put it on.
 
         Built on `show_detail`, which keeps the title, the byline and the
         action bar on screen while a long post pages under them."""
@@ -930,7 +932,7 @@ async def _show_board(
                 if not page.posts:
                     page_anchor = None
                     page = _refetch_current_page()
-                    return 0
+                    return None
                 index = next(
                     (i for i, p in enumerate(page.posts) if p.root_post_id == root),
                     min(index, len(page.posts) - 1),
@@ -958,7 +960,7 @@ async def _show_board(
                 # change): back to the newest page rather than a blank one.
                 page_anchor = None
                 page = _refetch_current_page()
-                return 0
+                return None
             # Only the post now on screen was seen, not the rest of the page
             # it was fetched with (Codex review on #719).
             record_board_seen(db, user, board, page.posts[index])
@@ -1203,7 +1205,10 @@ async def _show_board(
             else:
                 highlighted = (highlighted + step) % len(page.posts)
             await _render(page, highlighted)
-        elif (key.kind == EditorKeyKind.ENTER or char in ("\r", "\n")) and highlighted is not None:
+        elif (
+            (key.kind == EditorKeyKind.ENTER or char in ("\r", "\n"))
+            and highlighted is not None and highlighted < len(page.posts)
+        ):
             await _moved_on()
             highlighted = await _read_post(highlighted)
             await _render_and_advance_cursor(page, highlighted)

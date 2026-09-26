@@ -407,3 +407,35 @@ def test_a_subject_full_of_tabs_keeps_its_row_inside_the_terminal(db, alice):
     )
     assert all(display_width(_SGR.sub("", row)) <= 79 for row in rows)
     assert "\t" not in "".join(rows)
+
+
+def test_a_page_emptied_while_reading_leaves_no_cursor_to_crash_on(db, alice, monkeypatch):
+    """Claude review on #719: the reader returned index 0 for a page that had
+    emptied under the caller, and the next Enter indexed an empty list."""
+    from netbbs.moderation.roles import BoardPermission, grant_permissions
+
+    board = create_board(db, "general", creator=alice)
+    grant_permissions(
+        db, alice, object_type="board", object_id=board.id, permissions=BoardPermission.DELETE, granted_by=alice
+    )
+    create_post(db, board, alice, "Only post", "x")
+    real_list = board_flow.list_posts_page
+    emptied = {"now": False}
+
+    def _list(db_, board_, user, **kwargs):
+        page = real_list(db_, board_, user, **kwargs)
+        if emptied["now"]:
+            return posts_module.PostPage(posts=[], has_older=False, has_newer=False)
+        return page
+
+    monkeypatch.setattr(board_flow, "list_posts_page", _list)
+    real_tombstone = board_flow.tombstone_post
+
+    def _tombstone(*args, **kwargs):
+        emptied["now"] = True  # the page empties as the removal lands
+        return real_tombstone(*args, **kwargs)
+
+    monkeypatch.setattr(board_flow, "tombstone_post", _tombstone)
+    session = FakeSession(["1", "t", "y", "ENTER", "b"])
+
+    asyncio.run(board_flow._show_board(session, db, board, alice))  # no IndexError
