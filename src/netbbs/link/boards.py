@@ -116,6 +116,9 @@ class LinkConfigSnapshot:
     # Issue #683: the Link status readout covers file areas too. Defaulted so
     # older constructions keep working; the real value comes from LinkConfig.
     max_carried_file_areas: int = 500
+    # Issue #683: accepting a file area reprojects its stored catalogue under
+    # the same per-area cap intake applies.
+    max_remote_files_per_area: int = 5000
 
 
 @dataclass(frozen=True)
@@ -890,7 +893,7 @@ def materialize_carried_board_closure(db: Database, closure: BoardClosure, *, co
         db.connection.commit()
 
 
-def rebuild_carried_post_materialization(db: Database) -> int:
+def rebuild_carried_post_materialization(db: Database, *, board_id: str | None = None) -> int:
     """
     Repair pass (design doc §9.3, issue #73's own "supported rebuild
     path" acceptance criterion): materializes every accepted
@@ -910,7 +913,14 @@ def rebuild_carried_post_materialization(db: Database) -> int:
     node never carried), the same "derived state rebuildable from
     authoritative data" principle issue #74 applies to FTS indexes.
     Returns how many rows were newly materialized.
+
+    `board_id` limits the pass to one board (issue #683: accepting an offer
+    reprojects only that board's stored content). The unscoped pass would also
+    recreate posts a moderator removed or the expiry sweep deleted on every
+    other carried board, whose events are kept on purpose.
     """
+    scope = "" if board_id is None else " AND board_id = ?"
+    scope_args = () if board_id is None else (board_id,)
     rebuilt = 0
     while True:
         progressed = 0
@@ -918,12 +928,14 @@ def rebuild_carried_post_materialization(db: Database) -> int:
             """
             SELECT content_id, sender_fingerprint, object_type, envelope_json
             FROM link_events
-            WHERE object_type IN (?, ?, ?, ?) AND content_id NOT IN (SELECT post_id FROM posts)
+            WHERE object_type IN (?, ?, ?, ?) AND content_id NOT IN (SELECT post_id FROM posts)"""
+            + scope + """
             ORDER BY received_at ASC
             """,
             (
                 BOARD_POST_OBJECT_TYPE, BOARD_POST_EDIT_OBJECT_TYPE,
                 BOARD_POST_MODERATOR_EDIT_OBJECT_TYPE, BOARD_POST_TOMBSTONE_OBJECT_TYPE,
+                *scope_args,
             ),
         ).fetchall()
         for row in gaps:

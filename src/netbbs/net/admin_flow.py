@@ -7898,7 +7898,13 @@ async def _carry_decisions_screen(
         message = None
         if choice == "a":
             try:
-                await lane.run(accept_offer, selected.kind, selected.resource_id, actor=actor)
+                await lane.run(
+                    accept_offer, selected.kind, selected.resource_id, actor=actor,
+                    max_remote_files_per_area=(
+                        link_context.link_config.max_remote_files_per_area
+                        if link_context.link_config is not None else None
+                    ),
+                )
             except CarryDecisionError as exc:
                 _announce_line(session, colored(f"Could not accept {selected.name!r}: {exc}", fg_color=ERROR_COLOR))
             else:

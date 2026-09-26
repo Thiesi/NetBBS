@@ -336,6 +336,25 @@ async def _rate_limit_middleware(request: web.Request, handler):
     return await handler(request)
 
 
+_GENESIS_ID_FIELDS = {"boards": "board_id", "channels": "channel_id", "file_areas": "area_id"}
+
+
+def _forget_genesis(node: LinkNode, kind: str, content_id: str, envelope: dict) -> None:
+    """Undo `handle_events`' in-memory acceptance of a genesis that was not
+    persisted (issue #683)."""
+    node.known_event_ids.discard(content_id)
+    node.events.pop(content_id, None)
+    geneses = {
+        "boards": node.board_events.boards,
+        "channels": node.channel_events.channels,
+        "file_areas": node.file_area_events.areas,
+    }[kind]
+    resource_id = envelope["envelope"]["payload"].get(_GENESIS_ID_FIELDS[kind])
+    held = geneses.get(resource_id)
+    if held is not None and held.content_id == content_id:
+        del geneses[resource_id]
+
+
 async def _forget_unless_stored(
     lane: DatabaseLane, node: LinkNode, content_id: str, *, edit_root: str | None = None
 ) -> None:
@@ -501,10 +520,17 @@ async def persist_accepted_events(
                 "channels": max_carried_channels,
                 "file_areas": max_carried_file_areas,
             }[kind]
-            outcome = await lane.run(
-                accept_genesis, kind=kind, envelope=envelope, sender_fingerprint=sender_fingerprint,
-                content_id=content_id, own_fingerprint=node.identity.fingerprint, cap=cap,
-            )
+            try:
+                outcome = await lane.run(
+                    accept_genesis, kind=kind, envelope=envelope, sender_fingerprint=sender_fingerprint,
+                    content_id=content_id, own_fingerprint=node.identity.fingerprint, cap=cap,
+                )
+            except BaseException:
+                # The transaction rolled back, so neither a local copy nor an
+                # offer exists; `handle_events`' in-memory acceptance must go
+                # too, or every later delivery is skipped as a duplicate.
+                _forget_genesis(node, kind, content_id, envelope)
+                raise
             if outcome != "carried":
                 _logger.info(
                     "Link sync: %s %r offered for the SysOp to accept rather than carried (%s)",

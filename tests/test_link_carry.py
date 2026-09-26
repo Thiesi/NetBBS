@@ -361,3 +361,109 @@ def test_accepting_a_channel_carried_before_brings_back_its_stored_messages(db, 
 
     bodies = [row[0] for row in db.connection.execute("SELECT body FROM channel_messages")]
     assert bodies == ["kept in link_events"]
+
+
+def _stored_board_post(db, remote, board_id, subject):
+    from netbbs.link.boards import materialize_carried_post
+    from netbbs.link.events import build_board_post
+
+    post = build_board_post(
+        signing_identity=remote.signing_key, home_node_fingerprint=remote.fingerprint, local_user_id="wanderer",
+        board_id=board_id, subject=subject, body="hi", created_at="2026-01-02T00:00:00Z",
+    )
+    materialize_carried_post(db, post, sender_fingerprint=remote.fingerprint)
+    return post
+
+
+def test_accepting_one_board_does_not_bring_back_what_was_removed_from_another(db, remote, own, alice):
+    """Moderation and expiry delete a post's projection and keep its event on
+    purpose; a global rebuild on Accept would undo that on every board."""
+    from netbbs.link.carry import record_carry_decision
+
+    other = "9" * 64
+    _accept(db, _board_genesis(remote, board_id=other, name="Other"), own)
+    removed = _stored_board_post(db, remote, other, "removed by a moderator")
+    db.connection.execute("DELETE FROM posts WHERE post_id = ?", (removed.content_id,))
+    db.connection.commit()
+
+    _accept(db, _board_genesis(remote), own)
+    _stored_board_post(db, remote, BOARD_ID, "kept in link_events")
+    delete_board(db, get_board_by_name(db, "Remote Discussion"), deleted_by=alice)
+    record_carry_decision(db, "boards", BOARD_ID, OFFERED, "migrated")
+
+    accept_offer(db, "boards", BOARD_ID, actor=alice)
+
+    subjects = sorted(row[0] for row in db.connection.execute("SELECT subject FROM posts"))
+    assert subjects == ["kept in link_events"]
+
+
+def test_reprojecting_a_file_area_respects_the_catalogue_cap(db, remote, own, alice):
+    from netbbs.files.areas import delete_file_area, get_file_area_by_name
+    from netbbs.link.carry import record_carry_decision
+    from netbbs.link.events import build_file_descriptor
+    from netbbs.link.files import materialize_carried_file_descriptor
+
+    area_id = "a" * 64
+    genesis = build_file_area_genesis(
+        signing_identity=remote.signing_key, origin_fingerprint=remote.fingerprint,
+        area_id=area_id, name="files", created_at="2026-01-01T00:00:00Z",
+    )
+    _accept(db, genesis, own, kind="file_areas")
+    for i in range(3):
+        descriptor = build_file_descriptor(
+            signing_identity=remote.signing_key, area_id=area_id, file_id=f"f{i}", filename=f"f{i}.zip",
+            size_bytes=10, sha256="0" * 64, created_at=f"2026-01-0{i + 2}T00:00:00Z",
+        )
+        materialize_carried_file_descriptor(db, descriptor, sender_fingerprint=remote.fingerprint)
+    db.connection.execute("DELETE FROM remote_files")
+    db.connection.commit()
+    delete_file_area(db, get_file_area_by_name(db, "files"), deleted_by=alice)
+    record_carry_decision(db, "file_areas", area_id, OFFERED, "migrated")
+
+    accept_offer(db, "file_areas", area_id, actor=alice, max_remote_files_per_area=2)
+
+    assert db.connection.execute("SELECT COUNT(*) FROM remote_files").fetchone()[0] == 2
+
+
+def test_an_acceptance_interrupted_before_reprojection_is_finished_at_startup(db, remote, own, alice, monkeypatch):
+    from netbbs.link import carry as carry_module
+    from netbbs.link.carry import finish_pending_acceptances, record_carry_decision
+
+    _accept(db, _board_genesis(remote), own)
+    _stored_board_post(db, remote, BOARD_ID, "kept in link_events")
+    delete_board(db, get_board_by_name(db, "Remote Discussion"), deleted_by=alice)
+    record_carry_decision(db, "boards", BOARD_ID, OFFERED, "migrated")
+
+    def crash(*args, **kwargs):
+        raise RuntimeError("power cut")
+
+    monkeypatch.setattr(carry_module, "reproject_stored_content", crash)
+    with pytest.raises(RuntimeError):
+        accept_offer(db, "boards", BOARD_ID, actor=alice)
+    monkeypatch.undo()
+
+    # Carried, not listed as offered, and not acceptable twice meanwhile.
+    assert get_board_by_name(db, "Remote Discussion").board_id == BOARD_ID
+    assert list_carry_decisions(db, OFFERED) == []
+    with pytest.raises(CarryDecisionError):
+        accept_offer(db, "boards", BOARD_ID, actor=alice)
+
+    assert finish_pending_acceptances(db) == 1
+    assert [row[0] for row in db.connection.execute("SELECT subject FROM posts")] == ["kept in link_events"]
+    assert db.connection.execute("SELECT COUNT(*) FROM link_carry_decisions").fetchone()[0] == 0
+
+
+def test_a_genesis_that_failed_to_persist_is_forgotten_in_memory(remote):
+    from netbbs.link.protocol import LinkNode
+    from netbbs.link.transport import _forget_genesis
+
+    node = LinkNode(identity=bootstrap_node_identity("carry-memory"))
+    genesis = _board_genesis(remote)
+    node.board_events.record_genesis(genesis)
+    node.known_event_ids.add(genesis.content_id)
+    node.events[genesis.content_id] = genesis.to_dict()
+
+    _forget_genesis(node, "boards", genesis.content_id, genesis.to_dict())
+
+    assert genesis.content_id not in node.known_event_ids
+    assert BOARD_ID not in node.board_events.boards

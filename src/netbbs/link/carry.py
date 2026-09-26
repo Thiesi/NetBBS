@@ -60,6 +60,7 @@ from netbbs.link.files import (
     FileAreaCarryLimitError,
     materialize_carried_file_area,
     materialize_carried_file_descriptor,
+    RemoteFileCatalogueLimitError,
 )
 from netbbs.link.store import save_event
 from netbbs.auth.users import User
@@ -304,7 +305,10 @@ def _replay_board_lifecycle(db: Database, board_id: str) -> None:
             materialize_carried_board_closure(db, BoardClosure.from_dict(envelope), commit=False)
 
 
-def accept_offer(db: Database, kind: str, resource_id: str, *, actor: User | None) -> None:
+def accept_offer(
+    db: Database, kind: str, resource_id: str, *, actor: User | None,
+    max_remote_files_per_area: int | None = None,
+) -> None:
     """Carry an offered resource: materialize it from the stored genesis (not
     capped -- the SysOp chose it), apply what was accepted for it meanwhile,
     and clear the offer, in one transaction with its moderation-log entry. The
@@ -312,7 +316,11 @@ def accept_offer(db: Database, kind: str, resource_id: str, *, actor: User | Non
     carried resource."""
     db.connection.execute("BEGIN IMMEDIATE")
     try:
-        if carry_decision_state(db, kind, resource_id) != OFFERED:
+        row = db.connection.execute(
+            "SELECT state, reason FROM link_carry_decisions WHERE kind = ? AND resource_id = ?",
+            (kind, resource_id),
+        ).fetchone()
+        if row is None or row["state"] != OFFERED or row["reason"] == "accepting":
             raise CarryDecisionError("that resource is no longer on offer")
         envelope = _stored_genesis(db, kind, resource_id)
         if envelope is None:
@@ -325,8 +333,13 @@ def accept_offer(db: Database, kind: str, resource_id: str, *, actor: User | Non
             raise CarryDecisionError(f"could not create the local copy: {exc}") from exc
         if kind == "boards":
             _replay_board_lifecycle(db, resource_id)
+        # Not deleted yet: the row stays, marked `accepting`, until the
+        # stored content is reprojected below. A process that dies in
+        # between finishes it at startup (`finish_pending_acceptances`);
+        # a carried row beside it keeps it out of every list meanwhile.
         db.connection.execute(
-            "DELETE FROM link_carry_decisions WHERE kind = ? AND resource_id = ?", (kind, resource_id)
+            "UPDATE link_carry_decisions SET reason = 'accepting' WHERE kind = ? AND resource_id = ?",
+            (kind, resource_id),
         )
         if actor is not None:
             record_action_without_commit(
@@ -337,32 +350,71 @@ def accept_offer(db: Database, kind: str, resource_id: str, *, actor: User | Non
         db.connection.rollback()
         raise
     db.connection.commit()
-    reproject_stored_content(db, kind, resource_id)
+    _finish_acceptance(db, kind, resource_id, max_remote_files_per_area=max_remote_files_per_area)
 
 
-def reproject_stored_content(db: Database, kind: str, resource_id: str) -> None:
+def _finish_acceptance(db: Database, kind: str, resource_id: str, *, max_remote_files_per_area: int | None) -> None:
+    reproject_stored_content(db, kind, resource_id, max_remote_files_per_area=max_remote_files_per_area)
+    db.connection.execute(
+        "DELETE FROM link_carry_decisions WHERE kind = ? AND resource_id = ? AND reason = 'accepting'",
+        (kind, resource_id),
+    )
+    db.connection.commit()
+
+
+def finish_pending_acceptances(db: Database, *, max_remote_files_per_area: int | None = None) -> int:
+    """Complete any acceptance a previous run committed but did not finish
+    reprojecting (issue #683). Called once at startup; every step is
+    idempotent. Returns how many were finished."""
+    pending = db.connection.execute(
+        "SELECT kind, resource_id FROM link_carry_decisions WHERE reason = 'accepting'"
+    ).fetchall()
+    for row in pending:
+        _finish_acceptance(
+            db, row["kind"], row["resource_id"], max_remote_files_per_area=max_remote_files_per_area
+        )
+    return len(pending)
+
+
+def reproject_stored_content(
+    db: Database, kind: str, resource_id: str, *, max_remote_files_per_area: int | None = None
+) -> None:
     """Project what this node already holds for a resource it has just taken
     on. A resource carried before, deleted, and offered again by the
     migration (or accepted back later) keeps its posts, messages and file
     descriptors in `link_events` after their local rows are gone; this node
     declares those IDs as known, so no peer would ever send them again, and
     the accepted copy would stay missing its history. Each materializer is
-    idempotent on the event's content ID, so this is safe to repeat."""
+    idempotent on the event's content ID, so this is safe to repeat.
+
+    Scoped to this one resource, and bound by the same limits as intake: the
+    file catalogue cap applies, so descriptors refused at the cap stay
+    refused."""
     if kind == "boards":
-        rebuild_carried_post_materialization(db)
+        rebuild_carried_post_materialization(db, board_id=resource_id)
         return
-    column, object_type, build, materialize = {
-        "channels": ("channel_id", CHANNEL_MESSAGE_OBJECT_TYPE, ChannelMessage.from_dict,
-                     materialize_carried_channel_message),
-        "file_areas": ("file_area_id", FILE_DESCRIPTOR_OBJECT_TYPE, FileDescriptor.from_dict,
-                       materialize_carried_file_descriptor),
+    column, object_type = {
+        "channels": ("channel_id", CHANNEL_MESSAGE_OBJECT_TYPE),
+        "file_areas": ("file_area_id", FILE_DESCRIPTOR_OBJECT_TYPE),
     }[kind]
     for row in db.connection.execute(
         f"""SELECT sender_fingerprint, envelope_json FROM link_events
              WHERE object_type = ? AND {column} = ? ORDER BY received_at ASC""",
         (object_type, resource_id),
     ).fetchall():
-        materialize(db, build(json.loads(row["envelope_json"])), sender_fingerprint=row["sender_fingerprint"])
+        envelope = json.loads(row["envelope_json"])
+        if kind == "channels":
+            materialize_carried_channel_message(
+                db, ChannelMessage.from_dict(envelope), sender_fingerprint=row["sender_fingerprint"]
+            )
+            continue
+        try:
+            materialize_carried_file_descriptor(
+                db, FileDescriptor.from_dict(envelope), sender_fingerprint=row["sender_fingerprint"],
+                max_remote_files_per_area=max_remote_files_per_area,
+            )
+        except RemoteFileCatalogueLimitError:
+            break
 
 
 def exclude_offer(db: Database, kind: str, resource_id: str, *, actor: User | None) -> None:
