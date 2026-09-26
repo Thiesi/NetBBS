@@ -167,9 +167,11 @@ from netbbs.link.boards import load_own_board_events
 from netbbs.link.channels import load_own_channel_events
 from netbbs.link.files import load_own_file_area_events
 from netbbs.link.events import (
+    INVENTORY_NOT_CARRIED_CAPABILITY,
     LINK_MESSAGE_OBJECT_TYPE,
     EndpointDescriptor,
     canonical_bytes,
+    descriptor_has_capability,
     event_content_id,
 )
 from netbbs.link.enforcement import (
@@ -765,6 +767,10 @@ async def _sync_one_seed(
             requester_fingerprint=node.identity.fingerprint,
             responder_fingerprint=seed_peer.fingerprint,
             also_declare=node.deferred_events.declared(time.time()),
+            # Issue #669: only to a seed that says it understands the field.
+            declare_not_carried=descriptor_has_capability(
+                seed_peer.descriptor, INVENTORY_NOT_CARRIED_CAPABILITY
+            ),
         )
         events, _more_available, wanted = await request_inventory(
             node, session, seed_url, inventory_request

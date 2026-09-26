@@ -1276,9 +1276,10 @@ class InventoryRequest:
     boards: dict[str, tuple[str, ...]]
     channels: dict[str, tuple[str, ...]] = field(default_factory=dict)
     file_areas: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    not_carried: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
-        return {
+        data = {
             "requester_fingerprint": self.requester_fingerprint,
             "responder_fingerprint": self.responder_fingerprint,
             "created_at": self.created_at,
@@ -1288,6 +1289,11 @@ class InventoryRequest:
             "channels": {channel_id: list(ids) for channel_id, ids in self.channels.items()},
             "file_areas": {area_id: list(ids) for area_id, ids in self.file_areas.items()},
         }
+        # Issue #669: omitted when empty, exactly as the signed payload omits
+        # it, so a request that names nothing is byte-for-byte the old shape.
+        if any(self.not_carried.values()):
+            data["not_carried"] = {kind: list(ids) for kind, ids in self.not_carried.items() if ids}
+        return data
 
     @classmethod
     def from_dict(cls, data: dict) -> "InventoryRequest":
@@ -1304,7 +1310,28 @@ class InventoryRequest:
             # absence would retain the replay.
             channels={channel_id: tuple(ids) for channel_id, ids in data.get("channels", {}).items()},
             file_areas={area_id: tuple(ids) for area_id, ids in data.get("file_areas", {}).items()},
+            not_carried=_parse_not_carried(data.get("not_carried", {})),
         )
+
+
+INVENTORY_RESOURCE_KINDS = ("boards", "channels", "file_areas")
+
+
+def _parse_not_carried(raw: object) -> dict[str, tuple[str, ...]]:
+    """Issue #669: the resources a requester holds a genesis for and does not
+    carry, by kind. Strict, since it steers what the responder leaves out: an
+    unknown kind or a non-string ID is a malformed request, not something to
+    skip over."""
+    if not isinstance(raw, dict):
+        raise ValueError("not_carried must be an object")
+    parsed: dict[str, tuple[str, ...]] = {}
+    for kind, ids in raw.items():
+        if kind not in INVENTORY_RESOURCE_KINDS:
+            raise ValueError(f"not_carried names an unknown resource kind {kind!r}")
+        if not isinstance(ids, list) or not all(isinstance(i, str) for i in ids):
+            raise ValueError(f"not_carried[{kind!r}] must be a list of resource IDs")
+        parsed[kind] = tuple(ids)
+    return parsed
 
 
 @dataclass
@@ -2478,6 +2505,7 @@ class LinkNode:
             file_areas=request.file_areas,
             signature=request.signature,
             signing_verify_key=signing_verify_key,
+            not_carried=request.not_carried,
         ):
             raise LinkProtocolError(
                 f"inventory_request from {sender_fingerprint} does not verify against its "
