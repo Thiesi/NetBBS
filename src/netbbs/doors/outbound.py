@@ -40,6 +40,7 @@ import hashlib
 import json
 import logging
 import os
+import stat
 import re
 import shutil
 import sqlite3
@@ -460,26 +461,106 @@ def _is_request(name: str) -> bool:
     return lowered.endswith(_REQUEST_SUFFIX) and not lowered.endswith(RESULT_SUFFIX)
 
 
-def _scan_requests(directory: Path) -> tuple[list[Path], bool]:
-    """Finished requests in `directory`, bounded; and whether we stopped early.
+#: Whether this platform can pin a directory by descriptor and work relative
+#: to it. True on NetBSD and Linux; the fallback exists for development on
+#: Windows, where no door runs in a VM and there is no boundary to defend.
+_FD_SAFE = (os.name == "posix" and hasattr(os, "O_NOFOLLOW") and hasattr(os, "O_DIRECTORY")
+            and os.open in os.supports_dir_fd and os.replace in os.supports_dir_fd
+            and os.unlink in os.supports_dir_fd and os.scandir in os.supports_fd)
 
-    `os.scandir` with an explicit bound rather than `sorted(iterdir())`: the
-    latter materializes and orders the whole directory before any cap can
-    apply, so a door stuck in a write loop would make this allocate in
-    proportion to whatever it wrote -- and the drain runs on the shared
-    `DatabaseLane`, so every other caller's database work would wait behind it.
+
+class _DropDir:
+    """A door's drop directory, pinned so a symlink cannot redirect it.
+
+    For a native door this is belt and braces: it runs as the BBS user and
+    could do anything these operations could. A VM door is the reason it
+    exists (issue #474). Its guest writes to the node directory through 9p,
+    and could replace `outbound` -- or any request in it -- with a symlink to
+    a host path; a drain following it would read, rename and delete host files
+    as the service account, which is exactly the reach the VM is there to
+    take away. So the directory is opened once, without following a link, and
+    every scan, rename, read and delete is made relative to that descriptor.
     """
-    found: list[Path] = []
+
+    def __init__(self, path: Path):
+        self.path = path
+        if _FD_SAFE:
+            self.fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        else:
+            if not stat.S_ISDIR(os.lstat(path).st_mode):
+                raise NotADirectoryError(str(path))
+            self.fd = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        if self.fd is not None:
+            os.close(self.fd)
+
+    def scandir(self):
+        return os.scandir(self.fd if self.fd is not None else self.path)
+
+    def replace(self, source: str, target: str) -> None:
+        if self.fd is not None:
+            os.replace(source, target, src_dir_fd=self.fd, dst_dir_fd=self.fd)
+        else:
+            os.replace(self.path / source, self.path / target)
+
+    def unlink(self, name: str) -> None:
+        if self.fd is not None:
+            os.unlink(name, dir_fd=self.fd)
+        else:
+            (self.path / name).unlink()
+
+    def read(self, name: str, limit: int) -> bytes | None:
+        """A regular file's bytes, or None if it is larger than `limit`.
+
+        Never follows a link, never blocks on a FIFO, and never reads more
+        than `limit` bytes into this process whatever the file claims to be.
+        """
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        if self.fd is not None:
+            descriptor = os.open(name, flags, dir_fd=self.fd)
+        else:
+            descriptor = os.open(self.path / name, flags | getattr(os, "O_BINARY", 0))
+        with os.fdopen(descriptor, "rb") as source:
+            if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+                raise OSError(f"{name} is not a regular file")
+            data = source.read(limit + 1)
+        return None if len(data) > limit else data
+
+
+def _open_drop_dir(workdir: Path) -> _DropDir | None:
+    try:
+        return _DropDir(workdir / OUTBOUND_DIRNAME)
+    except OSError:
+        # Absent, or not a real directory -- a link, say. Either way there is
+        # nothing here this drain will read.
+        return None
+
+
+def _scan_requests(drop: _DropDir) -> tuple[list[str], bool]:
+    """Finished requests in the drop directory, bounded; and whether we stopped early.
+
+    Bounded by entries *looked at*, not by requests found: a door can fill the
+    directory with names that are not requests, and a bound that only counted
+    matches would enumerate all of them, on the shared `DatabaseLane`, on
+    every in-session tick. Only regular files count, judged without following
+    a link. `os.scandir` rather than `sorted(iterdir())` for the same reason:
+    the latter materializes the whole directory before any bound applies.
+    """
+    found: list[str] = []
     truncated = False
     try:
-        with os.scandir(directory) as entries:
-            for entry in entries:
-                if len(found) >= _MAX_REQUESTS_SCANNED:
+        with drop.scandir() as entries:
+            for scanned, entry in enumerate(entries):
+                if scanned >= _MAX_REQUESTS_SCANNED:
                     truncated = True
                     break
                 try:
-                    if entry.is_file() and _is_request(entry.name):
-                        found.append(Path(entry.path))
+                    if _is_request(entry.name) and entry.is_file(follow_symlinks=False):
+                        found.append(entry.name)
                 except OSError:
                     continue
     except OSError:
@@ -489,34 +570,33 @@ def _scan_requests(directory: Path) -> tuple[list[Path], bool]:
     return sorted(found), truncated
 
 
-def _claim(request: Path) -> Path | None:
+def _claim(drop: _DropDir, name: str) -> str | None:
     """Take a request out of the drop directory's pattern, or None if we cannot.
 
-    A request we cannot claim is left alone rather than read: an unclaimable
-    request that was processed anyway is exactly the one a later drain would
-    process again.
+    A request we cannot claim is not read: an unclaimable request that was
+    processed anyway is exactly the one a later drain would process again.
     """
     # Hashed, not appended to: a door's request name may already be near the
     # filesystem's 255-byte limit, and a claim that cannot be named is a
     # request that can never be answered.
-    claimed = request.with_name(_short(request.name) + _CLAIMED_SUFFIX)
+    claimed = _short(name) + _CLAIMED_SUFFIX
     try:
-        os.replace(request, claimed)
+        drop.replace(name, claimed)
     except OSError as exc:
-        _logger.warning("could not claim door outbound request %s: %s", request, exc)
+        _logger.warning("could not claim door outbound request %s: %s", name, exc)
         return None
     return claimed
 
 
-def _release(claimed: Path) -> None:
+def _release(drop: _DropDir, claimed: str) -> None:
     try:
-        claimed.unlink(missing_ok=True)
+        drop.unlink(claimed)
     except OSError:
         pass
 
 
-def _stem(request: Path) -> str:
-    return request.name[: -len(_REQUEST_SUFFIX)]
+def _stem(name: str) -> str:
+    return name[: -len(_REQUEST_SUFFIX)]
 
 
 def has_requests(workdir: Path) -> bool:
@@ -546,31 +626,46 @@ _NAME_PIECE_CHARS = 64
 
 
 def _short(name: str) -> str:
-    """`name` if it is short, else a readable prefix plus a hash of all of it."""
-    if len(name.encode("utf-8")) <= _NAME_PIECE_CHARS:
+    """`name` if it is short, else a readable prefix plus a hash of all of it.
+
+    Measured and hashed with `surrogateescape`: on POSIX a door may name a
+    file with bytes that are not UTF-8, and `os.scandir` hands those back as
+    lone surrogates, which a strict encode would turn into an exception that
+    stopped the drain.
+    """
+    encoded = name.encode("utf-8", errors="surrogateescape")
+    if len(encoded) <= _NAME_PIECE_CHARS:
         return name
-    digest = hashlib.sha256(name.encode("utf-8", errors="surrogateescape")).hexdigest()[:16]
-    return name[:_NAME_PIECE_CHARS // 2] + "-" + digest
+    digest = hashlib.sha256(encoded).hexdigest()[:16]
+    return name[:_NAME_PIECE_CHARS // 4] + "-" + digest
 
 
-def _refuse_all(db: Database, door, launch: str, requests: list[Path], reason: str,
-                *, rehearsal: bool = False) -> int:
-    """Answer every request in `requests` with the same refusal."""
+_UNCLAIMABLE = ("the request could not be taken for processing (it could not be renamed); "
+                "it was not read")
+
+
+def _refuse_all(db: Database, door, launch: str, drop: _DropDir, names: list[str], reason: str,
+                *, rehearsal: bool = False, final: bool = True) -> int:
+    """Answer every request in `names` with the same refusal."""
     answered = 0
-    for request in requests:
-        claimed = _claim(request)
+    for name in names:
+        claimed = _claim(drop, name)
         if claimed is None:
+            if final:
+                _write_result(db, door.id, launch, _stem(name),
+                              {"status": "rejected", "reason": _UNCLAIMABLE}, rehearsal=rehearsal)
+                answered += 1
             continue
         try:
-            _write_result(db, door.id, launch, _stem(request), {"status": "rejected", "reason": reason},
+            _write_result(db, door.id, launch, _stem(name), {"status": "rejected", "reason": reason},
                           rehearsal=rehearsal)
             answered += 1
         finally:
-            _release(claimed)
+            _release(drop, claimed)
     return answered
 
 
-def _discard_all(requests: list[Path]) -> int:
+def _discard_all(drop: _DropDir, names: list[str]) -> int:
     """Drop requests without recording anything.
 
     Used only when the hook is switched off. Writing a refusal would recreate
@@ -579,12 +674,12 @@ def _discard_all(requests: list[Path]) -> int:
     the next launch, so nothing tells it where to look. The absent block is
     the signal, and it is one the door already has to handle.
     """
-    for request in requests:
+    for name in names:
         try:
-            request.unlink(missing_ok=True)
+            drop.unlink(name)
         except OSError:
             pass
-    return len(requests)
+    return len(names)
 
 
 def results_root(db_path: Path) -> Path:
@@ -685,15 +780,24 @@ def drain(db: Database, door, workdir: Path, *, node_identity=None, rehearsal: b
     that has already exited cleanly must not be reported as having crashed
     because its drop directory was unreadable.
     """
-    directory = workdir / OUTBOUND_DIRNAME
-    requests, truncated = _scan_requests(directory)
+    drop = _open_drop_dir(workdir)
+    if drop is None:
+        return 0, 0
+    with drop:
+        return _drain(db, door, workdir, drop, node_identity=node_identity, rehearsal=rehearsal,
+                      limit=limit, final=final)
+
+
+def _drain(db: Database, door, workdir: Path, drop: _DropDir, *, node_identity, rehearsal: bool,
+           limit: int, final: bool) -> tuple[int, int]:
+    requests, truncated = _scan_requests(drop)
     # The working directory is freshly made per launch, so its name
     # distinguishes concurrent sessions of the same door from each other.
     launch = workdir.name
 
     config = outbound_config(db, door.id)
     if config is None:
-        return 0, _discard_all(requests if final else requests[:limit])
+        return 0, _discard_all(drop, requests if final else requests[:limit])
     if not requests:
         return 0, 0
 
@@ -704,25 +808,31 @@ def drain(db: Database, door, workdir: Path, *, node_identity=None, rehearsal: b
         # switches it on again, rather than posting unattributably.
         actor = get_user_by_id(db, config.enabled_by_user_id) if config.enabled_by_user_id else None
         if actor is None:
-            return 0, _refuse_all(db, door, launch, requests,
+            return 0, _refuse_all(db, door, launch, drop, requests if final else requests[:limit],
                                   "the account which enabled this door's outbound no longer exists; "
-                                  "a SysOp must switch it on again", rehearsal=rehearsal)
+                                  "a SysOp must switch it on again", rehearsal=rehearsal, final=final)
 
         posted = refused = 0
         # What a rehearsal would have spent so far in this drain. Never
         # persisted, but counted, so the fifth rehearsed request under a
         # ceiling of one is told what a real session would tell it.
         rehearsed = {"posts": 0}
-        for request in requests[:limit]:
-            claimed = _claim(request)
+        for name in requests[:limit]:
+            claimed = _claim(drop, name)
             if claimed is None:
+                # A later tick may manage it. The final drain is the last
+                # chance, so there the door hears why rather than nothing.
+                if final:
+                    _write_result(db, door.id, launch, _stem(name),
+                                  {"status": "rejected", "reason": _UNCLAIMABLE}, rehearsal=rehearsal)
+                    refused += 1
                 continue
             try:
-                reason = _handle_one(db, door, config, actor, launch, _stem(request), claimed,
+                reason = _handle_one(db, door, config, actor, launch, _stem(name), drop, claimed,
                                      node_identity=node_identity, rehearsal=rehearsal,
                                      rehearsed=rehearsed)
             finally:
-                _release(claimed)
+                _release(drop, claimed)
             if reason is None:
                 posted += 1
             else:
@@ -733,7 +843,7 @@ def drain(db: Database, door, workdir: Path, *, node_identity=None, rehearsal: b
         overflow = requests[limit:]
         if final and (overflow or truncated):
             refused += _refuse_all(
-                db, door, launch, overflow,
+                db, door, launch, drop, overflow,
                 f"more than {limit} requests in one session; "
                 "the rest were not processed", rehearsal=rehearsal)
             if not rehearsal:
@@ -746,12 +856,12 @@ def drain(db: Database, door, workdir: Path, *, node_identity=None, rehearsal: b
 
 
 def _handle_one(db: Database, door, config: OutboundConfig, actor: User, launch: str,
-                stem: str, request: Path, *, node_identity=None, rehearsal: bool = False,
-                rehearsed: dict | None = None) -> str | None:
+                stem: str, drop: _DropDir, claimed: str, *, node_identity=None,
+                rehearsal: bool = False, rehearsed: dict | None = None) -> str | None:
     """Post one claimed request, or return the reason it was refused.
 
-    `request` is the claimed file; `stem` is the name the door gave it, which
-    is what its receipt answers to.
+    `claimed` is the request's name inside `drop` once claimed; `stem` is the
+    name the door gave it, which is what its receipt answers to.
     """
     def answer(payload: dict) -> None:
         _write_result(db, door.id, launch, stem, payload, rehearsal=rehearsal)
@@ -760,13 +870,14 @@ def _handle_one(db: Database, door, config: OutboundConfig, actor: User, launch:
         # Checked before reading, not after parsing. A door can stream a file
         # to disk without it counting against its own RLIMIT_AS, and reading
         # it whole would allocate all of it inside NetBBS, on the shared lane.
-        if request.stat().st_size > _MAX_REQUEST_BYTES:
+        raw = drop.read(claimed, _MAX_REQUEST_BYTES)
+        if raw is None:
             answer({
                 "status": "rejected",
                 "reason": f"request is larger than {_MAX_REQUEST_BYTES} bytes",
             })
             return "oversized request"
-        payload = json.loads(request.read_text(encoding="utf-8"))
+        payload = json.loads(raw.decode("utf-8"))
     except Exception:
         # Deliberately broad, and the second finding of this shape: a lone
         # surrogate produced a UnicodeEncodeError, deep nesting produces a

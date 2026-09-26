@@ -558,14 +558,15 @@ def test_scanning_a_flooded_drop_directory_stays_bounded(db, door, sysop, board,
     """The drain runs on the shared DatabaseLane. Materializing and sorting a
     whole directory first would let one buggy door stall every caller's
     database work in proportion to whatever it wrote."""
-    from netbbs.doors.outbound import _MAX_REQUESTS_SCANNED, _scan_requests
+    from netbbs.doors.outbound import _MAX_REQUESTS_SCANNED, _DropDir, _scan_requests
 
     directory = tmp_path / OUTBOUND_DIRNAME
     directory.mkdir(exist_ok=True)
     for index in range(_MAX_REQUESTS_SCANNED + 25):
         (directory / f"post{index:05d}.json").write_text("{}", encoding="utf-8")
 
-    found, truncated = _scan_requests(directory)
+    with _DropDir(directory) as drop:
+        found, truncated = _scan_requests(drop)
 
     assert len(found) == _MAX_REQUESTS_SCANNED
     assert truncated is True
@@ -767,7 +768,7 @@ def test_a_request_is_answered_once_even_when_it_cannot_be_removed(db, door, sys
     what prevents that; removing it afterwards is only housekeeping."""
     from netbbs.doors import outbound
 
-    monkeypatch.setattr(outbound, "_release", lambda claimed: None)  # every delete fails
+    monkeypatch.setattr(outbound, "_release", lambda drop, claimed: None)  # every delete fails
     _enable(db, door, sysop, board)
     request = _request(tmp_path, subject="Once", body="...")
 
@@ -975,3 +976,74 @@ def test_a_long_request_name_can_still_be_claimed_and_answered(db, door, sysop, 
     assert receipt["request"] == name and receipt["status"] == "posted"
     assert all(len(path.name) < 200 for path in results_dir(db, door.id).iterdir())
     assert not request.exists()
+
+
+# -- slice 2 groundwork, review round 2: a guest-writable drop directory -------
+
+posix_only = pytest.mark.skipif(__import__("os").name != "posix", reason="symlinks and dir fds are POSIX")
+
+
+def test_entries_that_are_not_requests_count_against_the_scan_bound(tmp_path):
+    """Otherwise a door fills its drop directory with other names and every
+    tick walks all of them on the shared lane."""
+    from netbbs.doors.outbound import _MAX_REQUESTS_SCANNED, _DropDir, _scan_requests
+
+    directory = tmp_path / OUTBOUND_DIRNAME
+    directory.mkdir()
+    for index in range(_MAX_REQUESTS_SCANNED + 5):
+        (directory / f"junk{index:05d}.txt").write_text("", encoding="utf-8")
+
+    with _DropDir(directory) as drop:
+        found, truncated = _scan_requests(drop)
+    assert found == [] and truncated is True
+
+
+@posix_only
+def test_a_drop_directory_swapped_for_a_link_is_not_followed(db, door, sysop, board, tmp_path):
+    """A VM guest writes its node directory. Pointing `outbound` at a host
+    directory must not make NetBBS read, rename or delete what is there."""
+    _enable(db, door, sysop, board)
+    host = tmp_path / "host-files"
+    host.mkdir()
+    precious = host / "settings.json"
+    precious.write_text('{"subject": "leak", "body": "secret"}', encoding="utf-8")
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    (workdir / OUTBOUND_DIRNAME).symlink_to(host, target_is_directory=True)
+
+    assert drain(db, door, workdir) == (0, 0)
+    assert precious.read_text(encoding="utf-8").startswith('{"subject"')
+    assert sorted(path.name for path in host.iterdir()) == ["settings.json"]
+    assert _posts(db, board, sysop) == []
+
+
+@posix_only
+def test_a_request_that_is_a_link_to_a_host_file_is_never_read(db, door, sysop, board, tmp_path):
+    _enable(db, door, sysop, board)
+    secret = tmp_path / "secret.json"
+    secret.write_text('{"subject": "leak", "body": "secret"}', encoding="utf-8")
+    directory = tmp_path / OUTBOUND_DIRNAME
+    directory.mkdir()
+    (directory / "post.json").symlink_to(secret)
+
+    assert drain(db, door, tmp_path) == (0, 0)
+    assert secret.exists() and _posts(db, board, sysop) == []
+
+
+def test_the_last_drain_answers_a_request_it_could_not_take(db, door, sysop, board, tmp_path, monkeypatch):
+    """A tick may leave an unclaimable request for later; the final drain is
+    the last chance, so the door hears why instead of nothing."""
+    from netbbs.doors import outbound
+
+    _enable(db, door, sysop, board)
+    request = _request(tmp_path, subject="Stuck", body="...")
+
+    def refuse(*args, **kwargs):
+        raise PermissionError("locked")
+
+    # Only the claim fails; the receipt writer's own rename must still work.
+    monkeypatch.setattr(outbound._DropDir, "replace", refuse)
+    assert drain(db, door, tmp_path) == (0, 1)
+    receipt = _result(db, door, request)
+    assert receipt["status"] == "rejected" and "could not be taken" in receipt["reason"]
+    assert _posts(db, board, sysop) == []

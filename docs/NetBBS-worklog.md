@@ -5785,6 +5785,14 @@ cancelled before the final drain, and a lane job it already queued still runs
 first because the lane is one FIFO worker. A VM door's guest-visible receipt
 copy is topped up after each tick (`vm.copy_receipts`, finished
 `*.result.json` only, never a `.part`).
+A VM guest can write its node directory, so the drop directory is guest-
+controlled: `outbound` or any request in it may be a symlink to a host path.
+`_DropDir` opens it once with `O_DIRECTORY|O_NOFOLLOW` and makes every scan,
+rename, read (`O_NOFOLLOW|O_NONBLOCK`, regular files only, bounded) and
+unlink relative to that descriptor; the scan bound counts entries looked at,
+not matches. Without it a guest could make the drain read, rename and delete
+host `*.json` files as the service account. Any new host-side operation on a
+guest-writable path must follow the same rule.
 
 Legacy configuration parsers need byte-level validation against the actual
 program. LORD 4.07 silently ignores LF-only node files; install its NODE1.DAT
