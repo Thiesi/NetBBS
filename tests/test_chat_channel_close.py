@@ -279,6 +279,63 @@ def test_a_rename_is_not_a_close(db, lane, hub, sysop, alice):
     assert [m.kind for m in get_scrollback(db, channel)] == ["join", "leave"]
 
 
+def test_a_command_after_a_close_elsewhere_returns_to_the_list_instead_of_crashing(db, lane, hub, sysop, alice):
+    # Deleted from outside this process, so nothing pushed a close: /nick
+    # would insert its notice into the gone channel and fail its foreign key.
+    channel = create_channel(db, "lobby", creator=sysop)
+
+    class _NickAfterTheDelete(FakeSession):
+        sent = False
+
+        async def read_line(self, *args, **kwargs):
+            if self.sent:
+                return await super().read_line(*args, **kwargs)
+            while hub.participant_count("lobby") < 1:
+                await asyncio.sleep(0.01)
+            await lane.run(delete_channel, channel, deleted_by=sysop)
+            self.sent = True
+            return "/nick ali"
+
+    session = _NickAfterTheDelete([])
+    action = asyncio.run(asyncio.wait_for(
+        chat_flow._chat_loop(
+            session, lane, hub, PresenceRegistry(), MessageMailbox(), InputHistory(), channel, alice,
+        ),
+        timeout=5,
+    ))
+
+    assert isinstance(action, chat_flow._ToPicker)
+    assert "#lobby was closed by the SysOp." in _notices(session)
+
+
+def test_a_delete_from_another_connection_between_check_and_insert_records_nothing(db, sysop, alice, monkeypatch):
+    channel = create_channel(db, "lobby", creator=sysop)
+    delete_channel(db, channel, deleted_by=sysop)
+    # As if the other connection's delete landed right after the check.
+    monkeypatch.setattr(chat_flow, "_channel_still_open", lambda _db, _channel: True)
+
+    assert chat_flow._record_presence_event(db, channel, alice, "leave") is None
+    # The connection is usable afterwards: nothing was left half-written.
+    create_channel(db, "parlour", creator=sysop)
+
+
+def test_a_renamed_channel_keeps_the_sessions_hub_key(db, sysop):
+    channel = create_channel(db, "lobby", creator=sysop)
+    update_channel(
+        db, channel, name="parlour", description="new words", min_level=channel.min_level,
+        category_id=channel.category_id, pinned=channel.pinned, hidden=channel.hidden,
+        members_only=channel.members_only, allow_member_invites=channel.allow_member_invites,
+        min_age=channel.min_age, name_requirement=channel.name_requirement,
+        community_id=channel.community_id, changed_by=sysop,
+    )
+
+    fresh = chat_flow._fresh_channel(db, channel)
+
+    assert fresh is not None
+    assert fresh.description == "new words"
+    assert fresh.name == "lobby"
+
+
 # -- the SysOp console -----------------------------------------------------------
 
 

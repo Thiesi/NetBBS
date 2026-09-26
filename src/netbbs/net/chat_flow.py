@@ -70,7 +70,8 @@ from __future__ import annotations
 import asyncio
 import datetime
 import json
-from dataclasses import dataclass
+import sqlite3
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Awaitable, Callable, Sequence
 
 from netbbs.activity import record_channel_seen
@@ -1169,8 +1170,11 @@ def _fresh_channel(db: Database, channel: Channel) -> Channel | None:
     the lookup no longer returns. By identity, not name (issue #716): a
     rename (the standalone admin CLI allows one while callers are inside) is
     still this channel, and a new channel that took the name, or SQLite's
-    freed row id, is not."""
-    return get_channel_by_channel_id(db, channel.channel_id)
+    freed row id, is not. The result keeps the session's own `name`: that
+    is its `ChatHub` key, and live membership stays under it after a rename
+    (§6.3), so the status line keeps counting the room the caller is in."""
+    current = get_channel_by_channel_id(db, channel.channel_id)
+    return None if current is None else replace(current, name=channel.name)
 
 
 def _channel_closed_message(channel: Channel) -> str:
@@ -1193,7 +1197,15 @@ def _record_presence_event(db: Database, channel: Channel, user: User, kind: str
     its scrollback exactly as it was for Restore."""
     if not _channel_still_open(db, channel):
         return None
-    return record_message(db, channel, kind=kind, author_label=user.username, author_fingerprint=user.fingerprint)
+    try:
+        return record_message(
+            db, channel, kind=kind, author_label=user.username, author_fingerprint=user.fingerprint,
+        )
+    except sqlite3.IntegrityError:
+        # Deleted from another connection (the standalone admin CLI) between
+        # the check and the insert: the lane only serializes this process.
+        db.connection.rollback()
+        return None
 
 
 def _live_send_refusal(db: Database, channel: Channel, user: User) -> str | None:
@@ -4786,6 +4798,10 @@ async def _chat_loop(
             # `hub.join` made them reachable by `ChatHub.close_channel`.
             closed["closed"] = True
             announce(session, _channel_closed_message(channel), tone="muted")
+            discard_buffered_input = getattr(session, "discard_buffered_input", None)
+            if discard_buffered_input is not None:
+                # Typed during a slow entry, it would drive the picker.
+                await discard_buffered_input()
             return _ToPicker()
         await hub.broadcast(channel.name, recorded_join, exclude={participant_id})
         if link_context is not None and link_context.realtime_bridge is not None:
@@ -5117,6 +5133,15 @@ async def _chat_loop(
                                 fg_color=MUTED_COLOR,
                             ))
                             continue
+                        if line.startswith("/") and command_word != "quit" and not await lane.run(
+                            _channel_still_open, channel
+                        ):
+                            # Issue #716: closed where no push reached this
+                            # session (the standalone admin CLI). Commands
+                            # write to the channel too (/nick, /topic, ...),
+                            # and a deleted row fails their insert.
+                            announce(session, _channel_closed_message(channel), tone="muted")
+                            return _ToPicker()
                         if line.startswith("/"):
                             ctx = command_context(pinned=pinned_height is not None)
                             action = await _dispatch_command(ctx, line)
@@ -5479,8 +5504,9 @@ async def _chat_loop(
                 await discard_buffered_input()
             return _ToPicker()
         # receive_task finishing (a kick/ban) has no ChatAction of its
-        # own -- it always means "exit entirely," same as /quit.
-        if receive_task in done and pinned_ui.active:
+        # own -- it always means "exit entirely," same as /quit. A close
+        # that raced a command never holds (issue #716).
+        if receive_task in done and pinned_ui.active and not closed["closed"]:
             # `receive_task` completing normally (not cancelled, and the
             # exception re-raise above already ruled out a dropped
             # connection) only ever happens via `_KickNotice`'s own
