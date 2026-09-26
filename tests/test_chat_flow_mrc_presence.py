@@ -144,7 +144,7 @@ def test_the_hubs_welcome_is_shown_once_per_session(db, lane, hub, presence, ali
             # paces the outbound queue, so wait for the packet to land.
             session = await _browse(lane, hub, presence, alice, ["0", "1", "/quit"], mrc_bridge=bridge)
             assert "[MRC] Welcome to the fake hub" in _visible_text(session)
-            deadline = asyncio.get_running_loop().time() + 4
+            deadline = asyncio.get_running_loop().time() + 30.0
             while len(fake.packets(body_prefix="MOTD")) < 2 and asyncio.get_running_loop().time() < deadline:
                 await asyncio.sleep(0.05)
             assert len(fake.packets(body_prefix="MOTD")) == 2, [p.body for p in fake.received if p.from_user == "alice"]

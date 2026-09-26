@@ -46,8 +46,11 @@ def test_final_output_waits_for_slow_caller(end, rows, db, lane, player, tmp_pat
                 await super().write_raw(data)
 
         session = SlowSession()
+        # The wall limit runs from launch, and the 0.6s check below has to
+        # land before it: 1s left too little for a door that is slow to
+        # start under a parallel run.
         task = asyncio.create_task(run_door(session, lane, door, player,
-                                           wall_time_limit_seconds=1 if end == "timeout" else 10))
+                                           wall_time_limit_seconds=3 if end == "timeout" else 10))
         try:
             await asyncio.wait_for(blocked.wait(), 5)
             # The old leader-exit drain deadline silently cancels this write.
