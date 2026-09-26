@@ -521,3 +521,21 @@ def test_a_failed_file_area_delete_leaves_everything_and_no_audit_entry(db, alic
     assert db.connection.execute("SELECT COUNT(*) FROM remote_files").fetchone()[0] == 1
     assert staging.exists()
     assert list_recent_actions(db) == []
+
+
+def test_a_staging_file_that_cannot_be_removed_is_reported(db, alice, remote_node_identity, tmp_path, monkeypatch, caplog):
+    import logging
+
+    from netbbs.files import areas as areas_module
+    from netbbs.files.areas import delete_file_area
+
+    area, staging = _carried_area_with_a_transfer(db, remote_node_identity, tmp_path)
+
+    def refuse(path):
+        raise PermissionError(13, "Permission denied", path)
+
+    monkeypatch.setattr(areas_module.os, "remove", refuse)
+    with caplog.at_level(logging.WARNING, logger="netbbs.files.areas"):
+        delete_file_area(db, area, deleted_by=alice)
+
+    assert any(str(staging) in record.getMessage() for record in caplog.records)

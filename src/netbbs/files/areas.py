@@ -20,6 +20,7 @@ settings actually change file behavior.
 
 from __future__ import annotations
 
+import logging
 import os
 import sqlite3
 from dataclasses import dataclass
@@ -35,6 +36,8 @@ from netbbs.timeutil import utc_now_iso
 # recent upload), alphabetical, recent (newest area first), and volume
 # (file count).
 _VALID_SORT_ORDERS = ("activity", "alphabetical", "recent", "volume")
+
+_logger = logging.getLogger(__name__)
 
 
 def _check_max_file_age(max_file_age_days: int | None) -> None:
@@ -352,14 +355,17 @@ def delete_file_area(db: Database, area: FileArea, *, deleted_by: User) -> None:
     of partial transfers are removed only after the commit, as
     `netbbs.link.files.withdraw_remote_file` does.
     """
-    transfers = db.connection.execute(
-        """SELECT t.transfer_id, t.temp_path FROM link_file_transfers AS t
-             JOIN remote_files AS r ON r.file_id = t.remote_file_id
-            WHERE r.area_id = ?""",
-        (area.id,),
-    ).fetchall()
     db.connection.execute("BEGIN IMMEDIATE")
     try:
+        # Read under the write lock, so the paths removed below are exactly
+        # those of the rows deleted here -- another connection cannot start or
+        # advance a transfer in between.
+        transfers = db.connection.execute(
+            """SELECT t.transfer_id, t.temp_path FROM link_file_transfers AS t
+                 JOIN remote_files AS r ON r.file_id = t.remote_file_id
+                WHERE r.area_id = ?""",
+            (area.id,),
+        ).fetchall()
         record_action_without_commit(
             db, actor=deleted_by, action="delete_file_area", object_type="file_area", object_id=area.id,
             detail=f"deleted file area {area.name!r} (id {area.id})",
@@ -389,8 +395,14 @@ def delete_file_area(db: Database, area: FileArea, *, deleted_by: User) -> None:
         if row["temp_path"]:
             try:
                 os.remove(row["temp_path"])
-            except OSError:
-                pass  # already gone, or never written: nothing left to reclaim
+            except FileNotFoundError:
+                pass  # never written, or already gone: nothing left to reclaim
+            except OSError as exc:
+                # The rows naming it are committed away, so nothing would ever
+                # come back for it: say so, as `withdraw_remote_file` does.
+                _logger.warning(
+                    "could not remove staging file %s of a deleted file area: %s", row["temp_path"], exc
+                )
 
 
 def _row_to_file_area(row: sqlite3.Row) -> FileArea:
