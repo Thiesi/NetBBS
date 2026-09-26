@@ -327,7 +327,9 @@ def guest_exit_code(profile, directory: Path) -> tuple[int, str]:
     """The game's own verdict, read from the status file its guest wrote."""
     try:
         # The guest is the untrusted side: read a status, never a whole file.
-        with (directory / EXIT_STATUS).open("rb") as source:
+        # Not followed if the guest made it a link: it names a host file then.
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        with os.fdopen(os.open(directory / EXIT_STATUS, flags), "rb") as source:
             text = source.read(_STATUS_BYTES + 1)
         if len(text) > _STATUS_BYTES or not re.fullmatch(rb"\s*[0-9]{1,3}\s*", text):
             raise ValueError("not an exit status")

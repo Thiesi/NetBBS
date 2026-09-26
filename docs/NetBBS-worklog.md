@@ -5779,6 +5779,14 @@ in-session door reuses request names; doors are contractually forbidden to
 construct them. `_prune_results` runs once per drain (it globs, stats and
 sorts the whole directory), and `limit`/`final` let an in-session tick take a
 few requests while only the final drain refuses leftovers.
+A VM guest can write its node directory, so the drop directory is guest-
+controlled: `outbound` or any request in it may be a symlink to a host path.
+`_DropDir` opens it once with `O_DIRECTORY|O_NOFOLLOW` and makes every scan,
+rename, read (`O_NOFOLLOW|O_NONBLOCK`, regular files only, bounded) and
+unlink relative to that descriptor; the scan bound counts entries looked at,
+not matches. Without it a guest could make the drain read, rename and delete
+host `*.json` files as the service account. Any new host-side operation on a
+guest-writable path must follow the same rule.
 
 Legacy configuration parsers need byte-level validation against the actual
 program. LORD 4.07 silently ignores LF-only node files; install its NODE1.DAT
