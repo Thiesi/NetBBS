@@ -14909,7 +14909,7 @@ async def _draw_area_detail(
         MenuEntry(label=menu_key("E", "dit"), brief="Change this area's settings"),
         MenuEntry(label=menu_key("D", "elete"), brief="Permanently remove this area"),
         MenuEntry(label=menu_key("P", "ending files"), brief="Review uploads awaiting approval"),
-        MenuEntry(label=menu_key("x", "pired files", prefix="E"), brief="Recover files before they are purged"),
+        MenuEntry(label=menu_key("x", "pired files", prefix="E"), brief="Recover before they are purged"),
     ]
     if link_context is not None and not linked:
         options.append(MenuEntry(label=menu_key("L", "ink this file area"), brief="Share it via NetBBS Link"))
