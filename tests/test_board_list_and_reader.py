@@ -576,3 +576,46 @@ def test_reading_a_late_arrival_does_not_move_the_jump_position_back(db, alice, 
 
     assert board_read_cursor(db, alice, board) == (newer.created_at, newer.post_id)
     assert unread_post_count(db, alice, board) == 0
+
+
+def test_a_redraw_keeps_the_highlight_on_its_post(db, alice, monkeypatch):
+    """Ctrl-L refetches at the budget of the moment; after a resize the
+    newest page gains older posts in front, and the highlight must stay on
+    the post it was on, not on the same row number."""
+    board = create_board(db, "general", creator=alice)
+    _posts(db, board, alice, 60, monkeypatch)
+
+    class Growing(FakeSession):
+        async def read_editor_key(self, **kwargs):
+            key = await super().read_editor_key(**kwargs)
+            if key.kind == EditorKeyKind.CTRL:
+                self.terminal_height = 40
+            return key
+
+    session = Growing(["DOWN", "CTRL+L", "b"])
+
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+
+    screens = session.screens()
+    before = re.search(r">\s+\d+\s+Subject (\d+)\b", screens[1]).group(1)
+    after = re.search(r">\s+\d+\s+Subject (\d+)\b", screens[-1]).group(1)
+    assert len(_listed(screens[-1])) > len(_listed(screens[1]))
+    assert before == after
+
+
+def test_a_reply_to_a_long_subject_keeps_the_reader_on_the_screen(db, alice, monkeypatch):
+    board = create_board(db, "general", creator=alice)
+    stamps = iter(["2026-01-01T00:00:00.000000Z", "2026-01-01T00:00:01.000000Z"])
+    monkeypatch.setattr(posts_module, "utc_now_iso", lambda: next(stamps))
+    question = create_post(db, board, alice, "Question " * 30, "?")
+    body = "\n\n".join(f"Paragraph {i}" for i in range(40))
+    create_post(db, board, alice, "Re: Question", body, parent_post_id=question.post_id)
+    session = FakeSession(["2", "b", "b"], width=40, height=24)
+
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+
+    reader = [screen for screen in session.screens() if "Paragraph 0" in screen]
+    assert reader
+    for screen in reader:
+        assert len(screen.replace("\r\n", "\n").rstrip("\n").split("\n")) <= 24
+    assert 'reply to "Question' in reader[0] and "..." in reader[0]

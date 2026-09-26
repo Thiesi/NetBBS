@@ -924,7 +924,7 @@ async def _show_board(
             )
             byline = _post_byline(
                 db, post, name_requirement=name_requirement, is_new=post.id in _new_ids(page),
-                separator=separator,
+                separator=separator, width=width,
             )
             body_rows = _render_quoted_body(sanitize_text(post.body, allow_newlines=True), width).split("\r\n")
             has_previous = index > 0 or page.has_older
@@ -947,7 +947,7 @@ async def _show_board(
                 redraw_in_place=redraw_in_place,
                 unicode_style=unicode_style,
                 page=detail_page,
-                preamble=[byline],
+                preamble=byline,
                 message="\r\n".join(take_notices(session)) or None,
             )
             if key == "b":
@@ -1250,9 +1250,20 @@ async def _show_board(
             highlighted = await _read_post(int(char) - 1)
             await _render_and_advance_cursor(page, highlighted)
         elif (key.kind == EditorKeyKind.CTRL and key.char == "l") or char == REDRAW_KEY:
+            # The refetch runs at today's budget -- a consumed notice or a
+            # resized terminal can change it, and a newest page then gains
+            # older posts in front -- so the highlight follows the post it
+            # was on, not its row number (Codex review on #719).
+            was_on = (
+                page.posts[highlighted].post_id
+                if highlighted is not None and highlighted < len(page.posts) else None
+            )
             page = _refetch_current_page()
-            if highlighted is not None and page.posts:
-                highlighted = min(highlighted, len(page.posts) - 1)
+            if was_on is not None and page.posts:
+                highlighted = next(
+                    (i for i, listed in enumerate(page.posts) if listed.post_id == was_on),
+                    min(highlighted, len(page.posts) - 1),
+                )
             else:
                 highlighted = None
             await _render_and_advance_cursor(page, highlighted)
@@ -1656,10 +1667,14 @@ def _render_quoted_body(body: str, width: int) -> str:
 
 
 def _post_byline(
-    db: Database, post: Post, *, name_requirement: str | None, is_new: bool, separator: str
-) -> str:
-    """The reader's line under the subject: who, when, and what state the
-    post is in -- edited, new to this caller, and which post it answers."""
+    db: Database, post: Post, *, name_requirement: str | None, is_new: bool, separator: str,
+    width: int,
+) -> list[str]:
+    """The reader's lines under the subject: who, when, and what state the
+    post is in -- edited, new to this caller -- and then which post it
+    answers, on a row of its own cut to `width`: a parent's subject runs to
+    `MAX_SUBJECT_BYTES`, and wrapped it would take the rows the body is
+    paged into (Codex review on #719)."""
     parts = [
         _author_display_name(db, post, name_requirement=name_requirement),
         colored(format_for_display(post.created_at, db), fg_color=METADATA_COLOR),
@@ -1673,5 +1688,11 @@ def _post_byline(
         # at all for a parent that is expired, pending or trust-hidden.
         parent = visible_post(db, post.parent_post_id)
         if parent is not None:
-            parts.append(colored(f'reply to "{sanitize_text(parent.subject)}"', fg_color=METADATA_COLOR))
-    return colored(separator, fg_color=METADATA_COLOR).join(parts)
+            reply = f'reply to "{sanitize_text(parent.subject)}"'
+            if display_width(reply) > width - 1:
+                reply = cut_to_width(reply, max(1, width - 4)) + "..."
+            return [
+                colored(separator, fg_color=METADATA_COLOR).join(parts),
+                colored(reply, fg_color=METADATA_COLOR),
+            ]
+    return [colored(separator, fg_color=METADATA_COLOR).join(parts)]
