@@ -5768,17 +5768,22 @@ never-drained qemu stdout pipe stalls the guest once its console fills it;
 the runtime's diagnostics task drains socketpair doors' stdout, and any
 test harness must too.
 
-The door outbound hook's `drain` (issue #520) is repeatable. Each request is
-claimed with `os.replace` to `<name>.json.claimed` *before* it is read; a
-request that cannot be claimed is left unread for the next drain rather than
-processed. The old guarantee was a `request.unlink()` after answering, with
-`OSError` swallowed -- harmless while the drain ran only at exit and
-`rmtree` removed survivors, but a double post on every later tick once drains
-run in-session. Receipt names carry a `time.time_ns()` sequence because an
-in-session door reuses request names; doors are contractually forbidden to
-construct them. `_prune_results` runs once per drain (it globs, stats and
-sorts the whole directory), and `limit`/`final` let an in-session tick take a
-few requests while only the final drain refuses leftovers.
+The door outbound hook's `drain` (issue #520) must be safe to repeat, so a
+request is claimed -- renamed out of the request pattern, to a bounded
+`_short(name) + ".claimed"` (a prefix plus a hash once a name passes 64
+bytes, so a name near the 255-byte limit can still be claimed) -- *before* it
+is read. At-most-once rests on that rename, never on deleting the request
+afterwards, whose failure must be harmless. A request that cannot be claimed
+is left for the next drain; the final drain answers it instead. Receipt names
+carry a `time.time_ns()` sequence and a bounded form of the request name
+because an in-session door reuses request names; doors are contractually
+forbidden to construct them. Receipts are pruned every `_PRUNE_EVERY` writes
+and at the end of each drain -- not per receipt (it globs, stats and sorts the
+directory) and not only at the end (a flood would pass `netbbs.backup`'s scan
+ceiling mid-drain). `limit`/`final` let an in-session tick take a few requests
+while only the final drain refuses leftovers. A rehearsal's would-be spend is
+carried across one session's drains by the caller (`rehearsed`), since
+rehearsal posts are never persisted.
 A VM guest can write its node directory, so the drop directory is guest-
 controlled: `outbound` or any request in it may be a symlink to a host path.
 `_DropDir` opens it once with `O_DIRECTORY|O_NOFOLLOW` and makes every scan,

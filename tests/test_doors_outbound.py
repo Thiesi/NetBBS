@@ -991,3 +991,56 @@ def test_the_drop_directory_is_really_pinned_on_posix():
     from netbbs.doors.outbound import _FD_SAFE
 
     assert _FD_SAFE is True
+
+
+# -- slice 2 groundwork, review round 3 -------------------------------------
+
+
+def test_a_flood_never_pushes_receipts_past_the_backup_ceiling(db, door, sysop, board, tmp_path, monkeypatch):
+    """A backup running while a flood is answered must not find more receipts
+    than it will scan -- it would fail the whole backup."""
+    from netbbs.backup import _DOOR_OUTBOUND_SCAN_FACTOR
+    from netbbs.doors import outbound
+
+    _enable(db, door, sysop, board)
+    peak = []
+    real_write = outbound._write_result
+
+    def watching(*args, **kwargs):
+        real_write(*args, **kwargs)
+        peak.append(len(list(results_dir(db, door.id).glob("*.result.json"))))
+
+    monkeypatch.setattr(outbound, "_write_result", watching)
+    for index in range(outbound.RESULTS_KEPT + 200):
+        _request(tmp_path, name=f"f{index:05d}", subject="x", body="...")
+    drain(db, door, tmp_path)
+
+    assert max(peak) < _DOOR_OUTBOUND_SCAN_FACTOR * outbound.RESULTS_KEPT
+    assert max(peak) <= outbound.RESULTS_KEPT + outbound._PRUNE_EVERY
+
+
+def test_requests_hidden_by_the_scan_bound_are_not_lost_silently(db, door, sysop, board, tmp_path):
+    from netbbs.doors.outbound import _MAX_REQUESTS_SCANNED
+
+    _enable(db, door, sysop, board)
+    directory = tmp_path / OUTBOUND_DIRNAME
+    directory.mkdir()
+    for index in range(_MAX_REQUESTS_SCANNED + 5):
+        (directory / f"junk{index:05d}.txt").write_text("", encoding="utf-8")
+
+    assert drain(db, door, tmp_path) == (0, 1)
+    (receipt,) = [json.loads(path.read_text()) for path in results_dir(db, door.id).glob("*.result.json")]
+    assert receipt["request"] == "" and "were not seen" in receipt["reason"]
+
+
+def test_a_rehearsal_budget_spans_every_drain_of_the_session(db, door, sysop, board, tmp_path):
+    """A live rehearsal is drained every tick; its would-be spend must carry
+    over, as a real session's persisted debits do."""
+    _enable(db, door, sysop, board, posts_per_hour=1)
+    spend = {"posts": 0}
+    first = _request(tmp_path, name="first", subject="One", body="...")
+    assert drain(db, door, tmp_path, rehearsal=True, final=False, rehearsed=spend) == (1, 0)
+    second = _request(tmp_path, name="second", subject="Two", body="...")
+    assert drain(db, door, tmp_path, rehearsal=True, rehearsed=spend) == (0, 1)
+    assert _result(db, door, first)["would"] == "posted"
+    assert _result(db, door, second)["would"] == "rejected"

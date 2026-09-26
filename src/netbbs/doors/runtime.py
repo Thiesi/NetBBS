@@ -560,6 +560,9 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
     # A VM door's control channel (issue #474): the parent end asks the guest
     # to power down; the child end is qemu's, closed here once it is spawned.
     qmp_socket = qmp_child = None
+    # A rehearsal's would-be spend, for the whole session: rehearsal posts are
+    # never persisted, so without this every drain would start from zero.
+    rehearsal_spend = {"posts": 0}
     slave = workdir = None
     diagnostic_tasks = []
     resize_task = None
@@ -819,7 +822,7 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
                         await lane.run(
                             drain_outbound, door, workdir,
                             node_identity=node_identity() if callable(node_identity) else node_identity,
-                            rehearsal=rehearsal,
+                            rehearsal=rehearsal, rehearsed=rehearsal_spend,
                         )
                     except Exception as exc:
                         _logger.warning("door %r outbound drain failed: %s", door.name, exc)
