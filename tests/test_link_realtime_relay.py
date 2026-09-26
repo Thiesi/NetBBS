@@ -147,7 +147,7 @@ class _Node:
             return True
 
         self.direct = LiveDirectChat(
-            node_identity=self.identity, link_node=self.link_node, lane=self.lane, registry=self.registry,
+            link_node=self.link_node, lane=self.lane, registry=self.registry,
             on_frame=self.bridge.on_frame, track_session=self.bridge.track_session,
             relay_client=self.relay_client, deliver=_deliver, dial_timeout_seconds=2.0,
         )
@@ -760,7 +760,7 @@ def test_anchor_connectors_are_reconciled_when_participation_or_roster_changes(t
 
     async def scenario():
         await run_reliable_anchor_connectors(
-            node_identity=node.identity, link_node=node.link_node, lane=node.lane, registry=node.registry,
+            link_node=node.link_node, lane=node.lane, registry=node.registry,
             on_frame=node.bridge.on_frame, track_session=node.bridge.track_session,
             participation_accepted=lambda db: set_participation and __import__("netbbs.link.onboarding", fromlist=["participation_accepted"]).participation_accepted(db),
             start_connector=start_connector, interval_seconds=0, sleep=fake_sleep, stop_event=stop_event,

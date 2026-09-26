@@ -210,6 +210,7 @@ async def handle_session(
     # no Zmodem a browser link instead.
     transfers: object | None = None,
     door_services: object | None = None,
+    key_rotation: object | None = None,
 ) -> None:
     """
     Top-level per-connection entry point.
@@ -315,6 +316,7 @@ async def handle_session(
         transfers=transfers,
         door_services=door_services,
         presence=presence,
+        key_rotation=key_rotation,
     )
 
     session_registry.enter(session)
@@ -907,6 +909,7 @@ async def handle_ssh_session(
     # no Zmodem a browser link instead.
     transfers: object | None = None,
     door_services: object | None = None,
+    key_rotation: object | None = None,
     # Issue #611: the same node-wide `LoginThrottle` `handle_session`
     # takes, so a password re-check inside an SSH session charges the
     # same budgets. SSH's own password login already charges them from
@@ -971,6 +974,7 @@ async def handle_ssh_session(
         transfers=transfers,
         door_services=door_services,
         presence=presence,
+        key_rotation=key_rotation,
     )
 
     session_registry.enter(session)

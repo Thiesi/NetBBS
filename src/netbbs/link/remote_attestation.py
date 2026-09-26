@@ -443,16 +443,20 @@ def ingest_remote_attestation(
                     signature_b64, issued_at, received_at) VALUES (?, ?, ?, ?, ?, ?, ?)""",
                 (content_id, issuer, revoked_id, json.dumps(envelope, sort_keys=True), signature_b64, issued_at, now_value),
             )
-            db.connection.execute(
+            revoked_now = db.connection.execute(
                 """UPDATE link_remote_attestations SET revoked_by_content_id = ?, revoked_at = ?
                    WHERE content_id = ? AND revoked_at IS NULL""",
                 (content_id, now_value, revoked_id),
-            )
-            # Issue #596, Decision 6: told that the subject withdrew it, this
-            # node forgets the value rather than merely stops relying on it.
-            _forget_received_values(db, now_value, content_id=revoked_id)
-            _audit(db, target["subject_id"], "attestation", revoked_id, "revoked", {"revocation_content_id": content_id}, None, now_value)
-            _recompute_subject_id(db, target["subject_id"], now_value)
+            ).rowcount
+            if revoked_now:
+                # A repeat -- the issuer re-signing a revocation after a key
+                # rotation (issue #623) -- is stored and changes nothing else.
+                # Issue #596, Decision 6: told that the subject withdrew it,
+                # this node forgets the value rather than merely stops relying
+                # on it.
+                _forget_received_values(db, now_value, content_id=revoked_id)
+                _audit(db, target["subject_id"], "attestation", revoked_id, "revoked", {"revocation_content_id": content_id}, None, now_value)
+                _recompute_subject_id(db, target["subject_id"], now_value)
         return content_id
     if object_type != REMOTE_ATTESTATION_OBJECT_TYPE:
         raise ValueError(f"unsupported remote attestation object type: {object_type!r}")
@@ -1214,11 +1218,67 @@ def reconcile_issued_attestations(
                 signing_key_fingerprint=signing_fingerprint,
             )
             changes.append(IssuedAttestationChange(action, content_id, user_id, attribute, reason))
+        for content_id in _resign_orphaned_revocations(
+            db, signing_identity, home_node_fingerprint=home_node_fingerprint, now_value=now_value,
+        ):
+            changes.append(IssuedAttestationChange("revoked", content_id, None, "", "signing_key_rotated"))
         # After the revocations above, so an object retired this pass loses its
         # value in the transaction that retires it; and unconditionally, so an
         # object that merely ran out -- which nothing revokes -- loses it too.
         _redact_retired_issued(db, now_value)
     return changes
+
+
+def _resign_orphaned_revocations(
+    db: Database, signing_identity: Identity, *, home_node_fingerprint: str, now_value: str
+) -> list[str]:
+    """Re-sign, under the current key, revocations a previous key signed (issue #623).
+
+    The attestation half of what `trust_issuance._resign_orphaned_revocations`
+    does for vouches. A subscriber that learns this node's new key can no
+    longer verify what the old one signed. A live attestation is re-issued
+    by the reconcile above, but nothing re-issues a revocation, so one signed
+    shortly before a rotation and not yet pulled would be skipped as an
+    old-key object and the attestation it retires would stay accepted there
+    until it expired -- up to 90 days, with the value it carries still held.
+    Signed again, it reaches that subscriber; one that already holds the
+    first treats the second as a repeat.
+
+    Only while the target has not expired, since after that nobody relies on
+    it, and only when no revocation of that target was signed by the current
+    key, so this signs once per target per rotation.
+    """
+    targets = db.connection.execute(
+        """SELECT t.content_id,
+                  MAX(r.signing_key_fingerprint = ?) AS covered
+           FROM link_issued_remote_attestations AS t
+           JOIN link_issued_remote_attestations AS r
+             ON r.object_type = ?
+            AND json_extract(r.envelope_json, '$.payload.revoked_content_id') = t.content_id
+           WHERE t.object_type = ? AND t.revoked_at IS NOT NULL AND t.expires_at > ?
+           GROUP BY t.content_id
+           ORDER BY t.content_id""",
+        (signing_identity.fingerprint, REMOTE_ATTESTATION_REVOCATION_OBJECT_TYPE,
+         REMOTE_ATTESTATION_OBJECT_TYPE, now_value),
+    ).fetchall()
+    resigned: list[str] = []
+    for row in targets:
+        if row["covered"]:
+            continue
+        wire = build_remote_attestation_revocation(
+            signing_identity.signing_key,
+            issuer_fingerprint=home_node_fingerprint,
+            revoked_content_id=row["content_id"],
+            issued_at=now_value,
+        )
+        resigned.append(_store_issued(
+            db, wire,
+            object_type=REMOTE_ATTESTATION_REVOCATION_OBJECT_TYPE,
+            user_id=None, attribute=None, attested_value=None,
+            issued_at=now_value, expires_at=None, now_value=now_value,
+            signing_key_fingerprint=signing_identity.fingerprint,
+        ))
+    return resigned
 
 
 @dataclass(frozen=True)

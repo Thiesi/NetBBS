@@ -309,7 +309,7 @@ def test_composing_a_post_on_a_linked_board_queues_a_board_post(tmp_path):
     user = create_user(db, "alice", password="hunter2", user_level=10)
     board = create_board(db, "general", creator=user)
     node_identity = bootstrap_node_identity("roanoke")
-    link_context = LinkContext(node_identity=node_identity, link_node=LinkNode(identity=node_identity))
+    link_context = LinkContext(link_node=LinkNode(identity=node_identity))
     link_board(db, board, node_identity=node_identity)
     # First "p" answers the empty-board [P]ost/[B]ack choice (dogfood
     # fix); second "p" is review_composition's own commit confirm; a
@@ -339,7 +339,7 @@ def test_editing_a_post_on_a_linked_board_queues_a_board_post_edit(tmp_path):
     user = create_user(db, "alice", password="hunter2", user_level=10)
     board = create_board(db, "general", creator=user)
     node_identity = bootstrap_node_identity("roanoke")
-    link_context = LinkContext(node_identity=node_identity, link_node=LinkNode(identity=node_identity))
+    link_context = LinkContext(link_node=LinkNode(identity=node_identity))
     link_board(db, board, node_identity=node_identity)
     post = create_post(db, board, user, "Hello", "World")
     queue_board_post_if_linked(db, post, board, node_identity=node_identity)

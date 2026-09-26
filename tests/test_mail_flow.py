@@ -663,7 +663,7 @@ def _link_context_with_known_peer(
             descriptor=descriptor,
         ),
     )
-    return LinkContext(node_identity=node_identity, link_node=LinkNode(identity=node_identity))
+    return LinkContext(link_node=LinkNode(identity=node_identity))
 
 
 def test_compose_sends_a_link_message_to_a_remote_address(tmp_path):
@@ -742,7 +742,7 @@ def test_compose_prompt_mentions_link_address_option_when_link_context_given(tmp
     db = Database(db_path)
     alice = create_user(db, "alice", password="hunter2pw", user_level=10)
     node_identity = bootstrap_node_identity("roanoke")
-    link_context = LinkContext(node_identity=node_identity, link_node=LinkNode(identity=node_identity))
+    link_context = LinkContext(link_node=LinkNode(identity=node_identity))
 
     session = FakeSession(keys=["c", "b"], lines=[""])
     lane = DatabaseLane(db_path)
@@ -758,7 +758,7 @@ def test_compose_rejects_a_link_address_for_a_node_never_seen(tmp_path):
     db = Database(db_path)
     alice = create_user(db, "alice", password="hunter2pw", user_level=10)
     node_identity = bootstrap_node_identity("roanoke")
-    link_context = LinkContext(node_identity=node_identity, link_node=LinkNode(identity=node_identity))
+    link_context = LinkContext(link_node=LinkNode(identity=node_identity))
 
     session = FakeSession(keys=["c", "s", "c", "b"], lines=["bob@neverseenfingerprint", "Hello", "World", ""])
     lane = DatabaseLane(db_path)

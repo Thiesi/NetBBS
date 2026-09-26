@@ -592,6 +592,33 @@ If you also run the managed-DNS service itself, `[managed_dns] admin_token` in
 registrations as a table, each in full, and revocation with a reason and a
 typed-name confirmation. `services/managed_dns/README.md` §8 is the runbook.
 
+### Node keys
+
+Your node's **Technical identity** is its root key and never changes. Day to
+day it signs with an operational *signing key* and connects live with a
+*transport key*, and either can be replaced without changing the node's
+address or reputation. **Link status → Keys** shows both keys and their
+history. **Signing key** and **Transport key** each offer two ways to
+replace the key:
+
+- **Rotate** retires the old key. Everything it signed stays valid, so peers
+  notice nothing except that new content carries the new key. Use this for
+  routine replacement.
+- **Compromised** is for a key you believe someone else holds. Peers stop
+  trusting anything that key ever signed, and your node signs its own boards,
+  posts, files and mail again under the new key. Nodes that already copied
+  your content keep their copies. A node fetching your older content from one
+  of them skips it and gets it from yours instead.
+
+Replacing the transport key ends every live chat session at once. Peers
+reconnect on their own, but a caller watching a channel linked from another
+node is told the live link dropped and gets it back by re-entering the
+channel. To act with the node stopped, run `python -m
+netbbs.admin rotate-key signing` (or `transport`), adding `--compromised`
+where it applies and `--identity-dir` if yours is not the default. It refuses
+while the node is running. Back up the node after a rotation: an older backup
+restores the old key.
+
 ## MRC chat bridge
 
 MRC is a separate, public inter-BBS chat network. It is not NetBBS Link and
@@ -834,6 +861,7 @@ DNS registration, or backups is a separate, deliberate operator action.
 | --- | --- |
 | Service will not start | Read service output; check config paths, file permissions, selected interpreter, extras, and port conflicts. Do not treat a zero exit status alone as a working listener. |
 | A caller forgot their password, or you are locked out | Set a new password from the account's detail screen (**Password**), or run `python -m netbbs.admin reset-password USERNAME` on the host. Nothing recovers the old one. |
+| You think `signing.identity` or `transport.identity` leaked | Replace that key as **Compromised** under **Link status → Keys**, or with `python -m netbbs.admin rotate-key signing --compromised` while the node is stopped. The address and reputation stay; see [Node keys](#node-keys). If `root.identity` leaked too, as it does with a whole copied identity directory or backup, rotation is no remedy: the holder can authorize keys of their own, and only a new node identity ends that. |
 | SSH import fails on NetBSD | Check pkgsrc libraries and `LD_LIBRARY_PATH`; see installation above. |
 | Caller cannot log in | Check maintenance mode, pending approval, disabled account, and login throttling before resetting credentials. |
 | Caller can read but cannot contribute | Check write/join gates, age/name attestations, moderator grants, and inherited Community settings. |

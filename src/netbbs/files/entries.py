@@ -18,9 +18,10 @@ Moderated-area approval and the maintenance/expiry state machine
 (design doc §13/§15) mirror
 `netbbs.boards.posts`'s treatment structurally — see that
 module's docstring for the fuller reasoning, not repeated here. One
-real difference: `get_file_by_name` is a second unbounded lookup path
-(besides `get_file`) that posts don't have an equivalent of, so it
-gets its own pending-visibility check — see that function's docstring.
+real difference: expired files have a SysOp recovery listing
+(`list_expired_files`) that posts have no equivalent of, because a
+file's bytes are unrecoverable once the grace period ends and a post's
+text is not an artifact anyone recovers (design doc §5.3, issue #639).
 """
 
 from __future__ import annotations
@@ -227,80 +228,18 @@ def get_file(db: Database, file_id: str) -> FileEntry:
     `'pending'` file this way requires already knowing its exact
     `file_id`, which isn't discoverable through any listing a
     non-uploader, non-moderator would see.
+
+    Returning an `'expired'` row is a statement about the domain, not a
+    promise to callers (design doc §5.3, issue #639): expiry ends a
+    caller's reach, and what still resolves an expired file is SysOp
+    recovery (`list_expired_files`) and the transfer path serving it.
+    A caller-facing screen must not use this to put an expired file back
+    in front of someone.
     """
     row = db.connection.execute("SELECT * FROM files WHERE file_id = ?", (file_id,)).fetchone()
     if row is None:
         raise FileEntryError(f"no such file: {file_id!r}")
     return _row_to_file_entry(row)
-
-
-def get_file_by_name(
-    db: Database, area: FileArea, filename: str, *, requesting_user: User | None = None
-) -> FileEntry | None:
-    """
-    Look up a file in `area` by its exact stored `filename` — added
-    alongside `list_files_page` so a file that isn't on the *currently
-    displayed* page can still be referenced by name. Pagination bounds
-    what's fetched for browsing; it was never meant to bound what can be
-    *referenced by name*, and the previous, unbounded `list_files`
-    happened to make that distinction invisible since the full listing
-    was always in memory anyway.
-
-    No terminal screen reaches this any more: it existed for the file
-    area's `/download <filename>` command, and that screen is now
-    keystrokes only (design doc §3.5), resolving a file from the cursor,
-    the page or a picker and reaching another page's file through
-    `[F]ind`. The by-name lookup and its pending rule stay as this
-    module's answer to "which file is called this", which
-    `netbbs.net.file_transfer._may_see_pending` still cites as
-    canonical.
-
-    `filename` is not unique within an area (unlike `file_id`) — two
-    uploads can share a name (e.g. re-uploads/versions). Returns the
-    *oldest* match, preserving exactly the tie-breaking behavior the
-    old in-memory `next(entry for entry in files if entry.filename ==
-    filename)` scan had, which always saw entries oldest-first.
-
-    Unlike `get_file`, this path is reachable by anyone who merely
-    knows (or guesses) a filename — a real, practical route to a
-    `'pending'` file, not the theoretical one `get_file`/`get_post`
-    accept. So a `'pending'` match is only returned to its uploader or
-    a holder of `BoardPermission.APPROVE` on `area`; passing no
-    `requesting_user` treats it the same as an unauthorized one, the
-    safe default. `'expired'` matches
-    are always returned — expiry is a delisting, not an access
-    restriction (see `netbbs.boards.posts`'s equivalent treatment).
-    """
-    row = db.connection.execute(
-        """
-        SELECT * FROM files
-        WHERE area_id = ? AND filename = ?
-        ORDER BY created_at ASC, file_id ASC
-        LIMIT 1
-        """,
-        (area.id, filename),
-    ).fetchone()
-    if row is None:
-        return None
-
-    entry = _row_to_file_entry(row)
-    if entry.status == "pending" and not _can_view_pending(db, entry, requesting_user):
-        return None
-    return entry
-
-
-def _can_view_pending(db: Database, entry: FileEntry, requesting_user: User | None) -> bool:
-    if requesting_user is None:
-        return False
-    if requesting_user.id == entry.uploader_user_id:
-        return True
-    return has_permission(
-        db,
-        requesting_user,
-        object_type="file_area",
-        object_id=entry.area_id,
-        permission=BoardPermission.APPROVE,
-    )
 
 
 _DEFAULT_PAGE_SIZE = 5
@@ -354,10 +293,12 @@ def list_files_page(
     Only `status = 'approved'` entries are ever included here (mirroring
     `netbbs.boards.posts`'s treatment) —
     `'pending'` files belong to the moderation queue
-    (`list_pending_files`), and `'expired'` files are delisted from
-    normal browsing though still individually reachable (see
-    `get_file`/`get_file_by_name`). Sweeps the area's own files for
-    expiry/deletion first (`_sweep_expired_files`).
+    (`list_pending_files`), and `'expired'` files are gone as far as a
+    caller is concerned (design doc §5.3, issue #639) -- no caller
+    screen reaches one, by name or otherwise. What remains of them is
+    the SysOp's recovery listing (`list_expired_files`) until the grace
+    period ends. Sweeps the area's own files for expiry/deletion first
+    (`_sweep_expired_files`).
     """
     require_level(requesting_user, area.min_read_level)
     if before is not None and after is not None:
@@ -685,6 +626,54 @@ def list_pending_files(db: Database, area: FileArea, *, requesting_user: User) -
             (area.id, requesting_user.id),
         ).fetchall()
     return [_row_to_file_entry(row) for row in rows]
+
+
+def list_expired_files(db: Database, area: FileArea, *, requesting_user: User) -> list[FileEntry]:
+    """
+    SysOp recovery (design doc §5.3, issue #639): every file in `area`
+    that has expired but not yet been purged, oldest first. An expired
+    file's bytes survive in storage until the grace period ends, and this
+    is how they are reached without shell access -- the only listing of
+    expired rows there is, since expiry ends a *caller's* reach.
+
+    Requires `BoardPermission.APPROVE` on `area`, the permission the
+    pending queue's full view and the transfer path's recovery rule
+    (`netbbs.net.file_transfer`) already key on. Unlike
+    `list_pending_files` there is no own-uploads view for everyone
+    else: an uploader whose file expired has lost it the same as every
+    other caller has.
+
+    Sweeps first, so a file that expired since the area was last listed
+    is here and one whose grace period has ended is not. Not
+    cursor-paginated: the grace period bounds how long a row stays, the
+    same reasoning `list_pending_files` gives for the moderation queue.
+    """
+    if not has_permission(
+        db, requesting_user, object_type="file_area", object_id=area.id, permission=BoardPermission.APPROVE
+    ):
+        raise FileEntryError(
+            f"{requesting_user.username!r} does not hold APPROVE permission on this area"
+        )
+    _sweep_expired_files(db, area)
+    rows = db.connection.execute(
+        "SELECT * FROM files WHERE area_id = ? AND status = 'expired' ORDER BY created_at, file_id",
+        (area.id,),
+    ).fetchall()
+    return [_row_to_file_entry(row) for row in rows]
+
+
+def expired_file_purge_at(db: Database, area: FileArea, entry: FileEntry) -> str | None:
+    """When `_sweep_expired_files` will delete `entry`'s row, as a UTC
+    ISO timestamp -- the deadline the SysOp's recovery screen shows --
+    or `None` when no sweep will: the area has no maximum file age any
+    more, or the file was exempted after it expired."""
+    if area.max_file_age_days is None or entry.exempt_from_expiry:
+        return None
+    created = datetime.datetime.fromisoformat(entry.created_at)
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=datetime.timezone.utc)
+    purge = created + datetime.timedelta(days=area.max_file_age_days + get_expiry_grace_period_days(db))
+    return purge.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
 def list_pinned_files(db: Database, area: FileArea, *, requesting_user: User) -> list[FileEntry]:

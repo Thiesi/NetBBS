@@ -32,7 +32,7 @@ from pathlib import Path
 
 import nacl.signing
 
-from netbbs.identity.keys import Identity, IdentityError, IdentityKind
+from netbbs.identity.keys import Identity, IdentityError, IdentityKind, fingerprint_from_verify_key
 from netbbs.link.events import KeyTransition, build_key_transition, verify_key_transition
 from netbbs.timeutil import utc_now_iso
 
@@ -40,6 +40,13 @@ _ROOT_FILENAME = "root.identity"
 _SIGNING_FILENAME = "signing.identity"
 _TRANSPORT_FILENAME = "transport.identity"
 _TRANSITIONS_FILENAME = "transitions.json"
+# Issue #624: a rotation writes the replacement key here first and moves it
+# into place only after `transitions.json` names it, so a crash at any
+# point leaves a directory `load` can finish or discard (see `save_rotation`).
+_NEXT_SUFFIX = ".next"
+# Retired signing keys, kept for one purpose: opening Link mail a peer sealed
+# to this node's previous key before it learned the new one.
+_RETIRED_DIRNAME = "retired"
 
 
 class NodeIdentityError(Exception):
@@ -64,6 +71,11 @@ class NodeIdentity:
     signing_key: Identity
     transport_key: Identity
     transitions: tuple[KeyTransition, ...]
+    # Issue #624: every signing key this node has rotated away from, oldest
+    # first. Never used to sign. A peer seals Link mail to whatever signing
+    # key it last learned, so mail composed before it heard of a rotation
+    # arrives sealed to one of these (`netbbs.link.mail`).
+    retired_signing_keys: tuple[Identity, ...] = ()
 
     @property
     def fingerprint(self) -> str:
@@ -91,6 +103,56 @@ class NodeIdentity:
         self.root.save(directory / _ROOT_FILENAME, passphrase=passphrase)
         self.signing_key.save(directory / _SIGNING_FILENAME, passphrase=passphrase)
         self.transport_key.save(directory / _TRANSPORT_FILENAME, passphrase=passphrase)
+        self._save_retired(directory, passphrase=passphrase)
+        self._write_transitions(directory)
+
+    def save_rotation(self, directory: Path, *, purpose: str, passphrase: bytes | None = None) -> None:
+        """Persist this identity after `rotate_operational_key` produced it (issue #624).
+
+        `save` writes the key files and then the chain, so a crash between
+        the two leaves a directory `load` refuses: the chain names one key
+        and the disk holds another, and the node cannot start. A rotation
+        cannot take that risk on a node that is already running, so it
+        journals instead. The new key goes to `<file>.next`, then the chain
+        is replaced -- the commit point -- and only then is the key moved
+        into place. `load` finishes a rotation it finds half done and
+        discards one that never reached the chain.
+
+        Raises only before the commit point, so a caller that sees no
+        exception must treat the rotation as done.
+
+        The key being retired is kept first (signing only), since a crash
+        after the commit must not lose the one key that opens mail already
+        on its way.
+        """
+        if purpose not in ("signing", "transport"):
+            raise NodeIdentityError(f"invalid operational key purpose: {purpose!r}")
+        self._save_retired(directory, passphrase=passphrase)
+        filename = _SIGNING_FILENAME if purpose == "signing" else _TRANSPORT_FILENAME
+        new_key = self.signing_key if purpose == "signing" else self.transport_key
+        staged = directory / (filename + _NEXT_SUFFIX)
+        new_key.save(staged, passphrase=passphrase)
+        self._write_transitions(directory)
+        try:
+            staged.replace(directory / filename)
+        except OSError:
+            # Past the commit point: the chain already names the new key and
+            # `load` moves the staged file into place. Raising here would
+            # tell the caller nothing changed while the disk says otherwise,
+            # and a running node would keep the key its own chain revoked.
+            pass
+
+    def _save_retired(self, directory: Path, *, passphrase: bytes | None) -> None:
+        if not self.retired_signing_keys:
+            return
+        retired_dir = directory / _RETIRED_DIRNAME
+        retired_dir.mkdir(parents=True, exist_ok=True)
+        for index, key in enumerate(self.retired_signing_keys):
+            path = retired_dir / f"signing-{index:04d}.identity"
+            if not path.exists():
+                key.save(path, passphrase=passphrase)
+
+    def _write_transitions(self, directory: Path) -> None:
         transitions_path = directory / _TRANSITIONS_FILENAME
         tmp_path = transitions_path.with_suffix(transitions_path.suffix + ".tmp")
         tmp_path.write_text(json.dumps([t.to_dict() for t in self.transitions], indent=2))
@@ -109,14 +171,13 @@ class NodeIdentity:
         files and `transitions.json`), the same "fail loudly rather than
         silently operate under the wrong key" stance `Identity.load`'s
         own fingerprint check already takes.
-        """
-        try:
-            root = Identity.load(directory / _ROOT_FILENAME, passphrase=passphrase)
-            signing_key = Identity.load(directory / _SIGNING_FILENAME, passphrase=passphrase)
-            transport_key = Identity.load(directory / _TRANSPORT_FILENAME, passphrase=passphrase)
-        except (IdentityError, OSError) as exc:
-            raise NodeIdentityError(f"could not load node identity from {directory}: {exc}") from exc
 
+        Read-only: an interrupted `save_rotation` (issue #624) is resolved in
+        memory -- the staged key used when the chain already names it,
+        ignored when it does not -- and left on disk for
+        `finish_interrupted_rotation`. A backup's identity directory is
+        validated through here and must stay byte-identical.
+        """
         transitions_path = directory / _TRANSITIONS_FILENAME
         try:
             raw = json.loads(transitions_path.read_text())
@@ -124,7 +185,27 @@ class NodeIdentity:
             raise NodeIdentityError(f"could not read transition history at {transitions_path}: {exc}") from exc
         transitions = tuple(KeyTransition.from_dict(item) for item in raw)
 
-        identity = cls(root=root, signing_key=signing_key, transport_key=transport_key, transitions=transitions)
+        try:
+            root = Identity.load(directory / _ROOT_FILENAME, passphrase=passphrase)
+            operational = {
+                purpose: _load_operational(directory, filename, purpose, root, transitions, passphrase)
+                for purpose, filename in (("signing", _SIGNING_FILENAME), ("transport", _TRANSPORT_FILENAME))
+            }
+            retired_dir = directory / _RETIRED_DIRNAME
+            retired = tuple(
+                Identity.load(path, passphrase=passphrase)
+                for path in sorted(retired_dir.glob("signing-*.identity"))
+            ) if retired_dir.is_dir() else ()
+        except (IdentityError, OSError) as exc:
+            raise NodeIdentityError(f"could not load node identity from {directory}: {exc}") from exc
+
+        signing_key = operational["signing"]
+        identity = cls(
+            root=root, signing_key=signing_key, transport_key=operational["transport"], transitions=transitions,
+            # A rotation that crashed before its commit kept the key it was
+            # about to retire, which is still the current one.
+            retired_signing_keys=tuple(k for k in retired if k.fingerprint != signing_key.fingerprint),
+        )
         identity._verify_operational_keys_match_chain()
         return identity
 
@@ -144,6 +225,45 @@ class NodeIdentity:
                     f"{held_b64!r}) -- refusing to load a possibly-tampered-with or "
                     "inconsistently-saved node identity"
                 )
+
+
+def _load_operational(
+    directory: Path, filename: str, purpose: str, root: Identity,
+    transitions: tuple[KeyTransition, ...], passphrase: bytes | None,
+) -> Identity:
+    """One operational key file, preferring a staged rotation the chain already names."""
+    path = directory / filename
+    staged = directory / (filename + _NEXT_SUFFIX)
+    if staged.exists():
+        candidate = Identity.load(staged, passphrase=passphrase)
+        current = resolve_current_operational_key(
+            transitions, root_verify_key=root.verify_key,
+            subject_fingerprint=root.fingerprint, purpose=purpose,
+        )
+        if current == base64.b64encode(bytes(candidate.verify_key)).decode("ascii"):
+            return candidate
+    return Identity.load(path, passphrase=passphrase)
+
+
+def finish_interrupted_rotation(directory: Path, identity: NodeIdentity) -> None:
+    """Make the directory match `identity`, as `NodeIdentity.load` resolved it.
+
+    Moves a staged key the chain names into place and deletes one it does
+    not. Called where the directory belongs to the node itself: at startup
+    (`load_or_bootstrap_node_identity`) and before an offline rotation. Never
+    on a backup, whose validation must not change it.
+    """
+    for filename, key in (
+        (_SIGNING_FILENAME, identity.signing_key), (_TRANSPORT_FILENAME, identity.transport_key)
+    ):
+        staged = directory / (filename + _NEXT_SUFFIX)
+        if not staged.exists():
+            continue
+        # Compared by public key, so an encrypted staged file needs no passphrase.
+        if json.loads(staged.read_text()).get("fingerprint") == key.fingerprint:
+            staged.replace(directory / filename)
+        else:
+            staged.unlink()
 
 
 def bootstrap_node_identity(label: str) -> NodeIdentity:
@@ -198,22 +318,29 @@ def load_or_bootstrap_node_identity(
     "auto-generate silently at first node bootstrap").
     """
     if (directory / _ROOT_FILENAME).exists():
-        return NodeIdentity.load(directory, passphrase=passphrase)
+        identity = NodeIdentity.load(directory, passphrase=passphrase)
+        finish_interrupted_rotation(directory, identity)
+        return identity
     identity = bootstrap_node_identity(label)
     identity.save(directory, passphrase=passphrase)
     return identity
 
 
-def rotate_operational_key(identity: NodeIdentity, *, purpose: str) -> NodeIdentity:
+def rotate_operational_key(identity: NodeIdentity, *, purpose: str, compromised: bool = False) -> NodeIdentity:
     """
-    Rotate `purpose`'s operational key (design doc: "rotation
-    is a single guided admin-menu/CLI action") — generates a fresh
+    Rotate `purpose`'s operational key (design doc §4.5: "Rotation is a
+    guided SysOp action") — generates a fresh
     operational key, revokes the current one and authorizes the new one
     via two chained `key_transition` events (both signed by the root,
     both created in this one call), and returns a new `NodeIdentity`
     with the updated operational key and extended transition history.
-    Does not save to disk itself — callers (the eventual admin command)
-    call `.save()` on the result.
+    Does not save to disk itself — callers (`netbbs.link.key_rotation`)
+    call `.save_rotation()` on the result.
+
+    `compromised` marks the revoke (issue #624): peers then stop believing
+    anything the old key signed, where a routine rotation leaves its past
+    signatures valid. A retired signing key is kept on the result for
+    opening mail already sealed to it, either way.
 
     The revoke-then-authorize pair is deliberately two events, not one
     combined "rotate" event type — matches the design doc's own wording
@@ -241,6 +368,7 @@ def rotate_operational_key(identity: NodeIdentity, *, purpose: str) -> NodeIdent
         operational_key=current_key.verify_key,
         previous_transition_id=head_id,
         created_at=created_at,
+        compromised=compromised,
     )
     authorize = build_key_transition(
         root=identity.root,
@@ -253,7 +381,10 @@ def rotate_operational_key(identity: NodeIdentity, *, purpose: str) -> NodeIdent
 
     new_transitions = identity.transitions + (revoke, authorize)
     if purpose == "signing":
-        return replace(identity, signing_key=new_key, transitions=new_transitions)
+        return replace(
+            identity, signing_key=new_key, transitions=new_transitions,
+            retired_signing_keys=identity.retired_signing_keys + (current_key,),
+        )
     return replace(identity, transport_key=new_key, transitions=new_transitions)
 
 
@@ -365,6 +496,96 @@ def superseded_operational_keys(
         if transition.payload["action"] == "authorize" and key != current and key not in seen:
             seen.append(key)
     return seen
+
+
+@dataclass(frozen=True)
+class OperationalKeyRecord:
+    """One key a chain has authorized, and what became of it (issue #624)."""
+
+    key_b64: str
+    authorized_at: str
+    revoked_at: str | None
+    compromised: bool
+
+    @property
+    def status(self) -> str:
+        """`current`, `retired` (past signatures still valid) or `compromised`."""
+        if self.compromised:
+            return "compromised"
+        return "current" if self.revoked_at is None else "retired"
+
+    @property
+    def fingerprint(self) -> str:
+        return fingerprint_from_verify_key(nacl.signing.VerifyKey(base64.b64decode(self.key_b64)))
+
+
+def operational_key_history(
+    transitions: tuple[KeyTransition, ...],
+    *,
+    root_verify_key: nacl.signing.VerifyKey,
+    subject_fingerprint: str,
+    purpose: str,
+) -> list[OperationalKeyRecord]:
+    """Every key the verified chain authorized for `purpose`, oldest first.
+
+    A key is compromised when *any* revoke of it says so, including one
+    issued long after a routine retirement: a SysOp who learns late that an
+    old key leaked can still withdraw belief in what it signed.
+    """
+    ordered = _verify_and_order_chain(
+        transitions, root_verify_key=root_verify_key, subject_fingerprint=subject_fingerprint, purpose=purpose
+    )
+    records: dict[str, OperationalKeyRecord] = {}
+    for transition in ordered:
+        payload = transition.payload
+        key = payload["operational_key"]
+        if payload["action"] == "authorize":
+            if key not in records:
+                records[key] = OperationalKeyRecord(key, payload["created_at"], None, False)
+            elif records[key].revoked_at is not None and not records[key].compromised:
+                # Re-authorizing a retired key makes it current again; a
+                # compromised one stays compromised whatever follows.
+                records[key] = replace(records[key], revoked_at=None)
+        elif key in records:
+            record = records[key]
+            records[key] = replace(
+                record,
+                revoked_at=record.revoked_at or payload["created_at"],
+                compromised=record.compromised or bool(payload.get("compromised")),
+            )
+    return list(records.values())
+
+
+def verifying_operational_keys(
+    transitions: tuple[KeyTransition, ...],
+    *,
+    root_verify_key: nacl.signing.VerifyKey,
+    subject_fingerprint: str,
+    purpose: str,
+) -> list[str]:
+    """The keys whose signatures on long-lived content still count (issue #624).
+
+    The current key first, then every key the chain retired without calling
+    it compromised, newest first. Design doc §4.5 promises that historical
+    signatures remain verifiable by walking the chain back to the root; this
+    is that walk. What is signed fresh for one exchange -- a hello, a
+    request, a withdrawal -- and what a node re-issues on rotation (trust
+    objects, attestations) keeps checking the current key alone.
+    """
+    history = operational_key_history(
+        transitions, root_verify_key=root_verify_key,
+        subject_fingerprint=subject_fingerprint, purpose=purpose,
+    )
+    current = [r.key_b64 for r in history if r.status == "current"]
+    retired = [r.key_b64 for r in reversed(history) if r.status == "retired"]
+    # `resolve_current_operational_key` is the authority on which key is
+    # current; this list only ever agrees with it.
+    resolved = resolve_current_operational_key(
+        transitions, root_verify_key=root_verify_key,
+        subject_fingerprint=subject_fingerprint, purpose=purpose,
+    )
+    head = [resolved] if resolved is not None else []
+    return head + [k for k in current + retired if k != resolved]
 
 
 def resolve_current_operational_key(

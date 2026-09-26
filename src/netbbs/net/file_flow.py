@@ -782,7 +782,7 @@ async def _show_area(
     number key `1`-`5` names one directly. A file on *another* page is
     reached through `[F]ind` (`netbbs.net.scan_and_find`), which enters
     this area positioned on that file; `/download <filename>`'s
-    area-wide `get_file_by_name` lookup is what that replaced.
+    area-wide by-name lookup is what that replaced.
 
     `[E]` (issue #463) edits a file's description in the caller's own
     editor. Offered only when this caller could actually use it on
@@ -2327,7 +2327,7 @@ async def send_file_to_caller(
     # Takes the entry the caller actually chose -- a number key, Enter
     # on the cursor, or `_choose_entry`'s picker -- rather than a
     # filename to look up again. While `/download <filename>` existed
-    # this re-read the area by name (`get_file_by_name`) because the
+    # this re-read the area by name (a lookup since removed) because the
     # name was all the screen had; a filename is not unique within an
     # area, so that lookup could hand back a different row than the one
     # under the cursor. Every caller now holds the row itself, and one

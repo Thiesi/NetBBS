@@ -360,6 +360,12 @@ class NodeControls:
     # standalone CLI and typed `Any` for the same import-graph reason as
     # `mrc_bridge` above.
     presence: Any = None
+    # Issue #624: the running node's `netbbs.link.key_rotation.KeyRotator`,
+    # which swaps a rotated key into everything live. `None` from the
+    # standalone CLI, which rotates through `python -m netbbs.admin
+    # rotate-key` on a stopped node instead, and typed `Any` for the same
+    # import-graph reason as `mrc_bridge` above.
+    key_rotation: Any = None
 
 
 async def run_shutdown_sequence(

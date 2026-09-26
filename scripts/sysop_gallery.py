@@ -132,7 +132,7 @@ def link_context():
 
     identity = bootstrap_node_identity("roanoke")
     return LinkContext(
-        node_identity=identity, link_node=LinkNode(identity=identity),
+        link_node=LinkNode(identity=identity),
         link_config=LinkConfigSnapshot(
             outgoing_only=False, advertised_host="roanoke.example", advertised_port=7862,
             seeds=("http://seed.example:7862",), sync_interval_seconds=60.0, relay_serving_enabled=True,
