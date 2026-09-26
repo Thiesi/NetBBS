@@ -80,8 +80,8 @@ class DoorProfile:
     def validate(self) -> DoorProfile:
         if type(self.version) is not int or self.version != 1:
             raise ProfileError("unsupported door profile version")
-        if self.adapter not in ("native", "dosbox", "rlogin"):
-            raise ProfileError("adapter must be native, dosbox, or rlogin")
+        if self.adapter not in ("native", "dosbox", "rlogin", "vm"):
+            raise ProfileError("adapter must be native, dosbox, rlogin, or vm")
         if self.endpoint not in ("stdio", "pty", "socketpair"):
             raise ProfileError("endpoint must be stdio, pty, or socketpair")
         if self.encoding not in ("utf-8", "cp437", "raw"):
@@ -157,6 +157,12 @@ class DoorProfile:
             try:
                 validate_remote(self)
             except (ValueError, OSError) as exc:
+                raise ProfileError(str(exc)) from exc
+        if self.adapter == "vm":
+            from netbbs.doors.vm import validate_vm
+            try:
+                validate_vm(self)
+            except ValueError as exc:
                 raise ProfileError(str(exc)) from exc
         return self
 
@@ -259,7 +265,10 @@ def preflight(door, session=None) -> list[str]:
                 else:
                     if driver.upper() not in names:
                         problems.append(f"Missing FOSSIL driver {driver}; obtain it legally and install it outside NetBBS.")
-        if os.name != "posix" and (profile.endpoint != "stdio" or profile.adapter == "dosbox"):
+        if profile.adapter == "vm":
+            from netbbs.doors.vm import preflight_vm
+            problems.extend(preflight_vm(profile, door.executable_path))
+        if os.name != "posix" and (profile.endpoint != "stdio" or profile.adapter in ("dosbox", "vm")):
             problems.append("This profile requires POSIX (NetBSD/Linux); Windows is development-only.")
         if (session is not None and getattr(session, "_door_stream", None) is None and profile.width
                 and (session.terminal_width < profile.width or session.terminal_height < profile.height)):

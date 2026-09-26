@@ -14,6 +14,7 @@ import os
 import secrets
 import shutil
 import signal
+import socket
 import sqlite3
 import sys
 import tempfile
@@ -553,6 +554,9 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
     stop_grace = profile.stop_grace_seconds if profile else DOOR_STOP_GRACE_SECONDS
     start = time.monotonic()
     proc = endpoint = lease = child_socket = None
+    # A VM door's control channel (issue #474): the parent end asks the guest
+    # to power down; the child end is qemu's, closed here once it is spawned.
+    qmp_socket = qmp_child = None
     slave = workdir = None
     diagnostic_tasks = []
     resize_task = None
@@ -600,6 +604,9 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
                 endpoint, child_socket = socket_endpoint()
                 pass_fds = (child_socket.fileno(),)
                 stdin = asyncio.subprocess.DEVNULL
+                if profile and profile.adapter == "vm":
+                    qmp_socket, qmp_child = socket.socketpair()
+                    pass_fds += (qmp_child.fileno(),)
             elif kind == "pty":
                 endpoint, slave = pty_endpoint(width, height)
                 stdin = stdout = slave
@@ -627,6 +634,11 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
                     argv, dos_env = prepare_dosbox(door, workdir, child_socket.fileno(), lease.number)
                     env.update(dos_env)
                     cwd = workdir
+                elif profile.adapter == "vm":
+                    from netbbs.doors.vm import prepare_vm
+                    argv = prepare_vm(door, workdir, lease.number, width, height,
+                                      child_socket.fileno(), qmp_child.fileno())
+                    cwd = workdir
                 if profile.runner:
                     argv = [*profile.runner, *argv]
             if os.name == "posix":
@@ -650,6 +662,9 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
             if child_socket:
                 child_socket.close()
                 child_socket = None
+            if qmp_child:
+                qmp_child.close()
+                qmp_child = None
             if slave is not None:
                 os.close(slave)
                 slave = None
@@ -658,6 +673,10 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
             elif kind == "socketpair":
                 diagnostic_tasks.append(asyncio.create_task(_diagnostics(proc.stdout, tail)))
             diagnostic_tasks.append(asyncio.create_task(_diagnostics(proc.stderr, tail)))
+            if profile and profile.adapter == "vm":
+                from netbbs.doors.vm import options as vm_options, watch_boot
+                diagnostic_tasks.append(asyncio.create_task(watch_boot(
+                    workdir, proc, vm_options(profile)["boot_timeout_seconds"], tail)))
             mode = resize_mode(profile, kind, bundled_follows_resize=vouched)
             if os.name == "posix" and mode is not None:
                 resize_task = asyncio.create_task(_forward_resize(
@@ -679,6 +698,10 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
                     if failed or "RETURN.OK" not in names:
                         exit_code = 1
                         tail.extend(b"DOS command failed or did not return through the configured launcher.\n")
+                elif profile and profile.adapter == "vm" and exit_code == 0:
+                    from netbbs.doors.vm import guest_exit_code
+                    exit_code, problem = guest_exit_code(profile, workdir)
+                    tail.extend(problem.encode())
                 reason = "exited" if exit_code == 0 else "crashed"
                 # A capability probe's success includes its wire assertions,
                 # not merely the emulator's exit code. Persist one final verdict.
@@ -727,6 +750,14 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
                     drains.append(asyncio.create_task(_discard_output(proc.stdout)))
                 if proc.stderr is not None and not diagnostic_tasks:
                     drains.append(asyncio.create_task(_discard_output(proc.stderr)))
+            if qmp_socket is not None and proc is not None:
+                # Before the group is signalled: qemu exits on SIGTERM without
+                # telling its guest, so the game would never hear the hangup.
+                from netbbs.doors.vm import power_down
+                try:
+                    await power_down(qmp_socket, proc, stop_grace)
+                except Exception as exc:
+                    errors.append(exc)
             for operation in (lambda: _stop_process(proc, stop_grace) if proc is not None else None,
                               lambda: asyncio.gather(*drains),
                               lambda: endpoint.close() if endpoint is not None else None):
@@ -740,6 +771,9 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
                 exit_code = proc.returncode
             if child_socket:
                 child_socket.close()
+            for sock in (qmp_socket, qmp_child):
+                if sock is not None:
+                    sock.close()
             if slave is not None:
                 os.close(slave)
             for task in diagnostic_tasks:

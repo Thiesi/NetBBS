@@ -20,6 +20,7 @@ program. NetBBS does not download games, obtain licenses, or install emulators.
 - [Allow a door to post](#letting-a-door-post-to-a-board)
 - [DOS prerequisites](#dos-prerequisites), [LORD](#lord-407-dos),
   [Global War](#global-war-27-dos), [TradeWars](#tradewars-2002-309-dos)
+- [Foreign-platform doors in a VM](#foreign-platform-doors-in-a-vm)
 - [Remote services](#remote-services-tunnel-first)
 - [War Dialer maintenance and recovery](#war-dialer-shared-world-sessions)
 - [Voidrunner saves and recovery](#voidrunner-careers-and-concurrent-sessions)
@@ -347,6 +348,7 @@ not configure a scheduler, remote storage, or automatic deletion.
 | Global War 2.7 DOS demo | DOSBox-X built-in UART | NetBSD game creation; NetBSD/Debian saved waiting-game re-entry and normal quit; a full three-player match is not certified |
 | TradeWars 2002 3.09 DOS demo | DOSBox-X + BNU 1.70 | NetBSD player/ship/planet creation; NetBSD/Debian persistent universe re-entry and normal quit |
 | Remote RFC 1282 | Operator-run SSH/TLS tunnel, provider access | Real loopback handshake tests; live third-party accounts not certified |
+| Foreign-platform VM | External qemu 11.1 + the SysOp's guest image | NetBSD 11 amd64 (itself a VMware guest), `tcg`, recipe Alpine guest: capability probe, and Amiga Empire 0.13.1 (Linux x86_64, static) player creation, persistent re-entry, normal quit and caller hangup. `nvmm`/`kvm` and other guests are not certified; the runtime contract is tested against a fake qemu on every host |
 
 On both NetBSD and Debian, native and DOS serial fixtures pass over real Telnet, SSH and
 WebSocket connections, including return to the menu. The DOS fixture also
@@ -390,6 +392,10 @@ The environment and drop files do not disclose these secrets, but that is
 not a security sandbox. Only install code you trust. Never accept executable
 doors uploaded by callers. CPU/memory/time/process limits are resource
 controls, not filesystem or network isolation.
+
+A [VM door](#foreign-platform-doors-in-a-vm) is the exception: it runs in a
+guest which sees only its installation and node directories, with no network.
+That boundary is the qemu build and guest image you provide, not NetBBS's.
 
 For DOS, only the game installation is mounted as `C:` and the private launch
 directory as `D:`. Secure mode follows those mounts; audio and network devices
@@ -608,7 +614,9 @@ about half a second, not instantly.
 verify its provenance/license, install it and any interpreter/runtime, and
 read its communications-mode instructions. A Linux ELF executable is not a
 NetBSD executable. Build from source on NetBSD or obtain a NetBSD build;
-NetBSD's optional Linux emulation is not a supported backend here.
+NetBSD's optional Linux emulation is not a supported backend here. A door that
+exists only for another platform can run in a
+[VM door](#foreign-platform-doors-in-a-vm) instead.
 
 Choose the matching native template:
 
@@ -1130,6 +1138,186 @@ return to TradeWars' own title menu. Choose `X`, then Enter, there to return
 to NetBBS. This final step is necessary; leaving the title menu open is still
 a running door. The verified row above covers a single-player evaluation
 smoke, not EXTERN scheduling, a licensed multi-node game or a long campaign.
+
+## Foreign-platform doors in a VM
+
+Some doors ship only for a platform your host is not: a Linux x86_64 binary
+with no NetBSD build and no source, say. The `vm` adapter runs such a door in a
+small virtual machine, one per caller, which qemu boots from a guest kernel and
+initramfs you build. The door sees a normal terminal inside the guest; NetBBS
+wires the caller to it through a single virtio console and nothing else.
+
+What the adapter guarantees, because NetBBS builds the whole qemu command line
+rather than taking one from the profile: no network (`-nic none`), no display,
+no host devices, no user configuration files, and exactly two directory
+exports -- the door's installation directory at `/mnt/game` and this caller's
+private node directory at `/mnt/node`. The guest gets one caller's session and
+is discarded when it ends.
+
+**What the boundary buys, and what it does not.** A guest cannot read NetBBS's
+database, keys or configuration, other doors' installations, or anything on the
+host outside those two exports; a native door can read all of them. That is a
+real isolation boundary *you provision and own*. It is not a NetBBS sandbox:
+
+- the installation export is writable by the guest, as the game's own data
+  must be. Keep it on its own directory tree with no symlinks out of it, and
+  nothing else in it;
+- qemu runs as the NetBBS service account, so a VM escape lands where a native
+  door already starts;
+- the guest kernel, userland and their patch level are yours. NetBBS ships a
+  recipe and a probe, not an image, and does not update it;
+- a hardware accelerator (`nvmm`, `kvm`) means granting the service account a
+  kernel hypervisor device. That is a privilege grant on the whole host, not a
+  per-door setting;
+- the door binary is exactly as trustworthy as before. The VM is what stops it
+  reaching the rest of the host.
+
+### VM prerequisites
+
+**MANUAL — outside NetBBS, NetBSD:** install qemu. Read the package plan before
+agreeing to it: on a host that has not been upgraded recently, `pkgin` may
+propose upgrading unrelated packages (databases, mail, DNS) along with qemu's
+dependencies.
+
+```sh
+sudo pkgin -n install qemu     # read the plan first
+sudo pkgin install qemu
+qemu-system-x86_64 --version
+```
+
+`accel` selects how the guest's CPU runs:
+
+- `tcg` (the default) is qemu's software emulation. It needs no kernel module
+  and no privilege, and works on any host, including one which is itself a
+  virtual machine. It is the slowest.
+- `nvmm` is NetBSD's hypervisor. It needs `modload nvmm`, a CPU and hypervisor
+  that expose the virtualization features it requires (it refuses to load as
+  `cpu not supported` on some virtualized hosts), and read/write access to
+  `/dev/nvmm` for the service account.
+- `kvm` is Linux's, with `/dev/kvm` access for the service account.
+
+Measured on a NetBSD 11 host that is itself a VMware guest (Xeon E5-2680 v4,
+where `nvmm` will not load), with the recipe guest below and `tcg`: the
+caller sees the door's first screen about 3.7-4.0 s after launch; an idle game
+costs about 3 % of one CPU; a hangup powers the guest down in under half a
+second for a door that exits on SIGHUP. Hardware acceleration is much faster.
+
+**Memory.** `memory_mb` is qemu's address-space ceiling on the host, not the
+guest's RAM (`guest_memory_mb`). qemu maps guest RAM twice and reserves more at
+startup, so NetBBS requires `memory_mb` of at least twice `guest_memory_mb`
+plus 512: 1024 for the default 256 MiB guest.
+
+**CPU.** Booting costs a few CPU-seconds under `tcg`. The template raises
+`cpu_seconds` to 600; raise it further for a game that computes heavily.
+
+### Build the guest
+
+**MANUAL — outside NetBBS:** `examples/doors/vm/build-alpine-guest.sh` builds a
+minimal x86_64 Linux guest from Alpine Linux's own packages: its `virt`
+kernel, a static BusyBox, the 9p modules and `examples/doors/vm/init` as the
+guest's PID 1. It installs nothing on the host.
+
+```sh
+sudo -u netbbs sh examples/doors/vm/build-alpine-guest.sh /var/games/netbbs/vm
+```
+
+That writes `/var/games/netbbs/vm/vmlinux` (the uncompressed kernel, which
+qemu boots directly -- noticeably faster under `tcg` than the compressed one)
+and `initrd.cpio`. Rebuild it to take Alpine's kernel updates; the image is
+yours to keep patched. A guest built any other way works if it honours the
+contract below.
+
+The recipe guest runs the door with a static BusyBox and nothing else, which
+suits a statically linked binary (the Free Pascal door that motivated this
+adapter is one). A door that needs a C library or other shared libraries needs
+them in the guest image, or in its installation directory with the door
+started through its own loader; that is part of building the guest.
+
+### The guest image contract
+
+Whatever you build, its init runs once per caller and must:
+
+1. mount the 9p export tagged `game` at `/mnt/game` and the one tagged `node`
+   at `/mnt/node` (`trans=virtio,version=9p2000.L`);
+2. open `/dev/hvc0` -- the caller's terminal -- and keep it open for the whole
+   session, set it raw with no echo, and size it from `/mnt/node/geometry`
+   (`rows cols`);
+3. create `/mnt/node/booted`. Until this file exists, NetBBS counts the
+   launch against `boot_timeout_seconds`, not the caller's time limit;
+4. run `sh /mnt/node/run.sh` with `/dev/hvc0` as its controlling terminal and
+   standard input, output and error;
+5. write the door's exit status, as a decimal number, to
+   `/mnt/node/exit.status`;
+6. sync, unmount and power off.
+
+When the caller hangs up, the time limit runs out or the node stops, NetBBS
+presses the guest's ACPI power button. The init must then send the door SIGHUP
+-- as if its modem had dropped carrier -- give it a few seconds, and continue
+with steps 5 and 6. After `stop_grace_seconds` NetBBS kills qemu regardless.
+
+Step 5 is what makes a crash visible. A program's exit code never leaves the
+guest on its own: qemu exits 0 whether the game finished or crashed. NetBBS
+reports a missing or unreadable `exit.status` as a failure, and compares the
+number against `success_exit_codes`.
+
+`run.sh` is written by NetBBS for each session. It exports `TERM=ansi`, the
+profile's `environment`, and `NETBBS_DOOR_INFO`, `NETBBS_DOOR_NODE` and
+`NETBBS_DOOR_NODE_DIR` with their guest paths, changes to `/mnt/game`, and
+execs the configured `command`.
+
+### Register a VM door
+
+Start from the `vm-linux.json` setup template and set:
+
+- **Executable/runtime path:** qemu itself, for example
+  `/usr/pkg/bin/qemu-system-x86_64`. The door binary lives in the
+  installation directory, not here.
+- **Persistent installation directory:** the game, installed with ordinary
+  file tools and readable, writable and searchable by the service account.
+- **Adapter options** (`options`):
+
+  | Option | Meaning |
+  | --- | --- |
+  | `kernel`, `initrd` | Absolute host paths of the guest kernel and initramfs |
+  | `command` | The door's command line *inside the guest*: one program and its arguments, no quotes, redirection or shell syntax. `{install_dir}` is `/mnt/game`; `{node_dir}`, `{door32}`, `{door_sys}` and `{node}` resolve to the guest's paths and node number |
+  | `accel` | `tcg` (default), `nvmm` or `kvm` |
+  | `guest_memory_mb` | Guest RAM, 128-768 (default 256) |
+  | `boot_timeout_seconds` | How long the guest may take to reach its door, 5-300 (default 60) |
+  | `kernel_args` | Extra guest kernel arguments, appended to NetBBS's own |
+  | `success_exit_codes` | Exit statuses that count as a normal return (default `[0]`) |
+
+A door built on a common door library usually has a local or stdio mode for
+exactly this: the terminal it gets is the guest's console, not an inherited
+socket, so `DOOR32.SYS` names comm type 0. For example `{install_dir}/empire
+-D{door32} -X` runs a Free Pascal RMDoor game with its drop file and in stdio
+mode. The guest's terminal size is fixed for the session; `width`/`height`
+of 0 use the caller's size at launch.
+
+Then run **Emulator capability probe**. It boots *your* guest image with
+NetBBS's own test script in place of the game, in a temporary installation
+directory, and checks the console in both directions with CP437 block
+characters, a write through the installation export, and the exit-status
+handshake. It cannot run in CI, because no guest image ships with NetBBS;
+it is the check that says your image honours the contract. Then use
+**Test as SysOp** with the real game.
+
+### Troubleshooting a VM door
+
+Last diagnostic shows qemu's own errors and the guest's console:
+
+- `The VM did not start its door within N seconds`: the guest never created
+  `/mnt/node/booted`. The console lines above it usually say why -- a missing
+  9p module, a kernel that cannot find its init, a panic.
+- `cannot set up guest memory ... Cannot allocate memory`: `memory_mb` is too
+  low for qemu, whatever the guest needs; see Memory above.
+- `The guest did not report the door's exit status`: the guest powered off
+  without writing `/mnt/node/exit.status`. Check the init against the contract.
+- `The door exited with status N inside the guest`: the game's own failure;
+  run it by hand inside the guest image to see its messages.
+- A boot that hangs early on a busy or virtualized host under `tcg`: the guest
+  kernel failed to calibrate its clock. NetBBS passes the host's TSC frequency
+  (`tsc_early_khz`) on x86 hosts to avoid exactly this; a guest kernel that
+  ignores it needs another clock source.
 
 ## Remote services: tunnel first
 

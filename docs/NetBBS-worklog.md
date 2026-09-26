@@ -5640,6 +5640,30 @@ DOSBox can create lowercase host files from uppercase DOS paths. DOS `IF`
 redirection can create an empty file before evaluating the condition; use
 batch labels for distinct status markers and inspect names case-insensitively.
 
+VM doors (issue #474, `netbbs.doors.vm`) inherit several traps that are
+invisible until a real guest runs. qemu exits on SIGTERM without telling its
+guest, so the graceful stop must be a QMP `system_powerdown` sent *before*
+the process group is signalled; qemu stays in the door's group so the
+existing SIGKILL still guarantees no VM outlives its session -- a wrapper
+process in a separate group would lose that. The guest's `tiny-power-button`
+defaults to a systemd signal, so the recipe init loads it with
+`power_signal=2`. The hvc console driver resets termios on last close:
+`stty -F /dev/hvc0 raw` followed by a fresh open is cooked again, so init
+holds the console open on one descriptor for the whole session. Under TCG a
+guest kernel calibrating its TSC against the emulated PIT failed 3 boots in
+10 on a VMware-hosted NetBSD and then hung before its console came up;
+microvm has no HPET/PM timer to fall back on. `tsc_early_khz` from the
+host's `machdep.tsc_freq` (the guest TSC *is* the host's under TCG on x86)
+fixed 10/10. qemu's address space is about twice the guest RAM plus
+~500 MiB (measured bounds are in `vm.ADDRESS_SPACE_OVERHEAD_MB`'s comment),
+so `RLIMIT_AS` validation encodes that. qemu 11.1 deprecated `-mon` and
+warns on every launch into Last diagnostic; whether a binary takes
+`-object monitor-qmp` is asked once, from preflight's thread, and cached by
+path and mtime -- the launch itself must not spawn from the event loop. A
+never-drained qemu stdout pipe stalls the guest once its console fills it;
+the runtime's diagnostics task drains socketpair doors' stdout, and any
+test harness must too.
+
 Legacy configuration parsers need byte-level validation against the actual
 program. LORD 4.07 silently ignores LF-only node files; install its NODE1.DAT
 with CRLF. Global War's distributed 2.7 executable stalls with bare values
