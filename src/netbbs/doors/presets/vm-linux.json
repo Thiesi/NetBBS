@@ -1,0 +1,16 @@
+{
+  "name": "Linux x86_64 door in a VM (setup template)",
+  "executable_path": "/usr/pkg/bin/qemu-system-x86_64",
+  "args": [],
+  "profile": {
+    "version": 1, "adapter": "vm", "endpoint": "socketpair",
+    "install_dir": "/var/games/netbbs/linux-door", "drop_files": ["DOOR32.SYS"],
+    "filename_case": "lower", "encoding": "cp437", "width": 80, "height": 25,
+    "memory_mb": 1024, "cpu_seconds": 600, "max_sessions": 1,
+    "options": {
+      "kernel": "/var/games/netbbs/vm/vmlinux", "initrd": "/var/games/netbbs/vm/initrd.cpio",
+      "accel": "tcg", "guest_memory_mb": 256, "boot_timeout_seconds": 60,
+      "command": "{install_dir}/door -D{door32} -X"
+    }
+  }
+}

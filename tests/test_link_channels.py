@@ -498,3 +498,55 @@ def test_queue_channel_message_if_linked_never_signs_an_external_line(db, alice,
     )
 
     assert queue_channel_message_if_linked(db, message, channel, node_identity=node_identity) is None
+
+
+def test_search_skips_a_message_whose_author_home_is_quarantined(db, remote_node_identity):
+    """Issue #677: scrollback hid the message but search still returned it."""
+    from netbbs.search import search_channel_messages
+
+    reader = create_user(db, "reader", password="hunter2", user_level=10)
+    channel_id = _carried_channel(db, remote_node_identity)
+    message = _remote_channel_message(remote_node_identity, channel_id=channel_id)
+    materialize_carried_channel_message(db, message, sender_fingerprint=remote_node_identity.fingerprint)
+    channel = get_channel_by_name(db, "Remote Lobby")
+    assert [hit.body for hit in search_channel_messages(db, reader, "hello", visible_channels=[channel])] == [
+        "hello there"
+    ]
+
+    register_subject(
+        db, TrustSubject.node(remote_node_identity.fingerprint),
+        first_accepted_at="2026-01-01T00:00:00Z", now_iso="2026-01-01T00:00:00Z",
+    )
+    set_trust_override(
+        db, TrustSubject.node(remote_node_identity.fingerprint), TrustDimension.RESOURCE_BEHAVIOR,
+        TrustState.QUARANTINED, reason="test quarantine", now_iso="2026-01-01T00:00:02Z",
+    )
+
+    assert search_channel_messages(db, reader, "hello", visible_channels=[channel]) == []
+
+
+def test_unread_count_skips_a_message_whose_author_home_is_quarantined(db, remote_node_identity):
+    """Issue #677 (Codex review): scrollback hid the message, but [N]ew
+    scan still counted it as unread activity nobody could open."""
+    from netbbs.activity import record_channel_seen, unread_channel_count
+
+    reader = create_user(db, "reader", password="hunter2", user_level=10)
+    channel_id = _carried_channel(db, remote_node_identity)
+    channel = get_channel_by_name(db, "Remote Lobby")
+    baseline = record_message(db, channel, kind="message", author_label="alice", body="seen already")
+    record_channel_seen(db, reader, channel, baseline)
+    message = _remote_channel_message(remote_node_identity, channel_id=channel_id)
+    materialize_carried_channel_message(db, message, sender_fingerprint=remote_node_identity.fingerprint)
+    record_message(db, channel, kind="message", author_label="alice", body="local and new")
+    assert unread_channel_count(db, reader, channel) == 2
+
+    register_subject(
+        db, TrustSubject.node(remote_node_identity.fingerprint),
+        first_accepted_at="2026-01-01T00:00:00Z", now_iso="2026-01-01T00:00:00Z",
+    )
+    set_trust_override(
+        db, TrustSubject.node(remote_node_identity.fingerprint), TrustDimension.RESOURCE_BEHAVIOR,
+        TrustState.QUARANTINED, reason="test quarantine", now_iso="2026-01-01T00:00:02Z",
+    )
+
+    assert unread_channel_count(db, reader, channel) == 1

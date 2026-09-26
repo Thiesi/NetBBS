@@ -240,7 +240,7 @@ Two kinds of registration deliberately get none of it:
 | `node_name` | The node's display name, which a SysOp may change at any time. |
 | `node_id` | A stable, opaque per-node identifier which survives a rename. Key a door's world on this, not on `node_name`. Not a credential. |
 | `session_limit_seconds` | The effective wall-clock cap for *this* launch — the tighter of the profile's limit and any lower bound the launch itself imposes — so a door can warn before it is cut off. Absent when nothing bounds the run. |
-| `outbound` | Present **only** if a SysOp switched this door's outbound hook on: `label` (the name its posts appear under), `directory` (where to drop a request, relative to the file's own directory), `results` (absolute path where outcomes are kept across launches), `boards` (every board it may name) and `posts_per_hour`. See [Door outbound posting](#door-outbound-posting). |
+| `outbound` | Present **only** if a SysOp switched this door's outbound hook on: `label` (the name its posts appear under), `directory` (where to drop a request, relative to the file's own directory), `results` (absolute path where outcomes are kept across launches; for a door in a VM, a copy under `/mnt/node` taken at launch), `boards` (every board it may name) and `posts_per_hour`. See [Door outbound posting](#door-outbound-posting). |
 
 Treat every field as optional and absence as "unknown": that is how the file
 stays compatible as it grows. Two notes on what is deliberately **not** there.

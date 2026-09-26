@@ -57,11 +57,12 @@ from dataclasses import dataclass
 
 from netbbs.auth.users import User
 from netbbs.boards.boards import Board
-from netbbs.boards.posts import Post
+from netbbs.boards.posts import Post, count_visible_roots
 from netbbs.chat.channels import Channel
 from netbbs.chat.scrollback import ChannelMessage
 from netbbs.files.areas import FileArea
 from netbbs.files.entries import FileEntry
+from netbbs.link.enforcement import envelope_content_visible
 from netbbs.storage.database import Database
 from netbbs.timeutil import utc_now_iso
 
@@ -211,35 +212,19 @@ def unread_post_count(db: Database, user: User, board: Board) -> int | None:
     if cursor is None:
         return None
     if cursor.arrival_id is not None:
-        row = db.connection.execute(
-            """
-            SELECT COUNT(*) AS n FROM posts root
-            WHERE root.board_id = ? AND root.post_id = root.root_post_id
-              AND root.id > ?
-              AND EXISTS (
-                  SELECT 1 FROM posts v
-                  WHERE v.root_post_id = root.root_post_id AND v.board_id = root.board_id
-                    AND v.status = 'approved'
-              )
-            """,
-            (board.id, cursor.arrival_id),
-        ).fetchone()
+        count, _ = count_visible_roots(
+            db, board.id, extra_sql="AND root.id > ?", extra_params=(cursor.arrival_id,)
+        )
     else:
         # Legacy fallback -- see _Cursor's own docstring for when this applies.
-        row = db.connection.execute(
-            """
-            SELECT COUNT(*) AS n FROM posts root
-            WHERE root.board_id = ? AND root.post_id = root.root_post_id
-              AND (root.created_at, root.post_id) > (?, ?)
-              AND EXISTS (
-                  SELECT 1 FROM posts v
-                  WHERE v.root_post_id = root.root_post_id AND v.board_id = root.board_id
-                    AND v.status = 'approved'
-              )
-            """,
-            (board.id, cursor.created_at, cursor.stable_id),
-        ).fetchone()
-    return row["n"]
+        count, _ = count_visible_roots(
+            db, board.id,
+            extra_sql="AND (root.created_at, root.post_id) > (?, ?)",
+            extra_params=(cursor.created_at, cursor.stable_id),
+        )
+    # Trust-hidden carried posts are excluded (issue #677): [N]ew scan
+    # must not report posts the board page will never show.
+    return count
 
 
 def unread_replies_to(db: Database, user: User) -> list[Post]:
@@ -251,8 +236,9 @@ def unread_replies_to(db: Database, user: User) -> list[Post]:
     including any reply, is still unread)."""
     rows = db.connection.execute(
         """
-        SELECT root.* FROM posts root
+        SELECT root.*, e.envelope_json AS link_envelope_json FROM posts root
         JOIN posts parent ON parent.post_id = root.parent_post_id
+        LEFT JOIN link_events e ON e.content_id = root.post_id
         WHERE parent.author_user_id = ?
           AND root.post_id = root.root_post_id
           AND EXISTS (
@@ -263,7 +249,13 @@ def unread_replies_to(db: Database, user: User) -> list[Post]:
         """,
         (user.id,),
     ).fetchall()
-    replies = [_root_row_to_post(row) for row in rows]
+    # Trust-hidden replies are skipped, deciding once per author (issue #677).
+    author_cache: dict = {}
+    replies = [
+        _root_row_to_post(row) for row in rows
+        if row["link_envelope_json"] is None
+        or envelope_content_visible(db, row["link_envelope_json"], author_cache=author_cache)
+    ]
 
     unread = []
     for reply in replies:
@@ -364,14 +356,23 @@ def unread_channel_count(db: Database, user: User, channel: Channel) -> int | No
         return None
     last_message_id = int(cursor.stable_id)
     placeholders = ",".join("?" for _ in _CHANNEL_CONTENT_KINDS)
-    row = db.connection.execute(
+    # A carried message trust suppresses is hidden from scrollback, so it
+    # is not unread activity either (issue #677). The retained ring bounds
+    # the rows; the trust decision is made once per author.
+    rows = db.connection.execute(
         f"""
-        SELECT COUNT(*) AS n FROM channel_messages
-        WHERE channel_id = ? AND id > ? AND kind IN ({placeholders})
+        SELECT e.envelope_json FROM channel_messages m
+        LEFT JOIN link_events e ON e.content_id = m.link_content_id
+        WHERE m.channel_id = ? AND m.id > ? AND m.kind IN ({placeholders})
         """,
         (channel.id, last_message_id, *_CHANNEL_CONTENT_KINDS),
-    ).fetchone()
-    return row["n"]
+    )
+    author_cache: dict = {}
+    return sum(
+        1 for row in rows
+        if row["envelope_json"] is None
+        or envelope_content_visible(db, row["envelope_json"], author_cache=author_cache)
+    )
 
 
 def is_following(db: Database, user: User, object_type: str, object_id: int) -> bool:

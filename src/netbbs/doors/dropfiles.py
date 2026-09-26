@@ -32,6 +32,9 @@ def drop_file_bytes(profile: DoorProfile, info: dict, node: int, *, descriptor=0
     com = 1 if serial else 0
     # These are door-visible node paths, never the NetBBS database directory.
     node_path = "D:\\" + (profile.drop_subdir + "\\" if profile.drop_subdir else "") if serial else ""
+    if profile.adapter == "vm":
+        from netbbs.doors.vm import guest_substitutions
+        node_path = guest_substitutions(profile, node)["node_dir"]
     door_sys = [f"COM{com}:", baud, 8, node, baud, "Y", "N", "N", "N", handle,
                 "", "", "", "", security, 0, date, seconds, minutes, "GR", height,
                 "N", "", 0, "12/31/99", uid, "N", 0, 0, 0, 0,

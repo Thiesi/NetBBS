@@ -175,7 +175,7 @@ async def edit_door_profile(session, lane, actor, door, *, door_services=None):
             return
         result = await run_door(session, lane, candidate, actor, rehearsal=True)
         await _heading(session, "Test result")
-        passed = result.exit_code == 0
+        passed = result.reason == "exited" and result.exit_code == 0
         await _labelled(session, "Outcome", str(result.reason), color=SUCCESS_COLOR if passed else ERROR_COLOR)
         await _labelled(session, "Exit code", str(result.exit_code), color=VALUE_COLOR if passed else ERROR_COLOR)
         if result.diagnostic:
@@ -186,19 +186,22 @@ async def edit_door_profile(session, lane, actor, door, *, door_services=None):
     async def probe_prompt(session, lane, draft):
         try:
             candidate = _candidate(door, draft)
-            if candidate.profile is None or candidate.profile.adapter != "dosbox":
-                raise ProfileError("Emulator capability probe is only for DOSBox profiles.")
+            adapter = candidate.profile.adapter if candidate.profile is not None else None
+            if adapter not in ("dosbox", "vm"):
+                raise ProfileError("Emulator capability probe is only for DOSBox and VM profiles.")
             problems = await asyncio.to_thread(preflight, candidate, session)
             if problems:
                 raise ProfileError("\n".join(problems))
             await session.write_line(colored(
                 "This executes the configured emulator and optional FOSSIL with NetBBS's own serial fixture, "
-                "not the game.", fg_color=MUTED_COLOR))
+                "not the game." if adapter == "dosbox" else
+                "This boots your guest image with NetBBS's own test script in place of the game, "
+                "in a temporary installation directory.", fg_color=MUTED_COLOR))
             if await prompt_yes_no(session, "Run the emulator capability probe?", default=False):
-                from netbbs.doors.probe import probe_dosbox
-                result = await probe_dosbox(lane, candidate, actor)
+                from netbbs.doors.probe import probe_dosbox, probe_vm
+                result = await (probe_dosbox if adapter == "dosbox" else probe_vm)(lane, candidate, actor)
                 await _heading(session, "Capability probe")
-                passed = result.exit_code == 0
+                passed = result.reason == "exited" and result.exit_code == 0
                 await _labelled(session, "Outcome", str(result.reason), color=SUCCESS_COLOR if passed else ERROR_COLOR)
                 await _labelled(session, "Exit code", str(result.exit_code), color=VALUE_COLOR if passed else ERROR_COLOR)
                 if result.diagnostic:
@@ -219,7 +222,7 @@ async def edit_door_profile(session, lane, actor, door, *, door_services=None):
     add("original_api", "1", "Restore original API on Save", "Runtime",
         original_api_prompt,
         help="Remove compatibility settings on Save. Keeps executable/arguments and game data; correct paths first if needed. Toggle off to keep the profile draft.")
-    add("adapter", "a", "Adapter", "Runtime", choice_field("adapter", ["native", "dosbox", "rlogin"]))
+    add("adapter", "a", "Adapter", "Runtime", choice_field("adapter", ["native", "dosbox", "rlogin", "vm"]))
     add("endpoint", "i", "I/O endpoint", "Runtime", choice_field("endpoint", ["stdio", "pty", "socketpair"]))
     add("executable_path", "e", "Executable/runtime path", "Runtime")
     add("args_line", "g", "Arguments", "Runtime", help="Fixed argv. Available substitutions: {node_dir}, {node}, {door32}, {door_sys}, {install_dir}.")
