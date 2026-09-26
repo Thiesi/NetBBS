@@ -263,6 +263,7 @@ from netbbs.link.remote_attestation import (
     remove_attestation_recipient,
     set_remote_attestation_override,
 )
+from netbbs.link.realtime_proxy import describe_proxy_status
 from netbbs.link.store import introduced_by, retain_linked_genesis
 from netbbs.link.trust_carriage import relays_refusing_trust_deposits
 from netbbs.link.onboarding import (
@@ -7634,6 +7635,15 @@ async def _link_status_sections(
         peers.append(Field("Sync interval", f"{config.sync_interval_seconds:.0f}s"))
     live_sessions = link_context.realtime_registry.all_sessions() if link_context.realtime_registry is not None else []
     peers.append(Field("Live sessions", str(len(live_sessions))))
+    proxy_line = describe_proxy_status()
+    if proxy_line is not None:
+        # Issue #628: live chat tunnels through the proxy the environment
+        # names; its last outcome is the one place a refusal is visible.
+        text, ok = proxy_line
+        peers.append(Field(
+            "Live proxy", text,
+            color=MUTED_COLOR if ok is None else (SUCCESS_COLOR if ok else WARNING_COLOR),
+        ))
     sections.append(Section("Peers and seeds", peers))
 
     relays: list[Field | Note] = []

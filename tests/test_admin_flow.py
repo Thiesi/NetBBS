@@ -10004,6 +10004,52 @@ def test_the_vouch_screen_says_when_a_relay_did_not_take_this_nodes_vouches(db, 
     assert "1 of them did not take them at the last attempt; the Link log says why." in text
 
 
+def test_link_status_screen_shows_the_live_proxy_outcome(db, lane, sysop, monkeypatch):
+    """Issue #628: the anchor connector swallows dial failures and callers see
+    a reason-free message, so a refused tunnel is visible here or nowhere."""
+    from netbbs.link.realtime_proxy import REALTIME_PROXY_STATUS, ProxyEndpoint
+
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    REALTIME_PROXY_STATUS.reset()
+    try:
+        REALTIME_PROXY_STATUS.record(
+            ProxyEndpoint("squid.example", 3128, "Basic c2VjcmV0"),
+            "tunnel refused: 407 Proxy Authentication Required", ok=False,
+        )
+        session = FakeSession(["s", "l", "b", "b", "b"])
+        asyncio.run(admin_menu(session, lane, sysop, link_context=_link_context()))
+    finally:
+        REALTIME_PROXY_STATUS.reset()
+
+    text = _normalized_visible(_written_text(session))
+    assert "Live proxy: squid.example:3128 -- tunnel refused: 407 Proxy Authentication Required" in text
+
+
+def test_link_status_screen_names_a_configured_proxy_without_its_credentials(db, lane, sysop, monkeypatch):
+    from netbbs.link.realtime_proxy import REALTIME_PROXY_STATUS
+
+    for name in ("HTTPS_PROXY", "http_proxy", "https_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("HTTP_PROXY", "http://carrier:hunter2@squid.example:3128")
+    REALTIME_PROXY_STATUS.reset()
+    session = FakeSession(["s", "l", "b", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop, link_context=_link_context()))
+
+    text = _normalized_visible(_written_text(session))
+    assert "Live proxy: http://squid.example:3128 -- configured, not used by a live connection yet" in text
+    assert "hunter2" not in text and "carrier" not in text
+
+
+def test_link_status_screen_has_no_proxy_line_without_a_proxy(db, lane, sysop, monkeypatch):
+    from netbbs.link import realtime_proxy
+
+    monkeypatch.setattr(realtime_proxy.urllib.request, "getproxies", lambda: {})
+    realtime_proxy.REALTIME_PROXY_STATUS.reset()
+    session = FakeSession(["s", "l", "b", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop, link_context=_link_context()))
+
+    assert "Live proxy" not in _normalized_visible(_written_text(session))
 # -- issue #676: approving something no longer pending reports, not crashes --
 
 
