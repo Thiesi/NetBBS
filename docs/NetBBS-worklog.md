@@ -4536,6 +4536,19 @@ stop to reject the correct live process and delete or ignore its service
 pidfile. Do not remove the wide-output flag while PID ownership is established
 from the full invocation string.
 
+While `start` waits for readiness, a failed identity match is not proof of
+failure (issue #693). As the child execs `nohup` → `env` → the interpreter,
+`ps -o command=` can show text that fails the match, for longer than any
+fixed interval on a loaded boot. Treating one such poll as "failed to start"
+deleted the pidfile of a node that came up moments later, leaving it
+untracked for the next `start` to duplicate. The match cannot be dropped
+either: a child that died early is orphaned and its pid can be recycled. So
+during `start` a dead pid fails at once, an unrecognised live one means
+"keep waiting", and only a pid still unrecognised when
+`netbbs_start_timeout` runs out is declared someone else's. It is never
+signalled, only untracked. A stand-in child that execs into a shell before
+carrying the real argv reproduces the old failure on NetBSD.
+
 `rc.subr`'s `run_rc_command` ends with `[ ! -x $command ] && return 0`. A
 `$command` that does not exist is therefore not an error: `service netbbs
 start` prints nothing, exits 0, and `service netbbs status` then reports the
