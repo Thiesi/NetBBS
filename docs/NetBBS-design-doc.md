@@ -10801,10 +10801,13 @@ SysOp curating anything. What changes is everything past that default.
 state: carried, offered or excluded.** *Carried* has a local row. *Offered* and
 *excluded* are rows in a carry-decision record keyed by resource kind and id,
 holding the state, when it was set and by whom (the node, or a SysOp). Nothing
-is inferred from absence any more. The genesis save and its carry outcome —
-materialization or the record — are written in one transaction, which closes
-the genesis crash window the way issue #73 closed it for posts, rather than
-adding a repair pass for it. On migration, every existing genesis without a
+is inferred from absence any more. Every transition is one transaction: the genesis save
+with its carry outcome (materialization or the record), and each later move
+between states — accepting, excluding, deleting, restoring — with the local row
+and the record changing together. That needs non-committing variants of today's
+`materialize_carried_*` and `delete_*` helpers, which commit internally. It
+closes the genesis crash window the way issue #73 closed it for posts, rather
+than adding a repair pass for it. On migration, every existing genesis without a
 local row becomes *offered*: its history cannot be recovered, and offered is
 the state that loses nothing and forces nothing.
 
@@ -10814,7 +10817,11 @@ node can ever have. An offered resource is listed for the SysOp with its name,
 description and origin node, and `[A]ccept` materializes it from the stored
 genesis, after which the next pass backfills it by ordinary inventory pull, as
 for any newly carried resource. Accepting is the SysOp's choice and is not
-itself capped. While offered, a resource wants nothing further, for the reason
+itself capped. A genesis whose name is already taken locally is carried under a
+disambiguated local name, on automatic intake and on accept alike, and the SysOp
+can rename it as any carried resource; names are not identities in Link.
+Today such a genesis aborts one sync pass and is then never carried (issue
+#671). While offered, a resource wants nothing further, for the reason
 §8.8 gives for declined ones: asking about content this node has not taken on
 does not terminate. Rejected: reordering automatic intake to prefer reliable
 nodes, configured seeds or busier resources. Reliable nodes are never
@@ -10835,7 +10842,14 @@ silently turn into a carried resource later makes the list untrustworthy.
 until the SysOp reverses it.** The delete screen of a carried resource says that
 it will not come back and where to restore it. An `Excluded` list shows each
 excluded resource with `[R]estore`, which materializes it from the stored
-genesis and lets pull backfill it. The SysOp can also exclude an offered
+genesis and then replays the events this node still holds for it — a deleted
+resource's posts, messages and descriptors stay in `link_events`, are declared
+as known, and would never be sent again — before pull fetches what it is
+genuinely missing. Exclusion applies only to a resource originated elsewhere.
+Deleting a linked resource this node originated is not a carry choice: peers
+still hold this node as its only authority for closure, moderator edits and
+origin transfer, so that path goes through closure or origin transfer (§9.5)
+and is outside this decision. The SysOp can also exclude an offered
 resource without ever carrying it. This answers scenario 5 (it stays gone, and
 visibly so) and scenario 3 (pruning frees slots for automatic intake; nothing
 that was offered is lost). Excluded and offered resources are never visible to
@@ -10844,10 +10858,18 @@ callers.
 **Decision 6 — what a node does not carry, it tells its peers.** Offered and
 excluded resources are declared in every `InventoryRequest` so responders stop
 sending events under them, which is the fix for #669 and the #630 precedent
-(events set aside under probation are declared as seen). The wire shape is
-#669's to settle, under one constraint: an older responder must still verify
-the request's signature, so a new signed field needs a version gate, and the
-compatible first step is declaring through the existing maps.
+(events set aside under probation are declared as seen). The existing maps cannot
+say it: their values are known-ID sets, and a responder sends every event whose
+ID is absent, so declaring an offered resource's genesis alone still brings
+every post. The fix therefore needs an explicit "not carried here" field,
+signed, and version-gated so that an older responder still verifies the
+request. Against an older responder the fallback is the #630 shape: declare the
+content IDs already received under the resource, so each is sent once rather
+than on every pass. The declaration costs one resource ID per offered or
+excluded resource; the carried maps beside it list every content ID of every
+carried resource and are far larger, so keeping the whole request under the
+responder's size limit is one problem for both, and #669 owns it rather than a
+separate bound on the carry-decision record.
 
 **Decision 7 — the bound stays a per-type count, and all three get a
 readout.** 500 stays the default, and the declared scale (§2.3) stays small.
