@@ -370,3 +370,143 @@ def test_the_not_carried_declaration_is_bounded_and_sampled_fresh():
             assert set(ids) <= set(many[kind])
     # A fresh sample each time, so no fixed subset is left out on every pass.
     assert len({tuple(sorted((k, i) for k, ids in s.items() for i in ids)) for s in samples}) > 1
+
+
+# -- Issue #685: a declaration split into pages -------------------------------
+
+
+def _signed_paged_request(alice, bob, clock, page):
+    signature = sign_inventory_request(
+        signing_identity=alice.identity.signing_key,
+        requester_fingerprint=alice.fingerprint,
+        responder_fingerprint=bob.fingerprint,
+        created_at=clock.now_iso(),
+        nonce="0123456789abcdef0123456789abcdef",
+        boards={"b1": ("c1",)}, channels={}, file_areas={},
+        page=page,
+    )
+    return InventoryRequest(
+        requester_fingerprint=alice.fingerprint,
+        responder_fingerprint=bob.fingerprint,
+        created_at=clock.now_iso(),
+        nonce="0123456789abcdef0123456789abcdef",
+        signature=signature,
+        boards={"b1": ("c1",)},
+        page=page,
+    )
+
+
+def test_a_paged_request_round_trips_and_verifies(tmp_path, clock):
+    alice, bob, _alice_node, bob_node = _two_nodes_with_completed_hello(tmp_path, clock)
+    request = _signed_paged_request(alice, bob, clock, (1, 3))
+    data = request.to_dict()
+    assert data["page"] == {"index": 1, "count": 3}
+    parsed = InventoryRequest.from_dict(data)
+    assert parsed.page == (1, 3)
+    bob_node.handle_inventory_request(alice.fingerprint, parsed, now_iso=clock.now_iso())
+    alice.close()
+    bob.close()
+
+
+def test_the_page_is_signed(tmp_path, clock):
+    """It steers what the responder leaves out, so a relay must not be able to
+    move a request to another page."""
+    alice, bob, _alice_node, bob_node = _two_nodes_with_completed_hello(tmp_path, clock)
+    data = _signed_paged_request(alice, bob, clock, (1, 3)).to_dict()
+    data["page"] = {"index": 2, "count": 3}
+    with pytest.raises(LinkProtocolError):
+        bob_node.handle_inventory_request(alice.fingerprint, InventoryRequest.from_dict(data), now_iso=clock.now_iso())
+    alice.close()
+    bob.close()
+
+
+def test_a_whole_declaration_omits_the_page(tmp_path, clock):
+    """A one-page request is the pre-#685 shape byte for byte, so it still
+    verifies at a responder that has never heard of pages."""
+    alice, bob, _alice_node, _bob_node = _two_nodes_with_completed_hello(tmp_path, clock)
+    request = _signed_empty_request(
+        signing_identity=alice.identity.signing_key,
+        requester_fingerprint=alice.fingerprint,
+        responder_fingerprint=bob.fingerprint,
+        created_at=clock.now_iso(),
+    )
+    assert "page" not in request.to_dict()
+    alice.close()
+    bob.close()
+
+
+@pytest.mark.parametrize(
+    "page",
+    [[0, 2], {"index": 0}, {"index": 0, "count": 2, "x": 1}, {"index": "0", "count": 2},
+     {"index": True, "count": 2}, {"index": 2, "count": 2}, {"index": -1, "count": 2},
+     {"index": 0, "count": 1}, {"index": 0, "count": 4097}],
+    ids=["not-an-object", "no-count", "extra-key", "string", "bool", "index-past-end",
+         "negative", "one-page", "too-many-pages"],
+)
+def test_a_malformed_page_is_a_malformed_request(tmp_path, clock, page):
+    alice, bob, _alice_node, _bob_node = _two_nodes_with_completed_hello(tmp_path, clock)
+    data = _signed_empty_request(
+        signing_identity=alice.identity.signing_key,
+        requester_fingerprint=alice.fingerprint,
+        responder_fingerprint=bob.fingerprint,
+        created_at=clock.now_iso(),
+    ).to_dict()
+    data["page"] = page
+    with pytest.raises(ValueError):
+        InventoryRequest.from_dict(data)
+    alice.close()
+    bob.close()
+
+
+def test_inventory_page_is_stable_spreads_evenly_and_changes_with_the_salt():
+    """Both sides must compute the same split for one request; and a new
+    request, with a new nonce, must split differently, or a peer could craft
+    IDs that share one page and push it past the body limit forever."""
+    from netbbs.link.protocol import inventory_page
+
+    ids = [f"{i:064x}" for i in range(4000)]
+    pages = [inventory_page(i, 4, "salt-a") for i in ids]
+    assert pages == [inventory_page(i, 4, "salt-a") for i in ids]
+    for page in range(4):
+        assert 800 < pages.count(page) < 1200
+    crafted = [i for i, page in zip(ids, pages) if page == 0]
+    # IDs that all shared page 0 under one salt spread out again under another.
+    still_together = sum(inventory_page(i, 4, "salt-b") == 0 for i in crafted)
+    assert len(crafted) // 8 < still_together < len(crafted) * 3 // 8
+
+
+def test_a_paged_request_declares_its_whole_share_of_not_carried(tmp_path, monkeypatch):
+    """#669 capped `not_carried` with a random sample, so a refused set larger
+    than the cap was never suppressed in full. Paged, each request declares
+    every declined resource that falls on its page -- and the responder skips
+    undeclared resources off the page -- so none is ever resent."""
+    from netbbs.link import store as store_module
+    from netbbs.link.protocol import inventory_page
+
+    alice = spawn_node(tmp_path, "alice")
+    declined = {"boards": tuple(f"b{i:04d}" for i in range(600)), "channels": tuple(f"c{i:04d}" for i in range(400))}
+    monkeypatch.setattr(store_module, "uncarried_resource_ids", lambda db: declined)
+    monkeypatch.setattr(store_module, "MAX_NOT_CARRIED_DECLARED", 200)
+
+    def build(cursor, *, paged=True):
+        return store_module.build_inventory_request(
+            alice.db, signing_identity=alice.identity.signing_key,
+            requester_fingerprint=alice.fingerprint, responder_fingerprint="responder",
+            declare_not_carried=True, paged=paged, page_cursor=cursor,
+        )
+
+    first = build(0)
+    index, count = first.page
+    assert count >= 10
+    for cursor in range(count):
+        request = build(cursor)
+        index = request.page[0]
+        on_page = {
+            (kind, r) for kind, ids in declined.items() for r in ids
+            if inventory_page(r, count, request.nonce) == index
+        }
+        assert on_page
+        assert {(kind, r) for kind, ids in request.not_carried.items() for r in ids} == on_page
+    # Unpaged, the old sample: bounded, but never the whole set at once.
+    assert sum(len(ids) for ids in build(0, paged=False).not_carried.values()) == 200
+    alice.close()
