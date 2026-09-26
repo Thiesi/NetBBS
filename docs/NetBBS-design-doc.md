@@ -40,7 +40,7 @@ reading this design reference first.
 - Phase 5 has authenticated live chat, presence, scrollback-on-join, live
   private messages, and one-/two-relay paths. Cross-node `/dm` invitations and
   simultaneous background channel memberships are not implemented.
-- Phase 7 has native, DOSBox-X, and remote door adapters, three bundled games,
+- Phase 7 has native, DOSBox-X, VM (qemu) and remote door adapters, three bundled games,
   companion services, and door API 3 with optional outbound board posting.
   Compatibility is bounded to the documented host/game profiles.
 - Advanced Link governance, Link Communities, and the remaining deferred
@@ -2162,6 +2162,12 @@ resolve the current signing key, plus a signed endpoint descriptor.
 Endpoint descriptors may advertise ordered addresses and relay information.
 The newest valid descriptor wins; stale repeats are harmless.
 
+A descriptor also lists `capabilities`: the optional Link behaviours the
+signing node's code understands (issue #669). A peer uses such a behaviour only
+with a node that advertises it; a descriptor without the list advertises
+nothing. It describes the software, not a setting, so every descriptor a given
+version signs carries the same list.
+
 The protocol logic remains transport-independent. The `aiohttp` adapter is the
 boundary translating protocol messages to real HTTP requests and responses.
 
@@ -2492,6 +2498,30 @@ has not taken on, and would not terminate: such a board's posts never reach
 `link_events` at all, so they would be wanted every pass forever and occupy the
 requester's whole push page. A resource never seen is the opposite case and
 still wants everything declared for it, which is how a genesis arrives by push.
+
+The same resource needs the mirror rule on the other side of the exchange
+(issue #669). It is absent from the requester's maps, and absent means "never
+seen" (issue #94), so every responder carrying it would send its genesis and
+every event under it on every pass, under the one `_MAX_EVENTS_PER_REQUEST`
+budget all three kinds share: a declined board with a couple of hundred posts,
+sorting early, would be the only thing the requester ever received from anyone
+carrying it. So the request carries a signed `not_carried` list, by kind, of
+the resources the requester holds a genesis for and has no local copy of, and
+the responder leaves them out. Deleting a Linked resource keeps its genesis on
+file for this, including one this node originated, whose genesis otherwise
+lives only in its own row. The list is capped at 5,000 IDs per request: the stored
+genesis set is not bounded by anything the node controls, since a peer can keep
+sending geneses to a node past its cap, and an unbounded list would grow until
+every request was refused. Over the cap each request declares a fresh random
+sample, so what goes undeclared costs a resend, never a fixed starvation. The existing maps cannot say this, since their
+values are known-ID sets and an offered board's posts were never received. The
+field is part of the signed payload only when it names something, so a request
+without it signs exactly as before; and it is sent only to a responder whose
+descriptor advertises `inventory_not_carried` (§8.2), because an older
+responder would rebuild the payload without it and refuse the whole request.
+Against an older responder the old behaviour remains. Until issue #683 records
+carry states, the list is inferred from `link_events` the same way as "seen and
+not taken on" above.
 
 **The cap goes on the push, not on `wanted`.** `wanted` is returned whole:
 it can never exceed the content IDs the requester itself just declared, which
@@ -3118,6 +3148,24 @@ required. Origin recommendations (§9.1) never override this local policy,
 exactly as they never override any other local access/moderation/retention
 decision on a carried board.
 
+Concretely, since issue #677:
+- A carrying node whose copy of a board is **moderated** holds every received
+  `board_post` in its own pending queue, as it holds local posts.
+- A received `board_post_edit` is held there too when:
+  - this node's copy is moderated;
+  - the author's trust requires approval (§12.8); or
+  - no revision of that post is approved here yet.
+- An origin's `board_post_moderator_edit` is not held for local moderation,
+  since it is the origin's own moderation. It is still held while no revision
+  of the post is approved here, because a revision must never publish a post
+  nobody here approved.
+- Approving a held carried post only publishes it locally. It is already on
+  the network under its author's signed event, and it is never re-signed as
+  this node's own. Approving a held *edit* signs the edit event matching
+  whoever made it: `board_post_edit` for the author, `board_post_moderator_edit`
+  for a moderator on the origin. The editor is read from the moderation log,
+  because `edit_post` carries the author forward onto every revision.
+
 **Idempotency, New Scan, and search.** Duplicate delivery of an
 already-materialized event is a no-op (existing `post_id` found, row returned
 unchanged) — no duplicate local posts or revisions. `[N]ew scan`/unread
@@ -3156,6 +3204,13 @@ their events are not sent (issue #669), and are never visible to callers; the
 SysOp sees and acts on both lists from Link status. That is how a local
 exclusion is represented honestly as “not carried on this node,” not
 indistinguishable disappearance.
+
+Names are not identities in Link, and independently run nodes reuse them. A
+carried resource whose name is already in use here, compared without regard
+to case, is carried under that name suffixed with the first 8, then 16, then
+all characters of its own id, whichever is free first (issue #671); the SysOp
+can rename it like any carried resource, and peers keep seeing the genesis
+name. Only with every candidate taken is it refused, as the cap refuses.
 
 Origin recommendations never override the carrying node’s local access,
 moderation, retention, or legal policy.
@@ -3241,6 +3296,26 @@ specifically unsafe) marks the terminal revision; `edit_post`/`tombstone_
 post` both refuse to extend a chain whose current head is already
 tombstoned. Requires `BoardPermission.DELETE`, no author bypass, matching
 `delete_post`'s existing rule exactly.
+
+An origin's moderator edit or tombstone of a post written by a *remote*
+author is chained from that post's retained events: a carried revision keeps
+its signed event only in `link_events`, never in `posts.link_event_json`
+(issue #677; until then such posts looked off-chain and the origin's
+moderation of them was never sent).
+
+**A local tombstone is terminal on the node that made it** (issue #677). A
+carrying node's moderator may remove a post locally even though the removal
+is never propagated. A `board_post_edit` or `board_post_moderator_edit`
+received afterwards is retained as a signed event, so relay and inventory
+are unaffected, but it is never projected over the tombstone. Otherwise a
+later revision would sort above the tombstone and bring the removed content
+back. Removing or editing someone else's post on a non-origin node therefore
+changes this node's copy only, and the moderator is told so: the confirmation
+asks to remove the post "on this node only", and the outcome says that other
+nodes carrying the board keep the original. On the origin, the confirmation
+still says the removal cannot be undone. A closed board offers callers no
+`[P]ost` action and says it is closed, rather than letting a caller write a
+post that `create_post` would then refuse.
 
 All three share `board_origin_transfer_offer`'s verification shape: resolve
 the board's current origin (`current_board_origin`, not the genesis's
@@ -4186,14 +4261,32 @@ verification have one existing definition rather than a second near-identical
 request type. The URL fingerprint is routing information, never attribution.
 Probationary inventory responses use one quarter of the established event
 budget. Valid board posts from probationary users enter the local pending
-approval queue; services without an approval projection, including Link mail,
-refuse them with a stable reason code.
+approval queue, and so do their edits: an approved post must not be rewritten
+with unreviewed text. Services without an approval projection, including Link
+mail, refuse such content with a stable reason code.
 
 Enforcement attributes independently signed content to its author/home node,
 not to a carrier recorded in `link_events.sender_fingerprint`. Current display
 suppression is evaluated from retained signed authorship at read time; changing
 or clearing local policy therefore hides or restores projections without
 rewriting or deleting the accepted event bytes.
+
+Suppression applies to every surface that shows or counts content, not only
+the page that lists it (issue #677):
+- A board page is filled from visible posts only. Its older/newer links count
+  only visible posts, so hidden posts neither shorten a page nor produce an
+  empty one.
+- Post counts, `[N]ew scan` unread counts for boards and channels, and
+  "replies to you" exclude hidden content.
+- Local search excludes hidden posts and hidden channel messages.
+
+Visibility is decided per event in Python rather than in SQL, but it depends
+only on the event's author. A count therefore looks up each distinct author
+once, not each post. Paging over a long run of hidden posts costs further
+query batches rather than returning a short page.
+
+A local tombstone stays terminal once the expiry sweep has aged it: the check
+is for any tombstone revision in the chain, whatever its status.
 
 ### 12.9 Recovery, partitions, and explainability
 
@@ -7116,6 +7209,13 @@ Compatibility extension (issues #296/#297):
   Runtime diagnostics are bounded and SysOp-only; emulator stderr is never
   relayed to callers. DOS program status is checked separately from emulator
   status, including LORD's normal return code 255.
+- The VM adapter (issue #474) runs a foreign-platform native door in a
+  per-caller qemu guest the SysOp builds. NetBBS owns the command line: no
+  network, display or host devices, one virtio console on the door's
+  socketpair, and 9p exports of exactly the installation and node
+  directories. The guest reports its door's status through `exit.status`;
+  a graceful stop is an ACPI power-button press over a private QMP
+  socketpair before the process group is signalled.
 - RLogin requires a fixed allowlist and caller-visible service identity.
   Loopback SSH/TLS tunnels are the default; direct plaintext requires an
   explicit insecure-operation acknowledgement. Provider identity templates
@@ -7131,7 +7231,9 @@ The bounded verification matrix and exact manual setup instructions live in
 arbitrary game versions, platforms, or multiplayer operation. Same-user
 native code can read the service account's files, including keys and database;
 resource limits are not filesystem/network isolation. DOS mounts improve the
-practical boundary but cannot protect against emulator vulnerabilities.
+practical boundary but cannot protect against emulator vulnerabilities. A VM
+door is isolated from the host except for its two exports, but that boundary
+is the SysOp's qemu build and guest image, not something NetBBS certifies.
 Optional external runner argv is operator-managed and does not imply a
 privileged or automatically provisioned containment environment.
 
@@ -7652,6 +7754,86 @@ with an explicit per-door board allowlist and rate ceiling. A linked destination
 can federate the post through the live node's identity. There is no generic
 session-capability API for chat, mail, real-time game moves, or federated scores;
 those extensions need their own protocol and authority decisions.
+
+### Issue #474 — foreign-platform native doors in a VM — closed
+
+A door that exists only for another platform -- the motivating case was
+`aempire`, a statically linked Linux x86_64 Free Pascal door with no NetBSD
+build and no source -- runs under `adapter: "vm"`: one qemu guest per caller,
+booted from a kernel and initramfs the SysOp builds. The Phase 7 bullet above
+states the runtime contract; the door guide's "Foreign-platform doors in a VM"
+states the guest image contract and the manual setup.
+
+**Measured, not assumed.** The scoping questions were answered on the
+production host that motivated it (NetBSD 11.0 amd64, itself a VMware guest,
+qemu 11.1.1 from pkgsrc):
+
+| Question | Answer |
+| --- | --- |
+| Q1: does 9p `local` work on a NetBSD host? | Yes. Both exports mount (`9p2000.L`, `cache=none`); guest and host each see the other's writes. The persistent installation stays a directory, so backup and "install with ordinary file tools" are unchanged. |
+| Q2: does `-chardev socket,fd=N` accept an inherited descriptor? | Yes, for the door's terminal and for a second socketpair carrying QMP. |
+| Q3: qemu's address space? | About twice guest RAM plus 500 MiB: a 256 MiB guest fails at 768 MiB and starts at 1000; with `tb-size=64`, steady VSZ ~500 MiB. Validation requires `memory_mb >= 2 * guest_memory_mb + 512`. |
+| Q4: cold boot? | 3.65 s ±0.05 to the door's first byte (microvm, PVH direct kernel boot, TCG), 3.7-4.0 s through the full runtime. `pc` with PVH: 6.4 s; `pc` with a bzImage: 7.7 s. |
+| Q5: grant `/dev/nvmm`? | The operator accepted it (2026-09-12). Moot on this host: `nvmm` refuses to load there (`cpu not supported`), so everything above is software emulation (TCG). |
+
+**Adapter, not runner.** A `runner` script could spawn qemu, but host
+placeholders mean nothing inside a guest, and only a command line NetBBS
+builds can *guarantee* `-nic none`, `-nodefaults`, `-no-user-config`, no
+display and exactly two exports. `vm.py` owns the argv the way `dosbox.py`
+owns `dosbox.conf`; the profile supplies paths, the guest command, the
+accelerator and sizes, never qemu flags.
+
+**Per-session, at 3.7 s.** The rescoping comment on the issue put the
+threshold at ~3 s for per-session and ~5 s for a long-lived guest serving
+callers as a door service (#466). The measurement fell in between, and
+per-session was chosen: it keeps isolation per caller rather than per door,
+needs no multiplexing inside the guest, confines a guest crash to one
+caller, and reuses the existing reap-the-group lifecycle unchanged. A
+caller waits about as long as a DOSBox-X start. The measurement is on the
+slowest configuration there is -- nested virtualization with no hardware
+acceleration -- so the choice only gets better where `nvmm` or `kvm` works.
+A VM-backed door service remains possible later if a busy node needs it.
+
+**Channel.** The door's existing socketpair becomes a virtio console
+(`virtconsole`, `/dev/hvc0` in the guest): the tty lives in the guest, so
+the host PTY's edge cases do not apply, and the door gets a real terminal.
+vsock (Linux-only host support), SSH into the guest (needs guest networking
+and a credential) and a bespoke multiplexer were rejected, as scoped.
+
+**Exit status and stop.** qemu exits 0 whatever the game did, so the guest
+writes the door's status to `exit.status` in the node export; missing or
+unreadable is a failure, and `success_exit_codes` maps normal returns, as
+`EXIT.ERR`/`RETURN.OK` do for DOS. The guest touches `booted` once its door
+is about to start, which bounds a guest that cannot boot by
+`boot_timeout_seconds` instead of the caller's time limit. qemu exits on
+SIGTERM without informing its guest, so every stop path first presses the
+guest's ACPI power button over a private QMP socketpair (the guest hangs
+the door up and powers off), then signals the process group as for any door.
+qemu stays in that group, so the kill still guarantees no guest outlives
+its session.
+
+**What the boundary buys.** A guest cannot read the node's database, keys,
+configuration, other doors or anything outside its two exports, and has no
+network -- strictly more than a native door. It is still the SysOp's
+boundary: the installation export is writable, qemu runs as the service
+account, the guest image and its patching are the SysOp's, and an
+accelerator is a host-wide privilege grant. Documentation says "an isolation
+boundary you provision and own", never "sandboxed doors".
+
+**No shipped image.** NetBBS ships a build recipe
+(`examples/doors/vm/build-alpine-guest.sh`, from Alpine's own packages) and
+the reference init, not an image whose security updates it would own
+forever. The capability probe boots the SysOp's own image with a NetBBS
+fixture script and checks the console in both directions with CP437, a
+write through the installation export and the exit-status handshake. It can
+only be operator-run: unlike the DOS probe, it needs an image that no CI
+carries. The runtime contract is instead tested against a fake qemu that
+plays the guest's half over the descriptors it is given.
+
+**Deliberately not built.** Resize forwarding into the guest (the console's
+geometry is fixed at launch), guests for other architectures (the adapter
+is `qemu-system-x86_64` and `microvm`), and the sibling `ssh-exec` adapter
+for running a door on a second machine where it is native.
 
 ### Issue #165 — MRC gateway scoping — closed
 

@@ -142,13 +142,17 @@ async def edit_line_body(
         await _show_lines(session, lines)
 
     async def apply(candidate: list[str]) -> bool:
-        if len(candidate) > max_lines:
+        # A cap refuses growth past it, not every change to a body that is
+        # already over it: a body written in the fullscreen editor (no line
+        # cap) or carried over Link can arrive with more lines than this
+        # editor allows, and must still be trimmable with /delete or /edit.
+        if len(candidate) > max_lines and len(candidate) > len(lines):
             await session.write_line(
                 colored(f"Body cannot exceed {max_lines} logical lines.", fg_color=MUTED_COLOR)
             )
             return False
         size = _body_bytes(candidate)
-        if size > max_bytes:
+        if size > max_bytes and size > _body_bytes(lines):
             await session.write_line(
                 colored(f"Body cannot exceed {max_bytes} bytes (would be {size}).", fg_color=MUTED_COLOR)
             )

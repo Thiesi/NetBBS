@@ -11,3 +11,6 @@ web/** text eol=lf
 # check: the padding inside a frame and the SGR resets that end a row are
 # the capture, not sloppiness.
 web/shots/raw-*.txt binary
+
+# Guest-side scripts run inside a Linux VM; a CR would break their shebang.
+examples/doors/vm/* text eol=lf

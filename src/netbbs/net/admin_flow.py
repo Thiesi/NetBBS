@@ -200,6 +200,7 @@ from netbbs.files.diz import MAX_DESCRIPTION_LINES
 from netbbs.files.gc import GCReport, reclaim_orphaned_blobs
 from netbbs.files.entries import (
     FileEntry,
+    FileEntryError,
     approve_file,
     count_visible_files,
     delete_file,
@@ -222,7 +223,7 @@ from netbbs.link.boards import (
     is_board_origin_orphaned,
     link_board,
     offer_board_origin_transfer,
-    queue_board_post_if_linked,
+    queue_approved_board_post_if_linked,
     rebuild_carried_post_materialization,
 )
 from netbbs.link.channels import LinkChannelsError, is_channel_linked, link_channel
@@ -263,7 +264,7 @@ from netbbs.link.remote_attestation import (
     set_remote_attestation_override,
 )
 from netbbs.link.realtime_proxy import describe_proxy_status
-from netbbs.link.store import introduced_by
+from netbbs.link.store import introduced_by, retain_linked_genesis
 from netbbs.link.trust_carriage import relays_refusing_trust_deposits
 from netbbs.link.onboarding import (
     Participation,
@@ -14491,6 +14492,8 @@ async def _delete_board_screen(session: Session, lane: DatabaseLane, actor: User
     if confirmation != board.name:
         _announce_line(session, "Cancelled.")
         return False
+    # Issue #669: so a Linked board stays declared as not carried here.
+    await lane.run(retain_linked_genesis, "boards", board.board_id)
     await lane.run(delete_board, board, deleted_by=actor)
     _announce_line(session, f"{board.name!r} deleted.")
     return True
@@ -14587,10 +14590,15 @@ async def _post_action_screen(
             return
         elif choice == "a":
             await session.write_line("")
-            approved = await lane.run(approve_post, post, approved_by=actor)
+            try:
+                approved = await lane.run(approve_post, post, approved_by=actor)
+            except PostError as exc:
+                _announce(session, f"Error: {exc}", error=True)
+                await _draw_post_action(session, post, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line, when=when)
+                continue
             if link_context is not None:
                 await lane.run(
-                    queue_board_post_if_linked, approved, board, node_identity=link_context.node_identity
+                    queue_approved_board_post_if_linked, approved, board, node_identity=link_context.node_identity
                 )
             _announce_line(session, "Approved.")
             return
@@ -15238,6 +15246,8 @@ async def _delete_area_screen(session: Session, lane: DatabaseLane, actor: User,
     if confirmation != area.name:
         _announce_line(session, "Cancelled.")
         return False
+    # Issue #669: so a Linked file area stays declared as not carried here.
+    await lane.run(retain_linked_genesis, "file_areas", area.area_id)
     await lane.run(delete_file_area, area, deleted_by=actor)
     _announce_line(session, f"{area.name!r} deleted.")
     return True
@@ -15356,7 +15366,7 @@ async def _file_action_screen(
     """Act on one pending upload. Approving it is where a Linked area's
     catalogue entry is signed and queued (issue #464) -- the file-area
     counterpart of `_post_action_screen`'s own
-    `queue_board_post_if_linked` call, and the moderated half of the
+    `queue_approved_board_post_if_linked` call, and the moderated half of the
     split `netbbs.net.file_flow._handle_upload` documents: a pending
     upload is never announced, an approved one always is."""
     description_level = await lane.run(menu_description_level, actor)
@@ -15405,7 +15415,12 @@ async def _file_action_screen(
             await _draw()
         elif choice == "a":
             await session.write_line("")
-            approved = await lane.run(approve_file, entry, approved_by=actor)
+            try:
+                approved = await lane.run(approve_file, entry, approved_by=actor)
+            except FileEntryError as exc:
+                _announce(session, f"Error: {exc}", error=True)
+                await _draw()
+                continue
             if link_context is not None:
                 await lane.run(
                     queue_file_descriptor_if_linked, approved, area,
@@ -15415,7 +15430,12 @@ async def _file_action_screen(
             return
         elif choice == "r":
             await session.write_line("")
-            await lane.run(delete_file, entry, deleted_by=actor)
+            try:
+                await lane.run(delete_file, entry, deleted_by=actor)
+            except FileEntryError as exc:
+                _announce(session, f"Error: {exc}", error=True)
+                await _draw()
+                continue
             _announce_line(session, "Rejected.")
             return
         elif choice == "p":
@@ -17263,6 +17283,8 @@ async def _delete_channel_screen(session: Session, lane: DatabaseLane, actor: Us
     if confirmation != channel.name:
         _announce_line(session, "Cancelled.")
         return False
+    # Issue #669: so a Linked channel stays declared as not carried here.
+    await lane.run(retain_linked_genesis, "channels", channel.channel_id)
     await lane.run(delete_channel, channel, deleted_by=actor)
     _announce_line(session, f"{channel.name!r} deleted.")
     return True

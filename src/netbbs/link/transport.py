@@ -396,8 +396,20 @@ async def persist_accepted_events(
             )
             continue
         elif object_type == BOARD_POST_EDIT_OBJECT_TYPE:
+            # An author trust holds for approval has their edits held too
+            # (issue #677): an approved post edited afterwards would
+            # otherwise publish unreviewed text.
+            initial_status = "approved"
+            if enforce_trust_policy:
+                decision = await lane.run(
+                    decide_event_authorship, envelope,
+                    transport_peer_fingerprint=sender_fingerprint,
+                )
+                if decision.requires_approval:
+                    initial_status = "pending"
             await lane.run(
-                materialize_carried_post_edit, BoardPostEdit.from_dict(envelope), sender_fingerprint=sender_fingerprint
+                materialize_carried_post_edit, BoardPostEdit.from_dict(envelope),
+                sender_fingerprint=sender_fingerprint, initial_status=initial_status,
             )
             continue
         elif object_type == BOARD_POST_MODERATOR_EDIT_OBJECT_TYPE:
@@ -1931,20 +1943,27 @@ class LinkServer:
         # requester with nothing carried yet sends an all-empty request).
         # Still gated on `remaining > 0`: that's the shared response-size
         # budget, unrelated to whether the request itself was empty.
+        # Issue #669: what the requester holds a genesis for and does not
+        # carry is left out of all three diffs. Only a requester that saw
+        # this node advertise the capability sends it.
+        not_carried = inventory_request.not_carried
         board_events, board_truncated = await self._lane.run(
-            board_event_diff, inventory_request.boards, limit=response_limit
+            board_event_diff, inventory_request.boards, limit=response_limit,
+            not_carried=not_carried.get("boards", ()),
         )
         remaining = response_limit - len(board_events)
         if remaining > 0:
             channel_events, channel_truncated = await self._lane.run(
-                channel_event_diff, inventory_request.channels, limit=remaining
+                channel_event_diff, inventory_request.channels, limit=remaining,
+                not_carried=not_carried.get("channels", ()),
             )
         else:
             channel_events, channel_truncated = [], True
         remaining -= len(channel_events)
         if remaining > 0:
             file_area_events, file_area_truncated = await self._lane.run(
-                file_area_event_diff, inventory_request.file_areas, limit=remaining
+                file_area_event_diff, inventory_request.file_areas, limit=remaining,
+                not_carried=not_carried.get("file_areas", ()),
             )
         else:
             file_area_events, file_area_truncated = [], True

@@ -1,0 +1,79 @@
+#!/bin/busybox sh
+# Guest init for a NetBBS VM door: a reference implementation of the guest
+# image contract in docs/NetBBS-door-guide.md ("Foreign-platform doors in a
+# VM"). It runs as PID 1 inside the guest, once per caller:
+#
+#   1. mount the "game" export (the door's installation) at /mnt/game and the
+#      "node" export (this caller's node directory) at /mnt/node;
+#   2. put the virtio console /dev/hvc0 -- the caller's terminal -- in raw mode
+#      at the geometry NetBBS wrote to /mnt/node/geometry;
+#   3. touch /mnt/node/booted, which ends NetBBS's boot timeout;
+#   4. run /mnt/node/run.sh on that console as the door;
+#   5. write the door's exit status to /mnt/node/exit.status;
+#   6. flush and power off, which is what makes qemu exit.
+#
+# An ACPI power-button press is NetBBS's graceful stop (the caller hung up, the
+# time limit ran out, or the node is stopping): the door gets SIGHUP, exactly
+# as if its modem had dropped carrier, and a few seconds to save.
+/bin/busybox --install -s /bin
+export PATH=/bin
+mount -t proc proc /proc
+mount -t sysfs sys /sys
+mount -t devtmpfs dev /dev
+mkdir -p /dev/pts /tmp /mnt/game /mnt/node
+mount -t devpts devpts /dev/pts
+for module in netfs 9pnet 9pnet_virtio 9p; do
+    insmod /lib/modules/$module.ko
+done
+# Deliver the power button to this init as SIGINT, not the systemd default.
+insmod /lib/modules/tiny-power-button.ko power_signal=2
+
+halt_guest() {
+    sync
+    umount /mnt/node /mnt/game 2>/dev/null
+    poweroff -f
+}
+
+stopping=
+trap 'stopping=1; [ -n "$door" ] && kill -HUP -$door 2>/dev/null' INT TERM
+
+options=trans=virtio,version=9p2000.L,msize=262144,cache=none,access=any
+mount -t 9p -o $options game /mnt/game || { echo "init: game export missing"; halt_guest; }
+mount -t 9p -o $options node /mnt/node || { echo "init: node export missing"; halt_guest; }
+
+# The hvc driver resets a console's settings when its last user closes it, so
+# init holds it open for the whole session.
+exec 3<>/dev/hvc0
+geometry=$(cat /mnt/node/geometry 2>/dev/null)
+stty raw -echo ${geometry:+rows ${geometry% *} cols ${geometry#* }} <&3
+: >/mnt/node/booted
+
+# A stop requested while the guest was still booting: never start a door
+# that could only be cut off. 129 is what a hung-up door would report.
+if [ -n "$stopping" ]; then
+    echo 129 >/mnt/node/exit.status
+    halt_guest
+fi
+cd /mnt/game
+setsid -c sh /mnt/node/run.sh <&3 >&3 2>&1 &
+door=$!
+# The trap may have fired between the check above and $door being set.
+[ -n "$stopping" ] && kill -HUP -$door 2>/dev/null
+wait $door
+status=$?
+if [ -n "$stopping" ]; then
+    # The trap interrupted wait; give the door its chance to save, then end
+    # it. The host waits stop_grace seconds for the guest to power off, so
+    # keep a second of that for flushing and powering down.
+    grace=$(cat /mnt/node/stop_grace 2>/dev/null)
+    ticks=$(( (${grace:-5} - 1) * 5 ))
+    while [ $ticks -gt 0 ] && kill -0 $door 2>/dev/null; do
+        sleep 0.2
+        ticks=$((ticks - 1))
+    done
+    kill -KILL -$door 2>/dev/null
+    wait $door
+    status=$?
+fi
+echo $status >/mnt/node/exit.status
+halt_guest

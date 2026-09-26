@@ -3827,6 +3827,24 @@ fails on a new one. Two things about that helper are easy to undo by accident:
   TLS-inspecting proxy alternate between "open" and "failed" on every retry,
   and the log line that is meant to fire once per change fires twice per
   attempt.
+### Adding a field to a signed request needs a capability, not a version bump (issue #669)
+
+Signed Link requests are verified by rebuilding the payload from the parsed
+fields (`_inventory_request_payload`), and `from_dict` ignores keys it does not
+know. So a new field that is signed breaks every older responder, which drops
+it, rebuilds a payload without it, and refuses the whole request. Bumping the
+protocol version is no way out either: hello requires an exact match, so the
+peers would stop talking altogether. What works, and what `not_carried` does:
+
+- the field enters the signed payload only when it is non-empty, so a request
+  that does not use it signs byte-for-byte as before and older requesters keep
+  working against newer responders;
+- the responder advertises the capability in its signed endpoint descriptor
+  (`capabilities`, `LINK_CAPABILITIES`), and the requester sends the field only
+  to a peer whose current descriptor lists it (`descriptor_has_capability`).
+
+The capability is fixed per software version, not configurable, because it
+describes what the code can verify.
 
 ### Remote identity attestation: the issuing half, and what it exposed (issue #584)
 
@@ -4554,6 +4572,19 @@ stop to reject the correct live process and delete or ignore its service
 pidfile. Do not remove the wide-output flag while PID ownership is established
 from the full invocation string.
 
+While `start` waits for readiness, a failed identity match is not proof of
+failure (issue #693). As the child execs `nohup` → `env` → the interpreter,
+`ps -o command=` can show text that fails the match, for longer than any
+fixed interval on a loaded boot. Treating one such poll as "failed to start"
+deleted the pidfile of a node that came up moments later, leaving it
+untracked for the next `start` to duplicate. The match cannot be dropped
+either: a child that died early is orphaned and its pid can be recycled. So
+during `start` a dead pid fails at once, an unrecognised live one means
+"keep waiting", and only a pid still unrecognised when
+`netbbs_start_timeout` runs out is declared someone else's. It is never
+signalled, only untracked. A stand-in child that execs into a shell before
+carrying the real argv reproduces the old failure on NetBSD.
+
 `rc.subr`'s `run_rc_command` ends with `[ ! -x $command ] && return 0`. A
 `$command` that does not exist is therefore not an error: `service netbbs
 start` prints nothing, exits 0, and `service netbbs status` then reports the
@@ -4885,6 +4916,48 @@ flakiness rather than as the unsound synchronisation it is. Wait for the
 observable end state instead: where an injected fake ends the loop itself, the
 task completing *is* the signal, and a timeout around it is a deadlock guard
 rather than a pacing device.
+
+The suite runs in parallel (`pytest -n auto`, `pytest-xdist`), and that is the
+load under which these guesses fail: on a twenty-worker run every subprocess
+start, loopback round trip and lane hop is several times slower than alone.
+Two consequences:
+
+- The bound on a readiness poll is a deadlock guard, not an expectation of
+  speed. It costs nothing while the condition arrives, so it should be
+  generous (tens of seconds). A two-second bound is a timing guess with a
+  loop around it.
+- A test must not wait "long enough" for background work to finish and then
+  cancel it. Link sync tests cancel `run_link_sync` only once it is parked in
+  its interval sleep between passes (`tests/link_sync_wait.py`). Before that,
+  they cancelled after a fixed `settle` and asserted on a half-finished pass.
+
+A test whose *subject* is a real-time window, such as War Dialer's 100 ms
+escape lookahead probed with 50 ms gaps, cannot be made load-proof, because
+the timing is what it measures. Mark it `@pytest.mark.timing_sensitive`.
+`tests/conftest.py` skips those under an xdist worker (visibly, in the
+skipped count), so a full check is `pytest -n auto` followed by
+`pytest -m timing_sensitive`. Use the marker only for that case. A test that
+merely waits for something should wait for it instead.
+
+A time limit under test is a race of its own. A door given a one-second wall
+limit, with the test checking it is still running 0.6 s after its first write,
+fails whenever the door takes longer than 0.4 s to start. Leave the limit
+enough headroom over everything the test does before checking it.
+
+On Windows, killing a process that holds a file lock does not release the lock
+when the process exits. The OS releases it later, and a loaded machine makes
+"later" long enough for the next step of the same test to find it still held.
+A test child holding a lease should be told to leave its `with` block, with
+`kill()` kept only as a fallback.
+
+On Windows, a venv's `python.exe` is a launcher that runs the real
+interpreter as a second process. `kill()` stops the launcher, and the
+interpreter follows only after `wait()` has returned. A crash test that
+spawns a door with `sys.executable` and kills it mid-action can therefore
+find the action finished and saved. Under load this happened every time, and
+it looked exactly like a door failing to resume a checkpoint. Spawn a door
+you mean to kill with `tests/door_python.DOOR_PYTHON` (the base interpreter;
+the bundled doors are standard-library only).
 
 A test that pins a clock has to pin every timestamp that clock is compared
 against. Where the code under test falls back to a row's real creation time
@@ -5679,6 +5752,38 @@ short BIOS delay after the DOS game returns prevent losing its final bytes.
 DOSBox can create lowercase host files from uppercase DOS paths. DOS `IF`
 redirection can create an empty file before evaluating the condition; use
 batch labels for distinct status markers and inspect names case-insensitively.
+
+VM doors (issue #474, `netbbs.doors.vm`) inherit several traps that are
+invisible until a real guest runs. qemu exits on SIGTERM without telling its
+guest, so the graceful stop must be a QMP `system_powerdown` sent *before*
+the process group is signalled; qemu stays in the door's group so the
+existing SIGKILL still guarantees no VM outlives its session -- a wrapper
+process in a separate group would lose that. The guest's `tiny-power-button`
+defaults to a systemd signal, so the recipe init loads it with
+`power_signal=2`. The hvc console driver resets termios on last close:
+`stty -F /dev/hvc0 raw` followed by a fresh open is cooked again, so init
+holds the console open on one descriptor for the whole session. Under TCG a
+guest kernel calibrating its TSC against the emulated PIT failed 3 boots in
+10 on a VMware-hosted NetBSD and then hung before its console came up;
+microvm has no HPET/PM timer to fall back on. `tsc_early_khz` from the
+host's `machdep.tsc_freq` (the guest TSC *is* the host's under TCG on x86)
+fixed 10/10. qemu's address space is about twice the guest RAM plus
+~500 MiB (measured bounds are in `vm.ADDRESS_SPACE_OVERHEAD_MB`'s comment),
+so `RLIMIT_AS` validation encodes that. qemu 11.1 deprecated `-mon` and
+warns on every launch into Last diagnostic; whether a binary takes
+`-object monitor-qmp` is asked once, from preflight's thread, and cached by
+path and mtime -- the launch itself must not spawn from the event loop. A
+guest console must not be `-serial stdio`: qemu reads stdin (/dev/null for a
+door), the immediate EOF raises the UART's interrupt before the guest has
+programmed an interrupt controller, and about one boot in nine took a stray
+vector just after `int3_selftest`, panicked before its console existed, and
+exited 0 under `-no-reboot` -- indistinguishable from a door that ran and
+reported nothing. `qemu -d int,cpu_reset -D file` (wrapped in via the
+profile's `runner`) showed the pending IRQ; disabling the PIT/PIC made it
+worse. `file:/dev/stdout` fixed it (40/40). A
+never-drained qemu stdout pipe stalls the guest once its console fills it;
+the runtime's diagnostics task drains socketpair doors' stdout, and any
+test harness must too.
 
 Legacy configuration parsers need byte-level validation against the actual
 program. LORD 4.07 silently ignores LF-only node files; install its NODE1.DAT

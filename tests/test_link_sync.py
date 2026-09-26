@@ -23,6 +23,8 @@ from datetime import date
 import aiohttp
 import pytest
 
+from tests.link_sync_wait import run_sync_briefly as _run_sync_briefly
+
 from netbbs.attestation import attest_age, set_attestation_link_visible
 from netbbs.auth.users import SYSOP_LEVEL, create_user
 from netbbs.boards.boards import create_board
@@ -67,18 +69,6 @@ async def _run_server(node: LinkNode, lane: DatabaseLane, **kwargs) -> LinkServe
     )
     await server.start()
     return server
-
-
-async def _run_sync_briefly(coro_task: asyncio.Task, *, settle: float = 0.2) -> None:
-    """Lets a run_link_sync task run for a bit, then cancels it cleanly
-    -- mirrors how netbbs.__main__ will eventually cancel this same
-    task on node shutdown."""
-    await asyncio.sleep(settle)
-    coro_task.cancel()
-    try:
-        await coro_task
-    except asyncio.CancelledError:
-        pass
 
 
 class _NodeDb:
@@ -852,7 +842,13 @@ def test_sync_runs_a_second_pass_after_the_interval_elapses(tmp_path):
                         lambda: _hello_for(dialer_node), dialer.lane, interval_seconds=0.05,
                     )
                 )
-                await _run_sync_briefly(task, settle=0.3)
+                # Until the second hello lands, not for a fixed 0.3s: two
+                # passes over a real transport can take longer than that on
+                # a loaded parallel run.
+                deadline = asyncio.get_running_loop().time() + 60
+                while hello_count < 2 and asyncio.get_running_loop().time() < deadline:
+                    await asyncio.sleep(0.01)
+                await _run_sync_briefly(task, settle=0)
         finally:
             await seed_server.stop()
 
@@ -3703,5 +3699,148 @@ def test_a_blocked_reporter_is_not_asked_about(tmp_path, monkeypatch):
     try:
         asyncio.run(scenario())
         assert asked == [(a,)]
+    finally:
+        net.close()
+
+
+# -- Issue #669: what a node holds a genesis for and does not carry ------------
+
+
+def _deleted_board_scenario(tmp_path, monkeypatch, *, page_size=None, strip_capability=False):
+    """R originates two linked boards; B carries both, then deletes the one
+    that sorts first. R posts four times to the deleted one and, with the
+    responder's page shrunk to `page_size`, once to the other. Returns the
+    number of inventory events B received on each pass after the delete, and
+    the subjects B ended up with on the board it kept."""
+    import functools
+
+    from netbbs.boards.boards import delete_board, get_board_by_name
+    from netbbs.link import protocol as protocol_module
+    from netbbs.link import sync as sync_module
+    from netbbs.link import transport as transport_module
+    from netbbs.link.events import build_endpoint_descriptor as real_build_descriptor
+    from netbbs.link.store import load_link_node
+
+    if strip_capability:
+        # A responder from before #669: its descriptor advertises nothing.
+        monkeypatch.setattr(
+            protocol_module, "build_endpoint_descriptor",
+            functools.partial(real_build_descriptor, capabilities=()),
+        )
+    net = _ThreeNodes(tmp_path, enforce=False)
+    second = create_board(net.dbs["R"].db, "second", creator=net.sysops["R"])
+    link_board(net.dbs["R"].db, second, node_identity=net.ids["R"])
+    net.nodes["R"] = load_link_node(net.dbs["R"].db, net.ids["R"])
+    general = get_board_by_name(net.dbs["R"].db, "general")
+    by_id = sorted([(general.board_id, "general"), (second.board_id, "second")])
+    deleted_name, kept_name = by_id[0][1], by_id[1][1]
+
+    received: list[int] = []
+    real_request_inventory = sync_module.request_inventory
+
+    async def counting_request_inventory(*args, **kwargs):
+        result = await real_request_inventory(*args, **kwargs)
+        received.append(len(result[0]))
+        return result
+
+    monkeypatch.setattr(sync_module, "request_inventory", counting_request_inventory)
+
+    async def scenario():
+        server = await net.start()
+        try:
+            async with aiohttp.ClientSession() as session:
+                await net.dial("B", session)
+                board = get_board_by_name(net.dbs["B"].db, deleted_name)
+                assert board is not None, "the scenario needs B to carry both boards"
+                delete_board(net.dbs["B"].db, board, deleted_by=net.sysops["B"])
+                for i in range(4):
+                    net.post("R", f"on the deleted board {i}", board_name=deleted_name)
+                if page_size is not None:
+                    monkeypatch.setattr(transport_module, "_MAX_EVENTS_PER_REQUEST", page_size)
+                net.post("R", "on the kept board", board_name=kept_name)
+                received.clear()
+                for _ in range(3):
+                    await net.dial("B", session)
+        finally:
+            await server.stop()
+
+    try:
+        asyncio.run(scenario())
+        kept = [
+            row[0] for row in net.dbs["B"].db.connection.execute(
+                """SELECT p.subject FROM posts AS p JOIN boards AS b ON b.id = p.board_id
+                   WHERE b.name = ?""",
+                (kept_name,),
+            )
+        ]
+        return received, kept
+    finally:
+        net.close()
+
+
+def test_a_deleted_carried_board_is_not_sent_again_on_every_pass(tmp_path, monkeypatch):
+    """The board's genesis stays in `link_events` after the delete, so it was
+    absent from what B declared and R answered "never seen" with the genesis
+    and every post, on every pass. Only the kept board's new post arrives now,
+    and once."""
+    received, kept = _deleted_board_scenario(tmp_path, monkeypatch)
+    assert received == [1, 0, 0]
+    assert kept == ["on the kept board"]
+
+
+def test_a_deleted_carried_board_no_longer_starves_what_sorts_after_it(tmp_path, monkeypatch):
+    """With a page smaller than the deleted board's history, that history was
+    the whole page on every pass and the kept board's post never arrived --
+    at the real page of 200, a declined board with 200 posts does this to
+    every board, channel and file area behind it."""
+    received, kept = _deleted_board_scenario(tmp_path, monkeypatch, page_size=3)
+    assert kept == ["on the kept board"]
+    assert received == [1, 0, 0]
+
+
+def test_the_field_is_not_sent_to_a_responder_that_does_not_advertise_it(tmp_path, monkeypatch):
+    """An older responder rebuilds the signed payload without `not_carried`
+    and refuses the whole request, so a requester must not send it there.
+    Against such a responder the old behaviour remains -- the deleted board is
+    resent -- and sync keeps working rather than failing outright."""
+    received, kept = _deleted_board_scenario(tmp_path, monkeypatch, strip_capability=True)
+    assert kept == ["on the kept board"]
+    assert received[1:] == [received[1]] * 2 and received[1] > 0
+
+
+def test_a_linked_board_whose_name_is_taken_locally_is_carried_and_receives_posts(tmp_path):
+    """Issue #671. B already has its own `general` when R's linked `general`
+    arrives. The insert used to raise `IntegrityError: UNIQUE constraint
+    failed: boards.name` out of B's first pass; the genesis was already saved,
+    so every later pass skipped it and R's board was never carried. Now it is
+    carried under a suffixed name, and R's post lands in it rather than in
+    B's own board."""
+    from netbbs.boards.boards import get_board_by_name
+
+    net = _ThreeNodes(tmp_path, enforce=False)
+    create_board(net.dbs["B"].db, "general", creator=net.sysops["B"])
+    r_board_id = get_board_by_name(net.dbs["R"].db, "general").board_id
+
+    async def scenario():
+        server = await net.start()
+        try:
+            async with aiohttp.ClientSession() as session:
+                await net.dial("B", session)
+                net.post("R", "hello from R")
+                await net.dial("B", session)
+        finally:
+            await server.stop()
+
+    try:
+        asyncio.run(scenario())
+        rows = net.dbs["B"].db.connection.execute(
+            """SELECT b.name, b.board_id = ?, p.subject FROM boards AS b
+               LEFT JOIN posts AS p ON p.board_id = b.id ORDER BY b.id""",
+            (r_board_id,),
+        ).fetchall()
+        assert [tuple(row) for row in rows] == [
+            ("general", 0, None),
+            (f"general-{r_board_id[:8]}", 1, "hello from R"),
+        ]
     finally:
         net.close()

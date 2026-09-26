@@ -140,8 +140,12 @@ def search_posts(db: Database, user: User, query: str, *, limit: int = 20) -> li
     """Approved board posts matching `query`, most relevant first,
     filtered to boards `user` can currently read (level, age, Community
     inheritance -- `netbbs.communities.get_effective_min_read_level`/
-    `get_effective_min_age`, the same gate `_new_scan_screen` applies)."""
+    `get_effective_min_age`, the same gate `_new_scan_screen` applies),
+    and to posts the board page itself would show: a carried post whose
+    author trust suppresses is hidden from search as it is from the feed
+    (design doc §12.8, issue #677)."""
     from netbbs.boards.boards import list_boards  # deferred -- see module's TYPE_CHECKING note
+    from netbbs.link.enforcement import link_content_visible  # deferred, same cycle
 
     expr = _match_expression(query)
     if expr is None:
@@ -165,6 +169,8 @@ def search_posts(db: Database, user: User, query: str, *, limit: int = 20) -> li
             meets_level(user, get_effective_min_read_level(db, board))
             and meets_age(db, user, get_effective_min_age(db, board))
         ):
+            continue
+        if not link_content_visible(db, row["root_post_id"]):
             continue
         hits.append(
             PostSearchHit(board=board, root_post_id=row["root_post_id"], subject=row["subject"], body=row["body"])
@@ -218,7 +224,11 @@ def search_channel_messages(
     login_flow`) supplies this via `netbbs.net.chat_flow.
     list_visible_channels_for(db, user)`, the same call `_new_scan_
     screen` already makes, rather than this module reaching into chat
-    visibility rules itself and risking the two drifting apart."""
+    visibility rules itself and risking the two drifting apart. A carried
+    message trust suppresses is skipped, as scrollback skips it (issue
+    #677)."""
+    from netbbs.link.enforcement import link_content_visible  # deferred -- see module's TYPE_CHECKING note
+
     expr = _match_expression(query)
     if expr is None:
         return []
@@ -238,10 +248,14 @@ def search_channel_messages(
         if channel is None:
             continue
         message_row = db.connection.execute(
-            "SELECT author_label FROM channel_messages WHERE id = ?", (row["message_id"],)
+            "SELECT author_label, link_content_id FROM channel_messages WHERE id = ?", (row["message_id"],)
         ).fetchone()
         if message_row is None:
             continue  # trimmed since the search index was last pruned
+        if message_row["link_content_id"] is not None and not link_content_visible(
+            db, message_row["link_content_id"]
+        ):
+            continue
         hits.append(
             ChannelMessageSearchHit(
                 channel=channel, message_id=row["message_id"], author_label=message_row["author_label"],
