@@ -513,3 +513,66 @@ def test_the_reader_stays_on_its_post_after_an_action_queues_a_notice(db, alice,
     before, after = (re.search(r"Body of post (\d+)", s).group(1) for s in (readers[0], readers[-1]))
     assert before == after
     assert "Edit cancelled." in readers[-1]
+
+
+# -- Codex review round 3 on #719 --------------------------------------------
+
+
+def test_a_long_description_does_not_push_the_list_off_the_screen(db, alice, monkeypatch):
+    board = create_board(db, "general", description="A very long description. " * 200, creator=alice)
+    _posts(db, board, alice, 30, monkeypatch)
+    session = FakeSession(["b"])
+
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+
+    screen = session.screens()[0]
+    assert len(screen.replace("\r\n", "\n").rstrip("\n").split("\n")) <= 24
+    assert "..." in screen
+
+
+def test_discarding_a_draft_keeps_the_highlighted_post(db, alice, monkeypatch):
+    from netbbs.net.draft_storage import save_draft
+
+    board = create_board(db, "general", creator=alice)
+    _posts(db, board, alice, 60, monkeypatch)
+    save_draft(board_flow._post_draft_path(db, kind="new", board=board, user=alice), "an old draft")
+    # Highlight the top row (the one a shorter refetch would drop), then
+    # [D]raft -> [D]iscard, which announces "Draft deleted.".
+    session = FakeSession(["DOWN", "d", "d", "b"])
+
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+
+    screens = session.screens()
+    highlighted = [re.search(r">\s+\d+\s+Subject (\d+)\b", s) for s in screens]
+    before, after = highlighted[1].group(1), highlighted[-1].group(1)
+    assert before == after
+    assert "Draft deleted." in screens[-1]
+
+
+def test_an_empty_board_says_why_a_caller_cannot_post(db, alice):
+    board = create_board(db, "general", creator=alice, min_write_level=50)
+    session = FakeSession(["b"])
+
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+
+    assert "Read only: posting needs level 50." in session.visible()
+
+
+def test_reading_a_late_arrival_does_not_move_the_jump_position_back(db, alice, monkeypatch):
+    """A post carried late has an older authored date but a newer local id.
+    Seeing it advances the unread watermark; the position a jump lands on
+    stays where the caller had read to."""
+    from netbbs.activity import board_read_cursor, unread_post_count
+
+    board = create_board(db, "general", creator=alice)
+    stamps = iter(["2026-01-01T10:00:00.000000Z", "2026-01-01T09:00:00.000000Z"])
+    monkeypatch.setattr(posts_module, "utc_now_iso", lambda: next(stamps))
+    newer = create_post(db, board, alice, "Written at ten", "x")
+    record_board_seen(db, alice, board, newer)
+    late = create_post(db, board, alice, "Written at nine, arrived later", "y")
+    assert late.id > newer.id and late.created_at < newer.created_at
+
+    record_board_seen(db, alice, board, late)
+
+    assert board_read_cursor(db, alice, board) == (newer.created_at, newer.post_id)
+    assert unread_post_count(db, alice, board) == 0

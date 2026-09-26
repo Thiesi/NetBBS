@@ -119,11 +119,36 @@ def _record_seen_string_ordered(
     db: Database, user: User, object_type: str, object_id: int, *, created_at: str, stable_id: str, arrival_id: int
 ) -> None:
     existing = _get_cursor(db, user, object_type, object_id)
-    if existing is not None and _arrival_is_at_or_past(existing, arrival_id, created_at, stable_id):
-        return  # never retreat -- an older/equal page view must not un-mark newer content
+    if existing is None:
+        _upsert_cursor(
+            db, user, object_type, object_id,
+            last_seen_created_at=created_at, last_seen_stable_id=stable_id, last_seen_arrival_id=arrival_id,
+        )
+        return
+    if existing.arrival_id is None:
+        # Legacy cursor with no arrival axis: the pre-#72 rule, as before.
+        if _arrival_is_at_or_past(existing, arrival_id, created_at, stable_id):
+            return
+        _upsert_cursor(
+            db, user, object_type, object_id,
+            last_seen_created_at=created_at, last_seen_stable_id=stable_id, last_seen_arrival_id=arrival_id,
+        )
+        return
+    # The arrival watermark (what unread counts compare) and the feed
+    # position (where a jump to the first unread lands) are separate axes
+    # (§6.6), and each only ever moves forward. A late-arriving post has a
+    # newer arrival id but an older authored position: seeing it advances
+    # the watermark and must leave the feed position where it was, or a
+    # later jump would land on history already read (Codex review on #719).
+    arrival_advances = arrival_id > existing.arrival_id
+    feed_advances = (created_at, stable_id) > (existing.created_at, existing.stable_id)
+    if not arrival_advances and not feed_advances:
+        return  # never retreat -- an older/equal view must not un-mark newer content
     _upsert_cursor(
         db, user, object_type, object_id,
-        last_seen_created_at=created_at, last_seen_stable_id=stable_id, last_seen_arrival_id=arrival_id,
+        last_seen_created_at=created_at if feed_advances else existing.created_at,
+        last_seen_stable_id=stable_id if feed_advances else existing.stable_id,
+        last_seen_arrival_id=arrival_id if arrival_advances else existing.arrival_id,
     )
 
 

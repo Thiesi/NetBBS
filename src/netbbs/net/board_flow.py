@@ -100,7 +100,7 @@ from netbbs.rendering import (
 from netbbs.rendering.ansi import strip_ansi
 from netbbs.rendering.detail import Section, Styled
 from netbbs.rendering.reflow import wrap_terminal_text
-from netbbs.rendering.width import cut_to_width, display_width
+from netbbs.rendering.width import cut_to_width, display_width, wrap_to_width
 from netbbs.signature import append_signature, get_signature
 from netbbs.sort_preferences import get_effective_sort_mode, set_sort_preference
 from netbbs.storage.database import Database
@@ -465,6 +465,7 @@ _ROW_FURNITURE = 2 + 4 * 2 + 1
 _AUTHOR_MAX_WIDTH = 24
 _SUBJECT_MIN_WIDTH = 8
 _HINT_MIN_HEIGHT = 20
+_DESCRIPTION_ROWS = 2
 # A list with fewer rows than this is worth trading the action bar's
 # descriptions for.
 _COMFORTABLE_LIST_ROWS = 6
@@ -632,6 +633,17 @@ def _list_options(
     return options
 
 
+def _bounded_rows(text: str, width: int, rows: int) -> list[str]:
+    """`text` wrapped to `width` (one column kept free) and cut to `rows`
+    rows, the last ending in "..." when anything was cut."""
+    wrapped = wrap_to_width(" ".join(text.split()), max(1, width - 1)) or [""]
+    if len(wrapped) <= rows:
+        return wrapped
+    kept = wrapped[:rows]
+    kept[-1] = cut_to_width(kept[-1], max(1, width - 4)) + "..."
+    return kept
+
+
 def _count_rows(text: str, width: int) -> int:
     return wrap_terminal_text(text, max(1, width)).count("\r\n") + 1 if text else 0
 
@@ -771,7 +783,13 @@ async def _show_board(
         )
         notes = []
         if board.description:
-            notes.append(colored(sanitize_text(board.description), fg_color=MUTED_COLOR))
+            # At most two rows: a description has no length limit and can
+            # arrive over Link, and the list is what the caller came for
+            # (Codex review on #719).
+            notes.extend(
+                colored(row, fg_color=MUTED_COLOR)
+                for row in _bounded_rows(sanitize_text(board.description), session.terminal_width, _DESCRIPTION_ROWS)
+            )
         if closed:
             notes.append(colored(_CLOSED_BOARD_NOTICE, fg_color=MUTED_COLOR))
         elif read_only_reason:
@@ -784,22 +802,28 @@ async def _show_board(
             current_page, can_post=can_post, has_draft=has_draft,
             row_count=len(current_page.posts) if row_count is None else row_count,
         )
-        menu = menu_row(
-            options, width=session.terminal_width, height=session.terminal_height,
-            description_level=description_level,
-        )
         # Descriptions double the action bar. Where they would leave the
         # list fewer rows than a page worth having, the bar goes compact:
         # the posts are what the caller came for (Codex review on #719).
+        # Decided against the busiest bar this board can draw, the one the
+        # page budget measures, so the budget and the drawn frame agree.
+        busiest = menu_row(
+            _list_options(
+                PostPage(posts=[], has_older=True, has_newer=True),
+                can_post=can_post, has_draft=has_draft, row_count=9,
+            ),
+            width=session.terminal_width, height=session.terminal_height,
+            description_level=description_level,
+        )
         room = (
             session.terminal_height - _count_rows(above, session.terminal_width)
-            - _count_rows(menu, session.terminal_width) - _LIST_FURNITURE_ROWS
+            - _count_rows(busiest, session.terminal_width) - _LIST_FURNITURE_ROWS
         )
-        if description_level != "off" and room < _COMFORTABLE_LIST_ROWS:
-            menu = menu_row(
-                options, width=session.terminal_width, height=session.terminal_height,
-                description_level="off",
-            )
+        compact = description_level != "off" and room < _COMFORTABLE_LIST_ROWS
+        menu = menu_row(
+            options, width=session.terminal_width, height=session.terminal_height,
+            description_level="off" if compact else description_level,
+        )
         below_rows = [menu]
         # A hint is the first thing a short terminal can spare: the list's
         # rows are what the caller came for.
@@ -1148,6 +1172,8 @@ async def _show_board(
             )
             if closed:
                 await session.write_line(colored(f"\r\n{_CLOSED_BOARD_NOTICE}", fg_color=MUTED_COLOR))
+            elif read_only_reason:
+                await session.write_line(colored(f"\r\n{read_only_reason}", fg_color=MUTED_COLOR))
             if has_draft:
                 await session.write_line(colored(f"\r\n{_SAVED_DRAFT_NOTICE}", fg_color=MUTED_COLOR))
             options = []
@@ -1261,14 +1287,22 @@ async def _show_board(
             if await _saved_draft_menu(from_post=True):
                 page_anchor = None  # a freshly-created post always lands on the newest page
                 highlighted = None
-            page = _refetch_current_page()
+                page = _refetch_current_page()
+            else:
+                # Nothing was posted: the same page at the same size, so a
+                # notice now pending cannot drop the highlighted row.
+                page = _refetch_current_page(limit=len(page.posts) or None)
             await _render_and_advance_cursor(page, highlighted)
         elif char == "d" and _has_saved_draft():
             await _moved_on()
             if await _saved_draft_menu():
                 page_anchor = None  # a resumed-and-posted draft lands on the newest page too
                 highlighted = None
-            page = _refetch_current_page()
+                page = _refetch_current_page()
+            else:
+                # Discarded or left: same page, same size (Codex review on
+                # #719) -- "Draft deleted." must not cost the highlighted row.
+                page = _refetch_current_page(limit=len(page.posts) or None)
             await _render_and_advance_cursor(page, highlighted)
         elif char == "b":
             await _moved_on()
