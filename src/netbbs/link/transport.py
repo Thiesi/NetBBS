@@ -420,8 +420,20 @@ async def persist_accepted_events(
                 await _forget_unless_stored(lane, node, content_id)
             continue
         elif object_type == BOARD_POST_EDIT_OBJECT_TYPE:
+            # An author trust holds for approval has their edits held too
+            # (issue #677): an approved post edited afterwards would
+            # otherwise publish unreviewed text.
+            initial_status = "approved"
+            if enforce_trust_policy:
+                decision = await lane.run(
+                    decide_event_authorship, envelope,
+                    transport_peer_fingerprint=sender_fingerprint,
+                )
+                if decision.requires_approval:
+                    initial_status = "pending"
             projected = await lane.run(
-                materialize_carried_post_edit, BoardPostEdit.from_dict(envelope), sender_fingerprint=sender_fingerprint
+                materialize_carried_post_edit, BoardPostEdit.from_dict(envelope),
+                sender_fingerprint=sender_fingerprint, initial_status=initial_status,
             )
             if projected is None:
                 await _forget_unless_stored(

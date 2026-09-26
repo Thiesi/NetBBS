@@ -600,3 +600,45 @@ def test_delete_board_records_an_audit_entry_before_deleting(db, alice):
     delete_board(db, board, deleted_by=alice)
     entries = list_actions_for_object(db, "board", board_id)
     assert any(e.action == "delete_board" for e in entries)
+
+
+# -- issue #676: a maximum post age is at least one day -----------------------
+
+
+@pytest.mark.parametrize("bad_age", [0, -1, -30])
+def test_create_board_refuses_a_max_post_age_below_one_day(db, alice, bad_age):
+    """0 would expire every post on the next browse; a negative age moves
+    the deletion cutoff (`age + grace`) into the past."""
+    with pytest.raises(BoardError, match="at least 1 day"):
+        create_board(db, "general", creator=alice, max_post_age_days=bad_age)
+    assert list_boards(db) == []
+
+
+@pytest.mark.parametrize("bad_age", [0, -5])
+def test_update_board_refuses_a_max_post_age_below_one_day(db, alice, bad_age):
+    board = create_board(db, "general", creator=alice, max_post_age_days=30)
+    with pytest.raises(BoardError, match="at least 1 day"):
+        update_board(
+            db, board, name=board.name, description=board.description,
+            min_read_level=board.min_read_level, min_write_level=board.min_write_level,
+            category_id=board.category_id, pinned=board.pinned, moderated=board.moderated,
+            max_post_age_days=bad_age, min_age=board.min_age,
+            name_requirement=board.name_requirement, community_id=board.community_id,
+            changed_by=alice,
+        )
+    assert get_board_by_name(db, "general").max_post_age_days == 30
+
+
+def test_a_max_post_age_of_one_day_or_none_is_accepted(db, alice):
+    assert create_board(db, "daily", creator=alice, max_post_age_days=1).max_post_age_days == 1
+    assert create_board(db, "forever", creator=alice, max_post_age_days=None).max_post_age_days is None
+
+
+@pytest.mark.parametrize(
+    ("recommended", "stored"),
+    [(30, 30), (1, 1), (0, None), (-3, None), (None, None), (True, None), ("7", None), (2.5, None)],
+)
+def test_usable_max_age_days_drops_anything_but_a_positive_whole_number(recommended, stored):
+    from netbbs.boards.boards import usable_max_age_days
+
+    assert usable_max_age_days(recommended) == stored

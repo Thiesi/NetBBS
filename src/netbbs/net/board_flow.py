@@ -18,6 +18,7 @@ also split out, hold only session-entry/auth logic).
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from netbbs.activity import record_board_seen
@@ -49,6 +50,9 @@ from netbbs.link.remote_attestation import format_remote_name_for_resource
 from netbbs.link.trust import TrustSubject
 from netbbs.link.boards import (
     LinkContext,
+    board_origin_fingerprint,
+    is_board_closed,
+    is_board_linked,
     queue_board_post_edit_if_linked,
     queue_board_post_if_linked,
     queue_board_post_moderator_edit_if_linked,
@@ -76,6 +80,7 @@ from netbbs.rendering import (
     METADATA_COLOR,
     MUTED_COLOR,
     RULE_COLOR,
+    SUCCESS_COLOR,
     MenuEntry,
     badge,
     colored,
@@ -387,6 +392,7 @@ async def _render_board_page(
     unicode_style: bool = False,
     collapsed: bool = False,
     has_draft: bool = False,
+    closed: bool = False,
 ) -> None:
     """Renders one page of posts plus its navigation options — the unit
     that should be redrawn on an actual page change (initial entry,
@@ -400,6 +406,8 @@ async def _render_board_page(
         session, db, board_name, page, user, name_requirement=name_requirement, redraw_in_place=redraw_in_place,
         unicode_style=unicode_style, collapsed=collapsed,
     )
+    if closed:
+        await session.write_line(colored(f"\r\n{_CLOSED_BOARD_NOTICE}", fg_color=MUTED_COLOR))
     if has_draft:
         await session.write_line(colored(f"\r\n{_SAVED_DRAFT_NOTICE}", fg_color=MUTED_COLOR))
     options = []
@@ -424,6 +432,19 @@ async def _render_board_page(
 
 
 _SAVED_DRAFT_NOTICE = "You have a saved post draft for this message board from an earlier session."
+_CLOSED_BOARD_NOTICE = "This message board is closed. It can be read, but it takes no new posts."
+_STAYS_LOCAL_NOTICE = "Other nodes carrying this board keep the original: only its origin can change it for them."
+
+
+def _moderation_stays_local(db: Database, board: Board, link_context: LinkContext | None) -> bool:
+    """Whether a moderator's edit or removal on `board` changes this node's
+    copy only. On a Linked board only the origin's moderation is signed
+    and sent (`queue_board_post_moderator_edit_if_linked`,
+    `queue_board_post_tombstone_if_linked`, design doc §9.5); everywhere
+    else it is local, and the moderator is told so (issue #677)."""
+    if not is_board_linked(db, board):
+        return False
+    return link_context is None or board_origin_fingerprint(db, board) != link_context.node_identity.fingerprint
 _DRAFT_MENU_ENTRY = MenuEntry(label=menu_key("D", "raft"), brief="Resume or discard your saved draft")
 
 
@@ -462,8 +483,13 @@ async def _show_board(
     same degrade-gracefully shape every other optional context uses.
     """
     board_name = sanitize_text(board.name)
+    # A closed Linked board refuses every new post (`create_post`, design
+    # doc §9.5), so [P]ost is not offered on one: the caller would write a
+    # whole post before learning that (issue #677).
+    closed = is_board_closed(db, board)
     can_post = (
-        meets_level(user, get_effective_min_write_level(db, board))
+        not closed
+        and meets_level(user, get_effective_min_write_level(db, board))
         and meets_age(db, user, get_effective_min_age(db, board))
         and meets_name_requirement(db, user, get_effective_name_requirement(db, board))
     )
@@ -471,8 +497,6 @@ async def _show_board(
     redraw_in_place = redraw_in_place_enabled(db, user)
     unicode_style = unicode_style_enabled(db, user)
     collapsed = breadcrumb_collapsed_enabled(db, user)
-    accent_color = effective_accent_color(session, db)
-    header_color = effective_header_color(session, db)
 
     def _refetch_current_page() -> PostPage:
         """Re-fetches whichever page is currently on screen, using the
@@ -501,11 +525,18 @@ async def _show_board(
             unicode_style=unicode_style,
             collapsed=collapsed,
             has_draft=_has_saved_draft(),
+            closed=closed,
         )
         if current_page.posts:
             record_board_seen(db, user, board, current_page.posts[-1])
 
     async def _compose_new_post(*, initial_body: str | None = None) -> None:
+        # `[P]ost` is a hotkey followed straight by a line prompt: an Enter
+        # typed right behind it ("P<Enter>") would otherwise be read as a
+        # blank subject and cancel the post. Same guard as mail's compose.
+        discard_buffered_enter = getattr(session, "discard_buffered_enter", None)
+        if discard_buffered_enter is not None:
+            await discard_buffered_enter()
         await session.write("\r\nSubject (or press Enter to cancel): ")
         subject = (await session.read_line()).strip()
         if not subject:
@@ -536,58 +567,32 @@ async def _show_board(
             else:
                 await session.write_line(colored("Post cancelled.", fg_color=MUTED_COLOR))
             return
-        while True:
-            action = await review_composition(
-                session,
-                recipient=None,
-                subject=subject,
-                body=body,
-                commit_key="p",
-                commit_label="ost",
-                commit_brief="Publish this post",
-                description_level=description_level,
-                redraw_in_place=redraw_in_place,
-                unicode_style=unicode_style,
-                collapsed=collapsed,
-                accent_color=accent_color,
-                header_color=header_color,
-                truecolor=effective_truecolor(session, db, user),
-            )
-            if action is ReviewAction.CANCEL:
-                await session.write_line(colored("Post cancelled.", fg_color=MUTED_COLOR))
-                return
-            if action is ReviewAction.EDIT_SUBJECT:
-                await write_prompt(session, f"Subject [{sanitize_text(subject)}] (Enter to keep): ")
-                subject = (await session.read_line()).strip() or subject
-                continue
-            if action is ReviewAction.EDIT_BODY:
-                revised = await _compose_body(session, db, user, initial_text=body, draft_path=draft_path)
-                if revised is not None:
-                    body = revised
-                elif draft_path.exists():
-                    # /exit or /quit while revising -- issue #149: this
-                    # leaves the whole in-progress post as a saved
-                    # draft, not just "keep the previous body and stay
-                    # in review."
-                    await session.write_line(
-                        colored(
-                            "Draft saved -- you'll be offered it next time you visit this message board.",
-                            fg_color=MUTED_COLOR,
-                        )
-                    )
-                    return
-                else:
-                    await session.write_line(colored("Body unchanged.", fg_color=MUTED_COLOR))
-                continue
+        async def _publish(subject: str, body: str) -> bool:
             try:
                 post = create_post(db, board, user, subject, body)
             except PostError as exc:
                 await session.write_line(colored(f"Could not create post: {exc}", fg_color=MUTED_COLOR))
-                continue
+                return False
             if link_context is not None:
                 queue_board_post_if_linked(db, post, board, node_identity=link_context.node_identity)
-            await session.write_line(f"Posted (id {post.post_id[:12]}...).")
-            return
+            if post.status == "pending":
+                # A moderated board holds the post back; the page the
+                # caller returns to lists approved posts only, so
+                # "Posted" would describe a post they cannot find.
+                await session.write_line(
+                    colored("Submitted. It will appear once a moderator approves it.", fg_color=SUCCESS_COLOR)
+                )
+            else:
+                await session.write_line(colored("Posted.", fg_color=SUCCESS_COLOR))
+            return True
+
+        await _review_and_commit(
+            session, db, user, subject=subject, body=body, draft_path=draft_path,
+            commit_key="p", commit_label="ost", commit_brief="Publish this post",
+            cancelled_notice="Post cancelled.",
+            draft_saved_notice="Draft saved -- you'll be offered it next time you visit this message board.",
+            commit=_publish,
+        )
 
     def _has_saved_draft() -> bool:
         # Gated on `can_post` the same way [P]ost itself already is: no
@@ -688,6 +693,8 @@ async def _show_board(
         await session.write_line(
             f"\r\n{empty_state('This message board has no posts yet', detail='It is ready for its first conversation.', width=session.terminal_width, header_color=header_color)}"
         )
+        if closed:
+            await session.write_line(colored(f"\r\n{_CLOSED_BOARD_NOTICE}", fg_color=MUTED_COLOR))
         if not can_post:
             return
         while True:
@@ -814,12 +821,13 @@ async def _edit_existing_post(
         await session.write_line(colored("You can't edit that post.", fg_color=MUTED_COLOR))
         return
 
-    await write_prompt(session, f"Subject [{post.subject}] (Enter to keep): ")
+    await write_prompt(session, f"Subject [{sanitize_text(post.subject)}] (Enter to keep): ")
     subject = (await session.read_line()).strip() or post.subject
 
     edit_draft_path = _post_draft_path(
         db, kind="edit", board=board, user=user, root_post_id=post.root_post_id
     )
+    draft_saved_notice = "Draft saved -- you'll be offered it next time you edit this post."
     body = await _compose_body(session, db, user, initial_text=post.body, draft_path=edit_draft_path)
     if body is None:
         # Issue #149: /exit or /quit leaves this revision's draft on
@@ -829,26 +837,115 @@ async def _edit_existing_post(
         # docstring for why), so it's only ever resurfaced by picking
         # [E]dit on this same post again.
         if edit_draft_path.exists():
-            await session.write_line(
-                colored(
-                    "Draft saved -- you'll be offered it next time you edit this post.", fg_color=MUTED_COLOR
-                )
-            )
+            await session.write_line(colored(draft_saved_notice, fg_color=MUTED_COLOR))
         else:
             await session.write_line(colored("Edit cancelled.", fg_color=MUTED_COLOR))
         return
 
-    try:
-        edited = edit_post(db, post, board, subject=subject, body=body, edited_by=user)
-    except PostError as exc:
-        await session.write_line(colored(f"Could not save edit: {exc}", fg_color=MUTED_COLOR))
-        return
-    if link_context is not None:
-        queue_board_post_edit_if_linked(db, edited, board, node_identity=link_context.node_identity, edited_by=user)
-        queue_board_post_moderator_edit_if_linked(
-            db, edited, board, node_identity=link_context.node_identity, edited_by=user
+    async def _save(subject: str, body: str) -> bool:
+        if subject == post.subject and body == post.body:
+            await session.write_line(colored("No changes to save.", fg_color=MUTED_COLOR))
+            return True
+        try:
+            edited = edit_post(db, post, board, subject=subject, body=body, edited_by=user)
+        except PostError as exc:
+            # Back to review with the revision intact: the editor already
+            # deleted its draft on /done, so returning here would lose it.
+            await session.write_line(colored(f"Could not save edit: {exc}", fg_color=MUTED_COLOR))
+            return False
+        if link_context is not None:
+            queue_board_post_edit_if_linked(
+                db, edited, board, node_identity=link_context.node_identity, edited_by=user
+            )
+            queue_board_post_moderator_edit_if_linked(
+                db, edited, board, node_identity=link_context.node_identity, edited_by=user
+            )
+        if edited.status == "pending":
+            await session.write_line(
+                colored(
+                    "Edit submitted. The post keeps its current text until a moderator approves it.",
+                    fg_color=SUCCESS_COLOR,
+                )
+            )
+        else:
+            await session.write_line(colored("Post updated.", fg_color=SUCCESS_COLOR))
+        if post.author_user_id != user.id and _moderation_stays_local(db, board, link_context):
+            await session.write_line(colored(_STAYS_LOCAL_NOTICE, fg_color=MUTED_COLOR))
+        return True
+
+    await _review_and_commit(
+        session, db, user, subject=subject, body=body, draft_path=edit_draft_path,
+        commit_key="s", commit_label="ave", commit_brief="Save this edit",
+        cancelled_notice="Edit cancelled.",
+        draft_saved_notice=draft_saved_notice,
+        commit=_save,
+    )
+
+
+async def _review_and_commit(
+    session: Session,
+    db: Database,
+    user: User,
+    *,
+    subject: str,
+    body: str,
+    draft_path: Path,
+    commit_key: str,
+    commit_label: str,
+    commit_brief: str,
+    cancelled_notice: str,
+    draft_saved_notice: str,
+    commit: Callable[[str, str], Awaitable[bool]],
+) -> None:
+    """The review screen a new post and an edit both pass through
+    before anything is stored: the draft is shown whole, its subject and
+    body can be revised, and `commit(subject, body)` persists it.
+
+    `commit` returns whether the composition is finished. A `False`
+    (the domain refused it -- a subject over the byte cap, a board
+    closed meanwhile) keeps the caller in review with the text intact:
+    the editor deleted its draft when it handed the body back, so this
+    loop is the only copy left."""
+    while True:
+        action = await review_composition(
+            session,
+            recipient=None,
+            subject=subject,
+            body=body,
+            commit_key=commit_key,
+            commit_label=commit_label,
+            commit_brief=commit_brief,
+            description_level=menu_description_level(db, user),
+            redraw_in_place=redraw_in_place_enabled(db, user),
+            unicode_style=unicode_style_enabled(db, user),
+            collapsed=breadcrumb_collapsed_enabled(db, user),
+            accent_color=effective_accent_color(session, db),
+            header_color=effective_header_color(session, db),
+            truecolor=effective_truecolor(session, db, user),
         )
-    await session.write_line("Post updated.")
+        if action is ReviewAction.CANCEL:
+            await session.write_line(colored(cancelled_notice, fg_color=MUTED_COLOR))
+            return
+        if action is ReviewAction.EDIT_SUBJECT:
+            await write_prompt(session, f"Subject [{sanitize_text(subject)}] (Enter to keep): ")
+            subject = (await session.read_line()).strip() or subject
+            continue
+        if action is ReviewAction.EDIT_BODY:
+            revised = await _compose_body(session, db, user, initial_text=body, draft_path=draft_path)
+            if revised is not None:
+                body = revised
+            elif draft_path.exists():
+                # /exit or /quit while revising -- issue #149: this
+                # leaves the whole in-progress composition as a saved
+                # draft, not just "keep the previous body and stay in
+                # review."
+                await session.write_line(colored(draft_saved_notice, fg_color=MUTED_COLOR))
+                return
+            else:
+                await session.write_line(colored("Body unchanged.", fg_color=MUTED_COLOR))
+            continue
+        if await commit(subject, body):
+            return
 
 
 async def _tombstone_existing_post(
@@ -889,7 +986,14 @@ async def _tombstone_existing_post(
         await session.write_line(colored("You can't tombstone that post.", fg_color=MUTED_COLOR))
         return
 
-    if not await prompt_yes_no(session, "Redact this post? This cannot be undone.", default=False):
+    stays_local = _moderation_stays_local(db, board, link_context)
+    subject = sanitize_text(post.subject)
+    question = (
+        f"Remove \"{subject}\" on this node only?"
+        if stays_local
+        else f"Remove \"{subject}\"? This cannot be undone."
+    )
+    if not await prompt_yes_no(session, question, default=False):
         await session.write_line(colored("Cancelled.", fg_color=MUTED_COLOR))
         return
 
@@ -900,7 +1004,11 @@ async def _tombstone_existing_post(
         return
     if link_context is not None:
         queue_board_post_tombstone_if_linked(db, tombstoned, board, node_identity=link_context.node_identity)
-    await session.write_line("Post tombstoned.")
+    if stays_local:
+        await session.write_line(colored("Post removed on this node.", fg_color=SUCCESS_COLOR))
+        await session.write_line(colored(_STAYS_LOCAL_NOTICE, fg_color=MUTED_COLOR))
+    else:
+        await session.write_line(colored("Post removed.", fg_color=SUCCESS_COLOR))
 
 
 def _post_draft_path(db: Database, *, kind: str, board: Board, user: User, root_post_id: str = "") -> Path:
@@ -1070,6 +1178,8 @@ async def _render_post_page(
             divider_color = 238 if effective_truecolor(session, db, user) else RULE_COLOR
             await session.write_line(colored(rule_char * min(session.terminal_width, 78), fg_color=divider_color))
         when = format_for_display(post.created_at, db)
+        # A tombstoned post's own placeholder text says what happened
+        # to it; `is_edited` is False for it (_resolve_current_version).
         edited_marker = f" {badge('edited')}" if post.is_edited else ""
         author_display = _author_display_name(db, post, name_requirement=name_requirement)
         # Position numbers are 1-indexed *within this page only* -- not

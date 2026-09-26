@@ -21,6 +21,7 @@ import json
 import os
 import re
 import sys
+from tests.door_python import DOOR_PYTHON
 import subprocess
 import sqlite3
 import threading
@@ -503,7 +504,7 @@ def _running_door(tmp_path, *, new_player=False, event=False):
     env = dict(os.environ, WAR_DIALER_DB_PATH=str(path), PYTHONIOENCODING="utf-8")
     env.pop("NETBBS_DOOR_INFO", None)
     process = subprocess.Popen(
-        [sys.executable, "-u", str(_WAR_DIALER_PATH)],
+        [DOOR_PYTHON, "-u", str(_WAR_DIALER_PATH)],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
     )
     chunks = Queue()
@@ -858,6 +859,7 @@ def test_idle_zero_turn_menu_accepts_action_after_refill(tmp_path, monkeypatch):
     conn.close()
 
 
+@pytest.mark.timing_sensitive  # 50ms gaps against a 100ms escape lookahead
 @pytest.mark.parametrize("stage", ["onboarding", "receipt", "menu", "target"])
 def test_fragmented_x10_mouse_report_never_spends_a_turn(tmp_path, stage):
     with _running_door(
@@ -2886,7 +2888,7 @@ sys.exit(game.main())
 """
     env = dict(os.environ, WAR_DIALER_DB_PATH=str(path), PYTHONIOENCODING='utf-8')
     env.pop('NETBBS_DOOR_INFO', None)
-    process = subprocess.Popen([sys.executable, '-u', '-c', code, str(_WAR_DIALER_PATH)],
+    process = subprocess.Popen([DOOR_PYTHON, '-u', '-c', code, str(_WAR_DIALER_PATH)],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
     pool = ThreadPoolExecutor(1)
     def until(marker):

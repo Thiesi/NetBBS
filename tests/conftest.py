@@ -24,6 +24,26 @@ import netbbs.auth.passwords as passwords_module
 import netbbs.identity.keys as keys_module
 
 
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "timing_sensitive: the test's subject is a real-time window (an input "
+        "timeout, a burst threshold), so a starved process fails it by design. "
+        "Skipped under pytest-xdist; run them with `pytest -m timing_sensitive`.",
+    )
+
+
+def pytest_collection_modifyitems(config, items):
+    # A parallel worker cannot give these tests the scheduling they measure.
+    # Skipped rather than deselected, so they stay visible in the summary.
+    if not hasattr(config, "workerinput"):
+        return
+    skip = pytest.mark.skip(reason="timing_sensitive: run serially with `pytest -m timing_sensitive`")
+    for item in items:
+        if "timing_sensitive" in item.keywords:
+            item.add_marker(skip)
+
+
 @pytest.fixture(autouse=True)
 def _fast_argon2id(monkeypatch):
     monkeypatch.setattr(keys_module, "_SAVE_OPSLIMIT", nacl.pwhash.argon2id.OPSLIMIT_MIN)

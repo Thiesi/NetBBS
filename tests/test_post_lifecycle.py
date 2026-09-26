@@ -577,3 +577,61 @@ def test_can_reply_to_an_expired_post(db, alice, bob):
 
     reply = create_post(db, board, bob, "Re: Hello", "A reply", parent_post_id=parent.post_id)
     assert reply.parent_post_id == parent.post_id
+
+
+# -- issue #676: tombstones are not edits; approval needs a pending post ------
+
+
+def _grant(db, moderator, board, permissions):
+    grant_permissions(
+        db, moderator, object_type="board", object_id=board.id, permissions=permissions, granted_by=moderator
+    )
+
+
+def test_a_tombstoned_post_is_not_reported_as_edited(db, sysop, alice, bob):
+    """A tombstone is a later revision of the chain, but the page must not
+    call it an edit: "[removed by moderator] [edited]" reads as though the
+    placeholder itself had been revised."""
+    board = create_board(db, "general", creator=alice)
+    _grant(db, sysop, board, BoardPermission.DELETE)
+    post = create_post(db, board, bob, "Hello", "Body")
+    tombstone_post(db, post, board, tombstoned_by=sysop)
+
+    shown = list_posts_page(db, board, alice).posts[0]
+    assert shown.tombstoned_at is not None
+    assert shown.is_edited is False
+
+
+def test_an_edited_then_tombstoned_post_is_not_reported_as_edited(db, sysop, alice, bob):
+    board = create_board(db, "general", creator=alice)
+    _grant(db, sysop, board, BoardPermission.DELETE)
+    post = create_post(db, board, bob, "Hello", "Body")
+    edit_post(db, post, board, subject="Hello", body="Body, revised", edited_by=bob)
+    tombstone_post(db, post, board, tombstoned_by=sysop)
+
+    assert list_posts_page(db, board, alice).posts[0].is_edited is False
+
+
+def test_approving_a_post_that_is_no_longer_pending_is_refused(db, sysop, alice, bob):
+    """The queue is drawn once and acted on later: another moderator may
+    have approved or rejected the post, or the sweep expired it, meanwhile.
+    An expired post in particular must not be brought back by the click."""
+    board = create_board(db, "general", creator=alice, moderated=True)
+    _grant(db, sysop, board, BoardPermission.APPROVE)
+    post = create_post(db, board, bob, "Hello", "Body")
+    approve_post(db, post, approved_by=sysop)
+
+    with pytest.raises(PostError, match="no longer waiting for approval"):
+        approve_post(db, post, approved_by=sysop)
+
+
+def test_approving_an_expired_post_does_not_bring_it_back(db, sysop, alice, bob):
+    board = create_board(db, "general", creator=alice, moderated=True)
+    _grant(db, sysop, board, BoardPermission.APPROVE)
+    post = create_post(db, board, bob, "Hello", "Body")
+    db.connection.execute("UPDATE posts SET status = 'expired' WHERE id = ?", (post.id,))
+    db.connection.commit()
+
+    with pytest.raises(PostError, match="no longer waiting for approval"):
+        approve_post(db, post, approved_by=sysop)
+    assert get_post(db, post.post_id).status == "expired"

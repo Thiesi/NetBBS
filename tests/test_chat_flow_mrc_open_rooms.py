@@ -45,7 +45,7 @@ async def _bridge_on(db, lane, hub, *, open_rooms: bool = True, **open_overrides
         min_backoff_seconds=0.05, max_backoff_seconds=0.2, stable_after_seconds=0.0, per_user_interval_seconds=0.0,
     )
     await bridge.start()
-    deadline = asyncio.get_running_loop().time() + 2
+    deadline = asyncio.get_running_loop().time() + 30.0
     while bridge.state is not MrcState.CONNECTED:
         assert asyncio.get_running_loop().time() < deadline, bridge.status()
         await asyncio.sleep(0.01)

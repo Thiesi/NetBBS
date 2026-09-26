@@ -78,7 +78,7 @@ def test_password_work_never_exceeds_configured_concurrency(tmp_path, monkeypatc
             if active == 2:
                 two_workers_started.set()
         try:
-            assert release_workers.wait(timeout=2)
+            assert release_workers.wait(timeout=5)
             return False
         finally:
             with state_lock:
@@ -91,7 +91,7 @@ def test_password_work_never_exceeds_configured_concurrency(tmp_path, monkeypatc
             asyncio.create_task(authenticate_password_async(db, f"missing-{index}", "wrong"))
             for index in range(4)
         ]
-        assert await asyncio.to_thread(two_workers_started.wait, 1)
+        assert await asyncio.to_thread(two_workers_started.wait, 30)
         await asyncio.sleep(0.05)
         assert maximum_active == 2
         release_workers.set()
@@ -122,7 +122,7 @@ def test_cancelled_session_does_not_release_slot_before_worker_finishes(
             this_call = call_count
         if this_call == 1:
             first_started.set()
-            assert release_first.wait(timeout=2)
+            assert release_first.wait(timeout=5)
         else:
             second_started.set()
         return False
@@ -131,7 +131,7 @@ def test_cancelled_session_does_not_release_slot_before_worker_finishes(
 
     async def scenario() -> None:
         first = asyncio.create_task(authenticate_password_async(db, "first", "wrong"))
-        assert await asyncio.to_thread(first_started.wait, 1)
+        assert await asyncio.to_thread(first_started.wait, 30)
         first.cancel()
         with pytest.raises(asyncio.CancelledError):
             await first

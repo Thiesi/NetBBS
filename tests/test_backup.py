@@ -432,14 +432,29 @@ with vr['pilot_session'](Path(sys.argv[2]), 77):
     proc = subprocess.Popen([sys.executable, "-c", script, vr.__file__, str(directory), str(ready)],
                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
-        deadline = time.monotonic() + 5
+        # Generous, because the child imports the whole of Voidrunner
+        # before it can say it is ready, and under a parallel run
+        # (pytest-xdist) that competes with every other worker for the
+        # CPU. The loop leaves as soon as the file appears, so the bound
+        # costs nothing when the machine is idle.
+        deadline = time.monotonic() + 60
         while not ready.exists() and proc.poll() is None and time.monotonic() < deadline:
             time.sleep(0.01)
         assert ready.exists() and proc.poll() is None
         yield
     finally:
+        # Let the child leave `pilot_session` itself, which unlocks the
+        # lease before the process exits. Killing it leaves the unlock to
+        # the OS, and Windows does that some time after the process is
+        # gone -- under a parallel run long enough for the next backup in
+        # the same test to still find the pilot busy.
         if proc.poll() is None:
-            proc.kill()
+            try:
+                proc.stdin.write(b"x")
+                proc.stdin.flush()
+                proc.wait(timeout=60)
+            except (OSError, subprocess.TimeoutExpired):
+                proc.kill()
         proc.wait(timeout=5)
         for stream in (proc.stdin, proc.stdout, proc.stderr):
             stream.close()

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+from tests.door_python import DOOR_PYTHON
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
@@ -1823,7 +1824,7 @@ def test_process_death_releases_world_session_guard(db_path):
             "game=importlib.util.module_from_spec(spec); sys.modules['game']=game; spec.loader.exec_module(game); "
             "lease=game.world_session(game.Path(sys.argv[2])); lease.__enter__(); "
             "print('LOCKED',flush=True); sys.stdin.buffer.read(1)")
-    child = subprocess.Popen([sys.executable, "-u", "-c", code, str(_WAR_DIALER_PATH), str(db_path)],
+    child = subprocess.Popen([DOOR_PYTHON, "-u", "-c", code, str(_WAR_DIALER_PATH), str(db_path)],
                              stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
         assert child.stdout.readline().strip() == b"LOCKED"
@@ -3050,7 +3051,7 @@ conn.close()
     pool = ThreadPoolExecutor(2)
     try:
         for _ in range(2):
-            children.append(subprocess.Popen([sys.executable, '-u', '-c', code, str(_WAR_DIALER_PATH), str(db_path),
+            children.append(subprocess.Popen([DOOR_PYTHON, '-u', '-c', code, str(_WAR_DIALER_PATH), str(db_path),
                 wd.to_iso(now + wd.SEASON)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE))
         ready = [pool.submit(child.stdout.readline) for child in children]
         for future in ready: assert future.result(timeout=10).strip() == b'READY'

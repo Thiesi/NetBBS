@@ -209,16 +209,32 @@ def link_content_visible(db: Database, content_id: str) -> bool:
     ).fetchone()
     if row is None:
         return True
+    return envelope_content_visible(db, row[0])
+
+
+def envelope_content_visible(
+    db: Database, envelope_json: str, *, author_cache: dict[TrustSubject, bool] | None = None
+) -> bool:
+    """`link_content_visible` for an event whose retained envelope the caller
+    already fetched, typically joined into a query over many rows.
+
+    The decision depends only on the event's author, so a caller counting a
+    whole board passes one `author_cache` for the call: each distinct author
+    is looked up once, rather than every row paying the trust queries
+    (issue #677)."""
     try:
-        author = event_author(json.loads(row[0]))
+        author = event_author(json.loads(envelope_json))
     except (TypeError, ValueError, json.JSONDecodeError):
         return False
     if author is None:
         return True
+    if author_cache is not None and author in author_cache:
+        return author_cache[author]
     # Historical projections follow the independently signed author identity.
     # A quarantined relay therefore cannot taint content it merely carried,
     # while quarantine of the author's home node suppresses that node's users.
     home = node_transport_state(db, author.node_fingerprint)
-    if home in {TrustState.BLOCKED, TrustState.QUARANTINED}:
-        return False
-    return content_visible_for_subject(db, author)
+    visible = home not in {TrustState.BLOCKED, TrustState.QUARANTINED} and content_visible_for_subject(db, author)
+    if author_cache is not None:
+        author_cache[author] = visible
+    return visible

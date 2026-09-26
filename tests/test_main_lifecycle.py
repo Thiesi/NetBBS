@@ -22,6 +22,8 @@ import sys
 
 import pytest
 
+from tests.ports import port
+
 from netbbs.__main__ import (
     StartupError,
     _build_own_hello_provider,
@@ -176,7 +178,7 @@ async def _open_connection_when_ready(host: str, port: int, *, timeout: float = 
 
 
 def test_run_bootstraps_node_identity_on_first_startup(tmp_path):
-    config = _config(tmp_path, telnet=TransportConfig(True, "127.0.0.1", 12401))
+    config = _config(tmp_path, telnet=TransportConfig(True, "127.0.0.1", port(12401)))
     assert not config.identity_dir.exists()
 
     asyncio.run(_run_until_ready_then_shut_down(config))
@@ -190,7 +192,7 @@ def test_run_bootstraps_node_identity_on_first_startup(tmp_path):
 def test_run_reuses_existing_node_identity_on_second_startup(tmp_path):
     from netbbs.link.node_identity import NodeIdentity
 
-    config = _config(tmp_path, telnet=TransportConfig(True, "127.0.0.1", 12402))
+    config = _config(tmp_path, telnet=TransportConfig(True, "127.0.0.1", port(12402)))
     asyncio.run(_run_until_ready_then_shut_down(config))
     first_fingerprint = NodeIdentity.load(config.identity_dir).fingerprint
 
@@ -201,7 +203,7 @@ def test_run_reuses_existing_node_identity_on_second_startup(tmp_path):
 
 
 def test_run_logs_node_identity_fingerprint(tmp_path, caplog):
-    config = _config(tmp_path, telnet=TransportConfig(True, "127.0.0.1", 12403))
+    config = _config(tmp_path, telnet=TransportConfig(True, "127.0.0.1", port(12403)))
     with caplog.at_level(logging.INFO, logger="netbbs.__main__"):
         asyncio.run(_run_until_ready_then_shut_down(config))
     assert any("node Link identity" in record.message for record in caplog.records)
@@ -210,7 +212,7 @@ def test_run_logs_node_identity_fingerprint(tmp_path, caplog):
 def test_startup_fails_cleanly_on_corrupted_node_identity(tmp_path):
     from netbbs.link.node_identity import load_or_bootstrap_node_identity
 
-    config = _config(tmp_path, telnet=TransportConfig(True, "127.0.0.1", 12404))
+    config = _config(tmp_path, telnet=TransportConfig(True, "127.0.0.1", port(12404)))
     load_or_bootstrap_node_identity(config.identity_dir, label=config.node_name)
     # Corrupt the transition history so loading it fails on next startup.
     (config.identity_dir / "transitions.json").write_text("not valid json")
@@ -231,7 +233,7 @@ def test_startup_fails_cleanly_on_a_database_from_a_newer_build(tmp_path):
     propagated straight out of `run()` as a raw traceback -- now it's
     wrapped into the one exception type `main()` already knows how to
     report cleanly."""
-    config = _config(tmp_path, telnet=TransportConfig(True, "127.0.0.1", 12405))
+    config = _config(tmp_path, telnet=TransportConfig(True, "127.0.0.1", port(12405)))
     conn = sqlite3.connect(str(config.db_path))
     conn.execute("PRAGMA user_version = 999999")
     conn.close()
@@ -249,7 +251,7 @@ def test_startup_fails_cleanly_on_a_corrupted_database(tmp_path):
     refused loudly at startup, not left to surface later as a
     confusing raw error the first time some unlucky query touches the
     damaged page."""
-    config = _config(tmp_path, telnet=TransportConfig(True, "127.0.0.1", 12406))
+    config = _config(tmp_path, telnet=TransportConfig(True, "127.0.0.1", port(12406)))
 
     # Enough real rows, spread across several pages, that a late-offset
     # corruption lands in table data rather than the header/schema page
@@ -287,11 +289,11 @@ def test_startup_fails_cleanly_on_a_corrupted_database(tmp_path):
 
 def test_configured_telnet_listener_on_known_port_accepts_connections(tmp_path):
     async def scenario():
-        config = _config(tmp_path, telnet=TransportConfig(True, "127.0.0.1", 12399))
+        config = _config(tmp_path, telnet=TransportConfig(True, "127.0.0.1", port(12399)))
         shutdown_event = asyncio.Event()
         task = asyncio.create_task(run(config, shutdown_event=shutdown_event))
         try:
-            reader, writer = await _open_connection_when_ready("127.0.0.1", 12399)
+            reader, writer = await _open_connection_when_ready("127.0.0.1", port(12399))
             data = await reader.readexactly(1)  # first byte of Telnet negotiation
             assert data == b"\xff"  # IAC
             writer.close()
@@ -313,13 +315,13 @@ def test_configured_link_listener_completes_a_real_hello(tmp_path):
     async def scenario():
         config = _config(
             tmp_path,
-            telnet=TransportConfig(True, "127.0.0.1", 12401),
-            link=LinkConfig(enabled=True, host="127.0.0.1", port=12402),
+            telnet=TransportConfig(True, "127.0.0.1", port(12401)),
+            link=LinkConfig(enabled=True, host="127.0.0.1", port=port(12402)),
         )
         shutdown_event = asyncio.Event()
         task = asyncio.create_task(run(config, shutdown_event=shutdown_event))
         try:
-            await _open_connection_when_ready("127.0.0.1", 12401)  # node fully up
+            await _open_connection_when_ready("127.0.0.1", port(12401))  # node fully up
 
             dialer = LinkNode(identity=bootstrap_node_identity("dialer"))
             dialer_hello = dialer.build_hello(
@@ -329,7 +331,7 @@ def test_configured_link_listener_completes_a_real_hello(tmp_path):
             dialer_lane = DatabaseLane(dialer_db.path)
             try:
                 async with aiohttp.ClientSession() as session:
-                    record = await dial_hello(dialer, session, "http://127.0.0.1:12402", dialer_hello, dialer_lane)
+                    record = await dial_hello(dialer, session, f"http://127.0.0.1:{port(12402)}", dialer_hello, dialer_lane)
             finally:
                 dialer_lane.close()
                 dialer_db.close()
@@ -356,22 +358,22 @@ def test_configured_link_realtime_listener_accepts_a_real_noise_session(tmp_path
     async def scenario():
         config = _config(
             tmp_path,
-            telnet=TransportConfig(True, "127.0.0.1", 12403),
+            telnet=TransportConfig(True, "127.0.0.1", port(12403)),
             link=LinkConfig(
-                enabled=True, host="127.0.0.1", port=12404, realtime_port=12405,
+                enabled=True, host="127.0.0.1", port=port(12404), realtime_port=port(12405),
             ),
         )
         shutdown_event = asyncio.Event()
         task = asyncio.create_task(run(config, shutdown_event=shutdown_event))
         try:
-            await _open_connection_when_ready("127.0.0.1", 12403)  # node fully up
+            await _open_connection_when_ready("127.0.0.1", port(12403))  # node fully up
 
             from netbbs.link.node_identity import load_or_bootstrap_node_identity
 
             real_identity = load_or_bootstrap_node_identity(config.identity_dir, label=config.node_name)
             dialer_identity = bootstrap_node_identity("realtime-dialer")
 
-            reader, writer = await asyncio.open_connection("127.0.0.1", 12405)
+            reader, writer = await asyncio.open_connection("127.0.0.1", port(12405))
             try:
                 remote, ciphers = await establish_noise_xx_initiator(reader, writer, dialer_identity)
             finally:
@@ -403,9 +405,9 @@ def test_a_live_realtime_session_is_owned_and_gathered_cleanly_on_node_shutdown(
     async def scenario():
         config = _config(
             tmp_path,
-            telnet=TransportConfig(True, "127.0.0.1", 12420),
+            telnet=TransportConfig(True, "127.0.0.1", port(12420)),
             link=LinkConfig(
-                enabled=True, host="127.0.0.1", port=12421, realtime_port=12422,
+                enabled=True, host="127.0.0.1", port=port(12421), realtime_port=port(12422),
             ),
         )
         # `run()` always enforces trust policy on the real-time listener
@@ -430,9 +432,9 @@ def test_a_live_realtime_session_is_owned_and_gathered_cleanly_on_node_shutdown(
         shutdown_event = asyncio.Event()
         task = asyncio.create_task(run(config, shutdown_event=shutdown_event))
         try:
-            await _open_connection_when_ready("127.0.0.1", 12420)  # node fully up
+            await _open_connection_when_ready("127.0.0.1", port(12420))  # node fully up
 
-            reader, writer = await asyncio.open_connection("127.0.0.1", 12422)
+            reader, writer = await asyncio.open_connection("127.0.0.1", port(12422))
             remote, ciphers = await establish_noise_xx_initiator(reader, writer, dialer_identity)
 
             # Prove this is a genuinely live, still-open session (not just
@@ -492,18 +494,18 @@ def test_configured_link_seed_is_dialed_by_a_real_running_node(tmp_path):
 
         config = _config(
             tmp_path,
-            telnet=TransportConfig(True, "127.0.0.1", 12403),
+            telnet=TransportConfig(True, "127.0.0.1", port(12403)),
             link=LinkConfig(
-                enabled=True, host="127.0.0.1", port=12404,
+                enabled=True, host="127.0.0.1", port=port(12404),
                 seeds=[f"http://127.0.0.1:{seed_server.port}"], sync_interval_seconds=60.0,
             ),
         )
         shutdown_event = asyncio.Event()
         task = asyncio.create_task(run(config, shutdown_event=shutdown_event))
         try:
-            await _open_connection_when_ready("127.0.0.1", 12403)  # node fully up
+            await _open_connection_when_ready("127.0.0.1", port(12403))  # node fully up
 
-            deadline = asyncio.get_event_loop().time() + 5.0
+            deadline = asyncio.get_event_loop().time() + 30.0
             while not seed_node.peers:
                 if asyncio.get_event_loop().time() >= deadline:
                     raise AssertionError("the running node's sync task never dialed the seed")
@@ -538,23 +540,23 @@ def test_link_sync_failures_reach_the_bounded_diagnostic_log(tmp_path):
         # exercise.
         config = _config(
             tmp_path,
-            telnet=TransportConfig(True, "127.0.0.1", 12407),
+            telnet=TransportConfig(True, "127.0.0.1", port(12407)),
             link=LinkConfig(
-                enabled=True, host="127.0.0.1", port=12408,
+                enabled=True, host="127.0.0.1", port=port(12408),
                 seeds=["http://127.0.0.1:1"], sync_interval_seconds=60.0,
             ),
         )
         shutdown_event = asyncio.Event()
         task = asyncio.create_task(run(config, shutdown_event=shutdown_event))
         try:
-            await _open_connection_when_ready("127.0.0.1", 12407)
+            await _open_connection_when_ready("127.0.0.1", port(12407))
 
             # Other Link background tasks (e.g. the scheduled reliable-nodes
             # refresh, which also logs a warning trying to reach its own
             # real endpoint) can legitimately write to the same log
             # concurrently -- poll for the *specific* sync.py dial
             # failure this test means to exercise, not just "any row."
-            deadline = asyncio.get_event_loop().time() + 5.0
+            deadline = asyncio.get_event_loop().time() + 30.0
             matching_row = None
             while matching_row is None:
                 if asyncio.get_event_loop().time() >= deadline:
@@ -601,18 +603,18 @@ def test_link_sync_session_honors_forward_proxy_env_vars(tmp_path, monkeypatch):
     async def scenario():
         config = _config(
             tmp_path,
-            telnet=TransportConfig(True, "127.0.0.1", 12413),
+            telnet=TransportConfig(True, "127.0.0.1", port(12413)),
             link=LinkConfig(
-                enabled=True, host="127.0.0.1", port=12414,
+                enabled=True, host="127.0.0.1", port=port(12414),
                 seeds=[], sync_interval_seconds=60.0,
             ),
         )
         shutdown_event = asyncio.Event()
         task = asyncio.create_task(run(config, shutdown_event=shutdown_event))
         try:
-            await _open_connection_when_ready("127.0.0.1", 12413)
+            await _open_connection_when_ready("127.0.0.1", port(12413))
 
-            deadline = asyncio.get_event_loop().time() + 5.0
+            deadline = asyncio.get_event_loop().time() + 30.0
             while "trust_env" not in captured_kwargs:
                 if asyncio.get_event_loop().time() >= deadline:
                     raise AssertionError(
@@ -652,9 +654,9 @@ def test_link_sync_task_is_drained_promptly_on_shutdown_even_mid_sleep(tmp_path)
     async def scenario():
         config = _config(
             tmp_path,
-            telnet=TransportConfig(True, "127.0.0.1", 12409),
+            telnet=TransportConfig(True, "127.0.0.1", port(12409)),
             link=LinkConfig(
-                enabled=True, host="127.0.0.1", port=12410,
+                enabled=True, host="127.0.0.1", port=port(12410),
                 seeds=["http://127.0.0.1:1"], sync_interval_seconds=120.0,
             ),
             shutdown=ShutdownConfig(background_task_drain_seconds=20.0),
@@ -662,7 +664,7 @@ def test_link_sync_task_is_drained_promptly_on_shutdown_even_mid_sleep(tmp_path)
         shutdown_event = asyncio.Event()
         task = asyncio.create_task(run(config, shutdown_event=shutdown_event))
         try:
-            await _open_connection_when_ready("127.0.0.1", 12409)
+            await _open_connection_when_ready("127.0.0.1", port(12409))
             # Let the first pass finish and the sync task settle into its
             # (long) trailing sleep before signalling shutdown.
             await asyncio.sleep(0.3)
@@ -699,9 +701,9 @@ def test_link_sync_task_is_hard_cancelled_if_a_pass_hangs_past_the_grace_period(
     async def scenario():
         config = _config(
             tmp_path,
-            telnet=TransportConfig(True, "127.0.0.1", 12411),
+            telnet=TransportConfig(True, "127.0.0.1", port(12411)),
             link=LinkConfig(
-                enabled=True, host="127.0.0.1", port=12412,
+                enabled=True, host="127.0.0.1", port=port(12412),
                 seeds=["http://127.0.0.1:1"], sync_interval_seconds=120.0,
             ),
             shutdown=ShutdownConfig(background_task_drain_seconds=0.3),
@@ -709,7 +711,7 @@ def test_link_sync_task_is_hard_cancelled_if_a_pass_hangs_past_the_grace_period(
         shutdown_event = asyncio.Event()
         task = asyncio.create_task(run(config, shutdown_event=shutdown_event))
         try:
-            await _open_connection_when_ready("127.0.0.1", 12411)
+            await _open_connection_when_ready("127.0.0.1", port(12411))
             await asyncio.sleep(0.1)  # into the now-hanging first pass
 
             start = asyncio.get_event_loop().time()
@@ -761,9 +763,9 @@ def test_reliable_nodes_refresh_task_hard_cancelled_if_its_fetch_hangs_past_the_
     async def scenario():
         config = _config(
             tmp_path,
-            telnet=TransportConfig(True, "127.0.0.1", 12413),
+            telnet=TransportConfig(True, "127.0.0.1", port(12413)),
             link=LinkConfig(
-                enabled=True, host="127.0.0.1", port=12414,
+                enabled=True, host="127.0.0.1", port=port(12414),
                 seeds=["http://127.0.0.1:1"], sync_interval_seconds=120.0,
             ),
             shutdown=ShutdownConfig(background_task_drain_seconds=0.3),
@@ -771,7 +773,7 @@ def test_reliable_nodes_refresh_task_hard_cancelled_if_its_fetch_hangs_past_the_
         shutdown_event = asyncio.Event()
         task = asyncio.create_task(run(config, shutdown_event=shutdown_event))
         try:
-            await _open_connection_when_ready("127.0.0.1", 12413)
+            await _open_connection_when_ready("127.0.0.1", port(12413))
             await asyncio.sleep(0.1)  # into the now-hanging seed-refresh fetch
 
             start = asyncio.get_event_loop().time()
@@ -846,16 +848,16 @@ def test_shutdown_event_and_graceful_delay_reach_handle_session(tmp_path, monkey
 
     async def scenario():
         config = _config(
-            tmp_path, telnet=TransportConfig(True, "127.0.0.1", 12391),
+            tmp_path, telnet=TransportConfig(True, "127.0.0.1", port(12391)),
             shutdown=ShutdownConfig(graceful_delay_seconds=42.0),
         )
         shutdown_event = asyncio.Event()
         task = asyncio.create_task(run(config, shutdown_event=shutdown_event))
         try:
-            reader, writer = await _open_connection_when_ready("127.0.0.1", 12391)
+            reader, writer = await _open_connection_when_ready("127.0.0.1", port(12391))
             await skip_initial_negotiation(reader)
 
-            deadline = asyncio.get_event_loop().time() + 2.0
+            deadline = asyncio.get_event_loop().time() + 30.0
             while "node_controls" not in captured:
                 if asyncio.get_event_loop().time() >= deadline:
                     raise AssertionError("handle_session's spy was never reached")
@@ -934,13 +936,13 @@ def test_run_reconciles_interrupted_sessions_before_accepting_new_ones(tmp_path)
 
 def test_shutdown_stops_listeners_and_closes_database(tmp_path):
     async def scenario():
-        config = _config(tmp_path, telnet=TransportConfig(True, "127.0.0.1", 12398))
+        config = _config(tmp_path, telnet=TransportConfig(True, "127.0.0.1", port(12398)))
         shutdown_event = asyncio.Event()
         task = asyncio.create_task(run(config, shutdown_event=shutdown_event))
 
         # Confirm it's actually up before shutting down, so a false
         # "shutdown worked" isn't just "it was never listening at all".
-        reader, writer = await _open_connection_when_ready("127.0.0.1", 12398)
+        reader, writer = await _open_connection_when_ready("127.0.0.1", port(12398))
         writer.close()
         await writer.wait_closed()
 
@@ -949,7 +951,7 @@ def test_shutdown_stops_listeners_and_closes_database(tmp_path):
 
         # Listener is really gone -- a fresh connection attempt fails.
         with pytest.raises((ConnectionRefusedError, OSError)):
-            await asyncio.open_connection("127.0.0.1", 12398)
+            await asyncio.open_connection("127.0.0.1", port(12398))
 
     asyncio.run(scenario())
 
@@ -1085,19 +1087,19 @@ def test_partial_start_failure_stops_already_started_listeners(tmp_path):
 
     async def scenario():
         # Occupy a port so the web listener's bind fails.
-        blocker = await asyncio.start_server(lambda r, w: None, "127.0.0.1", 12397)
+        blocker = await asyncio.start_server(lambda r, w: None, "127.0.0.1", port(12397))
         try:
             config = _config(
                 tmp_path,
-                telnet=TransportConfig(True, "127.0.0.1", 12396),
-                web=TransportConfig(True, "127.0.0.1", 12397),
+                telnet=TransportConfig(True, "127.0.0.1", port(12396)),
+                web=TransportConfig(True, "127.0.0.1", port(12397)),
             )
             with pytest.raises(StartupError, match="web listener failed to start"):
                 await run(config)
 
             # Telnet must have been stopped again, not left running.
             with pytest.raises((ConnectionRefusedError, OSError)):
-                await asyncio.open_connection("127.0.0.1", 12396)
+                await asyncio.open_connection("127.0.0.1", port(12396))
         finally:
             blocker.close()
             await blocker.wait_closed()
@@ -1149,10 +1151,10 @@ def test_startup_failure_still_closes_the_database(tmp_path):
     captured_db_path = tmp_path / "node.db"
 
     async def scenario():
-        blocker = await asyncio.start_server(lambda r, w: None, "127.0.0.1", 12395)
+        blocker = await asyncio.start_server(lambda r, w: None, "127.0.0.1", port(12395))
         try:
             config = _config(
-                tmp_path, db_path=captured_db_path, telnet=TransportConfig(True, "127.0.0.1", 12395)
+                tmp_path, db_path=captured_db_path, telnet=TransportConfig(True, "127.0.0.1", port(12395))
             )
             with pytest.raises(StartupError, match="telnet listener failed to start"):
                 await run(config)
@@ -1213,11 +1215,11 @@ def test_failed_daybreak_task_does_not_prevent_listener_and_db_cleanup(tmp_path,
 
     async def scenario():
         config = _config(
-            tmp_path, db_path=captured_db_path, telnet=TransportConfig(True, "127.0.0.1", 12394)
+            tmp_path, db_path=captured_db_path, telnet=TransportConfig(True, "127.0.0.1", port(12394))
         )
         shutdown_event = asyncio.Event()
         task = asyncio.create_task(run(config, shutdown_event=shutdown_event))
-        reader, writer = await _open_connection_when_ready("127.0.0.1", 12394)
+        reader, writer = await _open_connection_when_ready("127.0.0.1", port(12394))
         writer.close()
         await writer.wait_closed()
 
@@ -1228,7 +1230,7 @@ def test_failed_daybreak_task_does_not_prevent_listener_and_db_cleanup(tmp_path,
         await asyncio.wait_for(task, timeout=5.0)
 
         with pytest.raises((ConnectionRefusedError, OSError)):
-            await asyncio.open_connection("127.0.0.1", 12394)
+            await asyncio.open_connection("127.0.0.1", port(12394))
 
     asyncio.run(scenario())
 
@@ -1465,7 +1467,7 @@ def test_silent_link_config_with_accepted_participation_starts_link(tmp_path, ca
     path the design describes, with no TOML edit."""
     # A real port: run() re-validates the Link block once a silent config
     # resolves to enabled, and 0 is not a valid configured port.
-    config = _config(tmp_path, link=LinkConfig(host="127.0.0.1", port=12420))
+    config = _config(tmp_path, link=LinkConfig(host="127.0.0.1", port=port(12420)))
     assert config.link.enabled is None
     db = Database(config.db_path)
     set_participation(db, Participation.ACCEPTED)
@@ -1486,7 +1488,7 @@ def test_silent_link_config_without_acceptance_leaves_link_off(tmp_path, caplog)
 def test_silent_config_resolved_to_enabled_still_validates_the_link_block(tmp_path):
     """Code review (PR #267): the Link checks skipped at config-load time
     for a silent config run at startup once participation enables Link."""
-    config = _config(tmp_path, link=LinkConfig(host="127.0.0.1", port=12423, sync_interval_seconds=0))
+    config = _config(tmp_path, link=LinkConfig(host="127.0.0.1", port=port(12423), sync_interval_seconds=0))
     db = Database(config.db_path)
     set_participation(db, Participation.ACCEPTED)
     db.close()
@@ -1504,7 +1506,7 @@ def test_silent_config_full_peer_via_participation_gets_the_full_peer_warning(tm
     exactly like an explicitly configured one."""
     config = _config(
         tmp_path,
-        link=LinkConfig(host="127.0.0.1", port=12422, outgoing_only=False, advertised_host="203.0.113.5"),
+        link=LinkConfig(host="127.0.0.1", port=port(12422), outgoing_only=False, advertised_host="203.0.113.5"),
     )
     db = Database(config.db_path)
     set_participation(db, Participation.ACCEPTED)
@@ -1537,7 +1539,7 @@ def test_run_mirrors_a_configured_managed_dns_service_url_into_the_database(tmp_
     package wrote that key at all."""
     config = _config(
         tmp_path,
-        telnet=TransportConfig(True, "127.0.0.1", 12441),
+        telnet=TransportConfig(True, "127.0.0.1", port(12441)),
         managed_dns=ManagedDnsConfig(service_url="http://127.0.0.1:8099"),
     )
 
@@ -1555,7 +1557,7 @@ def test_run_records_the_nodes_listener_ports_for_the_dns_screen(tmp_path):
     port, `[web] public_url` alongside."""
     config = _config(
         tmp_path,
-        telnet=TransportConfig(True, "127.0.0.1", 12443),
+        telnet=TransportConfig(True, "127.0.0.1", port(12443)),
         ssh=TransportConfig(False, "127.0.0.1", 2222),
         web=TransportConfig(False, "127.0.0.1", 8080, public_url="https://board.example"),
     )
@@ -1564,7 +1566,7 @@ def test_run_records_the_nodes_listener_ports_for_the_dns_screen(tmp_path):
 
     db = Database(config.db_path)
     facts = get_local_listeners(db)
-    assert facts.telnet_port == 12443
+    assert facts.telnet_port == port(12443)
     assert facts.ssh_port is None
     assert facts.web_port is None
     assert facts.web_public_url == "https://board.example"
@@ -1577,7 +1579,7 @@ def test_run_mirrors_the_managed_dns_admin_token_and_clears_it_when_removed(tmp_
     administration screen on the next start."""
     configured = _config(
         tmp_path,
-        telnet=TransportConfig(True, "127.0.0.1", 12444),
+        telnet=TransportConfig(True, "127.0.0.1", port(12444)),
         managed_dns=ManagedDnsConfig(service_url="http://127.0.0.1:8099", admin_token="s3cret"),
     )
     asyncio.run(_run_until_ready_then_shut_down(configured))
@@ -1585,7 +1587,7 @@ def test_run_mirrors_the_managed_dns_admin_token_and_clears_it_when_removed(tmp_
     assert get_admin_token(db) == "s3cret"
     db.close()
 
-    plain = _config(tmp_path, seed_sysop=False, telnet=TransportConfig(True, "127.0.0.1", 12444))
+    plain = _config(tmp_path, seed_sysop=False, telnet=TransportConfig(True, "127.0.0.1", port(12444)))
     asyncio.run(_run_until_ready_then_shut_down(plain))
     db = Database(plain.db_path)
     assert get_admin_token(db) is None
@@ -1599,12 +1601,12 @@ def test_run_clears_a_managed_dns_service_url_the_operator_removed(tmp_path):
     about once."""
     configured = _config(
         tmp_path,
-        telnet=TransportConfig(True, "127.0.0.1", 12442),
+        telnet=TransportConfig(True, "127.0.0.1", port(12442)),
         managed_dns=ManagedDnsConfig(service_url="http://127.0.0.1:8099"),
     )
     asyncio.run(_run_until_ready_then_shut_down(configured))
 
-    plain = _config(tmp_path, seed_sysop=False, telnet=TransportConfig(True, "127.0.0.1", 12442))
+    plain = _config(tmp_path, seed_sysop=False, telnet=TransportConfig(True, "127.0.0.1", port(12442)))
     asyncio.run(_run_until_ready_then_shut_down(plain))
 
     db = Database(plain.db_path)

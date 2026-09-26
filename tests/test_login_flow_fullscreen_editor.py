@@ -568,8 +568,8 @@ def test_edit_option_hidden_when_nothing_on_the_page_is_editable(db, alice):
 def test_edit_existing_post_via_plain_line_flow(db, alice):
     board = create_board(db, "general", creator=alice)
     create_post(db, board, alice, "Original subject", "Original body")
-    # e -> pick post 1 -> keep subject -> replace body line 1 -> finish -> back
-    session = FakeSession(["e", "1", "", "/edit 1", "Edited body", "", "b", ""])
+    # e -> pick post 1 -> keep subject -> replace body line 1 -> finish -> [S]ave in review -> back
+    session = FakeSession(["e", "1", "", "/edit 1", "Edited body", "", "s", "b", ""])
     asyncio.run(board_flow._show_board(session, db, board, alice))
     assert "Post updated" in _written_text(session)
     saved = list_posts_page(db, board, alice).posts[0]
@@ -583,7 +583,7 @@ def test_edit_existing_post_via_fullscreen_editor(db, alice):
     board = create_board(db, "general", creator=alice)
     create_post(db, board, alice, "Original subject", "Original body")
     session = FakeSession(
-        ["e", "1", "New subject"] + ["END"] + _type(" -- revised") + ["CTRL+O", "b", ""]
+        ["e", "1", "New subject"] + ["END"] + _type(" -- revised") + ["CTRL+O", "s", "b", ""]
     )
     asyncio.run(board_flow._show_board(session, db, board, alice))
     assert "Post updated" in _written_text(session)
@@ -618,7 +618,7 @@ def test_editing_a_post_does_not_reset_to_the_newest_page(db, alice):
     # page, edit the post shown there, and confirm the view stays on
     # that same older page rather than jumping back to page one.
     posts = [create_post(db, board, alice, f"Subject {i}", f"Body {i}") for i in range(6)]
-    session = FakeSession(["o", "e", "1", "", "/edit 1", "Edited", "", "b", ""])
+    session = FakeSession(["o", "e", "1", "", "/edit 1", "Edited", "", "s", "b", ""])
     asyncio.run(board_flow._show_board(session, db, board, alice))
     text = _written_text(session)
     assert "Post updated" in text
@@ -647,7 +647,9 @@ def test_tombstone_existing_post_via_plain_line_flow(db, alice):
     # t -> pick post 1 -> confirm -> back -> skip new post
     session = FakeSession(["t", "1", "y", "b", ""])
     asyncio.run(board_flow._show_board(session, db, board, alice))
-    assert "Post tombstoned" in _written_text(session)
+    text = _visible(session)
+    assert 'Remove "Original subject"? This cannot be undone.' in text
+    assert "Post removed." in text
     saved = list_posts_page(db, board, alice).posts[0]
     assert saved.subject == "[removed by moderator]"
     assert saved.tombstoned_at is not None
@@ -705,3 +707,129 @@ def test_edit_signature_prefills_the_fullscreen_editor_with_the_current_signatur
     session = FakeSession(["g", "END"] + _type(" - updated") + ["CTRL+O", "b"])
     asyncio.run(profile_flow._edit_profile(session, lane, alice))
     assert get_signature(db, alice) == "Original signature - updated"
+
+
+# -- issue #676: outcomes that say what happened; edits reviewed like posts --
+
+
+def _sysop(db):
+    from netbbs.auth.users import SYSOP_LEVEL
+
+    return create_user(db, "sysop", password="hunter2", user_level=SYSOP_LEVEL)
+
+
+def test_posting_to_a_moderated_board_says_the_post_awaits_approval(db, alice):
+    """The page lists approved posts only, so "Posted" would describe a
+    post the caller then cannot find."""
+    board = create_board(db, "general", creator=alice, moderated=True)
+    session = FakeSession(["p", "Hello", "Body", "", "p", "b"])
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+    text = _visible(session)
+    assert "Submitted. It will appear once a moderator approves it." in text
+    assert "Posted" not in text
+
+
+def test_posting_to_an_unmoderated_board_says_posted_without_the_content_hash(db, alice):
+    board = create_board(db, "general", creator=alice)
+    session = FakeSession(["p", "Hello", "Body", "", "p", "b"])
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+    text = _visible(session)
+    assert "Posted." in text
+    assert "(id " not in text
+
+
+def test_editing_on_a_moderated_board_says_the_edit_awaits_approval(db, alice):
+    from netbbs.boards.posts import approve_post
+
+    board = create_board(db, "general", creator=alice, moderated=True)
+    approve_post(db, create_post(db, board, alice, "Subject", "Original body"), approved_by=_sysop(db))
+    session = FakeSession(["e", "1", "", "/edit 1", "Revised body", "", "s", "b", ""])
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+    text = _visible(session)
+    assert "Edit submitted. The post keeps its current text until a moderator approves it." in text
+    assert "Post updated" not in text
+    assert list_posts_page(db, board, alice).posts[0].body == "Original body"
+
+
+def test_saving_an_unchanged_edit_says_nothing_changed(db, alice):
+    board = create_board(db, "general", creator=alice)
+    create_post(db, board, alice, "Subject", "Body")
+    # Keep the subject, finish the body untouched, save in review.
+    session = FakeSession(["e", "1", "", "", "s", "b", ""])
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+    text = _visible(session)
+    assert "No changes to save." in text
+    assert "Post updated" not in text
+    assert list_posts_page(db, board, alice).posts[0].is_edited is False
+
+
+def test_an_edit_is_reviewed_before_it_is_saved(db, alice):
+    board = create_board(db, "general", creator=alice)
+    create_post(db, board, alice, "Subject", "Body")
+    session = FakeSession(["e", "1", "", "/edit 1", "Revised", "", "c", "b", ""])
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+    text = _visible(session)
+    assert "Review composition" in text
+    assert "[S]ave" in text
+    assert "Edit cancelled." in text
+    assert list_posts_page(db, board, alice).posts[0].body == "Body"
+
+
+def test_a_refused_edit_stays_in_review_with_the_revision_intact(db, alice):
+    """The editor deletes its draft when it hands the body back, so a
+    refusal that returned to the board would lose the revision."""
+    board = create_board(db, "general", creator=alice)
+    create_post(db, board, alice, "Subject", "Body")
+    too_long = "x" * (MAX_SUBJECT_BYTES + 1)
+    session = FakeSession(
+        ["e", "1", too_long, "/edit 1", "Revised body", "", "s", "u", "Short subject", "s", "b", ""]
+    )
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+    text = _visible(session)
+    assert "Could not save edit" in text
+    assert "Post updated." in text
+    saved = list_posts_page(db, board, alice).posts[0]
+    assert saved.subject == "Short subject"
+    assert saved.body == "Revised body"
+
+
+def test_the_edit_subject_prompt_sanitizes_the_current_subject(db, alice):
+    """A subject carried over Link reaches this prompt from another node."""
+    board = create_board(db, "general", creator=alice)
+    create_post(db, board, alice, "Hi\x1b[2Jthere", "Body")
+    session = FakeSession(["e", "1", "", "/cancel", "b", ""])
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+    prompt = next(chunk for chunk in session.written if "(Enter to keep)" in chunk)
+    assert "\x1b[2J" not in prompt
+
+
+def test_a_tombstoned_post_carries_no_edited_badge(db, alice):
+    from netbbs.boards.posts import tombstone_post
+
+    board = create_board(db, "general", creator=alice)
+    post = create_post(db, board, alice, "Subject", "Body")
+    tombstone_post(db, post, board, tombstoned_by=_sysop(db))
+    session = FakeSession(["b", ""])
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+    text = _visible(session)
+    assert "[removed by moderator]" in text
+    assert "[edited]" not in text
+
+
+class _TypeAheadSession(FakeSession):
+    """Models an Enter typed straight behind a hotkey: a leading blank
+    line in the script is what `discard_buffered_enter` would find
+    buffered, and a real transport discards it."""
+
+    async def discard_buffered_enter(self) -> None:
+        if self._inputs and self._inputs[0] == "":
+            self._inputs.pop(0)
+
+
+def test_an_enter_typed_right_behind_post_does_not_cancel_the_post(db, alice):
+    board = create_board(db, "general", creator=alice)
+    session = _TypeAheadSession(["p", "", "Hello", "Body", "", "p", "b"])
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+    text = _visible(session)
+    assert "Post cancelled" not in text
+    assert list_posts_page(db, board, alice).posts[0].subject == "Hello"
