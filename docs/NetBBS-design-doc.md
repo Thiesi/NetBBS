@@ -1625,6 +1625,16 @@ therefore not renamed while callers are inside it: the SysOp screen refuses
 with the occupant count until it is empty, and the standalone admin CLI, which
 cannot see occupancy, states what a rename does to anyone inside.
 
+A channel that closes while callers are inside it — the SysOp deletes it, hides
+a carried Link channel (§16, issue #683), or retires an MRC room a caller
+opened — moves every one of them back to the channel list at once, where the
+line "#name was closed by the SysOp." is shown above the list; no keypress is
+asked for (issue #716). Their live Link subscription and MRC presence end the
+way `/leave` ends them. A closed channel gets no `leave` line: a deleted one has
+nowhere to hold it, and a hidden one keeps its scrollback exactly as it was for
+Restore. A close the running node cannot push (the standalone admin CLI) is
+caught by the session itself the next time it sends, with the same result.
+
 ### 6.4 Personal mail
 
 Local asynchronous mail is a persistent domain distinct from chat `/msg`.

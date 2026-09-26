@@ -86,6 +86,17 @@ class QueueOverflowNotice:
     dropped_count: int
 
 
+@dataclass(frozen=True)
+class ChannelClosed:
+    """
+    Delivered to every participant of a channel the SysOp has just
+    deleted, hidden (a carried Link channel, issue #683) or retired (an
+    MRC room a caller opened) -- see `ChatHub.close_channel`. Like
+    `QueueOverflowNotice`, only a signal: `netbbs.net.chat_flow`'s
+    `receive_loop` decides what the caller sees and where they go.
+    """
+
+
 class ChatHub:
     """
     Tracks which participants are present in which channels and routes
@@ -283,6 +294,22 @@ class ChatHub:
             return False
         self._deliver(queue, message, priority=priority)
         return True
+
+    def close_channel(self, channel_name: str) -> int:
+        """
+        Move every session out of `channel_name`, which has just stopped
+        existing for callers: each participant's queue gets a
+        `ChannelClosed`, as a priority event (see `send_to`), so a stalled
+        queue cannot drop it. Returns how many sessions were told.
+
+        Participants leave by themselves as their chat loops unwind; this
+        does not remove them, so their own `leave` bookkeeping (and the
+        Link/MRC cleanup that rides on it) runs exactly as for `/leave`.
+        """
+        participants = list(self._channels.get(channel_name, {}).values())
+        for queue in participants:
+            self._deliver(queue, ChannelClosed(), priority=True)
+        return len(participants)
 
     def last_activity(self, channel_name: str) -> str | None:
         """Timestamp of the most recent broadcast to `channel_name` since

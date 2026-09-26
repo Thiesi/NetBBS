@@ -2777,6 +2777,16 @@ says so) and `load_link_node` (its events stay known). The create/update
 read-backs look their row up unfiltered, so the write paths do not depend on
 the column.
 
+**Closing a channel under its callers (issue #716).** A SysOp path that makes a
+channel stop existing for callers (delete, hide, MRC retire) must call
+`ChatHub.close_channel(name)` after its transaction commits; `_move_callers_out`
+in `admin_flow` does it for the three today. `_chat_loop` records its join and
+leave through `_record_presence_event`, which checks the channel is still the
+same one (by `channel_id` -- SQLite reuses a freed row id) in the same lane job
+as the insert: with `foreign_keys = ON` a leave into a deleted channel used to
+raise on the way out, and one into a hidden channel would have changed what
+Restore brings back.
+
 **"Known" means stored (issue #683).** `handle_events` adds every accepted
 content ID to `LinkNode.known_event_ids`, and a later copy of a known ID is
 dropped as a duplicate. An event under a board, channel or file area with no

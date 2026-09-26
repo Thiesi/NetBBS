@@ -17112,6 +17112,7 @@ async def _channel_detail_screen(
             deleted = await _delete_channel_screen(
                 session, lane, actor, channel,
                 own_fingerprint=link_context.node_identity.fingerprint if link_context is not None else None,
+                chat_hub=chat_hub,
             )
             if deleted:
                 if mrc_bridge is not None and mrc_mapping is not None:
@@ -17141,7 +17142,7 @@ async def _channel_detail_screen(
             await _redraw()
         elif choice == "t" and mrc_mapping is not None and mrc_mapping.is_open_room:
             await session.write_line("")
-            if await _retire_open_room_screen(session, lane, actor, channel, mrc_bridge=mrc_bridge):
+            if await _retire_open_room_screen(session, lane, actor, channel, mrc_bridge=mrc_bridge, chat_hub=chat_hub):
                 return
             await _redraw()
         elif choice == "u" and mrc_mapping is not None and not mrc_mapping.is_open_room:
@@ -17283,11 +17284,12 @@ async def _adopt_open_room_screen(
 
 async def _retire_open_room_screen(
     session: Session, lane: DatabaseLane, actor: User, channel: Channel, *, mrc_bridge: MrcBridge | None,
+    chat_hub: ChatHub | None = None,
 ) -> bool:
     """`Re[t]ire` (issue #300): remove a room a caller opened, with its
     scrollback, now. Destructive, so the yes/no is the last keystroke
     behind the hotkey. Callers inside are told and returned to the
-    picker by the same path a deleted channel already uses."""
+    picker, as for a deleted channel (issue #716)."""
     if not await prompt_yes_no(
         session, f"Retire {sanitize_text(channel.name)} and delete its scrollback now?", default=False,
     ):
@@ -17308,6 +17310,7 @@ async def _retire_open_room_screen(
     if mrc_bridge is not None:
         await mrc_bridge.refresh_channel_mappings()
     _announce_line(session, f"Retired {channel.name!r}.")
+    _move_callers_out(session, chat_hub, channel)
     if mrc_bridge is None:
         _announce_line(session, colored(_MRC_STANDALONE_NOTE, fg_color=MUTED_COLOR))
     return True
@@ -17589,9 +17592,21 @@ async def _link_channel_screen(
 
 
 
+def _move_callers_out(session: Session, chat_hub: ChatHub | None, channel: Channel) -> None:
+    """Send everyone inside `channel`, which the SysOp just deleted, hid or
+    retired, back to the channel list (issue #716), and say how many."""
+    if chat_hub is None:
+        return
+    moved = chat_hub.close_channel(channel.name)
+    if moved:
+        _announce_line(
+            session, f"{moved} caller session{'s' if moved != 1 else ''} in it moved back to the channel list.",
+        )
+
+
 async def _delete_channel_screen(
     session: Session, lane: DatabaseLane, actor: User, channel: Channel, *,
-    own_fingerprint: str | None = None,
+    own_fingerprint: str | None = None, chat_hub: ChatHub | None = None,
 ) -> bool:
     # Issue #683: a carried chat channel whose origin is another node is hidden,
     # not destroyed -- see `_hide_carried_screen`.
@@ -17601,7 +17616,12 @@ async def _delete_channel_screen(
         _announce_line(session, colored(f"Cannot delete {channel.name!r}: {exc}", fg_color=ERROR_COLOR))
         return False
     if carried:
-        return await _hide_carried_screen(session, lane, actor, "channels", channel.channel_id, channel.name, own_fingerprint=own_fingerprint)
+        hidden = await _hide_carried_screen(
+            session, lane, actor, "channels", channel.channel_id, channel.name, own_fingerprint=own_fingerprint,
+        )
+        if hidden:
+            _move_callers_out(session, chat_hub, channel)
+        return hidden
     await session.write_line(
         colored(
             "\r\nThis permanently deletes the chat channel, its scrollback, mute/ban "
@@ -17620,10 +17640,13 @@ async def _delete_channel_screen(
         return False
     # Issues #669/#683: a Linked channel keeps its genesis and is recorded as
     # excluded, so it stays declared as not carried and does not come back.
-    return await _remove_resource(
+    removed = await _remove_resource(
         session, lane, actor, "channels", channel.channel_id, channel.name, own_fingerprint=own_fingerprint,
         delete=lambda db: delete_channel(db, channel, deleted_by=actor),
     )
+    if removed:
+        _move_callers_out(session, chat_hub, channel)
+    return removed
 
 
 # -- categories ----------------------------------------------------------
