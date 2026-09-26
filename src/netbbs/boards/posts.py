@@ -136,11 +136,11 @@ def create_post(
     require_level(author, board.min_write_level)
     _check_content_length(subject, body)
     closed_row = db.connection.execute(
-        "SELECT link_closed_at, link_hidden_at FROM boards WHERE id = ?", (board.id,)
+        "SELECT * FROM boards WHERE id = ?", (board.id,)
     ).fetchone()
     if closed_row is not None and closed_row["link_closed_at"] is not None:
         raise PostError(f"board {board.name!r} is closed and no longer accepts new posts")
-    if closed_row is not None and closed_row["link_hidden_at"] is not None:
+    if closed_row is not None and "link_hidden_at" in closed_row.keys() and closed_row["link_hidden_at"] is not None:
         # Issue #683: a caller who opened the board before the SysOp excluded
         # it still holds the `Board`; the write is refused here.
         raise PostError(f"board {board.name!r} is no longer available on this node")
@@ -260,11 +260,11 @@ def create_labelled_post(
     """
     _check_content_length(subject, body)
     closed_row = db.connection.execute(
-        "SELECT link_closed_at, link_hidden_at FROM boards WHERE id = ?", (board.id,)
+        "SELECT * FROM boards WHERE id = ?", (board.id,)
     ).fetchone()
     if closed_row is not None and closed_row["link_closed_at"] is not None:
         raise PostError(f"board {board.name!r} is closed and no longer accepts new posts")
-    if closed_row is not None and closed_row["link_hidden_at"] is not None:
+    if closed_row is not None and "link_hidden_at" in closed_row.keys() and closed_row["link_hidden_at"] is not None:
         # Issue #683: a caller who opened the board before the SysOp excluded
         # it still holds the `Board`; the write is refused here.
         raise PostError(f"board {board.name!r} is no longer available on this node")
@@ -308,8 +308,8 @@ def _refuse_if_board_hidden(db: Database, board_local_id: int) -> None:
     """Issue #683: every change to a board's posts is refused once the SysOp
     has excluded it -- a caller who opened the board before still holds its
     objects, and Restore must bring the board back exactly as it was hidden."""
-    row = db.connection.execute("SELECT name, link_hidden_at FROM boards WHERE id = ?", (board_local_id,)).fetchone()
-    if row is not None and row["link_hidden_at"] is not None:
+    row = db.connection.execute("SELECT * FROM boards WHERE id = ?", (board_local_id,)).fetchone()
+    if row is not None and "link_hidden_at" in row.keys() and row["link_hidden_at"] is not None:
         raise PostError(f"board {row['name']!r} is no longer available on this node")
 
 

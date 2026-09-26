@@ -115,8 +115,10 @@ def upload_file(
 def _refuse_hidden_area(db: Database, area: FileArea) -> None:
     """Issue #683: a caller who opened the area before the SysOp excluded it
     still holds the `FileArea`; an upload into it is refused here."""
-    row = db.connection.execute("SELECT link_hidden_at FROM file_areas WHERE id = ?", (area.id,)).fetchone()
-    if row is not None and row["link_hidden_at"] is not None:
+    # `SELECT *` and a key check, so a database migrated only partway (the
+    # legacy-schema tests) still takes uploads.
+    row = db.connection.execute("SELECT * FROM file_areas WHERE id = ?", (area.id,)).fetchone()
+    if row is not None and "link_hidden_at" in row.keys() and row["link_hidden_at"] is not None:
         raise FileEntryError(f"file area {area.name!r} is no longer available on this node")
 
 
