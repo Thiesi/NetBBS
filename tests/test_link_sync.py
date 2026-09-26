@@ -3944,7 +3944,10 @@ def test_a_hidden_board_is_left_alone_by_sync_and_restore_pulls_what_it_missed(t
             async with aiohttp.ClientSession() as session:
                 await net.dial("B", session)
                 assert net.subjects_on("B") == ["before hiding"]
-                hide_carried_resource(net.dbs["B"].db, "boards", r_board_id, actor=net.sysops["B"])
+                hide_carried_resource(
+                    net.dbs["B"].db, "boards", r_board_id, actor=net.sysops["B"],
+                    own_fingerprint=net.ids["B"].fingerprint,
+                )
                 net.post("R", "while hidden")
                 await net.dial("B", session)
                 hidden_count = net.dbs["B"].db.connection.execute("SELECT COUNT(*) FROM posts").fetchone()[0]

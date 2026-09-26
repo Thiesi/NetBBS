@@ -25,6 +25,7 @@ new.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 import sqlite3
 from dataclasses import dataclass
 
@@ -491,13 +492,32 @@ def exclude_offer(db: Database, kind: str, resource_id: str, *, actor: User | No
 # genesis, like an offer.
 
 
+class CarryOwnershipUnknown(CarryDecisionError):
+    """This node's own fingerprint is not known here, so whether a Linked
+    resource is carried from elsewhere cannot be decided."""
+
+
+def resolve_own_fingerprint(db: Database, own_fingerprint: str | None) -> str | None:
+    """This node's root fingerprint: the caller's, or the copy the running node
+    caches at every startup (the root key never rotates, so it cannot go
+    stale). `None` only on a node that has never started."""
+    if own_fingerprint is not None:
+        return own_fingerprint
+    from netbbs.managed_dns.state import get_node_fingerprint  # deferred: keeps link free of a hard dependency
+
+    return get_node_fingerprint(db)
+
+
 def carried_from_elsewhere(db: Database, kind: str, resource_id: str, own_fingerprint: str | None) -> bool:
     """Whether deleting this local resource should hide it rather than delete
     it: it is Linked, and its current origin is another node (a board's origin
-    can move, §9.4; channels and file areas have no succession). Without this
-    node's own fingerprint -- a console with no Link identity loaded -- a
-    genesis this node received from a peer counts: one it originated is kept
-    only on its own row until it is deleted."""
+    can move, §9.4; channels and file areas have no succession). Decided by the
+    persisted current origin against this node's own fingerprint -- the
+    caller's, or the cached one -- and never guessed from where a genesis
+    happens to be stored: a board created here and transferred away has no
+    genesis in `link_events`, and one transferred here does. Raises
+    `CarryOwnershipUnknown` for a Linked resource when the fingerprint cannot
+    be resolved."""
     table, column = _LOCAL[kind]
     row = db.connection.execute(f"SELECT * FROM {table} WHERE {column} = ?", (resource_id,)).fetchone()
     if row is None or row["link_genesis_json"] is None:
@@ -506,11 +526,13 @@ def carried_from_elsewhere(db: Database, kind: str, resource_id: str, own_finger
     origin = genesis["envelope"]["payload"].get("origin_fingerprint")
     if kind == "boards" and row["link_origin_fingerprint"]:
         origin = row["link_origin_fingerprint"]
-    if own_fingerprint is not None:
-        return origin != own_fingerprint
-    return db.connection.execute(
-        "SELECT 1 FROM link_events WHERE content_id = ?", (event_content_id(genesis["envelope"]),)
-    ).fetchone() is not None
+    own = resolve_own_fingerprint(db, own_fingerprint)
+    if own is None:
+        raise CarryOwnershipUnknown(
+            "this node's Link identity is not known here yet; start the node once, or delete it from "
+            "the running node's console"
+        )
+    return origin != own
 
 
 def hide_carried_resource(
@@ -531,7 +553,9 @@ def hide_carried_resource(
         # while the SysOp was confirming makes this node the board's authority,
         # and a resource this node originates is not a carry choice.
         if not carried_from_elsewhere(db, kind, resource_id, own_fingerprint):
-            raise CarryDecisionError("this node is now that resource's origin; it can only be deleted")
+            raise CarryDecisionError(
+                "this node is now that resource's origin, so it is not a carry choice; delete it again to remove it"
+            )
         genesis = json.loads(row["link_genesis_json"])
         save_event(
             db, sender_fingerprint=genesis["envelope"]["payload"]["origin_fingerprint"],
@@ -605,6 +629,37 @@ def restore_excluded(
     db.connection.commit()
     if reproject:
         _finish_acceptance(db, kind, resource_id, max_remote_files_per_area=max_remote_files_per_area)
+
+
+def remove_linked_or_local(
+    db: Database, kind: str, resource_id: str, *, actor: User, own_fingerprint: str | None,
+    delete: "Callable[[], None] | None",
+) -> str:
+    """The SysOp's delete, decided and done in one lane job (issue #683), so an
+    origin transfer the running node accepts meanwhile -- it runs on the same
+    lane -- cannot land between the decision and the act. Carried from
+    elsewhere: hidden (reversible), whatever the screen expected. Otherwise
+    `delete` runs, after `retain_linked_genesis` keeps a Linked resource's
+    genesis and records it excluded; with no `delete` (the hide screen, which
+    never warned about a permanent delete) the change of ownership is refused.
+    Returns `"hidden"`, `"deleted"` or `"deleted-excluded"`."""
+    from netbbs.link.store import clear_deletion_record, retain_linked_genesis
+
+    if carried_from_elsewhere(db, kind, resource_id, own_fingerprint):
+        hide_carried_resource(db, kind, resource_id, actor=actor, own_fingerprint=own_fingerprint)
+        return "hidden"
+    if delete is None:
+        raise CarryDecisionError(
+            "this node is now that resource's origin, so it is not a carry choice; delete it again to remove it"
+        )
+    kept = retain_linked_genesis(db, kind, resource_id, actor_user_id=actor.id)
+    try:
+        delete()
+    except BaseException:
+        if kept:
+            clear_deletion_record(db, kind, resource_id)
+        raise
+    return "deleted-excluded" if kept else "deleted"
 
 
 def purge_excluded(db: Database, kind: str, resource_id: str, *, actor: User | None) -> None:

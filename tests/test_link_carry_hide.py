@@ -44,8 +44,13 @@ AREA_ID = "a" * 64
 
 
 @pytest.fixture
-def db(tmp_path):
+def db(tmp_path, own):
+    from netbbs.managed_dns.state import set_node_fingerprint
+
     database = Database(tmp_path / "node.db")
+    # As a node that has started once: its root fingerprint is cached, which
+    # is what decides ownership where no Link identity is loaded.
+    set_node_fingerprint(database, own.fingerprint)
     yield database
     database.close()
 
@@ -257,8 +262,9 @@ def test_only_a_resource_originated_elsewhere_is_hidden(db, own, remote, sysop):
     db.connection.execute("UPDATE boards SET link_origin_fingerprint = ? WHERE board_id = ?", (own.fingerprint, BOARD_ID))
     db.connection.commit()
     assert carried_from_elsewhere(db, "boards", BOARD_ID, own.fingerprint) is False
-    # Without a loaded identity: a genesis this node received counts.
-    assert carried_from_elsewhere(db, "boards", BOARD_ID, None) is True
+    # Without a loaded identity the cached root fingerprint decides, by the
+    # same current-origin rule -- never where a genesis happens to be stored.
+    assert carried_from_elsewhere(db, "boards", BOARD_ID, None) is False
     assert carried_from_elsewhere(db, "boards", mine.board_id, None) is False
 
 
@@ -341,3 +347,79 @@ def test_hiding_is_refused_once_this_node_has_become_the_boards_origin(db, own, 
 
     with pytest.raises(CarryDecisionError, match="origin"):
         hide_carried_resource(db, "boards", BOARD_ID, actor=sysop, own_fingerprint=own.fingerprint)
+
+
+def test_changes_to_existing_posts_are_refused_once_the_board_is_hidden(db, own, remote, sysop):
+    """Restore must bring the board back exactly as it was hidden."""
+    from netbbs.boards.posts import PostError, edit_post, set_post_pinned
+
+    board = _carried_board(db, own, remote)
+    post = create_post(db, board, sysop, "before", "text")
+    hide_carried_resource(db, "boards", BOARD_ID, actor=sysop)
+
+    with pytest.raises(PostError, match="no longer available"):
+        edit_post(db, post, board, subject="after", body="changed", edited_by=sysop)
+    with pytest.raises(PostError, match="no longer available"):
+        tombstone_post(db, post, board, tombstoned_by=sysop)
+    with pytest.raises(PostError, match="no longer available"):
+        set_post_pinned(db, post, True, changed_by=sysop)
+
+
+def test_ownership_comes_from_the_cached_fingerprint_not_where_a_genesis_is_stored(db, own, remote, sysop):
+    """A board created here and transferred away has no genesis in
+    `link_events`; guessing from that would destroy it instead of hiding it."""
+    from netbbs.link.carry import carried_from_elsewhere
+    from netbbs.managed_dns.state import set_node_fingerprint
+
+    board = create_board(db, "made-here", creator=sysop)
+    link_board(db, board, node_identity=own)
+    db.connection.execute("UPDATE boards SET link_origin_fingerprint = ? WHERE id = ?", (remote.fingerprint, board.id))
+    db.connection.commit()
+    set_node_fingerprint(db, own.fingerprint)
+
+    assert carried_from_elsewhere(db, "boards", board.board_id, None) is True
+
+
+def test_ownership_that_cannot_be_decided_refuses_rather_than_guesses(db, own, sysop):
+    from netbbs.link.carry import CarryOwnershipUnknown, carried_from_elsewhere
+
+    db.connection.execute("DELETE FROM node_config WHERE key = 'managed_dns_node_fingerprint'")
+    db.connection.commit()
+    board = create_board(db, "made-here", creator=sysop)
+    link_board(db, board, node_identity=own)
+
+    with pytest.raises(CarryOwnershipUnknown):
+        carried_from_elsewhere(db, "boards", board.board_id, None)
+
+
+def test_a_delete_that_raced_an_origin_transfer_away_hides_instead(db, own, remote, sysop):
+    """The screen chose a permanent delete while this node owned the board; by
+    the time the SysOp confirmed, the origin had moved. Decided again in the
+    same lane job: the board is hidden, not destroyed."""
+    from netbbs.boards.boards import delete_board
+    from netbbs.link.carry import remove_linked_or_local
+
+    board = create_board(db, "made-here", creator=sysop)
+    link_board(db, board, node_identity=own)
+    db.connection.execute("UPDATE boards SET link_origin_fingerprint = ? WHERE id = ?", (remote.fingerprint, board.id))
+    db.connection.commit()
+
+    outcome = remove_linked_or_local(
+        db, "boards", board.board_id, actor=sysop, own_fingerprint=own.fingerprint,
+        delete=lambda: delete_board(db, board, deleted_by=sysop),
+    )
+
+    assert outcome == "hidden"
+    assert db.connection.execute("SELECT link_hidden_at FROM boards WHERE id = ?", (board.id,)).fetchone()[0]
+
+
+def test_the_hide_screen_never_turns_into_a_permanent_delete(db, own, remote, sysop):
+    from netbbs.link.carry import remove_linked_or_local
+
+    _carried_board(db, own, remote)
+    db.connection.execute("UPDATE boards SET link_origin_fingerprint = ? WHERE board_id = ?", (own.fingerprint, BOARD_ID))
+    db.connection.commit()
+
+    with pytest.raises(CarryDecisionError, match="origin"):
+        remove_linked_or_local(db, "boards", BOARD_ID, actor=sysop, own_fingerprint=own.fingerprint, delete=None)
+    assert get_board_by_name(db, "Remote Discussion") is not None

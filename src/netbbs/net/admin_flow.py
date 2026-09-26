@@ -276,13 +276,14 @@ from netbbs.link.carry import (
     carry_decision_counts,
     count_carry_decisions,
     hide_carried_resource,
+    remove_linked_or_local,
     purge_excluded,
     restore_excluded,
     exclude_offer,
     list_carry_decisions,
 )
 from netbbs.link.realtime_proxy import describe_proxy_status
-from netbbs.link.store import clear_deletion_record, introduced_by, retain_linked_genesis
+from netbbs.link.store import introduced_by
 from netbbs.link.trust_carriage import relays_refusing_trust_deposits
 from netbbs.link.onboarding import (
     Participation,
@@ -7859,6 +7860,7 @@ def _carry_decision_sections(decision: CarryDecision, *, origin_label: str, deci
 
 async def _carry_decisions_screen(
     session: Session, lane: DatabaseLane, actor: User, *, link_context: LinkContext, state: str,
+    mrc_bridge=None,
 ) -> None:
     """Picker over the offered (or excluded) resources, then one resource's
     screen, with `[A]ccept` and `E[x]clude` for an offer (issue #683)."""
@@ -7938,6 +7940,10 @@ async def _carry_decisions_screen(
                     session,
                     f"{selected.name!r} is carried now; its content arrives with the next sync passes.",
                 )
+                if selected.kind == "channels" and mrc_bridge is not None:
+                    # A channel coming back (or gone for good) changes which
+                    # MRC rooms the running bridge maps, as hiding it did.
+                    await mrc_bridge.refresh_channel_mappings()
                 if not await lane.run(list_carry_decisions, state):
                     return
         elif choice == "r":
@@ -7953,6 +7959,10 @@ async def _carry_decisions_screen(
                 _announce_line(session, colored(f"Could not restore {selected.name!r}: {exc}", fg_color=ERROR_COLOR))
             else:
                 _announce_line(session, f"{selected.name!r} restored; anything new arrives with the next sync passes.")
+                if selected.kind == "channels" and mrc_bridge is not None:
+                    # A channel coming back (or gone for good) changes which
+                    # MRC rooms the running bridge maps, as hiding it did.
+                    await mrc_bridge.refresh_channel_mappings()
                 if not await lane.run(list_carry_decisions, state):
                     return
         elif choice == "p":
@@ -7973,6 +7983,10 @@ async def _carry_decisions_screen(
                 _announce_line(session, colored(f"Could not purge {selected.name!r}: {exc}", fg_color=ERROR_COLOR))
             else:
                 _announce_line(session, f"{selected.name!r} purged; it stays excluded.")
+                if selected.kind == "channels" and mrc_bridge is not None:
+                    # A channel coming back (or gone for good) changes which
+                    # MRC rooms the running bridge maps, as hiding it did.
+                    await mrc_bridge.refresh_channel_mappings()
         elif choice == "x":
             try:
                 await lane.run(exclude_offer, selected.kind, selected.resource_id, actor=actor)
@@ -8065,9 +8079,15 @@ async def _link_status_screen(
                 await lane.run(dismiss_identity_observation, notice.id)
             message = colored("Identity changes acknowledged.", fg_color=SUCCESS_COLOR)
         elif choice == "o":
-            await _carry_decisions_screen(session, lane, actor, link_context=link_context, state=OFFERED)
+            await _carry_decisions_screen(
+                session, lane, actor, link_context=link_context, state=OFFERED,
+                mrc_bridge=node_controls.mrc_bridge if node_controls is not None else None,
+            )
         elif choice == "x":
-            await _carry_decisions_screen(session, lane, actor, link_context=link_context, state=EXCLUDED)
+            await _carry_decisions_screen(
+                session, lane, actor, link_context=link_context, state=EXCLUDED,
+                mrc_bridge=node_controls.mrc_bridge if node_controls is not None else None,
+            )
 
 
 # -- node keys: guided operational-key rotation (design doc §4.5, ------------
@@ -14701,7 +14721,12 @@ async def _delete_board_screen(
 ) -> bool:
     # Issue #683: a carried message board whose origin is another node is hidden,
     # not destroyed -- see `_hide_carried_screen`.
-    if await lane.run(carried_from_elsewhere, "boards", board.board_id, own_fingerprint):
+    try:
+        carried = await lane.run(carried_from_elsewhere, "boards", board.board_id, own_fingerprint)
+    except CarryDecisionError as exc:
+        _announce_line(session, colored(f"Cannot delete {board.name!r}: {exc}", fg_color=ERROR_COLOR))
+        return False
+    if carried:
         return await _hide_carried_screen(session, lane, actor, "boards", board.board_id, board.name, own_fingerprint=own_fingerprint)
     await session.write_line(
         colored(
@@ -14720,15 +14745,10 @@ async def _delete_board_screen(
         return False
     # Issues #669/#683: a Linked board keeps its genesis and is recorded as
     # excluded, so it stays declared as not carried and does not come back.
-    kept = await lane.run(retain_linked_genesis, "boards", board.board_id, actor_user_id=actor.id)
-    try:
-        await lane.run(delete_board, board, deleted_by=actor)
-    except BaseException:
-        if kept:
-            await lane.run(clear_deletion_record, "boards", board.board_id)
-        raise
-    _announce_line(session, f"{board.name!r} deleted." + (_EXCLUDED_AFTER_DELETE if kept else ""))
-    return True
+    return await _remove_resource(
+        session, lane, actor, "boards", board.board_id, board.name, own_fingerprint=own_fingerprint,
+        delete=lambda db: delete_board(db, board, deleted_by=actor),
+    )
 
 
 _EXCLUDED_AFTER_DELETE = " It is excluded from Link here and will not come back; Link status lists it."
@@ -14756,14 +14776,33 @@ async def _hide_carried_screen(
     if confirmation != name:
         _announce_line(session, "Cancelled.")
         return False
-    try:
-        await lane.run(
-            hide_carried_resource, kind, resource_id, actor=actor, own_fingerprint=own_fingerprint,
+    return await _remove_resource(
+        session, lane, actor, kind, resource_id, name, own_fingerprint=own_fingerprint, delete=None,
+    )
+
+
+async def _remove_resource(
+    session: Session, lane: DatabaseLane, actor: User, kind: str, resource_id: str, name: str, *,
+    own_fingerprint: str | None, delete,
+) -> bool:
+    """Carry out a confirmed delete as one lane job (`remove_linked_or_local`),
+    and say what actually happened -- which is the reversible hide if the
+    resource's origin moved away while the SysOp was confirming."""
+    def _job(db: Database) -> str:
+        return remove_linked_or_local(
+            db, kind, resource_id, actor=actor, own_fingerprint=own_fingerprint,
+            delete=(lambda: delete(db)) if delete is not None else None,
         )
+
+    try:
+        outcome = await lane.run(_job)
     except CarryDecisionError as exc:
-        _announce_line(session, colored(f"Could not exclude {name!r}: {exc}", fg_color=ERROR_COLOR))
+        _announce_line(session, colored(f"Could not delete {name!r}: {exc}", fg_color=ERROR_COLOR))
         return False
-    _announce_line(session, f"{name!r} excluded from this node; Link status -> Excluded restores or purges it.")
+    if outcome == "hidden":
+        _announce_line(session, f"{name!r} excluded from this node; Link status -> Excluded restores or purges it.")
+    else:
+        _announce_line(session, f"{name!r} deleted." + (_EXCLUDED_AFTER_DELETE if outcome == "deleted-excluded" else ""))
     return True
 
 
@@ -15508,7 +15547,12 @@ async def _delete_area_screen(
 ) -> bool:
     # Issue #683: a carried file area whose origin is another node is hidden,
     # not destroyed -- see `_hide_carried_screen`.
-    if await lane.run(carried_from_elsewhere, "file_areas", area.area_id, own_fingerprint):
+    try:
+        carried = await lane.run(carried_from_elsewhere, "file_areas", area.area_id, own_fingerprint)
+    except CarryDecisionError as exc:
+        _announce_line(session, colored(f"Cannot delete {area.name!r}: {exc}", fg_color=ERROR_COLOR))
+        return False
+    if carried:
         return await _hide_carried_screen(session, lane, actor, "file_areas", area.area_id, area.name, own_fingerprint=own_fingerprint)
     await session.write_line(
         colored(
@@ -15526,15 +15570,10 @@ async def _delete_area_screen(
         return False
     # Issues #669/#683: a Linked file area keeps its genesis and is recorded as
     # excluded, so it stays declared as not carried and does not come back.
-    kept = await lane.run(retain_linked_genesis, "file_areas", area.area_id, actor_user_id=actor.id)
-    try:
-        await lane.run(delete_file_area, area, deleted_by=actor)
-    except BaseException:
-        if kept:
-            await lane.run(clear_deletion_record, "file_areas", area.area_id)
-        raise
-    _announce_line(session, f"{area.name!r} deleted." + (_EXCLUDED_AFTER_DELETE if kept else ""))
-    return True
+    return await _remove_resource(
+        session, lane, actor, "file_areas", area.area_id, area.name, own_fingerprint=own_fingerprint,
+        delete=lambda db: delete_file_area(db, area, deleted_by=actor),
+    )
 
 
 async def _pending_files_screen(
@@ -17559,7 +17598,12 @@ async def _delete_channel_screen(
 ) -> bool:
     # Issue #683: a carried chat channel whose origin is another node is hidden,
     # not destroyed -- see `_hide_carried_screen`.
-    if await lane.run(carried_from_elsewhere, "channels", channel.channel_id, own_fingerprint):
+    try:
+        carried = await lane.run(carried_from_elsewhere, "channels", channel.channel_id, own_fingerprint)
+    except CarryDecisionError as exc:
+        _announce_line(session, colored(f"Cannot delete {channel.name!r}: {exc}", fg_color=ERROR_COLOR))
+        return False
+    if carried:
         return await _hide_carried_screen(session, lane, actor, "channels", channel.channel_id, channel.name, own_fingerprint=own_fingerprint)
     await session.write_line(
         colored(
@@ -17579,15 +17623,10 @@ async def _delete_channel_screen(
         return False
     # Issues #669/#683: a Linked channel keeps its genesis and is recorded as
     # excluded, so it stays declared as not carried and does not come back.
-    kept = await lane.run(retain_linked_genesis, "channels", channel.channel_id, actor_user_id=actor.id)
-    try:
-        await lane.run(delete_channel, channel, deleted_by=actor)
-    except BaseException:
-        if kept:
-            await lane.run(clear_deletion_record, "channels", channel.channel_id)
-        raise
-    _announce_line(session, f"{channel.name!r} deleted." + (_EXCLUDED_AFTER_DELETE if kept else ""))
-    return True
+    return await _remove_resource(
+        session, lane, actor, "channels", channel.channel_id, channel.name, own_fingerprint=own_fingerprint,
+        delete=lambda db: delete_channel(db, channel, deleted_by=actor),
+    )
 
 
 # -- categories ----------------------------------------------------------

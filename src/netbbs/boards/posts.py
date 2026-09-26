@@ -304,6 +304,15 @@ def create_labelled_post(
     return get_post(db, post_id)
 
 
+def _refuse_if_board_hidden(db: Database, board_local_id: int) -> None:
+    """Issue #683: every change to a board's posts is refused once the SysOp
+    has excluded it -- a caller who opened the board before still holds its
+    objects, and Restore must bring the board back exactly as it was hidden."""
+    row = db.connection.execute("SELECT name, link_hidden_at FROM boards WHERE id = ?", (board_local_id,)).fetchone()
+    if row is not None and row["link_hidden_at"] is not None:
+        raise PostError(f"board {row['name']!r} is no longer available on this node")
+
+
 def edit_post(
     db: Database,
     post: Post,
@@ -338,6 +347,7 @@ def edit_post(
     necessarily the immediate predecessor being amended if the post has
     already been edited before.
     """
+    _refuse_if_board_hidden(db, post.board_id)
     if post.author_user_id != edited_by.id:
         _require_board_permission(db, post, edited_by, BoardPermission.EDIT)
     _check_content_length(subject, body)
@@ -769,6 +779,7 @@ def approve_post(db: Database, post: Post, *, approved_by: User) -> Post:
     moderator, rejected, or expired since the queue was drawn. Without the
     status condition an expired post would be quietly brought back.
     """
+    _refuse_if_board_hidden(db, post.board_id)
     _require_board_permission(db, post, approved_by, BoardPermission.APPROVE)
 
     cursor = db.connection.execute(
@@ -812,6 +823,7 @@ def delete_post(db: Database, post: Post, *, deleted_by: User) -> None:
     until whatever references it is gone first -- an explicit, catchable
     refusal rather than a session-crashing exception.
     """
+    _refuse_if_board_hidden(db, post.board_id)
     _require_board_permission(db, post, deleted_by, BoardPermission.DELETE)
 
     blockers = db.connection.execute(
@@ -870,6 +882,7 @@ def tombstone_post(db: Database, post: Post, board: Board, *, tombstoned_by: Use
     by `netbbs.link.protocol.LinkNode.handle_events`' own rejection of a
     second `board_post_tombstone` for the same root post).
     """
+    _refuse_if_board_hidden(db, post.board_id)
     _require_board_permission(db, post, tombstoned_by, BoardPermission.DELETE)
 
     current = db.connection.execute(
@@ -939,6 +952,7 @@ def set_post_pinned(db: Database, post: Post, pinned: bool, *, changed_by: User)
     (that would break keyset pagination's stability guarantees) — see
     `list_pinned_posts` for the dedicated pinned view.
     """
+    _refuse_if_board_hidden(db, post.board_id)
     _require_board_permission(db, post, changed_by, BoardPermission.EDIT)
 
     db.connection.execute("UPDATE posts SET pinned = ? WHERE id = ?", (int(pinned), post.id))
@@ -959,6 +973,7 @@ def set_post_exempt(db: Database, post: Post, exempt: bool, *, changed_by: User)
     """Exempt or unexempt a post from the expiry sweep. Requires
     `BoardPermission.EDIT`, per the existing pin/exempt-under-`edit`
     sign-off note."""
+    _refuse_if_board_hidden(db, post.board_id)
     _require_board_permission(db, post, changed_by, BoardPermission.EDIT)
 
     db.connection.execute(
