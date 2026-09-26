@@ -3824,6 +3824,23 @@ isolation. Any future call site that constructs its own
 easy to add a new session and forget this, since everything works
 identically in every environment except one with no direct egress.
 
+The real-time half has the same trap in another shape (issue #628). Every
+real-time socket in `netbbs.link` is opened by
+`netbbs.link.realtime_proxy.open_realtime_connection`, which tunnels through
+the environment's proxy with `CONNECT` when one applies; a bare
+`asyncio.open_connection` works everywhere except on a proxy-only network.
+`tests/test_link_realtime_proxy.py::test_every_real_time_socket_in_netbbs_link_is_opened_by_the_helper`
+fails on a new one. Two things about that helper are easy to undo by accident:
+
+- **Loopback targets skip the proxy**, the precedent the managed-DNS client
+  set. The proxy tests therefore dial a made-up hostname the loopback test
+  proxy maps to the real server; dialling `127.0.0.1` would pass without ever
+  touching the proxy.
+- **Success is recorded only after the handshake** (`record_handshake_outcome`)
+  for every caller that runs Noise. Recording it when the tunnel opens makes a
+  TLS-inspecting proxy alternate between "open" and "failed" on every retry,
+  and the log line that is meant to fire once per change fires twice per
+  attempt.
 ### Adding a field to a signed request needs a capability, not a version bump (issue #669)
 
 Signed Link requests are verified by rebuilding the payload from the parsed
