@@ -182,3 +182,69 @@ def test_relays_needing_replacement_spares_a_never_dialed_relay(db, alice_node):
     alice_node.relays_serving_me["untested-dan"] = "2026-01-01T00:00:00Z"
 
     assert relays_needing_replacement(db, alice_node) == []
+
+
+# -- issue #712: a known relay must not lose to untested candidates ----------
+
+
+def test_a_known_peer_outranks_untested_candidates_at_equal_scores(db, alice_node):
+    """Every never-observed candidate scores the same neutral prior. The
+    candidates used to pass through a set, so which three were asked was
+    down to hash order, and a working relay could lose to a peer list's worth
+    of strangers indefinitely."""
+    for i in range(10):
+        _add_candidate(alice_node, f"stranger-{i:02d}")
+    _add_peer(alice_node, "known-relay")
+
+    assert select_relay_candidates(db, alice_node)[0] == "known-relay"
+
+
+def test_candidates_that_cannot_be_reached_fall_behind_a_reached_one(db, alice_node):
+    for name in ("dead-a", "dead-b", "dead-c"):
+        _add_candidate(alice_node, name)
+        record_dial_outcome(db, name, succeeded=False)
+    _add_peer(alice_node, "seed")
+    record_dial_outcome(db, "seed", succeeded=True)
+
+    assert select_relay_candidates(db, alice_node)[0] == "seed"
+
+
+def test_a_relay_consent_attempt_records_whether_the_candidate_was_reached(tmp_path, monkeypatch):
+    """The relay-consent path never recorded an outcome, so the ranking above
+    had nothing to rank by (issue #712)."""
+    import asyncio
+
+    import netbbs.link.sync as sync
+    from netbbs.link.reliability import reliability_score
+    from netbbs.link.transport import LinkTransportError
+    from netbbs.storage.execution import DatabaseLane
+
+    database = Database(tmp_path / "relay.db")
+    lane = DatabaseLane(database.path)
+    node = LinkNode(identity=bootstrap_node_identity("alice"))
+
+    async def unreachable(*_args, **_kwargs):
+        raise LinkTransportError("connection refused")
+
+    async def refused_consent(*_args, **_kwargs):
+        raise LinkTransportError("403 link_policy_node_probationary_read_only")
+
+    async def reached(*_args, **_kwargs):
+        return None
+
+    try:
+        monkeypatch.setattr(sync, "dial_hello", unreachable)
+        assert asyncio.run(sync._request_one_relay_consent(
+            node, None, "http://203.0.113.9:7862", "dead", lambda: None, lane,
+        )) is False
+        # Reached, then refused by the relay's policy: up, just unwilling.
+        monkeypatch.setattr(sync, "dial_hello", reached)
+        monkeypatch.setattr(sync, "request_relay_consent", refused_consent)
+        assert asyncio.run(sync._request_one_relay_consent(
+            node, None, "http://relay.example:7862", "unwilling", lambda: None, lane,
+        )) is False
+        assert reliability_score(database, "dead") == 0.0
+        assert reliability_score(database, "unwilling") == 1.0
+    finally:
+        lane.close()
+        database.close()

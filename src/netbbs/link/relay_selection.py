@@ -47,19 +47,23 @@ def _reachable_full_peer_candidates(node: LinkNode) -> list[str]:
     never a fingerprint already granted or already asked
     (`LinkNode.relays_serving_me`/`pending_own_relay_requests`).
     """
-    seen: set[str] = set()
+    # Ordered, not a set (issue #712): a peer this node has completed a
+    # hello with comes before a descriptor it only heard about, so that when
+    # scores tie -- every candidate never yet observed does -- the stable
+    # ranking below keeps the known peer ahead.
+    seen: dict[str, None] = {}
     for fingerprint, peer in node.peers.items():
         if fingerprint == node.identity.fingerprint:
             continue
         if peer.descriptor.payload.get("outgoing_only"):
             continue
-        seen.add(fingerprint)
+        seen.setdefault(fingerprint)
     for fingerprint, descriptor in node.candidate_descriptors.items():
         if fingerprint == node.identity.fingerprint:
             continue
         if descriptor.payload.get("outgoing_only"):
             continue
-        seen.add(fingerprint)
+        seen.setdefault(fingerprint)
     return [
         fingerprint
         for fingerprint in seen
