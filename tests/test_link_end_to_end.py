@@ -1071,7 +1071,7 @@ def test_linked_channel_message_sent_via_the_live_interactive_chat_path_reaches_
     creator = create_user(dialer.db, "alice", password="hunter2", user_level=10)
     channel = create_channel(dialer.db, "lobby", creator=creator)
     link_channel(dialer.db, channel, node_identity=dialer_identity)
-    link_context = LinkContext(node_identity=dialer_identity, link_node=dialer_node)
+    link_context = LinkContext(link_node=dialer_node)
 
     async def scenario():
         # Stage 1: the interactive send path, not a direct domain call --
@@ -1334,7 +1334,7 @@ def test_remote_file_browse_and_fetch_via_the_live_interactive_ui_flow(tmp_path)
 
             bob = create_user(seed.db, "bob", password="hunter2", user_level=10)
             carried_area = get_file_area_by_name(seed.db, "downloads")
-            link_context = LinkContext(node_identity=seed_identity, link_node=seed_node)
+            link_context = LinkContext(link_node=seed_node)
 
             # Not yet fetched, before the interactive flow.
             assert get_remote_file(seed.db, entry.file_id).fetched_file_id is None

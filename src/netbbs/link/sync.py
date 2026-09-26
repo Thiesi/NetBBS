@@ -167,9 +167,11 @@ from netbbs.link.boards import load_own_board_events
 from netbbs.link.channels import load_own_channel_events
 from netbbs.link.files import load_own_file_area_events
 from netbbs.link.events import (
+    INVENTORY_NOT_CARRIED_CAPABILITY,
     LINK_MESSAGE_OBJECT_TYPE,
     EndpointDescriptor,
     canonical_bytes,
+    descriptor_has_capability,
     event_content_id,
 )
 from netbbs.link.enforcement import (
@@ -765,6 +767,10 @@ async def _sync_one_seed(
             requester_fingerprint=node.identity.fingerprint,
             responder_fingerprint=seed_peer.fingerprint,
             also_declare=node.deferred_events.declared(time.time()),
+            # Issue #669: only to a seed that says it understands the field.
+            declare_not_carried=descriptor_has_capability(
+                seed_peer.descriptor, INVENTORY_NOT_CARRIED_CAPABILITY
+            ),
         )
         events, _more_available, wanted = await request_inventory(
             node, session, seed_url, inventory_request
@@ -804,7 +810,7 @@ async def _sync_one_seed(
                 allowed_events.append(event)
             accepted: list[str] = []
             try:
-                accepted, deferred, refusal = node.handle_events_tolerantly(
+                accepted, deferred, refusal, skipped = node.handle_events_tolerantly(
                     seed_peer.fingerprint, allowed_events
                 )
                 needed = [exc.missing_identity for _raw, exc in deferred if exc.missing_identity]
@@ -817,17 +823,26 @@ async def _sync_one_seed(
                     # In order, once: an event set aside for want of its
                     # signer may be what a later one in the same response
                     # builds on.
-                    retried, deferred, retry_refusal = node.handle_events_tolerantly(
+                    retried, deferred, retry_refusal, retry_skipped = node.handle_events_tolerantly(
                         seed_peer.fingerprint, [raw for raw, _exc in deferred]
                     )
                     accepted.extend(retried)
                     refusal = refusal or retry_refusal
+                    skipped += retry_skipped
                 for raw, exc in deferred:
                     node.deferred_events.defer(raw, waiting_for=exc.missing_identity, now=time.time())
                 if deferred:
                     _logger.info(
                         "Link sync: set aside %d event(s) from seed %s that this node cannot use yet",
                         len(deferred), seed_url,
+                    )
+                if skipped:
+                    # Issue #624: copies from before their signer re-signed
+                    # them after a compromise. The signer serves fresh ones.
+                    _logger.info(
+                        "Link sync: skipped %d event(s) from seed %s signed by a key its signer "
+                        "has marked compromised",
+                        len(skipped), seed_url,
                     )
                 if refusal is not None:
                     _logger.warning(

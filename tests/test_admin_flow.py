@@ -2867,7 +2867,7 @@ def _link_context():
     from netbbs.link.boards import LinkContext
 
     node_identity = bootstrap_node_identity("roanoke")
-    return LinkContext(node_identity=node_identity, link_node=LinkNode(identity=node_identity))
+    return LinkContext(link_node=LinkNode(identity=node_identity))
 
 
 def test_link_this_board_flow(db, lane, sysop):
@@ -7741,9 +7741,9 @@ def test_outbox_shows_no_items_yet_message(db, lane, sysop):
 
 
 def test_outbox_replays_a_dead_lettered_item(db, lane, sysop):
-    from netbbs.link.work_items import KIND_LINK_MAIL_DELIVERY, _MAX_ATTEMPTS, enqueue_work_item, record_failure
+    from netbbs.link.work_items import KIND_LINK_MAIL_DELIVERY, _MAX_ATTEMPTS, enqueue_work_item_without_commit, record_failure
 
-    item = enqueue_work_item(db, kind=KIND_LINK_MAIL_DELIVERY, reference_id="msg1", target_fingerprint="fp1")
+    item = enqueue_work_item_without_commit(db, kind=KIND_LINK_MAIL_DELIVERY, reference_id="msg1", target_fingerprint="fp1")
     for _ in range(_MAX_ATTEMPTS):
         item = record_failure(db, item, error="unreachable")
     assert item.status == "dead_lettered"
@@ -7767,9 +7767,9 @@ def test_outbox_replays_a_dead_lettered_item(db, lane, sysop):
 
 
 def test_outbox_cancels_a_retrying_item(db, lane, sysop):
-    from netbbs.link.work_items import KIND_LINK_MAIL_ACK, enqueue_work_item, record_failure
+    from netbbs.link.work_items import KIND_LINK_MAIL_ACK, enqueue_work_item_without_commit, record_failure
 
-    item = enqueue_work_item(db, kind=KIND_LINK_MAIL_ACK, reference_id="ack1", target_fingerprint="fp1")
+    item = enqueue_work_item_without_commit(db, kind=KIND_LINK_MAIL_ACK, reference_id="ack1", target_fingerprint="fp1")
     record_failure(db, item, error="connection refused")
 
     from netbbs.link.work_items import list_work_items
@@ -8415,7 +8415,7 @@ def test_subconsoles_adapt_to_40x24_terminal(db, lane, sysop):
 
     identity = bootstrap_node_identity("testnode")
     node = LinkNode(identity=identity)
-    link_context = LinkContext(node_identity=identity, link_node=node)
+    link_context = LinkContext(link_node=node)
     node_controls = _node_controls()
 
     ops_session = FakeSession(["o", "b", "b"])
@@ -8480,7 +8480,7 @@ def test_compact_subconsole_panels_fit_the_frame_at_40x24(db, lane, sysop):
     from netbbs.link.boards import LinkContext
 
     identity = bootstrap_node_identity("testnode")
-    link_context = LinkContext(node_identity=identity, link_node=LinkNode(identity=identity))
+    link_context = LinkContext(link_node=LinkNode(identity=identity))
     node_controls = _node_controls()
 
     for choice, label in (("u", "users"), ("c", "content"), ("o", "operations")):
@@ -8705,7 +8705,7 @@ def test_operations_menu_reloads_after_outbox_action(db, lane, sysop, monkeypatc
     from netbbs.link.boards import LinkContext
 
     identity = bootstrap_node_identity("testnode")
-    link_context = LinkContext(node_identity=identity, link_node=LinkNode(identity=identity))
+    link_context = LinkContext(link_node=LinkNode(identity=identity))
 
     session = FakeSession(["o", "o", "b", "b"])
     asyncio.run(
@@ -8749,7 +8749,7 @@ def test_operations_menu_reloads_after_diagnostic_and_follow_log_screens(db, lan
     from netbbs.link.boards import LinkContext
 
     identity = bootstrap_node_identity("testnode")
-    link_context = LinkContext(node_identity=identity, link_node=LinkNode(identity=identity))
+    link_context = LinkContext(link_node=LinkNode(identity=identity))
 
     # landing (1) -> operations initial (2) -> [d] reload (3) -> [f] reload (4)
     session = FakeSession(["o", "d", "f", "b", "b"])

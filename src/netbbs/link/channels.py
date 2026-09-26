@@ -35,6 +35,7 @@ from netbbs.link.events import (
     build_channel_genesis,
     build_channel_message,
 )
+from netbbs.link.local_names import free_local_name
 from netbbs.link.node_identity import NodeIdentity
 from netbbs.search import index_channel_message
 from netbbs.storage.database import Database
@@ -224,7 +225,7 @@ def materialize_carried_channel(
     what `Channel` actually has settable at creation time).
     """
     payload_name = str(genesis.payload.get("name", ""))
-    local_name = payload_name
+    base_name = payload_name
     if payload_name.lower().startswith(OPEN_ROOM_NAME_PREFIX):
         # Issue #300: the prefix is reserved for MRC rooms callers open
         # here. A genesis wearing it -- a channel Linked before the
@@ -232,20 +233,7 @@ def materialize_carried_channel(
         # is carried under `local-mrc:...`, the same rename the migration
         # applies to this node's own pre-release rows, so it can neither
         # block a room from opening nor impersonate one.
-        local_name = f"local-{payload_name}"
-        if db.connection.execute(
-            "SELECT 1 FROM channels WHERE lower(name) = lower(?)", (local_name,)
-        ).fetchone() is not None:
-            local_name = f"{local_name}-{genesis.payload['channel_id'][:8]}"
-            if db.connection.execute(
-                "SELECT 1 FROM channels WHERE lower(name) = lower(?)", (local_name,)
-            ).fetchone() is not None:
-                # Both candidates taken locally: a tolerated refusal, not an
-                # IntegrityError the transport would not expect.
-                raise ChannelCarryRefusedError(
-                    f"refusing to carry channel {payload_name!r}: both {local_name!r} and its "
-                    "unsuffixed form are already local channel names here"
-                )
+        base_name = f"local-{payload_name}"
     existing = db.connection.execute(
         "SELECT * FROM channels WHERE channel_id = ?", (genesis.payload["channel_id"],)
     ).fetchone()
@@ -268,6 +256,15 @@ def materialize_carried_channel(
         )
 
     payload = genesis.payload
+    # Issue #671 (and #300 before it for `local-mrc:`): a name already in use
+    # here would make the insert fail. Resolved after the idempotent return
+    # above, so a resend of a channel carried under its own name does not
+    # find itself in the way.
+    local_name = free_local_name(db, "channels", base_name, payload["channel_id"])
+    if local_name is None:
+        raise ChannelCarryRefusedError(
+            f"refusing to carry channel {payload_name!r}: no free local name for {base_name!r}"
+        )
     db.connection.execute(
         """
         INSERT INTO channels

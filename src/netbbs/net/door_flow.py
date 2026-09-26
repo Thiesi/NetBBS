@@ -142,7 +142,9 @@ async def browse_doors(
                 session, lane, door, user,
                 # Issue #520: without this a door's post to a Linked board would
                 # never reach the peers the SysOp linked that board to.
-                node_identity=link_context.node_identity if link_context is not None else None,
+                # Read at each drain, not at launch: a door session can
+                # outlast a signing-key rotation by hours (issue #624).
+                node_identity=(lambda: link_context.node_identity) if link_context is not None else None,
             )
         finally:
             if presence is not None:

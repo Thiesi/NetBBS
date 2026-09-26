@@ -305,6 +305,7 @@ def build_key_transition(
     operational_key: nacl.signing.VerifyKey,
     previous_transition_id: str | None,
     created_at: str,
+    compromised: bool = False,
 ) -> KeyTransition:
     """
     Build and sign one `key_transition` event, per design doc.
@@ -320,6 +321,15 @@ def build_key_transition(
     chain/head-pointer model applied to this object type, omitted
     entirely rather than stored as `null`.
 
+    `compromised` (issue #624) is only meaningful on a `"revoke"`: it
+    says the revoked key may be in someone else's hands, so nothing it
+    ever signed is to be believed again. Without it a revoke *retires*
+    the key: what it signed while current stays verifiable (design doc
+    §4.5), which is what lets a routine rotation leave a node's boards,
+    posts and files usable. Written as `"compromised": true` and omitted
+    otherwise, so a retirement is byte-identical to every revoke built
+    before the field existed.
+
     Always signed by `root` — never by an operational key (see
     `KeyTransition`'s own docstring).
     """
@@ -327,6 +337,8 @@ def build_key_transition(
         raise EventError(f"invalid key_transition purpose: {purpose!r}")
     if action not in _VALID_ACTIONS:
         raise EventError(f"invalid key_transition action: {action!r}")
+    if compromised and action != "revoke":
+        raise EventError("only a revoke can mark a key compromised")
 
     payload = {
         "subject_fingerprint": root.fingerprint,
@@ -337,6 +349,8 @@ def build_key_transition(
     }
     if previous_transition_id is not None:
         payload["previous_transition_id"] = previous_transition_id
+    if compromised:
+        payload["compromised"] = True
 
     envelope = build_envelope(KEY_TRANSITION_OBJECT_TYPE, payload)
     signature = root.sign(canonical_bytes(envelope))
@@ -349,6 +363,24 @@ def verify_key_transition(transition: KeyTransition, root_verify_key: nacl.signi
     `netbbs.link.node_identity.resolve_current_operational_key`'s job,
     since it needs the *set* of transitions for a chain, not one alone."""
     return verify_signature(root_verify_key, canonical_bytes(transition.envelope), transition.signature)
+
+
+INVENTORY_NOT_CARRIED_CAPABILITY = "inventory_not_carried"
+"""Issue #669: this node honours `InventoryRequest.not_carried`. It is the
+responder that must understand the field -- an older one rebuilds the signed
+payload without it and refuses the whole request -- so a requester sends it
+only to a peer whose descriptor carries this."""
+
+LINK_CAPABILITIES: tuple[str, ...] = (INVENTORY_NOT_CARRIED_CAPABILITY,)
+"""Every optional behaviour this version advertises in its own descriptor."""
+
+
+def descriptor_has_capability(descriptor: "EndpointDescriptor", capability: str) -> bool:
+    """Whether a peer's signed descriptor advertises `capability`. A
+    descriptor from before issue #669 has no list at all and advertises
+    nothing; a malformed list is treated the same way."""
+    capabilities = descriptor.payload.get("capabilities")
+    return isinstance(capabilities, list) and capability in capabilities
 
 
 @dataclass(frozen=True)
@@ -377,6 +409,10 @@ class EndpointDescriptor:
     this descriptor tries `addresses` first when present, falling back
     to `relays` — see `netbbs.link.sync`'s own send-via-relay logic
     (issue #58 task #25) for that resolution order.
+
+    Issue #669 adds `payload["capabilities"]`: the optional Link behaviours
+    this node's code understands, so a peer can use one only where it is
+    advertised. See `LINK_CAPABILITIES`.
     """
 
     envelope: dict
@@ -412,6 +448,7 @@ def build_endpoint_descriptor(
     live_relays: list[str] | None = None,
     friendly_name: str | None = None,
     canonical_dns_name: str | None = None,
+    capabilities: tuple[str, ...] = LINK_CAPABILITIES,
 ) -> EndpointDescriptor:
     """
     Build and sign one `endpoint_descriptor` event, per design doc §12
@@ -465,6 +502,11 @@ def build_endpoint_descriptor(
         payload["friendly_name"] = friendly_name
     if canonical_dns_name:
         payload["canonical_dns_name"] = canonical_dns_name
+    if capabilities:
+        # Issue #669. What this code understands, not a setting: every
+        # descriptor this version signs carries it. Same "omitted when empty"
+        # convention as the lists above.
+        payload["capabilities"] = list(capabilities)
 
     envelope = build_envelope(ENDPOINT_DESCRIPTOR_OBJECT_TYPE, payload)
     signature = signing_identity.sign(canonical_bytes(envelope))
@@ -2229,12 +2271,18 @@ def _inventory_request_payload(
     boards: dict[str, tuple[str, ...]],
     channels: dict[str, tuple[str, ...]],
     file_areas: dict[str, tuple[str, ...]],
+    not_carried: dict[str, tuple[str, ...]] | None = None,
 ) -> dict:
     """The exact payload shape `sign_inventory_request`/`verify_inventory_
     request` (issues #106/#124) both build canonical bytes over — one shared
     definition so the signer and verifier can never quietly drift apart
-    on what "the request" actually means."""
-    return {
+    on what "the request" actually means.
+
+    Issue #669: `not_carried` is signed like the rest, and is part of the
+    payload only when it names something. A request without it therefore
+    signs exactly as it did before the field existed, which is what lets an
+    older requester keep talking to a newer responder."""
+    payload = {
         "requester_fingerprint": requester_fingerprint,
         "responder_fingerprint": responder_fingerprint,
         "created_at": created_at,
@@ -2243,6 +2291,9 @@ def _inventory_request_payload(
         "channels": {channel_id: list(ids) for channel_id, ids in channels.items()},
         "file_areas": {area_id: list(ids) for area_id, ids in file_areas.items()},
     }
+    if not_carried and any(not_carried.values()):
+        payload["not_carried"] = {kind: list(ids) for kind, ids in not_carried.items() if ids}
+    return payload
 
 
 def sign_inventory_request(
@@ -2255,6 +2306,7 @@ def sign_inventory_request(
     boards: dict[str, tuple[str, ...]],
     channels: dict[str, tuple[str, ...]],
     file_areas: dict[str, tuple[str, ...]],
+    not_carried: dict[str, tuple[str, ...]] | None = None,
 ) -> bytes:
     """Sign an `InventoryRequest` (design doc §8.8, issues #106/#124) with the
     requester's own current operational signing key -- the same "always
@@ -2274,6 +2326,7 @@ def sign_inventory_request(
         boards,
         channels,
         file_areas,
+        not_carried,
     )
     envelope = build_envelope(INVENTORY_REQUEST_OBJECT_TYPE, payload)
     return signing_identity.sign(canonical_bytes(envelope))
@@ -2290,6 +2343,7 @@ def verify_inventory_request(
     file_areas: dict[str, tuple[str, ...]],
     signature: bytes,
     signing_verify_key: nacl.signing.VerifyKey,
+    not_carried: dict[str, tuple[str, ...]] | None = None,
 ) -> bool:
     """Verify an `InventoryRequest`'s signature against the claimed
     requester's *current signing key* -- resolving which key that
@@ -2306,6 +2360,7 @@ def verify_inventory_request(
         boards,
         channels,
         file_areas,
+        not_carried,
     )
     envelope = build_envelope(INVENTORY_REQUEST_OBJECT_TYPE, payload)
     return verify_signature(signing_verify_key, canonical_bytes(envelope), signature)

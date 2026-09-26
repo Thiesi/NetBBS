@@ -116,7 +116,7 @@ def carried_channel(db, origin_node_identity):
 
 def _link_context_for(node_identity, *, registry=None, bridge=None) -> LinkContext:
     return LinkContext(
-        node_identity=node_identity, link_node=LinkNode(identity=node_identity),
+        link_node=LinkNode(identity=node_identity),
         realtime_registry=registry, realtime_bridge=bridge,
     )
 
