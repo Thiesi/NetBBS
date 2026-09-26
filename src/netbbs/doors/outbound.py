@@ -309,7 +309,7 @@ def targets(db: Database, door_id: int) -> list[Board]:
     rows = db.connection.execute(
         """
         SELECT b.* FROM door_outbound_targets t
-        JOIN boards b ON b.id = t.board_id
+        JOIN boards b ON b.id = t.board_id AND b.link_hidden_at IS NULL
         WHERE t.door_id = ?
         ORDER BY t.id
         """,
@@ -847,16 +847,18 @@ def _drain(db: Database, door, workdir: Path, drop: _DropDir, *, node_identity, 
     if config is None:
         return 0, _discard_all(drop, requests if final else requests[:limit])
     receipts = _Receipts(results_dir(db, door.id))
+    hidden = 0
+    if final and truncated:
+        # The bound hid whatever lies beyond it, and this is the last drain
+        # before the directory goes. Say so once, whatever else this drain
+        # finds or does, rather than let those requests vanish silently.
+        _write_result(db, door.id, launch, "", {"status": "rejected", "reason": _HIDDEN},
+                      rehearsal=rehearsal)
+        receipts.note()
+        hidden = 1
     if not requests:
-        if final and truncated:
-            # Nothing we could see, but not nothing: the bound hid whatever
-            # else is there, and this is the last drain before the directory
-            # goes. Say so once rather than let it vanish silently.
-            _write_result(db, door.id, launch, "", {"status": "rejected", "reason": _HIDDEN},
-                          rehearsal=rehearsal)
-            _prune_results(receipts.directory)
-            return 0, 1
-        return 0, 0
+        _prune_results(receipts.directory)
+        return 0, hidden
 
     try:
         # A door posts on a named SysOp's authority. If that account is gone
@@ -865,12 +867,12 @@ def _drain(db: Database, door, workdir: Path, drop: _DropDir, *, node_identity, 
         # switches it on again, rather than posting unattributably.
         actor = get_user_by_id(db, config.enabled_by_user_id) if config.enabled_by_user_id else None
         if actor is None:
-            return 0, _refuse_all(db, door, launch, drop, requests if final else requests[:limit],
+            return 0, hidden + _refuse_all(db, door, launch, drop, requests if final else requests[:limit],
                                   "the account which enabled this door's outbound no longer exists; "
                                   "a SysOp must switch it on again", rehearsal=rehearsal, final=final,
                                   receipts=receipts)
 
-        posted = refused = 0
+        posted, refused = 0, hidden
         # What a rehearsal would have spent so far in this drain. Never
         # persisted, but counted, so the fifth rehearsed request under a
         # ceiling of one is told what a real session would tell it.
@@ -902,13 +904,13 @@ def _drain(db: Database, door, workdir: Path, drop: _DropDir, *, node_identity, 
                     _log_refusal_once_per_window(db, door, config, actor, reason)
                     config = outbound_config(db, door.id) or config
         overflow = requests[limit:]
-        if final and (overflow or truncated):
+        if final and overflow:
             refused += _refuse_all(
                 db, door, launch, drop, overflow,
                 f"more than {limit} requests in one session; "
                 "the rest were not processed", rehearsal=rehearsal, receipts=receipts)
-            if not rehearsal:
-                _log_refusal_once_per_window(db, door, config, actor, "per-session request flood")
+        if final and (overflow or truncated) and not rehearsal:
+            _log_refusal_once_per_window(db, door, config, actor, "per-session request flood")
         return posted, refused
     finally:
         # Once per drain, not once per receipt: pruning globs, stats and sorts

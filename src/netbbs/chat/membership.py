@@ -269,7 +269,7 @@ def list_pending_invitations_for_user(db: Database, user: User) -> list[PendingI
         SELECT ci.id AS invitation_id, ci.channel_id, c.name AS channel_name,
                u.username AS invited_by_username, ci.created_at, ci.expires_at
         FROM channel_invitations ci
-        JOIN channels c ON c.id = ci.channel_id
+        JOIN channels c ON c.id = ci.channel_id AND c.link_hidden_at IS NULL
         JOIN users u ON u.id = ci.invited_by_user_id
         WHERE ci.invited_user_id = ? AND ci.status = 'pending'
               AND (ci.expires_at IS NULL OR ci.expires_at > ?)

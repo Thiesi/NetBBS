@@ -113,6 +113,7 @@ from netbbs.net.draft_storage import drafts_directory, save_draft
 from netbbs.net.editor_preference import fullscreen_editor_enabled
 from netbbs.net.file_area_banner import load_file_area_banner
 from netbbs.net.node_theme import effective_accent_color_256, effective_header_color_256
+from netbbs.net.notices import announce_styled, write_notices
 from netbbs.net.picker import pick_item
 from netbbs.net.prose_editor import edit_prose
 from netbbs.net.session import Session
@@ -572,6 +573,10 @@ _CHOICE_PROMPT = "Choice: "
 
 
 async def _write_choice_prompt(session: Session) -> None:
+    # Whatever the caller's last action announced sits right above the
+    # prompt (issue #680): the screen was just redrawn, and a line written
+    # before the redraw is gone.
+    await write_notices(session)
     await session.write(_CHOICE_PROMPT)
 
 
@@ -1076,8 +1081,11 @@ async def _show_area(
     # offered here only to be refused after the editor opens -- which
     # also keeps an APPROVE holder from being shown someone else's
     # pending upload as if they could describe it.
-    if not can_write and not show_remote_hint and not describable_pending:
-        return
+    #
+    # A caller with none of these actions still gets the screen and a
+    # [B]ack bar (issue #680). It used to return straight after drawing
+    # the empty state, into the area list's redraw, so the screen flashed
+    # and vanished before it could be read.
 
     hints = []
     if can_write:
@@ -1280,7 +1288,7 @@ async def _browse_remote_files(
             )
         )
     if not await prompt_yes_no(session, "Fetch it from its origin now?", default=False):
-        await session.write_line(colored("Cancelled.", fg_color=MUTED_COLOR))
+        announce_styled(session, colored("Cancelled.", fg_color=MUTED_COLOR))
         return
 
     await _fetch_remote_file(
@@ -1336,7 +1344,8 @@ async def _fetch_remote_file(
         # Issue #630: the catalogue arrived through a node that carries the
         # area, and its origin is known here only by introduction. "Try again
         # later" would be a promise nothing keeps.
-        await session.write_line(
+        announce_styled(
+            session,
             colored(
                 "\r\nThis node has never been in direct contact with this file's origin, and a "
                 "file is only ever fetched from its origin directly. It can be listed here, "
@@ -1347,7 +1356,8 @@ async def _fetch_remote_file(
         return
     base_urls = dialable_base_urls_for_peer(link_context.link_node, remote_file.origin_fingerprint)
     if not base_urls:
-        await session.write_line(
+        announce_styled(
+            session,
             colored(
                 "\r\nThis file's origin is not currently reachable directly (chunk transfer is "
                 "never relayed) -- try again later.",
@@ -1389,7 +1399,8 @@ async def _fetch_remote_file(
         # entry. Say which of those two things happened; a generic
         # "transfer failed" invites the caller to keep retrying something
         # that can never work.
-        await session.write_line(
+        announce_styled(
+            session,
             colored(
                 f"The origin no longer has {sanitize_text(remote_file.filename)!r} — it was deleted "
                 "or expired there. Removed from this area's catalogue.",
@@ -1398,11 +1409,12 @@ async def _fetch_remote_file(
         )
         return
     except (LinkProtocolError, LinkTransportError, FileTransferError) as exc:
-        await session.write_line(colored(f"Fetch failed: {exc}", fg_color=ERROR_COLOR))
+        announce_styled(session, colored(f"Fetch failed: {exc}", fg_color=ERROR_COLOR))
         return
 
     if transfer.status == "completed":
-        await session.write_line(
+        announce_styled(
+            session,
             colored(
                 f"{sanitize_text(remote_file.filename)!r} fetched and verified — it is in this "
                 "file area's listing now.",
@@ -1410,7 +1422,8 @@ async def _fetch_remote_file(
             )
         )
     else:
-        await session.write_line(
+        announce_styled(
+            session,
             colored(f"Fetch failed: transfer ended in status {transfer.status!r}.", fg_color=ERROR_COLOR)
         )
 
@@ -1758,7 +1771,8 @@ async def _handle_describe(
     # the one actually chosen may still not be: this is where a caller
     # who picked someone else's file is told so.
     if not can_edit_any_file and entry.uploader_user_id != user.id:
-        await session.write_line(
+        announce_styled(
+            session,
             colored(
                 f"\r\n{sanitize_text(entry.filename)!r} was uploaded by someone else — only its "
                 "uploader or a moderator of this area can describe it.",
@@ -1779,7 +1793,8 @@ async def _handle_describe(
         # be told afterwards that they lack a permission they never had,
         # which is what `set_file_description` says rather than what
         # actually happened.
-        await session.write_line(
+        announce_styled(
+            session,
             colored(
                 f"\r\n{sanitize_text(entry.filename)!r} has already been approved in a moderated "
                 "area — ask a moderator to change its description.",
@@ -1816,14 +1831,15 @@ async def _handle_describe(
         # caller expects to find again (Codex review).
         kept = await lane.run(_description_draft_path, entry, user)
         if kept.exists():
-            await session.write_line(
+            announce_styled(
+                session,
                 colored(
                     "\r\nDraft kept — press [E] on this file again to pick it up.",
                     fg_color=MUTED_COLOR,
                 )
             )
         else:
-            await session.write_line(colored("\r\nDescription unchanged.", fg_color=MUTED_COLOR))
+            announce_styled(session, colored("\r\nDescription unchanged.", fg_color=MUTED_COLOR))
         return page
 
     try:
@@ -1864,16 +1880,18 @@ async def _handle_describe(
                 return False
 
         kept = await lane.run(_persist)
-        await session.write_line(colored(f"\r\nNot saved: {exc}", fg_color=ERROR_COLOR))
+        announce_styled(session, colored(f"\r\nNot saved: {exc}", fg_color=ERROR_COLOR))
         if kept:
-            await session.write_line(
+            announce_styled(
+                session,
                 colored(
                     "Your text is kept as a draft — press [E] on this file again to fix it.",
                     fg_color=MUTED_COLOR,
                 )
             )
         else:
-            await session.write_line(
+            announce_styled(
+                session,
                 colored(
                     "This node could not keep a draft of it either — copy your text before "
                     "leaving this screen.",
@@ -1882,7 +1900,8 @@ async def _handle_describe(
             )
         return page
 
-    await session.write_line(
+    announce_styled(
+        session,
         colored(f"\r\nDescription saved for {sanitize_text(entry.filename)!r}.", fg_color=SUCCESS_COLOR)
     )
     if area_linked and await lane.run(has_queued_file_descriptor, entry):
@@ -1896,7 +1915,8 @@ async def _handle_describe(
         # approved before its area was Linked has no descriptor and
         # never will, so telling its describer that peers hold an older
         # wording would simply be false.
-        await session.write_line(
+        announce_styled(
+            session,
             colored(
                 "This area is Linked — peers keep the description they were already sent.",
                 fg_color=MUTED_COLOR,
@@ -1954,7 +1974,8 @@ async def _offer_transfer_link(
     # would have worked.
     offers_to_page = getattr(session, "offer_transfer", None) is not None
     if transfers.base_url is None and not offers_to_page:
-        await session.write_line(
+        announce_styled(
+            session,
             colored(
                 "\r\nThis node has no public web address configured, so it cannot hand out "
                 "transfer links. Ask the SysOp to set the web transport's public URL.",
@@ -1974,7 +1995,7 @@ async def _offer_transfer_link(
             file_id=entry.file_id if entry is not None else None,
         )
     except TransferError as exc:
-        await session.write_line(colored(f"\r\n{exc}", fg_color=ERROR_COLOR))
+        announce_styled(session, colored(f"\r\n{exc}", fg_color=ERROR_COLOR))
         return
 
     url = transfers.url_for(grant)
@@ -1988,7 +2009,8 @@ async def _offer_transfer_link(
             direction=direction, url=f"/transfer/{grant.token}",
             filename=entry.filename if entry is not None else None,
         ):
-            await session.write_line(
+            announce_styled(
+                session,
                 colored(
                     f"\r\nYour browser is handling the {what_of(direction, area, entry)}."
                     if direction == DOWNLOAD
@@ -2001,7 +2023,8 @@ async def _offer_transfer_link(
         # A node whose SysOp never told it how it is reached cannot
         # print a URL that works. Saying which setting is missing beats
         # printing a loopback address that fails in a browser.
-        await session.write_line(
+        announce_styled(
+            session,
             colored(
                 "\r\nThis node has no public web address configured, so it cannot hand out "
                 "transfer links. Ask the SysOp to set the web transport's public URL.",
@@ -2029,7 +2052,8 @@ async def _offer_transfer_link(
         # speaking this protocol, may ignore a message type it does not
         # know. So the URL is printed underneath either way -- quieter,
         # and phrased for someone whose browser did nothing.
-        await session.write_line(
+        announce_styled(
+            session,
             colored(
                 f"\r\nYour browser is handling the {what}."
                 if direction == DOWNLOAD
@@ -2037,13 +2061,14 @@ async def _offer_transfer_link(
                 fg_color=MUTED_COLOR,
             )
         )
-        await session.write_line(colored("If nothing happened, open this instead:", fg_color=MUTED_COLOR))
-        await session.write_line(f"  {colored(url, fg_color=VALUE_COLOR)}")
+        announce_styled(session, colored("If nothing happened, open this instead:", fg_color=MUTED_COLOR))
+        announce_styled(session, f"  {colored(url, fg_color=VALUE_COLOR)}")
         return
 
-    await session.write_line(colored(f"\r\nOpen this in a browser to {what}:", fg_color=MUTED_COLOR))
-    await session.write_line(f"  {colored(url, fg_color=VALUE_COLOR)}")
-    await session.write_line(
+    announce_styled(session, colored(f"\r\nOpen this in a browser to {what}:", fg_color=MUTED_COLOR))
+    announce_styled(session, f"  {colored(url, fg_color=VALUE_COLOR)}")
+    announce_styled(
+        session,
         colored(
             f"It works once, and stops working in {DEFAULT_GRANT_TTL_SECONDS // 60} minutes.",
             fg_color=MUTED_COLOR,
@@ -2110,6 +2135,7 @@ async def _transfer_link_screen(
         await session.write_line(
             f"\r\n{_menu_row(options, width=session.terminal_width, height=session.terminal_height, description_level='off')}"
         )
+        await write_notices(session)
         await session.write("Choice: ")
         choice = (await session.read_key()).lower()
         await session.write_line("")
@@ -2184,7 +2210,8 @@ async def _handle_upload(
         if transfers is not None:
             await _offer_transfer_link(session, lane, user, area, transfers, direction=UPLOAD)
         else:
-            await session.write_line(
+            announce_styled(
+                session,
                 colored(
                     "\r\nThis transport cannot carry a Zmodem transfer, and this node has no "
                     "browser transfer configured. Ask the SysOp to enable the web listener.",
@@ -2292,9 +2319,10 @@ async def _handle_upload(
         # the session. temp_path is already cleaned up by receive_file
         # itself on any failure of its own; a NotImplementedError means
         # receive_file never even opened it.
-        await session.write_line(colored(f"\r\nUpload failed: {exc}", fg_color=ERROR_COLOR))
+        announce_styled(session, colored(f"\r\nUpload failed: {exc}", fg_color=ERROR_COLOR))
         return True
-    await session.write_line(
+    announce_styled(
+        session,
         colored(
             f"\r\nUploaded {sanitize_text(entry.filename)!r} ({_format_size(entry.size_bytes)}) "
             f"to [{sanitize_text(area.name)}].",
@@ -2302,16 +2330,17 @@ async def _handle_upload(
         )
     )
     if entry.description:
-        await session.write_line(colored("Description read from FILE_ID.DIZ:", fg_color=MUTED_COLOR))
+        announce_styled(session, colored("Description read from FILE_ID.DIZ:", fg_color=MUTED_COLOR))
         for line in entry.description.splitlines():
-            await session.write_line(f"  {colored(sanitize_text(line), fg_color=MUTED_COLOR)}")
+            announce_styled(session, f"  {colored(sanitize_text(line), fg_color=MUTED_COLOR)}")
     else:
         # Deliberately not "there is no FILE_ID.DIZ in it" (Codex
         # review): the same `None` covers an archive whose format has
         # no unpacker installed here, one this node couldn't read, and
         # a plain file that was never an archive. Say what is true --
         # nothing was read — and offer the way to fix it.
-        await session.write_line(
+        announce_styled(
+            session,
             colored(
                 "No description was read from it — press [E] on the listing to write one.",
                 fg_color=MUTED_COLOR,
@@ -2350,7 +2379,8 @@ async def send_file_to_caller(
                 session, lane, user, area, transfers, direction=DOWNLOAD, entry=entry
             )
         else:
-            await session.write_line(
+            announce_styled(
+                session,
                 colored(
                     "\r\nThis transport cannot carry a Zmodem transfer, and this node has no "
                     "browser transfer configured. Ask the SysOp to enable the web listener.",
@@ -2381,7 +2411,7 @@ async def send_file_to_caller(
         data = download_file(entry)
         await zmodem.send_file(session, entry.filename, data)
     except (zmodem.ZmodemError, NotImplementedError) as exc:
-        await session.write_line(colored(f"\r\nDownload failed: {exc}", fg_color=ERROR_COLOR))
+        announce_styled(session, colored(f"\r\nDownload failed: {exc}", fg_color=ERROR_COLOR))
         return
     except OSError:
         # The row the caller chose is the row that gets sent now, rather
@@ -2390,7 +2420,8 @@ async def send_file_to_caller(
         # reaches `download_file` with no bytes behind it. Reported the
         # way the by-name lookup used to report a missing file, instead
         # of leaving the screen through `FileNotFoundError`.
-        await session.write_line(
+        announce_styled(
+            session,
             colored(
                 f"\r\n{entry_filename!r} is no longer on this node — it was removed while this "
                 "listing was on screen.",
@@ -2398,4 +2429,4 @@ async def send_file_to_caller(
             )
         )
         return
-    await session.write_line(colored(f"\r\nSent {entry_filename!r}.", fg_color=SUCCESS_COLOR))
+    announce_styled(session, colored(f"\r\nSent {entry_filename!r}.", fg_color=SUCCESS_COLOR))

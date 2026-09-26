@@ -821,7 +821,34 @@ SQLite rowid can redirect a live grant.
 Two traps worth keeping:
 
 - `aiohttp`'s `add_get` registers HEAD as well, so a link scanner's probe spends
-  a single-use token unless HEAD is handled separately.
+  a single-use token unless HEAD is handled separately. HEAD peeks the grant and
+  runs `resolve` read-only (issue #511); it once answered 204 for everything to
+  avoid being a token oracle, which 256-bit tokens make moot.
+
+Multipart accounting (issue #511), established the hard way in #508:
+
+- `client_max_size` bounds `read()`/`post()`, not a streamed parse, and
+  `reader.next()` consumes the preamble and a part's headers before returning.
+  The bound has to sit under the parser: `_CountingStream` wraps the request
+  body, counts net of `unread_data`, and checks after each (bounded) read.
+- Two counters, never merged: the stream's total against
+  `max_upload_bytes + MULTIPART_FRAMING_ALLOWANCE`, and the file's own bytes
+  against `max_upload_bytes`, which is also what the empty-file check reads.
+- What follows `file` is drained through the counted stream before the handler
+  answers. #508 measured that aiohttp does not *buffer* an unread trailer, but
+  it does read and discard one after the handler returns, for up to its
+  ten-second `lingering_time`, outside the transfer slot, deadline and bound.
+  Closing instead is worse: unread bytes make the close a TCP reset, which can
+  lose the success response in the ordinary case of an unread closing
+  boundary.
+- A single line longer than the request stream's high-water mark (512 KiB)
+  raises `LineTooLong` inside aiohttp before the counter sees it; the wrapper
+  turns that into 413.
+
+The page's transfer JavaScript has a Node harness,
+`tests/fixtures/transfer_web_shim.cjs`, with DOM, `fetch`, `FormData` and
+`AbortController` doubles; `door_web_shim.cjs` covers door mode. Both skip
+without `node` on the PATH.
 - The grant table is event-loop state that touches no database. Minting it
   through `DatabaseLane` puts issuance on a worker thread while redemption runs
   on the loop — two threads in one dict.
@@ -2720,15 +2747,47 @@ whether that projection actually exists yet, rather than trusting a
 proves the protocol accepted something; it says nothing about whether any
 other table has ever heard about it.
 
-**Post/edit materialization closed a crash-window genesis materialization
-still has.** `materialize_carried_board` is a separate `lane.run` call from
-the `save_event` that persists its own underlying signed event -- a crash
-between the two leaves an accepted-but-unmaterialized genesis, with no repair
-path today. `materialize_carried_post`/`_edit` do both writes in one call,
-one transaction, closing that window for posts/edits specifically (and
+**Post/edit materialization closed a crash window; genesis intake closed it
+too (issue #683).** `materialize_carried_post`/`_edit` do the `link_events`
+insert and the projection in one call, one transaction (and
 `rebuild_carried_post_materialization` repairs the one-time gap on a node
-upgrading from before this existed) -- genesis's own gap is unfixed, and
-worth remembering before assuming "it's accepted" implies "it's carried."
+upgrading from before that existed). Genesis intake used to be two lane calls,
+`save_event` then `materialize_carried_*`, and a crash between them left an
+accepted genesis with no local row and no repair. `netbbs.link.carry.
+accept_genesis` now writes the genesis and its carry outcome -- the local row,
+or an `offered` row in `link_carry_decisions` -- in one transaction, using the
+`commit=False` variants of `save_event` and the three materializers. "It's
+accepted" still does not imply "it's carried": the decision table says which.
+
+**Hidden rows (issue #683).** `boards`, `channels` and `file_areas` carry
+`link_hidden_at`, set when the SysOp deletes a carried resource whose origin is
+elsewhere. Every caller-facing and admin helper filters it: `list_boards`,
+`get_board_by_name`, `list_channels`, `get_channel_by_name`, `list_file_areas`,
+`get_file_area_by_name`, `get_file_area_by_area_id`, the Link
+`get_channel_by_channel_id` and the MRC mapping lookups, plus three queries that
+bypass them (`unread_replies_to`, `list_pending_invitations_for_user`, door
+outbound `targets`). Search, new-scan and the menus inherit it through those
+helpers. A new query that reads these tables for a caller must filter it too.
+On the Link side a hidden resource is not carried (`carried_*_ids`,
+`carried_*_count`, `_all_*_events` treat it as absent), is declared not carried,
+takes no new content (the materializers return `None`), and pushes nothing of
+its own (`load_own_*_events`). Two things deliberately do *not* filter it: the
+UNIQUE `name` (a hidden resource's name stays taken; the create/rename error
+says so) and `load_link_node` (its events stay known). The create/update
+read-backs look their row up unfiltered, so the write paths do not depend on
+the column.
+
+**"Known" means stored (issue #683).** `handle_events` adds every accepted
+content ID to `LinkNode.known_event_ids`, and a later copy of a known ID is
+dropped as a duplicate. An event under a board, channel or file area with no
+local row is accepted but neither projected nor stored (the materializers
+return `None` before their `link_events` insert), so it used to stay "known"
+in memory only: after the SysOp accepted the offered resource, the resend
+that should have filled it was dropped, and the accepted copy stayed empty
+until a restart rebuilt `known_event_ids` from `link_events`.
+`persist_accepted_events` now forgets such an ID (`_forget_unless_stored`).
+An event that was stored and only its projection refused -- identity policy,
+a trimmed scrollback -- stays known, since `link_events` holds it.
 
 **A self-originated Link event's effect on `LinkNode` state must be applied
 directly by whichever caller built it -- it never flows through that same
@@ -3810,6 +3869,23 @@ isolation. Any future call site that constructs its own
 easy to add a new session and forget this, since everything works
 identically in every environment except one with no direct egress.
 
+The real-time half has the same trap in another shape (issue #628). Every
+real-time socket in `netbbs.link` is opened by
+`netbbs.link.realtime_proxy.open_realtime_connection`, which tunnels through
+the environment's proxy with `CONNECT` when one applies; a bare
+`asyncio.open_connection` works everywhere except on a proxy-only network.
+`tests/test_link_realtime_proxy.py::test_every_real_time_socket_in_netbbs_link_is_opened_by_the_helper`
+fails on a new one. Two things about that helper are easy to undo by accident:
+
+- **Loopback targets skip the proxy**, the precedent the managed-DNS client
+  set. The proxy tests therefore dial a made-up hostname the loopback test
+  proxy maps to the real server; dialling `127.0.0.1` would pass without ever
+  touching the proxy.
+- **Success is recorded only after the handshake** (`record_handshake_outcome`)
+  for every caller that runs Noise. Recording it when the tunnel opens makes a
+  TLS-inspecting proxy alternate between "open" and "failed" on every retry,
+  and the log line that is meant to fire once per change fires twice per
+  attempt.
 ### Adding a field to a signed request needs a capability, not a version bump (issue #669)
 
 Signed Link requests are verified by rebuilding the payload from the parsed

@@ -95,7 +95,12 @@ def _link_context_for(node_identity) -> LinkContext:
 
 
 def _written(session: FakeSession) -> str:
-    return "".join(session.written)
+    """What was written, plus any outcome still queued for the next screen
+    (`netbbs.net.notices`, issue #680): these tests stop where the real flow
+    would draw the picker that shows it."""
+    from netbbs.net.notices import pending_notices
+
+    return "".join(session.written) + "\r\n".join(pending_notices(session))
 
 
 def test_remote_hint_hidden_without_link_context(db, lane, alice):

@@ -481,8 +481,23 @@ The
 [developer handbook's configuration reference](NetBBS-Developer-Handbook.md#node-configuration-reference)
 lists the less common transport and quota settings.
 
-Create a local resource before promoting it to linked scope. To carry a
-remote resource, use its Link browsing/carry actions. Carrying a message board
+Create a local resource before promoting it to linked scope. Linked boards,
+channels and file areas from other nodes are carried automatically up to the
+`max_carried_boards` / `max_carried_channels` / `max_carried_file_areas` caps
+(500 each). Past a cap, a new one is not lost: it waits under **Link status →
+Offered**, with its origin and why, until you **Accept** it (not limited by the
+cap) or **Exclude** it. Set a cap to 0 to carry only what you accept. Lowering a
+cap removes nothing already carried. Deleting a carried resource that another
+node originated excludes it without destroying it: callers stop seeing it and
+this node stops carrying it, but everything in it -- your users' posts, your
+moderation -- is kept. **Link status → Excluded** lists it: **Restore** brings it
+back exactly as it was (what arrived meanwhile follows with the next sync), and
+**Purge** deletes it for good. Its name stays taken until you do one or the
+other. Deleting a board, channel or file area this node originated is still a
+real delete. Link status shows `carried/cap` for all three kinds and how many are
+offered and excluded.
+
+To carry a remote resource, use its Link browsing/carry actions. Carrying a message board
 creates a local browsable copy; file catalogues do not automatically download
 all file contents. Ask the other SysOp to verify both sides when first testing
 publication. Hello/discovery alone does not prove content arrived.
@@ -491,6 +506,54 @@ Asynchronous delivery can continue after a peer reconnects. Live chat and
 private messages require a working live session; a failed live message is not
 silently converted to mail. Link mail is encrypted to the recipient's home
 node for ordinary accounts; the home-node operator can read it.
+
+### Behind an HTTP proxy
+
+If your node's only way out is an HTTP proxy, set the standard variables in
+the environment NetBBS starts in (the service unit, rc.d script, or shell):
+
+```sh
+HTTP_PROXY=http://proxy.example:3128
+HTTPS_PROXY=http://proxy.example:3128
+NO_PROXY=localhost,127.0.0.1
+```
+
+Boards, mail and files use them as ordinary HTTP. Live chat uses the same
+proxy, as a `CONNECT` tunnel, and runs its encrypted session through it
+unchanged; the proxy sees which address is dialled, not what is said. When a
+proxy is set it is the only way live chat goes out: there is no direct attempt
+first. List peers the proxy should not carry in `NO_PROXY`.
+
+- **Proxy login.** A username and password in the proxy URL
+  (`http://user:password@proxy.example:3128`), or a `~/.netrc` entry for the
+  proxy host, are sent as Basic authentication. NTLM and Kerberos proxies are
+  not supported directly; run a local authenticating proxy such as CNTLM or
+  px, and point the variables at it on `127.0.0.1`.
+- **Only `http://` proxy URLs.** A SOCKS or `https://` proxy URL makes live
+  connections fail with a stated reason rather than go direct.
+- **Proxies that inspect TLS** (SSL inspection, Squid `ssl_bump`) cannot carry
+  live chat, which is not TLS. Boards and mail still work.
+- **A managed name cannot be kept behind a proxy:** its check-ins always
+  connect directly, because the service publishes the address they come from.
+
+**Link status** shows a **Live proxy** line: the proxy and the last outcome,
+for example `tunnel refused: 407 Proxy Authentication Required`, or
+`tunnel opened, handshake failed` for an inspecting proxy. A change of outcome
+is also written to the log once.
+
+**MANUAL — outside NetBBS, for reliable-node operators:** many corporate
+proxies allow `CONNECT` only to port 443. To be reachable live from such
+networks, advertise the real-time port as 443 and forward it to the real-time
+listener:
+
+```toml
+[link]
+realtime_port = 8862
+realtime_advertised_port = 443
+```
+
+NetBBS does not bind 443 itself. If 443 on that address already serves HTTPS,
+use a second address, or a protocol demultiplexer in front of both.
 
 ### Trust and recovery
 

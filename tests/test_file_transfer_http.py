@@ -293,9 +293,92 @@ def test_a_head_probe_does_not_spend_a_grant(node):
                     return probed, response.status, await response.read()
 
     probed, status, body = _run(scenario)
-    assert probed == 204
+    assert probed == 200
     assert status == 200
     assert body == b"payload"
+
+
+# -- HEAD says what a GET would do (issue #511) ---------------------------
+
+
+def _head(node, url_for):
+    async def scenario():
+        async with node:
+            url = url_for()
+            async with aiohttp.ClientSession() as client:
+                async with client.head(url) as probe:
+                    return probe.status, probe.headers.get("X-NetBBS-Transfer-Message"), dict(probe.headers)
+
+    return _run(scenario)
+
+
+def test_a_head_probe_of_an_unknown_link_says_so(node):
+    status, message, _ = _head(node, lambda: f"{node.base}/transfer/not-a-real-token")
+    assert status == 404
+    assert "not valid" in message
+
+
+def test_a_head_probe_reports_a_refusal_without_spending_the_link(node):
+    """The browser saves a refused GET's body under the filename; the probe
+    is how the page finds out first. It must also leave the link alone, so
+    the answer is the same however many times it is asked."""
+    alice = create_user(node.db, "alice", password="hunter2", user_level=10)
+    area = create_file_area(node.db, "docs", creator=alice)
+    entry = upload_file(node.db, area, alice, "game.zip", b"payload")
+    node.db.connection.execute("UPDATE file_areas SET min_read_level = 50 WHERE id = ?", (area.id,))
+    node.db.connection.commit()
+
+    async def scenario():
+        async with node:
+            grant = node.grants.issue(direction=DOWNLOAD, user=alice, area=area, file_id=entry.file_id)
+            url = f"{node.base}/transfer/{grant.token}"
+            async with aiohttp.ClientSession() as client:
+                answers = []
+                for _ in range(2):
+                    async with client.head(url) as probe:
+                        answers.append((probe.status, probe.headers.get("X-NetBBS-Transfer-Message")))
+                return answers, node.grants.peek(grant.token) is not None
+
+    answers, still_there = _run(scenario)
+    assert answers[0] == answers[1]
+    assert answers[0][0] == 403
+    assert "no longer read" in answers[0][1]
+    assert still_there
+
+
+def test_a_head_probe_of_a_good_download_carries_its_headers(node):
+    alice = create_user(node.db, "alice", password="hunter2", user_level=10)
+    area = create_file_area(node.db, "docs", creator=alice)
+    entry = upload_file(node.db, area, alice, "game.zip", b"payload")
+
+    def url():
+        grant = node.grants.issue(direction=DOWNLOAD, user=alice, area=area, file_id=entry.file_id)
+        return f"{node.base}/transfer/{grant.token}"
+
+    status, message, headers = _head(node, url)
+    assert status == 200
+    assert message is None
+    assert headers["Content-Length"] == str(len(b"payload"))
+    assert "game.zip" in headers["Content-Disposition"]
+
+
+def test_a_head_probe_reports_a_busy_node(tmp_path):
+    running = _Node(tmp_path)
+    running.server._transfers._max_concurrent_uploads = 0  # every slot already taken
+    alice = create_user(running.db, "alice", password="hunter2", user_level=10)
+    area = create_file_area(running.db, "docs", creator=alice)
+    entry = upload_file(running.db, area, alice, "game.zip", b"payload")
+
+    def url():
+        grant = running.grants.issue(direction=DOWNLOAD, user=alice, area=area, file_id=entry.file_id)
+        return f"{running.base}/transfer/{grant.token}"
+
+    try:
+        status, message, _ = _head(running, url)
+    finally:
+        running.close()
+    assert status == 429
+    assert "busy" in message
 
 
 def test_a_download_link_cannot_be_used_to_upload(node):
@@ -328,6 +411,128 @@ def test_an_upload_into_a_moderated_area_lands_pending(node):
                     return await response.json()
 
     assert _run(scenario)["status"] == "pending"
+
+
+# -- multipart request accounting (issue #511) ---------------------------
+#
+# `max_upload_bytes` bounds the *file*; the request as a whole gets that
+# plus MULTIPART_FRAMING_ALLOWANCE. Built by hand rather than with
+# `aiohttp.FormData`, because the shapes that matter here -- a preamble,
+# padding parts, a part after the file -- are ones no well-behaved client
+# sends.
+
+_BOUNDARY = "netbbs-test-boundary"
+
+
+def _multipart(*parts: tuple[str, str | None, bytes], preamble: bytes = b"") -> bytes:
+    body = preamble
+    for name, filename, content in parts:
+        disposition = f'form-data; name="{name}"'
+        if filename is not None:
+            disposition += f'; filename="{filename}"'
+        body += (
+            f"--{_BOUNDARY}\r\nContent-Disposition: {disposition}\r\n\r\n".encode()
+            + content + b"\r\n"
+        )
+    return body + f"--{_BOUNDARY}--\r\n".encode()
+
+
+def _post_multipart(node, alice, area, body: bytes):
+    async def scenario():
+        async with node:
+            grant = node.grants.issue(direction=UPLOAD, user=alice, area=area)
+            headers = {"Content-Type": f"multipart/form-data; boundary={_BOUNDARY}"}
+            async with aiohttp.ClientSession() as client:
+                async with client.post(f"{node.base}/transfer/{grant.token}", data=body, headers=headers) as response:
+                    return response.status
+
+    return _run(scenario)
+
+
+def test_a_multipart_preamble_counts_against_the_request(node):
+    """`reader.next()` consumes the preamble before the first boundary,
+    in a loop with no limit of its own -- before this, 200 KB of it was
+    read and the upload answered 200."""
+    alice = create_user(node.db, "alice", password="hunter2", user_level=10)
+    area = create_file_area(node.db, "docs", creator=alice)
+    set_max_upload_bytes(node.db, 64)
+    preamble = (b"x" * 1000 + b"\r\n") * 200
+
+    body = _multipart(("file", "tiny.txt", b"hello"), preamble=preamble)
+    assert _post_multipart(node, alice, area, body) == 413
+    assert list_files_page(node.db, area, alice).entries == []
+
+
+def test_parts_skipped_before_the_file_count_against_the_request(node):
+    alice = create_user(node.db, "alice", password="hunter2", user_level=10)
+    area = create_file_area(node.db, "docs", creator=alice)
+    set_max_upload_bytes(node.db, 64)
+
+    body = _multipart(("padding", None, b"y" * 200_000), ("file", "tiny.txt", b"hello"))
+    assert _post_multipart(node, alice, area, body) == 413
+    assert list_files_page(node.db, area, alice).entries == []
+
+
+def test_a_file_at_the_limit_is_accepted_despite_its_framing(node):
+    """`max_upload_bytes` means file bytes, as it does over Zmodem: a
+    browser's boundaries and part headers must not push a file that fits
+    over the line."""
+    alice = create_user(node.db, "alice", password="hunter2", user_level=10)
+    area = create_file_area(node.db, "docs", creator=alice)
+    set_max_upload_bytes(node.db, 4096)
+
+    body = _multipart(("comment", None, b"a small field"), ("file", "exact.bin", b"z" * 4096))
+    assert _post_multipart(node, alice, area, body) == 200
+    assert list_files_page(node.db, area, alice).entries[0].size_bytes == 4096
+
+
+def test_an_empty_file_part_is_refused_however_it_is_padded(node):
+    """An earlier attempt let padding bytes into the counter the empty-file
+    check reads, and stored a zero-byte file."""
+    alice = create_user(node.db, "alice", password="hunter2", user_level=10)
+    area = create_file_area(node.db, "docs", creator=alice)
+
+    body = _multipart(("padding", None, b"p" * 10_000), ("file", "empty.txt", b""))
+    assert _post_multipart(node, alice, area, body) == 400
+    assert list_files_page(node.db, area, alice).entries == []
+
+
+def test_a_part_after_the_file_counts_against_the_request(node):
+    """Left unread, a trailing part is read and discarded by aiohttp after
+    the handler returns, for up to its lingering time and outside the
+    transfer slot, deadline and bound -- so it is drained, counted, here."""
+    alice = create_user(node.db, "alice", password="hunter2", user_level=10)
+    area = create_file_area(node.db, "docs", creator=alice)
+    set_max_upload_bytes(node.db, 64)
+
+    body = _multipart(("file", "tiny.txt", b"hello"), ("trailer", None, b"t" * 200_000))
+    assert _post_multipart(node, alice, area, body) == 413
+    assert list_files_page(node.db, area, alice).entries == []
+
+
+def test_a_small_trailing_part_is_harmless(node):
+    alice = create_user(node.db, "alice", password="hunter2", user_level=10)
+    area = create_file_area(node.db, "docs", creator=alice)
+    set_max_upload_bytes(node.db, 64)
+
+    body = _multipart(("file", "tiny.txt", b"hello"), ("note", None, b"thanks"))
+    assert _post_multipart(node, alice, area, body) == 200
+    assert list_files_page(node.db, area, alice).entries[0].filename == "tiny.txt"
+
+
+def test_one_overlong_preamble_line_is_refused_as_too_large(node):
+    """One preamble line longer than the request stream's high-water mark
+    (512 KiB here) makes aiohttp raise before the counter sees the line;
+    that is a too-large request, not a 400 or 500. The file limit is set
+    high so that the per-line ceiling, not the request bound, is what
+    trips."""
+    alice = create_user(node.db, "alice", password="hunter2", user_level=10)
+    area = create_file_area(node.db, "docs", creator=alice)
+    set_max_upload_bytes(node.db, 2_000_000)
+
+    body = _multipart(("file", "tiny.txt", b"hello"), preamble=b"x" * 700_000 + b"\r\n")
+    assert _post_multipart(node, alice, area, body) == 413
+    assert list_files_page(node.db, area, alice).entries == []
 
 
 def test_an_empty_upload_is_refused(node):
@@ -527,3 +732,22 @@ def test_a_failed_rollback_does_not_reverse_a_stored_upload(tmp_path, monkeypatc
         assert [e.filename for e in list_files_page(running.db, area, alice).entries] == ["notes.txt"]
     finally:
         running.close()
+
+
+def test_head_probes_have_their_own_bound(node, monkeypatch):
+    """A probe holds no transfer slot, so it gets a ceiling of its own on
+    work queued against the database; past it, a busy answer."""
+    from netbbs.net import file_transfer
+
+    monkeypatch.setattr(file_transfer, "MAX_CONCURRENT_PROBES", 0)
+    alice = create_user(node.db, "alice", password="hunter2", user_level=10)
+    area = create_file_area(node.db, "docs", creator=alice)
+    entry = upload_file(node.db, area, alice, "game.zip", b"payload")
+
+    def url():
+        grant = node.grants.issue(direction=DOWNLOAD, user=alice, area=area, file_id=entry.file_id)
+        return f"{node.base}/transfer/{grant.token}"
+
+    status, message, _ = _head(node, url)
+    assert status == 429
+    assert "busy" in message

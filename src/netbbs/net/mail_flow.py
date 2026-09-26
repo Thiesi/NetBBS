@@ -62,7 +62,7 @@ from netbbs.mail import (
 )
 from netbbs.net.char_input import reject_unhandled_key
 from netbbs.net.color_depth_preference import effective_truecolor
-from netbbs.net.composition import ReviewAction, edit_line_body, review_composition
+from netbbs.net.composition import ReviewAction, edit_line_body, read_prefilled_field, review_composition
 from netbbs.net.confirm import prompt_yes_no
 from netbbs.net.editor_preference import fullscreen_editor_enabled
 from netbbs.net.menu_description_preference import menu_description_level
@@ -72,6 +72,7 @@ from netbbs.net.unicode_style_preference import unicode_style_enabled
 from netbbs.net.node_theme import effective_accent_color_256, effective_header_color_256
 from netbbs.net.picker import pick_item
 from netbbs.net.prose_editor import edit_prose
+from netbbs.net.notices import announce, announce_styled, write_notices
 from netbbs.net.session import Session, write_prompt
 from netbbs.signature import append_signature, get_signature
 from netbbs.rendering import (
@@ -178,6 +179,7 @@ async def _render_mail_menu(
     await session.write_line(
         f"\r\n{_menu_row(options, width=session.terminal_width, height=session.terminal_height, description_level=description_level)}"
     )
+    await write_notices(session)
     await session.write("Choice: ")
 
 
@@ -369,6 +371,7 @@ async def _show_inbox_message(session: Session, lane: DatabaseLane, user: User, 
         await session.write_line(
             f"\r\n{_menu_row(options, width=session.terminal_width, height=session.terminal_height, description_level=description_level)}"
         )
+        await write_notices(session)
         await session.write("Choice: ")
         choice = (await session.read_key()).lower()
 
@@ -380,7 +383,7 @@ async def _show_inbox_message(session: Session, lane: DatabaseLane, user: User, 
             if not await prompt_yes_no(session, "Delete this message?", default=False):
                 continue
             await lane.run(delete_for_recipient, user, message)
-            await session.write_line(colored("Message deleted.", fg_color=SUCCESS_COLOR))
+            announce(session, "Message deleted.")
             return
         elif choice == "r":
             await session.write_line("")
@@ -419,6 +422,7 @@ async def _show_sent_message(session: Session, lane: DatabaseLane, user: User, m
         await session.write_line(
             f"\r\n{_menu_row(options, width=session.terminal_width, height=session.terminal_height, description_level=description_level)}"
         )
+        await write_notices(session)
         await session.write("Choice: ")
         choice = (await session.read_key()).lower()
 
@@ -430,7 +434,7 @@ async def _show_sent_message(session: Session, lane: DatabaseLane, user: User, m
             if not await prompt_yes_no(session, "Delete this message?", default=False):
                 continue
             await lane.run(delete_for_sender, user, message)
-            await session.write_line(colored("Message deleted.", fg_color=SUCCESS_COLOR))
+            announce(session, "Message deleted.")
             return
         else:
             await session.write(reject_unhandled_key(choice))
@@ -476,7 +480,7 @@ async def _compose_mail(
             await write_prompt(session, f"\r\nTo ({prompt}): ")
             recipient_text = (await session.read_line()).strip()
             if not recipient_text:
-                await session.write_line(colored("Cancelled.", fg_color=MUTED_COLOR))
+                announce(session, "Cancelled.", tone="muted")
                 return
             if link_context is not None and "@" in recipient_text:
                 break
@@ -496,18 +500,17 @@ async def _compose_mail(
             break
 
     if prefill_subject:
-        await write_prompt(session, f"Subject [{sanitize_text(prefill_subject)}] (Enter to keep): ")
-        subject = (await session.read_line()).strip() or prefill_subject
+        subject = await read_prefilled_field(session, "Subject", prefill_subject)
     else:
         await session.write("Subject: ")
         subject = (await session.read_line()).strip()
     if not subject:
-        await session.write_line(colored("Cancelled -- a subject is required.", fg_color=ERROR_COLOR))
+        announce(session, "Cancelled -- a subject is required.", tone="error")
         return
 
     body = await _compose_mail_body(session, lane, user, initial_text=None)
     if body is None or not body.strip():
-        await session.write_line(colored("Message cancelled.", fg_color=MUTED_COLOR))
+        announce(session, "Message cancelled.", tone="muted")
         return
     # Appended once, right after the message is first composed -- not on
     # every subsequent "edit body" pass over the same draft (`netbbs.
@@ -543,22 +546,20 @@ async def _compose_mail(
             truecolor=review_truecolor,
         )
         if action is ReviewAction.CANCEL:
-            await session.write_line(colored("Message cancelled.", fg_color=MUTED_COLOR))
+            announce(session, "Message cancelled.", tone="muted")
             return
         if action is ReviewAction.EDIT_RECIPIENT:
-            await write_prompt(session, f"To [{sanitize_text(recipient_text)}] (Enter to keep): ")
-            recipient_text = (await session.read_line()).strip() or recipient_text
+            recipient_text = await read_prefilled_field(session, "To", recipient_text)
             continue
         if action is ReviewAction.EDIT_SUBJECT:
-            await write_prompt(session, f"Subject [{sanitize_text(subject)}] (Enter to keep): ")
-            subject = (await session.read_line()).strip() or subject
+            subject = await read_prefilled_field(session, "Subject", subject)
             continue
         if action is ReviewAction.EDIT_BODY:
             revised = await _compose_mail_body(session, lane, user, initial_text=body)
             if revised is not None:
                 body = revised
             else:
-                await session.write_line(colored("Body unchanged.", fg_color=MUTED_COLOR))
+                announce(session, "Body unchanged.", tone="muted")
             continue
 
         if link_context is not None and "@" in recipient_text:
@@ -572,20 +573,22 @@ async def _compose_mail(
                         candidates.append(
                             f"{sanitize_text(identity.label)} [{sanitize_text(fingerprint)}]"
                         )
-                    await session.write_line(
+                    announce_styled(
+                        session,
                         colored(
                             f"Could not send: {sanitize_text(node_reference)!r} matches more than one node "
                             f"({', '.join(candidates)}). Address the recipient as "
                             "user@technical-identity.",
                             fg_color=ERROR_COLOR,
-                        )
+                        ),
                     )
                 else:
-                    await session.write_line(
+                    announce_styled(
+                        session,
                         colored(
                             f"Could not send: no linked node is known as {sanitize_text(node_reference)!r}.",
                             fg_color=ERROR_COLOR,
-                        )
+                        ),
                     )
                 continue
             technical_recipient = f"{remote_user}@{resolved}"
@@ -598,32 +601,25 @@ async def _compose_mail(
                     node_identity=link_context.node_identity,
                 )
             except (LinkMailError, MailError) as exc:
-                await session.write_line(colored(f"Could not send: {exc}", fg_color=ERROR_COLOR))
+                announce(session, f"Could not send: {exc}", tone="error")
                 continue
-            await session.write_line(colored("Message sent.", fg_color=SUCCESS_COLOR))
+            announce(session, "Message sent.")
             return
 
         try:
             recipient = await lane.run(get_user_by_username, recipient_text)
         except AuthError:
-            await session.write_line(
-                colored(f"Could not send: no such user {sanitize_text(recipient_text)!r}.", fg_color=ERROR_COLOR)
-            )
+            announce(session, f"Could not send: no such user {recipient_text!r}.", tone="error")
             continue
         try:
             await lane.run(send_mail, user, recipient, subject, body)
         except MailboxFullError:
-            await session.write_line(
-                colored(
-                    f"{recipient.username}'s mailbox is full and cannot accept new mail right now.",
-                    fg_color=ERROR_COLOR,
-                )
-            )
+            announce(session, f"{recipient.username}'s mailbox is full and cannot accept new mail right now.", tone="error")
             continue
         except MailError as exc:
-            await session.write_line(colored(f"Could not send: {exc}", fg_color=ERROR_COLOR))
+            announce(session, f"Could not send: {exc}", tone="error")
             continue
-        await session.write_line(colored("Message sent.", fg_color=SUCCESS_COLOR))
+        announce(session, "Message sent.")
         return
 
 

@@ -171,7 +171,11 @@ def get_channel_by_channel_id(db: Database, channel_id: str) -> Channel | None:
     Phase 5's real-time subscribe path (design doc §8.10.2), which only
     ever has the wire-level `channel_id` string to look up from, never
     a local integer row id."""
-    row = db.connection.execute("SELECT * FROM channels WHERE channel_id = ?", (channel_id,)).fetchone()
+    # Issue #683: a hidden channel is not one this node carries -- no peer may
+    # subscribe to it or be served its scrollback.
+    row = db.connection.execute(
+        "SELECT * FROM channels WHERE channel_id = ? AND link_hidden_at IS NULL", (channel_id,)
+    ).fetchone()
     return None if row is None else _channel_from_row(row)
 
 
@@ -194,7 +198,7 @@ def carried_channel_count(db: Database, own_fingerprint: str) -> int:
     `netbbs.link.boards.carried_board_count` exactly."""
     count = 0
     for row in db.connection.execute(
-        "SELECT link_genesis_json FROM channels WHERE link_genesis_json IS NOT NULL"
+        "SELECT link_genesis_json FROM channels WHERE link_genesis_json IS NOT NULL AND link_hidden_at IS NULL"
     ):
         genesis = json.loads(row["link_genesis_json"])
         if genesis["envelope"]["payload"].get("origin_fingerprint") != own_fingerprint:
@@ -208,6 +212,7 @@ def materialize_carried_channel(
     *,
     own_fingerprint: str | None = None,
     max_carried_channels: int | None = None,
+    commit: bool = True,
 ) -> Channel:
     """
     Turn a *received* (not self-originated) `channel_genesis` into a
@@ -284,7 +289,10 @@ def materialize_carried_channel(
             json.dumps(genesis.to_dict()),
         ),
     )
-    db.connection.commit()
+    # Issue #683: `commit=False` lets `netbbs.link.carry` write this and the
+    # carry decision it belongs with in one transaction.
+    if commit:
+        db.connection.commit()
 
     return _channel_from_row(
         db.connection.execute("SELECT * FROM channels WHERE channel_id = ?", (payload["channel_id"],)).fetchone()
@@ -340,7 +348,7 @@ def materialize_carried_channel_message(
     channel_row = db.connection.execute(
         "SELECT * FROM channels WHERE channel_id = ?", (message.payload["channel_id"],)
     ).fetchone()
-    if channel_row is None or channel_row["link_genesis_json"] is None:
+    if channel_row is None or channel_row["link_genesis_json"] is None or channel_row["link_hidden_at"] is not None:
         # Not carried: no genesis on file. That also excludes an MRC room
         # a caller opened (issue #300), which never has one -- a message
         # naming its id is projected nowhere, whatever a peer claims.
@@ -466,13 +474,15 @@ def load_own_channel_events(db: Database, own_fingerprint: str) -> list[ChannelG
     """
     events: list[ChannelGenesis | ChannelMessage] = []
     for row in db.connection.execute(
-        "SELECT link_genesis_json FROM channels WHERE link_genesis_json IS NOT NULL"
+        "SELECT link_genesis_json FROM channels WHERE link_genesis_json IS NOT NULL AND link_hidden_at IS NULL"
     ):
         genesis = ChannelGenesis.from_dict(json.loads(row["link_genesis_json"]))
         if genesis.payload["origin_fingerprint"] == own_fingerprint:
             events.append(genesis)
+    # Issue #683: nothing is pushed for a channel this node has hidden.
     for row in db.connection.execute(
-        "SELECT link_event_json FROM channel_messages WHERE link_event_json IS NOT NULL"
+        """SELECT m.link_event_json FROM channel_messages AS m JOIN channels AS c ON c.id = m.channel_id
+            WHERE m.link_event_json IS NOT NULL AND c.link_hidden_at IS NULL"""
     ):
         events.append(ChannelMessage.from_dict(json.loads(row["link_event_json"])))
     return events

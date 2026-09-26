@@ -1153,3 +1153,20 @@ def test_a_live_rehearsal_is_budgeted_across_its_ticks(db, lane, sysop, board, t
     verdicts = {json.loads(path.read_text())["request"]: json.loads(path.read_text())["would"]
                 for path in results_dir(db, door.id).glob("*.result.json")}
     assert verdicts == {"first": "posted", "second": "rejected"}
+
+
+def test_a_truncated_final_scan_says_so_even_when_it_found_requests(db, door, sysop, board, tmp_path, monkeypatch):
+    """Visible requests are answered one by one; whatever the bound hid still
+    gets a receipt, on the normal path and when the authority has lapsed."""
+    from netbbs.doors import outbound
+
+    monkeypatch.setattr(outbound, "_MAX_REQUESTS_SCANNED", 3)
+    _enable(db, door, sysop, board)
+    for index in range(5):
+        _request(tmp_path, name=f"p{index}", subject="Hi", body="...")
+
+    posted, refused = drain(db, door, tmp_path)
+    receipts = [json.loads(path.read_text()) for path in results_dir(db, door.id).glob("*.result.json")]
+    hidden = [receipt for receipt in receipts if receipt["request"] == ""]
+    assert len(hidden) == 1 and "were not seen" in hidden[0]["reason"]
+    assert posted + refused == 3 + 1
