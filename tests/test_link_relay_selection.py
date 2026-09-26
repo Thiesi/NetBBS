@@ -349,3 +349,50 @@ def test_reachable_nodes_that_decline_do_not_use_up_the_relay_slots(tmp_path, mo
     finally:
         lane.close()
         database.close()
+
+
+def test_decliners_move_to_the_back_so_a_later_pass_reaches_the_willing_relay(tmp_path, monkeypatch):
+    """Codex review of #713: with a per-pass bound, reachable decliners that
+    outnumber it were asked every pass in the same order and the willing
+    node below them never was. Recent decliners go to the back."""
+    import asyncio
+    from types import SimpleNamespace
+
+    import netbbs.link.sync as sync
+    from netbbs.storage.execution import DatabaseLane
+
+    database = Database(tmp_path / "rotate.db")
+    lane = DatabaseLane(database.path)
+    node = LinkNode(identity=bootstrap_node_identity("alice"))
+    names = [f"decliner-{i}" for i in range(7)] + ["willing"]
+    for name in names:
+        _add_peer(node, name)
+    asked = []
+
+    async def dial(_node, _session, _url, _hello, _lane, **_kwargs):
+        return SimpleNamespace(fingerprint=asked[-1])
+
+    async def consent(_node, _session, _url, relay_fingerprint, _lane):
+        return SimpleNamespace(payload={"accepted": relay_fingerprint == "willing"})
+
+    original = sync._request_one_relay_consent
+
+    async def tracking(node_, session, url, relay_fingerprint, *args, **kwargs):
+        asked.append(relay_fingerprint)
+        return await original(node_, session, url, relay_fingerprint, *args, **kwargs)
+
+    monkeypatch.setattr(sync, "dial_hello", dial)
+    monkeypatch.setattr(sync, "request_relay_consent", consent)
+    monkeypatch.setattr(sync, "_request_one_relay_consent", tracking)
+    monkeypatch.setattr(sync, "select_relay_candidates", lambda db, n: list(names))
+    declines: dict[str, float] = {}
+    try:
+        asyncio.run(sync._maintain_relay_selection(node, None, lambda: None, lane, declines=declines))
+        assert asked == names[:6]
+        asked.clear()
+        asyncio.run(sync._maintain_relay_selection(node, None, lambda: None, lane, declines=declines))
+        assert asked[:2] == ["decliner-6", "willing"]
+        assert "willing" not in declines
+    finally:
+        lane.close()
+        database.close()
