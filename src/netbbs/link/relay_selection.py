@@ -73,10 +73,16 @@ def _reachable_full_peer_candidates(node: LinkNode) -> list[str]:
 
 def select_relay_candidates(db: Database, node: LinkNode, *, count: int = TARGET_RELAY_COUNT) -> list[str]:
     """
-    Up to `count` reachable-full-peer fingerprints this node should ask
-    to relay for it next, ranked most-reliable-first (design doc §12:
-    candidates "ranked by observed reliability") -- already excludes
-    anyone currently serving or already asked.
+    Every reachable-full-peer fingerprint this node could ask to relay for
+    it, ranked most-reliable-first (design doc §12: candidates "ranked by
+    observed reliability") -- already excluding anyone currently serving
+    or already asked.
+
+    The whole ranked list, not one per empty slot (issue #712): only a
+    *grant* fills a slot, so the caller walks it until enough candidates
+    have consented. Cut to the number of empty slots, a reachable node that
+    declines kept its place at the top and the ones below it were never
+    asked.
 
     Returns an empty list once `node.relays_serving_me` already holds
     `count` entries -- topping up on top of an already-full set is the
@@ -86,9 +92,7 @@ def select_relay_candidates(db: Database, node: LinkNode, *, count: int = TARGET
     """
     if len(node.relays_serving_me) >= count:
         return []
-    candidates = _reachable_full_peer_candidates(node)
-    ranked = rank_by_reliability(db, candidates)
-    return ranked[: count - len(node.relays_serving_me)]
+    return rank_by_reliability(db, _reachable_full_peer_candidates(node))
 
 
 def relays_needing_replacement(db: Database, node: LinkNode, *, floor: float = _RELIABILITY_FLOOR) -> list[str]:

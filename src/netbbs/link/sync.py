@@ -188,7 +188,7 @@ from netbbs.link.protocol import (
     DEFERRED_EVENT_RETRY_SECONDS, MAX_EVENTS_PER_REQUEST, HelloMessage, LinkNode, LinkProtocolError,
 )
 from netbbs.link.relay_mailbox import RelayableEnvelope
-from netbbs.link.relay_selection import relays_needing_replacement, select_relay_candidates
+from netbbs.link.relay_selection import TARGET_RELAY_COUNT, relays_needing_replacement, select_relay_candidates
 from netbbs.link.reliability import record_dial_outcome
 from netbbs.link.onboarding import participation_accepted
 from netbbs.link.reliable_nodes import effective_reliable_nodes, record_observed_reliable_identity
@@ -277,6 +277,11 @@ _logger = logging.getLogger(__name__)
 # number" precedent (no reliability ranking exists yet to pick more
 # cleverly), not every entry in node.candidate_descriptors.
 _MAX_CANDIDATE_FALLBACK_ATTEMPTS = 5
+
+# Relay-consent requests one maintenance pass may make (issue #712). Enough to
+# get past a few reachable nodes that decline, without dialing a whole peer
+# list's worth of strangers every pass.
+_MAX_RELAY_CONSENT_ATTEMPTS_PER_PASS = 6
 _MAX_TRUST_PULL_PAGES_PER_PASS = 10
 
 # Issue #313: consecutive passes reaching nothing at all -- no seed, no
@@ -1922,10 +1927,13 @@ async def _try_candidate_fallback(
                 node, session, url, own_hello_provider, lane,
                 enforce_trust_policy=enforce_trust_policy,
                 fallback_offsets=fallback_offsets,
-                record_reachability=False,
             )
         )
-        await lane.run(record_dial_outcome, fingerprint, succeeded=succeeded)
+        if not succeeded:
+            # A success is recorded by `_sync_one_seed` against the node that
+            # actually answered, which is not always the one this descriptor
+            # names (a stale or reassigned address; Codex review of #713).
+            await lane.run(record_dial_outcome, fingerprint, succeeded=False)
         if succeeded:
             _logger.info(
                 "Link sync: every configured seed failed this pass -- reached the network "
@@ -2038,12 +2046,22 @@ async def _maintain_relay_selection(
             stale_fingerprint,
         )
 
+    needed = TARGET_RELAY_COUNT - len(node.relays_serving_me)
+    attempted = 0
     for candidate_fingerprint in await lane.run(select_relay_candidates, node):
+        # Only a grant fills a slot (Codex review of #713): a reachable node
+        # that declines -- serving off, full, or not accepting this requester
+        # -- ranks high on reachability and would otherwise take a slot's
+        # turn on every pass, so the candidates below it were never asked.
+        # Bounded per pass, since every attempt is a real dial.
+        if needed <= 0 or attempted >= _MAX_RELAY_CONSENT_ATTEMPTS_PER_PASS:
+            break
         base_urls = _candidate_dialable_addresses(node, candidate_fingerprint)
         if not base_urls:
             continue
+        attempted += 1
         reached: set[str] = set()
-        await _try_addresses_via(
+        granted = await _try_addresses_via(
             base_urls,
             lambda url: _request_one_relay_consent(
                 node,
@@ -2062,6 +2080,8 @@ async def _maintain_relay_selection(
         # candidate kept the neutral score of one never tried, and an
         # unreachable one was asked every pass ahead of a relay that works.
         await lane.run(record_dial_outcome, candidate_fingerprint, succeeded=candidate_fingerprint in reached)
+        if granted:
+            needed -= 1
 
 
 async def _pickup_one_relay_mailbox(

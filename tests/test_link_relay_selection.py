@@ -146,14 +146,17 @@ def test_select_relay_candidates_returns_empty_once_target_count_reached(db, ali
     assert select_relay_candidates(db, alice_node) == []
 
 
-def test_select_relay_candidates_limits_to_remaining_slots(db, alice_node):
+def test_select_relay_candidates_returns_the_whole_ranked_list(db, alice_node):
+    """Issue #712: slots are filled by grants, which the caller counts, so
+    the list is not cut to the number of empty slots -- a reachable node
+    that declines must not keep the ones below it from being asked."""
     alice_node.relays_serving_me["relay-0"] = "2026-01-01T00:00:00Z"
     for i in range(10):
         _add_peer(alice_node, f"candidate-{i}")
 
     selected = select_relay_candidates(db, alice_node)
 
-    assert len(selected) == TARGET_RELAY_COUNT - 1
+    assert len(selected) == 10
 
 
 # -- relays_needing_replacement -----------------------------------------------
@@ -296,8 +299,53 @@ def test_a_successful_fallback_dial_is_counted_once(tmp_path, monkeypatch):
         attempts = database.connection.execute(
             "SELECT attempts FROM link_reliability WHERE fingerprint = 'fallback-bob'"
         ).fetchone()[0]
+        # Recorded once, by the seed path, for the node that answered.
         assert attempts == 1
-        assert calls[0]["record_reachability"] is False
+        assert calls[0].get("record_reachability", True) is True
+    finally:
+        lane.close()
+        database.close()
+
+
+def test_reachable_nodes_that_decline_do_not_use_up_the_relay_slots(tmp_path, monkeypatch):
+    """Codex review of #713: reachability scores a decliner 1.0, and with the
+    list cut to the empty slots three reachable decliners were all that was
+    ever asked. Only a grant fills a slot, so the willing node below them is
+    asked too."""
+    import asyncio
+    from types import SimpleNamespace
+
+    import netbbs.link.sync as sync
+    from netbbs.storage.execution import DatabaseLane
+
+    database = Database(tmp_path / "decline.db")
+    lane = DatabaseLane(database.path)
+    node = LinkNode(identity=bootstrap_node_identity("alice"))
+    for name in ("decliner-1", "decliner-2", "decliner-3", "willing"):
+        _add_peer(node, name)
+    asked = []
+
+    async def dial(_node, _session, url, _hello, _lane, **_kwargs):
+        return SimpleNamespace(fingerprint=asked[-1])
+
+    async def consent(_node, _session, _url, relay_fingerprint, _lane):
+        return SimpleNamespace(payload={"accepted": relay_fingerprint == "willing"})
+
+    original = sync._request_one_relay_consent
+
+    async def tracking(node_, session, url, relay_fingerprint, *args, **kwargs):
+        asked.append(relay_fingerprint)
+        return await original(node_, session, url, relay_fingerprint, *args, **kwargs)
+
+    monkeypatch.setattr(sync, "dial_hello", dial)
+    monkeypatch.setattr(sync, "request_relay_consent", consent)
+    monkeypatch.setattr(sync, "_request_one_relay_consent", tracking)
+    monkeypatch.setattr(
+        sync, "select_relay_candidates", lambda db, n: ["decliner-1", "decliner-2", "decliner-3", "willing"],
+    )
+    try:
+        asyncio.run(sync._maintain_relay_selection(node, None, lambda: None, lane))
+        assert asked == ["decliner-1", "decliner-2", "decliner-3", "willing"]
     finally:
         lane.close()
         database.close()
