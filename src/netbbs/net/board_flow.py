@@ -50,6 +50,9 @@ from netbbs.link.remote_attestation import format_remote_name_for_resource
 from netbbs.link.trust import TrustSubject
 from netbbs.link.boards import (
     LinkContext,
+    board_origin_fingerprint,
+    is_board_closed,
+    is_board_linked,
     queue_board_post_edit_if_linked,
     queue_board_post_if_linked,
     queue_board_post_moderator_edit_if_linked,
@@ -389,6 +392,7 @@ async def _render_board_page(
     unicode_style: bool = False,
     collapsed: bool = False,
     has_draft: bool = False,
+    closed: bool = False,
 ) -> None:
     """Renders one page of posts plus its navigation options — the unit
     that should be redrawn on an actual page change (initial entry,
@@ -402,6 +406,8 @@ async def _render_board_page(
         session, db, board_name, page, user, name_requirement=name_requirement, redraw_in_place=redraw_in_place,
         unicode_style=unicode_style, collapsed=collapsed,
     )
+    if closed:
+        await session.write_line(colored(f"\r\n{_CLOSED_BOARD_NOTICE}", fg_color=MUTED_COLOR))
     if has_draft:
         await session.write_line(colored(f"\r\n{_SAVED_DRAFT_NOTICE}", fg_color=MUTED_COLOR))
     options = []
@@ -426,6 +432,19 @@ async def _render_board_page(
 
 
 _SAVED_DRAFT_NOTICE = "You have a saved post draft for this message board from an earlier session."
+_CLOSED_BOARD_NOTICE = "This message board is closed. It can be read, but it takes no new posts."
+_STAYS_LOCAL_NOTICE = "Other nodes carrying this board keep the original: only its origin can change it for them."
+
+
+def _moderation_stays_local(db: Database, board: Board, link_context: LinkContext | None) -> bool:
+    """Whether a moderator's edit or removal on `board` changes this node's
+    copy only. On a Linked board only the origin's moderation is signed
+    and sent (`queue_board_post_moderator_edit_if_linked`,
+    `queue_board_post_tombstone_if_linked`, design doc §9.5); everywhere
+    else it is local, and the moderator is told so (issue #677)."""
+    if not is_board_linked(db, board):
+        return False
+    return link_context is None or board_origin_fingerprint(db, board) != link_context.node_identity.fingerprint
 _DRAFT_MENU_ENTRY = MenuEntry(label=menu_key("D", "raft"), brief="Resume or discard your saved draft")
 
 
@@ -464,8 +483,13 @@ async def _show_board(
     same degrade-gracefully shape every other optional context uses.
     """
     board_name = sanitize_text(board.name)
+    # A closed Linked board refuses every new post (`create_post`, design
+    # doc §9.5), so [P]ost is not offered on one: the caller would write a
+    # whole post before learning that (issue #677).
+    closed = is_board_closed(db, board)
     can_post = (
-        meets_level(user, get_effective_min_write_level(db, board))
+        not closed
+        and meets_level(user, get_effective_min_write_level(db, board))
         and meets_age(db, user, get_effective_min_age(db, board))
         and meets_name_requirement(db, user, get_effective_name_requirement(db, board))
     )
@@ -501,6 +525,7 @@ async def _show_board(
             unicode_style=unicode_style,
             collapsed=collapsed,
             has_draft=_has_saved_draft(),
+            closed=closed,
         )
         if current_page.posts:
             record_board_seen(db, user, board, current_page.posts[-1])
@@ -668,6 +693,8 @@ async def _show_board(
         await session.write_line(
             f"\r\n{empty_state('This message board has no posts yet', detail='It is ready for its first conversation.', width=session.terminal_width, header_color=header_color)}"
         )
+        if closed:
+            await session.write_line(colored(f"\r\n{_CLOSED_BOARD_NOTICE}", fg_color=MUTED_COLOR))
         if not can_post:
             return
         while True:
@@ -842,6 +869,8 @@ async def _edit_existing_post(
             )
         else:
             await session.write_line(colored("Post updated.", fg_color=SUCCESS_COLOR))
+        if post.author_user_id != user.id and _moderation_stays_local(db, board, link_context):
+            await session.write_line(colored(_STAYS_LOCAL_NOTICE, fg_color=MUTED_COLOR))
         return True
 
     await _review_and_commit(
@@ -957,7 +986,14 @@ async def _tombstone_existing_post(
         await session.write_line(colored("You can't tombstone that post.", fg_color=MUTED_COLOR))
         return
 
-    if not await prompt_yes_no(session, "Redact this post? This cannot be undone.", default=False):
+    stays_local = _moderation_stays_local(db, board, link_context)
+    subject = sanitize_text(post.subject)
+    question = (
+        f"Remove \"{subject}\" on this node only?"
+        if stays_local
+        else f"Remove \"{subject}\"? This cannot be undone."
+    )
+    if not await prompt_yes_no(session, question, default=False):
         await session.write_line(colored("Cancelled.", fg_color=MUTED_COLOR))
         return
 
@@ -968,7 +1004,11 @@ async def _tombstone_existing_post(
         return
     if link_context is not None:
         queue_board_post_tombstone_if_linked(db, tombstoned, board, node_identity=link_context.node_identity)
-    await session.write_line("Post tombstoned.")
+    if stays_local:
+        await session.write_line(colored("Post removed on this node.", fg_color=SUCCESS_COLOR))
+        await session.write_line(colored(_STAYS_LOCAL_NOTICE, fg_color=MUTED_COLOR))
+    else:
+        await session.write_line(colored("Post removed.", fg_color=SUCCESS_COLOR))
 
 
 def _post_draft_path(db: Database, *, kind: str, board: Board, user: User, root_post_id: str = "") -> Path:

@@ -647,7 +647,9 @@ def test_tombstone_existing_post_via_plain_line_flow(db, alice):
     # t -> pick post 1 -> confirm -> back -> skip new post
     session = FakeSession(["t", "1", "y", "b", ""])
     asyncio.run(board_flow._show_board(session, db, board, alice))
-    assert "Post tombstoned" in _written_text(session)
+    text = _visible(session)
+    assert 'Remove "Original subject"? This cannot be undone.' in text
+    assert "Post removed." in text
     saved = list_posts_page(db, board, alice).posts[0]
     assert saved.subject == "[removed by moderator]"
     assert saved.tombstoned_at is not None
