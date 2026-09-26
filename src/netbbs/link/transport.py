@@ -162,6 +162,8 @@ from netbbs.link.protocol import (
     build_pong_frame,
     validate_realtime_frame_payload,
 )
+from netbbs.link.carry import KIND_LABELS, accept_genesis, genesis_kind
+from netbbs.link.store import event_is_stored
 from netbbs.link.realtime_proxy import open_realtime_connection, record_handshake_outcome
 from netbbs.link.relay_mailbox import (
     RelayableEnvelope,
@@ -335,6 +337,46 @@ async def _rate_limit_middleware(request: web.Request, handler):
     return await handler(request)
 
 
+_GENESIS_ID_FIELDS = {"boards": "board_id", "channels": "channel_id", "file_areas": "area_id"}
+
+
+def _forget_genesis(node: LinkNode, kind: str, content_id: str, envelope: dict) -> None:
+    """Undo `handle_events`' in-memory acceptance of a genesis that was not
+    persisted (issue #683)."""
+    node.known_event_ids.discard(content_id)
+    node.events.pop(content_id, None)
+    geneses = {
+        "boards": node.board_events.boards,
+        "channels": node.channel_events.channels,
+        "file_areas": node.file_area_events.areas,
+    }[kind]
+    resource_id = envelope["envelope"]["payload"].get(_GENESIS_ID_FIELDS[kind])
+    held = geneses.get(resource_id)
+    if held is not None and held.content_id == content_id:
+        del geneses[resource_id]
+
+
+async def _forget_unless_stored(
+    lane: DatabaseLane, node: LinkNode, content_id: str, *, edit_root: str | None = None
+) -> None:
+    """Issue #683: an event `handle_events` accepted but that was neither
+    projected nor stored -- the board, channel or file area it belongs to has
+    no local copy here, typically because it is only offered -- must not stay
+    in `known_event_ids`. It would then be dropped as a duplicate when it is
+    sent again after the SysOp accepts the resource, and the accepted copy
+    would stay empty until a restart. An event that was stored and only its
+    projection refused (identity policy, a trimmed scrollback) stays known.
+
+    An edit, moderator edit or tombstone is also in an in-memory edit chain,
+    which `handle_events` consults before `known_event_ids`; `edit_root` names
+    its root post so it is dropped from there too."""
+    if not await lane.run(event_is_stored, content_id):
+        node.known_event_ids.discard(content_id)
+        node.events.pop(content_id, None)
+        if edit_root is not None:
+            node.board_events.forget_edit(edit_root, content_id)
+
+
 async def persist_accepted_events(
     lane: DatabaseLane,
     node: LinkNode,
@@ -390,10 +432,12 @@ async def persist_accepted_events(
                 )
                 if decision.requires_approval:
                     initial_status = "pending"
-            await lane.run(
+            projected = await lane.run(
                 materialize_carried_post, BoardPost.from_dict(envelope),
                 sender_fingerprint=sender_fingerprint, initial_status=initial_status,
             )
+            if projected is None:
+                await _forget_unless_stored(lane, node, content_id)
             continue
         elif object_type == BOARD_POST_EDIT_OBJECT_TYPE:
             # An author trust holds for approval has their edits held too
@@ -407,33 +451,47 @@ async def persist_accepted_events(
                 )
                 if decision.requires_approval:
                     initial_status = "pending"
-            await lane.run(
+            projected = await lane.run(
                 materialize_carried_post_edit, BoardPostEdit.from_dict(envelope),
                 sender_fingerprint=sender_fingerprint, initial_status=initial_status,
             )
+            if projected is None:
+                await _forget_unless_stored(
+                    lane, node, content_id, edit_root=envelope["envelope"]["payload"]["root_post_id"]
+                )
             continue
         elif object_type == BOARD_POST_MODERATOR_EDIT_OBJECT_TYPE:
             # Design doc §9.5, issue #88: same "skip the generic save_
             # event dispatch" shape as BOARD_POST_EDIT_OBJECT_TYPE above.
-            await lane.run(
+            projected = await lane.run(
                 materialize_carried_board_post_moderator_edit,
                 BoardPostModeratorEdit.from_dict(envelope), sender_fingerprint=sender_fingerprint,
             )
+            if projected is None:
+                await _forget_unless_stored(
+                    lane, node, content_id, edit_root=envelope["envelope"]["payload"]["root_post_id"]
+                )
             continue
         elif object_type == BOARD_POST_TOMBSTONE_OBJECT_TYPE:
-            await lane.run(
+            projected = await lane.run(
                 materialize_carried_board_post_tombstone,
                 BoardPostTombstone.from_dict(envelope), sender_fingerprint=sender_fingerprint,
             )
+            if projected is None:
+                await _forget_unless_stored(
+                    lane, node, content_id, edit_root=envelope["envelope"]["payload"]["root_post_id"]
+                )
             continue
         elif object_type == CHANNEL_MESSAGE_OBJECT_TYPE:
             # Design doc §9.6, issue #87: same "skip the generic save_
             # event dispatch, materialize does its own link_events
             # insert in the same transaction" shape as board_post above.
-            await lane.run(
+            projected = await lane.run(
                 materialize_carried_channel_message, ChannelMessage.from_dict(envelope),
                 sender_fingerprint=sender_fingerprint,
             )
+            if projected is None:
+                await _forget_unless_stored(lane, node, content_id)
             continue
         elif object_type == FILE_DESCRIPTOR_OBJECT_TYPE:
             # Design doc §11.2, issue #89: same shape -- catalogue
@@ -441,13 +499,44 @@ async def persist_accepted_events(
             # table (see materialize_carried_file_descriptor's own
             # docstring for why).
             try:
-                await lane.run(
+                projected = await lane.run(
                     materialize_carried_file_descriptor,
                     FileDescriptor.from_dict(envelope), sender_fingerprint=sender_fingerprint,
                     max_remote_files_per_area=max_remote_files_per_area,
                 )
+                if projected is None:
+                    await _forget_unless_stored(lane, node, content_id)
             except RemoteFileCatalogueLimitError as exc:
                 _logger.warning("Link sync: %s", exc)
+            continue
+
+        kind = genesis_kind(object_type)
+        if kind is not None:
+            # Issue #683 (design doc §9.3): the genesis and its carry outcome
+            # in one transaction -- carried under the cap, otherwise recorded
+            # as offered for the SysOp to accept. The genesis is accepted and
+            # keeps gossiping either way; only this node's own copy waits.
+            cap = {
+                "boards": max_carried_boards,
+                "channels": max_carried_channels,
+                "file_areas": max_carried_file_areas,
+            }[kind]
+            try:
+                outcome = await lane.run(
+                    accept_genesis, kind=kind, envelope=envelope, sender_fingerprint=sender_fingerprint,
+                    content_id=content_id, own_fingerprint=node.identity.fingerprint, cap=cap,
+                )
+            except BaseException:
+                # The transaction rolled back, so neither a local copy nor an
+                # offer exists; `handle_events`' in-memory acceptance must go
+                # too, or every later delivery is skipped as a duplicate.
+                _forget_genesis(node, kind, content_id, envelope)
+                raise
+            if outcome != "carried":
+                _logger.info(
+                    "Link sync: %s %r offered for the SysOp to accept rather than carried (%s)",
+                    KIND_LABELS[kind], envelope["envelope"]["payload"].get("name"), outcome,
+                )
             continue
 
         await lane.run(
@@ -477,36 +566,6 @@ async def persist_accepted_events(
             await lane.run(apply_link_message_accepted, envelope)
         elif object_type == LINK_MESSAGE_BOUNCED_OBJECT_TYPE:
             await lane.run(apply_link_message_bounced, envelope)
-        elif object_type == BOARD_GENESIS_OBJECT_TYPE:
-            try:
-                await lane.run(
-                    materialize_carried_board,
-                    BoardGenesis.from_dict(envelope),
-                    own_fingerprint=node.identity.fingerprint,
-                    max_carried_boards=max_carried_boards,
-                )
-            except BoardCarryLimitError as exc:
-                # Design doc §13.9: the genesis event above is
-                # already accepted/persisted (save_event, earlier in
-                # this loop) and keeps gossiping normally -- only
-                # this node's own local materialization is refused,
-                # logged rather than surfaced as a failed request
-                # (the peer that pushed it did nothing wrong; this
-                # node simply declined to carry one more board).
-                _logger.warning("Link sync: %s", exc)
-        elif object_type == CHANNEL_GENESIS_OBJECT_TYPE:
-            # Design doc §9.6, issue #87: mirrors BOARD_GENESIS_OBJECT_
-            # TYPE above exactly, including the same carry-limit
-            # tolerance.
-            try:
-                await lane.run(
-                    materialize_carried_channel,
-                    ChannelGenesis.from_dict(envelope),
-                    own_fingerprint=node.identity.fingerprint,
-                    max_carried_channels=max_carried_channels,
-                )
-            except ChannelCarryLimitError as exc:
-                _logger.warning("Link sync: %s", exc)
         elif object_type == BOARD_ORIGIN_TRANSFER_ACCEPTED_OBJECT_TYPE:
             transfer_accepted = BoardOriginTransferAccepted.from_dict(envelope)
             await lane.run(
@@ -521,18 +580,6 @@ async def persist_accepted_events(
             # needs -- the closing origin's own case is handled directly
             # by close_board_if_linked itself.
             await lane.run(materialize_carried_board_closure, BoardClosure.from_dict(envelope))
-        elif object_type == FILE_AREA_GENESIS_OBJECT_TYPE:
-            # Design doc §11, issue #89: mirrors BOARD_GENESIS_OBJECT_TYPE
-            # above exactly, including the same carry-limit tolerance.
-            try:
-                await lane.run(
-                    materialize_carried_file_area,
-                    FileAreaGenesis.from_dict(envelope),
-                    own_fingerprint=node.identity.fingerprint,
-                    max_carried_file_areas=max_carried_file_areas,
-                )
-            except FileAreaCarryLimitError as exc:
-                _logger.warning("Link sync: %s", exc)
 
 
 class PullCursorUnknown(Exception):

@@ -1677,6 +1677,21 @@ class BoardEventState:
     ) -> None:
         self.post_edits[root_post_id] = self.edit_chain(root_post_id) + (edit,)
 
+    def forget_edit(self, root_post_id: str, content_id: str) -> None:
+        """Issue #683: drop an edit that was accepted but never stored (its
+        board has no local copy yet), with every edit after it in the chain,
+        since each of those extends it and none was stored either. Otherwise a
+        resend after the SysOp accepts the board is taken for a duplicate and
+        never reaches persistence."""
+        chain = self.edit_chain(root_post_id)
+        for index, edit in enumerate(chain):
+            if edit.content_id == content_id:
+                if index:
+                    self.post_edits[root_post_id] = chain[:index]
+                else:
+                    self.post_edits.pop(root_post_id, None)
+                return
+
 
 @dataclass
 class ChannelEventState:
