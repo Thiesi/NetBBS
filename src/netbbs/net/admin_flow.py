@@ -180,11 +180,16 @@ from netbbs.doors import (
 from netbbs.doors.bundled import available_bundled_doors
 from netbbs.doors.outbound import (
     OutboundError,
+    allow_channel,
     allow_target,
+    channel_not_allowable,
+    channel_targets,
     disable_outbound,
     enable_outbound,
     outbound_config,
+    revoke_channel,
     revoke_target,
+    set_chat_ceiling,
     set_rate_ceiling,
 )
 from netbbs.doors.outbound import targets as outbound_targets
@@ -16502,6 +16507,36 @@ def _door_target_description(board: Board) -> str | None:
     return "; ".join(notes) if notes else board.description
 
 
+def _door_channel_candidates(db: Database) -> list[tuple[Channel, bool]]:
+    """Every channel a door could be allowed to speak in, and whether it is Linked.
+
+    An MRC-bridged channel is left out rather than shown and refused: it can
+    never be allowed, so offering it would only be a dead end.
+    """
+    return [(channel, is_channel_linked(db, channel)) for channel in list_channels(db)
+            if channel_not_allowable(db, channel) is None]
+
+
+def _door_channel_description(channel: Channel, linked: bool) -> str | None:
+    """What a SysOp needs to know about a channel before a door may speak in it."""
+    notes = []
+    if linked:
+        notes.append("Linked — its lines reach every peer and cannot be taken back")
+    if channel.min_age or channel.name_requirement:
+        notes.append("age/name gated for callers — a door is not subject to that")
+    return "; ".join(notes) if notes else channel.description
+
+
+def _door_channel_summary(db: Database, target) -> str:
+    """One allowed channel as the outbound screen lists it."""
+    name = f"#{target.channel.name}"
+    if not target.suspended:
+        return name
+    by = f" by {target.suspended_by}" if target.suspended_by else ""
+    until = f" until {format_for_display(target.suspended_until, db)}" if target.suspended_until else ""
+    return f"{name} (muted{by}{until})"
+
+
 async def _door_outbound_screen(session: Session, lane: DatabaseLane, actor: User, door: Door) -> None:
     """Switch one door's outbound hook on or off, and curate its allowlist.
 
@@ -16533,6 +16568,8 @@ async def _door_outbound_screen(session: Session, lane: DatabaseLane, actor: Use
     while True:
         config = await lane.run(outbound_config, door.id)
         allowed = await lane.run(outbound_targets, door.id) if config is not None else []
+        channels = await lane.run(channel_targets, door.id) if config is not None else []
+        channel_summary = [await lane.run(_door_channel_summary, target) for target in channels]
         await session.write_line(
             "\r\n" + screen_title(f"{sanitize_text(door.name)} — outbound",
                 breadcrumb=(session.node_display_name,), width=session.terminal_width,
@@ -16544,8 +16581,8 @@ async def _door_outbound_screen(session: Session, lane: DatabaseLane, actor: Use
                 Field("Outbound", status_badge("OFF", tone="neutral", unicode_style=unicode_style), styled=True),
                 Note(
                     "This door cannot post anything. Switching it on lets it post to boards "
-                    "you allow here, and nothing else — it can never read the BBS, send mail, or "
-                    "look up a caller."
+                    "and speak in chat channels you allow here, and nothing else — it can never "
+                    "read the BBS, send mail, or look up a caller."
                 ),
             ]
         else:
@@ -16565,6 +16602,12 @@ async def _door_outbound_screen(session: Session, lane: DatabaseLane, actor: Use
                     else "(none yet — it can post nowhere until you allow one)",
                     color=VALUE_COLOR if allowed else WARNING_COLOR,
                 ),
+                Field("Chat ceiling", f"{config.chat_lines_per_hour} lines per hour"),
+                Field(
+                    "Allowed channels",
+                    ", ".join(channel_summary) if channels else "(none)",
+                    color=VALUE_COLOR if channels else MUTED_COLOR,
+                ),
             ]
             if lapsed:
                 hook.append(Note(
@@ -16573,6 +16616,10 @@ async def _door_outbound_screen(session: Session, lane: DatabaseLane, actor: Use
                 ))
             if any(board.moderated for board in allowed):
                 hook.append(Note("A moderated board holds this door's posts for your approval first."))
+            if channels:
+                hook.append(Note(
+                    "A channel's moderators can /mute this door there, for a time or until they "
+                    "/unmute it; that stops it in that channel only."))
         await _write_sections(session, [Section("Outbound hook", hook)], unicode_style=unicode_style)
         if message:
             await session.write_line("")
@@ -16594,6 +16641,10 @@ async def _door_outbound_screen(session: Session, lane: DatabaseLane, actor: Use
                 MenuEntry(label=menu_key("A", "llow a board"), brief="Let it post to one more board"),
                 MenuEntry(label=menu_key("R", "evoke a board"), brief="Stop it posting to one"),
                 MenuEntry(label=menu_key("C", "eiling"), brief="Posts per hour"),
+                MenuEntry(label=menu_key("L", "et it chat in a channel"),
+                          brief="Let it speak in one more chat channel"),
+                MenuEntry(label=menu_key("D", "rop a channel"), brief="Stop it speaking in one"),
+                MenuEntry(label=menu_key("H", "ourly chat lines"), brief="Chat lines per hour"),
             ]
         options.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to the door"))
         await session.write_line(
@@ -16653,6 +16704,56 @@ async def _door_outbound_screen(session: Session, lane: DatabaseLane, actor: Use
                 try:
                     config = await lane.run(set_rate_ceiling, door, int(raw), changed_by=actor)
                     message = f"Ceiling is now {config.posts_per_hour} posts per hour."
+                except (ValueError, OutboundError) as exc:
+                    message_failed = True
+                    message = (str(exc) if isinstance(exc, OutboundError)
+                               else "That is not a whole number.")
+        elif choice == "l" and config is not None:
+            picked = await pick_item(
+                session, await lane.run(_door_channel_candidates),
+                name_of=lambda item: f"#{item[0].name}", stable_id_of=lambda item: item[0].id,
+                description_of=lambda item: _door_channel_description(*item),
+                title="Which channel may it speak in?",
+                empty_message="No chat channel it could speak in (MRC-bridged ones never can).",
+                description_level=description_level,
+                redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
+                accent_color=accent_color, header_color=header_color,
+            )
+            if picked is not None:
+                channel, linked = picked
+                # Asked only for a Linked channel, and only because it cannot
+                # be undone: every peer carrying it gets each line, and chat
+                # has no way to take one back.
+                if not linked or await prompt_yes_no(
+                        session,
+                        f"#{sanitize_text(channel.name)} is Linked: every line this door sends there "
+                        "reaches every node carrying it, and cannot be taken back. Allow it?",
+                        default=False):
+                    try:
+                        await lane.run(allow_channel, door, channel, allowed_by=actor)
+                        message = f"#{channel.name} allowed."
+                    except OutboundError as exc:
+                        message, message_failed = str(exc), True
+        elif choice == "d" and config is not None:
+            target = await pick_item(
+                session, channels, name_of=lambda t: f"#{t.channel.name}",
+                stable_id_of=lambda t: t.channel.id,
+                title="Stop it speaking in which channel?",
+                empty_message="It cannot speak in any channel yet.",
+                description_level=description_level,
+                redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
+                accent_color=accent_color, header_color=header_color,
+            )
+            if target is not None:
+                await lane.run(revoke_channel, door, target.channel, revoked_by=actor)
+                message = f"#{target.channel.name} revoked."
+        elif choice == "h" and config is not None:
+            await session.write_line(f"Chat lines per hour (1-240, currently {config.chat_lines_per_hour}):")
+            raw = (await session.read_line()).strip()
+            if raw:
+                try:
+                    config = await lane.run(set_chat_ceiling, door, int(raw), changed_by=actor)
+                    message = f"Chat ceiling is now {config.chat_lines_per_hour} lines per hour."
                 except (ValueError, OutboundError) as exc:
                     message_failed = True
                     message = (str(exc) if isinstance(exc, OutboundError)

@@ -18,6 +18,7 @@ from netbbs.boards.boards import create_board
 from netbbs.boards.posts import get_post, list_posts_page
 from netbbs.doors import create_door
 from netbbs.doors.outbound import (
+    DEFAULT_CHAT_LINES_PER_HOUR,
     DEFAULT_POSTS_PER_HOUR,
     OUTBOUND_DIRNAME,
     OutboundError,
@@ -401,6 +402,8 @@ def test_a_door_is_told_its_own_label_and_targets(db, door, sysop, board):
         "results": str(results_dir(db, door.id)),
         "boards": ["Chronicle"],
         "posts_per_hour": DEFAULT_POSTS_PER_HOUR,
+        "channels": [],
+        "chat_lines_per_hour": DEFAULT_CHAT_LINES_PER_HOUR,
     }
 
 

@@ -69,9 +69,10 @@ class DoorRunResult:
 #: Version of the `door_info.json` contract (issue #469). 1 was the original
 #: six fields; 2 adds the caller/node metadata below; 3 adds the optional
 #: `outbound` object (issue #520), present only for a door whose SysOp has
-#: switched its outbound hook on. A door may refuse a platform it does not
-#: understand instead of probing for fields.
-DOOR_API_VERSION = 3
+#: switched its outbound hook on; 4 adds `outbound.channels` and
+#: `outbound.chat_lines_per_hour`, and requests naming a `channel`. A door may
+#: refuse a platform it does not understand instead of probing for fields.
+DOOR_API_VERSION = 4
 
 
 def node_opaque_id(db) -> str:
@@ -472,8 +473,20 @@ async def _forward_resize(session, proc, info_path, info, *, published, pty_fd=N
             return
 
 
+async def _publish_chat_lines(chat_fanout, published, door) -> None:
+    """Deliver the chat lines a drain recorded to whoever is in the channel now."""
+    if chat_fanout is None or not published:
+        return
+    try:
+        await chat_fanout(published)
+    except Exception as exc:
+        # Already in the channel's scrollback and queued for Link: a failed
+        # live delivery costs the moment, not the line.
+        _logger.warning("door %r chat lines could not be delivered live: %s", door.name, exc)
+
+
 async def _drain_while_running(lane, door, workdir, node_identity, rehearsal, *, rehearsed=None,
-                               guest_receipts=False,
+                               guest_receipts=False, chat_fanout=None,
                                interval=None):
     """Answer a door's outbound requests while it is still running (#520).
 
@@ -482,18 +495,27 @@ async def _drain_while_running(lane, door, workdir, node_identity, rehearsal, *,
     non-final, so leftovers wait for the next one and only the drain at exit
     refuses anything. A failure is logged and the next pass tries again: it
     must never end the caller's session.
+
+    A cancellation lands only between passes. A pass works in threads --
+    the lane's and `to_thread`'s -- which a cancelled await does not stop,
+    so a pass interrupted mid-way would keep writing into the working
+    directory while the caller deleted it, and the chat lines it had just
+    recorded would never be delivered. The caller waits for the pass instead,
+    and a pass is bounded.
     """
     from netbbs.doors.outbound import RESULTS_KEPT, has_requests, results_dir
 
     receipts = await lane.run(lambda db: results_dir(db, door.id)) if guest_receipts else None
-    while True:
-        await asyncio.sleep(interval or _OUTBOUND_TICK_SECONDS)
+
+    async def one_pass():
         try:
             if await asyncio.to_thread(has_requests, workdir):
+                published = []
                 await lane.run(drain_outbound, door, workdir,
                                node_identity=node_identity() if callable(node_identity) else node_identity,
                                rehearsal=rehearsal, rehearsed=rehearsed,
-                               limit=_OUTBOUND_TICK_LIMIT, final=False)
+                               limit=_OUTBOUND_TICK_LIMIT, final=False, published=published)
+                await _publish_chat_lines(chat_fanout, published, door)
             if receipts is not None:
                 # Every tick, not only after this session drained: another
                 # session of the same door may have been answered, and a native
@@ -502,6 +524,12 @@ async def _drain_while_running(lane, door, workdir, node_identity, rehearsal, *,
                 await asyncio.to_thread(copy_receipts, receipts, workdir, RESULTS_KEPT)
         except Exception as exc:
             _logger.warning("door %r in-session outbound drain failed: %s", door.name, exc)
+
+    while True:
+        await asyncio.sleep(interval or _OUTBOUND_TICK_SECONDS)
+        _, cancelled = await _finish_owned(asyncio.ensure_future(one_pass()))
+        if cancelled:
+            raise asyncio.CancelledError
 
 
 async def _diagnostics(reader, tail):
@@ -572,8 +600,14 @@ def effective_wall_limit(profile, call_site_limit=None):
 
 
 async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
-                   output_check=None, node_identity=None, rehearsal=False):
+                   output_check=None, node_identity=None, rehearsal=False, chat_fanout=None):
     """Supervise and record one run; an optional synchronous probe check returns an error string.
+
+    `chat_fanout`, an async callable taking `[(channel, message), ...]`,
+    delivers the chat lines a door sent through its outbound hook to the
+    people in those channels right now, and to live-subscribed Link peers.
+    Without it a line still reaches the channel's scrollback and the Link
+    queue, so a reader sees it on their next visit rather than as it happens.
 
     `node_identity`, when this node has Link running, is what lets a post a
     door made through its outbound hook (issue #520) reach the peers a
@@ -600,7 +634,7 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
     qmp_socket = qmp_child = None
     # A rehearsal's would-be spend, for the whole session: rehearsal posts are
     # never persisted, so without this every drain would start from zero.
-    rehearsal_spend = {"posts": 0}
+    rehearsal_spend = {"posts": 0, "chat": 0}
     slave = workdir = None
     diagnostic_tasks = []
     resize_task = None
@@ -727,7 +761,7 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
             if "outbound" in info:
                 outbound_task = asyncio.create_task(_drain_while_running(
                     lane, door, workdir, node_identity, rehearsal, rehearsed=rehearsal_spend,
-                    guest_receipts=bool(profile and profile.adapter == "vm")))
+                    guest_receipts=bool(profile and profile.adapter == "vm"), chat_fanout=chat_fanout))
             mode = resize_mode(profile, kind, bundled_follows_resize=vouched)
             if os.name == "posix" and mode is not None:
                 resize_task = asyncio.create_task(_forward_resize(
@@ -802,9 +836,9 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
             if resize_task is not None:
                 resize_task.cancel()
                 await asyncio.gather(resize_task, return_exceptions=True)
-            # Before the final drain below. A pick-up already running in the
-            # lane's worker thread finishes first -- the lane runs one job at
-            # a time, in order -- and claiming makes an overlap harmless anyway.
+            # Before the final drain below. A pass already under way finishes
+            # first (see `_drain_while_running`), so nothing it started is
+            # still writing into the working directory once this returns.
             if outbound_task is not None:
                 outbound_task.cancel()
                 await asyncio.gather(outbound_task, return_exceptions=True)
@@ -867,14 +901,16 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
                     # error: a door which exited cleanly must not be
                     # reported as having crashed because its drop directory
                     # was unreadable.
+                    published = []
                     try:
                         await lane.run(
                             drain_outbound, door, workdir,
                             node_identity=node_identity() if callable(node_identity) else node_identity,
-                            rehearsal=rehearsal, rehearsed=rehearsal_spend,
+                            rehearsal=rehearsal, rehearsed=rehearsal_spend, published=published,
                         )
                     except Exception as exc:
                         _logger.warning("door %r outbound drain failed: %s", door.name, exc)
+                    await _publish_chat_lines(chat_fanout, published, door)
                 if workdir is not None:
                     shutil.rmtree(workdir, ignore_errors=True)
                 if lease:

@@ -9147,6 +9147,92 @@ def test_a_remote_door_is_told_outbound_cannot_work_for_it(db, lane, sysop):
     assert outbound_config(db, door.id) is None, "the switch must not be reachable at all"
 
 
+def test_a_door_can_be_let_into_a_local_channel_without_a_question(db, lane, sysop):
+    from netbbs.chat.channels import create_channel
+    from netbbs.doors import create_door
+    from netbbs.doors.outbound import channel_targets, enable_outbound
+
+    door = create_door(db, "Blacksite", "/usr/bin/python3", creator=sysop)
+    create_channel(db, "lobby", creator=sysop)
+    enable_outbound(db, door, enabled_by=sysop)
+
+    session = FakeSession(_door_outbound_keys("l", "0", "1"))
+    _run(session, lane, sysop)
+
+    assert [t.channel.name for t in channel_targets(db, door.id)] == ["lobby"]
+    assert "#lobby allowed." in _written_text(session)
+
+
+def test_a_linked_channel_asks_first_because_its_lines_cannot_be_taken_back(db, lane, sysop):
+    from netbbs.chat.channels import create_channel
+    from netbbs.doors import create_door
+    from netbbs.doors.outbound import channel_targets, enable_outbound
+    from netbbs.link.channels import link_channel
+    from netbbs.link.node_identity import bootstrap_node_identity
+
+    door = create_door(db, "Blacksite", "/usr/bin/python3", creator=sysop)
+    channel = create_channel(db, "lobby", creator=sysop)
+    link_channel(db, channel, node_identity=bootstrap_node_identity("thisnode"))
+    enable_outbound(db, door, enabled_by=sysop)
+
+    declined = FakeSession(_door_outbound_keys("l", "0", "1", "n"))
+    _run(declined, lane, sysop)
+    assert "cannot be taken back" in _written_text(declined)
+    assert channel_targets(db, door.id) == [], "declining allows nothing"
+
+    accepted = FakeSession(_door_outbound_keys("l", "0", "1", "y"))
+    _run(accepted, lane, sysop)
+    assert [t.channel.name for t in channel_targets(db, door.id)] == ["lobby"]
+
+
+def test_an_mrc_bridged_channel_is_never_offered_to_a_door(db, lane, sysop):
+    from netbbs.chat.channels import create_channel
+    from netbbs.doors import create_door
+    from netbbs.doors.outbound import enable_outbound
+    from netbbs.mrc.settings import set_mrc_room
+
+    door = create_door(db, "Blacksite", "/usr/bin/python3", creator=sysop)
+    set_mrc_room(db, create_channel(db, "bridged", creator=sysop), "bridged")
+    enable_outbound(db, door, enabled_by=sysop)
+
+    session = FakeSession(_door_outbound_keys("l"))
+    _run(session, lane, sysop)
+
+    assert "MRC-bridged ones never can" in _written_text(session)
+
+
+def test_the_outbound_screen_shows_a_moderators_mute(db, lane, sysop):
+    from netbbs.chat.channels import create_channel
+    from netbbs.doors import create_door
+    from netbbs.doors.outbound import allow_channel, enable_outbound, suspend_channel
+
+    door = create_door(db, "Blacksite", "/usr/bin/python3", creator=sysop)
+    channel = create_channel(db, "lobby", creator=sysop)
+    enable_outbound(db, door, enabled_by=sysop)
+    allow_channel(db, door, channel, allowed_by=sysop)
+    suspend_channel(db, door, channel, duration=None, reason=None, suspended_by=sysop)
+
+    session = FakeSession(_door_outbound_keys())
+    _run(session, lane, sysop)
+
+    assert "#lobby (muted by sysop)" in _normalized_visible(_written_text(session))
+
+
+def test_the_chat_ceiling_is_set_on_its_own(db, lane, sysop):
+    from netbbs.doors import create_door
+    from netbbs.doors.outbound import enable_outbound, outbound_config
+
+    door = create_door(db, "Blacksite", "/usr/bin/python3", creator=sysop)
+    enable_outbound(db, door, enabled_by=sysop)
+
+    session = FakeSession(_door_outbound_keys("h", "12"))
+    _run(session, lane, sysop)
+
+    config = outbound_config(db, door.id)
+    assert (config.chat_lines_per_hour, config.posts_per_hour) == (12, 6)
+    assert "Chat ceiling is now 12 lines per hour." in _written_text(session)
+
+
 def test_user_picker_keeps_an_active_search_across_a_sort(db, lane, sysop):
     """A re-sort or a filter replaces the backing set, and used to throw
     the search away with it -- so a SysOp who found three accounts and

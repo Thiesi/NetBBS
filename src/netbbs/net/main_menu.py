@@ -1061,6 +1061,7 @@ async def _resource_type_menu(
                     door_services=node_controls.door_services if node_controls is not None else None,
                     presence=presence,
                     link_context=link_context,
+                    chat_hub=hub,
                 )
             else:
                 await session.write_line(
