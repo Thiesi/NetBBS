@@ -691,6 +691,7 @@ async def _sync_one_seed(
     enforce_trust_policy: bool = False,
     reliable_urls: frozenset[str] = frozenset(),
     fallback_offsets: dict[str, int] | None = None,
+    record_reachability: bool = True,
 ) -> bool:
     """Returns whether the hello itself succeeded -- the bar `run_link_
     sync` uses to decide "did this node reach the network at all this
@@ -709,8 +710,10 @@ async def _sync_one_seed(
     # Issue #712: a seed this node reaches every pass is the best-known relay
     # candidate it has, and relay selection ranks by these observations. A
     # failure cannot be recorded here: before the hello, the URL names no
-    # fingerprint.
-    await lane.run(record_dial_outcome, seed_peer.fingerprint, succeeded=True)
+    # fingerprint. `_try_candidate_fallback` records its own outcome, one per
+    # candidate, so it turns this off rather than count a success twice.
+    if record_reachability:
+        await lane.run(record_dial_outcome, seed_peer.fingerprint, succeeded=True)
     if seed_url in reliable_urls:
         # Issue #219/#270: the identity behind a reliable-roster URL is what
         # was *observed* by dialing it -- the only binding the live-relay
@@ -1919,6 +1922,7 @@ async def _try_candidate_fallback(
                 node, session, url, own_hello_provider, lane,
                 enforce_trust_policy=enforce_trust_policy,
                 fallback_offsets=fallback_offsets,
+                record_reachability=False,
             )
         )
         await lane.run(record_dial_outcome, fingerprint, succeeded=succeeded)
@@ -1941,6 +1945,7 @@ async def _request_one_relay_consent(
     lane: DatabaseLane,
     *,
     enforce_trust_policy: bool = False,
+    reached: set[str] | None = None,
 ) -> bool:
     """One relay-consent attempt against a single `base_url`, collapsed
     to a bool for `_try_addresses_via`'s own contract. A completed hello
@@ -1956,17 +1961,18 @@ async def _request_one_relay_consent(
     `dial_hello` call -- one bad or hostile candidate must not abort the
     rest of this pass."""
     try:
-        try:
-            await dial_hello(node, session, base_url, own_hello_provider(), lane)
-        except (LinkTransportError, LinkProtocolError):
-            # Issue #712: without this, a candidate that can never be reached
-            # kept the neutral score of one never tried, and was asked again
-            # every pass ahead of a relay that works. Reachability is what is
-            # recorded, not consent: a refusal by the relay's policy says
-            # nothing about whether it is up.
-            await lane.run(record_dial_outcome, relay_fingerprint, succeeded=False)
-            raise
-        await lane.run(record_dial_outcome, relay_fingerprint, succeeded=True)
+        answered = await dial_hello(node, session, base_url, own_hello_provider(), lane)
+        if answered.fingerprint != relay_fingerprint:
+            # A stale or reassigned address in an unverified descriptor: some
+            # other node answered. Not this candidate reached, and no consent
+            # to ask of it here.
+            _logger.info(
+                "Link sync: relay candidate %s's address %s is answered by %s instead",
+                relay_fingerprint, base_url, answered.fingerprint,
+            )
+            return False
+        if reached is not None:
+            reached.add(relay_fingerprint)
         if enforce_trust_policy:
             await lane.run(ensure_node_subject, relay_fingerprint)
             decision = await lane.run(
@@ -2036,6 +2042,7 @@ async def _maintain_relay_selection(
         base_urls = _candidate_dialable_addresses(node, candidate_fingerprint)
         if not base_urls:
             continue
+        reached: set[str] = set()
         await _try_addresses_via(
             base_urls,
             lambda url: _request_one_relay_consent(
@@ -2046,8 +2053,15 @@ async def _maintain_relay_selection(
                 own_hello_provider,
                 lane,
                 enforce_trust_policy=enforce_trust_policy,
+                reached=reached,
             ),
         )
+        # Issue #712: one observation per candidate, however many addresses it
+        # took, and of reachability rather than consent -- a refusal by the
+        # relay's policy says nothing about whether it is up. Without it every
+        # candidate kept the neutral score of one never tried, and an
+        # unreachable one was asked every pass ahead of a relay that works.
+        await lane.run(record_dial_outcome, candidate_fingerprint, succeeded=candidate_fingerprint in reached)
 
 
 async def _pickup_one_relay_mailbox(

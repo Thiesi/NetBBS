@@ -209,10 +209,13 @@ def test_candidates_that_cannot_be_reached_fall_behind_a_reached_one(db, alice_n
     assert select_relay_candidates(db, alice_node)[0] == "seed"
 
 
-def test_a_relay_consent_attempt_records_whether_the_candidate_was_reached(tmp_path, monkeypatch):
+def test_relay_selection_records_one_reachability_outcome_per_candidate(tmp_path, monkeypatch):
     """The relay-consent path never recorded an outcome, so the ranking above
-    had nothing to rank by (issue #712)."""
+    had nothing to rank by (issue #712). It records exactly one per candidate:
+    whether *that* node was reached -- not whether it consented, and not once
+    per address it advertises."""
     import asyncio
+    from types import SimpleNamespace
 
     import netbbs.link.sync as sync
     from netbbs.link.reliability import reliability_score
@@ -223,28 +226,78 @@ def test_a_relay_consent_attempt_records_whether_the_candidate_was_reached(tmp_p
     lane = DatabaseLane(database.path)
     node = LinkNode(identity=bootstrap_node_identity("alice"))
 
-    async def unreachable(*_args, **_kwargs):
-        raise LinkTransportError("connection refused")
+    def descriptor(fingerprint, *hosts):
+        return build_endpoint_descriptor(
+            signing_identity=Identity.generate(IdentityKind.NODE, fingerprint),
+            subject_fingerprint=fingerprint,
+            addresses=[{"protocol": "http", "address": host, "port": 7862} for host in hosts],
+            outgoing_only=False, created_at="2026-01-01T00:00:00Z",
+        )
 
-    async def refused_consent(*_args, **_kwargs):
+    node.candidate_descriptors["dead"] = descriptor("dead", "203.0.113.1")
+    node.candidate_descriptors["misaddressed"] = descriptor("misaddressed", "203.0.113.2")
+    node.candidate_descriptors["unwilling"] = descriptor("unwilling", "198.51.100.3")
+    node.candidate_descriptors["multi"] = descriptor("multi", "203.0.113.4", "198.51.100.4")
+    answers = {
+        "198.51.100.3": "unwilling", "198.51.100.4": "multi", "203.0.113.2": "someone-else",
+    }
+
+    async def dial(_node, _session, url, _hello, _lane, **_kwargs):
+        host = url.split("//", 1)[1].split(":", 1)[0]
+        if host not in answers:
+            raise LinkTransportError("connection refused")
+        return SimpleNamespace(fingerprint=answers[host])
+
+    async def refused(*_args, **_kwargs):
         raise LinkTransportError("403 link_policy_node_probationary_read_only")
 
-    async def reached(*_args, **_kwargs):
-        return None
-
+    monkeypatch.setattr(sync, "dial_hello", dial)
+    monkeypatch.setattr(sync, "request_relay_consent", refused)
+    monkeypatch.setattr(sync, "select_relay_candidates", lambda db, n: ["dead", "misaddressed", "unwilling", "multi"])
     try:
-        monkeypatch.setattr(sync, "dial_hello", unreachable)
-        assert asyncio.run(sync._request_one_relay_consent(
-            node, None, "http://203.0.113.9:7862", "dead", lambda: None, lane,
-        )) is False
-        # Reached, then refused by the relay's policy: up, just unwilling.
-        monkeypatch.setattr(sync, "dial_hello", reached)
-        monkeypatch.setattr(sync, "request_relay_consent", refused_consent)
-        assert asyncio.run(sync._request_one_relay_consent(
-            node, None, "http://relay.example:7862", "unwilling", lambda: None, lane,
-        )) is False
+        asyncio.run(sync._maintain_relay_selection(node, None, lambda: None, lane))
+        rows = dict(database.connection.execute(
+            "SELECT fingerprint, attempts FROM link_reliability"
+        ).fetchall())
+        assert rows == {"dead": 1, "misaddressed": 1, "unwilling": 1, "multi": 1}
         assert reliability_score(database, "dead") == 0.0
+        assert reliability_score(database, "misaddressed") == 0.0
         assert reliability_score(database, "unwilling") == 1.0
+        assert reliability_score(database, "multi") == 1.0
+    finally:
+        lane.close()
+        database.close()
+
+
+def test_a_successful_fallback_dial_is_counted_once(tmp_path, monkeypatch):
+    """Codex review of #713: the seed path records a reached seed, and the
+    fallback path records its candidate too; a successful fallback counted
+    twice while a failed one counted once."""
+    import asyncio
+
+    import netbbs.link.sync as sync
+    from netbbs.storage.execution import DatabaseLane
+
+    database = Database(tmp_path / "fallback.db")
+    lane = DatabaseLane(database.path)
+    node = LinkNode(identity=bootstrap_node_identity("alice"))
+    _add_candidate(node, "fallback-bob")
+    calls = []
+
+    async def reached(_node, _session, url, _hello, lane_, **kwargs):
+        calls.append(kwargs)
+        if kwargs.get("record_reachability", True):
+            await lane_.run(record_dial_outcome, "fallback-bob", succeeded=True)
+        return True
+
+    monkeypatch.setattr(sync, "_sync_one_seed", reached)
+    try:
+        assert asyncio.run(sync._try_candidate_fallback(node, None, lambda: None, lane, fallback_offsets={})) is True
+        attempts = database.connection.execute(
+            "SELECT attempts FROM link_reliability WHERE fingerprint = 'fallback-bob'"
+        ).fetchone()[0]
+        assert attempts == 1
+        assert calls[0]["record_reachability"] is False
     finally:
         lane.close()
         database.close()
