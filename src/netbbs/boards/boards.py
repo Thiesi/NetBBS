@@ -38,6 +38,30 @@ from netbbs.timeutil import utc_now_iso
 _VALID_SORT_ORDERS = ("activity", "alphabetical", "recent", "volume")
 
 
+def _check_max_post_age(max_post_age_days: int | None) -> None:
+    """A maximum age is a whole number of days, at least one. Zero would
+    expire every post on the next browse, and a negative value moves the
+    deletion cutoff (`age + grace`) into the past, hard-deleting
+    unreferenced posts almost at once. `None` means posts never expire."""
+    if max_post_age_days is not None and max_post_age_days < 1:
+        raise BoardError(f"maximum post age must be at least 1 day, got {max_post_age_days}")
+
+
+def usable_max_age_days(value: object) -> int | None:
+    """A Link genesis's recommended maximum age as this node can store it.
+
+    The value comes from a remote origin and is unvalidated on the wire.
+    Anything but a whole number of at least one day is dropped to `None`
+    (no expiry) rather than refusing the genesis: a bad recommendation
+    must not cost this node the board, and must not reach the sweep,
+    where 0 or a negative age deletes posts (see `_check_max_post_age`).
+    Shared with file-area genesis, whose `max_file_age_days` has the
+    same rule."""
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 1:
+        return value
+    return None
+
+
 class BoardError(Exception):
     """Raised for board creation/lookup failures."""
 
@@ -133,6 +157,7 @@ def create_board(
     """
     if name_requirement not in (None, "verified", "verified_and_displayed"):
         raise BoardError(f"invalid name_requirement: {name_requirement!r}")
+    _check_max_post_age(max_post_age_days)
     created_at = utc_now_iso()
     board_id = compute_content_id(
         {
@@ -329,6 +354,7 @@ def update_board(
     """
     if name_requirement not in (None, "verified", "verified_and_displayed"):
         raise BoardError(f"invalid name_requirement: {name_requirement!r}")
+    _check_max_post_age(max_post_age_days)
     try:
         db.connection.execute(
             """

@@ -17,6 +17,8 @@ from __future__ import annotations
 import asyncio
 
 from netbbs.__main__ import run
+
+from tests.ports import port
 from netbbs.net import shutdown as shutdown_module
 from netbbs.net.maintenance import MAINTENANCE_MESSAGE, MaintenanceMode
 from netbbs.net.nodeconfig import TransportConfig
@@ -721,7 +723,7 @@ def test_maintenance_mode_rejects_a_new_connection_before_login():
 
 def test_immediate_shutdown_broadcasts_and_disconnects_without_waiting(tmp_path):
     async def scenario():
-        config = _config(tmp_path, telnet=TransportConfig(True, "127.0.0.1", 12394))
+        config = _config(tmp_path, telnet=TransportConfig(True, "127.0.0.1", port(12394)))
         shutdown_event = asyncio.Event()
         session_registry = ActiveSessionRegistry()
         maintenance = MaintenanceMode()
@@ -734,10 +736,10 @@ def test_immediate_shutdown_broadcasts_and_disconnects_without_waiting(tmp_path)
             )
         )
         try:
-            reader, writer = await _open_connection_when_ready("127.0.0.1", 12394)
+            reader, writer = await _open_connection_when_ready("127.0.0.1", port(12394))
             await skip_initial_negotiation(reader)
 
-            deadline = asyncio.get_event_loop().time() + 2.0
+            deadline = asyncio.get_event_loop().time() + 30.0
             while len(session_registry) == 0:
                 if asyncio.get_event_loop().time() >= deadline:
                     raise AssertionError("connection never registered itself")
@@ -769,7 +771,7 @@ def test_immediate_shutdown_broadcasts_and_disconnects_without_waiting(tmp_path)
 
 def test_graceful_shutdown_actually_waits_before_disconnecting(tmp_path):
     async def scenario():
-        config = _config(tmp_path, telnet=TransportConfig(True, "127.0.0.1", 12393))
+        config = _config(tmp_path, telnet=TransportConfig(True, "127.0.0.1", port(12393)))
         shutdown_event = asyncio.Event()
         session_registry = ActiveSessionRegistry()
         maintenance = MaintenanceMode()
@@ -782,10 +784,10 @@ def test_graceful_shutdown_actually_waits_before_disconnecting(tmp_path):
             )
         )
         try:
-            reader, writer = await _open_connection_when_ready("127.0.0.1", 12393)
+            reader, writer = await _open_connection_when_ready("127.0.0.1", port(12393))
             await skip_initial_negotiation(reader)
 
-            deadline = asyncio.get_event_loop().time() + 2.0
+            deadline = asyncio.get_event_loop().time() + 30.0
             while len(session_registry) == 0:
                 if asyncio.get_event_loop().time() >= deadline:
                     raise AssertionError("connection never registered itself")

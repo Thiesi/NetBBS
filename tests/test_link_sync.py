@@ -23,6 +23,8 @@ from datetime import date
 import aiohttp
 import pytest
 
+from tests.link_sync_wait import run_sync_briefly as _run_sync_briefly
+
 from netbbs.attestation import attest_age, set_attestation_link_visible
 from netbbs.auth.users import SYSOP_LEVEL, create_user
 from netbbs.boards.boards import create_board
@@ -67,18 +69,6 @@ async def _run_server(node: LinkNode, lane: DatabaseLane, **kwargs) -> LinkServe
     )
     await server.start()
     return server
-
-
-async def _run_sync_briefly(coro_task: asyncio.Task, *, settle: float = 0.2) -> None:
-    """Lets a run_link_sync task run for a bit, then cancels it cleanly
-    -- mirrors how netbbs.__main__ will eventually cancel this same
-    task on node shutdown."""
-    await asyncio.sleep(settle)
-    coro_task.cancel()
-    try:
-        await coro_task
-    except asyncio.CancelledError:
-        pass
 
 
 class _NodeDb:
@@ -852,7 +842,13 @@ def test_sync_runs_a_second_pass_after_the_interval_elapses(tmp_path):
                         lambda: _hello_for(dialer_node), dialer.lane, interval_seconds=0.05,
                     )
                 )
-                await _run_sync_briefly(task, settle=0.3)
+                # Until the second hello lands, not for a fixed 0.3s: two
+                # passes over a real transport can take longer than that on
+                # a loaded parallel run.
+                deadline = asyncio.get_running_loop().time() + 60
+                while hello_count < 2 and asyncio.get_running_loop().time() < deadline:
+                    await asyncio.sleep(0.01)
+                await _run_sync_briefly(task, settle=0)
         finally:
             await seed_server.stop()
 

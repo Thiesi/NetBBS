@@ -94,7 +94,7 @@ async def _rig(db, lane, hub, channel, *, room: str = "lobby") -> _Rig:
         min_backoff_seconds=0.05, max_backoff_seconds=0.2, stable_after_seconds=0.0, per_user_interval_seconds=0.0,
     )
     await bridge.start()
-    deadline = asyncio.get_running_loop().time() + 2
+    deadline = asyncio.get_running_loop().time() + 30.0
     while bridge.state is not MrcState.CONNECTED:
         assert asyncio.get_running_loop().time() < deadline, bridge.status()
         await asyncio.sleep(0.01)
@@ -303,7 +303,7 @@ def test_who_names_and_mrc_show_the_hub_roster_and_link_state(db, lane, hub, pre
             # The roster arrives asynchronously from the hub's USERLIST
             # reply; a second pass once it has landed is the real check.
             await rig.fake.wait_for(lambda p: p.body == "USERLIST")
-            deadline = asyncio.get_running_loop().time() + 2
+            deadline = asyncio.get_running_loop().time() + 30.0
             while not rig.bridge.remote_roster(channel):
                 assert asyncio.get_running_loop().time() < deadline
                 await asyncio.sleep(0.01)
@@ -349,7 +349,7 @@ def test_offline_hub_keeps_chat_local_and_says_so(db, lane, hub, presence, chann
         rig = await _rig(db, lane, hub, channel)
         try:
             await rig.fake.close()
-            deadline = asyncio.get_running_loop().time() + 2
+            deadline = asyncio.get_running_loop().time() + 30.0
             while rig.bridge.state is MrcState.CONNECTED:
                 assert asyncio.get_running_loop().time() < deadline
                 await asyncio.sleep(0.01)

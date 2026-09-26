@@ -200,6 +200,7 @@ from netbbs.files.diz import MAX_DESCRIPTION_LINES
 from netbbs.files.gc import GCReport, reclaim_orphaned_blobs
 from netbbs.files.entries import (
     FileEntry,
+    FileEntryError,
     approve_file,
     count_visible_files,
     delete_file,
@@ -14579,7 +14580,12 @@ async def _post_action_screen(
             return
         elif choice == "a":
             await session.write_line("")
-            approved = await lane.run(approve_post, post, approved_by=actor)
+            try:
+                approved = await lane.run(approve_post, post, approved_by=actor)
+            except PostError as exc:
+                _announce(session, f"Error: {exc}", error=True)
+                await _draw_post_action(session, post, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line, when=when)
+                continue
             if link_context is not None:
                 await lane.run(
                     queue_board_post_if_linked, approved, board, node_identity=link_context.node_identity
@@ -15399,7 +15405,12 @@ async def _file_action_screen(
             await _draw()
         elif choice == "a":
             await session.write_line("")
-            approved = await lane.run(approve_file, entry, approved_by=actor)
+            try:
+                approved = await lane.run(approve_file, entry, approved_by=actor)
+            except FileEntryError as exc:
+                _announce(session, f"Error: {exc}", error=True)
+                await _draw()
+                continue
             if link_context is not None:
                 await lane.run(
                     queue_file_descriptor_if_linked, approved, area,
@@ -15409,7 +15420,12 @@ async def _file_action_screen(
             return
         elif choice == "r":
             await session.write_line("")
-            await lane.run(delete_file, entry, deleted_by=actor)
+            try:
+                await lane.run(delete_file, entry, deleted_by=actor)
+            except FileEntryError as exc:
+                _announce(session, f"Error: {exc}", error=True)
+                await _draw()
+                continue
             _announce_line(session, "Rejected.")
             return
         elif choice == "p":

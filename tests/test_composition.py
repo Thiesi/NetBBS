@@ -295,3 +295,38 @@ def test_post_review_has_no_recipient_action_and_can_commit():
     )
     assert action is ReviewAction.COMMIT
     assert "To:" not in _text(session)
+
+
+# -- issue #676: a cap refuses growth, not trimming ---------------------------
+
+
+def test_a_body_already_over_the_line_cap_can_still_be_trimmed():
+    """A body written in the fullscreen editor (no line cap) or carried
+    over Link can hold more lines than this editor allows. /delete must
+    still work on it, or the caller is stuck with /done or /cancel."""
+    session = FakeSession(lines=["/delete 1", "/done"])
+    body = asyncio.run(
+        edit_line_body(session, initial_text="one\ntwo\nthree\nfour", max_bytes=1000, max_lines=2)
+    )
+    assert body == "two\nthree\nfour"
+    assert "cannot exceed" not in _text(session)
+
+
+def test_a_body_over_the_line_cap_cannot_grow_further():
+    session = FakeSession(lines=["five", "/done"])
+    body = asyncio.run(
+        edit_line_body(session, initial_text="one\ntwo\nthree\nfour", max_bytes=1000, max_lines=2)
+    )
+    assert body == "one\ntwo\nthree\nfour"
+    assert "Body cannot exceed 2 logical lines." in _text(session)
+
+
+def test_a_body_over_the_byte_cap_can_still_be_shortened():
+    # Still over the cap after the edit, but shorter: accepted, because it
+    # moves the body toward the cap rather than past it.
+    session = FakeSession(lines=["/edit 1", "y" * 40, "/done"])
+    body = asyncio.run(
+        edit_line_body(session, initial_text="y" * 50, max_bytes=10, max_lines=200)
+    )
+    assert body == "y" * 40
+    assert "cannot exceed" not in _text(session)
