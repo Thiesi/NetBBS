@@ -57,7 +57,7 @@ from dataclasses import dataclass
 
 from netbbs.auth.users import User
 from netbbs.boards.boards import Board
-from netbbs.boards.posts import Post, count_visible_roots
+from netbbs.boards.posts import Post, count_visible_roots, sweep_expired_posts
 from netbbs.chat.channels import Channel
 from netbbs.chat.scrollback import ChannelMessage
 from netbbs.files.areas import FileArea
@@ -221,6 +221,7 @@ def unread_post_count(db: Database, user: User, board: Board) -> int | None:
     cursor = _get_cursor(db, user, _BOARD, board.id)
     if cursor is None:
         return None
+    sweep_expired_posts(db, board)
     if cursor.arrival_id is not None:
         count, _ = count_visible_roots(
             db, board.id, extra_sql="AND root.id > ?", extra_params=(cursor.arrival_id,)

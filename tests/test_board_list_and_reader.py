@@ -439,3 +439,77 @@ def test_a_page_emptied_while_reading_leaves_no_cursor_to_crash_on(db, alice, mo
     session = FakeSession(["1", "t", "y", "ENTER", "b"])
 
     asyncio.run(board_flow._show_board(session, db, board, alice))  # no IndexError
+
+
+# -- Codex review round 2 on #719 --------------------------------------------
+
+
+def test_every_post_shown_in_the_reader_is_recorded_as_it_is_shown(db, alice, monkeypatch):
+    board = create_board(db, "general", creator=alice)
+    _posts(db, board, alice, 60, monkeypatch)
+    recorded = []
+    real = board_flow.record_board_seen
+    monkeypatch.setattr(
+        board_flow, "record_board_seen",
+        lambda db_, user, board_, post: recorded.append(post.subject) or real(db_, user, board_, post),
+    )
+    # Across the page boundary with [N]ext post, then one more step inside
+    # the page the list never drew.
+    session = FakeSession(["o", "UP", "ENTER", "n", "n", "b", "b"])
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+
+    shown = [
+        f"Subject {re.search(r'Body of post (\d+)', screen).group(1)}"
+        for screen in session.screens() if "Body of post" in screen
+    ]
+    assert len(shown) == 3
+    for subject in shown:
+        assert subject in recorded
+
+
+def test_board_activity_does_not_count_posts_past_their_age(db, alice, monkeypatch):
+    from netbbs.activity import unread_post_count
+
+    board = create_board(db, "general", creator=alice, max_post_age_days=1)
+    first, stale = _posts(db, board, alice, 2, monkeypatch)
+    db.connection.execute(
+        "UPDATE posts SET created_at = ? WHERE post_id = ?", ("2020-01-01T00:00:00.000000Z", first.post_id)
+    )
+    db.connection.commit()
+    record_board_seen(db, alice, board, first)
+    db.connection.execute(
+        "UPDATE posts SET created_at = ? WHERE post_id = ?", ("2020-01-02T00:00:00.000000Z", stale.post_id)
+    )
+    db.connection.commit()
+
+    # Still stamped 'approved' until something sweeps the board; the count
+    # must not report it as new.
+    assert unread_post_count(db, alice, board) == 0
+
+
+def test_a_non_ascii_digit_on_the_list_rings_the_bell(db, alice, monkeypatch):
+    board = create_board(db, "general", creator=alice)
+    _posts(db, board, alice, 2, monkeypatch)
+    session = FakeSession(["²", "①", "b"])
+
+    asyncio.run(board_flow._show_board(session, db, board, alice))  # no ValueError
+
+    assert "\a" in "".join(session.written)
+
+
+def test_the_reader_stays_on_its_post_after_an_action_queues_a_notice(db, alice, monkeypatch):
+    """A pending outcome takes a row from a fresh page budget; the refetch
+    after an action keeps the page's own size, so the post acted on stays."""
+    board = create_board(db, "general", creator=alice)
+    _posts(db, board, alice, 60, monkeypatch)
+    # Row 1 is the oldest post on the newest page -- the one a shorter
+    # refetch would drop. Cancel an edit of it, which announces "Edit
+    # cancelled.", and see which post the reader comes back to.
+    session = FakeSession(["1", "e", "", "/cancel", "b", "b"])
+
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+
+    readers = [screen for screen in session.screens() if "Body of post" in screen]
+    before, after = (re.search(r"Body of post (\d+)", s).group(1) for s in (readers[0], readers[-1]))
+    assert before == after
+    assert "Edit cancelled." in readers[-1]

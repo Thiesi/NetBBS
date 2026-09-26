@@ -845,17 +845,18 @@ async def _show_board(
         await write_notices(session)
         await session.write("Choice: ")
 
-    def _refetch_current_page() -> PostPage:
+    def _refetch_current_page(*, limit: int | None = None) -> PostPage:
         """Re-fetches whichever page is currently on screen, using the
         exact cursor that produced it -- not always the newest page.
         Needed after an in-place edit (which never moves a post's feed
         position, see netbbs.boards.posts._resolve_current_version)
         so [E]diting a post doesn't also silently jump the SysOp back
         to page one as an unrelated side effect."""
+        rows = limit if limit is not None else _page_limit()
         if page_anchor is None:
-            return list_posts_page(db, board, user, limit=_page_limit())
+            return list_posts_page(db, board, user, limit=rows)
         mode, cursor = page_anchor
-        return list_posts_page(db, board, user, limit=_page_limit(), **{mode: cursor})
+        return list_posts_page(db, board, user, limit=rows, **{mode: cursor})
 
     async def _render_and_advance_cursor(current_page: PostPage, highlighted: int | None = None) -> None:
         """The one place every render in this loop funnels through
@@ -882,6 +883,11 @@ async def _show_board(
         detail_page = 0
         while True:
             post = page.posts[index]
+            # Recorded as it is shown, one post at a time: stepping through a
+            # page the list never drew must not leave those posts unread if
+            # the connection drops before [B]ack (Codex review on #719).
+            # `record_board_seen` only ever moves forward.
+            record_board_seen(db, user, board, post)
             width = session.terminal_width
             title = screen_title(
                 sanitize_text(post.subject),
@@ -928,7 +934,11 @@ async def _show_board(
                     await _edit_existing_post(session, db, board, post, user, link_context=link_context)
                 else:
                     await _tombstone_existing_post(session, db, board, post, user, link_context=link_context)
-                page = _refetch_current_page()
+                # The same number of rows as the page the reader is on: an
+                # outcome notice now pending takes a row from a fresh budget,
+                # and a page one post shorter could drop the post just acted
+                # on (Codex review on #719).
+                page = _refetch_current_page(limit=len(page.posts))
                 if not page.posts:
                     page_anchor = None
                     page = _refetch_current_page()
@@ -961,9 +971,6 @@ async def _show_board(
                 page_anchor = None
                 page = _refetch_current_page()
                 return None
-            # Only the post now on screen was seen, not the rest of the page
-            # it was fetched with (Codex review on #719).
-            record_board_seen(db, user, board, page.posts[index])
 
     async def _compose_new_post(*, initial_body: str | None = None) -> None:
         # `[P]ost` is a hotkey followed straight by a line prompt: an Enter
@@ -1212,7 +1219,7 @@ async def _show_board(
             await _moved_on()
             highlighted = await _read_post(highlighted)
             await _render_and_advance_cursor(page, highlighted)
-        elif char.isdigit() and 1 <= int(char) <= min(9, len(page.posts)):
+        elif len(char) == 1 and char in "123456789" and int(char) <= min(9, len(page.posts)):
             await _moved_on()
             highlighted = await _read_post(int(char) - 1)
             await _render_and_advance_cursor(page, highlighted)

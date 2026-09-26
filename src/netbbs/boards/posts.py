@@ -1091,6 +1091,15 @@ def _cutoff_iso(days: int) -> str:
     return cutoff.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
+def sweep_expired_posts(db: Database, board: Board) -> None:
+    """Bring `board`'s expiry state up to date. Expiry is swept lazily, on
+    the reads that show a board; any other surface that reports on posts
+    -- an unread count on the board list or in [N]ew scan -- runs this
+    first, or it counts posts past their age that the board itself would
+    no longer show (Codex review on #719)."""
+    _sweep_expired_posts(db, board)
+
+
 def _sweep_expired_posts(db: Database, board: Board) -> None:
     """
     Lazily bring `board`'s post statuses up to date: age `'approved'`
