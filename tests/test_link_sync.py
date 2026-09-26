@@ -23,6 +23,8 @@ from datetime import date
 import aiohttp
 import pytest
 
+from tests.link_sync_wait import run_sync_briefly as _run_sync_briefly
+
 from netbbs.attestation import attest_age, set_attestation_link_visible
 from netbbs.auth.users import SYSOP_LEVEL, create_user
 from netbbs.boards.boards import create_board
@@ -67,18 +69,6 @@ async def _run_server(node: LinkNode, lane: DatabaseLane, **kwargs) -> LinkServe
     )
     await server.start()
     return server
-
-
-async def _run_sync_briefly(coro_task: asyncio.Task, *, settle: float = 0.2) -> None:
-    """Lets a run_link_sync task run for a bit, then cancels it cleanly
-    -- mirrors how netbbs.__main__ will eventually cancel this same
-    task on node shutdown."""
-    await asyncio.sleep(settle)
-    coro_task.cancel()
-    try:
-        await coro_task
-    except asyncio.CancelledError:
-        pass
 
 
 class _NodeDb:

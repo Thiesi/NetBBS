@@ -233,7 +233,7 @@ def test_hub_replies_reach_only_the_asker_and_are_bounded_per_caller(db, lane, l
             for i in range(8):
                 await fake.send_line(f"SERVER~~~alice~~~line {i}~")
             got = []
-            deadline = asyncio.get_running_loop().time() + 2
+            deadline = asyncio.get_running_loop().time() + 30.0
             while len(got) < 4 and asyncio.get_running_loop().time() < deadline:
                 got.append(await asyncio.wait_for(alice_queue.get(), timeout=2))
             texts = [n.text for n in got]

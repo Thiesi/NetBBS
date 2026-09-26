@@ -78,7 +78,7 @@ def test_password_work_never_exceeds_configured_concurrency(tmp_path, monkeypatc
             if active == 2:
                 two_workers_started.set()
         try:
-            assert release_workers.wait(timeout=2)
+            assert release_workers.wait(timeout=30)
             return False
         finally:
             with state_lock:
@@ -122,7 +122,7 @@ def test_cancelled_session_does_not_release_slot_before_worker_finishes(
             this_call = call_count
         if this_call == 1:
             first_started.set()
-            assert release_first.wait(timeout=2)
+            assert release_first.wait(timeout=30)
         else:
             second_started.set()
         return False

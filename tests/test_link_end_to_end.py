@@ -46,6 +46,8 @@ import os
 import aiohttp
 import pytest
 
+from tests.link_sync_wait import run_sync_briefly as _run_sync_briefly
+
 from netbbs.auth.users import create_user
 from netbbs.boards.boards import create_board, get_board_by_name
 from netbbs.boards.posts import create_post, list_posts_page
@@ -104,15 +106,6 @@ async def _run_server(node: LinkNode, lane: DatabaseLane) -> LinkServer:
     server = LinkServer(host="127.0.0.1", port=0, node=node, own_hello_provider=lambda: _hello_for(node), lane=lane)
     await server.start()
     return server
-
-
-async def _run_sync_briefly(coro_task: asyncio.Task, *, settle: float = 0.2) -> None:
-    await asyncio.sleep(settle)
-    coro_task.cancel()
-    try:
-        await coro_task
-    except asyncio.CancelledError:
-        pass
 
 
 class _NodeDb:

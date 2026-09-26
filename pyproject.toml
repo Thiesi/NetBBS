@@ -16,6 +16,9 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0",
+    # `pytest -n auto`: the suite is parallel-safe (see the worklog's
+    # testing policy) and runs roughly ten times faster that way.
+    "pytest-xdist>=3.0",
     "asyncssh>=2.24",
     "aiohttp>=3.9",
 ]

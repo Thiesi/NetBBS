@@ -4846,6 +4846,31 @@ observable end state instead: where an injected fake ends the loop itself, the
 task completing *is* the signal, and a timeout around it is a deadlock guard
 rather than a pacing device.
 
+The suite runs in parallel (`pytest -n auto`, `pytest-xdist`), and that is the
+load under which these guesses fail: on a twenty-worker run every subprocess
+start, loopback round trip and lane hop is several times slower than alone.
+Two consequences:
+
+- The bound on a readiness poll is a deadlock guard, not an expectation of
+  speed. It costs nothing while the condition arrives, so it should be
+  generous (tens of seconds). A two-second bound is a timing guess with a
+  loop around it.
+- A test must not wait "long enough" for background work to finish and then
+  cancel it. Link sync tests cancel `run_link_sync` only once it is parked in
+  its interval sleep between passes (`tests/link_sync_wait.py`). Before that,
+  they cancelled after a fixed `settle` and asserted on a half-finished pass.
+
+A time limit under test is a race of its own. A door given a one-second wall
+limit, with the test checking it is still running 0.6 s after its first write,
+fails whenever the door takes longer than 0.4 s to start. Leave the limit
+enough headroom over everything the test does before checking it.
+
+On Windows, killing a process that holds a file lock does not release the lock
+when the process exits. The OS releases it later, and a loaded machine makes
+"later" long enough for the next step of the same test to find it still held.
+A test child holding a lease should be told to leave its `with` block, with
+`kill()` kept only as a fallback.
+
 A test that pins a clock has to pin every timestamp that clock is compared
 against. Where the code under test falls back to a row's real creation time
 (`COALESCE(mrc_last_active_at, created_at)`), a hardcoded `now` is a date-bomb:

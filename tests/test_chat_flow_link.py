@@ -255,7 +255,7 @@ def test_message_join_and_leave_in_a_linked_channel_are_pushed_live_to_a_real_su
                 await subscriber_session.send(build_subscribe_frame(channel.channel_id))
 
                 loop = asyncio.get_running_loop()
-                deadline = loop.time() + 2.0
+                deadline = loop.time() + 30.0
                 while loop.time() < deadline and channel.channel_id not in origin_bridge._subscribers:
                     await asyncio.sleep(0.02)
                 assert channel.channel_id in origin_bridge._subscribers
@@ -266,7 +266,7 @@ def test_message_join_and_leave_in_a_linked_channel_are_pushed_live_to_a_real_su
                     link_context=link_context,
                 )
 
-                deadline = loop.time() + 2.0
+                deadline = loop.time() + 30.0
                 while loop.time() < deadline and len(received) < 5:
                     await asyncio.sleep(0.02)
             finally:
@@ -457,7 +457,7 @@ def test_a_second_local_caller_still_watching_keeps_the_origin_subscription_aliv
         )
 
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + 2.0
+        deadline = loop.time() + 30.0
         while loop.time() < deadline and len(calls) < 1:
             await asyncio.sleep(0.02)
         assert len(calls) == 1  # bob is now live-subscribed and interest-registered
@@ -584,7 +584,7 @@ def test_chat_loop_announces_a_lost_real_time_link_while_still_in_the_channel(
             )
         )
         # Let the announcer task actually run and reach `closed.wait()`.
-        deadline = asyncio.get_running_loop().time() + 2.0
+        deadline = asyncio.get_running_loop().time() + 30.0
         while asyncio.get_running_loop().time() < deadline and not any(
             "is up" in line for line in session.written
         ):
@@ -593,7 +593,7 @@ def test_chat_loop_announces_a_lost_real_time_link_while_still_in_the_channel(
 
         fake_session.closed.set()
 
-        deadline = asyncio.get_running_loop().time() + 2.0
+        deadline = asyncio.get_running_loop().time() + 30.0
         while asyncio.get_running_loop().time() < deadline and not any(
             "was lost" in line for line in session.written
         ):

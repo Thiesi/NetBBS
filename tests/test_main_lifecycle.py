@@ -503,7 +503,7 @@ def test_configured_link_seed_is_dialed_by_a_real_running_node(tmp_path):
         try:
             await _open_connection_when_ready("127.0.0.1", 12403)  # node fully up
 
-            deadline = asyncio.get_event_loop().time() + 5.0
+            deadline = asyncio.get_event_loop().time() + 30.0
             while not seed_node.peers:
                 if asyncio.get_event_loop().time() >= deadline:
                     raise AssertionError("the running node's sync task never dialed the seed")
@@ -554,7 +554,7 @@ def test_link_sync_failures_reach_the_bounded_diagnostic_log(tmp_path):
             # real endpoint) can legitimately write to the same log
             # concurrently -- poll for the *specific* sync.py dial
             # failure this test means to exercise, not just "any row."
-            deadline = asyncio.get_event_loop().time() + 5.0
+            deadline = asyncio.get_event_loop().time() + 30.0
             matching_row = None
             while matching_row is None:
                 if asyncio.get_event_loop().time() >= deadline:
@@ -612,7 +612,7 @@ def test_link_sync_session_honors_forward_proxy_env_vars(tmp_path, monkeypatch):
         try:
             await _open_connection_when_ready("127.0.0.1", 12413)
 
-            deadline = asyncio.get_event_loop().time() + 5.0
+            deadline = asyncio.get_event_loop().time() + 30.0
             while "trust_env" not in captured_kwargs:
                 if asyncio.get_event_loop().time() >= deadline:
                     raise AssertionError(
@@ -855,7 +855,7 @@ def test_shutdown_event_and_graceful_delay_reach_handle_session(tmp_path, monkey
             reader, writer = await _open_connection_when_ready("127.0.0.1", 12391)
             await skip_initial_negotiation(reader)
 
-            deadline = asyncio.get_event_loop().time() + 2.0
+            deadline = asyncio.get_event_loop().time() + 30.0
             while "node_controls" not in captured:
                 if asyncio.get_event_loop().time() >= deadline:
                     raise AssertionError("handle_session's spy was never reached")
