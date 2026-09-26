@@ -208,7 +208,19 @@ def list_carry_decisions(db: Database, state: str, *, limit: int = MAX_LISTED_DE
                                                    WHERE channel_id = d.resource_id AND link_hidden_at IS NOT NULL)
                      ELSE EXISTS (SELECT 1 FROM file_areas
                                    WHERE area_id = d.resource_id AND link_hidden_at IS NOT NULL)
-                   END AS hidden
+                   END AS hidden,
+                   -- A hidden row may carry a local name (a rename, or a
+                   -- collision suffix): that is the name the SysOp knows it by.
+                   CASE d.kind
+                     WHEN 'boards' THEN (SELECT name FROM boards WHERE board_id = d.resource_id)
+                     WHEN 'channels' THEN (SELECT name FROM channels WHERE channel_id = d.resource_id)
+                     ELSE (SELECT name FROM file_areas WHERE area_id = d.resource_id)
+                   END AS local_name,
+                   CASE d.kind
+                     WHEN 'boards' THEN (SELECT description FROM boards WHERE board_id = d.resource_id)
+                     WHEN 'channels' THEN (SELECT description FROM channels WHERE channel_id = d.resource_id)
+                     ELSE (SELECT description FROM file_areas WHERE area_id = d.resource_id)
+                   END AS local_description
               FROM link_carry_decisions AS d
              WHERE d.state = ? AND NOT {_CARRIED_ROW}
              ORDER BY d.decided_at DESC, d.kind, d.resource_id
@@ -220,8 +232,8 @@ def list_carry_decisions(db: Database, state: str, *, limit: int = MAX_LISTED_DE
         decisions.append(CarryDecision(
             kind=row["kind"], resource_id=row["resource_id"], state=row["state"],
             reason=row["reason"], decided_at=row["decided_at"], actor_user_id=row["actor_user_id"],
-            name=str(payload.get("name") or row["resource_id"]),
-            description=payload.get("description"),
+            name=str(row["local_name"] or payload.get("name") or row["resource_id"]),
+            description=row["local_description"] if row["local_name"] else payload.get("description"),
             origin_fingerprint=str(payload.get("origin_fingerprint") or ""),
             ref=row["ref"],
             hidden=bool(row["hidden"]),
@@ -501,7 +513,9 @@ def carried_from_elsewhere(db: Database, kind: str, resource_id: str, own_finger
     ).fetchone() is not None
 
 
-def hide_carried_resource(db: Database, kind: str, resource_id: str, *, actor: User | None) -> None:
+def hide_carried_resource(
+    db: Database, kind: str, resource_id: str, *, actor: User | None, own_fingerprint: str | None = None
+) -> None:
     """Hide a carried resource in one transaction: keep its genesis in
     `link_events`, set `link_hidden_at`, record it excluded (`deleted`) and
     audit it."""
@@ -513,6 +527,11 @@ def hide_carried_resource(db: Database, kind: str, resource_id: str, *, actor: U
             raise CarryDecisionError("that is not a carried Link resource")
         if row["link_hidden_at"] is not None:
             raise CarryDecisionError("that resource is already excluded")
+        # Re-checked under the lock: an origin transfer to this node accepted
+        # while the SysOp was confirming makes this node the board's authority,
+        # and a resource this node originates is not a carry choice.
+        if not carried_from_elsewhere(db, kind, resource_id, own_fingerprint):
+            raise CarryDecisionError("this node is now that resource's origin; it can only be deleted")
         genesis = json.loads(row["link_genesis_json"])
         save_event(
             db, sender_fingerprint=genesis["envelope"]["payload"]["origin_fingerprint"],

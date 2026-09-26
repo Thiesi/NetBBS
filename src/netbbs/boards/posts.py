@@ -136,10 +136,14 @@ def create_post(
     require_level(author, board.min_write_level)
     _check_content_length(subject, body)
     closed_row = db.connection.execute(
-        "SELECT link_closed_at FROM boards WHERE id = ?", (board.id,)
+        "SELECT link_closed_at, link_hidden_at FROM boards WHERE id = ?", (board.id,)
     ).fetchone()
     if closed_row is not None and closed_row["link_closed_at"] is not None:
         raise PostError(f"board {board.name!r} is closed and no longer accepts new posts")
+    if closed_row is not None and closed_row["link_hidden_at"] is not None:
+        # Issue #683: a caller who opened the board before the SysOp excluded
+        # it still holds the `Board`; the write is refused here.
+        raise PostError(f"board {board.name!r} is no longer available on this node")
 
     status = "pending" if board.moderated else "approved"
     created_at = utc_now_iso()
@@ -256,10 +260,14 @@ def create_labelled_post(
     """
     _check_content_length(subject, body)
     closed_row = db.connection.execute(
-        "SELECT link_closed_at FROM boards WHERE id = ?", (board.id,)
+        "SELECT link_closed_at, link_hidden_at FROM boards WHERE id = ?", (board.id,)
     ).fetchone()
     if closed_row is not None and closed_row["link_closed_at"] is not None:
         raise PostError(f"board {board.name!r} is closed and no longer accepts new posts")
+    if closed_row is not None and closed_row["link_hidden_at"] is not None:
+        # Issue #683: a caller who opened the board before the SysOp excluded
+        # it still holds the `Board`; the write is refused here.
+        raise PostError(f"board {board.name!r} is no longer available on this node")
 
     status = "pending" if board.moderated else "approved"
     created_at = utc_now_iso()

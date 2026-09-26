@@ -290,3 +290,54 @@ def test_a_hidden_channel_stops_offering_its_pending_invitations(db, own, remote
     hide_carried_resource(db, "channels", CHANNEL_ID, actor=sysop)
 
     assert list_pending_invitations_for_user(db, guest) == []
+
+
+def test_a_caller_already_inside_a_hidden_board_cannot_post_to_it(db, own, remote, sysop):
+    """They still hold the `Board` from before it was hidden; the write path
+    refuses it."""
+    from netbbs.boards.posts import PostError
+
+    board = _carried_board(db, own, remote)
+    hide_carried_resource(db, "boards", BOARD_ID, actor=sysop)
+
+    with pytest.raises(PostError, match="no longer available"):
+        create_post(db, board, sysop, "late", "still typing")
+
+
+def test_a_caller_already_inside_a_hidden_file_area_cannot_upload_to_it(db, own, remote, sysop):
+    from netbbs.files.entries import FileEntryError, upload_file
+
+    _carry(db, own, build_file_area_genesis(
+        signing_identity=remote.signing_key, origin_fingerprint=remote.fingerprint,
+        area_id=AREA_ID, name="files", created_at="2026-01-01T00:00:00Z",
+    ), "file_areas")
+    area = get_file_area_by_name(db, "files")
+    hide_carried_resource(db, "file_areas", AREA_ID, actor=sysop)
+
+    with pytest.raises(FileEntryError, match="no longer available"):
+        upload_file(db, area, sysop, "late.txt", b"still uploading")
+
+
+def test_excluded_lists_a_hidden_resource_under_its_local_name(db, own, remote, sysop):
+    """Renamed here (or given a collision suffix): that is the name the SysOp
+    knows, and the one Purge asks them to type."""
+    _carried_board(db, own, remote)
+    db.connection.execute(
+        "UPDATE boards SET name = 'Renamed Here', description = 'local words' WHERE board_id = ?", (BOARD_ID,)
+    )
+    db.connection.commit()
+    hide_carried_resource(db, "boards", BOARD_ID, actor=sysop)
+
+    [decision] = list_carry_decisions(db, EXCLUDED)
+    assert (decision.name, decision.description) == ("Renamed Here", "local words")
+
+
+def test_hiding_is_refused_once_this_node_has_become_the_boards_origin(db, own, remote, sysop):
+    """An origin transfer to this node accepted while the SysOp was confirming
+    makes this node the board's authority; the hide re-checks under the lock."""
+    _carried_board(db, own, remote)
+    db.connection.execute("UPDATE boards SET link_origin_fingerprint = ? WHERE board_id = ?", (own.fingerprint, BOARD_ID))
+    db.connection.commit()
+
+    with pytest.raises(CarryDecisionError, match="origin"):
+        hide_carried_resource(db, "boards", BOARD_ID, actor=sysop, own_fingerprint=own.fingerprint)

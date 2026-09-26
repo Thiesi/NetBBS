@@ -14702,7 +14702,7 @@ async def _delete_board_screen(
     # Issue #683: a carried message board whose origin is another node is hidden,
     # not destroyed -- see `_hide_carried_screen`.
     if await lane.run(carried_from_elsewhere, "boards", board.board_id, own_fingerprint):
-        return await _hide_carried_screen(session, lane, actor, "boards", board.board_id, board.name)
+        return await _hide_carried_screen(session, lane, actor, "boards", board.board_id, board.name, own_fingerprint=own_fingerprint)
     await session.write_line(
         colored(
             "\r\nThis permanently deletes the message board, all of its posts, and any "
@@ -14736,6 +14736,7 @@ _EXCLUDED_AFTER_DELETE = " It is excluded from Link here and will not come back;
 
 async def _hide_carried_screen(
     session: Session, lane: DatabaseLane, actor: User, kind: str, resource_id: str, name: str,
+    *, own_fingerprint: str | None,
 ) -> bool:
     """Deleting a carried Link resource whose origin is another node (issue
     #683, decided 2026-09-26): it is hidden from callers and no longer carried,
@@ -14756,7 +14757,9 @@ async def _hide_carried_screen(
         _announce_line(session, "Cancelled.")
         return False
     try:
-        await lane.run(hide_carried_resource, kind, resource_id, actor=actor)
+        await lane.run(
+            hide_carried_resource, kind, resource_id, actor=actor, own_fingerprint=own_fingerprint,
+        )
     except CarryDecisionError as exc:
         _announce_line(session, colored(f"Could not exclude {name!r}: {exc}", fg_color=ERROR_COLOR))
         return False
@@ -15506,7 +15509,7 @@ async def _delete_area_screen(
     # Issue #683: a carried file area whose origin is another node is hidden,
     # not destroyed -- see `_hide_carried_screen`.
     if await lane.run(carried_from_elsewhere, "file_areas", area.area_id, own_fingerprint):
-        return await _hide_carried_screen(session, lane, actor, "file_areas", area.area_id, area.name)
+        return await _hide_carried_screen(session, lane, actor, "file_areas", area.area_id, area.name, own_fingerprint=own_fingerprint)
     await session.write_line(
         colored(
             "\r\nThis permanently deletes the file area, all of its files, and any "
@@ -17557,7 +17560,7 @@ async def _delete_channel_screen(
     # Issue #683: a carried chat channel whose origin is another node is hidden,
     # not destroyed -- see `_hide_carried_screen`.
     if await lane.run(carried_from_elsewhere, "channels", channel.channel_id, own_fingerprint):
-        return await _hide_carried_screen(session, lane, actor, "channels", channel.channel_id, channel.name)
+        return await _hide_carried_screen(session, lane, actor, "channels", channel.channel_id, channel.name, own_fingerprint=own_fingerprint)
     await session.write_line(
         colored(
             "\r\nThis permanently deletes the chat channel, its scrollback, mute/ban "
