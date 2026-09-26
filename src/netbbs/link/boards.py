@@ -627,20 +627,21 @@ def materialize_carried_post_edit(
     ).fetchone()
     if root_row is None:
         return None
-    predecessor_exists = db.connection.execute(
-        "SELECT 1 FROM posts WHERE post_id = ?", (payload["previous_event_id"],)
-    ).fetchone()
-    if predecessor_exists is None:
-        return None
-
-    board_local_id = root_row["board_id"]
-    author = payload["author"]
-    author_label = f"{author['local_user_id']}@{author['home_node_fingerprint']}"
     # An author's own edit follows local moderation and the author's
     # trust decision, as a new post does (issue #677).
     status = _carried_revision_status(
         db, payload["root_post_id"], local_moderation=True, requested=initial_status
     )
+    # Past a local tombstone nothing is projected, so a predecessor that was
+    # itself retained but never projected must not keep this event from
+    # being retained too: a chain of edits after a tombstone would otherwise
+    # lose every edit after the first from durable storage.
+    if status is not None and not _predecessor_projected(db, payload["previous_event_id"]):
+        return None
+
+    board_local_id = root_row["board_id"]
+    author = payload["author"]
+    author_label = f"{author['local_user_id']}@{author['home_node_fingerprint']}"
 
     db.connection.execute(
         """
@@ -676,6 +677,12 @@ def materialize_carried_post_edit(
     return _post_from_row(
         db.connection.execute("SELECT * FROM posts WHERE post_id = ?", (edit.content_id,)).fetchone()
     )
+
+
+def _predecessor_projected(db: Database, previous_event_id: str) -> bool:
+    return db.connection.execute(
+        "SELECT 1 FROM posts WHERE post_id = ?", (previous_event_id,)
+    ).fetchone() is not None
 
 
 def _carried_revision_status(
@@ -748,10 +755,13 @@ def materialize_carried_board_post_moderator_edit(
     ).fetchone()
     if root_row is None:
         return None
-    predecessor_exists = db.connection.execute(
-        "SELECT 1 FROM posts WHERE post_id = ?", (payload["previous_event_id"],)
-    ).fetchone()
-    if predecessor_exists is None:
+    # The origin's moderator edit is the origin's own moderation, so this
+    # node's "Moderated" flag does not hold it -- but it may neither undo
+    # a local tombstone nor publish a chain nobody approved here. Past a
+    # tombstone it is retained whether or not its predecessor was
+    # projected, as `materialize_carried_post_edit` explains.
+    status = _carried_revision_status(db, payload["root_post_id"], local_moderation=False)
+    if status is not None and not _predecessor_projected(db, payload["previous_event_id"]):
         return None
 
     db.connection.execute(
@@ -765,10 +775,6 @@ def materialize_carried_board_post_moderator_edit(
             json.dumps(edit.to_dict()), utc_now_iso(), payload["board_id"],
         ),
     )
-    # The origin's moderator edit is the origin's own moderation, so this
-    # node's "Moderated" flag does not hold it -- but it may neither undo
-    # a local tombstone nor publish a chain nobody approved here.
-    status = _carried_revision_status(db, payload["root_post_id"], local_moderation=False)
     if status is None:
         db.connection.commit()
         return None

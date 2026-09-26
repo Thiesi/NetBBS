@@ -568,3 +568,38 @@ def test_counting_a_board_asks_trust_once_per_author(db, remote, alice, monkeypa
 
     assert count_visible_posts(db, board)[0] == 20
     assert len(calls) == 2
+
+
+# -- Codex review round 2 ----------------------------------------------------
+
+
+def test_every_remote_edit_after_a_local_tombstone_is_retained(db, remote, alice, sysop):
+    """The first edit after a local tombstone is retained but not
+    projected. The second names it as its predecessor, which is therefore
+    not in `posts`; it must be retained all the same, or the node loses it
+    from durable storage and cannot relay it after a restart."""
+    board = _carried_board(db, remote)
+    root = _carry(db, remote)
+    tombstone_post(db, root, board, tombstoned_by=sysop)
+    first = _remote_edit(remote, root, previous=root.post_id, body="first edit")
+    second = build_board_post_edit(
+        signing_identity=remote.signing_key,
+        author={"home_node_fingerprint": remote.fingerprint, "local_user_id": "wanderer"},
+        board_id=BOARD_ID,
+        root_post_id=root.post_id,
+        previous_event_id=first.content_id,
+        subject="hello",
+        body="second edit",
+        created_at="2026-01-03T00:00:00Z",
+    )
+
+    for edit in (first, second):
+        assert materialize_carried_post_edit(db, edit, sender_fingerprint=remote.fingerprint) is None
+
+    retained = {
+        row[0] for row in db.connection.execute(
+            "SELECT content_id FROM link_events WHERE content_id IN (?, ?)", (first.content_id, second.content_id)
+        )
+    }
+    assert retained == {first.content_id, second.content_id}
+    assert list_posts_page(db, board, alice).posts[0].subject == "[removed by moderator]"
