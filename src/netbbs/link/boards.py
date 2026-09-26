@@ -138,9 +138,13 @@ class LinkContext:
     both only ever matter together with `link_node`/`node_identity`
     (`ensure_live_subscription` needs all four at once). `None` under
     the exact same conditions as `link_node` -- a node with Link
-    disabled constructs neither."""
+    disabled constructs neither.
 
-    node_identity: NodeIdentity
+    `node_identity` is read through `link_node` rather than held, because
+    a session lives across a key rotation (issue #624): a caller who
+    opened a screen before the SysOp rotated the signing key would
+    otherwise go on signing posts with the key just revoked."""
+
     link_node: LinkNode
     link_config: LinkConfigSnapshot | None = None
     realtime_registry: LinkRealtimeSessionRegistry | None = None
@@ -150,6 +154,10 @@ class LinkContext:
     # online) -- `None` under the same conditions as the two above.
     relay: RealtimeRelay | None = None
     direct_chat: LiveDirectChat | None = None
+
+    @property
+    def node_identity(self) -> NodeIdentity:
+        return self.link_node.identity
 
 
 class LinkBoardsError(Exception):

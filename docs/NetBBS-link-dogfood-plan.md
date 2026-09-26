@@ -276,6 +276,25 @@ Use test identities and non-sensitive evidence.
       it reports a local restriction without exposing reporter identities,
       private evidence, configuration notes, or a network-wide verdict.
 
+- [ ] Rotate a signing key routinely. On node A, open **Link status → Keys →
+      Signing key**, choose **Rotate** and confirm. Record the retired and new
+      key fingerprints the screen reports; the node fingerprint must not
+      change. After one pass on each node, confirm B still carries A's
+      boards, that a post A made *before* the rotation reaches a node that
+      subscribes to that board only now, and that any vouch A issued was
+      renewed (the Link log names `signing_key_rotated`).
+- [ ] Rotate a transport key. On a node holding live sessions, rotate its
+      transport key and confirm the sessions end and reconnect on their own,
+      and that live chat and `/msg` work again afterwards.
+- [ ] Respond to a compromise, offline. Stop node A, run `python -m
+      netbbs.admin rotate-key signing --compromised --db … --identity-dir …`,
+      confirm, and record how many objects it re-signed. Start A. Confirm B
+      still accepts A's content after its next pass. Then point a node that
+      has never carried A's board at a node that carries it (not at A itself),
+      and confirm its log says the stale copies were skipped for a compromised
+      key rather than refusing the whole response; the node must still take
+      the rest. Record both audit entries (`rotate_node_key`).
+
 For each row, record node/operator roles, UTC timestamps, software commit,
 subject and dimension, pre/post effective states, public reason code, whether
 a restart or partition was active, and the relevant audit IDs. Do not paste

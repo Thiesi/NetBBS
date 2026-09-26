@@ -434,11 +434,9 @@ def materialize_carried_file_descriptor(
     those columns already feed the board/channel diffs.
     """
     file_id = descriptor.payload["file_id"]
-    existing = db.connection.execute(
-        "SELECT * FROM remote_files WHERE file_id = ?", (file_id,)
-    ).fetchone()
+    existing = get_remote_file(db, file_id)
     if existing is not None:
-        return _remote_file_from_row(existing)
+        return existing
 
     area_row = db.connection.execute(
         "SELECT id, link_genesis_json FROM file_areas WHERE area_id = ?", (descriptor.payload["area_id"],)
@@ -512,9 +510,9 @@ def materialize_carried_file_descriptor(
     )
     db.connection.commit()
 
-    return _remote_file_from_row(
-        db.connection.execute("SELECT * FROM remote_files WHERE file_id = ?", (file_id,)).fetchone()
-    )
+    stored = get_remote_file(db, file_id)
+    assert stored is not None
+    return stored
 
 
 def has_queued_file_descriptor(db: Database, file_entry: FileEntry) -> bool:
