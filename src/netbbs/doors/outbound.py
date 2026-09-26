@@ -464,9 +464,13 @@ def _is_request(name: str) -> bool:
 #: Whether this platform can pin a directory by descriptor and work relative
 #: to it. True on NetBSD and Linux; the fallback exists for development on
 #: Windows, where no door runs in a VM and there is no boundary to defend.
+#: `os.rename`, not `os.replace`: on POSIX both are renameat(2), which replaces
+#: its target, but NetBSD's Python lists only `os.rename` in `supports_dir_fd`
+#: -- checking for `os.replace` silently turned the pinning off there.
 _FD_SAFE = (os.name == "posix" and hasattr(os, "O_NOFOLLOW") and hasattr(os, "O_DIRECTORY")
-            and os.open in os.supports_dir_fd and os.replace in os.supports_dir_fd
-            and os.unlink in os.supports_dir_fd and os.scandir in os.supports_fd)
+            and os.open in os.supports_dir_fd and os.rename in os.supports_dir_fd
+            and os.unlink in os.supports_dir_fd and os.mkdir in os.supports_dir_fd
+            and os.scandir in os.supports_fd)
 
 
 class _DropDir:
@@ -503,7 +507,7 @@ class _DropDir:
 
     def replace(self, source: str, target: str) -> None:
         if self.fd is not None:
-            os.replace(source, target, src_dir_fd=self.fd, dst_dir_fd=self.fd)
+            os.rename(source, target, src_dir_fd=self.fd, dst_dir_fd=self.fd)
         else:
             os.replace(self.path / source, self.path / target)
 

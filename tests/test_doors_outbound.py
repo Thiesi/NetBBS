@@ -788,7 +788,7 @@ def test_a_request_that_cannot_be_claimed_is_left_unread(db, door, sysop, board,
     def refuse(*args, **kwargs):
         raise PermissionError("locked")
 
-    monkeypatch.setattr(outbound.os, "replace", refuse)
+    monkeypatch.setattr(outbound._DropDir, "replace", refuse)
     assert drain(db, door, tmp_path, final=False) == (0, 0)
     assert request.exists() and _posts(db, board, sysop) == []
 
@@ -981,3 +981,13 @@ def test_the_last_drain_answers_a_request_it_could_not_take(db, door, sysop, boa
     receipt = _result(db, door, request)
     assert receipt["status"] == "rejected" and "could not be taken" in receipt["reason"]
     assert _posts(db, board, sysop) == []
+
+
+@posix_only
+def test_the_drop_directory_is_really_pinned_on_posix():
+    """The symlink defence silently degraded to path checks on NetBSD once,
+    because one capability test named the wrong function. Assert the real
+    thing is in force on every POSIX host this suite runs on."""
+    from netbbs.doors.outbound import _FD_SAFE
+
+    assert _FD_SAFE is True
