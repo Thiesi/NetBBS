@@ -5768,6 +5768,18 @@ never-drained qemu stdout pipe stalls the guest once its console fills it;
 the runtime's diagnostics task drains socketpair doors' stdout, and any
 test harness must too.
 
+The door outbound hook's `drain` (issue #520) is repeatable. Each request is
+claimed with `os.replace` to `<name>.json.claimed` *before* it is read; a
+request that cannot be claimed is left unread for the next drain rather than
+processed. The old guarantee was a `request.unlink()` after answering, with
+`OSError` swallowed -- harmless while the drain ran only at exit and
+`rmtree` removed survivors, but a double post on every later tick once drains
+run in-session. Receipt names carry a `time.time_ns()` sequence because an
+in-session door reuses request names; doors are contractually forbidden to
+construct them. `_prune_results` runs once per drain (it globs, stats and
+sorts the whole directory), and `limit`/`final` let an in-session tick take a
+few requests while only the final drain refuses leftovers.
+
 Legacy configuration parsers need byte-level validation against the actual
 program. LORD 4.07 silently ignores LF-only node files; install its NODE1.DAT
 with CRLF. Global War's distributed 2.7 executable stalls with bare values

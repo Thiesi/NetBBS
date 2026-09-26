@@ -547,10 +547,11 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
 
     `rehearsal` marks a launch a SysOp made to *check* the door -- the
     compatibility screen's test launch, or the DOS probe -- rather than a
-    caller playing it. Such a launch does not drain the outbound hook: a
-    SysOp trying a door out must not publish its content to a real board,
-    and a probe which runs the game for twelve seconds on every preflight
-    would do it repeatedly.
+    caller playing it. Such a launch never publishes through the outbound
+    hook: a SysOp trying a door out must not post its content to a real
+    board, and a probe which runs the game on every preflight would do it
+    repeatedly. Its requests are still answered, with what *would* have
+    happened, so the test exercises the door's posting logic too (#520).
     """
     profile = door.profile
     stop_grace = profile.stop_grace_seconds if profile else DOOR_STOP_GRACE_SECONDS
@@ -805,7 +806,7 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
             except Exception as exc:
                 errors.append(exc)
             finally:
-                if workdir is not None and not rehearsal:
+                if workdir is not None:
                     # Issue #520, and strictly before the workdir goes: the
                     # door has already been stopped above, so nothing races
                     # its own writes here, and a request left un-drained
@@ -818,6 +819,7 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
                         await lane.run(
                             drain_outbound, door, workdir,
                             node_identity=node_identity() if callable(node_identity) else node_identity,
+                            rehearsal=rehearsal,
                         )
                     except Exception as exc:
                         _logger.warning("door %r outbound drain failed: %s", door.name, exc)

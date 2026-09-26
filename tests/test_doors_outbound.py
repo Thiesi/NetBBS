@@ -460,6 +460,9 @@ def test_a_sysop_testing_a_door_does_not_publish_what_it_wrote(db, lane, sysop, 
 
     assert asyncio.run(_run(FakeSession(), lane, door, sysop, rehearsal=True)).reason == "exited"
     assert _posts(db, board, sysop) == []
+    # ...but the door still hears what would have happened.
+    (receipt,) = [json.loads(path.read_text()) for path in results_dir(db, door.id).glob("*.result.json")]
+    assert (receipt["status"], receipt["would"]) == ("rehearsal", "posted")
 
     # The same door, played rather than tested, does post.
     assert asyncio.run(_run(FakeSession(), lane, door, sysop)).reason == "exited"
@@ -753,3 +756,103 @@ def test_a_refusal_quotes_a_doors_own_text_back_at_it_bounded(db, door, sysop, b
     assert len(result["reason"]) < 400
     written = next(results_dir(db, door.id).glob("*.result.json"))
     assert written.stat().st_size < 64 * 1024, "a receipt a backup would not carry"
+
+
+# -- slice 2 groundwork: repeated drains and rehearsal verdicts ---------------
+
+
+def test_a_request_is_answered_once_even_when_it_cannot_be_removed(db, door, sysop, board, tmp_path, monkeypatch):
+    """Once drains run during a session, a request that survives its own
+    answer would post again on every tick. Claiming it before reading is
+    what prevents that; removing it afterwards is only housekeeping."""
+    from netbbs.doors import outbound
+
+    monkeypatch.setattr(outbound, "_release", lambda claimed: None)  # every delete fails
+    _enable(db, door, sysop, board)
+    request = _request(tmp_path, subject="Once", body="...")
+
+    assert drain(db, door, tmp_path, final=False) == (1, 0)
+    assert drain(db, door, tmp_path, final=False) == (0, 0)
+    assert drain(db, door, tmp_path) == (0, 0)
+    assert len(_posts(db, board, sysop)) == 1
+    assert _result(db, door, request)["status"] == "posted"
+
+
+def test_a_request_that_cannot_be_claimed_is_left_unread(db, door, sysop, board, tmp_path, monkeypatch):
+    from netbbs.doors import outbound
+
+    _enable(db, door, sysop, board)
+    request = _request(tmp_path, subject="Later", body="...")
+
+    def refuse(*args, **kwargs):
+        raise PermissionError("locked")
+
+    monkeypatch.setattr(outbound.os, "replace", refuse)
+    assert drain(db, door, tmp_path, final=False) == (0, 0)
+    assert request.exists() and _posts(db, board, sysop) == []
+
+    monkeypatch.undo()
+    assert drain(db, door, tmp_path) == (1, 0)
+
+
+def test_a_reused_request_name_keeps_every_receipt(db, door, sysop, board, tmp_path):
+    """A door posting during its session will call every request post.json;
+    the second one's receipt must not replace the first one's."""
+    _enable(db, door, sysop, board)
+    first = _request(tmp_path, name="post", subject="One", body="...")
+    assert drain(db, door, tmp_path, final=False) == (1, 0)
+    _request(tmp_path, name="post", subject="Two", body="...")
+    assert drain(db, door, tmp_path) == (1, 0)
+
+    receipts = _results(db, door, first)
+    assert [receipt["status"] for receipt in receipts] == ["posted", "posted"]
+    assert len({receipt["post_id"] for receipt in receipts}) == 2
+
+
+def test_a_drain_during_the_session_takes_a_few_and_leaves_the_rest(db, door, sysop, board, tmp_path):
+    _enable(db, door, sysop, board, posts_per_hour=20)
+    for index in range(5):
+        _request(tmp_path, name=f"p{index}", subject=f"Post {index}", body="...")
+
+    assert drain(db, door, tmp_path, limit=2, final=False) == (2, 0)
+    assert len(list((tmp_path / OUTBOUND_DIRNAME).glob("*.json"))) == 3
+    assert drain(db, door, tmp_path, limit=2, final=False) == (2, 0)
+    # Only the final drain refuses what is left over.
+    assert drain(db, door, tmp_path, limit=0) == (0, 1)
+    assert "not processed" in _result(db, door, tmp_path / OUTBOUND_DIRNAME / "p4.json")["reason"]
+
+
+def test_a_rehearsal_says_what_would_have_happened_and_does_nothing(db, door, sysop, board, tmp_path):
+    """A SysOp testing a door sees its posting logic judged -- allowlist,
+    shape, rate -- without a post, a rate debit or an audit entry."""
+    _enable(db, door, sysop, board)
+    good = _request(tmp_path, name="good", subject="Season 1", body="...")
+    stray = _request(tmp_path, name="stray", subject="Hi", body="...", board="Private")
+    before = len(list_actions_for_object(db, "door", door.id))
+
+    assert drain(db, door, tmp_path, rehearsal=True) == (1, 1)
+
+    would_post = _result(db, door, good)
+    assert (would_post["status"], would_post["would"], would_post["board"]) == ("rehearsal", "posted", "Chronicle")
+    assert "post_id" not in would_post
+    would_refuse = _result(db, door, stray)
+    assert (would_refuse["status"], would_refuse["would"]) == ("rehearsal", "rejected")
+    assert "not allowlisted" in would_refuse["reason"]
+
+    assert _posts(db, board, sysop) == []
+    assert db.connection.execute(
+        "SELECT COUNT(*) FROM door_outbound_history WHERE door_id = ?", (door.id,)).fetchone()[0] == 0
+    assert len(list_actions_for_object(db, "door", door.id)) == before
+    assert not [entry for entry in list_actions_for_object(db, "board", board.id)
+                if entry.action == "door_outbound_post"]
+
+
+def test_a_rehearsal_is_judged_against_the_real_rate_budget(db, door, sysop, board, tmp_path):
+    _enable(db, door, sysop, board, posts_per_hour=1)
+    _request(tmp_path, name="real", subject="Real", body="...")
+    assert drain(db, door, tmp_path) == (1, 0)
+
+    rehearsed = _request(tmp_path, name="rehearsed", subject="Again", body="...")
+    assert drain(db, door, tmp_path, rehearsal=True) == (0, 1)
+    receipt = _result(db, door, rehearsed)
+    assert receipt["would"] == "rejected" and "rate limit" in receipt["reason"]
