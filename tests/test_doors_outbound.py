@@ -1062,6 +1062,8 @@ def test_the_cheap_check_asks_what_the_drain_asks(tmp_path):
     assert has_requests(tmp_path) is True
 
 
+
+
 @posix_only
 def test_the_drop_directory_is_really_pinned_on_posix():
     """The symlink defence silently degraded to path checks on NetBSD once,
