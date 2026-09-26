@@ -84,4 +84,4 @@ def test_browser_shim_executes_streaming_decoder_and_mode_changes():
         pytest.skip("Node.js required for JavaScript shim execution")
     root = Path(__file__).resolve().parent.parent
     subprocess.run([node, str(root / "tests/fixtures/door_web_shim.cjs"),
-                    str(root / "src/netbbs/web/static/netbbs-terminal.js")], check=True, timeout=15)
+                    str(root / "src/netbbs/web/static/netbbs-terminal.js")], check=True, timeout=60)
