@@ -2459,8 +2459,8 @@ to the resource it was filed under.
 
 A resource this node has **seen and not taken on** — offered or excluded
 (§9.3), which is what a carry-quota refusal or a SysOp's exclusion leaves
-behind — wants nothing further. Asking on would be asking for what this node already
-refused to keep, and would not terminate: a declined board's posts never reach
+behind — wants nothing further. Asking on would be asking for content this node
+has not taken on, and would not terminate: such a board's posts never reach
 `link_events` at all, so they would be wanted every pass forever and occupy the
 requester's whole push page. A resource never seen is the opposite case and
 still wants everything declared for it, which is how a genesis arrives by push.
@@ -10875,10 +10875,14 @@ separate bound on the carry-decision record.
 readout.** 500 stays the default, and the declared scale (§2.3) stays small.
 Link status shows `carried/cap` for boards, channels and file areas alike, and
 the offered and excluded counts beside them. Rejected for now: a storage or
-activity bound. The costs that differ by type are already bounded where they
-concentrate — `max_remote_files_per_area` for a file area's catalogue, and the
-node-wide scrollback retention limit for a channel's history — and a count is the number a SysOp
-can reason about when choosing what to accept.
+activity bound. Two of the three types are already bounded where their cost
+concentrates — `max_remote_files_per_area` for a file area's catalogue and the
+node-wide scrollback retention limit for a channel's history — and boards are
+not: a carried board's posts are durable, unbounded-lifetime state (§8.9), and
+no cap shape changes that, since a board grows after it is accepted. A storage
+bound would need the node-wide disk accounting §13.9 lists as its own future
+slice; until then a count is the number a SysOp can reason about when choosing
+what to accept, and excluding a board that grew too large is the lever.
 
 **Decision 8 — the vocabulary is the one Link Communities will use.** §6.5 says
 carrying a Community carries its present and future members with per-resource
