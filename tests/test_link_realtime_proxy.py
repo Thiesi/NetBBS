@@ -458,3 +458,49 @@ def test_basic_credentials_are_encoded_the_way_aiohttp_encodes_them():
 
 def test_an_internationalized_host_is_dialled_by_its_a_label():
     assert validate_authority("bbs.münchen.example", 8862) == ("bbs.xn--mnchen-3ya.example", 8862)
+
+
+@pytest.mark.parametrize("host", ["fe80::1%eth0\r\nX-Injected: yes", "fe80::1%eth0", "127.1", "2130706433", "0x7f.0.0.1"])
+def test_scoped_ipv6_and_numeric_ipv4_spellings_are_refused(host):
+    with pytest.raises(RealtimeTargetError):
+        validate_authority(host, 8862)
+
+
+@pytest.mark.parametrize("host", ["LOCALHOST", "localhost.", "Localhost", "db.localhost", "::1"])
+def test_every_spelling_of_loopback_stays_off_the_proxy(monkeypatch, host):
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:9")
+    assert proxy_for(validate_authority(host, 8862)[0]) is None
+
+
+def test_an_explicit_port_zero_is_a_configuration_error_not_port_80(monkeypatch):
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.example:0")
+    with pytest.raises(RealtimeProxyError, match="port 0"):
+        proxy_for("bob.example")
+
+
+def test_the_netrc_account_is_the_username_when_login_is_empty(monkeypatch, tmp_path):
+    netrc = tmp_path / "netrc"
+    netrc.write_text("machine proxy.example account carrier password secret\n")
+    monkeypatch.setenv("NETRC", str(netrc))
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.example:3128")
+    assert proxy_for("bob.example").authorization == realtime_proxy._basic("carrier", "secret")
+
+
+def test_a_proxy_that_resets_mid_exchange_is_a_recorded_failure(monkeypatch):
+    async def scenario():
+        async def reset(reader, writer):
+            await reader.readuntil(b"\r\n\r\n")
+            writer.transport.abort()
+
+        server = await asyncio.start_server(reset, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        monkeypatch.setenv("HTTP_PROXY", f"http://127.0.0.1:{port}")
+        try:
+            with pytest.raises(RealtimeProxyError):
+                await open_realtime_connection("bob.example", 8862)
+        finally:
+            server.close()
+            await server.wait_closed()
+
+    asyncio.run(scenario())
+    assert REALTIME_PROXY_STATUS.ok is False and REALTIME_PROXY_STATUS.outcome is not None

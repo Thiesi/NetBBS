@@ -126,6 +126,10 @@ def validate_authority(host: object, port: object) -> tuple[str, int]:
         raise RealtimeTargetError(f"invalid real-time port {port!r}")
     if not isinstance(host, str) or not host:
         raise RealtimeTargetError(f"invalid real-time host {host!r}")
+    if "%" in host:
+        # A scope id (`fe80::1%eth0`) means nothing off this host, and
+        # `ipaddress` accepts arbitrary bytes after the `%` -- CR/LF included.
+        raise RealtimeTargetError(f"invalid real-time host {host!r}")
     try:
         ipaddress.ip_address(host)
         return host, port
@@ -139,7 +143,13 @@ def validate_authority(host: object, port: object) -> tuple[str, int]:
         except UnicodeError:
             raise RealtimeTargetError(f"invalid real-time host {host!r}") from None
     name = host[:-1] if host.endswith(".") else host
-    if len(name) > 253 or not all(_HOSTNAME_LABEL.match(label) for label in name.split(".")):
+    labels = name.split(".")
+    if len(name) > 253 or not all(_HOSTNAME_LABEL.match(label) for label in labels):
+        raise RealtimeTargetError(f"invalid real-time host {host!r}")
+    if labels[-1].isdigit():
+        # No top-level domain is numeric. What ends in one is a legacy IPv4
+        # spelling (`127.1`, `2130706433`) that resolvers accept and that
+        # the loopback check below would not recognise.
         raise RealtimeTargetError(f"invalid real-time host {host!r}")
     return host, port
 
@@ -163,8 +173,8 @@ def _netrc_authorization(proxy_host: str) -> str | None:
         return None
     if not auth:
         return None
-    login, _account, password = auth
-    return _basic(login or "", password or "")
+    login, account, password = auth
+    return _basic(login or account or "", password or "")
 
 
 def _basic(user: str, password: str) -> str:
@@ -183,7 +193,11 @@ def proxy_for(host: str) -> ProxyEndpoint | None:
     """The proxy a tunnel to `host` goes through, or `None` for a direct
     socket. Raises `RealtimeProxyError` for a proxy URL that applies but is
     not usable, rather than falling back to direct."""
-    if is_loopback_host(host):
+    canonical = host.lower().rstrip(".")
+    if is_loopback_host(canonical) or canonical == "localhost" or canonical.endswith(".localhost"):
+        # Never let a peer's advertised address point the operator's proxy at
+        # the proxy host's own loopback (`.localhost` is reserved for it,
+        # RFC 6761); numeric spellings are refused by `validate_authority`.
         return None
     proxies = urllib.request.getproxies()
     url = proxies.get("http") or proxies.get("https")
@@ -193,9 +207,11 @@ def proxy_for(host: str) -> ProxyEndpoint | None:
         return None
     try:
         parts = urllib.parse.urlsplit(url if "://" in url else f"http://{url}")
-        port = parts.port or 80
+        port = 80 if parts.port is None else parts.port
     except ValueError:
         raise _configuration_error(url, "is not a valid proxy URL") from None
+    if port == 0:
+        raise _configuration_error(url, "names port 0")
     if parts.scheme != "http" or not parts.hostname:
         raise _configuration_error(url, "is not an http:// proxy, which is all real-time Link can tunnel through")
     if parts.username is not None:
@@ -272,9 +288,12 @@ async def _open_tunnel(
             request = f"CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n"
             if proxy.authorization is not None:
                 request += f"Proxy-Authorization: {proxy.authorization}\r\n"
-            writer.write((request + "\r\n").encode("ascii"))
-            await writer.drain()
-            answer = await _read_answer(reader)
+            try:
+                writer.write((request + "\r\n").encode("ascii"))
+                await writer.drain()
+                answer = await _read_answer(reader)
+            except OSError as exc:
+                raise RealtimeProxyError(f"the proxy dropped the connection ({type(exc).__name__})") from exc
     except TimeoutError:
         error = RealtimeProxyError(f"no answer from the proxy within {PROXY_TIMEOUT_SECONDS:.0f}s")
         REALTIME_PROXY_STATUS.record(proxy, str(error), ok=False)
