@@ -3129,6 +3129,13 @@ SysOp sees and acts on both lists from Link status. That is how a local
 exclusion is represented honestly as “not carried on this node,” not
 indistinguishable disappearance.
 
+Names are not identities in Link, and independently run nodes reuse them. A
+carried resource whose name is already in use here, compared without regard
+to case, is carried under that name suffixed with the first 8, then 16, then
+all characters of its own id, whichever is free first (issue #671); the SysOp
+can rename it like any carried resource, and peers keep seeing the genesis
+name. Only with every candidate taken is it refused, as the cap refuses.
+
 Origin recommendations never override the carrying node’s local access,
 moderation, retention, or legal policy.
 

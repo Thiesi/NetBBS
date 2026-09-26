@@ -3705,3 +3705,41 @@ def test_a_blocked_reporter_is_not_asked_about(tmp_path, monkeypatch):
         assert asked == [(a,)]
     finally:
         net.close()
+
+
+def test_a_linked_board_whose_name_is_taken_locally_is_carried_and_receives_posts(tmp_path):
+    """Issue #671. B already has its own `general` when R's linked `general`
+    arrives. The insert used to raise `IntegrityError: UNIQUE constraint
+    failed: boards.name` out of B's first pass; the genesis was already saved,
+    so every later pass skipped it and R's board was never carried. Now it is
+    carried under a suffixed name, and R's post lands in it rather than in
+    B's own board."""
+    from netbbs.boards.boards import get_board_by_name
+
+    net = _ThreeNodes(tmp_path, enforce=False)
+    create_board(net.dbs["B"].db, "general", creator=net.sysops["B"])
+    r_board_id = get_board_by_name(net.dbs["R"].db, "general").board_id
+
+    async def scenario():
+        server = await net.start()
+        try:
+            async with aiohttp.ClientSession() as session:
+                await net.dial("B", session)
+                net.post("R", "hello from R")
+                await net.dial("B", session)
+        finally:
+            await server.stop()
+
+    try:
+        asyncio.run(scenario())
+        rows = net.dbs["B"].db.connection.execute(
+            """SELECT b.name, b.board_id = ?, p.subject FROM boards AS b
+               LEFT JOIN posts AS p ON p.board_id = b.id ORDER BY b.id""",
+            (r_board_id,),
+        ).fetchall()
+        assert [tuple(row) for row in rows] == [
+            ("general", 0, None),
+            (f"general-{r_board_id[:8]}", 1, "hello from R"),
+        ]
+    finally:
+        net.close()
