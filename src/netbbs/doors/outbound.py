@@ -603,6 +603,36 @@ def _stem(name: str) -> str:
     return name[: -len(_REQUEST_SUFFIX)]
 
 
+def has_requests(workdir: Path) -> bool:
+    """Whether a finished request is waiting, without touching the database.
+
+    What the in-session ticker asks before it spends a job on the shared lane:
+    most ticks of most sessions find nothing.
+
+    It asks exactly what the drain's own scan asks -- through the same pinned
+    directory, of regular files only, within the same bound -- so the two can
+    never disagree: a mismatch would queue a lane job every tick for work the
+    drain then does not find.
+    """
+    drop = _open_drop_dir(workdir)
+    if drop is None:
+        return False
+    with drop:
+        try:
+            with drop.scandir() as entries:
+                for scanned, entry in enumerate(entries):
+                    if scanned >= _MAX_REQUESTS_SCANNED:
+                        return False
+                    try:
+                        if _is_request(entry.name) and entry.is_file(follow_symlinks=False):
+                            return True
+                    except OSError:
+                        continue
+        except OSError:
+            return False
+    return False
+
+
 #: Longest piece of a door's own request name that NetBBS puts into a name of
 #: its own. The receipt payload always carries the full name; the file name
 #: only has to be unique and readable.
