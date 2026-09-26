@@ -694,7 +694,8 @@ async def _show_board(
         # board's notice with it. And a pass after composing drew its
         # choices under whatever the review screen had left.
         header_color = effective_header_color_256(db)
-        while True:
+
+        async def _draw_empty_board() -> bool:
             has_draft = _has_saved_draft()
             await session.write_line(
                 f"\r\n{screen_title(board_name, breadcrumb=(session.node_display_name, 'Message boards'), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, header_color=header_color, node_name_gradient=session.node_name_gradient)}"
@@ -720,6 +721,15 @@ async def _show_board(
             )
             await write_notices(session)
             await session.write("Choice: ")
+            return has_draft
+
+        # Redrawn after composing (the review screen replaced it), never
+        # after a stray key: `reject_unhandled_key` leaves the prompt as it
+        # was, and reprinting the screen per keystroke would stack copies
+        # of it without redraw-in-place (Claude review on #701), the same
+        # rule the empty file area and the populated board page follow.
+        has_draft = await _draw_empty_board()
+        while True:
             choice = (await session.read_key()).lower()
             if choice == "b":
                 await session.write_line("")
@@ -734,6 +744,7 @@ async def _show_board(
                     # loop below, same post-then-refresh behavior the
                     # non-empty case's own [P]ost option already has.
                     break
+                has_draft = await _draw_empty_board()
                 continue
             await session.write(reject_unhandled_key(choice))
 

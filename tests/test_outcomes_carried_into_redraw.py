@@ -295,3 +295,15 @@ def test_an_empty_inbox_says_so_on_the_mail_menu(db, alice):
         lane.close()
 
     _stays_on_screen_until_the_next_prompt(session, "Your inbox is empty.")
+
+
+def test_a_stray_key_on_the_empty_board_does_not_redraw_it(db):
+    """Claude review on #701: without redraw-in-place, redrawing the screen
+    per unrecognized key stacks copies of it."""
+    bob = create_user(db, "bob", password="hunter2", user_level=10)  # redraw-in-place off
+    board = create_board(db, "general", creator=bob, min_write_level=100)
+    session = FakeSession(["x", "y", "b"])
+
+    asyncio.run(board_flow._show_board(session, db, board, bob))
+
+    assert session.visible().count("This message board has no posts yet") == 1
