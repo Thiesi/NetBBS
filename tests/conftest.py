@@ -17,6 +17,9 @@ call site needs to change.
 
 from __future__ import annotations
 
+import ipaddress
+import socket
+
 import nacl.pwhash
 import pytest
 
@@ -42,6 +45,39 @@ def pytest_collection_modifyitems(config, items):
     for item in items:
         if "timing_sensitive" in item.keywords:
             item.add_marker(skip)
+
+
+_real_getaddrinfo = socket.getaddrinfo
+
+
+def _local_only_getaddrinfo(host, *args, **kwargs):
+    """`socket.getaddrinfo` that refuses to look up any host outside this machine.
+
+    Issue #714: a test that accepted reliable-node participation started a
+    real node, which dialled the shipped roster -- the live ReLink seed --
+    and registered a fake peer there on every suite run. `src/` holds four
+    production endpoints a test can reach that way (the reliable-node
+    fallback and roster, managed DNS, the GitHub releases API). Refusing the
+    name lookup closes all of them at once, whatever a test configures. IP
+    literals and loopback names resolve as before, which is all the suite's
+    real sockets use.
+    """
+    name = host.decode() if isinstance(host, bytes) else host
+    if name in (None, "", "localhost") or str(name).endswith(".localhost"):
+        return _real_getaddrinfo(host, *args, **kwargs)
+    try:
+        ipaddress.ip_address(str(name).split("%", 1)[0])
+    except ValueError:
+        raise socket.gaierror(
+            socket.EAI_NONAME, f"test suite: refusing to resolve {name!r} -- tests must not reach real hosts"
+        ) from None
+    return _real_getaddrinfo(host, *args, **kwargs)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_network(monkeypatch):
+    monkeypatch.setattr(socket, "getaddrinfo", _local_only_getaddrinfo)
+    yield
 
 
 @pytest.fixture(autouse=True)

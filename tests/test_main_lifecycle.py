@@ -1617,3 +1617,17 @@ def test_run_clears_a_managed_dns_service_url_the_operator_removed(tmp_path):
     assert get_service_url(db) == DEFAULT_SERVICE_URL
     assert get_service_url(db) != "http://127.0.0.1:8099"
     db.close()
+
+
+def test_the_suite_cannot_reach_the_live_reliable_node(tmp_path):
+    """Issue #714: a node with participation accepted dials the shipped
+    roster. In the suite that name must not resolve, or every run registers
+    a fake peer on the production seed."""
+    import socket as socket_module
+
+    from netbbs.link.reliable_nodes import FALLBACK_RELIABLE_NODES
+
+    host = FALLBACK_RELIABLE_NODES[0].url.split("//", 1)[1].split(":", 1)[0]
+    with pytest.raises(socket_module.gaierror, match="must not reach real hosts"):
+        socket_module.getaddrinfo(host, 7862)
+    assert socket_module.getaddrinfo("127.0.0.1", 7862)
