@@ -260,7 +260,8 @@ _LINK_CLIENT_MAX_SIZE_BYTES = 2 * 1024 * 1024
 
 # Issue #478: a peer's `wanted` list is a subset of the content IDs this
 # node's own `InventoryRequest` just declared, so it is already bounded
-# by the body size that request had to fit -- roughly 30,000 IDs at 2 MiB.
+# by the body size that request had to fit -- roughly 30,000 IDs at 2 MiB,
+# and about half that since issue #685 pages a larger declaration.
 # This is the backstop for a peer that answers with something else
 # entirely; it is not a page size, and must stay well above any legitimate
 # value (truncating `wanted` is what the Codex review of #478 showed pins
@@ -1992,17 +1993,19 @@ class LinkServer:
         # budget, unrelated to whether the request itself was empty.
         # Issue #669: what the requester holds a genesis for and does not
         # carry is left out of all three diffs. Only a requester that saw
-        # this node advertise the capability sends it.
+        # this node advertise the capability sends it. Issue #685: the same
+        # for `page`, which narrows all three to one page of a declaration
+        # too large to send whole.
         not_carried = inventory_request.not_carried
         board_events, board_truncated = await self._lane.run(
             board_event_diff, inventory_request.boards, limit=response_limit,
-            not_carried=not_carried.get("boards", ()),
+            not_carried=not_carried.get("boards", ()), page=inventory_request.page,
         )
         remaining = response_limit - len(board_events)
         if remaining > 0:
             channel_events, channel_truncated = await self._lane.run(
                 channel_event_diff, inventory_request.channels, limit=remaining,
-                not_carried=not_carried.get("channels", ()),
+                not_carried=not_carried.get("channels", ()), page=inventory_request.page,
             )
         else:
             channel_events, channel_truncated = [], True
@@ -2010,7 +2013,7 @@ class LinkServer:
         if remaining > 0:
             file_area_events, file_area_truncated = await self._lane.run(
                 file_area_event_diff, inventory_request.file_areas, limit=remaining,
-                not_carried=not_carried.get("file_areas", ()),
+                not_carried=not_carried.get("file_areas", ()), page=inventory_request.page,
             )
         else:
             file_area_events, file_area_truncated = [], True

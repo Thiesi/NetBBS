@@ -58,6 +58,7 @@ this same in-memory state.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import secrets
 from collections import deque
@@ -1254,11 +1255,9 @@ class InventoryRequest:
     compatibility extensions.
 
     `boards` is keyed by every `board_id` the requester currently
-    carries (bounded by its own `max_carried_boards` quota, §13.9 --
-    this request's size is therefore already bounded by an existing
-    cap, not a new one), mapped to that board's full known-`content_id`
-    list. `channels` (design doc §9.6, issue #87) is the identical shape,
-    bounded by `max_carried_channels`, for linked channels. `file_areas`
+    carries (bounded by its own `max_carried_boards` quota, §13.9),
+    mapped to that board's known-`content_id` list. `channels` (design
+    doc §9.6, issue #87) is the identical shape, bounded by `max_carried_channels`, for linked channels. `file_areas`
     (design doc §11, issue #93) is the identical shape again, bounded by
     `max_carried_file_areas`, for linked file-area catalogues -- chunk
     bytes themselves are never part of this: only `file_area_genesis`/
@@ -1269,6 +1268,15 @@ class InventoryRequest:
     exact same `LinkNode.handle_events` path a push response already
     uses (see `netbbs.link.transport`'s `/inventory` route and
     `request_inventory`).
+
+    The quotas bound the keys, not the history under them: issue #685
+    found a node past about 30,000 held events sending a body over the
+    responder's 2 MiB limit, refused with 413 on every pass. So a
+    declaration too large for one request is split into `page = (index,
+    count)` by `inventory_page`: every key is still present, each list
+    holds only the IDs on page `index`, and the responder answers for that
+    page alone (see `netbbs.link.store.build_inventory_request` and
+    `_resource_event_diff`).
     """
 
     requester_fingerprint: str
@@ -1280,6 +1288,7 @@ class InventoryRequest:
     channels: dict[str, tuple[str, ...]] = field(default_factory=dict)
     file_areas: dict[str, tuple[str, ...]] = field(default_factory=dict)
     not_carried: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    page: tuple[int, int] | None = None
 
     def to_dict(self) -> dict:
         data = {
@@ -1296,6 +1305,9 @@ class InventoryRequest:
         # it, so a request that names nothing is byte-for-byte the old shape.
         if any(self.not_carried.values()):
             data["not_carried"] = {kind: list(ids) for kind, ids in self.not_carried.items() if ids}
+        # Issue #685: likewise omitted for a whole (one-page) declaration.
+        if self.page is not None:
+            data["page"] = {"index": self.page[0], "count": self.page[1]}
         return data
 
     @classmethod
@@ -1314,6 +1326,7 @@ class InventoryRequest:
             channels={channel_id: tuple(ids) for channel_id, ids in data.get("channels", {}).items()},
             file_areas={area_id: tuple(ids) for area_id, ids in data.get("file_areas", {}).items()},
             not_carried=_parse_not_carried(data.get("not_carried", {})),
+            page=_parse_page(data.get("page")),
         )
 
 
@@ -1335,6 +1348,38 @@ def _parse_not_carried(raw: object) -> dict[str, tuple[str, ...]]:
             raise ValueError(f"not_carried[{kind!r}] must be a list of resource IDs")
         parsed[kind] = tuple(ids)
     return parsed
+
+
+MAX_INVENTORY_PAGES = 4096
+"""Issue #685: the most pages one declaration is split into. At the requester's
+1 MiB budget per page that is about 60 million declared IDs, far past any node
+this project is built for; it bounds the modulus a peer can make a responder
+compute with, not anything a real node reaches."""
+
+
+def inventory_page(identifier: str, count: int) -> int:
+    """Issue #685: which of `count` pages a content or resource ID falls on.
+
+    A hash of the ID rather than the ID itself, so the split does not depend
+    on what an ID looks like, and it spreads evenly whatever the IDs are."""
+    digest = hashlib.sha256(identifier.encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], "big") % count
+
+
+def _parse_page(raw: object) -> tuple[int, int] | None:
+    """Issue #685: `{"index": i, "count": n}`, `0 <= i < n`, `2 <= n <=
+    MAX_INVENTORY_PAGES`. Strict for the same reason as `not_carried`: it
+    steers what the responder leaves out. A one-page request omits it."""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict) or set(raw) != {"index", "count"}:
+        raise ValueError("page must be an object with exactly index and count")
+    index, count = raw["index"], raw["count"]
+    if any(isinstance(v, bool) or not isinstance(v, int) for v in (index, count)):
+        raise ValueError("page index and count must be integers")
+    if not 2 <= count <= MAX_INVENTORY_PAGES or not 0 <= index < count:
+        raise ValueError(f"page {index} of {count} is out of range")
+    return index, count
 
 
 @dataclass
@@ -1401,8 +1446,8 @@ DEFERRED_EVENT_RETRY_SECONDS = 3600
 # Remotely influenced, so bounded. At the cap the oldest entry goes, which only
 # means that event is offered, and set aside, once more. Each entry adds one
 # content ID to every inventory request, whose body fits about 30,000 of them
-# (`transport._LINK_CLIENT_MAX_SIZE_BYTES`) and has to fit what this node holds
-# as well, so this is a third of that and not more. Past it the oldest are
+# (`transport._LINK_CLIENT_MAX_SIZE_BYTES`); past that the declaration is split
+# into pages (issue #685), so this is a third of it, to keep them few. Past it the oldest are
 # offered again and, a page being 200 events, can crowd out the rest: the
 # remedy then is the SysOp's, establishing or blocking the nodes concerned.
 _MAX_DEFERRED_EVENTS = 10_000
@@ -1909,6 +1954,11 @@ class LinkNode:
     attestation_pull_requests: InventoryRequestState = field(default_factory=InventoryRequestState)
     identity_requests: InventoryRequestState = field(default_factory=InventoryRequestState)
     deferred_events: DeferredEvents = field(default_factory=DeferredEvents)
+    # Issue #685: per responder, how many paged inventory declarations this
+    # node has sent it, so successive passes walk the pages in turn rather
+    # than landing on the same one. One entry per seed dialled; memory only,
+    # since a restart merely starts the walk again.
+    inventory_page_cursors: dict[str, int] = field(default_factory=dict)
     # Issue #630: fingerprints named by content this node recently served, in
     # least-recently-served order; and (carrier, fingerprint) pairs a carrier
     # could not answer for, with the time to ask again.
@@ -2612,6 +2662,7 @@ class LinkNode:
             signature=request.signature,
             signing_verify_key=signing_verify_key,
             not_carried=request.not_carried,
+            page=request.page,
         ):
             raise LinkProtocolError(
                 f"inventory_request from {sender_fingerprint} does not verify against its "

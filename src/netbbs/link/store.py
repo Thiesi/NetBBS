@@ -30,6 +30,7 @@ from __future__ import annotations
 import base64
 import json
 import secrets
+from collections.abc import Callable
 from datetime import datetime, timedelta
 
 from netbbs.identity.keys import Identity
@@ -61,7 +62,9 @@ from netbbs.link.events import (
     sign_inventory_request,
 )
 from netbbs.link.node_identity import NodeIdentity
-from netbbs.link.protocol import MAX_INTRODUCED_IDENTITIES, InventoryRequest, LinkNode, PeerRecord
+from netbbs.link.protocol import (
+    MAX_INTRODUCED_IDENTITIES, MAX_INVENTORY_PAGES, InventoryRequest, LinkNode, PeerRecord, inventory_page,
+)
 from netbbs.storage.database import Database
 from netbbs.timeutil import utc_now_iso
 
@@ -888,6 +891,8 @@ def build_inventory_request(
     include_inventory: bool = True,
     also_declare: dict[str, dict[str, set[str]]] | None = None,
     declare_not_carried: bool = False,
+    paged: bool = False,
+    page_cursor: int = 0,
 ) -> InventoryRequest:
     """
     This node's own `InventoryRequest` to send as requester (design doc
@@ -915,6 +920,16 @@ def build_inventory_request(
     signed `not_carried` field. The caller sets it only for a responder whose
     descriptor advertises `INVENTORY_NOT_CARRIED_CAPABILITY`: an older one
     would rebuild the signed payload without the field and refuse the request.
+
+    Issue #685: a declaration larger than `INVENTORY_DECLARATION_BUDGET_BYTES`
+    is split into pages by `inventory_page`, and this request carries page
+    `page_cursor % count`, so successive calls walk every page in turn. Every
+    key stays; each list keeps only the IDs on that page, and `not_carried`
+    only the resources on it. `paged` says the responder advertises
+    `INVENTORY_PAGES_CAPABILITY` and is told which page this is. An older
+    responder is sent the same slice without being told: it takes the rest as
+    missing and resends some of it, which costs it bandwidth and this node's
+    dedup, but the request fits, where the whole one was refused with 413.
     """
     boards = (
         {board_id: tuple(_all_board_events(db, board_id)) for board_id in carried_board_ids(db)}
@@ -943,9 +958,29 @@ def build_inventory_request(
                 mapping[resource_id] = tuple(
                     dict.fromkeys([*mapping.get(resource_id, ()), *sorted(content_ids)])
                 )
-    not_carried = (
-        bound_not_carried(uncarried_resource_ids(db)) if include_inventory and declare_not_carried else {}
-    )
+    not_carried = uncarried_resource_ids(db) if include_inventory and declare_not_carried else {}
+    page: tuple[int, int] | None = None
+    count = inventory_page_count(boards, channels, file_areas, not_carried if paged else {})
+    if paged:
+        # Enough pages that each one's share of `not_carried` stays well under
+        # the sampling cap: then every page declares its whole share, and the
+        # complete refused set is suppressed once per walk of the pages.
+        declined = sum(len(ids) for ids in not_carried.values())
+        count = min(MAX_INVENTORY_PAGES, max(count, -(-2 * declined // MAX_NOT_CARRIED_DECLARED)))
+    if count > 1:
+        index = page_cursor % count
+        boards, channels, file_areas = (
+            {resource_id: tuple(i for i in ids if inventory_page(i, count) == index)
+             for resource_id, ids in mapping.items()}
+            for mapping in (boards, channels, file_areas)
+        )
+        if paged:
+            page = (index, count)
+            not_carried = {
+                kind: kept for kind, ids in not_carried.items()
+                if (kept := tuple(r for r in ids if inventory_page(r, count) == index))
+            }
+    not_carried = bound_not_carried(not_carried, limit=MAX_NOT_CARRIED_DECLARED)
     created_at = utc_now_iso()
     nonce = secrets.token_hex(16)
     signature = sign_inventory_request(
@@ -956,6 +991,7 @@ def build_inventory_request(
         nonce=nonce,
         boards=boards, channels=channels, file_areas=file_areas,
         not_carried=not_carried,
+        page=page,
     )
     return InventoryRequest(
         requester_fingerprint=requester_fingerprint,
@@ -965,7 +1001,75 @@ def build_inventory_request(
         signature=signature,
         boards=boards, channels=channels, file_areas=file_areas,
         not_carried=not_carried,
+        page=page,
     )
+
+
+INVENTORY_DECLARATION_BUDGET_BYTES = 1024 * 1024
+"""Issue #685: the most bytes of IDs one inventory request declares before it
+is split into pages -- half the responder's 2 MiB `client_max_size`
+(`transport._LINK_CLIENT_MAX_SIZE_BYTES`), leaving room for the keys, the
+envelope and a page that hashes out somewhat above average."""
+
+
+def inventory_page_count(
+    boards: dict[str, tuple[str, ...]],
+    channels: dict[str, tuple[str, ...]],
+    file_areas: dict[str, tuple[str, ...]],
+    not_carried: dict[str, tuple[str, ...]],
+    *,
+    budget: int | None = None,
+) -> int:
+    """How many pages a declaration needs to stay inside `budget` bytes each:
+    every ID as it is serialized, quoted and comma-separated."""
+    budget = budget or INVENTORY_DECLARATION_BUDGET_BYTES
+    size = sum(
+        len(i) + 4
+        for mapping in (boards, channels, file_areas, not_carried)
+        for ids in mapping.values()
+        for i in ids
+    )
+    return min(MAX_INVENTORY_PAGES, max(1, -(-size // budget)))
+
+
+def _resource_event_diff(
+    requested: dict[str, list[str]],
+    carried: list[str],
+    all_events: Callable[[str], dict[str, dict]],
+    *,
+    limit: int,
+    not_carried: tuple[str, ...],
+    page: tuple[int, int] | None,
+) -> tuple[list[dict], bool]:
+    """The walk `board_event_diff` and its two siblings share; see there.
+
+    Issue #685: with a `page`, a declared resource's list holds only the IDs on
+    that page, so only its events on that page are compared, and an undeclared
+    one is answered for only when the resource itself is on that page -- the
+    requester's `not_carried` was cut to the same page, so only there does
+    "absent" still mean "never seen". Either way the rest comes up on a later
+    page."""
+    collected: list[dict] = []
+    truncated = False
+    # Issue #669: what the requester holds a genesis for and chose not to
+    # carry costs it nothing here -- see `uncarried_resource_ids`.
+    for resource_id in sorted((set(requested) | set(carried)) - set(not_carried)):
+        if truncated:
+            break
+        declared = resource_id in requested
+        if page is not None and not declared and inventory_page(resource_id, page[1]) != page[0]:
+            continue
+        known_ids = set(requested.get(resource_id, ()))
+        for content_id, envelope in all_events(resource_id).items():
+            if content_id in known_ids:
+                continue
+            if page is not None and declared and inventory_page(content_id, page[1]) != page[0]:
+                continue
+            if len(collected) >= limit:
+                truncated = True
+                break
+            collected.append(envelope)
+    return collected, truncated
 
 
 def _all_board_events(db: Database, board_id: str) -> dict[str, dict]:
@@ -1048,6 +1152,7 @@ def board_event_diff(
     *,
     limit: int,
     not_carried: tuple[str, ...] = (),
+    page: tuple[int, int] | None = None,
 ) -> tuple[list[dict], bool]:
     """
     The responder side of one `InventoryRequest` (design doc §8.8, issue
@@ -1086,24 +1191,14 @@ def board_event_diff(
     `limit` -- the caller's own next pass will ask again with a
     by-then-larger known-ID list, so nothing here needs to track a
     pagination cursor.
+
+    Issue #685: `page` is the requester's, when its declaration was too
+    large for one request -- see `_resource_event_diff` for what it narrows.
     """
-    collected: list[dict] = []
-    truncated = False
-    # Issue #669: what the requester holds a genesis for and chose not to
-    # carry costs it nothing here -- see `uncarried_resource_ids`.
-    all_board_ids = sorted((set(requested_boards) | set(carried_board_ids(db))) - set(not_carried))
-    for board_id in all_board_ids:
-        if truncated:
-            break
-        known_ids = set(requested_boards.get(board_id, ()))
-        for content_id, envelope in _all_board_events(db, board_id).items():
-            if content_id in known_ids:
-                continue
-            if len(collected) >= limit:
-                truncated = True
-                break
-            collected.append(envelope)
-    return collected, truncated
+    return _resource_event_diff(
+        requested_boards, carried_board_ids(db), lambda resource_id: _all_board_events(db, resource_id),
+        limit=limit, not_carried=not_carried, page=page,
+    )
 
 
 def _all_channel_events(db: Database, channel_id: str) -> dict[str, dict]:
@@ -1160,6 +1255,7 @@ def channel_event_diff(
     *,
     limit: int,
     not_carried: tuple[str, ...] = (),
+    page: tuple[int, int] | None = None,
 ) -> tuple[list[dict], bool]:
     """
     The channel-side responder logic for one `InventoryRequest` --
@@ -1171,23 +1267,10 @@ def channel_event_diff(
     function's own `limit` is whatever budget remains after the board
     half already ran, not a second independent cap.
     """
-    collected: list[dict] = []
-    truncated = False
-    # Issue #669: what the requester holds a genesis for and chose not to
-    # carry costs it nothing here -- see `uncarried_resource_ids`.
-    all_channel_ids = sorted((set(requested_channels) | set(carried_channel_ids(db))) - set(not_carried))
-    for channel_id in all_channel_ids:
-        if truncated:
-            break
-        known_ids = set(requested_channels.get(channel_id, ()))
-        for content_id, envelope in _all_channel_events(db, channel_id).items():
-            if content_id in known_ids:
-                continue
-            if len(collected) >= limit:
-                truncated = True
-                break
-            collected.append(envelope)
-    return collected, truncated
+    return _resource_event_diff(
+        requested_channels, carried_channel_ids(db), lambda resource_id: _all_channel_events(db, resource_id),
+        limit=limit, not_carried=not_carried, page=page,
+    )
 
 
 def _all_file_area_events(db: Database, area_id: str) -> dict[str, dict]:
@@ -1244,6 +1327,7 @@ def file_area_event_diff(
     *,
     limit: int,
     not_carried: tuple[str, ...] = (),
+    page: tuple[int, int] | None = None,
 ) -> tuple[list[dict], bool]:
     """
     The file-area-side responder logic for one `InventoryRequest` --
@@ -1260,23 +1344,10 @@ def file_area_event_diff(
     on demand through `netbbs.link.file_transfer`, unchanged by this
     issue.
     """
-    collected: list[dict] = []
-    truncated = False
-    # Issue #669: what the requester holds a genesis for and chose not to
-    # carry costs it nothing here -- see `uncarried_resource_ids`.
-    all_area_ids = sorted((set(requested_file_areas) | set(carried_file_area_ids(db))) - set(not_carried))
-    for area_id in all_area_ids:
-        if truncated:
-            break
-        known_ids = set(requested_file_areas.get(area_id, ()))
-        for content_id, envelope in _all_file_area_events(db, area_id).items():
-            if content_id in known_ids:
-                continue
-            if len(collected) >= limit:
-                truncated = True
-                break
-            collected.append(envelope)
-    return collected, truncated
+    return _resource_event_diff(
+        requested_file_areas, carried_file_area_ids(db), lambda resource_id: _all_file_area_events(db, resource_id),
+        limit=limit, not_carried=not_carried, page=page,
+    )
 
 
 def inventory_wanted_ids(

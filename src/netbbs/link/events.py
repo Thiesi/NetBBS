@@ -371,7 +371,13 @@ responder that must understand the field -- an older one rebuilds the signed
 payload without it and refuses the whole request -- so a requester sends it
 only to a peer whose descriptor carries this."""
 
-LINK_CAPABILITIES: tuple[str, ...] = (INVENTORY_NOT_CARRIED_CAPABILITY,)
+INVENTORY_PAGES_CAPABILITY = "inventory_pages"
+"""Issue #685: this node honours `InventoryRequest.page`, answering for one page
+of a declaration too large to send whole. Advertised for the same reason as
+`INVENTORY_NOT_CARRIED_CAPABILITY`: the field is signed, so an older responder
+would refuse a request that carries it."""
+
+LINK_CAPABILITIES: tuple[str, ...] = (INVENTORY_NOT_CARRIED_CAPABILITY, INVENTORY_PAGES_CAPABILITY)
 """Every optional behaviour this version advertises in its own descriptor."""
 
 
@@ -2272,6 +2278,7 @@ def _inventory_request_payload(
     channels: dict[str, tuple[str, ...]],
     file_areas: dict[str, tuple[str, ...]],
     not_carried: dict[str, tuple[str, ...]] | None = None,
+    page: tuple[int, int] | None = None,
 ) -> dict:
     """The exact payload shape `sign_inventory_request`/`verify_inventory_
     request` (issues #106/#124) both build canonical bytes over — one shared
@@ -2281,7 +2288,8 @@ def _inventory_request_payload(
     Issue #669: `not_carried` is signed like the rest, and is part of the
     payload only when it names something. A request without it therefore
     signs exactly as it did before the field existed, which is what lets an
-    older requester keep talking to a newer responder."""
+    older requester keep talking to a newer responder. Issue #685's `page` is
+    the same: present only for a declaration split across requests."""
     payload = {
         "requester_fingerprint": requester_fingerprint,
         "responder_fingerprint": responder_fingerprint,
@@ -2293,6 +2301,8 @@ def _inventory_request_payload(
     }
     if not_carried and any(not_carried.values()):
         payload["not_carried"] = {kind: list(ids) for kind, ids in not_carried.items() if ids}
+    if page is not None:
+        payload["page"] = {"index": page[0], "count": page[1]}
     return payload
 
 
@@ -2307,6 +2317,7 @@ def sign_inventory_request(
     channels: dict[str, tuple[str, ...]],
     file_areas: dict[str, tuple[str, ...]],
     not_carried: dict[str, tuple[str, ...]] | None = None,
+    page: tuple[int, int] | None = None,
 ) -> bytes:
     """Sign an `InventoryRequest` (design doc §8.8, issues #106/#124) with the
     requester's own current operational signing key -- the same "always
@@ -2327,6 +2338,7 @@ def sign_inventory_request(
         channels,
         file_areas,
         not_carried,
+        page,
     )
     envelope = build_envelope(INVENTORY_REQUEST_OBJECT_TYPE, payload)
     return signing_identity.sign(canonical_bytes(envelope))
@@ -2344,6 +2356,7 @@ def verify_inventory_request(
     signature: bytes,
     signing_verify_key: nacl.signing.VerifyKey,
     not_carried: dict[str, tuple[str, ...]] | None = None,
+    page: tuple[int, int] | None = None,
 ) -> bool:
     """Verify an `InventoryRequest`'s signature against the claimed
     requester's *current signing key* -- resolving which key that
@@ -2361,6 +2374,7 @@ def verify_inventory_request(
         channels,
         file_areas,
         not_carried,
+        page,
     )
     envelope = build_envelope(INVENTORY_REQUEST_OBJECT_TYPE, payload)
     return verify_signature(signing_verify_key, canonical_bytes(envelope), signature)

@@ -3969,3 +3969,146 @@ def test_a_hidden_board_is_left_alone_by_sync_and_restore_pulls_what_it_missed(t
         assert net.subjects_on("B") == ["before hiding", "while hidden"]
     finally:
         net.close()
+
+
+# -- Issue #685: a declaration larger than the responder's body limit ----------
+
+
+def _oversized_declaration_scenario(tmp_path, monkeypatch, *, strip_capability=False):
+    """B carries R's board and holds 100 posts of it. The responder's body
+    limit is then lowered to just under B's whole declaration -- the state a
+    node reaches at about 30,000 held events against the real 2 MiB -- and R
+    posts twice more and links a board B has never seen. Returns what B sent
+    and received on each later pass, the whole declaration's size, the limit,
+    and B's subjects on `general` and whether it discovered the new board."""
+    import functools
+
+    from netbbs.boards.boards import get_board_by_name
+    from netbbs.link import protocol as protocol_module
+    from netbbs.link import store as store_module
+    from netbbs.link import sync as sync_module
+    from netbbs.link import transport as transport_module
+    from netbbs.link.events import build_endpoint_descriptor as real_build_descriptor
+
+    if strip_capability:
+        # A responder from before #685 (and #669): its descriptor advertises nothing.
+        monkeypatch.setattr(
+            protocol_module, "build_endpoint_descriptor",
+            functools.partial(real_build_descriptor, capabilities=()),
+        )
+    net = _ThreeNodes(tmp_path, enforce=False)
+    for i in range(100):
+        net.post("R", f"history {i:03d}")
+
+    sent: list[tuple[int, tuple[int, int] | None]] = []
+    received: list[int] = []
+    failures: list[Exception] = []
+    real_request_inventory = sync_module.request_inventory
+
+    async def recording_request_inventory(node, session, url, request):
+        sent.append((len(json.dumps(request.to_dict())), request.page))
+        try:
+            result = await real_request_inventory(node, session, url, request)
+            received.append(len(result[0]))
+            return result
+        except Exception as exc:
+            failures.append(exc)
+            raise
+
+    monkeypatch.setattr(sync_module, "request_inventory", recording_request_inventory)
+    sizes: dict[str, int] = {}
+
+    async def scenario():
+        async with aiohttp.ClientSession() as session:
+            server = await net.start()
+            try:
+                await net.dial("B", session)
+            finally:
+                await server.stop()
+            assert len(net.subjects_on("B")) == 100
+            whole = store_module.build_inventory_request(
+                net.dbs["B"].db, signing_identity=net.ids["B"].signing_key,
+                requester_fingerprint=net.ids["B"].fingerprint,
+                responder_fingerprint=net.ids["R"].fingerprint,
+            )
+            sizes["whole"] = len(json.dumps(whole.to_dict()))
+            sizes["limit"] = sizes["whole"] - 1
+            monkeypatch.setattr(transport_module, "_LINK_CLIENT_MAX_SIZE_BYTES", sizes["limit"])
+            monkeypatch.setattr(store_module, "INVENTORY_DECLARATION_BUDGET_BYTES", sizes["limit"] // 2)
+            net.post("R", "new one")
+            net.post("R", "new two")
+            later = create_board(net.dbs["R"].db, "later", creator=net.sysops["R"])
+            link_board(net.dbs["R"].db, later, node_identity=net.ids["R"])
+            net.nodes["R"] = store_module.load_link_node(net.dbs["R"].db, net.ids["R"])
+            sent.clear()
+            received.clear()
+            server = await net.start()
+            try:
+                for _ in range(4):
+                    await net.dial("B", session)
+            finally:
+                await server.stop()
+
+    try:
+        asyncio.run(scenario())
+        return (
+            sent, received, failures, sizes, net.subjects_on("B"),
+            get_board_by_name(net.dbs["B"].db, "later") is not None,
+        )
+    finally:
+        net.close()
+
+
+def test_a_declaration_over_the_body_limit_is_sent_in_pages(tmp_path, monkeypatch):
+    """Before #685 the whole declaration went out on every pass, the responder
+    refused it with 413, and pull stopped for good. Now each request fits, the
+    pages are walked in turn, and what R has since is caught up -- posts on a
+    board B carries, and a board B has never seen."""
+    sent, received, failures, sizes, subjects, discovered = _oversized_declaration_scenario(tmp_path, monkeypatch)
+    assert failures == []
+    assert all(size <= sizes["limit"] for size, _page in sent)
+    pages = [page for _size, page in sent]
+    assert all(page is not None and page[1] >= 2 for page in pages)
+    assert {page[0] for page in pages} == set(range(pages[0][1]))
+    assert {"new one", "new two"} <= set(subjects)
+    assert len(subjects) == 102
+    assert discovered
+    # Two posts and one genesis, each once: the responder compared only the
+    # page it was told, so nothing B holds on another page came back.
+    assert sum(received) == 3
+
+
+def test_an_older_responder_is_sent_a_slice_that_fits(tmp_path, monkeypatch):
+    """A responder that does not advertise pages cannot be told which page it
+    has. It is still sent a request that fits, takes the rest as missing and
+    resends it -- wasteful, but sync goes on, where the whole declaration was
+    refused outright."""
+    sent, _received, failures, sizes, subjects, discovered = _oversized_declaration_scenario(
+        tmp_path, monkeypatch, strip_capability=True,
+    )
+    assert failures == []
+    assert all(size <= sizes["limit"] and page is None for size, page in sent)
+    assert len(subjects) == 102
+    assert discovered
+
+
+def test_a_paged_diff_answers_an_undeclared_resource_only_on_its_own_page(tmp_path):
+    """The requester cut its `not_carried` to the same page, so only there
+    does a resource missing from its maps still mean "never seen". Anywhere
+    else it may be one the requester declined, and sending it would be the
+    #669 resend on every pass."""
+    from netbbs.boards.boards import get_board_by_name
+    from netbbs.link.protocol import inventory_page
+    from netbbs.link.store import board_event_diff
+
+    net = _ThreeNodes(tmp_path, enforce=False)
+    try:
+        db = net.dbs["R"].db
+        board_id = get_board_by_name(db, "general").board_id
+        own_page = inventory_page(board_id, 3)
+        other_page = (own_page + 1) % 3
+        events, _ = board_event_diff(db, {}, limit=200, page=(own_page, 3))
+        assert len(events) == 1
+        assert board_event_diff(db, {}, limit=200, page=(other_page, 3)) == ([], False)
+    finally:
+        net.close()

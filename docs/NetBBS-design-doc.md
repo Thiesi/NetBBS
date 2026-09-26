@@ -2195,7 +2195,9 @@ A descriptor also lists `capabilities`: the optional Link behaviours the
 signing node's code understands (issue #669). A peer uses such a behaviour only
 with a node that advertises it; a descriptor without the list advertises
 nothing. It describes the software, not a setting, so every descriptor a given
-version signs carries the same list.
+version signs carries the same list. Two exist: `inventory_not_carried` (issue
+#669) and `inventory_pages` (issue #685), both for signed `InventoryRequest`
+fields (§8.8).
 
 The protocol logic remains transport-independent. The `aiohttp` adapter is the
 boundary translating protocol messages to real HTTP requests and responses.
@@ -2330,7 +2332,9 @@ InventoryRequest {
   signature: bytes,
   boards: { board_id: [known_content_id, ...], ... },
   channels: { channel_id: [known_content_id, ...], ... },
-  file_areas: { area_id: [known_content_id, ...], ... }
+  file_areas: { area_id: [known_content_id, ...], ... },
+  not_carried?: { kind: [resource_id, ...], ... },   // issue #669
+  page?: { index: int, count: int }                  // issue #685
 }
 ```
 
@@ -2343,11 +2347,41 @@ bounded replay window across restart. This prevents a captured request from
 being redirected to enumerate a different peer or replayed indefinitely.
 
 `boards` is keyed by every `board_id` the requester itself currently
-carries (bounded by its own `max_carried_boards` quota, §13.9 — the request
-size is therefore already bounded by an existing cap, not a new one) mapped
+carries (bounded by its own `max_carried_boards` quota, §13.9) mapped
 to that board's full set of content IDs the requester already has for it.
 `channels`/`file_areas` (§9.6, §11) are the identical shape for linked
 channels and linked file-area catalogues respectively.
+
+**A declaration too large for one request is sent in pages (issue #685).** The
+quotas bound the keys, not the history under them. At about 30,000 held content
+IDs the request outgrew the responder's 2 MiB `client_max_size` and was refused
+with 413 on every pass, so pull, and the `wanted` push that rides on it,
+stopped for good. When the IDs (and `not_carried`, below) would exceed 1 MiB,
+half the limit, the requester splits them into `count` pages by
+`inventory_page(id, count)` — the first eight bytes of the ID's SHA-256, big
+endian, modulo `count` — and each request carries one page, walked in turn per
+responder. Every key is still present; each list holds only its IDs on that
+page, and `not_carried` only the resources on it. The signed `page` field tells
+the responder which page it has, and the responder narrows its answer to match:
+for a declared resource it compares only its own events on that page, and an
+undeclared resource it answers for only when the resource ID itself is on that
+page, because only there is the requester's `not_carried` complete and "absent"
+still means "never seen". What falls on other pages comes up on their turn, so
+a node past the limit catches up in `count` passes rather than never.
+`count` is at most 4,096. Rejected: a per-resource digest with a full list
+where it differs (a second round trip, and one very large resource, which a
+busy linked channel becomes since channel events are never pruned, still
+outgrows the body); a per-resource cursor or high-water mark (content IDs
+carry no order the two sides share, and a gap below the mark would never be
+asked for again); paging whole resources (the same single-resource ceiling).
+Splitting within a resource lets a reply or edit arrive before what it refers
+to, which the materializers already tolerate: gossip arrives out of order anyway.
+
+`page` is signed and omitted for a one-page request, and it is sent only to a
+responder whose descriptor advertises `inventory_pages` (§8.2), for the same
+reason as `not_carried` below. An older responder is sent the same slice
+without being told: it takes the rest as missing and resends some of it, which
+costs bandwidth and dedup, but the request fits.
 
 **Route: `POST {LINK_PATH_PREFIX}/inventory/{fingerprint}`**, mirroring
 `/events/{fingerprint}`'s existing convention (`fingerprint` names the
@@ -2542,7 +2576,11 @@ lives only in its own row. The list is capped at 5,000 IDs per request: the stor
 genesis set is not bounded by anything the node controls, since a peer can keep
 sending geneses to a node past its cap, and an unbounded list would grow until
 every request was refused. Over the cap each request declares a fresh random
-sample, so what goes undeclared costs a resend, never a fixed starvation. The existing maps cannot say this, since their
+sample, so what goes undeclared costs a resend, never a fixed starvation.
+Against a responder that takes pages (issue #685, above), the requester instead
+uses enough pages that each page's share stays well under the cap, so every
+declined resource is declared on its own page and the whole set is suppressed
+once per walk; the sample remains only as the backstop. The existing maps cannot say this, since their
 values are known-ID sets and an offered board's posts were never received. The
 field is part of the signed payload only when it names something, so a request
 without it signs exactly as before; and it is sent only to a responder whose
@@ -11247,8 +11285,9 @@ dropped without reaching `link_events`. Mixed versions keep today's behaviour
 until the responder upgrades. The declaration costs one resource ID per offered or
 excluded resource; the carried maps beside it list every content ID of every
 carried resource and are far larger, so keeping the whole request under the
-responder's size limit is one problem for both, and #669 owns it rather than a
-separate bound on the carry-decision record.
+responder's size limit is one problem for both. Issue #685 settled it for both
+at once by paging the declaration (§8.8), rather than a separate bound on the
+carry-decision record.
 
 **Decision 7 — the bound stays a per-type count, and all three get a
 readout.** 500 stays the default, and the declared scale (§2.3) stays small.

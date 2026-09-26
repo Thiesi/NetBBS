@@ -2647,7 +2647,8 @@ requester's own filter, leave the responder unchanged, and come back identical
 forever. Capping after that filter truncates only events the requester can
 actually send, so the responder has them next pass and the list strictly
 shrinks. `wanted` needs no cap of its own: it is a subset of the IDs the
-requester just declared, which `client_max_size` already bounds.
+requester just declared, which `client_max_size` already bounds, and a paged
+declaration (issue #685) only makes it smaller.
 
 **Anything that rides along with a budgeted push must not eat the budget.**
 `key_transition`s are append-only and sent unconditionally; deriving the
@@ -3903,7 +3904,28 @@ peers would stop talking altogether. What works, and what `not_carried` does:
   to a peer whose current descriptor lists it (`descriptor_has_capability`).
 
 The capability is fixed per software version, not configurable, because it
-describes what the code can verify.
+describes what the code can verify. `page` (issue #685, `inventory_pages`) is
+the second field added this way.
+
+### A paged inventory declaration: both sides must cut the same way (issue #685)
+
+A declaration past `INVENTORY_DECLARATION_BUDGET_BYTES` goes out one page at a
+time, and the responder has to narrow its answer by exactly the rule the
+requester cut by, or the page starves again in a new form:
+
+- a declared resource's list is only its IDs on this page, so the responder
+  must skip its own events on other pages, or it resends everything the
+  requester holds there and those duplicates fill the 200-event response;
+- `not_carried` is cut to the same page, so an undeclared resource is answered
+  for only when its own ID is on the page, or a declined resource on another
+  page is resent every pass (the #669 starvation).
+
+`inventory_page` (SHA-256, first eight bytes, big endian, mod `count`) is the
+one definition both use, and `_resource_event_diff` holds the responder's walk
+for all three kinds, so the rule cannot drift between them. The cursor that
+walks the pages is per responder (`LinkNode.inventory_page_cursors`): one
+counter shared by all seeds, with two seeds and two pages, would give each seed
+the same page forever.
 
 ### Remote identity attestation: the issuing half, and what it exposed (issue #584)
 

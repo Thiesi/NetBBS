@@ -168,6 +168,7 @@ from netbbs.link.channels import load_own_channel_events
 from netbbs.link.files import load_own_file_area_events
 from netbbs.link.events import (
     INVENTORY_NOT_CARRIED_CAPABILITY,
+    INVENTORY_PAGES_CAPABILITY,
     LINK_MESSAGE_OBJECT_TYPE,
     EndpointDescriptor,
     canonical_bytes,
@@ -760,6 +761,10 @@ async def _sync_one_seed(
     # leave it unset, and the push below treats that differently from
     # an answered "I need nothing from you."
     wanted: list[str] | None = None
+    # Issue #685: which page of a declaration too large for one request this
+    # pass sends, counted per seed so each one is walked through every page.
+    page_cursor = node.inventory_page_cursors.get(seed_peer.fingerprint, 0)
+    node.inventory_page_cursors[seed_peer.fingerprint] = page_cursor + 1
     try:
         inventory_request = await lane.run(
             build_inventory_request,
@@ -771,6 +776,8 @@ async def _sync_one_seed(
             declare_not_carried=descriptor_has_capability(
                 seed_peer.descriptor, INVENTORY_NOT_CARRIED_CAPABILITY
             ),
+            paged=descriptor_has_capability(seed_peer.descriptor, INVENTORY_PAGES_CAPABILITY),
+            page_cursor=page_cursor,
         )
         events, _more_available, wanted = await request_inventory(
             node, session, seed_url, inventory_request
