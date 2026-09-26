@@ -293,6 +293,20 @@ FAKE_QEMU = '''
         os.rename(os.path.join(node, "outbound", "post.part"), os.path.join(node, "outbound", "post.json"))
     open(os.path.join(game, "argv.json"), "w").write(json.dumps(argv))
     open(os.path.join(node, "booted"), "w").close()
+    if mode == "outbound-live":
+        info = json.load(open(os.path.join(node, "door_info.json")))
+        results = info["outbound"]["results"].replace("/mnt/node", node)
+        os.makedirs(os.path.join(node, "outbound"), exist_ok=True)
+        with open(os.path.join(node, "outbound", "live.part"), "w") as request:
+            json.dump({"subject": "Sector 7", "body": "From the guest, live."}, request)
+        os.rename(os.path.join(node, "outbound", "live.part"), os.path.join(node, "outbound", "live.json"))
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            found = [json.load(open(os.path.join(results, name))) for name in os.listdir(results)]
+            if any(receipt.get("request") == "live" for receipt in found):
+                open(os.path.join(game, "live-receipt"), "w").write(json.dumps(found))
+                break
+            time.sleep(0.1)
     door.sendall(b"READY")
     if mode == "refuse":
         stream = qmp.makefile("rwb")
@@ -461,3 +475,110 @@ def test_the_guest_init_honours_every_step_of_the_contract():
         assert f"/mnt/node/{name}" in init
     # A stop requested during boot must not start a door that is then cut off.
     assert init.index('if [ -n "$stopping" ]; then\n    echo 129') < init.index("sh /mnt/node/run.sh")
+
+
+@posix_only
+def test_a_vm_door_sees_its_receipt_during_the_session(db, lane, player, tmp_path, monkeypatch):
+    """The guest's receipts are a copy; an in-session drain must top it up, or
+    a VM door would learn its outcome only on its next launch."""
+    from netbbs.auth.users import create_user
+    from netbbs.boards.boards import create_board
+    from netbbs.doors import runtime
+    from netbbs.doors.outbound import allow_target, enable_outbound
+
+    monkeypatch.setattr(runtime, "_OUTBOUND_TICK_SECONDS", 0.2)
+    sysop = create_user(db, "sysop", password="hunter2", user_level=255)
+    board = create_board(db, "Chronicle", creator=sysop)
+    door = _fake_qemu_door(db, player, tmp_path, "outbound-live")
+    enable_outbound(db, door, enabled_by=sysop)
+    allow_target(db, door, board, allowed_by=sysop)
+
+    assert _play(lane, door, player).reason == "exited"
+    receipts = json.loads((tmp_path / "game" / "live-receipt").read_text())
+    assert [receipt["status"] for receipt in receipts if receipt["request"] == "live"] == ["posted"]
+
+
+# -- the receipt copy writes into a guest-writable directory -----------------
+
+
+def _receipts(tmp_path, count=2):
+    source = tmp_path / "door-outbound"
+    source.mkdir()
+    for index in range(count):
+        (source / f"launch.{index}.post.result.json").write_text(f'{{"n": {index}}}')
+    node = tmp_path / "node"
+    node.mkdir()
+    return source, node
+
+
+@posix_only
+def test_a_receipt_directory_swapped_for_a_link_is_not_written_through(tmp_path):
+    """The guest writes its node export while the copy runs. A link where the
+    receipt directory belongs must never let NetBBS write a host path."""
+    source, node = _receipts(tmp_path)
+    host = tmp_path / "host"
+    host.mkdir()
+    (node / "outbound-results").symlink_to(host, target_is_directory=True)
+
+    vm.copy_receipts(source, node, results_kept=10)
+
+    assert list(host.iterdir()) == []
+    copied = node / "outbound-results"
+    assert copied.is_dir() and not copied.is_symlink()
+    assert sorted(path.name for path in copied.iterdir()) == sorted(path.name for path in source.iterdir())
+
+
+@posix_only
+def test_a_staging_name_planted_as_a_link_is_not_written_through(tmp_path):
+    """The guest can guess the staging name; a link planted there is removed,
+    never opened."""
+    source, node = _receipts(tmp_path, count=1)
+    (node / "outbound-results").mkdir()
+    victim = tmp_path / "victim"
+    victim.write_text("untouched")
+    (node / "outbound-results" / "launch.0.post.result.json.part").symlink_to(victim)
+
+    vm.copy_receipts(source, node, results_kept=10)
+
+    assert victim.read_text() == "untouched"
+    copied = node / "outbound-results" / "launch.0.post.result.json"
+    assert not copied.is_symlink() and copied.read_text() == '{"n": 0}'
+
+
+def test_the_copy_never_exposes_a_partial_receipt_name(tmp_path, monkeypatch):
+    """Staged under a name the guest ignores, then renamed into place."""
+    source, node = _receipts(tmp_path, count=1)
+    seen = []
+    real_replace = vm.os.replace
+
+    def watching(src, dst, *args, **kwargs):
+        seen.append((str(src), str(dst)))
+        return real_replace(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(vm.os, "replace", watching)
+    monkeypatch.setattr(vm.os, "rename", watching)
+    vm.copy_receipts(source, node, results_kept=10)
+    assert seen and all(src.endswith(".part") and dst.endswith(".result.json") for src, dst in seen)
+
+
+@posix_only
+def test_the_receipt_directory_exists_before_the_first_receipt(tmp_path):
+    source = tmp_path / "door-outbound"  # not made yet: no receipt has been written
+    node = tmp_path / "node"
+    node.mkdir()
+    vm.copy_receipts(source, node, results_kept=10)
+    assert (node / "outbound-results").is_dir()
+
+
+def test_the_guest_copy_follows_the_nodes_pruning(tmp_path):
+    """The node keeps a bounded number of receipts; the guest's copy must
+    shrink with it, or it grows for as long as the door keeps writing."""
+    source, node = _receipts(tmp_path, count=3)
+    vm.copy_receipts(source, node, results_kept=10)
+    (source / "launch.0.post.result.json").unlink()  # the node pruned it
+    (node / "outbound-results" / "not-a-receipt.txt").write_text("the guest's own")
+
+    vm.copy_receipts(source, node, results_kept=10)
+
+    assert sorted(path.name for path in (node / "outbound-results").iterdir()) == [
+        "launch.1.post.result.json", "launch.2.post.result.json", "not-a-receipt.txt"]

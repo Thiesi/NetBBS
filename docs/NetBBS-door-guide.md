@@ -1272,9 +1272,10 @@ starts: booting is bounded by `boot_timeout_seconds` alone.
 
 If the SysOp has switched on the door's [outbound hook](#letting-a-door-post-to-a-board),
 the guest's `door_info.json` names its receipts as `/mnt/node/outbound-results`:
-a copy, taken at launch, of the receipts NetBBS keeps for the door beside the
-node database. Receipts are written only after a session ends, so the copy is
-exactly what a native door would see; the guest cannot change the originals.
+a copy of the receipts NetBBS keeps for the door beside the node database,
+taken at launch and topped up whenever a request is answered during the
+session, so the guest sees what a native door would; it cannot change the
+originals.
 Requests go in the `outbound` directory beside `door_info.json`, as for any door.
 
 `run.sh` is written by NetBBS for each session. It exports `TERM=ansi`, the
