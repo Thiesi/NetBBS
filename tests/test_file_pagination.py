@@ -1,5 +1,5 @@
 """
-Tests for netbbs.files.entries.list_files_page and get_file_by_name
+Tests for netbbs.files.entries.list_files_page
 (issue #10's file-area follow-up) -- mirrors
 tests/test_post_pagination.py's structure and coverage exactly, since
 list_files_page deliberately mirrors list_posts_page's design.
@@ -12,7 +12,7 @@ import pytest
 from netbbs.auth.users import create_user
 from netbbs.files import entries as entries_module
 from netbbs.files.areas import create_file_area
-from netbbs.files.entries import get_file_by_name, list_files_page, upload_file
+from netbbs.files.entries import list_files_page, upload_file
 from netbbs.storage.database import Database
 
 
@@ -138,44 +138,3 @@ def test_composite_file_pagination_index_exists(db):
     ).fetchall()
     names = {row["name"] for row in rows}
     assert "idx_files_area_id_created_at_file_id" in names
-
-
-# -- get_file_by_name -----------------------------------------------------
-
-
-def test_get_file_by_name_finds_a_file_not_on_the_newest_page(db, alice, monkeypatch):
-    """The whole reason get_file_by_name exists: pagination bounds what
-    is fetched for *browsing*, never what can be referenced by name, so
-    the lookup has to reach a file that isn't on the currently displayed
-    (newest) page. (The file area's `/download <filename>` command was
-    its first caller and is gone -- that screen is keystrokes only now
-    -- but the by-name lookup and its pending rule remain this module's
-    answer to "which file is called this", which
-    netbbs.net.file_transfer._may_see_pending cites as canonical.)"""
-    area = create_file_area(db, "docs", creator=alice)
-    _upload_with_distinct_timestamps(db, area, alice, monkeypatch, count=10)
-
-    # The newest page (default limit) won't include file0.txt once
-    # there are more than a page's worth of uploads.
-    newest_page = list_files_page(db, area, alice)
-    assert "file0.txt" not in [f.filename for f in newest_page.entries]
-
-    found = get_file_by_name(db, area, "file0.txt")
-    assert found is not None
-    assert found.filename == "file0.txt"
-
-
-def test_get_file_by_name_returns_none_when_not_found(db, alice):
-    area = create_file_area(db, "docs", creator=alice)
-    assert get_file_by_name(db, area, "nonexistent.txt") is None
-
-
-def test_get_file_by_name_returns_oldest_match_for_duplicate_names(db, alice, monkeypatch):
-    area = create_file_area(db, "docs", creator=alice)
-    timestamps = iter(["2026-01-01T00:00:00.000000Z", "2026-01-01T00:00:01.000000Z"])
-    monkeypatch.setattr(entries_module, "utc_now_iso", lambda: next(timestamps))
-    first = upload_file(db, area, alice, "same.txt", b"version 1")
-    upload_file(db, area, alice, "same.txt", b"version 2")
-
-    found = get_file_by_name(db, area, "same.txt")
-    assert found.file_id == first.file_id

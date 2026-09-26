@@ -3805,6 +3805,43 @@ def test_a_moderator_can_download_a_pending_file_before_deciding(db, lane, sysop
     assert get_file(db, entry.file_id).status == "pending"
 
 
+def test_a_sysop_can_recover_an_expired_file_before_it_is_purged(db, lane, sysop):
+    """Issue #639: expiry ends a caller's reach, so the file area's own
+    screens never show an expired file again -- and its bytes are
+    unrecoverable once the grace period ends. `E[x]pired files` is where
+    the SysOp fetches one back in between, without shell access.
+
+    Same fake-transport caveat as the pending download above: the send
+    fails, and what this proves is that `[D]` reaches the transfer path
+    and the screen is still standing afterwards."""
+    import datetime
+
+    from netbbs.files.areas import create_file_area
+    from netbbs.files.entries import get_file, upload_file
+
+    alice = create_user(db, "alice", password="hunter2", user_level=10)
+    area = create_file_area(db, "Docs", creator=sysop, max_file_age_days=30)
+    entry = upload_file(db, area, alice, "old.txt", b"hello")
+    upload_file(db, area, alice, "fresh.txt", b"still listed")
+    backdated = (
+        datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=31)
+    ).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    db.connection.execute("UPDATE files SET created_at = ? WHERE id = ?", (backdated, entry.id))
+    db.connection.commit()
+
+    inputs = ["m", "f", "l", "0", "1", "x", "0", "1", "d", "b", "b", "b", "b", "b", "b"]
+    session = FakeSession(inputs)
+    _run(session, lane, sysop)
+
+    text = _visible(_written_text(session))
+    assert "E[x]pired files" in text
+    assert "Expired files in 'Docs'" in text
+    assert "fresh.txt" not in text  # approved files are not the recovery screen's business
+    assert "Purge date" in text
+    assert "Starting Zmodem send of 'old.txt'" in text
+    assert get_file(db, entry.file_id).status == "expired"
+
+
 def test_create_and_delete_board_category_flow(db, lane, sysop):
     from netbbs.boards.categories import list_top_level_categories
 
