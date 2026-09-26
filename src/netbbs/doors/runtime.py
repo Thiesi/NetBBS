@@ -635,9 +635,11 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
                     env.update(dos_env)
                     cwd = workdir
                 elif profile.adapter == "vm":
-                    from netbbs.doors.vm import prepare_vm
+                    from netbbs.doors.outbound import RESULTS_KEPT
+                    from netbbs.doors.vm import prepare_vm, publish_guest_info
                     argv = prepare_vm(door, workdir, lease.number, width, height,
                                       child_socket.fileno(), qmp_child.fileno())
+                    info = await asyncio.to_thread(publish_guest_info, workdir, info_path, info, RESULTS_KEPT)
                     cwd = workdir
                 if profile.runner:
                     argv = [*profile.runner, *argv]
@@ -683,8 +685,18 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
                     session, proc, info_path, info, published=(width, height),
                     pty_fd=endpoint.fd if mode == "pty" else None, signal_door=mode == "signal"))
         try:
-            reason = await asyncio.wait_for(_relay(terminal, endpoint, proc, stop_grace),
-                                            timeout=effective_wall_limit(profile, wall_time_limit_seconds))
+            relay = asyncio.create_task(_relay(terminal, endpoint, proc, stop_grace))
+            try:
+                if profile and profile.adapter == "vm":
+                    # A guest's boot is bounded by its own watchdog; the caller's
+                    # time limit is for playing, and starts when the door does.
+                    from netbbs.doors.vm import wait_booted
+                    await wait_booted(workdir, relay)
+                reason = await asyncio.wait_for(relay, timeout=effective_wall_limit(profile, wall_time_limit_seconds))
+            finally:
+                if not relay.done():
+                    relay.cancel()
+                    await asyncio.gather(relay, return_exceptions=True)
             if reason == "door_exited":
                 if proc and proc.returncode is None:
                     try:

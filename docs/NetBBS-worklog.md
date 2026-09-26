@@ -5660,6 +5660,14 @@ so `RLIMIT_AS` validation encodes that. qemu 11.1 deprecated `-mon` and
 warns on every launch into Last diagnostic; whether a binary takes
 `-object monitor-qmp` is asked once, from preflight's thread, and cached by
 path and mtime -- the launch itself must not spawn from the event loop. A
+guest console must not be `-serial stdio`: qemu reads stdin (/dev/null for a
+door), the immediate EOF raises the UART's interrupt before the guest has
+programmed an interrupt controller, and about one boot in nine took a stray
+vector just after `int3_selftest`, panicked before its console existed, and
+exited 0 under `-no-reboot` -- indistinguishable from a door that ran and
+reported nothing. `qemu -d int,cpu_reset -D file` (wrapped in via the
+profile's `runner`) showed the pending IRQ; disabling the PIT/PIC made it
+worse. `file:/dev/stdout` fixed it (40/40). A
 never-drained qemu stdout pipe stalls the guest once its console fills it;
 the runtime's diagnostics task drains socketpair doors' stdout, and any
 test harness must too.

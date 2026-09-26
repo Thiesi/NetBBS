@@ -48,16 +48,29 @@ geometry=$(cat /mnt/node/geometry 2>/dev/null)
 stty raw -echo ${geometry:+rows ${geometry% *} cols ${geometry#* }} <&3
 : >/mnt/node/booted
 
+# A stop requested while the guest was still booting: never start a door
+# that could only be cut off. 129 is what a hung-up door would report.
+if [ -n "$stopping" ]; then
+    echo 129 >/mnt/node/exit.status
+    halt_guest
+fi
 cd /mnt/game
 setsid -c sh /mnt/node/run.sh <&3 >&3 2>&1 &
 door=$!
+# The trap may have fired between the check above and $door being set.
+[ -n "$stopping" ] && kill -HUP -$door 2>/dev/null
 wait $door
 status=$?
 if [ -n "$stopping" ]; then
-    # The trap interrupted wait; give the door its chance to save, then end it.
-    for tick in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
-        kill -0 $door 2>/dev/null || break
+    # The trap interrupted wait; give the door its chance to save, then end
+    # it. The host waits stop_grace seconds for the guest to power off, so
+    # keep a second of that for flushing and powering down.
+    grace=$(cat /mnt/node/stop_grace 2>/dev/null)
+    ticks=$(( (${grace:-5} - 1) * 5 ))
+    [ $ticks -lt 5 ] && ticks=5
+    while [ $ticks -gt 0 ] && kill -0 $door 2>/dev/null; do
         sleep 0.2
+        ticks=$((ticks - 1))
     done
     kill -KILL -$door 2>/dev/null
     wait $door

@@ -17,7 +17,6 @@ exactly as `EXIT.ERR`/`RETURN.OK` are for DOS.
 from __future__ import annotations
 
 import asyncio
-import functools
 import json
 import os
 import platform
@@ -45,6 +44,9 @@ DEFAULT_BOOT_TIMEOUT_SECONDS = 60
 ADDRESS_SPACE_OVERHEAD_MB = 512
 #: Files NetBBS and the guest's init exchange through the node export.
 RUN_SCRIPT, GEOMETRY, BOOTED, EXIT_STATUS = "run.sh", "geometry", "booted", "exit.status"
+STOP_GRACE = "stop_grace"
+#: Where a VM door finds its outbound receipts: a snapshot in the node export.
+GUEST_RESULTS_DIRNAME = "outbound-results"
 #: The guest console. Quiet, because it lands in the door's Last diagnostic;
 #: `panic=-1` with `-no-reboot` turns a guest panic into qemu exiting instead of
 #: a wedged VM sitting out the caller's time limit.
@@ -120,6 +122,7 @@ def preflight_vm(profile, executable: str) -> list[str]:
     does not, and must not spawn anything to find out.
     """
     monitor_objects(executable)
+    known_tsc_khz(learn=True)
     problems = []
     opts = options(profile)
     for key in ("kernel", "initrd"):
@@ -156,7 +159,6 @@ def run_script(profile, node: int) -> str:
     return "\n".join(lines) + "\n"
 
 
-@functools.cache
 def host_tsc_khz() -> int | None:
     """The host's TSC frequency, or None where it cannot be read.
 
@@ -176,6 +178,24 @@ def host_tsc_khz() -> int | None:
         return int(Path("/sys/devices/system/cpu/cpu0/tsc_freq_khz").read_text()) or None
     except (OSError, ValueError, subprocess.SubprocessError):
         return None
+
+
+_UNLEARNED = object()
+_TSC_KHZ = _UNLEARNED
+
+
+def known_tsc_khz(*, learn: bool = False) -> int | None:
+    """The host TSC frequency once preflight has read it, else None.
+
+    Reading it runs `sysctl` on NetBSD, which must not happen on the event
+    loop the launch runs on: preflight (off the loop) learns it, and the launch
+    only ever reads what was learnt. A launch before any preflight simply
+    boots without the hint.
+    """
+    global _TSC_KHZ
+    if learn and _TSC_KHZ is _UNLEARNED:
+        _TSC_KHZ = host_tsc_khz()
+    return None if _TSC_KHZ is _UNLEARNED else _TSC_KHZ
 
 
 _MONITOR_OBJECTS: dict[tuple[str, int], bool] = {}
@@ -221,9 +241,13 @@ def prepare_vm(door, directory: Path, node: int, width: int, height: int, door_f
     install = Path(profile.install_dir).resolve()
     (directory / RUN_SCRIPT).write_text(run_script(profile, node), encoding="utf-8")
     (directory / GEOMETRY).write_text(f"{height} {width}\n", encoding="ascii")
+    # How long the guest may give its door after a hangup. The host waits this
+    # long for qemu to exit before killing it, so a guest-side deadline any
+    # shorter would cut off a door the SysOp gave more time to save.
+    (directory / STOP_GRACE).write_text(f"{profile.stop_grace_seconds}\n", encoding="ascii")
     accel = opts["accel"]
     kernel_args = _KERNEL_ARGS
-    if accel == "tcg" and (khz := host_tsc_khz()):
+    if accel == "tcg" and (khz := known_tsc_khz()):
         kernel_args += f" tsc_early_khz={khz}"
     if opts["kernel_args"].strip():
         kernel_args += " " + opts["kernel_args"].strip()
@@ -231,7 +255,13 @@ def prepare_vm(door, directory: Path, node: int, width: int, height: int, door_f
         door.executable_path, "-nodefaults", "-no-user-config",
         "-machine", "microvm", "-accel", "tcg,tb-size=64" if accel == "tcg" else accel,
         "-cpu", "max", "-smp", "1", "-m", str(opts["guest_memory_mb"]),
-        "-display", "none", "-nic", "none", "-no-reboot", "-serial", "stdio",
+        # The guest console is write-only on purpose. `-serial stdio` reads
+        # stdin -- /dev/null here -- and the EOF it sees immediately changes
+        # the UART's modem status, raising IRQ 4 before the guest kernel has
+        # programmed an interrupt controller. About one boot in nine then took
+        # a stray vector early and panicked; qemu, under -no-reboot, exited 0.
+        # 40 of 40 clean with a file backend on the same host.
+        "-display", "none", "-nic", "none", "-no-reboot", "-serial", "file:/dev/stdout",
         "-kernel", opts["kernel"], "-initrd", opts["initrd"], "-append", kernel_args,
         "-fsdev", f"local,id=game,path={_fsdev_path(install)},security_model=none",
         "-device", "virtio-9p-device,fsdev=game,mount_tag=game",
@@ -245,12 +275,59 @@ def prepare_vm(door, directory: Path, node: int, width: int, height: int, door_f
     ]
 
 
+def publish_guest_info(directory: Path, info_path: Path, info: dict, results_kept: int) -> dict:
+    """Rewrite `door_info.json` so every path in it is one the guest can open.
+
+    The outbound hook's receipts live beside the node database, outside both
+    exports, so a guest could submit a request and never learn its outcome.
+    Receipts are only written when a run drains, after the door has exited,
+    so a copy taken now holds exactly what the live directory would show the
+    door for its whole session. Copied, not exported: the guest must not be
+    able to rewrite the node's record of what it was told.
+    """
+    outbound = info.get("outbound")
+    if not outbound:
+        return info
+    source = Path(outbound["results"])
+    target = directory / GUEST_RESULTS_DIRNAME
+    target.mkdir(exist_ok=True)
+    try:
+        receipts = sorted(entry for entry in source.iterdir()
+                          if entry.is_file() and not entry.is_symlink())[-results_kept:]
+    except OSError:
+        receipts = []
+    for receipt in receipts:
+        try:
+            (target / receipt.name).write_bytes(receipt.read_bytes())
+        except OSError:
+            continue
+    info = dict(info, outbound=dict(outbound, results=f"{GUEST_NODE}/{GUEST_RESULTS_DIRNAME}"))
+    info_path.write_text(json.dumps(info), encoding="utf-8")
+    return info
+
+
+async def wait_booted(directory: Path, relay: asyncio.Task) -> None:
+    """Hold the caller's time limit until the guest reaches its door.
+
+    Returns when the guest has booted or the relay has already ended (the
+    caller left, or the boot watchdog killed the guest). The boot itself is
+    bounded by `watch_boot`, not by this.
+    """
+    while not relay.done() and not (directory / BOOTED).exists():
+        await asyncio.sleep(0.1)
+
+
 def guest_exit_code(profile, directory: Path) -> tuple[int, str]:
     """The game's own verdict, read from the status file its guest wrote."""
     try:
         text = (directory / EXIT_STATUS).read_text(encoding="ascii").strip()
         status = int(text)
     except (OSError, ValueError):
+        if not (directory / BOOTED).exists():
+            # A kernel panic or reset powers qemu off cleanly under
+            # -no-reboot, which would otherwise read as a door that ran.
+            return 1, ("The VM stopped before its door started (a guest kernel panic or reset powers qemu "
+                       "off cleanly); the guest console lines above show why.\n")
         return 1, ("The guest did not report the door's exit status: its init must write exit.status "
                    "before powering off (see the guest image contract in the door guide).\n")
     if status in options(profile)["success_exit_codes"]:

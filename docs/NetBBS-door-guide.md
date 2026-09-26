@@ -783,7 +783,11 @@ until you switch it on, and switching it on grants exactly one ability:
 posting to the boards on that door's own allowlist. A door can never read the
 BBS, send mail, look up a caller, or post anywhere you did not allow.
 
-**Native doors only, for now.** A DOS door cannot read `door_info.json` at
+**Native and [VM](#foreign-platform-doors-in-a-vm) doors, not DOS yet.** A VM
+door finds its request directory beside `door_info.json` in `/mnt/node`, and
+its receipts in a copy NetBBS places there at launch. For a VM door, unlike a
+native one, this *is* a new ability: the guest cannot otherwise reach the node's
+database at all. A DOS door cannot read `door_info.json` at
 all — `NETBBS_DOOR_INFO` names a host path the guest has no way to reach — so
 it has no way to learn its posting name or where to write. The file-drop
 transport was chosen precisely so a DOS door *can* be served later (a socket
@@ -1252,13 +1256,26 @@ Whatever you build, its init runs once per caller and must:
 
 When the caller hangs up, the time limit runs out or the node stops, NetBBS
 presses the guest's ACPI power button. The init must then send the door SIGHUP
--- as if its modem had dropped carrier -- give it a few seconds, and continue
-with steps 5 and 6. After `stop_grace_seconds` NetBBS kills qemu regardless.
+-- as if its modem had dropped carrier -- give it up to the number of seconds in
+`/mnt/node/stop_grace` (the profile's `stop_grace_seconds`, less a moment to
+power off), and continue with steps 5 and 6. After `stop_grace_seconds` NetBBS
+kills qemu regardless. A press that arrives before the door has started means
+the door must not be started at all.
 
 Step 5 is what makes a crash visible. A program's exit code never leaves the
 guest on its own: qemu exits 0 whether the game finished or crashed. NetBBS
 reports a missing or unreadable `exit.status` as a failure, and compares the
 number against `success_exit_codes`.
+
+The caller's time limit starts when the guest creates `booted`, not when qemu
+starts: booting is bounded by `boot_timeout_seconds` alone.
+
+If the SysOp has switched on the door's [outbound hook](#letting-a-door-post-to-a-board),
+the guest's `door_info.json` names its receipts as `/mnt/node/outbound-results`:
+a copy, taken at launch, of the receipts NetBBS keeps for the door beside the
+node database. Receipts are written only after a session ends, so the copy is
+exactly what a native door would see; the guest cannot change the originals.
+Requests go in the `outbound` directory beside `door_info.json`, as for any door.
 
 `run.sh` is written by NetBBS for each session. It exports `TERM=ansi`, the
 profile's `environment`, and `NETBBS_DOOR_INFO`, `NETBBS_DOOR_NODE` and
@@ -1310,6 +1327,9 @@ Last diagnostic shows qemu's own errors and the guest's console:
   9p module, a kernel that cannot find its init, a panic.
 - `cannot set up guest memory ... Cannot allocate memory`: `memory_mb` is too
   low for qemu, whatever the guest needs; see Memory above.
+- `The VM stopped before its door started`: the guest kernel panicked or
+  reset during boot, which powers qemu off cleanly. Add `loglevel=8` to
+  `kernel_args` to see its boot messages in Last diagnostic.
 - `The guest did not report the door's exit status`: the guest powered off
   without writing `/mnt/node/exit.status`. Check the init against the contract.
 - `The door exited with status N inside the guest`: the game's own failure;
