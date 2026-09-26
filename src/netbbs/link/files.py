@@ -33,6 +33,7 @@ import logging
 import os
 from dataclasses import dataclass
 
+from netbbs.boards.boards import usable_max_age_days
 from netbbs.files.areas import FileArea
 from netbbs.files.diz import fit_description
 from netbbs.files.entries import FileEntry
@@ -117,6 +118,10 @@ def link_file_area(
     """
     if is_area_linked(db, area):
         raise LinkFilesError(f"file area {area.name!r} is already Linked")
+    if default_max_file_age_days is not None and usable_max_age_days(default_max_file_age_days) is None:
+        raise LinkFilesError(
+            f"recommended maximum file age must be at least 1 day, got {default_max_file_age_days}"
+        )
 
     genesis = build_file_area_genesis(
         signing_identity=node_identity.signing_key,
@@ -216,7 +221,7 @@ def materialize_carried_file_area(
             payload.get("default_min_write_level", 0),
             payload["created_at"],
             int(payload.get("default_moderated", False)),
-            payload.get("default_max_file_age_days"),
+            usable_max_age_days(payload.get("default_max_file_age_days")),
             payload.get("default_min_age"),
             payload.get("default_name_requirement"),
             json.dumps(genesis.to_dict()),

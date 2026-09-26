@@ -708,3 +708,46 @@ def test_an_uploader_may_still_rewrite_a_description_in_an_unmoderated_area(db, 
     entry = upload_file(db, area, alice, "game.zip", b"payload", description="first")
     assert entry.status == "approved"
     assert set_file_description(db, entry, "second", changed_by=alice).description == "second"
+
+
+# -- issue #676: a maximum file age is at least one day; approval needs pending
+
+
+@pytest.mark.parametrize("bad_age", [0, -1])
+def test_create_file_area_refuses_a_max_file_age_below_one_day(db, alice, bad_age):
+    from netbbs.files.areas import FileAreaError
+
+    with pytest.raises(FileAreaError, match="at least 1 day"):
+        create_file_area(db, "docs", creator=alice, max_file_age_days=bad_age)
+    assert list_file_areas(db) == []
+
+
+def test_update_file_area_refuses_a_max_file_age_below_one_day(db, alice):
+    from netbbs.files.areas import FileAreaError
+
+    area = create_file_area(db, "docs", creator=alice, max_file_age_days=30)
+    with pytest.raises(FileAreaError, match="at least 1 day"):
+        update_file_area(
+            db, area, name=area.name, description=area.description,
+            min_read_level=area.min_read_level, min_write_level=area.min_write_level,
+            category_id=area.category_id, pinned=area.pinned, moderated=area.moderated,
+            max_file_age_days=0, min_age=area.min_age,
+            name_requirement=area.name_requirement, community_id=area.community_id,
+            changed_by=alice,
+        )
+    assert get_file_area_by_name(db, "docs").max_file_age_days == 30
+
+
+def test_approving_a_file_that_is_no_longer_pending_is_refused(db, alice, bob):
+    from netbbs.files.entries import FileEntryError
+
+    area = create_file_area(db, "docs", creator=bob, moderated=True)
+    grant_permissions(
+        db, bob, object_type="file_area", object_id=area.id,
+        permissions=BoardPermission.APPROVE, granted_by=bob,
+    )
+    entry = upload_file(db, area, alice, "game.zip", b"payload", description="honest")
+    approve_file(db, entry, approved_by=bob)
+
+    with pytest.raises(FileEntryError, match="no longer waiting for approval"):
+        approve_file(db, entry, approved_by=bob)

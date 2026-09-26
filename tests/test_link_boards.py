@@ -1522,3 +1522,30 @@ def test_a_carried_board_applies_the_gate_it_inherits_from_its_community(
 
     _accept_remote_attestation(db, remote_node_identity)
     assert rebuild_carried_post_materialization(db) == 1
+
+
+# -- issue #676: a recommended maximum post age is at least one day -----------
+
+
+@pytest.mark.parametrize("bad_age", [0, -7])
+def test_link_board_refuses_a_recommended_max_post_age_below_one_day(db, alice, node_identity, bad_age):
+    from netbbs.link.boards import LinkBoardsError, is_board_linked
+
+    board = create_board(db, "general", creator=alice)
+    with pytest.raises(LinkBoardsError, match="at least 1 day"):
+        link_board(db, board, node_identity=node_identity, default_max_post_age_days=bad_age)
+    assert is_board_linked(db, board) is False
+
+
+@pytest.mark.parametrize("bad_age", [0, -7])
+def test_a_carried_genesis_recommending_a_max_age_below_one_day_is_stored_without_expiry(
+    db, remote_node_identity, bad_age
+):
+    """The origin's recommendation is unvalidated on the wire. Stored as
+    sent, 0 would expire every carried post on the first browse and a
+    negative age would hard-delete them; the board is still carried."""
+    genesis = _remote_genesis(remote_node_identity, default_max_post_age_days=bad_age)
+
+    board = materialize_carried_board(db, genesis)
+
+    assert board.max_post_age_days is None

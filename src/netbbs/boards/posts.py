@@ -93,7 +93,8 @@ class Post:
     tombstoned_at: str | None = None
     # True only on a Post resolved by list_posts_page/list_pinned_posts
     # whose displayed subject/body came from a later edit, not this row
-    # itself -- see _resolve_current_version. Always False on a Post
+    # itself, and False when that later revision is a tombstone -- see
+    # _resolve_current_version. Always False on a Post
     # from get_post/list_pending_posts, which return exact, unresolved
     # rows and have no concept of "is there a newer version of this."
     is_edited: bool = False
@@ -479,8 +480,15 @@ def _resolve_current_version(db: Database, root_row: sqlite3.Row) -> Post:
     root = _row_to_post(root_row)
     if latest is None or latest["post_id"] == root.post_id:
         return root
+    # A tombstone is a later revision too, but not an edit a reader
+    # should be told about: "[removed by moderator] [edited]" says the
+    # placeholder text itself was revised. `tombstoned_at` carries it.
     return replace(
-        root, subject=latest["subject"], body=latest["body"], tombstoned_at=latest["tombstoned_at"], is_edited=True
+        root,
+        subject=latest["subject"],
+        body=latest["body"],
+        tombstoned_at=latest["tombstoned_at"],
+        is_edited=latest["tombstoned_at"] is None,
     )
 
 
@@ -704,11 +712,19 @@ def approve_post(db: Database, post: Post, *, approved_by: User) -> Post:
     Approve a `'pending'` post, requiring `approved_by` to hold
     `BoardPermission.APPROVE` on its board. Logged via
     `netbbs.moderation.log.record_action`.
+
+    Refuses a post that is no longer pending -- approved by another
+    moderator, rejected, or expired since the queue was drawn. Without the
+    status condition an expired post would be quietly brought back.
     """
     _require_board_permission(db, post, approved_by, BoardPermission.APPROVE)
 
-    db.connection.execute("UPDATE posts SET status = 'approved' WHERE id = ?", (post.id,))
+    cursor = db.connection.execute(
+        "UPDATE posts SET status = 'approved' WHERE id = ? AND status = 'pending'", (post.id,)
+    )
     db.connection.commit()
+    if cursor.rowcount == 0:
+        raise PostError("this post is no longer waiting for approval")
     record_action(
         db,
         actor=approved_by,

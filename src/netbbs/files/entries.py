@@ -455,11 +455,16 @@ def download_file(entry: FileEntry) -> bytes:
 def approve_file(db: Database, entry: FileEntry, *, approved_by: User) -> FileEntry:
     """Approve a `'pending'` file, requiring `approved_by` to hold
     `BoardPermission.APPROVE` on its area. Logged via
-    `netbbs.moderation.log.record_action`."""
+    `netbbs.moderation.log.record_action`. Refuses a file that is no
+    longer pending, the same rule as `netbbs.boards.posts.approve_post`."""
     _require_area_permission(db, entry, approved_by, BoardPermission.APPROVE)
 
-    db.connection.execute("UPDATE files SET status = 'approved' WHERE id = ?", (entry.id,))
+    cursor = db.connection.execute(
+        "UPDATE files SET status = 'approved' WHERE id = ? AND status = 'pending'", (entry.id,)
+    )
     db.connection.commit()
+    if cursor.rowcount == 0:
+        raise FileEntryError("this file is no longer waiting for approval")
     record_action(
         db,
         actor=approved_by,

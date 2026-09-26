@@ -9965,3 +9965,60 @@ def test_the_vouch_screen_says_when_a_relay_did_not_take_this_nodes_vouches(db, 
 
     assert "handed to the 2 nodes that relay for it" in text
     assert "1 of them did not take them at the last attempt; the Link log says why." in text
+
+
+# -- issue #676: approving something no longer pending reports, not crashes --
+
+
+class _ActsBeforeKey(FakeSession):
+    """Runs `before` just as the scripted `key` is read: models another
+    moderator acting while this one has the pending item on screen."""
+
+    def __init__(self, inputs, *, key, before):
+        super().__init__(inputs)
+        self._key = key
+        self._before = before
+
+    async def read_key(self, echo: bool = True) -> str:
+        if self._inputs and self._inputs[0] == self._key and self._before is not None:
+            before, self._before = self._before, None
+            before()
+        return await super().read_key(echo)
+
+
+def test_approving_a_post_approved_meanwhile_reports_it_and_stays_on_screen(db, lane, sysop):
+    from netbbs.boards.boards import create_board
+    from netbbs.boards.posts import approve_post, create_post, get_post
+
+    alice = create_user(db, "alice", password="hunter2", user_level=10)
+    board = create_board(db, "General", creator=sysop, moderated=True)
+    post = create_post(db, board, alice, "Hello", "Body text")
+
+    session = _ActsBeforeKey(
+        ["m", "m", "l", "0", "1", "p", "0", "1", "a", "b", "b", "b", "b", "b", "b"],
+        key="a", before=lambda: approve_post(db, post, approved_by=sysop),
+    )
+    _run(session, lane, sysop)
+
+    text = _visible(_written_text(session))
+    assert "no longer waiting for approval" in text
+    assert get_post(db, post.post_id).status == "approved"
+
+
+def test_approving_a_file_approved_meanwhile_reports_it_and_stays_on_screen(db, lane, sysop):
+    from netbbs.files.areas import create_file_area
+    from netbbs.files.entries import approve_file, get_file, upload_file
+
+    alice = create_user(db, "alice", password="hunter2", user_level=10)
+    area = create_file_area(db, "Docs", creator=sysop, moderated=True)
+    entry = upload_file(db, area, alice, "readme.txt", b"hello")
+
+    session = _ActsBeforeKey(
+        ["m", "f", "l", "0", "1", "p", "0", "1", "a", "b", "b", "b", "b", "b", "b"],
+        key="a", before=lambda: approve_file(db, entry, approved_by=sysop),
+    )
+    _run(session, lane, sysop)
+
+    text = _visible(_written_text(session))
+    assert "no longer waiting for approval" in text
+    assert get_file(db, entry.file_id).status == "approved"

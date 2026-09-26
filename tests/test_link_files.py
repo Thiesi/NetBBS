@@ -438,3 +438,25 @@ def test_a_file_larger_than_a_catalogue_entry_may_claim_is_not_announced(db, ali
     assert queue_file_descriptor_if_linked(
         db, get_file(db, entry.file_id), area, node_identity=node_identity
     ) is None
+
+
+# -- issue #676: a recommended maximum file age is at least one day -----------
+
+
+def test_link_file_area_refuses_a_recommended_max_file_age_below_one_day(db, alice, node_identity):
+    from netbbs.link.files import LinkFilesError
+
+    area = create_file_area(db, "downloads", creator=alice)
+    with pytest.raises(LinkFilesError, match="at least 1 day"):
+        link_file_area(db, area, node_identity=node_identity, default_max_file_age_days=0)
+    assert is_area_linked(db, area) is False
+
+
+def test_a_carried_genesis_recommending_a_max_file_age_below_one_day_is_stored_without_expiry(
+    db, remote_node_identity
+):
+    genesis = _remote_genesis(remote_node_identity, default_max_file_age_days=-1)
+
+    area = materialize_carried_file_area(db, genesis)
+
+    assert area.max_file_age_days is None

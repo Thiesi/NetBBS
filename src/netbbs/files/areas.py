@@ -36,6 +36,13 @@ from netbbs.timeutil import utc_now_iso
 _VALID_SORT_ORDERS = ("activity", "alphabetical", "recent", "volume")
 
 
+def _check_max_file_age(max_file_age_days: int | None) -> None:
+    """Same rule as `netbbs.boards.boards._check_max_post_age`: at least
+    one day, or `None` for no expiry."""
+    if max_file_age_days is not None and max_file_age_days < 1:
+        raise FileAreaError(f"maximum file age must be at least 1 day, got {max_file_age_days}")
+
+
 class FileAreaError(Exception):
     """Raised for file area creation/lookup failures."""
 
@@ -112,6 +119,7 @@ def create_file_area(
     """
     if name_requirement not in (None, "verified", "verified_and_displayed"):
         raise FileAreaError(f"invalid name_requirement: {name_requirement!r}")
+    _check_max_file_age(max_file_age_days)
     created_at = utc_now_iso()
     area_id = compute_content_id(
         {
@@ -297,6 +305,7 @@ def update_file_area(
     §16."""
     if name_requirement not in (None, "verified", "verified_and_displayed"):
         raise FileAreaError(f"invalid name_requirement: {name_requirement!r}")
+    _check_max_file_age(max_file_age_days)
     try:
         db.connection.execute(
             """

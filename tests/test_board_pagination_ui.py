@@ -345,7 +345,7 @@ def test_editing_a_post_on_a_linked_board_queues_a_board_post_edit(tmp_path):
     queue_board_post_if_linked(db, post, board, node_identity=node_identity)
 
     session = FakeSession(
-        keys=["e", "1", "b"], lines=["Hello (edited)", "/edit 1", "World, edited", ""]
+        keys=["e", "1", "s", "b"], lines=["Hello (edited)", "/edit 1", "World, edited", ""]
     )
     asyncio.run(_show_board(session, db, board, user, link_context=link_context))
 
@@ -364,7 +364,7 @@ def test_editing_a_post_without_link_context_never_queues_one(tmp_path):
     post = create_post(db, board, user, "Hello", "World")
 
     session = FakeSession(
-        keys=["e", "1", "b"], lines=["Hello (edited)", "/edit 1", "World, edited", ""]
+        keys=["e", "1", "s", "b"], lines=["Hello (edited)", "/edit 1", "World, edited", ""]
     )
     asyncio.run(_show_board(session, db, board, user))
 
