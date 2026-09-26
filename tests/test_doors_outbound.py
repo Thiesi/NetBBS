@@ -1125,3 +1125,31 @@ def test_a_rehearsal_budget_spans_every_drain_of_the_session(db, door, sysop, bo
     assert drain(db, door, tmp_path, rehearsal=True, rehearsed=spend) == (0, 1)
     assert _result(db, door, first)["would"] == "posted"
     assert _result(db, door, second)["would"] == "rejected"
+
+
+def test_a_live_rehearsal_is_budgeted_across_its_ticks(db, lane, sysop, board, tmp_path, monkeypatch):
+    """Two requests a few ticks apart under a ceiling of one: a real session
+    posts the first and refuses the second, so the rehearsal must say so."""
+    import asyncio
+    import sys
+
+    from netbbs.doors import runtime
+    from tests.test_doors_runtime import FakeSession, _run, _write_script
+
+    monkeypatch.setattr(runtime, "_OUTBOUND_TICK_SECONDS", 0.2)
+    script = _write_script(tmp_path, "two.py", """
+        import json, os, pathlib, time
+        info = json.load(open(os.environ["NETBBS_DOOR_INFO"]))
+        drop = pathlib.Path(os.environ["NETBBS_DOOR_INFO"]).parent / info["outbound"]["directory"]
+        for name in ("first", "second"):
+            (drop / (name + ".part")).write_text(json.dumps({"subject": name, "body": "..."}))
+            (drop / (name + ".part")).replace(drop / (name + ".json"))
+            time.sleep(1.0)
+    """)
+    door = create_door(db, "Blacksite", sys.executable, args=(str(script),), creator=sysop)
+    _enable(db, door, sysop, board, posts_per_hour=1)
+
+    assert asyncio.run(_run(FakeSession(), lane, door, sysop, rehearsal=True)).reason == "exited"
+    verdicts = {json.loads(path.read_text())["request"]: json.loads(path.read_text())["would"]
+                for path in results_dir(db, door.id).glob("*.result.json")}
+    assert verdicts == {"first": "posted", "second": "rejected"}

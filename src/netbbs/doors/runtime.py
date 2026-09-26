@@ -472,7 +472,8 @@ async def _forward_resize(session, proc, info_path, info, *, published, pty_fd=N
             return
 
 
-async def _drain_while_running(lane, door, workdir, node_identity, rehearsal, *, guest_receipts=False,
+async def _drain_while_running(lane, door, workdir, node_identity, rehearsal, *, rehearsed=None,
+                               guest_receipts=False,
                                interval=None):
     """Answer a door's outbound requests while it is still running (#520).
 
@@ -491,7 +492,8 @@ async def _drain_while_running(lane, door, workdir, node_identity, rehearsal, *,
             if await asyncio.to_thread(has_requests, workdir):
                 await lane.run(drain_outbound, door, workdir,
                                node_identity=node_identity() if callable(node_identity) else node_identity,
-                               rehearsal=rehearsal, limit=_OUTBOUND_TICK_LIMIT, final=False)
+                               rehearsal=rehearsal, rehearsed=rehearsed,
+                               limit=_OUTBOUND_TICK_LIMIT, final=False)
             if receipts is not None:
                 # Every tick, not only after this session drained: another
                 # session of the same door may have been answered, and a native
@@ -724,7 +726,7 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
                     workdir, proc, vm_options(profile)["boot_timeout_seconds"], tail)))
             if "outbound" in info:
                 outbound_task = asyncio.create_task(_drain_while_running(
-                    lane, door, workdir, node_identity, rehearsal,
+                    lane, door, workdir, node_identity, rehearsal, rehearsed=rehearsal_spend,
                     guest_receipts=bool(profile and profile.adapter == "vm")))
             mode = resize_mode(profile, kind, bundled_follows_resize=vouched)
             if os.name == "posix" and mode is not None:

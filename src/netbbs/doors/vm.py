@@ -351,6 +351,17 @@ def copy_receipts(source: Path, directory: Path, results_kept: int) -> None:
             for name in names:
                 if name not in have:
                     _stage_and_publish(source / name, target, name)
+            # Reconciled, not only added to: the node prunes its receipts, and
+            # a copy that kept every one would grow for as long as the door
+            # kept writing. Only receipt-shaped names are ours to remove.
+            retained = set(names)
+            for name in have:
+                if (name.endswith(RESULT_SUFFIX) or name.endswith(RESULT_SUFFIX + ".part")) \
+                        and name not in retained:
+                    try:
+                        os.unlink(name, dir_fd=target)
+                    except OSError:
+                        pass
         finally:
             os.close(target)
     finally:
@@ -433,6 +444,15 @@ def _copy_receipts_by_path(source: Path, target: Path, names: list[str]) -> None
             staging.replace(target / name)
         except OSError:
             continue
+    from netbbs.doors.outbound import RESULT_SUFFIX
+
+    retained = set(names)
+    for name in have:
+        if name.endswith(RESULT_SUFFIX) and name not in retained:
+            try:
+                (target / name).unlink()
+            except OSError:
+                pass
 
 
 async def wait_booted(directory: Path, relay: asyncio.Task) -> None:

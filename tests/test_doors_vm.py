@@ -568,3 +568,17 @@ def test_the_receipt_directory_exists_before_the_first_receipt(tmp_path):
     node.mkdir()
     vm.copy_receipts(source, node, results_kept=10)
     assert (node / "outbound-results").is_dir()
+
+
+def test_the_guest_copy_follows_the_nodes_pruning(tmp_path):
+    """The node keeps a bounded number of receipts; the guest's copy must
+    shrink with it, or it grows for as long as the door keeps writing."""
+    source, node = _receipts(tmp_path, count=3)
+    vm.copy_receipts(source, node, results_kept=10)
+    (source / "launch.0.post.result.json").unlink()  # the node pruned it
+    (node / "outbound-results" / "not-a-receipt.txt").write_text("the guest's own")
+
+    vm.copy_receipts(source, node, results_kept=10)
+
+    assert sorted(path.name for path in (node / "outbound-results").iterdir()) == [
+        "launch.1.post.result.json", "launch.2.post.result.json", "not-a-receipt.txt"]
