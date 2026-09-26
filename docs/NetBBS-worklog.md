@@ -3920,9 +3920,12 @@ requester cut by, or the page starves again in a new form:
   for only when its own ID is on the page, or a declined resource on another
   page is resent every pass (the #669 starvation).
 
-`inventory_page` (SHA-256, first eight bytes, big endian, mod `count`) is the
-one definition both use, and `_resource_event_diff` holds the responder's walk
-for all three kinds, so the rule cannot drift between them. The cursor that
+`inventory_page` (SHA-256 of the request nonce and the ID, first eight bytes,
+big endian, mod `count`) is the one definition both use, and
+`_resource_event_diff` holds the responder's walk for all three kinds, so the
+rule cannot drift between them. The nonce salt is load-bearing: with a fixed
+split, a peer that authors events can grind their IDs onto one page and make
+that page too large to send, forever. The cursor that
 walks the pages is per responder (`LinkNode.inventory_page_cursors`): one
 counter shared by all seeds, with two seeds and two pages, would give each seed
 the same page forever.

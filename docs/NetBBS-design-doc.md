@@ -2358,16 +2358,19 @@ IDs the request outgrew the responder's 2 MiB `client_max_size` and was refused
 with 413 on every pass, so pull, and the `wanted` push that rides on it,
 stopped for good. When the IDs (and `not_carried`, below) would exceed 1 MiB,
 half the limit, the requester splits them into `count` pages by
-`inventory_page(id, count)` — the first eight bytes of the ID's SHA-256, big
-endian, modulo `count` — and each request carries one page, walked in turn per
-responder. Every key is still present; each list holds only its IDs on that
+`inventory_page(id, count, nonce)` — the first eight bytes of the SHA-256 of
+the request's nonce and the ID, big endian, modulo `count` — and each request
+carries one page. The nonce is random, signed and fresh, so the split is new
+every request: unsalted, a peer that authors events could vary them until
+their IDs shared one page and push that page past the limit for good. Every key is still present; each list holds only its IDs on that
 page, and `not_carried` only the resources on it. The signed `page` field tells
 the responder which page it has, and the responder narrows its answer to match:
 for a declared resource it compares only its own events on that page, and an
 undeclared resource it answers for only when the resource ID itself is on that
 page, because only there is the requester's `not_carried` complete and "absent"
-still means "never seen". What falls on other pages comes up on their turn, so
-a node past the limit catches up in `count` passes rather than never.
+still means "never seen". Any given item is on the page sent with chance
+1/`count`, so a node past the limit catches up in about `count` passes rather
+than never.
 `count` is at most 4,096. Rejected: a per-resource digest with a full list
 where it differs (a second round trip, and one very large resource, which a
 busy linked channel becomes since channel events are never pruned, still
@@ -2380,8 +2383,12 @@ to, which the materializers already tolerate: gossip arrives out of order anyway
 `page` is signed and omitted for a one-page request, and it is sent only to a
 responder whose descriptor advertises `inventory_pages` (§8.2), for the same
 reason as `not_carried` below. An older responder is sent the same slice
-without being told: it takes the rest as missing and resends some of it, which
-costs bandwidth and dedup, but the request fits.
+without being told. It takes the rest as missing and answers with events the
+requester already holds, which past its 200-event page can fill every response,
+so pull from it may make no progress until it upgrades; the push half still
+works, since `wanted` is computed from what the page declares. Nothing an older
+responder understands can do better, and the whole declaration moved nothing in
+either direction.
 
 **Route: `POST {LINK_PATH_PREFIX}/inventory/{fingerprint}`**, mirroring
 `/events/{fingerprint}`'s existing convention (`fingerprint` names the
@@ -2578,9 +2585,10 @@ sending geneses to a node past its cap, and an unbounded list would grow until
 every request was refused. Over the cap each request declares a fresh random
 sample, so what goes undeclared costs a resend, never a fixed starvation.
 Against a responder that takes pages (issue #685, above), the requester instead
-uses enough pages that each page's share stays well under the cap, so every
-declined resource is declared on its own page and the whole set is suppressed
-once per walk; the sample remains only as the backstop. The existing maps cannot say this, since their
+uses enough pages that each page's share stays well under the cap, so each
+request declares every declined resource on its page, the responder skips every
+undeclared resource off it, and none is ever resent; the sample remains only as
+the backstop. The existing maps cannot say this, since their
 values are known-ID sets and an offered board's posts were never received. The
 field is part of the signed payload only when it names something, so a request
 without it signs exactly as before; and it is sent only to a responder whose

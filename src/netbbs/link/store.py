@@ -922,14 +922,21 @@ def build_inventory_request(
     would rebuild the signed payload without the field and refuse the request.
 
     Issue #685: a declaration larger than `INVENTORY_DECLARATION_BUDGET_BYTES`
-    is split into pages by `inventory_page`, and this request carries page
-    `page_cursor % count`, so successive calls walk every page in turn. Every
-    key stays; each list keeps only the IDs on that page, and `not_carried`
-    only the resources on it. `paged` says the responder advertises
-    `INVENTORY_PAGES_CAPABILITY` and is told which page this is. An older
-    responder is sent the same slice without being told: it takes the rest as
-    missing and resends some of it, which costs it bandwidth and this node's
-    dedup, but the request fits, where the whole one was refused with 413.
+    is split into pages by `inventory_page`, salted with this request's
+    nonce, and this request carries page `page_cursor % count`. Every key
+    stays; each list keeps only the IDs on that page, and `not_carried` only
+    the resources on it. The split is new each request, so an ID is on the
+    page sent with chance 1/count, and a node past the limit catches up in
+    about `count` passes. `paged` says the responder advertises
+    `INVENTORY_PAGES_CAPABILITY` and is told which page this is.
+
+    An older responder is sent the same slice without being told. It takes
+    the rest as missing and answers with events this node already holds,
+    which can fill its whole response on every pass, so pull from it may make
+    no progress until it upgrades. The request still fits, and the push half
+    still works: its `wanted` is computed from what this page declares. That
+    is the best an older responder allows; the whole declaration was refused
+    with 413 and moved nothing in either direction.
     """
     boards = (
         {board_id: tuple(_all_board_events(db, board_id)) for board_id in carried_board_ids(db)}
@@ -959,6 +966,8 @@ def build_inventory_request(
                     dict.fromkeys([*mapping.get(resource_id, ()), *sorted(content_ids)])
                 )
     not_carried = uncarried_resource_ids(db) if include_inventory and declare_not_carried else {}
+    created_at = utc_now_iso()
+    nonce = secrets.token_hex(16)
     page: tuple[int, int] | None = None
     count = inventory_page_count(boards, channels, file_areas, not_carried if paged else {})
     if paged:
@@ -970,7 +979,7 @@ def build_inventory_request(
     if count > 1:
         index = page_cursor % count
         boards, channels, file_areas = (
-            {resource_id: tuple(i for i in ids if inventory_page(i, count) == index)
+            {resource_id: tuple(i for i in ids if inventory_page(i, count, nonce) == index)
              for resource_id, ids in mapping.items()}
             for mapping in (boards, channels, file_areas)
         )
@@ -978,11 +987,9 @@ def build_inventory_request(
             page = (index, count)
             not_carried = {
                 kind: kept for kind, ids in not_carried.items()
-                if (kept := tuple(r for r in ids if inventory_page(r, count) == index))
+                if (kept := tuple(r for r in ids if inventory_page(r, count, nonce) == index))
             }
     not_carried = bound_not_carried(not_carried, limit=MAX_NOT_CARRIED_DECLARED)
-    created_at = utc_now_iso()
-    nonce = secrets.token_hex(16)
     signature = sign_inventory_request(
         signing_identity=signing_identity,
         requester_fingerprint=requester_fingerprint,
@@ -1040,6 +1047,7 @@ def _resource_event_diff(
     limit: int,
     not_carried: tuple[str, ...],
     page: tuple[int, int] | None,
+    page_salt: str,
 ) -> tuple[list[dict], bool]:
     """The walk `board_event_diff` and its two siblings share; see there.
 
@@ -1057,13 +1065,13 @@ def _resource_event_diff(
         if truncated:
             break
         declared = resource_id in requested
-        if page is not None and not declared and inventory_page(resource_id, page[1]) != page[0]:
+        if page is not None and not declared and inventory_page(resource_id, page[1], page_salt) != page[0]:
             continue
         known_ids = set(requested.get(resource_id, ()))
         for content_id, envelope in all_events(resource_id).items():
             if content_id in known_ids:
                 continue
-            if page is not None and declared and inventory_page(content_id, page[1]) != page[0]:
+            if page is not None and declared and inventory_page(content_id, page[1], page_salt) != page[0]:
                 continue
             if len(collected) >= limit:
                 truncated = True
@@ -1153,6 +1161,7 @@ def board_event_diff(
     limit: int,
     not_carried: tuple[str, ...] = (),
     page: tuple[int, int] | None = None,
+    page_salt: str = "",
 ) -> tuple[list[dict], bool]:
     """
     The responder side of one `InventoryRequest` (design doc §8.8, issue
@@ -1193,11 +1202,12 @@ def board_event_diff(
     pagination cursor.
 
     Issue #685: `page` is the requester's, when its declaration was too
-    large for one request -- see `_resource_event_diff` for what it narrows.
+    large for one request, and `page_salt` its nonce -- see
+    `_resource_event_diff` for what they narrow.
     """
     return _resource_event_diff(
         requested_boards, carried_board_ids(db), lambda resource_id: _all_board_events(db, resource_id),
-        limit=limit, not_carried=not_carried, page=page,
+        limit=limit, not_carried=not_carried, page=page, page_salt=page_salt,
     )
 
 
@@ -1256,6 +1266,7 @@ def channel_event_diff(
     limit: int,
     not_carried: tuple[str, ...] = (),
     page: tuple[int, int] | None = None,
+    page_salt: str = "",
 ) -> tuple[list[dict], bool]:
     """
     The channel-side responder logic for one `InventoryRequest` --
@@ -1269,7 +1280,7 @@ def channel_event_diff(
     """
     return _resource_event_diff(
         requested_channels, carried_channel_ids(db), lambda resource_id: _all_channel_events(db, resource_id),
-        limit=limit, not_carried=not_carried, page=page,
+        limit=limit, not_carried=not_carried, page=page, page_salt=page_salt,
     )
 
 
@@ -1328,6 +1339,7 @@ def file_area_event_diff(
     limit: int,
     not_carried: tuple[str, ...] = (),
     page: tuple[int, int] | None = None,
+    page_salt: str = "",
 ) -> tuple[list[dict], bool]:
     """
     The file-area-side responder logic for one `InventoryRequest` --
@@ -1346,7 +1358,7 @@ def file_area_event_diff(
     """
     return _resource_event_diff(
         requested_file_areas, carried_file_area_ids(db), lambda resource_id: _all_file_area_events(db, resource_id),
-        limit=limit, not_carried=not_carried, page=page,
+        limit=limit, not_carried=not_carried, page=page, page_salt=page_salt,
     )
 
 

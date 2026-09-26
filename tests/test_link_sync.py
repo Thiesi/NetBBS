@@ -4018,6 +4018,9 @@ def _oversized_declaration_scenario(tmp_path, monkeypatch, *, strip_capability=F
     monkeypatch.setattr(sync_module, "request_inventory", recording_request_inventory)
     sizes: dict[str, int] = {}
 
+    def has_later():
+        return net.dbs["B"].db.connection.execute("SELECT 1 FROM boards WHERE name = 'later'").fetchone() is not None
+
     async def scenario():
         async with aiohttp.ClientSession() as session:
             server = await net.start()
@@ -4044,16 +4047,19 @@ def _oversized_declaration_scenario(tmp_path, monkeypatch, *, strip_capability=F
             received.clear()
             server = await net.start()
             try:
-                for _ in range(4):
+                # Each request's split is new, so an item is on the page sent
+                # with chance 1/count; the walk ends once B has caught up.
+                for _ in range(40):
                     await net.dial("B", session)
+                    if len(net.subjects_on("B")) == 102 and has_later():
+                        break
             finally:
                 await server.stop()
 
     try:
         asyncio.run(scenario())
         return (
-            sent, received, failures, sizes, net.subjects_on("B"),
-            get_board_by_name(net.dbs["B"].db, "later") is not None,
+            sent, received, failures, sizes, net.subjects_on("B"), has_later(),
         )
     finally:
         net.close()
@@ -4061,15 +4067,17 @@ def _oversized_declaration_scenario(tmp_path, monkeypatch, *, strip_capability=F
 
 def test_a_declaration_over_the_body_limit_is_sent_in_pages(tmp_path, monkeypatch):
     """Before #685 the whole declaration went out on every pass, the responder
-    refused it with 413, and pull stopped for good. Now each request fits, the
-    pages are walked in turn, and what R has since is caught up -- posts on a
-    board B carries, and a board B has never seen."""
+    refused it with 413, and pull stopped for good. Now each request fits, and
+    what R has since is caught up -- posts on a board B carries, and a board B
+    has never seen."""
     sent, received, failures, sizes, subjects, discovered = _oversized_declaration_scenario(tmp_path, monkeypatch)
     assert failures == []
     assert all(size <= sizes["limit"] for size, _page in sent)
     pages = [page for _size, page in sent]
     assert all(page is not None and page[1] >= 2 for page in pages)
-    assert {page[0] for page in pages} == set(range(pages[0][1]))
+    # The cursor walks the page indexes in turn.
+    count = pages[0][1]
+    assert [(page[0] - pages[0][0]) % count for page in pages] == [i % count for i in range(len(pages))]
     assert {"new one", "new two"} <= set(subjects)
     assert len(subjects) == 102
     assert discovered
@@ -4080,9 +4088,11 @@ def test_a_declaration_over_the_body_limit_is_sent_in_pages(tmp_path, monkeypatc
 
 def test_an_older_responder_is_sent_a_slice_that_fits(tmp_path, monkeypatch):
     """A responder that does not advertise pages cannot be told which page it
-    has. It is still sent a request that fits, takes the rest as missing and
-    resends it -- wasteful, but sync goes on, where the whole declaration was
-    refused outright."""
+    has. It is still sent a request that fits and takes the rest as missing.
+    Here its duplicates fit beside the new events in one response, so sync
+    goes on; with a history past its 200-event page they can fill every
+    response, and pull from it waits for its upgrade (see
+    `build_inventory_request`). Either way nothing is refused with 413."""
     sent, _received, failures, sizes, subjects, discovered = _oversized_declaration_scenario(
         tmp_path, monkeypatch, strip_capability=True,
     )
@@ -4105,10 +4115,11 @@ def test_a_paged_diff_answers_an_undeclared_resource_only_on_its_own_page(tmp_pa
     try:
         db = net.dbs["R"].db
         board_id = get_board_by_name(db, "general").board_id
-        own_page = inventory_page(board_id, 3)
+        salt = "0123456789abcdef0123456789abcdef"
+        own_page = inventory_page(board_id, 3, salt)
         other_page = (own_page + 1) % 3
-        events, _ = board_event_diff(db, {}, limit=200, page=(own_page, 3))
+        events, _ = board_event_diff(db, {}, limit=200, page=(own_page, 3), page_salt=salt)
         assert len(events) == 1
-        assert board_event_diff(db, {}, limit=200, page=(other_page, 3)) == ([], False)
+        assert board_event_diff(db, {}, limit=200, page=(other_page, 3), page_salt=salt) == ([], False)
     finally:
         net.close()

@@ -1276,7 +1276,8 @@ class InventoryRequest:
     count)` by `inventory_page`: every key is still present, each list
     holds only the IDs on page `index`, and the responder answers for that
     page alone (see `netbbs.link.store.build_inventory_request` and
-    `_resource_event_diff`).
+    `_resource_event_diff`). The split is salted with `nonce`, so it is a
+    different one every request.
     """
 
     requester_fingerprint: str
@@ -1357,12 +1358,16 @@ this project is built for; it bounds the modulus a peer can make a responder
 compute with, not anything a real node reaches."""
 
 
-def inventory_page(identifier: str, count: int) -> int:
-    """Issue #685: which of `count` pages a content or resource ID falls on.
+def inventory_page(identifier: str, count: int, salt: str) -> int:
+    """Issue #685: which of `count` pages a content or resource ID falls on in
+    the request whose nonce is `salt`.
 
-    A hash of the ID rather than the ID itself, so the split does not depend
-    on what an ID looks like, and it spreads evenly whatever the IDs are."""
-    digest = hashlib.sha256(identifier.encode("utf-8")).digest()
+    A hash, so the split does not depend on what an ID looks like. Salted with
+    the request's nonce, which is random, signed and fresh, so the split is a
+    new one every request: a peer that authors events could otherwise vary
+    them until their IDs shared one page, push that page past the body limit,
+    and have it refused on every pass (Codex review of #718)."""
+    digest = hashlib.sha256(f"{salt}\0{identifier}".encode("utf-8")).digest()
     return int.from_bytes(digest[:8], "big") % count
 
 

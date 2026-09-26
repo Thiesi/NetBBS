@@ -458,20 +458,28 @@ def test_a_malformed_page_is_a_malformed_request(tmp_path, clock, page):
     bob.close()
 
 
-def test_inventory_page_is_stable_and_spreads_evenly():
+def test_inventory_page_is_stable_spreads_evenly_and_changes_with_the_salt():
+    """Both sides must compute the same split for one request; and a new
+    request, with a new nonce, must split differently, or a peer could craft
+    IDs that share one page and push it past the body limit forever."""
     from netbbs.link.protocol import inventory_page
 
     ids = [f"{i:064x}" for i in range(4000)]
-    pages = [inventory_page(i, 4) for i in ids]
-    assert pages == [inventory_page(i, 4) for i in ids]
+    pages = [inventory_page(i, 4, "salt-a") for i in ids]
+    assert pages == [inventory_page(i, 4, "salt-a") for i in ids]
     for page in range(4):
         assert 800 < pages.count(page) < 1200
+    crafted = [i for i, page in zip(ids, pages) if page == 0]
+    # IDs that all shared page 0 under one salt spread out again under another.
+    still_together = sum(inventory_page(i, 4, "salt-b") == 0 for i in crafted)
+    assert len(crafted) // 8 < still_together < len(crafted) * 3 // 8
 
 
 def test_a_paged_request_declares_its_whole_share_of_not_carried(tmp_path, monkeypatch):
     """#669 capped `not_carried` with a random sample, so a refused set larger
-    than the cap was never suppressed in full. Paged, each page declares every
-    declined resource that falls on it, and the pages together declare all."""
+    than the cap was never suppressed in full. Paged, each request declares
+    every declined resource that falls on its page -- and the responder skips
+    undeclared resources off the page -- so none is ever resent."""
     from netbbs.link import store as store_module
     from netbbs.link.protocol import inventory_page
 
@@ -490,14 +498,15 @@ def test_a_paged_request_declares_its_whole_share_of_not_carried(tmp_path, monke
     first = build(0)
     index, count = first.page
     assert count >= 10
-    seen: set[tuple[str, str]] = set()
     for cursor in range(count):
         request = build(cursor)
         index = request.page[0]
-        on_page = {(kind, r) for kind, ids in declined.items() for r in ids if inventory_page(r, count) == index}
+        on_page = {
+            (kind, r) for kind, ids in declined.items() for r in ids
+            if inventory_page(r, count, request.nonce) == index
+        }
+        assert on_page
         assert {(kind, r) for kind, ids in request.not_carried.items() for r in ids} == on_page
-        seen |= on_page
-    assert seen == {(kind, r) for kind, ids in declined.items() for r in ids}
     # Unpaged, the old sample: bounded, but never the whole set at once.
     assert sum(len(ids) for ids in build(0, paged=False).not_carried.values()) == 200
     alice.close()

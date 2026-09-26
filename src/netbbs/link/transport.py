@@ -2000,12 +2000,14 @@ class LinkServer:
         board_events, board_truncated = await self._lane.run(
             board_event_diff, inventory_request.boards, limit=response_limit,
             not_carried=not_carried.get("boards", ()), page=inventory_request.page,
+            page_salt=inventory_request.nonce,
         )
         remaining = response_limit - len(board_events)
         if remaining > 0:
             channel_events, channel_truncated = await self._lane.run(
                 channel_event_diff, inventory_request.channels, limit=remaining,
                 not_carried=not_carried.get("channels", ()), page=inventory_request.page,
+                page_salt=inventory_request.nonce,
             )
         else:
             channel_events, channel_truncated = [], True
@@ -2014,6 +2016,7 @@ class LinkServer:
             file_area_events, file_area_truncated = await self._lane.run(
                 file_area_event_diff, inventory_request.file_areas, limit=remaining,
                 not_carried=not_carried.get("file_areas", ()), page=inventory_request.page,
+                page_salt=inventory_request.nonce,
             )
         else:
             file_area_events, file_area_truncated = [], True
