@@ -21,7 +21,8 @@ your node carries and who it trusts.
 - Chat locally, across NetBBS Link, or through the optional MRC chat bridge.
 - Exchange persistent mail and files, using browser transfer links or Zmodem.
 - Play three bundled doors: **Retro Trivia**, **Voidrunner**, and **War Dialer**.
-  Add trusted native, DOSBox-X, or remote doors using configurable profiles.
+  Add trusted native, DOSBox-X, VM-hosted foreign-platform, or remote doors
+  using configurable profiles.
 - Manage accounts, access rules, moderation, backups, and node appearance
   from the built-in SysOp console.
 
