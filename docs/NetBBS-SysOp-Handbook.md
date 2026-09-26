@@ -491,6 +491,54 @@ private messages require a working live session; a failed live message is not
 silently converted to mail. Link mail is encrypted to the recipient's home
 node for ordinary accounts; the home-node operator can read it.
 
+### Behind an HTTP proxy
+
+If your node's only way out is an HTTP proxy, set the standard variables in
+the environment NetBBS starts in (the service unit, rc.d script, or shell):
+
+```sh
+HTTP_PROXY=http://proxy.example:3128
+HTTPS_PROXY=http://proxy.example:3128
+NO_PROXY=localhost,127.0.0.1
+```
+
+Boards, mail and files use them as ordinary HTTP. Live chat uses the same
+proxy, as a `CONNECT` tunnel, and runs its encrypted session through it
+unchanged; the proxy sees which address is dialled, not what is said. When a
+proxy is set it is the only way live chat goes out: there is no direct attempt
+first. List peers the proxy should not carry in `NO_PROXY`.
+
+- **Proxy login.** A username and password in the proxy URL
+  (`http://user:password@proxy.example:3128`), or a `~/.netrc` entry for the
+  proxy host, are sent as Basic authentication. NTLM and Kerberos proxies are
+  not supported directly; run a local authenticating proxy such as CNTLM or
+  px, and point the variables at it on `127.0.0.1`.
+- **Only `http://` proxy URLs.** A SOCKS or `https://` proxy URL makes live
+  connections fail with a stated reason rather than go direct.
+- **Proxies that inspect TLS** (SSL inspection, Squid `ssl_bump`) cannot carry
+  live chat, which is not TLS. Boards and mail still work.
+- **A managed name cannot be kept behind a proxy:** its check-ins always
+  connect directly, because the service publishes the address they come from.
+
+**Link status** shows a **Live proxy** line: the proxy and the last outcome,
+for example `tunnel refused: 407 Proxy Authentication Required`, or
+`tunnel opened, handshake failed` for an inspecting proxy. A change of outcome
+is also written to the log once.
+
+**MANUAL — outside NetBBS, for reliable-node operators:** many corporate
+proxies allow `CONNECT` only to port 443. To be reachable live from such
+networks, advertise the real-time port as 443 and forward it to the real-time
+listener:
+
+```toml
+[link]
+realtime_port = 8862
+realtime_advertised_port = 443
+```
+
+NetBBS does not bind 443 itself. If 443 on that address already serves HTTPS,
+use a second address, or a protocol demultiplexer in front of both.
+
 ### Trust and recovery
 
 Use **Link status** for peers and relay state, **Outbox** for pending or failed
