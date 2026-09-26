@@ -654,12 +654,38 @@ def _short(name: str) -> str:
     return name[:_NAME_PIECE_CHARS // 4] + "-" + digest
 
 
+#: How many receipts a drain writes between prunes. A final drain can answer
+#: up to `_MAX_REQUESTS_SCANNED` requests; pruning only at its end would let a
+#: door's receipt directory pass `netbbs.backup`'s scan ceiling (a multiple of
+#: `RESULTS_KEPT`) mid-drain and fail a backup running at that moment.
+_PRUNE_EVERY = 64
+
+
+class _Receipts:
+    """Counts one drain's receipts and prunes every `_PRUNE_EVERY` of them."""
+
+    def __init__(self, directory: Path):
+        self.directory = directory
+        self.written = 0
+
+    def note(self) -> None:
+        self.written += 1
+        if self.written % _PRUNE_EVERY == 0:
+            _prune_results(self.directory)
+
+
+#: What a receipt says when the scan bound hid requests from the drain. Its
+#: `request` is empty: it answers for the drop directory, not for one file.
+_HIDDEN = ("the drop directory held more entries than one drain looks at; any requests "
+           "beyond them were not seen and were discarded")
+
+
 _UNCLAIMABLE = ("the request could not be taken for processing (it could not be renamed); "
                 "it was not read")
 
 
 def _refuse_all(db: Database, door, launch: str, drop: _DropDir, names: list[str], reason: str,
-                *, rehearsal: bool = False, final: bool = True) -> int:
+                *, rehearsal: bool = False, final: bool = True, receipts: _Receipts | None = None) -> int:
     """Answer every request in `names` with the same refusal."""
     answered = 0
     for name in names:
@@ -669,11 +695,15 @@ def _refuse_all(db: Database, door, launch: str, drop: _DropDir, names: list[str
                 _write_result(db, door.id, launch, _stem(name),
                               {"status": "rejected", "reason": _UNCLAIMABLE}, rehearsal=rehearsal)
                 answered += 1
+                if receipts is not None:
+                    receipts.note()
             continue
         try:
             _write_result(db, door.id, launch, _stem(name), {"status": "rejected", "reason": reason},
                           rehearsal=rehearsal)
             answered += 1
+            if receipts is not None:
+                receipts.note()
         finally:
             _release(drop, claimed)
     return answered
@@ -768,7 +798,8 @@ def _write_result(db: Database, door_id: int, launch: str, stem: str, payload: d
 
 
 def drain(db: Database, door, workdir: Path, *, node_identity=None, rehearsal: bool = False,
-          limit: int = _MAX_REQUESTS_PER_DRAIN, final: bool = True) -> tuple[int, int]:
+          limit: int = _MAX_REQUESTS_PER_DRAIN, final: bool = True,
+          rehearsed: dict | None = None) -> tuple[int, int]:
     """Process the requests a door has written, returning (posted, refused).
 
     Safe to call repeatedly, including while the door is still writing: each
@@ -788,7 +819,10 @@ def drain(db: Database, door, workdir: Path, *, node_identity=None, rehearsal: b
 
     A `rehearsal` (a SysOp testing the door) is checked exactly as a real
     session is -- allowlist, rate, shape -- and answered with what would have
-    happened, but nothing is posted, debited or audit-logged.
+    happened, but nothing is posted, debited or audit-logged. Its would-be
+    spend is kept in `rehearsed`, which a caller draining one session several
+    times passes to every call, so the rate verdicts span the whole session
+    the way a real one's persisted debits do.
 
     Failures here never propagate into the caller's shutdown path. A door
     that has already exited cleanly must not be reported as having crashed
@@ -799,11 +833,11 @@ def drain(db: Database, door, workdir: Path, *, node_identity=None, rehearsal: b
         return 0, 0
     with drop:
         return _drain(db, door, workdir, drop, node_identity=node_identity, rehearsal=rehearsal,
-                      limit=limit, final=final)
+                      limit=limit, final=final, rehearsed=rehearsed)
 
 
 def _drain(db: Database, door, workdir: Path, drop: _DropDir, *, node_identity, rehearsal: bool,
-           limit: int, final: bool) -> tuple[int, int]:
+           limit: int, final: bool, rehearsed: dict | None) -> tuple[int, int]:
     requests, truncated = _scan_requests(drop)
     # The working directory is freshly made per launch, so its name
     # distinguishes concurrent sessions of the same door from each other.
@@ -812,7 +846,16 @@ def _drain(db: Database, door, workdir: Path, drop: _DropDir, *, node_identity, 
     config = outbound_config(db, door.id)
     if config is None:
         return 0, _discard_all(drop, requests if final else requests[:limit])
+    receipts = _Receipts(results_dir(db, door.id))
     if not requests:
+        if final and truncated:
+            # Nothing we could see, but not nothing: the bound hid whatever
+            # else is there, and this is the last drain before the directory
+            # goes. Say so once rather than let it vanish silently.
+            _write_result(db, door.id, launch, "", {"status": "rejected", "reason": _HIDDEN},
+                          rehearsal=rehearsal)
+            _prune_results(receipts.directory)
+            return 0, 1
         return 0, 0
 
     try:
@@ -824,13 +867,15 @@ def _drain(db: Database, door, workdir: Path, drop: _DropDir, *, node_identity, 
         if actor is None:
             return 0, _refuse_all(db, door, launch, drop, requests if final else requests[:limit],
                                   "the account which enabled this door's outbound no longer exists; "
-                                  "a SysOp must switch it on again", rehearsal=rehearsal, final=final)
+                                  "a SysOp must switch it on again", rehearsal=rehearsal, final=final,
+                                  receipts=receipts)
 
         posted = refused = 0
         # What a rehearsal would have spent so far in this drain. Never
         # persisted, but counted, so the fifth rehearsed request under a
         # ceiling of one is told what a real session would tell it.
-        rehearsed = {"posts": 0}
+        if rehearsed is None:
+            rehearsed = {"posts": 0}
         for name in requests[:limit]:
             claimed = _claim(drop, name)
             if claimed is None:
@@ -840,6 +885,7 @@ def _drain(db: Database, door, workdir: Path, drop: _DropDir, *, node_identity, 
                     _write_result(db, door.id, launch, _stem(name),
                                   {"status": "rejected", "reason": _UNCLAIMABLE}, rehearsal=rehearsal)
                     refused += 1
+                    receipts.note()
                 continue
             try:
                 reason = _handle_one(db, door, config, actor, launch, _stem(name), drop, claimed,
@@ -847,6 +893,7 @@ def _drain(db: Database, door, workdir: Path, drop: _DropDir, *, node_identity, 
                                      rehearsed=rehearsed)
             finally:
                 _release(drop, claimed)
+            receipts.note()
             if reason is None:
                 posted += 1
             else:
@@ -859,7 +906,7 @@ def _drain(db: Database, door, workdir: Path, drop: _DropDir, *, node_identity, 
             refused += _refuse_all(
                 db, door, launch, drop, overflow,
                 f"more than {limit} requests in one session; "
-                "the rest were not processed", rehearsal=rehearsal)
+                "the rest were not processed", rehearsal=rehearsal, receipts=receipts)
             if not rehearsal:
                 _log_refusal_once_per_window(db, door, config, actor, "per-session request flood")
         return posted, refused

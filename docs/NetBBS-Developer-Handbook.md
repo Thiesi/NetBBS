@@ -368,6 +368,7 @@ Reasons you can expect to see, and what they mean for the door:
 | `rate limit reached` | Try again later; the ceiling is in `posts_per_hour`. |
 | `larger than` | The request exceeded the size limit and was not read. |
 | `requests in one session` | You wrote more in one session than a drain answers. |
+| `were not seen` | Your drop directory held more entries than one drain looks at. This receipt's `request` is empty: it answers for the directory, not one file. |
 | `switch it on again` | The account that enabled the hook is gone, so it has lapsed until a SysOp vouches for the door again. |
 
 Results are bounded receipts, not an indefinitely retained event stream. A
