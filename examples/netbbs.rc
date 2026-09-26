@@ -179,6 +179,21 @@ netbbs_running()
 	esac
 }
 
+# Whether the node this start just launched is still alive (issue #693).
+# During start the pid is this script's own child, published seconds ago:
+# it cannot have been recycled, so being alive is the whole question and
+# netbbs_running's command-text check has nothing to guard against. That
+# check reads `ps -o command=`, which is not stable while the child is
+# still exec'ing nohup -> env -> the interpreter; a single poll that caught
+# it mid-exec used to report "failed to start", delete the pidfile, and
+# leave a healthy node running untracked -- so the next start would launch
+# a second one against the same database.
+netbbs_launched_alive()
+{
+	netbbs_read_pid || return 1
+	kill -0 "${_pid}" 2>/dev/null
+}
+
 netbbs_start()
 {
 	if netbbs_running; then
@@ -224,7 +239,7 @@ netbbs_start()
 		# reader, the launcher below blocks opening its own `>>`
 		# redirection *before* it can exec Python -- yet its pid has
 		# already been published, and its command text contains
-		# "-m netbbs --config", so netbbs_running would accept the blocked
+		# "-m netbbs --config", so the liveness check would accept the blocked
 		# launcher and this start would report success with no listener
 		# anywhere. That is exactly the silent success this script exists
 		# to remove, so the shape that causes it is not supported.
@@ -346,7 +361,7 @@ netbbs_start()
 	# which one was used, rather than silently doing either.
 	if [ "${_readiness_observable}" = no ]; then
 		sleep 3
-		if netbbs_running; then
+		if netbbs_launched_alive; then
 			echo "netbbs started as pid ${_pid} (readiness unconfirmed:"
 			echo "${netbbs_logfile} is not a regular file, so the node's"
 			echo "ready marker cannot be read back)."
@@ -359,7 +374,7 @@ netbbs_start()
 	fi
 	_waited=0
 	while :; do
-		if ! netbbs_running; then
+		if ! netbbs_launched_alive; then
 			echo "netbbs failed to start -- see ${netbbs_logfile}." >&2
 			# Strip terminal control characters (keeping tab, LF and CR,
 			# and leaving UTF-8 alone). This file is deliberately owned

@@ -4536,6 +4536,19 @@ stop to reject the correct live process and delete or ignore its service
 pidfile. Do not remove the wide-output flag while PID ownership is established
 from the full invocation string.
 
+That identity check is for a pidfile *inherited* from before this start,
+never for the pid `start` itself just published (issue #693). While the
+child is still exec'ing `nohup` → `env` → the interpreter, `ps -o command=`
+can show text that fails the match, and anything the launched process execs
+changes it outright. `start` used to run the full check on every readiness
+poll. One unlucky poll then reported "failed to start" and deleted the
+pidfile of a node that came up a moment later, leaving it untracked for the
+next `start` to duplicate. `start` now judges its own child by `kill -0`
+alone (`netbbs_launched_alive`): a pid published seconds ago cannot have
+been recycled. Reproduced on NetBSD 11 with a stand-in child that execs into
+a shell: the old script failed and dropped the pidfile, and the fixed one
+kept it.
+
 `rc.subr`'s `run_rc_command` ends with `[ ! -x $command ] && return 0`. A
 `$command` that does not exist is therefore not an error: `service netbbs
 start` prints nothing, exits 0, and `service netbbs status` then reports the
