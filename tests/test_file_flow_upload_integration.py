@@ -299,7 +299,7 @@ def _link_context():
     from netbbs.link.protocol import LinkNode
 
     node_identity = bootstrap_node_identity("roanoke")
-    return LinkContext(node_identity=node_identity, link_node=LinkNode(identity=node_identity))
+    return LinkContext(link_node=LinkNode(identity=node_identity))
 
 
 def _upload(db, lane, area, user, filename, payload, *, link_context=None):

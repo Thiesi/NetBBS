@@ -18,7 +18,7 @@ from netbbs.link.work_items import (
     WorkItemError,
     _MAX_ATTEMPTS,
     cancel_work_item,
-    enqueue_work_item,
+    enqueue_work_item_without_commit,
     get_work_item,
     list_work_items,
     load_due_work_items,
@@ -27,6 +27,14 @@ from netbbs.link.work_items import (
     replay_work_item,
 )
 from netbbs.moderation.log import list_actions_for_object
+
+
+def enqueue_work_item(db, **kwargs):
+    """Enqueue and commit, as the tests here want; production always
+    enqueues inside its caller's own transaction."""
+    item = enqueue_work_item_without_commit(db, **kwargs)
+    db.connection.commit()
+    return item
 from netbbs.storage.database import Database
 
 

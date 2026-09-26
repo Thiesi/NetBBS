@@ -41,6 +41,7 @@ Then run the complete suite:
 | SysOp explanation and configuration | A SysOp can inspect domains, reporters, anchors, authorities, subjects, effective decisions, evidence, overrides, recovery requirements, and audit history | implemented; automated UI coverage |
 | Manual quarantine/block/recovery exercise | Follow “Phase 4 trust and recovery exercise” in `docs/NetBBS-link-dogfood-plan.md`; record the visible reason and effects, restart while restricted, clear the trigger or override, observe the recovery hold, and record release | pending real exercise |
 | Independently administered multi-node exercise | Using that same runbook, at least two administrators configure separate nodes; introduce a trust trigger across a partition; inspect quarantine on the receiving node; heal, revoke/remove the trigger, restart, and verify convergence without deleting accepted objects | pending |
+| Operational-key rotation and compromise response | The rotation rows of that runbook: a routine signing-key rotation leaves the node's earlier content usable by a new subscriber, a transport rotation's sessions reconnect, and an offline compromise response re-signs the node's own content while stale carrier copies are skipped per object (issue #624) | pending real exercise |
 | Sustained private dogfood | Complete and record issue #83's duration, restart, partition, quota, and operator-observation checklist | pending |
 
 ## Decision

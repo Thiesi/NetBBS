@@ -80,7 +80,7 @@ class _Rig:
 
     def context(self, *, direct=True) -> LinkContext:
         return LinkContext(
-            node_identity=self.identity, link_node=self.link_node, realtime_registry=self.registry,
+            link_node=self.link_node, realtime_registry=self.registry,
             realtime_bridge=self.bridge, direct_chat=self.direct if direct else None,
         )
 
@@ -199,7 +199,7 @@ def test_send_explains_unknown_and_ambiguous_nodes_and_off_link_nodes(tmp_path):
     assert not ok and "No linked node this board knows as 'nope'" in text
     ok, text = _send(rig, "bob", "hi")
     assert not ok and "user@node-name-or-dns" in text
-    ok, text = _send(rig, "bob@abc", "hi", context=LinkContext(node_identity=rig.identity, link_node=rig.link_node))
+    ok, text = _send(rig, "bob@abc", "hi", context=LinkContext(link_node=rig.link_node))
     assert not ok and "isn't on NetBBS Link" in text
     rig.close()
 

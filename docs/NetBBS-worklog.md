@@ -656,6 +656,28 @@ or mismatched key state.
 Keep root-key use narrow. Ordinary Link content uses the current operational
 signing key.
 
+Rotation (issue #624) lives in `netbbs.link.key_rotation`. Traps it had to
+avoid:
+
+- **Pick the verification rule per object family.** A new signature check on
+  a long-lived event goes through `LinkNode._resolve_sender_content_keys`,
+  which accepts keys the chain retired routinely. A check on something signed
+  fresh, or re-issued on rotation, goes through `_resolve_sender_signing_key`.
+  Using the strict one on content makes a routine rotation strand the node's
+  history. Using the lenient one on a request lets a replaced key act.
+- **Never keep a copy of the node identity in something that outlives a
+  rotation.** Read `link_node.identity` when you sign or dial.
+  `LinkContext.node_identity` is a property for exactly this reason. The
+  real-time listener and connectors do keep a copy, so a transport rotation
+  must `update_identity` on each before it closes sessions.
+- **Save with `save_rotation`, not `save`, on a running node.** `save` writes
+  the key files before the chain, so a crash between them leaves a directory
+  `load` refuses. `save_rotation` stages the key and commits with the chain.
+- **A per-object skip, not a refusal, for anything a known-dead key signed.**
+  In `handle_events_tolerantly`, an event that verifies only under a
+  compromised key is skipped. Refusing it would end every carrier response
+  it appears in, which is the wedge #622 removed for trust pulls.
+
 ---
 
 ## 5. Permissions, moderation, and Communities

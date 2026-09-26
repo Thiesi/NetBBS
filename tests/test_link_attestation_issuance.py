@@ -741,6 +741,38 @@ def test_rotating_the_signing_key_reissues_a_live_attestation(db, node_identity,
     assert _content_id(first[0]) != _content_id(newest)
 
 
+def test_rotating_the_signing_key_re_signs_a_revocation_its_target_still_needs(db, node_identity, alice):
+    """Issue #623: a revocation signed just before a rotation, and not yet
+    pulled, would be skipped by a subscriber that has learned the new key,
+    and the attestation it retires would stay accepted there until it
+    expired. Nothing re-issues a revocation, so the reconcile signs it again,
+    once."""
+    set_attestation_link_visible(db, alice, "name", True)
+    reconcile(db, node_identity)
+    issued_id = _content_id(served(db)[0])
+    set_attestation_link_visible(db, alice, "name", False)
+    reconcile(db, node_identity, at=NOW + timedelta(hours=1))
+
+    rotated = Identity(
+        kind=IdentityKind.NODE, label="issuer",
+        signing_key=nacl.signing.SigningKey.generate(), created_at=stamp(NOW),
+    )
+    changes = reconcile_issued_attestations(
+        db, rotated, home_node_fingerprint=HOME, now_iso=stamp(NOW + timedelta(hours=2))
+    )
+
+    assert [(c.action, c.reason) for c in changes] == [("revoked", "signing_key_rotated")]
+    revocations = served(db)
+    assert [r["envelope"]["payload"]["revoked_content_id"] for r in revocations] == [issued_id, issued_id]
+    rotated.verify_key.verify(
+        canonical_bytes(revocations[-1]["envelope"]), base64.b64decode(revocations[-1]["signature"])
+    )
+    # Once per target per rotation.
+    assert reconcile_issued_attestations(
+        db, rotated, home_node_fingerprint=HOME, now_iso=stamp(NOW + timedelta(hours=3))
+    ) == []
+
+
 def test_a_value_that_can_never_be_exported_is_reported_not_swallowed(db, node_identity):
     """A real name past the wire's 128-byte limit is accepted locally, so the
     caller's toggle goes on and every pass then fails to build an object. That

@@ -35,6 +35,7 @@ from netbbs.doors.services import DoorServiceManager
 from netbbs.mrc.bridge import MRC_LOGGER_NAME, MrcBridge
 from netbbs.link.enforcement import LinkPolicyAction, decide_node_action
 from netbbs.link.onboarding import participation_accepted
+from netbbs.link.key_rotation import KeyRotator, resign_own_content
 from netbbs.link.node_identity import NodeIdentityError, load_or_bootstrap_node_identity
 from netbbs.link.protocol import HelloMessage, LinkNode
 from netbbs.doors.runtime import record_voidrunner_save_dir
@@ -781,7 +782,7 @@ async def run(
             # directly rather than re-checking config.link.enabled here.
             link_context=(
                 LinkContext(
-                    node_identity=node_identity, link_node=link_node, link_config=link_config_snapshot,
+                    link_node=link_node, link_config=link_config_snapshot,
                     realtime_registry=link_realtime_registry, realtime_bridge=link_realtime_bridge,
                     relay=link_realtime_relay, direct_chat=link_direct_chat,
                 ) if link_node is not None else None
@@ -791,6 +792,7 @@ async def run(
             backup_identity_dir=config.identity_dir,
             transfers=transfer_grants,
             door_services=door_services,
+            key_rotation=key_rotator,
         )
 
     async def ssh_session_handler(session):
@@ -809,7 +811,7 @@ async def run(
             lane=foreground_lane,
             link_context=(
                 LinkContext(
-                    node_identity=node_identity, link_node=link_node, link_config=link_config_snapshot,
+                    link_node=link_node, link_config=link_config_snapshot,
                     realtime_registry=link_realtime_registry, realtime_bridge=link_realtime_bridge,
                     relay=link_realtime_relay, direct_chat=link_direct_chat,
                 ) if link_node is not None else None
@@ -819,6 +821,7 @@ async def run(
             backup_identity_dir=config.identity_dir,
             transfers=transfer_grants,
             door_services=door_services,
+            key_rotation=key_rotator,
         )
 
     servers: list = []
@@ -845,6 +848,7 @@ async def run(
     link_anchor_state = None
     own_hello_provider = None
     reliable_anchor_task: asyncio.Task | None = None
+    key_rotator = None
     try:
         # Design doc §13.10, issue #75: this node's own PID, so a later
         # `netbbs.backup restore` can reliably refuse against an idle-
@@ -881,6 +885,14 @@ async def run(
         # direct-db reasoning load_link_node's own read just below
         # already documents for this exact point in startup.
         set_node_fingerprint(db, node_identity.fingerprint)
+        # Issue #624: finishes a compromise response a stop interrupted
+        # between saving the rotation and signing its objects again. Free
+        # on a node whose chain marks no key compromised.
+        resigned = resign_own_content(db, node_identity)
+        if resigned:
+            _logger.warning(
+                "re-signed %d object(s) that a compromised signing key had signed", resigned
+            )
 
         # Issue #583: the one path by which an operator's own
         # `[managed_dns] service_url` reaches the database
@@ -1053,7 +1065,7 @@ async def run(
 
                 async def _establish_relayed(**kw):
                     return await attach_relayed_session(
-                        kw["host"], kw["port"], node_identity, attach_token=kw["attach_token"],
+                        kw["host"], kw["port"], link_node.identity, attach_token=kw["attach_token"],
                         role=kw["role"], expected_fingerprint=kw["expected_fingerprint"],
                         on_frame=link_realtime_bridge.on_frame, registry=link_realtime_registry,
                         lane=background_lane, enforce_trust_policy=True,
@@ -1068,7 +1080,7 @@ async def run(
                     allowed_attach_addresses=lambda fp: dialable_realtime_addresses_for_peer(link_node, fp),
                 )
                 link_direct_chat = LiveDirectChat(
-                    node_identity=node_identity, link_node=link_node, lane=background_lane,
+                    link_node=link_node, lane=background_lane,
                     registry=link_realtime_registry, on_frame=link_realtime_bridge.on_frame,
                     track_session=link_realtime_bridge.track_session, relay_client=link_realtime_relay_client,
                     deliver=build_direct_message_deliverer(
@@ -1085,6 +1097,22 @@ async def run(
                     link_realtime_relay_client.owns_frame, link_realtime_relay_client.handle_frame
                 )
                 link_realtime_bridge.register_frame_handler(link_direct_chat.owns_frame, link_direct_chat.handle_frame)
+
+        # Issue #624: the SysOp console's live rotation. Built here, after
+        # everything that holds a key exists; the listener is looked up
+        # when a rotation happens, since `servers` is filled in below.
+        def _realtime_server():
+            if link_realtime_registry is None:
+                return None
+            from netbbs.link.transport import LinkRealtimeServer
+
+            return next((s for s in servers if isinstance(s, LinkRealtimeServer)), None)
+
+        key_rotator = KeyRotator(
+            identity_dir=config.identity_dir, link_node=link_node, lane=background_lane,
+            realtime_server=_realtime_server, realtime_registry=link_realtime_registry,
+            anchor_state=link_anchor_state,
+        )
 
         # Issue #270: what this node advertises as `live_relays` in every
         # hello -- the reliable nodes it is standing by at right now.
@@ -1186,7 +1214,7 @@ async def run(
                     # this way, exactly as the Zmodem path does (#464);
                     # `None` when Link is off, which makes queueing a
                     # no-op rather than a special case.
-                    announce_identity=lambda: node_identity if link_node is not None else None,
+                    announce_identity=lambda: link_node.identity if link_node is not None else None,
                 )
 
         servers = await _start_servers(
@@ -1339,7 +1367,7 @@ async def run(
                         return connector
 
                     reliable_anchor_task = asyncio.create_task(run_reliable_anchor_connectors(
-                        node_identity=node_identity, link_node=link_node, lane=background_lane,
+                        link_node=link_node, lane=background_lane,
                         registry=link_realtime_registry, on_frame=link_realtime_bridge.on_frame,
                         track_session=link_realtime_bridge.track_session,
                         participation_accepted=participation_accepted, start_connector=_start_anchor_connector,
