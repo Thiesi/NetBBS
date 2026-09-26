@@ -35,6 +35,11 @@ def free_local_name(db: Database, table: str, name: str, resource_id: str) -> st
     first of `name-<id prefix>` that is free, else `None`."""
     if table not in _TABLES:
         raise ValueError(f"not a carried-resource table: {table!r}")
+    if not isinstance(resource_id, str) or not resource_id:
+        # Nothing validates a genesis id's type before this runs, and this is
+        # after `save_event`: refuse, which the transport tolerates, rather
+        # than raise out of the sync pass.
+        return None
     candidates = [name] + [
         f"{name}-{resource_id if length is None else resource_id[:length]}" for length in _SUFFIX_LENGTHS
     ]

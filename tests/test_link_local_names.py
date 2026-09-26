@@ -140,6 +140,13 @@ def test_two_carried_resources_with_one_name_both_land(db, remote):
     assert _name_of(db, "board", other) == f"general-{other[:8]}"
 
 
+@pytest.mark.parametrize("resource_id", [12345, "", None])
+def test_a_resource_id_that_is_not_a_string_is_refused_not_raised(db, resource_id):
+    """A genesis's id is not type-checked before projection; slicing an
+    integer used to raise `TypeError` out of the sync pass."""
+    assert free_local_name(db, "boards", "general", resource_id) is None
+
+
 def test_free_local_name_refuses_a_table_it_does_not_know(db):
     with pytest.raises(ValueError):
         free_local_name(db, "users", "general", RESOURCE_ID)
