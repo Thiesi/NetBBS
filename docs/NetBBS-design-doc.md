@@ -616,9 +616,13 @@ link); it announces it through `netbbs.net.notices`. Whichever screen is drawn
 next shows it directly above its prompt, and a picker shows it above its
 list. No keypress is asked for. This started in the SysOp console and now
 applies to every screen: boards, file areas, the composition review screen
-shared by posts and mail, and every picker. A screen with a nothing-to-do
-state still draws a `[B]ack` bar and waits, rather than returning straight
-into its parent's redraw, where it would flash and vanish.
+shared by posts and mail, every picker, and the main and mail menus that
+flows unwind back to.
+
+A screen with a nothing-to-do state still draws a `[B]ack` bar and waits,
+rather than returning straight into its parent's redraw, where it would flash
+and vanish. The one exception is a picker with nothing to pick: it announces
+its empty message and returns, so the screen it returns to says it.
 
 No *menu* has a typed command language. A caller's options are the keys the
 action bar shows, and a prompt reading `Choice: ` accepts exactly those. The

@@ -15394,14 +15394,13 @@ async def _file_action_screen(
             return
         elif choice == "d" and can_download:
             await session.write_line("")
-            # `send_file_to_caller` belongs to the caller-facing file screens
-            # and writes its own outcome -- "Sent 'x.zip'.", a failure, or the
-            # browser link the moderator is meant to open -- and this screen
-            # redraws straight after it. Held behind the stand-in, what it
-            # wrote last is on the redrawn screen instead of under its clear.
-            flow = _TrailingOutput(session)
-            await send_file_to_caller(flow, lane, area, entry, actor, transfers=transfers)
-            flow.announce_rest()
+            # `send_file_to_caller` announces its own outcome -- "Sent
+            # 'x.zip'.", a failure, or the browser link the moderator is
+            # meant to open (`netbbs.net.notices`, issue #680) -- so the
+            # redraw below shows it. Its setup lines (the heading, "Starting
+            # Zmodem send") are progress, not outcomes, and are meant to be
+            # cleared: no stand-in session is needed to hold them.
+            await send_file_to_caller(session, lane, area, entry, actor, transfers=transfers)
             await _draw()
         elif choice == "a":
             await session.write_line("")
@@ -15523,11 +15522,9 @@ async def _expired_file_screen(
             return
         elif choice == "d" and can_download:
             await session.write_line("")
-            # Same stand-in as the pending review: the outcome
-            # `send_file_to_caller` writes lands on the redrawn screen.
-            flow = _TrailingOutput(session)
-            await send_file_to_caller(flow, lane, area, entry, actor, transfers=transfers)
-            flow.announce_rest()
+            # As on the pending review: `send_file_to_caller` announces its
+            # outcome, and the redraw below shows it.
+            await send_file_to_caller(session, lane, area, entry, actor, transfers=transfers)
             await _draw()
         else:
             await session.write(reject_unhandled_key(choice))

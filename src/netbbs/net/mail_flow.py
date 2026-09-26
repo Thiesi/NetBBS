@@ -72,7 +72,7 @@ from netbbs.net.unicode_style_preference import unicode_style_enabled
 from netbbs.net.node_theme import effective_accent_color_256, effective_header_color_256
 from netbbs.net.picker import pick_item
 from netbbs.net.prose_editor import edit_prose
-from netbbs.net.notices import announce, announce_styled
+from netbbs.net.notices import announce, announce_styled, write_notices
 from netbbs.net.session import Session, write_prompt
 from netbbs.signature import append_signature, get_signature
 from netbbs.rendering import (
@@ -179,6 +179,7 @@ async def _render_mail_menu(
     await session.write_line(
         f"\r\n{_menu_row(options, width=session.terminal_width, height=session.terminal_height, description_level=description_level)}"
     )
+    await write_notices(session)
     await session.write("Choice: ")
 
 
@@ -370,6 +371,7 @@ async def _show_inbox_message(session: Session, lane: DatabaseLane, user: User, 
         await session.write_line(
             f"\r\n{_menu_row(options, width=session.terminal_width, height=session.terminal_height, description_level=description_level)}"
         )
+        await write_notices(session)
         await session.write("Choice: ")
         choice = (await session.read_key()).lower()
 
@@ -420,6 +422,7 @@ async def _show_sent_message(session: Session, lane: DatabaseLane, user: User, m
         await session.write_line(
             f"\r\n{_menu_row(options, width=session.terminal_width, height=session.terminal_height, description_level=description_level)}"
         )
+        await write_notices(session)
         await session.write("Choice: ")
         choice = (await session.read_key()).lower()
 
@@ -477,7 +480,7 @@ async def _compose_mail(
             await write_prompt(session, f"\r\nTo ({prompt}): ")
             recipient_text = (await session.read_line()).strip()
             if not recipient_text:
-                await session.write_line(colored("Cancelled.", fg_color=MUTED_COLOR))
+                announce(session, "Cancelled.", tone="muted")
                 return
             if link_context is not None and "@" in recipient_text:
                 break
@@ -502,12 +505,12 @@ async def _compose_mail(
         await session.write("Subject: ")
         subject = (await session.read_line()).strip()
     if not subject:
-        await session.write_line(colored("Cancelled -- a subject is required.", fg_color=ERROR_COLOR))
+        announce(session, "Cancelled -- a subject is required.", tone="error")
         return
 
     body = await _compose_mail_body(session, lane, user, initial_text=None)
     if body is None or not body.strip():
-        await session.write_line(colored("Message cancelled.", fg_color=MUTED_COLOR))
+        announce(session, "Message cancelled.", tone="muted")
         return
     # Appended once, right after the message is first composed -- not on
     # every subsequent "edit body" pass over the same draft (`netbbs.
@@ -543,7 +546,7 @@ async def _compose_mail(
             truecolor=review_truecolor,
         )
         if action is ReviewAction.CANCEL:
-            await session.write_line(colored("Message cancelled.", fg_color=MUTED_COLOR))
+            announce(session, "Message cancelled.", tone="muted")
             return
         if action is ReviewAction.EDIT_RECIPIENT:
             recipient_text = await read_prefilled_field(session, "To", recipient_text)
@@ -600,7 +603,7 @@ async def _compose_mail(
             except (LinkMailError, MailError) as exc:
                 announce(session, f"Could not send: {exc}", tone="error")
                 continue
-            await session.write_line(colored("Message sent.", fg_color=SUCCESS_COLOR))
+            announce(session, "Message sent.")
             return
 
         try:
@@ -616,7 +619,7 @@ async def _compose_mail(
         except MailError as exc:
             announce(session, f"Could not send: {exc}", tone="error")
             continue
-        await session.write_line(colored("Message sent.", fg_color=SUCCESS_COLOR))
+        announce(session, "Message sent.")
         return
 
 

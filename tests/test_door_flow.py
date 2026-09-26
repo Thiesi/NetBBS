@@ -7,6 +7,8 @@ brief real door launch these tests exercise)."""
 from __future__ import annotations
 
 import asyncio
+
+from netbbs.net.notices import pending_notices
 import sys
 import textwrap
 
@@ -114,7 +116,7 @@ def test_has_visible_doors_respects_min_play_level(db, player, tmp_path):
 def test_browsing_with_no_doors_shows_empty_message_then_backs_out(db, lane, player):
     session = FakeSession(inputs=[])
     asyncio.run(browse_doors(session, lane, player))
-    assert "No doors are available" in _text(session)
+    assert "No doors are available" in _text(session) + "".join(pending_notices(session))
 
 
 def test_picking_a_door_launches_it_and_returns_to_the_picker(db, lane, player, tmp_path):
@@ -135,4 +137,4 @@ def test_a_door_below_the_callers_level_is_not_offered(db, lane, player, tmp_pat
     create_door(db, "Elite Only", sys.executable, args=(str(script),), min_play_level=250, creator=player)
     session = FakeSession(inputs=[])
     asyncio.run(browse_doors(session, lane, player))
-    assert "No doors are available" in _text(session)
+    assert "No doors are available" in _text(session) + "".join(pending_notices(session))

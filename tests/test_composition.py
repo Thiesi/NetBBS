@@ -390,3 +390,21 @@ def test_a_carried_subject_is_shown_sanitized_and_kept_raw_when_untouched():
     shown = session.initial
     session, value = _prefilled([shown], raw)
     assert value == raw  # the sanitized text, saved as shown, is "unchanged"
+
+
+def test_a_prefilled_fields_viewport_is_the_width_left_after_its_label():
+    """The line editor measures its viewport from the cursor, which sits
+    after "Subject: "; a full-width one soft-wraps a long subject and then
+    edits against the wrong row (Codex review on #701)."""
+    from netbbs.net.composition import read_prefilled_field
+
+    seen = {}
+
+    class _Session(_PrefillSession):
+        async def read_line(self, **kwargs):
+            seen["viewport"] = kwargs["viewport"]()
+            return await super().read_line(**kwargs)
+
+    session = _Session(lines=["x"])
+    asyncio.run(read_prefilled_field(session, "Subject", "old"))
+    assert seen["viewport"] == 80 - len("Subject: ")

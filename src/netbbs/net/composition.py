@@ -17,6 +17,7 @@ from netbbs.net.draft_storage import delete_draft, load_draft, offer_draft_recov
 from netbbs.net.help_overlay import show_help
 from netbbs.net.notices import write_notices
 from netbbs.net.session import Session, write_prompt
+from netbbs.rendering.width import display_width
 from netbbs.rendering import (
     ACCENT_COLOR,
     HEADER_COLOR,
@@ -51,14 +52,19 @@ async def read_prefilled_field(session: Session, label: str, current: str) -> st
     #680): Enter saves what is shown, Esc leaves it unchanged. A field that
     may not be empty keeps its value when the line is emptied, rather than
     turning blank -- "keep" is Esc, not an empty answer."""
-    await write_prompt(session, f"{label}: ")
+    prompt = f"{label}: "
+    await write_prompt(session, prompt)
     # The editor echoes its initial buffer, and a subject carried over Link
     # can hold control sequences: it is shown sanitized, and handed back
     # untouched when the caller saves it without changing it.
     shown = sanitize_text(current)
     try:
         value = await session.read_line(
-            initial=shown, cancellable=True, viewport=lambda: session.terminal_width,
+            initial=shown, cancellable=True,
+            # The columns left after the label on this row: the viewport is
+            # measured from the cursor, and a full-width one would wrap a
+            # long subject and edit against the wrong row.
+            viewport=lambda: max(1, session.terminal_width - display_width(prompt)),
         )
     except InputCancelled:
         await session.write_line("")

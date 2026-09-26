@@ -33,6 +33,7 @@ from netbbs.mail import unread_count as unread_mail_count
 from netbbs.net.admin_flow import admin_menu
 from netbbs.net.board_flow import _browse_boards, _has_visible_boards
 from netbbs.net.breadcrumb_preference import breadcrumb_collapsed_enabled
+from netbbs.net.notices import write_notices
 from netbbs.net.char_input import REDRAW_KEY, InputHistory, reject_unhandled_key
 from netbbs.net.chat_flow import browse_channels, has_visible_channels, run_direct_chat_loop
 from netbbs.net.confirm import prompt_yes_no
@@ -308,6 +309,10 @@ async def _draw_main_menu(
         await session.write_line(f"\r\n{title}\r\n{options}\r\n")
     if notice:
         await session.write_line(notice)
+    # An outcome from a flow that unwound all the way back here (a download
+    # whose browser link was the whole of the transfer) is shown here
+    # rather than erased by this menu's clear (issue #680).
+    await write_notices(session)
     await write_prompt(session, _main_menu_prompt(db, user, node_controls))
 
 
@@ -988,6 +993,7 @@ async def _resource_type_menu(
         await session.write_line(
             f"\r\n{menu_row(option_list, width=session.terminal_width, height=session.terminal_height, description_level=description_level)}"
         )
+        await write_notices(session)
         await session.write("Choice: ")
 
         choice = (await session.read_key()).lower()
