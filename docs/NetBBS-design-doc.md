@@ -643,9 +643,9 @@ it was a deliberate trade and not an oversight:
 - **An expired file.** Nothing, and that is now the decided answer rather
   than a loss: expiry ends a file's reach to callers entirely (§5.3, issue
   #639). The listing and `[F]ind` are approved-and-current only, and a caller
-  who knows a name has no way to spend it. A SysOp is to reach an expired
-  file from the file area's admin detail screen while the grace period lasts;
-  that screen is decided but not yet built (issue #639).
+  who knows a name has no way to spend it. A SysOp reaches an expired file
+  while the grace period lasts through `E[x]pired files` on the file area's
+  admin detail screen, which carries the same `[D]ownload` (§5.3).
   Only areas that set a maximum file age have expired files at all.
 
 ### 3.6 Resource lists (issue #528)
@@ -1159,18 +1159,29 @@ caller-facing surface:
   reply to a thread that expired mid-conversation still finds its parent
   (§6.1's edit chains depend on the same lookup).
 - **SysOp recovery.** A file's bytes survive in content-addressed storage
-  until the grace period ends. The file area's admin detail screen is to list
-  its expired files with `[D]ownload`, the same action the pending-file review
-  screen carries, so recovering an upload does not need shell access. The
-  screen is decided but not yet built (issue #639). Posts
-  have no equivalent screen: a post's content is its text, and the recovery
-  case that justifies the file screen does not arise.
+  until the grace period ends. The file area's admin detail screen lists its
+  expired files under `E[x]pired files`, oldest first, each with its purge
+  date and `[D]ownload`: the same action the pending-file review screen
+  carries, offered under the same transport rule (issue #475), so recovering
+  an upload does not need shell access. The listing requires `APPROVE` on the
+  area; the uploader has no view of their own, since an expired file is gone
+  for them as for every other caller. Recovery is the whole of the screen:
+  putting a file back in the listing is not an action, and a re-upload is how
+  a SysOp who wants it listed again says so. Posts have no equivalent screen:
+  a post's content is its text, and the recovery case that justifies the file
+  screen does not arise.
+
+A browser transfer link (§6.2) follows the same boundary. A download link
+minted while a file was listed is refused once the file expires, its own
+uploader included, and serves an expired file only to a holder of `APPROVE`
+on the area, which is who the recovery screen mints it for.
 
 A domain function returning an expired row is therefore a statement about
 the domain, not a promise to callers, and the contracts of `list_files_page`,
-`get_file_by_name`, `list_posts_page` and `get_post` are to say so in those
-terms. Today `get_post` and `list_files_page` still describe expired content as
-"individually reachable"; issue #639 carries that edit.
+`get_file`, `list_posts_page` and `get_post` say so in those terms. There is
+no by-name file lookup: `get_file_by_name` had no caller once
+`/download <filename>` was gone, and the recovery screen hands over the row
+the SysOp picked rather than a name, which is not unique within an area.
 
 ### 5.4 Channel visibility and membership
 
@@ -2474,10 +2485,10 @@ under a fabricated resource and read an exact membership answer off the
 response. A signed request identifies the asker; it does not make an ID belong
 to the resource it was filed under.
 
-A resource this node has **seen and declined** — persisted but not
-materialized, which is what a carry-quota refusal (§13.9) leaves behind —
-wants nothing further. Asking on would be asking for what this node already
-refused to keep, and would not terminate: a declined board's posts never reach
+A resource this node has **seen and not taken on** — offered or excluded
+(§9.3), which is what a carry-quota refusal or a SysOp's exclusion leaves
+behind — wants nothing further. Asking on would be asking for content this node
+has not taken on, and would not terminate: such a board's posts never reach
 `link_events` at all, so they would be wanted every pass forever and occupy the
 requester's whole push page. A resource never seen is the opposite case and
 still wants everything declared for it, which is how a genesis arrives by push.
@@ -2667,6 +2678,20 @@ nodes which both cannot accept inbound connections meet through a live relay
 (§8.10.3, issue #168) -- a raw-socket proxy below the Noise layer, a separate
 mechanism from the asynchronous relay mailbox, never tunneled through it.
 Asynchronous linked-channel events continue to work regardless.
+
+A node whose only way out is an HTTP proxy opens every real-time socket as a
+`CONNECT` tunnel through the proxy asynchronous Link uses (`HTTP_PROXY`, else
+`HTTPS_PROXY`, subject to `NO_PROXY`) and runs the same bytes over it: the
+attach preamble, the Noise handshake and the session are unchanged, and of the
+Link traffic the proxy sees no more than an on-path observer of a direct
+connection would (Basic proxy credentials, where used, are the proxy's own and
+cross to it in the clear). The target authority is validated strictly before it
+is sent. The tunnel is the only attempt when a proxy applies, an unsupported
+proxy URL fails the dial rather than dialling direct, authentication is Basic
+from the proxy URL or `~/.netrc`, and a refused tunnel or a failed handshake
+over an open one is recorded for the Link status screen. A proxy that inspects
+TLS inside the tunnel cannot carry Noise. Decisions and rationale: §16, issue
+#628.
 
 #### 8.10.1 Session framing and ownership
 
@@ -3118,9 +3143,19 @@ reclaim already established — purely additive (fills in a missing row from
 an already-verified signed event, never deletes or rewrites anything), so
 unlike blob reclaim it needs no dry-run/confirm step.
 
-Linked resources are carried by default within the supported topology, with a
-visible local exclusion option. A local exclusion must be represented honestly
-as “not carried on this node,” not indistinguishable disappearance.
+Linked resources are carried by default within the supported topology. Every
+genesis a node has accepted is in exactly one recorded state (issue #561):
+**carried** (a local row), **offered** (it arrived past the automatic-intake
+cap `max_carried_*` and waits for the SysOp to accept it) or **excluded** (the
+SysOp declined it, or deleted it while carried, and it stays out until the SysOp
+restores it). The genesis save and its carry outcome are one transaction. The
+caps bound automatic intake only: lowering one sheds nothing, a SysOp's accept
+or restore is not capped, and a cap of 0 offers everything new. Offered and
+excluded resources want nothing further (§8.8), are declared to peers so that
+their events are not sent (issue #669), and are never visible to callers; the
+SysOp sees and acts on both lists from Link status. That is how a local
+exclusion is represented honestly as “not carried on this node,” not
+indistinguishable disappearance.
 
 Origin recommendations never override the carrying node’s local access,
 moderation, retention, or legal policy.
@@ -4983,7 +5018,7 @@ let one peer impose unbounded cost on another node:
 | `LinkNode.peers`/`link_peers` — any node that completes a hello becomes a permanent peer, no cap (mirror-image gap to candidate descriptors, which *are* capped) | New `LinkConfig.max_peers` (default 1000 — generous relative to §14's declared small-network scale, but no longer infinite) | Same shape as candidate descriptors: admitting a genuinely *new* fingerprint past the cap is refused; a hello from an *already-known* peer (key rotation, descriptor refresh) is always accepted regardless of the count. Implemented as `handle_hello`'s own optional `max_peers` keyword (`None` default, unbounded, preserving every prior caller) rather than `handle_relay_consent_request`'s "caller decides" split — that idiom exists specifically for relay-consent's in-band `accepted=False` reply shape, which `handle_hello` has no equivalent of; refusing a hello is a whole-request failure either way, the same shape peer-list's own internal cap already uses. Only threaded into the *inbound* path (`LinkServer._handle_hello`/`_handle_relay_mailbox_pickup`) — `dial_hello` (outbound) is left unbounded by this cap, already indirectly bounded by `_MAX_CANDIDATE_DESCRIPTORS` plus the operator's own small configured seed list. |
 | `handle_events` batch size — no per-request cap, unlike peer-list's own `_MAX_PEER_LIST_ENTRIES_PER_REQUEST` from the same design round | New `_MAX_EVENTS_PER_REQUEST = 200` beside the existing constant in `protocol.py` | Reject the whole batch with `LinkProtocolError`, identical to the peer-list precedent — a genuine sync backlog still drains over several passes rather than one unbounded request. |
 | `board_post`/`board_post_edit` content size — zero validation on receive, unlike locally created posts (`netbbs.boards.posts.MAX_SUBJECT_BYTES`/`MAX_BODY_BYTES`) | Apply the same two constants inside `handle_events`'s `board_post`/`board_post_edit` branches | `LinkProtocolError`, matching every other malformed-event rejection already in that method. |
-| Carried-board count — `materialize_carried_board` turns any verified `board_genesis` into a local `Board` row unconditionally | New `LinkConfig.max_carried_boards` | The `board_genesis` event is still verified, accepted, and gossiped on past this node (dedup and chain integrity for *other* nodes must not depend on this node's own local storage choices) — only *materializing* a local, browsable `Board` row is refused once the cap is hit. This is the exact shape §9.3 already specifies for a local exclusion: represented honestly as "not carried on this node," never a silent, indistinguishable drop. |
+| Carried-board count — `materialize_carried_board` turns any verified `board_genesis` into a local `Board` row unconditionally | New `LinkConfig.max_carried_boards` | The `board_genesis` event is still verified, accepted, and gossiped on past this node (dedup and chain integrity for *other* nodes must not depend on this node's own local storage choices) — only *materializing* a local, browsable `Board` row is refused once the cap is hit. Issue #561 decided that past the cap the resource will be recorded as *offered* for the SysOp to accept rather than left declined (§9.3); until that is implemented it is refused as described here. |
 | Link HTTP request body size — neither `LinkServer` nor `WebServer` sets `client_max_size`, so both silently inherit aiohttp's implicit 1 MiB default | Set `client_max_size` explicitly on `LinkServer`'s `web.Application()`, sized to comfortably fit `_MAX_EVENTS_PER_REQUEST` worth of events (2 MiB) | Turns an accidental library default into a deliberate, documented value; aiohttp's own 413 response is unchanged (not worth reshaping into a `LinkProtocolError` payload for a request that was rejected before any handler ran). |
 | Link HTTP request rate — no throttling on any Link route at all, including the two unauthenticated ones (`/hello`, `/peers`) | New `netbbs.net.throttle.LinkRequestThrottle` (a small public wrapper around the existing `_KeyedTokenBuckets` machinery `LoginThrottle` already uses internally), keyed by source address, applied via an aiohttp middleware on every route -- constructed once in `netbbs.__main__` from three new flat `LinkConfig` fields (`request_rate_capacity`/`request_rate_refill_per_minute`/`request_rate_max_tracked_sources`, not a nested sub-dataclass) and passed into `LinkServer`, the same "build once, node-lifetime, threaded into the one real server" shape `_build_throttle` already uses for `LoginThrottle` | Exceeding it returns a plain HTTP 429, no signed payload needed (an unauthenticated-route response can't be signed meaningfully anyway). `None` throttle (every caller predating this) is a middleware no-op, not a hard requirement. |
 
@@ -5015,7 +5050,9 @@ scope:
 
 **SysOp visibility.** `[L]ink status` gains a peer-count line showing
 `current/max_peers` (matching the existing `relaying_for`-slots-in-use
-display precedent) and a carried-boards `current/max_carried_boards` line;
+display precedent) and a carried-boards `current/max_carried_boards` line
+(issue #561 decided to extend it to channels and file areas, with offered and
+excluded counts; not yet built);
 rate-limit rejections are logged the same way `LoginThrottle` rejections
 already are, not surfaced as a separate screen in this slice.
 
@@ -10585,19 +10622,36 @@ to a thread that expired mid-conversation.
 caller-facing one.** Expired files are listed on the file area's admin detail
 screen with `[D]ownload`, mirroring the pending-file review screen #638
 already gave that action to, and offered under the same transport rule
-(issue #475). This is also what gives `get_file_by_name` a production caller
-again; if this decision had gone the other way the function should have been
-deleted rather than left as another implemented, tested and unreachable name.
+(issue #475).
+
+**Decision 5 — `get_file_by_name` is deleted.** Decision 3 was first expected
+to give it a production caller again. Building the screen showed it does not:
+the recovery screen is a picker, which hands over the row the SysOp chose, and
+#638 had already moved `send_file_to_caller` off re-reading a file by name
+because a filename is not unique within an area. Routing recovery through the
+by-name lookup would have handed back the oldest row of that name, possibly an
+approved file rather than the expired one picked. With no caller the function
+went, rather than stay as another implemented, tested and unreachable name. Its
+pending rule lives on where it is enforced: `list_pending_files` and the
+transfer path.
+
+**Decision 6 — a transfer link does not outlive expiry.** A download link
+minted while a file was listed is refused once the file expires, its uploader
+included, the same way an outstanding link does not outlive a lockout. It
+serves an expired file only to a holder of `APPROVE` on the area, which is who
+the recovery screen mints it for.
 
 **Decision 4 — posts get no equivalent screen.** A file is an artifact that
 is unrecoverable once the grace period ends; a post is text in a board. The
 recovery case that justifies decision 3 does not arise, and inventing a
 screen for symmetry would be building for nobody.
 
-**Not done, deliberately.** `test_expired_file_still_reachable_by_name` stays
-and is renamed for what it now guards, since the domain behaviour it pins is
-still true and still load-bearing — what was wrong was the promise about
-callers, not the return value. The §3.5 bullet recording #638's trade also
+**Not done, deliberately.** `test_expired_file_still_reachable_by_name` stays,
+renamed `test_expired_file_keeps_its_row_until_purged` and pinned through
+`get_file` now that the by-name lookup is gone, since the domain behaviour it
+guards is still true and still load-bearing: what was wrong was the promise
+about callers, not the return value. The recovery screen has no restore
+action; a re-upload is how a SysOp puts a file back. The §3.5 bullet recording #638's trade also
 cited §11 for the delisting rule, which §11 does not state; it now points at
 §5.3, which does.
 
@@ -10681,6 +10735,331 @@ refuses while a node process holds the database. Both surfaces write a
 Not built: a screen action that declares an already-retired key compromised.
 The chain and `operational_key_history` accept that second revoke, and
 nothing issues it yet.
+
+### Issue #628 — real-time Link through an HTTP `CONNECT` proxy
+
+Decided during the roadmap re-evaluation of 2026-09-18 (issue #612): a network
+that permits outbound traffic only through an HTTP proxy is one of the settings
+Link is meant for, and there asynchronous Link works (every outbound
+`aiohttp.ClientSession` sets `trust_env=True`) while live chat does not.
+Normative description: §8.10.
+
+What the code does today, which set the shape of the answer:
+
+- **Three places open a real-time socket, and they all end the same way.**
+  `dial_realtime_session` (direct dials of a peer, a relay, an anchor or a
+  linked channel's origin), `attach_relayed_session` (a party joining a
+  relayed bridge, which writes the plaintext `NETBBS-BRIDGE/1` attach record
+  before Noise starts) and `RealtimeRelay._handle_upstream_ready` (a relay
+  forwarding to an upstream relay, issue #270, which never runs Noise at all).
+  Each calls `asyncio.open_connection(host, port)` on an address taken from the
+  peer's signed descriptor and then works on the stream pair. Nothing below
+  that line knows or cares where the bytes go, so a tunnelled stream
+  substitutes cleanly — including for the attach preamble, which is just more
+  bytes written ahead of the handshake.
+- **An outgoing-only node dials directly as well as through relays.** No
+  real-time dial checks `outgoing_only`: a DM tries the target's advertised
+  real-time addresses first, a linked channel dials its origin, and every
+  participating node keeps anchor connections to the reliable nodes. So the
+  gap is not the relay leg alone; on a proxy-only network every real-time
+  path fails.
+- **The advertised port is already independent of the bound one.**
+  `realtime_advertised_port` exists and is what the signed descriptor carries,
+  so a node can bind 8862 and advertise 443 behind a forwarder today.
+
+**Decision 1 — one helper opens every real-time socket, and it tunnels when a
+proxy applies.** All three sites call a single function in place of
+`asyncio.open_connection`. When the environment names a proxy for the target,
+the helper connects to the proxy, sends `CONNECT host:port HTTP/1.1` with a
+`Host: host:port` header, requires a `2xx` answer, and returns the same stream
+pair; Noise, the attach preamble and the relay pipe then run over it unchanged.
+The target comes from a peer's descriptor, which is signed but whose addresses
+nothing validates today, so the helper accepts only a strict authority — a DNS
+hostname, an IPv4 literal or a bracketed IPv6 literal, and a port in range —
+and refuses anything else before a byte reaches the proxy; otherwise a peer
+could inject request lines into the operator's authenticated proxy. The target
+host is sent to the proxy unresolved, because on a proxy-only network the local
+resolver commonly cannot resolve outside names. Of the Link traffic, the proxy
+sees what any on-path observer of a direct connection sees: the dialled address
+and, on a relayed attach, the plaintext `NETBBS-BRIDGE/1` record with its
+single-use attach token, which travels in the clear on a direct connection too.
+Everything after it is Noise, authenticated end to end (§8.10). What a direct
+connection does not have is the proxy's own credentials: with Basic
+authentication (decision 4) they cross the `http://` leg to the proxy in the
+clear, exactly as they already do for the asynchronous half's proxied requests. The descriptor-pinning rules for relay
+attach addresses are unaffected because they compare the address before the
+socket is opened. The upstream-relay site
+is included although a relay is by definition reachable: the rule "every
+real-time socket is opened here" is what keeps a fourth site from quietly
+reopening the gap. Rejected: a proxy-aware variant of each caller, which is
+three implementations of one handshake.
+
+**Decision 2 — the proxy comes from the environment only, and it is the one
+asynchronous Link uses.** A peer's Link endpoint is advertised as `http`, so
+`aiohttp` sends that peer's boards and mail through `HTTP_PROXY`; the tunnel
+uses the same variable, falling back to `HTTPS_PROXY` when only that is set, and
+`NO_PROXY` exempts targets, all read with the standard library's own rules
+rather than a parser of ours. Using the proxy that already carries this node's
+asynchronous traffic is what keeps the two halves from disagreeing when the
+variables differ. Only `http://` proxy URLs are supported. A SOCKS or `https://`
+proxy URL that applies to a target fails that dial with a visible configuration
+error and is never treated as absent: a configured proxy is the only way out,
+and falling back to a direct dial would bypass the operator's egress policy
+wherever direct traffic happens to be possible. Rejected: a `[link] proxy`
+setting. It would be a second source of truth beside the one the
+async half of Link already reads, and the two halves of one node could then
+disagree about how that node reaches the network.
+
+**Decision 3 — when a proxy applies, the tunnel is the only attempt.** There is
+no direct dial first and no fallback to direct afterwards. A network that needs
+a proxy usually drops rather than refuses direct outbound connections, so a
+direct-first rule would make every live dial wait out its full timeout, once
+per advertised address, before the path that works. This is also what `aiohttp`
+does for the async half: with a proxy configured it uses it. A SysOp whose
+proxy should not carry some peers says so with `NO_PROXY`, which is the
+standard lever for exactly that. Rejected: tunnel-on-failure, for the latency
+above and because it makes the path a dial takes depend on timing rather than
+on configuration.
+
+**Decision 4 — proxy authentication is Basic, from the same sources
+asynchronous Link reads, and nothing else.** Credentials in the proxy URL's
+userinfo, or failing that the `~/.netrc` entry for the proxy host (which
+`aiohttp` consults under `trust_env`), become a `Proxy-Authorization: Basic`
+header on the `CONNECT`. NTLM, Negotiate and Kerberos are out of scope: the
+async half of Link does not speak them either (`aiohttp` does not), so building
+them for live chat alone would leave a node with live chat and no boards. The
+supported answer for such a network is a local authenticating shim that
+presents an unauthenticated proxy on loopback, which serves both halves at
+once; the operator documentation names that pattern.
+
+**Decision 5 — no NetBBS change for the port; it is an operator recipe.**
+Corporate proxies commonly allow `CONNECT` only to 443 (Squid's stock
+`deny CONNECT !SSL_ports`). A reliable node that wants proxy-only callers to
+reach it live advertises its real-time address on 443 with
+`realtime_advertised_port` and forwards that port to its real-time listener.
+NetBBS does not bind 443 itself — the same rule as the web transport (issue
+#201) — and does not multiplex Noise with TLS on one port; a host whose 443 is
+already taken by an HTTPS front end needs a second address, or a protocol
+demultiplexer in front of both, and either is the operator's choice. Rejected for now: a
+second advertised real-time address per node. The descriptor already carries a
+list and dialers already try each entry in order, so adding one later is a
+compatible change, but nothing needs it until a reliable node cannot move its
+only real-time port.
+
+**Decision 6 — the tunnel is bounded, and its failures are recorded where they
+happen.** One timeout of the helper's own covers connecting to the proxy and
+reading its answer, and the answer has a header-size ceiling, since
+`dial_realtime_session` itself has no overall timeout and the anchor connector
+calls it without one; a proxy that blackholes the connection, or accepts it and
+then says nothing, must not hold a dial open. On every path that does not
+return the stream — timeout, an oversized or malformed answer, a refusal,
+cancellation — the helper closes the proxy connection and waits for it to close
+before raising, since no caller holds the writer yet; anchor retries would
+otherwise leak a socket per attempt. A refusal
+(`403`, `407`, `502`, anything not `2xx`) raises a distinct transport error
+naming the status. The helper also records the last tunnel outcome on a
+node-owned status object, and a dial whose tunnel opened but whose handshake
+then failed records that too — "tunnel opened, handshake failed" is its own
+outcome and never shows as a success, because the anchor connector swallows every dial
+exception and a caller's `DirectChatUnreachable` deliberately carries no
+reason; the Link status screen shows the proxy in use and that last outcome
+("tunnel refused: 407 Proxy Authentication Required"), and a change of outcome
+is logged at WARNING once rather than on every retry. Callers keep the generic
+unreachable message: a caller cannot fix a proxy and the SysOp now can see it.
+
+**Decision 7 — a TLS-inspecting proxy is a known limit.** A proxy that
+terminates or inspects TLS inside the tunnel (Squid `ssl_bump`, most
+"SSL inspection" appliances) will reject a stream that is not TLS, and Noise is
+not TLS. That shows up as a tunnel that opens and then fails its handshake, which is
+the outcome decision 6 records. Wrapping real-time Link in TLS to pass such a proxy is
+not part of this decision; it would be a separate one, taken only if a real
+deployment meets it.
+
+**Testing.** A real loopback `CONNECT` proxy in the suite (an asyncio server
+that parses the request, rejects one without `Host`, optionally demands Basic
+credentials, and pipes bytes), per the rule about real boundaries: a direct dial, a relayed attach
+with its preamble, and an upstream-relay leg each through it; `NO_PROXY`
+bypass; a `407` surfacing as the recorded outcome; a silent proxy and a
+blackholed one both bounded by the timeout; an unsupported proxy URL failing
+the dial rather than dialling direct; a descriptor address with CR/LF refused
+before the proxy sees it; the proxy observing EOF after each failed setup. A ratchet test that no `asyncio.open_connection` remains in
+`netbbs.link` outside the helper. The live check is the proxy-only node joining
+the dogfood deployment and holding an anchor session to a reliable node.
+
+**Not done, deliberately.** Managed DNS stays as it is: its heartbeat connects
+direct on purpose, because the service publishes the address a check-in
+arrives from and a proxy-only node has no address worth publishing (issue
+#201). This
+decision does not change that asymmetry, and the helper is not used there.
+Implementation is its own issue.
+
+### Issue #561 — the Link carry model: what the cap decides, and what "declined" means
+
+Carry is opt-out: joining Link is the only decision a SysOp makes, and each
+verified genesis becomes a local board, channel or file area on arrival, up to
+`max_carried_boards` / `max_carried_channels` / `max_carried_file_areas`
+(500 each). The issue asked whether the property that falls out of that —
+*which* resources a node carries is decided by sync arrival order, and the
+rest are declined forever — was chosen or accidental. It was accidental.
+Normative description: §9.3.
+
+What the code does today, which set the shape of the answer:
+
+- **"Declined" is never recorded; it is inferred.** A genesis in `link_events`
+  with no local row reads as "seen and declined" (`inventory_wanted_ids`), and
+  three different histories produce that state: a quota refusal, a SysOp
+  deleting a carried resource (the delete functions leave `link_events`
+  alone), and a crash between `save_event` and `materialize_carried_board`,
+  which are separate lane calls with no repair path. Nothing can tell them
+  apart, so §9.3's promise of a visible local exclusion "represented honestly
+  as 'not carried on this node'" had no implementation behind it.
+- **Arrival order decides, and nothing revisits it.** Responders walk
+  resources in sorted-id order; the requester dials configured seeds before the
+  reliable roster. The 501st genesis of a type is refused and, being inferred
+  as declined, never asked about again.
+- **The declined state also starves sync.** A resource this node does not carry
+  is absent from its `InventoryRequest`, so every responder carrying it sends
+  its genesis and every event under it on every pass, under the one 200-event
+  budget shared by all three types. Recorded as issue #669, with a
+  reproduction.
+- **The cap is exempt for what already landed**, so lowering it sheds nothing,
+  and only boards have a readout (`Carried boards: N/500`); channels and file
+  areas have none.
+
+**Decision 1 — carry stays opt-out.** A node that joins Link carries what
+arrives, and scenario 1's "small node joins a busy Link" keeps working without a
+SysOp curating anything. What changes is everything past that default.
+
+**Decision 2 — a genesis this node has accepted is in exactly one recorded
+state: carried, offered or excluded.** *Carried* has a local row. *Offered* and
+*excluded* are rows in a carry-decision record keyed by resource kind and id,
+holding the state, when it was set and by whom (the node, or a SysOp). Nothing
+is inferred from absence any more. Every transition is one transaction: the genesis save
+with its carry outcome (materialization or the record), and each later move
+between states — accepting, excluding, deleting, restoring — with the local row
+and the record changing together. That needs non-committing variants of today's
+`materialize_carried_*` and `delete_*` helpers, which commit internally. It
+closes the genesis crash window the way issue #73 closed it for posts, rather
+than adding a repair pass for it. On migration, every existing genesis without a
+local row becomes *offered*: its history cannot be recovered, and offered is
+the state that loses nothing and forces nothing.
+
+**Decision 3 — past the cap a new resource is offered, not declined.** The
+cap bounds what the node takes on automatically; it no longer decides what the
+node can ever have. An offered resource is listed for the SysOp with its name,
+description and origin node, and `[A]ccept` materializes it from the stored
+genesis, replays any other events this node already holds for it (a migrated
+resource, or lifecycle events accepted beside a genesis past the cap, would
+otherwise be declared as known and never projected), and then the next pass
+backfills the rest by ordinary inventory pull. Accepting is the SysOp's choice and is not
+itself capped. A genesis whose name is already taken locally is carried under a
+disambiguated local name, on automatic intake and on accept alike, and the SysOp
+can rename it as any carried resource; names are not identities in Link.
+Today such a genesis aborts one sync pass and is then never carried (issue
+#671). While offered, a resource wants nothing further, for the reason
+§8.8 gives for declined ones: asking about content this node has not taken on
+does not terminate. Rejected: reordering automatic intake to prefer reliable
+nodes, configured seeds or busier resources. Reliable nodes are never
+protocol-privileged (issue #219, decision 1), and any order is still an order;
+once nothing is lost past the cap, which resources arrive first decides only
+which ones need no click.
+
+**Decision 4 — the cap governs intake, not holdings, and a cap of 0 is a
+curated node.** Lowering a cap sheds nothing; a SysOp prunes by excluding, which
+is a choice about named resources rather than a second arrival-order rule run
+in reverse. A cap of 0 offers everything new and carries nothing unasked, which
+is scenario 2's "these ten, nothing else" without a separate mode. A slot freed
+by an exclusion is not filled from the offered list: once a resource has been
+put in front of the SysOp, accepting it is theirs to do, and an offer that can
+silently turn into a carried resource later makes the list untrustworthy.
+
+**Decision 5 — deleting a carried resource excludes it, and exclusion lasts
+until the SysOp reverses it.** The delete screen of a carried resource says that
+it will not come back and where to restore it. An `Excluded` list shows each
+excluded resource with `[R]estore`, which materializes it from the stored
+genesis and then replays the events this node still holds for it — a deleted
+resource's posts, messages and descriptors stay in `link_events`, are declared
+as known, and would never be sent again — before pull fetches what it is
+genuinely missing. Two things an exclusion must keep for that to be true, both
+written in the exclusion's transaction:
+
+- **what this node's own users wrote there.** Self-originated envelopes live in
+  `posts.link_event_json` and `channel_messages.link_event_json`, not in
+  `link_events`, and the delete helpers remove those rows; they move to durable
+  event storage first, or excluding a resource destroys this node's signed
+  history and restoring it depends on some peer having kept a copy;
+- **this node's own moderation of it.** A carrying node's moderator edits and
+  tombstones on a remotely originated board are local and are not in the
+  signed history, so replay alone would bring back content the SysOp removed.
+  They are kept as an overlay and reapplied on restore.
+
+Exclusion applies only to a resource whose *current* origin, resolved as §9.4
+resolves it, is another node — not merely one whose genesis came from
+elsewhere, since a board transferred to this node makes it the authority peers
+depend on for closure, moderator edits and further transfer. Removing a linked
+resource this node is the current origin of is not a carry choice and is outside
+this decision: for boards it goes through closure or origin transfer (§9.5, §9.4);
+linked channels and file areas have no transfer or closure events yet, so their
+delete path stays as it is today, a gap this decision records rather than
+closes. The SysOp can also exclude an offered
+resource without ever carrying it. This answers scenario 5 (it stays gone, and
+visibly so) and scenario 3 (pruning frees slots for automatic intake; nothing
+that was offered is lost). Excluded and offered resources are never visible to
+callers.
+
+**Decision 6 — what a node does not carry, it tells its peers.** Offered and
+excluded resources are declared in every `InventoryRequest` so responders stop
+sending events under them, which is the fix for #669 and the #630 precedent
+(events set aside under probation are declared as seen). The existing maps cannot
+say it: their values are known-ID sets, and a responder sends every event whose
+ID is absent, so declaring an offered resource's genesis alone still brings
+every post. The fix therefore needs an explicit "not carried here" field,
+signed, and sent only to a responder that has said it understands it: an older
+responder rebuilds the signature payload without an unknown field and would
+reject the whole request, and bumping the protocol version would stop hello
+from completing, since versions must match exactly. So the responder advertises
+an inventory capability — in its hello or descriptor — and the requester sends
+the field only where it is advertised. Against an older responder there is no
+suppression: nothing it understands can express it, and declaring received IDs
+the #630 way would need a retained-ID store for events this node never keeps,
+since posts, messages and descriptors under a resource without a local row are
+dropped without reaching `link_events`. Mixed versions keep today's behaviour
+until the responder upgrades. The declaration costs one resource ID per offered or
+excluded resource; the carried maps beside it list every content ID of every
+carried resource and are far larger, so keeping the whole request under the
+responder's size limit is one problem for both, and #669 owns it rather than a
+separate bound on the carry-decision record.
+
+**Decision 7 — the bound stays a per-type count, and all three get a
+readout.** 500 stays the default, and the declared scale (§2.3) stays small.
+Link status shows `carried/cap` for boards, channels and file areas alike, and
+the offered and excluded counts beside them. Rejected for now: a storage or
+activity bound. Two of the three types are already bounded where their cost
+concentrates — `max_remote_files_per_area` for a file area's catalogue and the
+node-wide scrollback retention limit for a channel's history — and boards are
+not: a carried board's posts are durable, unbounded-lifetime state (§8.9), and
+no cap shape changes that, since a board grows after it is accepted. A storage
+bound would need the node-wide disk accounting §13.9 lists as its own future
+slice; until then a count is the number a SysOp can reason about when choosing
+what to accept, and excluding a board that grew too large is the lever.
+
+**Decision 8 — the vocabulary is the one Link Communities will use.** §6.5 says
+carrying a Community carries its present and future members with per-resource
+and whole-Community exclusions. In these terms a Community subscription is a
+standing rule that accepts offers naming that Community; opting one member out
+is excluding it; and a resource in no Community stays under the node-wide
+automatic intake, so unfiled content is never uncarryable by construction.
+Leaving a Community does not shed members already carried, for the reason in
+decision 4. Whether a subscription has a bound of its own, and how a subscribed
+Community is told apart from a same-named local one, stay Phase 6 questions;
+nothing here forecloses them.
+
+**Not done, deliberately.** Offers add a row per genesis this node already
+stores, so they grow nothing a peer could not already make it store; bounding
+genesis intake as a whole is a separate question, and this decision does not
+change it. Bulk actions on the offered list (exclude everything from one
+origin) wait until a list long enough to need them exists. Implementation is its
+own issue, after #669.
 
 ### SFTP over the SSH transport — declined
 
