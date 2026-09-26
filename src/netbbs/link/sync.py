@@ -706,6 +706,11 @@ async def _sync_one_seed(
     except (LinkTransportError, LinkProtocolError) as exc:
         _logger.warning("Link sync: could not complete hello with seed %s: %s", seed_url, exc)
         return False
+    # Issue #712: a seed this node reaches every pass is the best-known relay
+    # candidate it has, and relay selection ranks by these observations. A
+    # failure cannot be recorded here: before the hello, the URL names no
+    # fingerprint.
+    await lane.run(record_dial_outcome, seed_peer.fingerprint, succeeded=True)
     if seed_url in reliable_urls:
         # Issue #219/#270: the identity behind a reliable-roster URL is what
         # was *observed* by dialing it -- the only binding the live-relay
@@ -1951,7 +1956,17 @@ async def _request_one_relay_consent(
     `dial_hello` call -- one bad or hostile candidate must not abort the
     rest of this pass."""
     try:
-        await dial_hello(node, session, base_url, own_hello_provider(), lane)
+        try:
+            await dial_hello(node, session, base_url, own_hello_provider(), lane)
+        except (LinkTransportError, LinkProtocolError):
+            # Issue #712: without this, a candidate that can never be reached
+            # kept the neutral score of one never tried, and was asked again
+            # every pass ahead of a relay that works. Reachability is what is
+            # recorded, not consent: a refusal by the relay's policy says
+            # nothing about whether it is up.
+            await lane.run(record_dial_outcome, relay_fingerprint, succeeded=False)
+            raise
+        await lane.run(record_dial_outcome, relay_fingerprint, succeeded=True)
         if enforce_trust_policy:
             await lane.run(ensure_node_subject, relay_fingerprint)
             decision = await lane.run(
