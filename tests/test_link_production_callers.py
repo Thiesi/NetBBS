@@ -54,11 +54,6 @@ ALLOWED: dict[str, str] = {
     "record_activity": "#589",
     "clear_local_observation": "#589",
     "recompute_all_trust_states": "#589",
-    # Issue #584 -- named by the same scan, not yet triaged to a subsystem.
-    "enqueue_work_item": "#584",
-    "frame_is_relay_traffic": "#584",
-    "get_remote_file": "#584",
-    "rotate_realtime_transport_key": "#584",
 }
 
 

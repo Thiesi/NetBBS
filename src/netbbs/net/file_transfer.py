@@ -324,18 +324,33 @@ def _visible_file(db: Database, grant: TransferGrant, area: FileArea, user: User
         raise TransferError("that file is no longer in this area")
     if entry.status == "pending" and not _may_see_pending(db, entry, user):
         raise TransferError("that file has not been approved yet")
+    if entry.status == "expired" and not _may_recover(db, entry, user):
+        # Expiry ends a caller's reach (design doc §5.3, issue #639), and
+        # a link minted while the file was still listed must not outlive
+        # that any more than an outstanding link outlives a lockout. The
+        # one holder it still serves is the SysOp recovering it from the
+        # file area's expired-files screen.
+        raise TransferError("that file has expired")
     if not Path(entry.storage_path).exists():
         raise TransferError("this node no longer has that file's content")
     return entry
 
 
 def _may_see_pending(db: Database, entry: FileEntry, user: User) -> bool:
-    """The same answer `netbbs.files.entries.get_file_by_name` gives a
-    terminal caller: its own uploader, or a moderator holding APPROVE
-    on the area (Codex review -- a moderator who could ask for the file
-    by name was being handed a link that always refused)."""
+    """A pending file is its own uploader's, and a moderator holding
+    APPROVE on the area reviews it -- the same split
+    `netbbs.files.entries.list_pending_files` draws (Codex review -- a
+    moderator reviewing an upload was being handed a link that always
+    refused)."""
     if entry.uploader_user_id == user.id:
         return True
+    return _may_recover(db, entry, user)
+
+
+def _may_recover(db: Database, entry: FileEntry, user: User) -> bool:
+    """APPROVE on the area: who `netbbs.files.entries.list_expired_files`
+    shows an expired file to. Its uploader is not included -- once a
+    file expires it is gone for them as for every other caller."""
     return has_permission(
         db, user, object_type="file_area", object_id=entry.area_id,
         permission=BoardPermission.APPROVE,

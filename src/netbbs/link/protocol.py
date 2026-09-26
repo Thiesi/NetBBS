@@ -61,7 +61,7 @@ import base64
 import json
 import secrets
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from string import hexdigits
 from typing import NamedTuple
@@ -70,9 +70,10 @@ import nacl.signing
 
 from netbbs.boards.limits import MAX_BODY_BYTES as _MAX_BOARD_POST_BODY_BYTES
 from netbbs.boards.limits import MAX_SUBJECT_BYTES as _MAX_BOARD_POST_SUBJECT_BYTES
-from netbbs.identity.keys import fingerprint_from_verify_key
+from netbbs.identity.keys import fingerprint_from_verify_key, verify_signature
 from netbbs.identity.encryption import derive_encryption_public_key
 from netbbs.link.events import (
+    canonical_bytes,
     event_content_id,
     BOARD_CLOSURE_OBJECT_TYPE,
     BOARD_GENESIS_OBJECT_TYPE,
@@ -137,6 +138,8 @@ from netbbs.link.node_identity import (
     NodeIdentityError,
     resolve_current_operational_key,
     superseded_operational_keys,
+    verifying_operational_keys,
+    operational_key_history,
 )
 from netbbs.link.introduction import IdentityRequest, referenced_identities
 from netbbs.link.remote_attestation import AttestationPullRequest
@@ -1506,6 +1509,11 @@ class TolerantOutcome(NamedTuple):
     # The refusal that ended the response early, if one did. Everything in
     # `accepted` was accepted before it and still has to be persisted.
     refusal: LinkProtocolError | None
+    # Content IDs dropped for good because their signer marked the key that
+    # signed them compromised (issue #624): a carrier's copy from before the
+    # signer re-signed it. Skipped rather than refused, or one stale copy
+    # would end every response it appears in.
+    skipped: tuple[str, ...] = ()
 
 
 @dataclass
@@ -2042,9 +2050,44 @@ class LinkNode:
                 f"hello from {claimed_fingerprint} refused: already at this node's own "
                 f"max_peers limit ({max_peers})"
             )
+        if existing is not None:
+            record = self._merge_known_chain(existing, record)
 
         self.peer_directory.admit(record)
         return record
+
+    def _merge_known_chain(self, existing: "PeerRecord", record: "PeerRecord") -> "PeerRecord":
+        """A repeated hello's record, keeping every transition already on file.
+
+        A bundle verifies against itself alone, so an older prefix of a node's
+        chain -- one that ends before a compromise revoke -- verifies too, and
+        would make the compromised key current again for whoever holds it
+        (issue #624). Transitions are append-only history: what this node has
+        verified stays, the hello can only add to it, and the descriptor must
+        verify against the current key of the merged chain. The merge also
+        keeps the transport transitions a hello bundle never carries.
+        """
+        known = {t.content_id for t in existing.transitions}
+        merged = existing.transitions + tuple(t for t in record.transitions if t.content_id not in known)
+        if merged == record.transitions:
+            return record
+        try:
+            current = resolve_current_operational_key(
+                merged, root_verify_key=existing.root_verify_key,
+                subject_fingerprint=existing.fingerprint, purpose="signing",
+            )
+        except NodeIdentityError as exc:
+            raise LinkProtocolError(
+                f"hello from {existing.fingerprint} conflicts with the key history on file: {exc}"
+            ) from exc
+        if current is None or not verify_endpoint_descriptor(
+            record.descriptor, nacl.signing.VerifyKey(base64.b64decode(current))
+        ):
+            raise LinkProtocolError(
+                f"hello from {existing.fingerprint} is signed by a key its own key history on file "
+                "has replaced -- refusing an older chain"
+            )
+        return replace(record, transitions=merged)
 
     def _verify_hello_bundle(self, message: HelloMessage, *, what: str) -> PeerRecord:
         """Check a hello bundle against nothing but itself, and return its record.
@@ -2142,6 +2185,7 @@ class LinkNode:
             )
         accepted: list[str] = []
         deferred: list[tuple[dict, MissingDependency]] = []
+        skipped: list[str] = []
         # Content IDs set aside in this call, with the identity each waits for.
         set_aside_here: dict[str, str | None] = {}
 
@@ -2159,6 +2203,9 @@ class LinkNode:
             except MissingDependency as exc:
                 _set_aside(raw, exc)
             except LinkProtocolError as exc:
+                if self._signed_by_compromised_key(raw):
+                    skipped.append(event_content_id(raw["envelope"]))
+                    continue
                 # An event that builds on one set aside, in this response or
                 # an earlier one, fails in whatever way its branch checks a
                 # chain: "does not extend the current head", say, and not
@@ -2184,15 +2231,48 @@ class LinkNode:
                     fp for fp in referenced_identities(raw) if fp in self.introduced
                 ]
                 if not stale:
-                    return TolerantOutcome(accepted, deferred, exc)
+                    return TolerantOutcome(accepted, deferred, exc, tuple(skipped))
                 _set_aside(raw, MissingDependency(str(exc), missing_identity=stale[0]))
             except Exception as exc:  # noqa: BLE001 -- unvalidated input, e.g. a float that cannot be canonicalized
                 # `handle_events` parses before it validates, and a parse can
                 # fail in ways that are not a protocol refusal. Pushed events
                 # get a 400 for it; here an escape would end the sync task
                 # and lose what this response had already had accepted.
-                return TolerantOutcome(accepted, deferred, LinkProtocolError(f"malformed event: {exc}"))
-        return TolerantOutcome(accepted, deferred, None)
+                return TolerantOutcome(
+                    accepted, deferred, LinkProtocolError(f"malformed event: {exc}"), tuple(skipped)
+                )
+        return TolerantOutcome(accepted, deferred, None, tuple(skipped))
+
+    def _signed_by_compromised_key(self, raw: dict) -> bool:
+        """Whether `raw` verifies only under a key its signer marked compromised.
+
+        The signer is whoever the refused branch resolved a key for. A
+        compromised key's signature is no evidence of anything, so this
+        answers only "is this a known-dead copy", never "is this authentic".
+        """
+        signer = self._last_key_resolved_for
+        record = self.known_identity(signer) if signer is not None else None
+        if record is None:
+            return False
+        try:
+            history = operational_key_history(
+                record.transitions, root_verify_key=record.root_verify_key,
+                subject_fingerprint=signer, purpose="signing",
+            )
+            message = canonical_bytes(raw["envelope"])
+            signature = base64.b64decode(raw["signature"])
+        except Exception:  # noqa: BLE001 -- unvalidated input
+            return False
+        for record in history:
+            if record.status != "compromised":
+                continue
+            try:
+                key = nacl.signing.VerifyKey(base64.b64decode(record.key_b64))
+            except Exception:  # noqa: BLE001 -- unvalidated input, see _superseded_signing_keys
+                continue
+            if verify_signature(key, message, signature):
+                return True
+        return False
 
     def _set_aside_predecessor(
         self, raw: dict, set_aside_here: dict[str, str | None]
@@ -2901,6 +2981,44 @@ class LinkNode:
             raise LinkProtocolError(f"rejected {kind} from {sender_fingerprint}: no currently-authorized signing key")
         return nacl.signing.VerifyKey(base64.b64decode(signing_key_b64))
 
+    def _resolve_sender_content_keys(
+        self, sender: "PeerRecord", sender_fingerprint: str, kind: str
+    ) -> list[nacl.signing.VerifyKey]:
+        """Every key a signature on `sender`'s long-lived content may verify
+        under (issue #624): the current one, then each key its chain retired
+        without calling it compromised (`verifying_operational_keys`).
+
+        Only for events -- a post, a genesis, a descriptor, a message. A
+        board created last year was signed by last year's key, and a peer
+        joining that board today must still accept it or a routine rotation
+        would cut every new subscriber off from the node's past. Requests,
+        hellos and trust objects keep `_resolve_sender_signing_key`: those
+        are signed fresh or re-issued on rotation, so an old key there is
+        either a replay or a stale copy.
+        """
+        self._last_key_resolved_for = sender_fingerprint
+        keys = verifying_operational_keys(
+            sender.transitions,
+            root_verify_key=sender.root_verify_key,
+            subject_fingerprint=sender_fingerprint,
+            purpose="signing",
+        )
+        if not keys or keys[0] != resolve_current_operational_key(
+            sender.transitions, root_verify_key=sender.root_verify_key,
+            subject_fingerprint=sender_fingerprint, purpose="signing",
+        ):
+            raise LinkProtocolError(f"rejected {kind} from {sender_fingerprint}: no currently-authorized signing key")
+        # A key in a peer's chain is root-signed but never checked to be a
+        # key at all; one that is not must refuse the event, not escape as a
+        # decode error past every caller that catches only protocol errors.
+        resolved: list[nacl.signing.VerifyKey] = []
+        for key in keys:
+            try:
+                resolved.append(nacl.signing.VerifyKey(base64.b64decode(key)))
+            except Exception:  # noqa: BLE001 -- unvalidated input, see _superseded_signing_keys
+                continue
+        return resolved
+
     def _check_board_post_content_size(self, payload: dict, sender_fingerprint: str, kind: str) -> None:
         """Shared by the `board_post`/`board_post_edit` branches below
         (design doc §13.9, issue #60's third operational slice): neither
@@ -3164,11 +3282,11 @@ class LinkNode:
                         "different genesis is already on file for it"
                     )
 
-                signing_verify_key = self._resolve_sender_signing_key(origin_peer, origin_fingerprint, "board_genesis")
-                if not verify_board_genesis(genesis, signing_verify_key):
+                signing_verify_keys = self._resolve_sender_content_keys(origin_peer, origin_fingerprint, "board_genesis")
+                if not any(verify_board_genesis(genesis, key) for key in signing_verify_keys):
                     raise LinkProtocolError(
                         f"board_genesis from origin {origin_fingerprint} does not verify against "
-                        "its current signing key"
+                        "its signing keys"
                     )
 
                 self.board_events.record_genesis(genesis)
@@ -3209,11 +3327,11 @@ class LinkNode:
                         missing_identity=home_node_fingerprint,
                     )
 
-                signing_verify_key = self._resolve_sender_signing_key(author_peer, home_node_fingerprint, "board_post")
-                if not verify_board_post(post, signing_verify_key):
+                signing_verify_keys = self._resolve_sender_content_keys(author_peer, home_node_fingerprint, "board_post")
+                if not any(verify_board_post(post, key) for key in signing_verify_keys):
                     raise LinkProtocolError(
                         f"board_post from home node {home_node_fingerprint} does not verify "
-                        "against its current signing key"
+                        "against its signing keys"
                     )
 
                 self.known_event_ids.add(post.content_id)
@@ -3277,13 +3395,13 @@ class LinkNode:
                         "isn't tolerated, a full resend recovers, same model as key_transition)"
                     )
 
-                signing_verify_key = self._resolve_sender_signing_key(
+                signing_verify_keys = self._resolve_sender_content_keys(
                     edit_author_peer, home_node_fingerprint, "board_post_edit"
                 )
-                if not verify_board_post_edit(edit, signing_verify_key):
+                if not any(verify_board_post_edit(edit, key) for key in signing_verify_keys):
                     raise LinkProtocolError(
                         f"board_post_edit from home node {home_node_fingerprint} does not verify "
-                        "against its current signing key"
+                        "against its signing keys"
                     )
 
                 self.board_events.extend_edit_chain(root_post_id, edit)
@@ -3348,13 +3466,13 @@ class LinkNode:
                         missing_identity=current_origin,
                     )
 
-                signing_verify_key = self._resolve_sender_signing_key(
+                signing_verify_keys = self._resolve_sender_content_keys(
                     origin_peer, current_origin, "board_post_moderator_edit"
                 )
-                if not verify_board_post_moderator_edit(mod_edit, signing_verify_key):
+                if not any(verify_board_post_moderator_edit(mod_edit, key) for key in signing_verify_keys):
                     raise LinkProtocolError(
                         f"board_post_moderator_edit from current origin {current_origin} does "
-                        "not verify against its current signing key"
+                        "not verify against its signing keys"
                     )
 
                 self.board_events.extend_edit_chain(root_post_id, mod_edit)
@@ -3413,13 +3531,13 @@ class LinkNode:
                         missing_identity=current_origin,
                     )
 
-                signing_verify_key = self._resolve_sender_signing_key(
+                signing_verify_keys = self._resolve_sender_content_keys(
                     origin_peer, current_origin, "board_post_tombstone"
                 )
-                if not verify_board_post_tombstone(tombstone, signing_verify_key):
+                if not any(verify_board_post_tombstone(tombstone, key) for key in signing_verify_keys):
                     raise LinkProtocolError(
                         f"board_post_tombstone from current origin {current_origin} does not "
-                        "verify against its current signing key"
+                        "verify against its signing keys"
                     )
 
                 self.board_events.extend_edit_chain(root_post_id, tombstone)
@@ -3453,13 +3571,13 @@ class LinkNode:
                         "different genesis is already on file for it"
                     )
 
-                signing_verify_key = self._resolve_sender_signing_key(
+                signing_verify_keys = self._resolve_sender_content_keys(
                     origin_peer, origin_fingerprint, "channel_genesis"
                 )
-                if not verify_channel_genesis(channel_genesis, signing_verify_key):
+                if not any(verify_channel_genesis(channel_genesis, key) for key in signing_verify_keys):
                     raise LinkProtocolError(
                         f"channel_genesis from origin {origin_fingerprint} does not verify against "
-                        "its current signing key"
+                        "its signing keys"
                     )
 
                 self.channel_events.record_genesis(channel_genesis)
@@ -3519,13 +3637,13 @@ class LinkNode:
                         missing_identity=home_node_fingerprint,
                     )
 
-                signing_verify_key = self._resolve_sender_signing_key(
+                signing_verify_keys = self._resolve_sender_content_keys(
                     author_peer, home_node_fingerprint, "channel_message"
                 )
-                if not verify_channel_message(channel_message, signing_verify_key):
+                if not any(verify_channel_message(channel_message, key) for key in signing_verify_keys):
                     raise LinkProtocolError(
                         f"channel_message from home node {home_node_fingerprint} does not verify "
-                        "against its current signing key"
+                        "against its signing keys"
                     )
 
                 self.known_event_ids.add(channel_message.content_id)
@@ -3556,13 +3674,13 @@ class LinkNode:
                         "different genesis is already on file for it"
                     )
 
-                signing_verify_key = self._resolve_sender_signing_key(
+                signing_verify_keys = self._resolve_sender_content_keys(
                     origin_peer, origin_fingerprint, "file_area_genesis"
                 )
-                if not verify_file_area_genesis(file_area_genesis, signing_verify_key):
+                if not any(verify_file_area_genesis(file_area_genesis, key) for key in signing_verify_keys):
                     raise LinkProtocolError(
                         f"file_area_genesis from origin {origin_fingerprint} does not verify "
-                        "against its current signing key"
+                        "against its signing keys"
                     )
 
                 self.file_area_events.record_genesis(file_area_genesis)
@@ -3602,13 +3720,13 @@ class LinkNode:
                         missing_identity=origin_fingerprint,
                     )
 
-                signing_verify_key = self._resolve_sender_signing_key(
+                signing_verify_keys = self._resolve_sender_content_keys(
                     origin_peer, origin_fingerprint, "file_descriptor"
                 )
-                if not verify_file_descriptor(descriptor, signing_verify_key):
+                if not any(verify_file_descriptor(descriptor, key) for key in signing_verify_keys):
                     raise LinkProtocolError(
                         f"file_descriptor from origin {origin_fingerprint} does not verify "
-                        "against its current signing key"
+                        "against its signing keys"
                     )
 
                 self.known_event_ids.add(descriptor.content_id)
@@ -3681,13 +3799,13 @@ class LinkNode:
                         f"extend the current lifecycle head ({current_head!r})"
                     )
 
-                signing_verify_key = self._resolve_sender_signing_key(
+                signing_verify_keys = self._resolve_sender_content_keys(
                     origin_peer, current_origin, "board_origin_transfer_offer"
                 )
-                if not verify_board_origin_transfer_offer(offer, signing_verify_key):
+                if not any(verify_board_origin_transfer_offer(offer, key) for key in signing_verify_keys):
                     raise LinkProtocolError(
                         f"board_origin_transfer_offer from current origin {current_origin} does "
-                        "not verify against its current signing key"
+                        "not verify against its signing keys"
                     )
 
                 self.board_lifecycle.record_offer(board_id, offer)
@@ -3750,13 +3868,13 @@ class LinkNode:
                         missing_identity=new_origin_fingerprint,
                     )
 
-                signing_verify_key = self._resolve_sender_signing_key(
+                signing_verify_keys = self._resolve_sender_content_keys(
                     new_origin_peer, new_origin_fingerprint, "board_origin_transfer_accepted"
                 )
-                if not verify_board_origin_transfer_accepted(transfer_accepted, signing_verify_key):
+                if not any(verify_board_origin_transfer_accepted(transfer_accepted, key) for key in signing_verify_keys):
                     raise LinkProtocolError(
                         f"board_origin_transfer_accepted from new origin {new_origin_fingerprint} "
-                        "does not verify against its current signing key"
+                        "does not verify against its signing keys"
                     )
 
                 self.board_lifecycle.record_acceptance(
@@ -3817,11 +3935,11 @@ class LinkNode:
                         f"lifecycle head ({current_head!r})"
                     )
 
-                signing_verify_key = self._resolve_sender_signing_key(origin_peer, current_origin, "board_closure")
-                if not verify_board_closure(closure, signing_verify_key):
+                signing_verify_keys = self._resolve_sender_content_keys(origin_peer, current_origin, "board_closure")
+                if not any(verify_board_closure(closure, key) for key in signing_verify_keys):
                     raise LinkProtocolError(
                         f"board_closure from current origin {current_origin} does not verify "
-                        "against its current signing key"
+                        "against its signing keys"
                     )
 
                 self.board_lifecycle.record_closure(board_id, closure)
@@ -3858,11 +3976,11 @@ class LinkNode:
                         "stranger yet)"
                     )
 
-                signing_verify_key = self._resolve_sender_signing_key(sender, sender_fingerprint, "link_message")
-                if not verify_link_message(message, signing_verify_key):
+                signing_verify_keys = self._resolve_sender_content_keys(sender, sender_fingerprint, "link_message")
+                if not any(verify_link_message(message, key) for key in signing_verify_keys):
                     raise LinkProtocolError(
                         f"link_message from {sender_fingerprint} does not verify against its "
-                        "current signing key"
+                        "signing keys"
                     )
 
                 self.known_event_ids.add(message.content_id)
@@ -3891,13 +4009,13 @@ class LinkNode:
                         f"different recipient node ({expected_recipient!r}) -- refusing"
                     )
 
-                signing_verify_key = self._resolve_sender_signing_key(
+                signing_verify_keys = self._resolve_sender_content_keys(
                     sender, sender_fingerprint, "link_message_accepted"
                 )
-                if not verify_link_message_accepted(accepted_ack, signing_verify_key):
+                if not any(verify_link_message_accepted(accepted_ack, key) for key in signing_verify_keys):
                     raise LinkProtocolError(
                         f"link_message_accepted from {sender_fingerprint} does not verify "
-                        "against its current signing key"
+                        "against its signing keys"
                     )
 
                 self.known_event_ids.add(accepted_ack.content_id)
@@ -3926,13 +4044,13 @@ class LinkNode:
                         f"different recipient node ({expected_recipient!r}) -- refusing"
                     )
 
-                signing_verify_key = self._resolve_sender_signing_key(
+                signing_verify_keys = self._resolve_sender_content_keys(
                     sender, sender_fingerprint, "link_message_bounced"
                 )
-                if not verify_link_message_bounced(bounced, signing_verify_key):
+                if not any(verify_link_message_bounced(bounced, key) for key in signing_verify_keys):
                     raise LinkProtocolError(
                         f"link_message_bounced from {sender_fingerprint} does not verify "
-                        "against its current signing key"
+                        "against its signing keys"
                     )
 
                 self.known_event_ids.add(bounced.content_id)

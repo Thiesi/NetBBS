@@ -1180,9 +1180,13 @@ def create_backup(*, db_path: Path, identity_dir: Path, destination: Path,
 
     if identity_dir.is_dir():
         shutil.copytree(identity_dir, destination / _IDENTITY_DIRNAME)
-        for entry in sorted((destination / _IDENTITY_DIRNAME).iterdir()):
+        identity_copy = destination / _IDENTITY_DIRNAME
+        # Recursive since issue #624: retired signing keys live in a
+        # subdirectory, and losing one loses mail sealed to it.
+        for entry in sorted(identity_copy.rglob("*")):
             if entry.is_file():
-                checksums[f"{_IDENTITY_DIRNAME}/{entry.name}"] = _sha256_of_file(entry)
+                relative = entry.relative_to(identity_copy).as_posix()
+                checksums[f"{_IDENTITY_DIRNAME}/{relative}"] = _sha256_of_file(entry)
 
     for extra_path in _extra_artifact_paths(db_path):
         if extra_path.exists():
@@ -1437,18 +1441,30 @@ def _require_node_not_running(db_path: Path) -> None:
     "operator responsibility, not a load-bearing distributed lock"
     framing this module already applies to a second instance running
     on an entirely different machine."""
+    pid = running_node_pid(db_path)
+    if pid is not None:
+        raise BackupError(
+            f"refusing to restore over {db_path}: a node process (PID {pid}) appears to still "
+            f"be running, per {_pid_file_path_for(db_path)} -- stop it first"
+        )
+
+
+def running_node_pid(db_path: Path) -> int | None:
+    """The PID of the node process serving `db_path`, or `None` if none is running.
+
+    Same best-effort reading as `_require_node_not_running`, for the other
+    offline tools that must not act under a live node -- `python -m
+    netbbs.admin rotate-key` (issue #624), whose running node would go on
+    signing with the key being replaced.
+    """
     pid_file = _pid_file_path_for(db_path)
     if not pid_file.exists():
-        return
+        return None
     try:
         pid = int(pid_file.read_text().strip())
     except ValueError:
-        return
-    if _process_is_running(pid):
-        raise BackupError(
-            f"refusing to restore over {db_path}: a node process (PID {pid}) appears to still "
-            f"be running, per {pid_file} -- stop it first"
-        )
+        return None
+    return pid if _process_is_running(pid) else None
 
 
 def _restore_state_path_for(db_path: Path) -> Path:

@@ -305,6 +305,7 @@ def build_key_transition(
     operational_key: nacl.signing.VerifyKey,
     previous_transition_id: str | None,
     created_at: str,
+    compromised: bool = False,
 ) -> KeyTransition:
     """
     Build and sign one `key_transition` event, per design doc.
@@ -320,6 +321,15 @@ def build_key_transition(
     chain/head-pointer model applied to this object type, omitted
     entirely rather than stored as `null`.
 
+    `compromised` (issue #624) is only meaningful on a `"revoke"`: it
+    says the revoked key may be in someone else's hands, so nothing it
+    ever signed is to be believed again. Without it a revoke *retires*
+    the key: what it signed while current stays verifiable (design doc
+    §4.5), which is what lets a routine rotation leave a node's boards,
+    posts and files usable. Written as `"compromised": true` and omitted
+    otherwise, so a retirement is byte-identical to every revoke built
+    before the field existed.
+
     Always signed by `root` — never by an operational key (see
     `KeyTransition`'s own docstring).
     """
@@ -327,6 +337,8 @@ def build_key_transition(
         raise EventError(f"invalid key_transition purpose: {purpose!r}")
     if action not in _VALID_ACTIONS:
         raise EventError(f"invalid key_transition action: {action!r}")
+    if compromised and action != "revoke":
+        raise EventError("only a revoke can mark a key compromised")
 
     payload = {
         "subject_fingerprint": root.fingerprint,
@@ -337,6 +349,8 @@ def build_key_transition(
     }
     if previous_transition_id is not None:
         payload["previous_transition_id"] = previous_transition_id
+    if compromised:
+        payload["compromised"] = True
 
     envelope = build_envelope(KEY_TRANSITION_OBJECT_TYPE, payload)
     signature = root.sign(canonical_bytes(envelope))

@@ -179,6 +179,21 @@ def _resolve_peer_signing_key(db: Database, node_fingerprint: str) -> nacl.signi
     return nacl.signing.VerifyKey(base64.b64decode(signing_key_b64))
 
 
+def _open_sealed(node_identity: NodeIdentity, ciphertext: bytes) -> bytes:
+    """Open mail sealed to this node's current signing key or a retired one.
+
+    A sender seals to the key it last learned, so a message composed before
+    it heard of a rotation arrives sealed to the key that rotation retired
+    (issue #624). Newest first, since that is the likely one.
+    """
+    for key in (node_identity.signing_key, *reversed(node_identity.retired_signing_keys)):
+        try:
+            return decrypt_with(key, ciphertext)
+        except EncryptionError:
+            continue
+    raise EncryptionError("sealed to none of this node's signing keys")
+
+
 def deliver_link_message(
     db: Database, raw_message: dict, *, node_identity: NodeIdentity
 ) -> LinkMessageAccepted | LinkMessageBounced:
@@ -221,7 +236,7 @@ def deliver_link_message(
 
     try:
         ciphertext = base64.b64decode(message.payload["ciphertext"])
-        plaintext = decrypt_with(node_identity.signing_key, ciphertext)
+        plaintext = _open_sealed(node_identity, ciphertext)
         decoded = json.loads(plaintext)
     except EncryptionError:
         # handle_events already confirmed this node is the named
