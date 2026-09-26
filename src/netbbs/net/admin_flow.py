@@ -57,7 +57,6 @@ import re
 import shlex
 import sqlite3
 import sys
-import weakref
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Sequence
@@ -549,6 +548,7 @@ from netbbs.rendering import (
 )
 from netbbs.rendering.detail import Field, Note, Section, Table, render_sections
 from netbbs.rendering.reflow import wrap_terminal_text
+from netbbs.net import notices as _notices
 from netbbs.guest import (
     guest_user,
     pre_login_notice,
@@ -744,24 +744,17 @@ async def _load_condensed_status_line(lane: DatabaseLane, *, unicode_style: bool
 
 # -- outcomes carried into the next redraw ------------------------------------
 #
-# With redraw-in-place on (the default for a new account), a line written just
-# before a screen returns is never seen: the screen it returns to clears the
-# terminal in the same burst of output. So an action does not *write* its
-# outcome; it `_announce`s it, and whichever console screen is drawn next shows
-# it directly above its prompt -- `_choice_prompt` for a screen that draws
-# itself, `show_detail` for a paged one. No keypress is asked for: the outcome
-# is simply on the screen the SysOp lands on, where the eye already is.
-#
-# Keyed weakly by session, so a notice can never outlive the connection it was
-# meant for or reach another SysOp's console.
-_pending_notices: "weakref.WeakKeyDictionary[Session, list[str]]" = weakref.WeakKeyDictionary()
+# The mechanism lives in `netbbs.net.notices` (issue #680 shared it with the
+# caller-facing screens); these names are the console's own spelling of it.
+# An action does not *write* its outcome; it `_announce`s it, and whichever
+# console screen is drawn next shows it directly above its prompt --
+# `_choice_prompt` for a screen that draws itself, `show_detail` for a paged
+# one.
 
 
 def _announce(session: Session, text: str, *, error: bool = False, color: int | None = None) -> None:
     """Queue one outcome line for the next console screen drawn on `session`."""
-    if color is None:
-        color = ERROR_COLOR if error else SUCCESS_COLOR
-    _pending_notices.setdefault(session, []).append(colored(sanitize_text(text), fg_color=color))
+    _notices.announce(session, text, tone="error" if error else "success", color=color)
 
 
 _CLEAR_SEQUENCE = "\x1b[2J"
@@ -788,23 +781,20 @@ def _announce_line(session: Session, line: str) -> None:
         else:
             color = SUCCESS_COLOR
         line = colored(line, fg_color=color)
-    _pending_notices.setdefault(session, []).append(line)
+    _notices.announce_styled(session, line)
 
 
 def _announce_styled(session: Session, line: str) -> None:
     """Queue a line that is already sanitized and styled (a badge, a captured row)."""
-    _pending_notices.setdefault(session, []).append(line)
+    _notices.announce_styled(session, line)
 
 
 def _pending_notice_rows(session: Session) -> int:
-    width = max(1, session.terminal_width)
-    return sum(
-        wrap_terminal_text(line, width).count("\r\n") + 1 for line in _pending_notices.get(session, ())
-    )
+    return _notices.pending_notice_rows(session)
 
 
 def _take_notices(session: Session) -> list[str]:
-    return _pending_notices.pop(session, [])
+    return _notices.take_notices(session)
 
 
 class _TrailingOutput:
@@ -827,6 +817,9 @@ class _TrailingOutput:
     def __init__(self, session: Session) -> None:
         self._session = session
         self._held: list[str] = []
+        # A flow that announces its outcome (`netbbs.net.notices`) instead
+        # of writing it reaches the real session's queue through this.
+        self.notice_session = session
 
     def __getattr__(self, name: str):
         return getattr(self._session, name)
@@ -14246,7 +14239,7 @@ async def _close_board_screen(session: Session, lane: DatabaseLane, board: Board
             fg_color=MUTED_COLOR,
         )
     )
-    await session.write("Optional reason (blank for none): ")
+    await write_prompt(session, "Optional reason (blank for none): ")
     reason = (await session.read_line()).strip() or None
     if not await prompt_yes_no(session, f"Close {board.name!r}?", default=False):
         _announce_line(session, "Cancelled.")
@@ -14409,6 +14402,13 @@ async def _draw_board_detail(
             is_closed = await lane.run(is_board_closed, board)
             if is_closed:
                 link_rows.append(Field("Closed", "yes -- no longer accepts new posts", color=WARNING_COLOR))
+                # The reason is part of the signed closure; without this the
+                # one place a SysOp looks at a closed board never showed it
+                # (issue #680).
+                closure = link_context.link_node.board_closures.get(board.board_id)
+                closure_reason = closure.payload.get("reason") if closure is not None else None
+                if closure_reason:
+                    link_rows.append(Field("Closure reason", sanitize_text(closure_reason)))
             origin_fingerprint = await lane.run(board_origin_fingerprint, board)
             is_origin = origin_fingerprint == link_context.node_identity.fingerprint
             origin_label = (

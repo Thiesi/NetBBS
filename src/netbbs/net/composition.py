@@ -12,10 +12,11 @@ from __future__ import annotations
 from enum import Enum, auto
 from pathlib import Path
 
-from netbbs.net.char_input import CANCEL_KEY, HELP_KEY, EditorKey, EditorKeyKind, reject_unhandled_key
+from netbbs.net.char_input import CANCEL_KEY, HELP_KEY, EditorKey, EditorKeyKind, InputCancelled, reject_unhandled_key
 from netbbs.net.draft_storage import delete_draft, load_draft, offer_draft_recovery, save_draft
 from netbbs.net.help_overlay import show_help
-from netbbs.net.session import Session
+from netbbs.net.notices import write_notices
+from netbbs.net.session import Session, write_prompt
 from netbbs.rendering import (
     ACCENT_COLOR,
     HEADER_COLOR,
@@ -42,6 +43,30 @@ def _menu_row(entries: list[MenuEntry], *, width: int, height: int, description_
     if description_level == "off":
         return action_bar([e.label for e in entries], width=width)
     return menu_grid([("", entries)], width=width, height=height, description_level=description_level)
+
+
+async def read_prefilled_field(session: Session, label: str, current: str) -> str:
+    """A required one-line field (a subject, a recipient) opened on its
+    current value (design doc §3.5, issue #529's rule; applied here by issue
+    #680): Enter saves what is shown, Esc leaves it unchanged. A field that
+    may not be empty keeps its value when the line is emptied, rather than
+    turning blank -- "keep" is Esc, not an empty answer."""
+    await write_prompt(session, f"{label}: ")
+    # The editor echoes its initial buffer, and a subject carried over Link
+    # can hold control sequences: it is shown sanitized, and handed back
+    # untouched when the caller saves it without changing it.
+    shown = sanitize_text(current)
+    try:
+        value = await session.read_line(
+            initial=shown, cancellable=True, viewport=lambda: session.terminal_width,
+        )
+    except InputCancelled:
+        await session.write_line("")
+        return current
+    value = value.strip()
+    if not value or value == shown.strip():
+        return current
+    return value
 
 
 class ReviewAction(Enum):
@@ -441,6 +466,9 @@ async def review_composition(
             f"\r\n{_menu_row(options, width=session.terminal_width, height=session.terminal_height, description_level=description_level)}"
         )
         await session.write_line(colored("(Ctrl-H for help on these fields)", fg_color=MUTED_COLOR))
+        # A refused commit ("Could not create post: ...") returns here, and
+        # this redraw would erase a line written before it (issue #680).
+        await write_notices(session)
         await session.write("Choice: ")
 
     await draw()

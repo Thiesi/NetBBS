@@ -10059,3 +10059,22 @@ def test_approving_a_file_approved_meanwhile_reports_it_and_stays_on_screen(db, 
     text = _visible(_written_text(session))
     assert "no longer waiting for approval" in text
     assert get_file(db, entry.file_id).status == "approved"
+
+
+def test_a_closed_boards_detail_shows_the_closure_reason(db, lane, sysop):
+    """Issue #680: the reason is part of the signed closure, and the board
+    detail screen -- the one place a SysOp looks at a closed board -- never
+    showed it."""
+    from netbbs.boards.boards import create_board
+    from netbbs.link.boards import close_board_if_linked, link_board
+
+    board = create_board(db, "General", creator=sysop)
+    link_context = _link_context()
+    link_board(db, board, node_identity=link_context.node_identity)
+    closure = close_board_if_linked(db, board, node_identity=link_context.node_identity, reason="archived")
+    link_context.link_node.board_closures[board.board_id] = closure
+
+    session = FakeSession(["m", "m", "l", "0", "1", "b", "b", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
+
+    assert "Closure reason: archived" in _normalized_visible(_written_text(session))

@@ -142,7 +142,12 @@ class _ClientSession(Session):
 
 
 def _written_text(session: _ServerSession) -> str:
-    return "".join(session.written)
+    """What was written, plus any outcome still queued for the next screen
+    (`netbbs.net.notices`, issue #680): these tests stop where the real flow
+    would draw the area list that shows it."""
+    from netbbs.net.notices import pending_notices
+
+    return "".join(session.written) + "\r\n".join(pending_notices(session))
 
 
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")

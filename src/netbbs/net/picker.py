@@ -48,6 +48,7 @@ from netbbs.net.char_input import CANCEL_KEY, HELP_KEY, REDRAW_KEY, REFRESH_KEY,
 from netbbs.net.help_overlay import show_help
 from netbbs.rendering.ansi import strip_ansi
 from netbbs.rendering.reflow import wrap_terminal_text
+from netbbs.net.notices import with_notices
 from netbbs.net.session import Session, write_preformatted_line
 from netbbs.rendering import (
     ACCENT_COLOR,
@@ -679,6 +680,11 @@ async def pick_item(
     # it kept reporting "Backup: never" while another session completed
     # a backup -- stale precisely on a screen that had just advertised
     # Ctrl-R as a way to see current reality.
+    #
+    # An outcome the caller's last action announced (`netbbs.net.notices`,
+    # issue #680) rides along the same way: a picker is often the screen a
+    # finished action returns to, and its redraw would erase a written line.
+    masthead = with_notices(session, masthead)
     masthead_text = "" if callable(masthead) else masthead
 
     async def _refresh_masthead() -> None:

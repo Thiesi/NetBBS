@@ -608,6 +608,18 @@ itself, and a draft editor would have to hold the plaintext across redraws to
 offer anything more. Each prompt cancels on a blank line and nothing is
 written before the last one.
 
+**An action's outcome is shown on the screen the caller lands on** (issue
+#680). With redraw-in-place on, a line written just before a screen redraws
+is erased by that redraw's clear. So an action does not write its outcome
+("Posted.", "Could not send: ...", "Sent 'game.zip'.", a one-time transfer
+link); it announces it through `netbbs.net.notices`. Whichever screen is drawn
+next shows it directly above its prompt, and a picker shows it above its
+list. No keypress is asked for. This started in the SysOp console and now
+applies to every screen: boards, file areas, the composition review screen
+shared by posts and mail, and every picker. A screen with a nothing-to-do
+state still draws a `[B]ack` bar and waits, rather than returning straight
+into its parent's redraw, where it would flash and vanish.
+
 No *menu* has a typed command language. A caller's options are the keys the
 action bar shows, and a prompt reading `Choice: ` accepts exactly those. The
 file-area listing was the last menu that read whole *lines* instead: it
