@@ -2654,14 +2654,16 @@ Asynchronous linked-channel events continue to work regardless.
 A node whose only way out is an HTTP proxy opens every real-time socket as a
 `CONNECT` tunnel through the proxy asynchronous Link uses (`HTTP_PROXY`, else
 `HTTPS_PROXY`, subject to `NO_PROXY`) and runs the same bytes over it: the
-attach preamble, the Noise handshake and the session are unchanged, and the
-proxy sees no more than an on-path observer of a direct connection would. The
-target authority is validated strictly before it is sent. The tunnel is the
-only attempt when a proxy applies, an unsupported proxy URL fails the dial
-rather than dialling direct, authentication is Basic from the proxy URL or
-`~/.netrc`, and a refused tunnel or a failed handshake over an open one is
-recorded for the Link status screen. A proxy that inspects TLS
-inside the tunnel cannot carry Noise. Decisions and rationale: §16, issue #628.
+attach preamble, the Noise handshake and the session are unchanged, and of the
+Link traffic the proxy sees no more than an on-path observer of a direct
+connection would (Basic proxy credentials, where used, are the proxy's own and
+cross to it in the clear). The target authority is validated strictly before it
+is sent. The tunnel is the only attempt when a proxy applies, an unsupported
+proxy URL fails the dial rather than dialling direct, authentication is Basic
+from the proxy URL or `~/.netrc`, and a refused tunnel or a failed handshake
+over an open one is recorded for the Link status screen. A proxy that inspects
+TLS inside the tunnel cannot carry Noise. Decisions and rationale: §16, issue
+#628.
 
 #### 8.10.1 Session framing and ownership
 
@@ -10653,11 +10655,14 @@ hostname, an IPv4 literal or a bracketed IPv6 literal, and a port in range —
 and refuses anything else before a byte reaches the proxy; otherwise a peer
 could inject request lines into the operator's authenticated proxy. The target
 host is sent to the proxy unresolved, because on a proxy-only network the local
-resolver commonly cannot resolve outside names. The proxy sees what any on-path
-observer of a direct connection sees: the dialled address and, on a relayed
-attach, the plaintext `NETBBS-BRIDGE/1` record with its single-use attach token,
-which travels in the clear on a direct connection too. Everything after it is
-Noise, authenticated end to end (§8.10). The descriptor-pinning rules for relay
+resolver commonly cannot resolve outside names. Of the Link traffic, the proxy
+sees what any on-path observer of a direct connection sees: the dialled address
+and, on a relayed attach, the plaintext `NETBBS-BRIDGE/1` record with its
+single-use attach token, which travels in the clear on a direct connection too.
+Everything after it is Noise, authenticated end to end (§8.10). What a direct
+connection does not have is the proxy's own credentials: with Basic
+authentication (decision 4) they cross the `http://` leg to the proxy in the
+clear, exactly as they already do for the asynchronous half's proxied requests. The descriptor-pinning rules for relay
 attach addresses are unaffected because they compare the address before the
 socket is opened. The upstream-relay site
 is included although a relay is by definition reachable: the rule "every
@@ -10722,7 +10727,11 @@ happen.** One timeout of the helper's own covers connecting to the proxy and
 reading its answer, and the answer has a header-size ceiling, since
 `dial_realtime_session` itself has no overall timeout and the anchor connector
 calls it without one; a proxy that blackholes the connection, or accepts it and
-then says nothing, must not hold a dial open. A refusal
+then says nothing, must not hold a dial open. On every path that does not
+return the stream — timeout, an oversized or malformed answer, a refusal,
+cancellation — the helper closes the proxy connection and waits for it to close
+before raising, since no caller holds the writer yet; anchor retries would
+otherwise leak a socket per attempt. A refusal
 (`403`, `407`, `502`, anything not `2xx`) raises a distinct transport error
 naming the status. The helper also records the last tunnel outcome on a
 node-owned status object, and a dial whose tunnel opened but whose handshake
@@ -10749,7 +10758,7 @@ with its preamble, and an upstream-relay leg each through it; `NO_PROXY`
 bypass; a `407` surfacing as the recorded outcome; a silent proxy and a
 blackholed one both bounded by the timeout; an unsupported proxy URL failing
 the dial rather than dialling direct; a descriptor address with CR/LF refused
-before the proxy sees it. A ratchet test that no `asyncio.open_connection` remains in
+before the proxy sees it; the proxy observing EOF after each failed setup. A ratchet test that no `asyncio.open_connection` remains in
 `netbbs.link` outside the helper. The live check is the proxy-only node joining
 the dogfood deployment and holding an anchor session to a reliable node.
 
