@@ -469,7 +469,7 @@ def test_removing_a_post_on_the_origin_node_is_not_called_local(db, sysop, alice
     board = create_board(db, "general", creator=sysop)
     link_board(db, board, node_identity=node_identity)
     create_post(db, board, alice, "Local subject", "Body")
-    link_context = LinkContext(node_identity=node_identity, link_node=LinkNode(identity=node_identity))
+    link_context = LinkContext(link_node=LinkNode(identity=node_identity))
 
     session = _Session(["t", "1", "y", "b"])
     asyncio.run(board_flow._show_board(session, db, board, sysop, link_context=link_context))
