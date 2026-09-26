@@ -238,6 +238,8 @@ def test_drop_files_name_the_guest_node_directory(tmp_path):
     ("0\n", [255], (1, "The door exited with status 0 inside the guest.\n")),
     (None, [0], (1, None)),
     ("garbage", [0], (1, None)),
+    # A hostile guest's status is read bounded, never whole.
+    ("0" * 100_000, [0], (1, None)),
 ])
 def test_the_status_file_is_the_only_verdict(tmp_path, written, success, expected):
     (tmp_path / "booted").touch()

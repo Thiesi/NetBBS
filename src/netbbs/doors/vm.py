@@ -25,6 +25,7 @@ import shlex
 import signal
 import string
 import subprocess
+import threading
 from pathlib import Path
 
 GUEST_GAME = "/mnt/game"
@@ -56,6 +57,7 @@ _KERNEL_ARGS = "console=ttyS0 quiet loglevel=3 panic=-1 no_timer_check"
 _COMMAND_FORBIDDEN = set(";&|<>$`\\'\"*?()[]~!#\t\r\n\x00")
 _KERNEL_ARGS_PATTERN = re.compile(r"[A-Za-z0-9_.,=:/+ -]{0,512}")
 _POWERDOWN_TIMEOUT = 3
+_STATUS_BYTES = 16
 
 
 def options(profile) -> dict:
@@ -199,6 +201,7 @@ def known_tsc_khz(*, learn: bool = False) -> int | None:
 
 
 _MONITOR_OBJECTS: dict[tuple[str, int], bool] = {}
+_MONITOR_LOCK = threading.Lock()
 
 
 def monitor_objects(executable: str) -> bool:
@@ -212,14 +215,17 @@ def monitor_objects(executable: str) -> bool:
         key = (executable, os.stat(executable).st_mtime_ns)
     except OSError:
         return False
-    if key not in _MONITOR_OBJECTS:
-        try:
-            listing = subprocess.run([executable, "-object", "help"], capture_output=True, text=True,
-                                     timeout=10, stdin=subprocess.DEVNULL).stdout
-        except (OSError, subprocess.SubprocessError):
-            listing = ""
-        _MONITOR_OBJECTS[key] = "monitor-qmp" in listing.split()
-    return _MONITOR_OBJECTS[key]
+    # Preflights run in worker threads; a burst of callers after a restart or
+    # a qemu upgrade must ask qemu once, not once each.
+    with _MONITOR_LOCK:
+        if key not in _MONITOR_OBJECTS:
+            try:
+                listing = subprocess.run([executable, "-object", "help"], capture_output=True, text=True,
+                                         timeout=10, stdin=subprocess.DEVNULL).stdout
+            except (OSError, subprocess.SubprocessError):
+                listing = ""
+            _MONITOR_OBJECTS[key] = "monitor-qmp" in listing.split()
+        return _MONITOR_OBJECTS[key]
 
 
 def _cached_monitor_objects(executable: str) -> bool:
@@ -320,7 +326,11 @@ async def wait_booted(directory: Path, relay: asyncio.Task) -> None:
 def guest_exit_code(profile, directory: Path) -> tuple[int, str]:
     """The game's own verdict, read from the status file its guest wrote."""
     try:
-        text = (directory / EXIT_STATUS).read_text(encoding="ascii").strip()
+        # The guest is the untrusted side: read a status, never a whole file.
+        with (directory / EXIT_STATUS).open("rb") as source:
+            text = source.read(_STATUS_BYTES + 1)
+        if len(text) > _STATUS_BYTES or not re.fullmatch(rb"\s*[0-9]{1,3}\s*", text):
+            raise ValueError("not an exit status")
         status = int(text)
     except (OSError, ValueError):
         if not (directory / BOOTED).exists():

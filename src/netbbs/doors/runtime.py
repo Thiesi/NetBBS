@@ -762,15 +762,20 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
                     drains.append(asyncio.create_task(_discard_output(proc.stdout)))
                 if proc.stderr is not None and not diagnostic_tasks:
                     drains.append(asyncio.create_task(_discard_output(proc.stderr)))
+            kill_grace = stop_grace
             if qmp_socket is not None and proc is not None:
                 # Before the group is signalled: qemu exits on SIGTERM without
                 # telling its guest, so the game would never hear the hangup.
                 from netbbs.doors.vm import power_down
+                began = time.monotonic()
                 try:
                     await power_down(qmp_socket, proc, stop_grace)
                 except Exception as exc:
                     errors.append(exc)
-            for operation in (lambda: _stop_process(proc, stop_grace) if proc is not None else None,
+                # One deadline for the whole stop, as documented: whatever the
+                # power-down used is not granted again after SIGTERM.
+                kill_grace = max(1, stop_grace - (time.monotonic() - began))
+            for operation in (lambda: _stop_process(proc, kill_grace) if proc is not None else None,
                               lambda: asyncio.gather(*drains),
                               lambda: endpoint.close() if endpoint is not None else None):
                 try:
