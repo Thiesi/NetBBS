@@ -12,12 +12,17 @@ from __future__ import annotations
 
 import os
 
-# Wider than the span of ports any one file uses, so worker N's range never
-# reaches worker N+1's.
-_WORKER_STRIDE = 100
+# A Link listener configured without an explicit `realtime_port` binds a
+# second one at `port + 1000`, so a worker's range is its written ports
+# (12391-12444 today) *and* those plus 1000. The stride has to clear both,
+# or worker N's real-time listeners land on worker N+10's base ports.
+_WORKER_STRIDE = 2000
+# 12444 + 1000 + 25 * 2000 stays below 65536. More workers than that reuse
+# a range, which is only a risk on a machine with more than 26 of them.
+_WORKER_RANGES = 26
 
 
 def port(base: int) -> int:
     worker = os.environ.get("PYTEST_XDIST_WORKER", "")
     index = int(worker[2:]) if worker.startswith("gw") and worker[2:].isdigit() else 0
-    return base + index * _WORKER_STRIDE
+    return base + (index % _WORKER_RANGES) * _WORKER_STRIDE
