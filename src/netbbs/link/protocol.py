@@ -2327,8 +2327,19 @@ class LinkNode:
         hello) -- never re-shares a candidate this node itself learned
         secondhand, so a claim's provenance never grows past one hop of
         "someone I've actually talked to vouches this address is worth
-        trying.\""""
-        return PeerListMessage(descriptors=tuple(peer.descriptor for peer in self.peer_directory.peers.values()))
+        trying.\"
+
+        At most `_MAX_PEER_LIST_ENTRIES_PER_REQUEST` of them, the most recently
+        signed first (issue #703): a receiver refuses a longer list outright, so
+        a node that had met more peers than that sent every requester a list it
+        would reject. The freshest descriptors are the ones most worth dialing.
+        """
+        descriptors = sorted(
+            (peer.descriptor for peer in self.peer_directory.peers.values()),
+            key=lambda descriptor: str(descriptor.payload.get("created_at", "")),
+            reverse=True,
+        )
+        return PeerListMessage(descriptors=tuple(descriptors[:_MAX_PEER_LIST_ENTRIES_PER_REQUEST]))
 
     def handle_peer_list(self, sender_fingerprint: str, message: PeerListMessage) -> list[str]:
         """
