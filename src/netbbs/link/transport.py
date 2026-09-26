@@ -162,6 +162,7 @@ from netbbs.link.protocol import (
     build_pong_frame,
     validate_realtime_frame_payload,
 )
+from netbbs.link.realtime_proxy import open_realtime_connection, record_handshake_outcome
 from netbbs.link.relay_mailbox import (
     RelayableEnvelope,
     RelayMailboxFullError,
@@ -1411,12 +1412,19 @@ async def dial_realtime_session(
     future generic listen-for-anyone bootstrap path) skips the check."""
     if enforce_trust_policy and lane is None:
         raise ValueError("enforce_trust_policy requires a lane")
-    reader, writer = await asyncio.open_connection(host, port)
+    # Issue #628: direct, or a CONNECT tunnel when a proxy applies.
+    connection = await open_realtime_connection(host, port)
+    reader, writer = connection.reader, connection.writer
     session: LinkRealtimeSession | None = None
     try:
-        remote, ciphers = await establish_noise_xx_initiator(
-            reader, writer, identity, expected_fingerprint=expected_fingerprint
-        )
+        try:
+            remote, ciphers = await establish_noise_xx_initiator(
+                reader, writer, identity, expected_fingerprint=expected_fingerprint
+            )
+        except BaseException as exc:
+            record_handshake_outcome(connection, exc)
+            raise
+        record_handshake_outcome(connection, None)
         fingerprint = remote.root_fingerprint
         if enforce_trust_policy:
             assert lane is not None
@@ -1476,17 +1484,26 @@ async def attach_relayed_session(
         raise ValueError("enforce_trust_policy requires a lane")
     if role not in ("initiator", "responder"):
         raise LinkTransportError(f"unknown relay role {role!r}")
-    reader, writer = await asyncio.open_connection(host, port)
+    # Issue #628: direct, or a CONNECT tunnel when a proxy applies; the
+    # attach preamble below is just more bytes through it.
+    connection = await open_realtime_connection(host, port)
+    reader, writer = connection.reader, connection.writer
     session: LinkRealtimeSession | None = None
     try:
         writer.write(encode_bridge_attach_record(attach_token))
         await writer.drain()
-        if role == "initiator":
-            remote, ciphers = await establish_noise_xx_initiator(
-                reader, writer, identity, expected_fingerprint=expected_fingerprint
-            )
-        else:
-            remote, ciphers = await establish_noise_xx_responder(reader, writer, identity)
+        try:
+            if role == "initiator":
+                remote, ciphers = await establish_noise_xx_initiator(
+                    reader, writer, identity, expected_fingerprint=expected_fingerprint
+                )
+            else:
+                remote, ciphers = await establish_noise_xx_responder(reader, writer, identity)
+        except BaseException as exc:
+            record_handshake_outcome(connection, exc)
+            raise
+        record_handshake_outcome(connection, None)
+        if role != "initiator":
             if remote.root_fingerprint != expected_fingerprint:
                 raise LinkProtocolError(
                     f"expected a relayed session with {expected_fingerprint}, "

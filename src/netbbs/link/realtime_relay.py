@@ -86,6 +86,7 @@ from netbbs.link.protocol import (
     build_relay_request_frame,
     build_relay_waiting_frame,
 )
+from netbbs.link.realtime_proxy import open_realtime_connection
 from netbbs.link.transport import (
     LinkRealtimeSession,
     LinkRealtimeSessionRegistry,
@@ -572,10 +573,16 @@ class RealtimeRelay:
         # reservation is closed, never turned into a late rendezvous.
         writer = None
         try:
-            reader, writer = await asyncio.wait_for(
-                asyncio.open_connection(payload["attach_address"], payload["attach_port"]),
+            # Issue #628: through the proxy too, when one applies. A raw
+            # pipe with no handshake of its own, so the tunnel's success is
+            # recorded as soon as it opens.
+            connection = await asyncio.wait_for(
+                open_realtime_connection(
+                    payload["attach_address"], payload["attach_port"], handshake_follows=False
+                ),
                 timeout=self._rendezvous_timeout,
             )
+            reader, writer = connection.reader, connection.writer
             writer.write(encode_bridge_attach_record(payload["attach_token"]))
             await writer.drain()
         except asyncio.CancelledError:
