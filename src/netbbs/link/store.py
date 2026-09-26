@@ -675,6 +675,112 @@ def delete_relay_consent(db: Database, fingerprint: str, *, role: str) -> None:
     db.connection.commit()
 
 
+def uncarried_resource_ids(db: Database) -> dict[str, tuple[str, ...]]:
+    """
+    Issue #669: every resource this node has accepted a genesis for and has
+    no local row for, by inventory kind -- a carry-quota refusal, a SysOp's
+    deletion of a carried resource, a refused `mrc:` channel (issue #300), or
+    the genesis crash window. Until issue #683 records those states, this is
+    inferred from `link_events` exactly the way `inventory_wanted_ids` infers
+    "seen and declined".
+
+    Such a resource is absent from what `build_inventory_request` declares,
+    and a responder reads absent as "never seen" (issue #94), so it used to
+    send the genesis and every event under it on every pass, under the one
+    `_MAX_EVENTS_PER_REQUEST` budget shared by all three kinds: a declined
+    board with a couple of hundred posts, sorting early, was the only thing a
+    node ever received from anyone carrying it. Declaring these as not carried
+    lets a responder that advertises `INVENTORY_NOT_CARRIED_CAPABILITY` leave
+    them out. One resource ID each, and bounded by the geneses this node has
+    already stored.
+    """
+    # "Carried" is a row with a Link genesis, the same test `carried_board_ids`
+    # uses: a local-only row sharing an id -- an MRC room a caller opened,
+    # whose id a refused genesis claimed (issue #300) -- is not a copy of it.
+    queries = (
+        ("boards", "board_id", BOARD_GENESIS_OBJECT_TYPE,
+         "SELECT board_id FROM boards WHERE link_genesis_json IS NOT NULL"),
+        ("channels", "channel_id", CHANNEL_GENESIS_OBJECT_TYPE,
+         "SELECT channel_id FROM channels WHERE link_genesis_json IS NOT NULL"),
+        ("file_areas", "file_area_id", FILE_AREA_GENESIS_OBJECT_TYPE,
+         "SELECT area_id FROM file_areas WHERE link_genesis_json IS NOT NULL"),
+    )
+    result: dict[str, tuple[str, ...]] = {}
+    for kind, column, object_type, local_ids in queries:
+        rows = db.connection.execute(
+            f"""SELECT DISTINCT {column} AS resource_id FROM link_events
+                WHERE object_type = ? AND {column} IS NOT NULL
+                  AND {column} NOT IN ({local_ids})
+                ORDER BY {column}""",
+            (object_type,),
+        ).fetchall()
+        if rows:
+            result[kind] = tuple(row["resource_id"] for row in rows)
+    return result
+
+
+MAX_NOT_CARRIED_DECLARED = 5000
+"""Issue #669: the most resource IDs one request declares as not carried --
+about 340 KB, well inside the responder's 2 MiB body limit beside the carried
+maps. The stored genesis set is not bounded by anything this node controls: a
+peer can keep sending geneses to a node past its carry cap, and each one is
+kept. Declaring them all would grow every request until the responder refused
+it with 413 and sync stopped altogether."""
+
+
+def bound_not_carried(
+    not_carried: dict[str, tuple[str, ...]], *, limit: int = MAX_NOT_CARRIED_DECLARED
+) -> dict[str, tuple[str, ...]]:
+    """Cap `not_carried` at `limit` IDs in total. Over the cap, each request
+    declares a fresh random sample: no fixed subset is left out on every pass,
+    so whatever is undeclared this time costs one resend, not a standing
+    starvation, and no request ever outgrows the responder's limit."""
+    pairs = [(kind, resource_id) for kind, ids in not_carried.items() for resource_id in ids]
+    if len(pairs) <= limit:
+        return not_carried
+    chosen = sorted(secrets.SystemRandom().sample(pairs, limit))
+    bounded: dict[str, tuple[str, ...]] = {}
+    for kind, resource_id in chosen:
+        bounded.setdefault(kind, ())
+        bounded[kind] += (resource_id,)
+    return bounded
+
+
+_LINKED_RESOURCE_TABLES = {
+    "boards": ("board_id", BOARD_GENESIS_OBJECT_TYPE),
+    "channels": ("channel_id", CHANNEL_GENESIS_OBJECT_TYPE),
+    "file_areas": ("area_id", FILE_AREA_GENESIS_OBJECT_TYPE),
+}
+
+
+def retain_linked_genesis(db: Database, table: str, resource_id: str) -> None:
+    """
+    Issue #669: keep a Linked resource's genesis in `link_events` before the
+    SysOp deletes the resource, so `uncarried_resource_ids` can go on
+    declaring it after the local row is gone. A carried resource's genesis is
+    already there; one this node originated lives only in its own row's
+    `link_genesis_json` (`link_board` and its siblings never call
+    `save_event`), so without this a deleted origin would be declared as
+    neither carried nor not carried, and every peer carrying it would resend
+    it and everything under it on every pass. A resource that was never
+    Linked has nothing to keep.
+    """
+    id_column, object_type = _LINKED_RESOURCE_TABLES[table]
+    row = db.connection.execute(
+        f"SELECT link_genesis_json FROM {table} WHERE {id_column} = ?", (resource_id,)
+    ).fetchone()
+    if row is None or row["link_genesis_json"] is None:
+        return
+    genesis = json.loads(row["link_genesis_json"])
+    save_event(
+        db,
+        sender_fingerprint=genesis["envelope"]["payload"]["origin_fingerprint"],
+        content_id=event_content_id(genesis["envelope"]),
+        object_type=object_type,
+        envelope=genesis,
+    )
+
+
 def carried_board_ids(db: Database) -> list[str]:
     """
     Every `board_id` this node currently has *some* Linked copy of
@@ -719,6 +825,7 @@ def build_inventory_request(
     responder_fingerprint: str,
     include_inventory: bool = True,
     also_declare: dict[str, dict[str, set[str]]] | None = None,
+    declare_not_carried: bool = False,
 ) -> InventoryRequest:
     """
     This node's own `InventoryRequest` to send as requester (design doc
@@ -741,6 +848,11 @@ def build_inventory_request(
     the signed request to one peer and one short-lived attempt.
     `include_inventory=False` builds the same authenticated envelope
     with empty resource maps for another pull route's authorization.
+
+    Issue #669: `declare_not_carried` adds `uncarried_resource_ids` as the
+    signed `not_carried` field. The caller sets it only for a responder whose
+    descriptor advertises `INVENTORY_NOT_CARRIED_CAPABILITY`: an older one
+    would rebuild the signed payload without the field and refuse the request.
     """
     boards = (
         {board_id: tuple(_all_board_events(db, board_id)) for board_id in carried_board_ids(db)}
@@ -769,6 +881,9 @@ def build_inventory_request(
                 mapping[resource_id] = tuple(
                     dict.fromkeys([*mapping.get(resource_id, ()), *sorted(content_ids)])
                 )
+    not_carried = (
+        bound_not_carried(uncarried_resource_ids(db)) if include_inventory and declare_not_carried else {}
+    )
     created_at = utc_now_iso()
     nonce = secrets.token_hex(16)
     signature = sign_inventory_request(
@@ -778,6 +893,7 @@ def build_inventory_request(
         created_at=created_at,
         nonce=nonce,
         boards=boards, channels=channels, file_areas=file_areas,
+        not_carried=not_carried,
     )
     return InventoryRequest(
         requester_fingerprint=requester_fingerprint,
@@ -786,6 +902,7 @@ def build_inventory_request(
         nonce=nonce,
         signature=signature,
         boards=boards, channels=channels, file_areas=file_areas,
+        not_carried=not_carried,
     )
 
 
@@ -861,7 +978,11 @@ def _all_board_events(db: Database, board_id: str) -> dict[str, dict]:
 
 
 def board_event_diff(
-    db: Database, requested_boards: dict[str, list[str]], *, limit: int
+    db: Database,
+    requested_boards: dict[str, list[str]],
+    *,
+    limit: int,
+    not_carried: tuple[str, ...] = (),
 ) -> tuple[list[dict], bool]:
     """
     The responder side of one `InventoryRequest` (design doc §8.8, issue
@@ -903,7 +1024,9 @@ def board_event_diff(
     """
     collected: list[dict] = []
     truncated = False
-    all_board_ids = sorted(set(requested_boards) | set(carried_board_ids(db)))
+    # Issue #669: what the requester holds a genesis for and chose not to
+    # carry costs it nothing here -- see `uncarried_resource_ids`.
+    all_board_ids = sorted((set(requested_boards) | set(carried_board_ids(db))) - set(not_carried))
     for board_id in all_board_ids:
         if truncated:
             break
@@ -967,7 +1090,11 @@ def _all_channel_events(db: Database, channel_id: str) -> dict[str, dict]:
 
 
 def channel_event_diff(
-    db: Database, requested_channels: dict[str, list[str]], *, limit: int
+    db: Database,
+    requested_channels: dict[str, list[str]],
+    *,
+    limit: int,
+    not_carried: tuple[str, ...] = (),
 ) -> tuple[list[dict], bool]:
     """
     The channel-side responder logic for one `InventoryRequest` --
@@ -981,7 +1108,9 @@ def channel_event_diff(
     """
     collected: list[dict] = []
     truncated = False
-    all_channel_ids = sorted(set(requested_channels) | set(carried_channel_ids(db)))
+    # Issue #669: what the requester holds a genesis for and chose not to
+    # carry costs it nothing here -- see `uncarried_resource_ids`.
+    all_channel_ids = sorted((set(requested_channels) | set(carried_channel_ids(db))) - set(not_carried))
     for channel_id in all_channel_ids:
         if truncated:
             break
@@ -1045,7 +1174,11 @@ def _all_file_area_events(db: Database, area_id: str) -> dict[str, dict]:
 
 
 def file_area_event_diff(
-    db: Database, requested_file_areas: dict[str, list[str]], *, limit: int
+    db: Database,
+    requested_file_areas: dict[str, list[str]],
+    *,
+    limit: int,
+    not_carried: tuple[str, ...] = (),
 ) -> tuple[list[dict], bool]:
     """
     The file-area-side responder logic for one `InventoryRequest` --
@@ -1064,7 +1197,9 @@ def file_area_event_diff(
     """
     collected: list[dict] = []
     truncated = False
-    all_area_ids = sorted(set(requested_file_areas) | set(carried_file_area_ids(db)))
+    # Issue #669: what the requester holds a genesis for and chose not to
+    # carry costs it nothing here -- see `uncarried_resource_ids`.
+    all_area_ids = sorted((set(requested_file_areas) | set(carried_file_area_ids(db))) - set(not_carried))
     for area_id in all_area_ids:
         if truncated:
             break

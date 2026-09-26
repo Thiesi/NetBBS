@@ -278,14 +278,19 @@ def test_link_refuses_a_genesis_that_squats_or_aliases_an_open_room(db):
     # ... and the room of that name can still be opened here.
     assert materialize_open_room(db, "elsewhere", open_settings=_on()).channel.name == "mrc:elsewhere"
     # A second genesis colliding on the renamed name gets a suffix; a
-    # third, with both names taken, is a tolerated refusal rather than an
-    # IntegrityError the transport would not expect.
+    # third finds a longer suffix (issue #671 generalized #300's two
+    # candidates); only with every candidate taken is it a tolerated
+    # refusal rather than an IntegrityError the transport would not expect.
     second = materialize_carried_channel(db, _genesis("e" * 64, "MRC:elsewhere"))
     assert second.name == "local-MRC:elsewhere-eeeeeeee"
     sysop = create_user(db, "sysop3", password="hunter2", user_level=255)
     create_channel(db, "local-mrc:elsewhere-dddddddd", creator=sysop)
-    with pytest.raises(ChannelCarryRefusedError, match="already local channel names"):
-        materialize_carried_channel(db, _genesis("d" * 64, "mrc:elsewhere"))
+    third = materialize_carried_channel(db, _genesis("d" * 64, "mrc:elsewhere"))
+    assert third.name == "local-mrc:elsewhere-" + "d" * 16
+    for suffix in ("c" * 8, "c" * 16, "c" * 64):
+        create_channel(db, f"local-mrc:elsewhere-{suffix}", creator=sysop)
+    with pytest.raises(ChannelCarryRefusedError, match="no free local name"):
+        materialize_carried_channel(db, _genesis("c" * 64, "mrc:elsewhere"))
     with pytest.raises(ChannelCarryRefusedError, match="belongs to an MRC room"):
         materialize_carried_channel(db, _genesis(opened.channel_id, "innocent"))
     assert get_mrc_mapping(db, opened).is_open_room
@@ -408,3 +413,30 @@ def test_a_legacy_overlength_blocklist_entry_is_dropped_on_load(db):
     saved = save_open_room_settings(db, OpenRoomSettings(enabled=loaded.enabled, blocklist=loaded.blocklist, cap=16))
     assert saved.cap == 16
     assert "x" * 25 not in get_config(db, OPEN_ROOMS_BLOCKLIST_KEY)
+
+
+def test_a_genesis_refused_for_an_open_rooms_id_is_declared_not_carried(db):
+    """Issue #669: the room shares the id but has no Link genesis, so it is
+    not a copy of the refused resource. Counting it as carried left the
+    resource in neither set, and capable peers resent it on every pass."""
+    from netbbs.link.channels import ChannelCarryRefusedError, materialize_carried_channel
+    from netbbs.link.events import build_channel_genesis
+    from netbbs.link.store import save_event, uncarried_resource_ids
+    from netbbs.timeutil import utc_now_iso
+
+    peer = bootstrap_node_identity("peer-669")
+    opened = materialize_open_room(db, "lobby", open_settings=_on()).channel
+    genesis = build_channel_genesis(
+        signing_identity=peer.signing_key, origin_fingerprint=peer.fingerprint, channel_id=opened.channel_id,
+        name="innocent", created_at=utc_now_iso(), description=None, default_min_level=0,
+        default_min_age=None, default_name_requirement=None,
+    )
+    # As `persist_accepted_events` does: saved first, then refused.
+    save_event(
+        db, sender_fingerprint=peer.fingerprint, content_id=genesis.content_id,
+        object_type="channel_genesis", envelope=genesis.to_dict(),
+    )
+    with pytest.raises(ChannelCarryRefusedError):
+        materialize_carried_channel(db, genesis)
+
+    assert uncarried_resource_ids(db) == {"channels": (opened.channel_id,)}

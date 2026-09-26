@@ -44,6 +44,7 @@ from netbbs.link.events import (
     build_file_area_genesis,
     build_file_descriptor,
 )
+from netbbs.link.local_names import free_local_name
 from netbbs.link.node_identity import NodeIdentity
 from netbbs.link.protocol import (
     MAX_CATALOGUED_FILE_SIZE_BYTES,
@@ -68,6 +69,12 @@ class FileAreaCarryLimitError(Exception):
     rejection: the underlying `file_area_genesis` is already verified,
     accepted, and persisted, and keeps gossiping normally regardless --
     only this node's own local materialization is refused."""
+
+
+class FileAreaCarryRefusedError(FileAreaCarryLimitError):
+    """Raised by `materialize_carried_file_area` when no local name is free
+    for the area (issue #671; see `netbbs.link.local_names`). A subclass of
+    `FileAreaCarryLimitError` so the caller's existing tolerance applies."""
 
 
 class RemoteFileCatalogueLimitError(Exception):
@@ -205,6 +212,12 @@ def materialize_carried_file_area(
         )
 
     payload = genesis.payload
+    # Issue #671: a name already in use here would make the insert fail.
+    local_name = free_local_name(db, "file_areas", str(payload["name"]), payload["area_id"])
+    if local_name is None:
+        raise FileAreaCarryRefusedError(
+            f"cannot carry file area {payload['area_id']!r}: no free local name for {payload['name']!r}"
+        )
     db.connection.execute(
         """
         INSERT INTO file_areas
@@ -215,7 +228,7 @@ def materialize_carried_file_area(
         """,
         (
             payload["area_id"],
-            payload["name"],
+            local_name,
             payload.get("description"),
             payload.get("default_min_read_level", 0),
             payload.get("default_min_write_level", 0),
