@@ -1166,6 +1166,7 @@ async def run(
                 max_peers=config.link.max_peers,
                 max_carried_boards=config.link.max_carried_boards,
                 max_carried_channels=config.link.max_carried_channels,
+                max_carried_file_areas=config.link.max_carried_file_areas,
             )
             if link_node is not None else None
         )

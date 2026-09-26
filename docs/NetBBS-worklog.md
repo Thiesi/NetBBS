@@ -2720,15 +2720,29 @@ whether that projection actually exists yet, rather than trusting a
 proves the protocol accepted something; it says nothing about whether any
 other table has ever heard about it.
 
-**Post/edit materialization closed a crash-window genesis materialization
-still has.** `materialize_carried_board` is a separate `lane.run` call from
-the `save_event` that persists its own underlying signed event -- a crash
-between the two leaves an accepted-but-unmaterialized genesis, with no repair
-path today. `materialize_carried_post`/`_edit` do both writes in one call,
-one transaction, closing that window for posts/edits specifically (and
+**Post/edit materialization closed a crash window; genesis intake closed it
+too (issue #683).** `materialize_carried_post`/`_edit` do the `link_events`
+insert and the projection in one call, one transaction (and
 `rebuild_carried_post_materialization` repairs the one-time gap on a node
-upgrading from before this existed) -- genesis's own gap is unfixed, and
-worth remembering before assuming "it's accepted" implies "it's carried."
+upgrading from before that existed). Genesis intake used to be two lane calls,
+`save_event` then `materialize_carried_*`, and a crash between them left an
+accepted genesis with no local row and no repair. `netbbs.link.carry.
+accept_genesis` now writes the genesis and its carry outcome -- the local row,
+or an `offered` row in `link_carry_decisions` -- in one transaction, using the
+`commit=False` variants of `save_event` and the three materializers. "It's
+accepted" still does not imply "it's carried": the decision table says which.
+
+**"Known" means stored (issue #683).** `handle_events` adds every accepted
+content ID to `LinkNode.known_event_ids`, and a later copy of a known ID is
+dropped as a duplicate. An event under a board, channel or file area with no
+local row is accepted but neither projected nor stored (the materializers
+return `None` before their `link_events` insert), so it used to stay "known"
+in memory only: after the SysOp accepted the offered resource, the resend
+that should have filled it was dropped, and the accepted copy stayed empty
+until a restart rebuilt `known_event_ids` from `link_events`.
+`persist_accepted_events` now forgets such an ID (`_forget_unless_stored`).
+An event that was stored and only its projection refused -- identity policy,
+a trimmed scrollback -- stays known, since `link_events` holds it.
 
 **A self-originated Link event's effect on `LinkNode` state must be applied
 directly by whichever caller built it -- it never flows through that same

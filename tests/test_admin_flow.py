@@ -10002,3 +10002,35 @@ def test_the_vouch_screen_says_when_a_relay_did_not_take_this_nodes_vouches(db, 
 
     assert "handed to the 2 nodes that relay for it" in text
     assert "1 of them did not take them at the last attempt; the Link log says why." in text
+
+
+def test_link_status_offers_an_uncarried_board_and_accepting_it_carries_it(db, lane, sysop):
+    """Issue #683: past the cap a board is offered, not declined; the SysOp
+    sees it under [O]ffered with its origin and why, and [A]ccept carries it."""
+    from netbbs.boards.boards import get_board_by_name
+    from netbbs.link.carry import accept_genesis, carry_decision_counts
+    from netbbs.link.events import build_board_genesis
+    from netbbs.link.node_identity import bootstrap_node_identity
+
+    remote = bootstrap_node_identity("offering-origin")
+    genesis = build_board_genesis(
+        signing_identity=remote.signing_key, origin_fingerprint=remote.fingerprint,
+        board_id="d" * 64, name="Retro Hardware", created_at="2026-01-01T00:00:00Z",
+    )
+    accept_genesis(
+        db, kind="boards", envelope=genesis.to_dict(), sender_fingerprint=remote.fingerprint,
+        content_id=genesis.content_id, own_fingerprint="own", cap=0,
+    )
+
+    # The Content section is on the status screen's second page.
+    session = FakeSession(["s", "l", "PAGE_DOWN", "o", "0", "1", "a", "b", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop, link_context=_link_context()))
+
+    text = _normalized_visible(_written_text(session))
+    assert "Offered: 1 waiting to be accepted" in text
+    assert "Name: Retro Hardware" in text
+    assert "Why: arrived when this node was already at its carry cap" in text
+    assert "'Retro Hardware' is carried now" in text
+    assert "Nothing here." not in text
+    assert get_board_by_name(db, "Retro Hardware").board_id == "d" * 64
+    assert carry_decision_counts(db) == {}
