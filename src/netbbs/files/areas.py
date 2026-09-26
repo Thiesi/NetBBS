@@ -384,52 +384,59 @@ def delete_file_area(db: Database, area: FileArea, *, deleted_by: User) -> None:
     """
     db.connection.execute("BEGIN IMMEDIATE")
     try:
-        # Read under the write lock, so the paths removed below are exactly
-        # those of the rows deleted here -- another connection cannot start or
-        # advance a transfer in between.
-        transfers = db.connection.execute(
-            """SELECT t.transfer_id, t.temp_path FROM link_file_transfers AS t
-                 JOIN remote_files AS r ON r.file_id = t.remote_file_id
-                WHERE r.area_id = ?""",
-            (area.id,),
-        ).fetchall()
         record_action_without_commit(
             db, actor=deleted_by, action="delete_file_area", object_type="file_area", object_id=area.id,
             detail=f"deleted file area {area.name!r} (id {area.id})",
         )
-        for row in transfers:
-            db.connection.execute(
-                "DELETE FROM link_file_transfer_chunks WHERE transfer_id = ?", (row["transfer_id"],)
-            )
-            db.connection.execute("DELETE FROM link_file_transfers WHERE transfer_id = ?", (row["transfer_id"],))
-        db.connection.execute("DELETE FROM remote_files WHERE area_id = ?", (area.id,))
-        db.connection.execute("DELETE FROM files WHERE area_id = ?", (area.id,))
-        db.connection.execute(
-            "DELETE FROM moderator_grants WHERE object_type = 'file_area' AND object_id = ?", (area.id,)
-        )
-        db.connection.execute(
-            "DELETE FROM user_read_cursors WHERE object_type = 'file_area' AND object_id = ?", (area.id,)
-        )
-        db.connection.execute(
-            "DELETE FROM user_follows WHERE object_type = 'file_area' AND object_id = ?", (area.id,)
-        )
-        db.connection.execute("DELETE FROM file_areas WHERE id = ?", (area.id,))
+        staging = delete_file_area_rows(db, area.id)
     except BaseException:
         db.connection.rollback()
         raise
     db.connection.commit()
+    remove_staging_files(staging)
+
+
+def delete_file_area_rows(db: Database, area_local_id: int) -> list[str]:
+    """Delete a file area and everything that references it, inside the
+    caller's open transaction, without committing; returns the staging files
+    of its partial transfers, for `remove_staging_files` once the caller has
+    committed. Shared by `delete_file_area` and the Link Purge of an excluded
+    area (issue #683), so the foreign-key order lives in one place (#696).
+
+    Run it under the write lock (`BEGIN IMMEDIATE`): the transfer rows are read
+    here, so the paths returned are exactly those of the rows deleted -- no
+    other connection can start or advance a transfer in between."""
+    transfers = db.connection.execute(
+        """SELECT t.transfer_id, t.temp_path FROM link_file_transfers AS t
+             JOIN remote_files AS r ON r.file_id = t.remote_file_id
+            WHERE r.area_id = ?""",
+        (area_local_id,),
+    ).fetchall()
     for row in transfers:
-        if row["temp_path"]:
-            try:
-                os.remove(row["temp_path"])
-            except FileNotFoundError:
-                pass  # never written, or already gone: nothing left to reclaim
-            except OSError as exc:
-                # The rows naming it are committed away, so nothing would ever
-                # come back for it: say so, as `withdraw_remote_file` does.
-                _logger.warning(
-                    "could not remove staging file %s of a deleted file area: %s", row["temp_path"], exc
-                )
+        db.connection.execute("DELETE FROM link_file_transfer_chunks WHERE transfer_id = ?", (row["transfer_id"],))
+        db.connection.execute("DELETE FROM link_file_transfers WHERE transfer_id = ?", (row["transfer_id"],))
+    db.connection.execute("DELETE FROM remote_files WHERE area_id = ?", (area_local_id,))
+    db.connection.execute("DELETE FROM files WHERE area_id = ?", (area_local_id,))
+    for scoped in ("moderator_grants", "user_read_cursors", "user_follows"):
+        db.connection.execute(
+            f"DELETE FROM {scoped} WHERE object_type = 'file_area' AND object_id = ?", (area_local_id,)
+        )
+    db.connection.execute("DELETE FROM file_areas WHERE id = ?", (area_local_id,))
+    return [row["temp_path"] for row in transfers if row["temp_path"]]
+
+
+def remove_staging_files(paths: list[str]) -> None:
+    """Remove the staging files `delete_file_area_rows` returned, after the
+    commit. A failure other than "already gone" is logged: the rows naming the
+    file are committed away, so nothing would ever come back for it, the same
+    reasoning as `withdraw_remote_file`."""
+    for path in paths:
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass  # never written, or already gone: nothing left to reclaim
+        except OSError as exc:
+            _logger.warning("could not remove staging file %s of a deleted file area: %s", path, exc)
 
 
 def _row_to_file_area(row: sqlite3.Row) -> FileArea:

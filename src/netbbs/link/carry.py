@@ -25,8 +25,6 @@ new.
 from __future__ import annotations
 
 import json
-import logging
-import os
 import sqlite3
 from dataclasses import dataclass
 
@@ -65,13 +63,13 @@ from netbbs.link.files import (
     RemoteFileCatalogueLimitError,
 )
 from netbbs.link.events import event_content_id
+from netbbs.files.areas import delete_file_area_rows, remove_staging_files
 from netbbs.link.store import save_event
 from netbbs.auth.users import User
 from netbbs.moderation.log import record_action_without_commit
 from netbbs.storage.database import Database
 from netbbs.timeutil import utc_now_iso
 
-_logger = logging.getLogger(__name__)
 
 OFFERED = "offered"
 EXCLUDED = "excluded"
@@ -612,31 +610,15 @@ def purge_excluded(db: Database, kind: str, resource_id: str, *, actor: User | N
             db.connection.execute("DELETE FROM channel_message_search WHERE channel_id = ?", (local_id,))
             for child in ("channel_restrictions", "channel_members", "channel_invitations"):
                 db.connection.execute(f"DELETE FROM {child} WHERE channel_id = ?", (local_id,))
+        if kind == "file_areas":
+            # The remote catalogue goes first, in foreign-key order (#696).
+            staging = delete_file_area_rows(db, local_id)
         else:
-            # The remote catalogue references the area and, through
-            # `fetched_file_id`, its files: it goes first (issue #696).
-            transfers = db.connection.execute(
-                """SELECT t.transfer_id, t.temp_path FROM link_file_transfers AS t
-                     JOIN remote_files AS r ON r.file_id = t.remote_file_id
-                    WHERE r.area_id = ?""",
-                (local_id,),
-            ).fetchall()
-            for transfer in transfers:
+            for scoped in ("moderator_grants", "user_read_cursors", "user_follows"):
                 db.connection.execute(
-                    "DELETE FROM link_file_transfer_chunks WHERE transfer_id = ?", (transfer["transfer_id"],)
+                    f"DELETE FROM {scoped} WHERE object_type = ? AND object_id = ?", (object_type, local_id)
                 )
-                db.connection.execute(
-                    "DELETE FROM link_file_transfers WHERE transfer_id = ?", (transfer["transfer_id"],)
-                )
-                if transfer["temp_path"]:
-                    staging.append(transfer["temp_path"])
-            db.connection.execute("DELETE FROM remote_files WHERE area_id = ?", (local_id,))
-            db.connection.execute("DELETE FROM files WHERE area_id = ?", (local_id,))
-        for scoped in ("moderator_grants", "user_read_cursors", "user_follows"):
-            db.connection.execute(
-                f"DELETE FROM {scoped} WHERE object_type = ? AND object_id = ?", (object_type, local_id)
-            )
-        db.connection.execute(f"DELETE FROM {table} WHERE id = ?", (local_id,))
+            db.connection.execute(f"DELETE FROM {table} WHERE id = ?", (local_id,))
         db.connection.execute(
             "UPDATE link_carry_decisions SET reason = 'purged', decided_at = ?, actor_user_id = ? "
             "WHERE kind = ? AND resource_id = ?",
@@ -651,10 +633,4 @@ def purge_excluded(db: Database, kind: str, resource_id: str, *, actor: User | N
         db.connection.rollback()
         raise
     db.connection.commit()
-    for path in staging:
-        try:
-            os.remove(path)
-        except FileNotFoundError:
-            pass
-        except OSError as exc:
-            _logger.warning("could not remove staging file %s of a purged file area: %s", path, exc)
+    remove_staging_files(staging)

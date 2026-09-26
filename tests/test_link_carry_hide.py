@@ -274,3 +274,19 @@ def test_a_chat_session_in_a_channel_that_gets_hidden_degrades(db, own, remote, 
 
     assert _fresh_channel(db, channel) is None
     assert _meets_live_participation_requirements(db, channel, sysop) is False
+
+
+def test_a_hidden_channel_stops_offering_its_pending_invitations(db, own, remote, sysop):
+    from netbbs.chat.membership import create_invitation, list_pending_invitations_for_user
+
+    _carry(db, own, build_channel_genesis(
+        signing_identity=remote.signing_key, origin_fingerprint=remote.fingerprint,
+        channel_id=CHANNEL_ID, name="lobby", created_at="2026-01-01T00:00:00Z",
+    ), "channels")
+    guest = create_user(db, "guest", password="hunter2", user_level=10)
+    create_invitation(db, get_channel_by_name(db, "lobby"), guest, invited_by=sysop)
+    assert [view.channel_name for view in list_pending_invitations_for_user(db, guest)] == ["lobby"]
+
+    hide_carried_resource(db, "channels", CHANNEL_ID, actor=sysop)
+
+    assert list_pending_invitations_for_user(db, guest) == []
