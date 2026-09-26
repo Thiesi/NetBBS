@@ -32,22 +32,35 @@ from netbbs.link.boards import (
     BoardCarryLimitError,
     materialize_carried_board,
     materialize_carried_board_closure,
+    rebuild_carried_post_materialization,
     record_board_origin_change,
 )
-from netbbs.link.channels import ChannelCarryLimitError, materialize_carried_channel
+from netbbs.link.channels import (
+    ChannelCarryLimitError,
+    materialize_carried_channel,
+    materialize_carried_channel_message,
+)
 from netbbs.link.events import (
     BOARD_CLOSURE_OBJECT_TYPE,
     BOARD_GENESIS_OBJECT_TYPE,
     BOARD_ORIGIN_TRANSFER_ACCEPTED_OBJECT_TYPE,
     CHANNEL_GENESIS_OBJECT_TYPE,
+    CHANNEL_MESSAGE_OBJECT_TYPE,
     FILE_AREA_GENESIS_OBJECT_TYPE,
+    FILE_DESCRIPTOR_OBJECT_TYPE,
     BoardClosure,
     BoardGenesis,
     BoardOriginTransferAccepted,
     ChannelGenesis,
+    ChannelMessage,
     FileAreaGenesis,
+    FileDescriptor,
 )
-from netbbs.link.files import FileAreaCarryLimitError, materialize_carried_file_area
+from netbbs.link.files import (
+    FileAreaCarryLimitError,
+    materialize_carried_file_area,
+    materialize_carried_file_descriptor,
+)
 from netbbs.link.store import save_event
 from netbbs.auth.users import User
 from netbbs.moderation.log import record_action_without_commit
@@ -324,6 +337,32 @@ def accept_offer(db: Database, kind: str, resource_id: str, *, actor: User | Non
         db.connection.rollback()
         raise
     db.connection.commit()
+    reproject_stored_content(db, kind, resource_id)
+
+
+def reproject_stored_content(db: Database, kind: str, resource_id: str) -> None:
+    """Project what this node already holds for a resource it has just taken
+    on. A resource carried before, deleted, and offered again by the
+    migration (or accepted back later) keeps its posts, messages and file
+    descriptors in `link_events` after their local rows are gone; this node
+    declares those IDs as known, so no peer would ever send them again, and
+    the accepted copy would stay missing its history. Each materializer is
+    idempotent on the event's content ID, so this is safe to repeat."""
+    if kind == "boards":
+        rebuild_carried_post_materialization(db)
+        return
+    column, object_type, build, materialize = {
+        "channels": ("channel_id", CHANNEL_MESSAGE_OBJECT_TYPE, ChannelMessage.from_dict,
+                     materialize_carried_channel_message),
+        "file_areas": ("file_area_id", FILE_DESCRIPTOR_OBJECT_TYPE, FileDescriptor.from_dict,
+                       materialize_carried_file_descriptor),
+    }[kind]
+    for row in db.connection.execute(
+        f"""SELECT sender_fingerprint, envelope_json FROM link_events
+             WHERE object_type = ? AND {column} = ? ORDER BY received_at ASC""",
+        (object_type, resource_id),
+    ).fetchall():
+        materialize(db, build(json.loads(row["envelope_json"])), sender_fingerprint=row["sender_fingerprint"])
 
 
 def exclude_offer(db: Database, kind: str, resource_id: str, *, actor: User | None) -> None:

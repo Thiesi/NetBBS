@@ -312,3 +312,52 @@ def test_a_listing_is_bounded_and_newest_first(db, remote, own):
     listed = list_carry_decisions(db, OFFERED, limit=3)
     assert len(listed) == 3 and count_carry_decisions(db, OFFERED) == 5
     assert len({decision.ref for decision in listed}) == 3
+
+
+def test_accepting_a_resource_carried_before_brings_back_what_this_node_still_holds(db, remote, own, alice):
+    """A carried board that was deleted keeps its posts in `link_events`; the
+    migration offers it again. Those IDs are declared as known, so no peer
+    would resend them: accepting must project them itself."""
+    from netbbs.link.boards import materialize_carried_post
+    from netbbs.link.carry import record_carry_decision
+    from netbbs.link.events import build_board_post
+
+    genesis = _board_genesis(remote)
+    _accept(db, genesis, own)
+    post = build_board_post(
+        signing_identity=remote.signing_key, home_node_fingerprint=remote.fingerprint, local_user_id="wanderer",
+        board_id=BOARD_ID, subject="kept in link_events", body="hi", created_at="2026-01-02T00:00:00Z",
+    )
+    materialize_carried_post(db, post, sender_fingerprint=remote.fingerprint)
+    delete_board(db, get_board_by_name(db, "Remote Discussion"), deleted_by=alice)
+    record_carry_decision(db, "boards", BOARD_ID, OFFERED, "migrated")
+
+    accept_offer(db, "boards", BOARD_ID, actor=alice)
+
+    subjects = [row[0] for row in db.connection.execute("SELECT subject FROM posts")]
+    assert subjects == ["kept in link_events"]
+
+
+def test_accepting_a_channel_carried_before_brings_back_its_stored_messages(db, remote, own, alice):
+    from netbbs.chat.channels import delete_channel, get_channel_by_name
+    from netbbs.link.carry import record_carry_decision
+    from netbbs.link.channels import materialize_carried_channel_message
+    from netbbs.link.events import build_channel_message
+
+    genesis = build_channel_genesis(
+        signing_identity=remote.signing_key, origin_fingerprint=remote.fingerprint,
+        channel_id="c" * 64, name="lobby", created_at="2026-01-01T00:00:00Z",
+    )
+    _accept(db, genesis, own, kind="channels")
+    message = build_channel_message(
+        signing_identity=remote.signing_key, home_node_fingerprint=remote.fingerprint, local_user_id="wanderer",
+        channel_id="c" * 64, body="kept in link_events", created_at="2026-01-02T00:00:00Z",
+    )
+    materialize_carried_channel_message(db, message, sender_fingerprint=remote.fingerprint)
+    delete_channel(db, get_channel_by_name(db, "lobby"), deleted_by=alice)
+    record_carry_decision(db, "channels", "c" * 64, OFFERED, "migrated")
+
+    accept_offer(db, "channels", "c" * 64, actor=alice)
+
+    bodies = [row[0] for row in db.connection.execute("SELECT body FROM channel_messages")]
+    assert bodies == ["kept in link_events"]
