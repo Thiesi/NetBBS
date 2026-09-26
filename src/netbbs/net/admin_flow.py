@@ -258,7 +258,7 @@ from netbbs.link.remote_attestation import (
     remove_attestation_recipient,
     set_remote_attestation_override,
 )
-from netbbs.link.store import introduced_by
+from netbbs.link.store import introduced_by, retain_linked_genesis
 from netbbs.link.trust_carriage import relays_refusing_trust_deposits
 from netbbs.link.onboarding import (
     Participation,
@@ -14304,6 +14304,8 @@ async def _delete_board_screen(session: Session, lane: DatabaseLane, actor: User
     if confirmation != board.name:
         _announce_line(session, "Cancelled.")
         return False
+    # Issue #669: so a Linked board stays declared as not carried here.
+    await lane.run(retain_linked_genesis, "boards", board.board_id)
     await lane.run(delete_board, board, deleted_by=actor)
     _announce_line(session, f"{board.name!r} deleted.")
     return True
@@ -15046,6 +15048,8 @@ async def _delete_area_screen(session: Session, lane: DatabaseLane, actor: User,
     if confirmation != area.name:
         _announce_line(session, "Cancelled.")
         return False
+    # Issue #669: so a Linked file area stays declared as not carried here.
+    await lane.run(retain_linked_genesis, "file_areas", area.area_id)
     await lane.run(delete_file_area, area, deleted_by=actor)
     _announce_line(session, f"{area.name!r} deleted.")
     return True
@@ -16960,6 +16964,8 @@ async def _delete_channel_screen(session: Session, lane: DatabaseLane, actor: Us
     if confirmation != channel.name:
         _announce_line(session, "Cancelled.")
         return False
+    # Issue #669: so a Linked channel stays declared as not carried here.
+    await lane.run(retain_linked_genesis, "channels", channel.channel_id)
     await lane.run(delete_channel, channel, deleted_by=actor)
     _announce_line(session, f"{channel.name!r} deleted.")
     return True

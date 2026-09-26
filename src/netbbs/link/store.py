@@ -716,6 +716,41 @@ def uncarried_resource_ids(db: Database) -> dict[str, tuple[str, ...]]:
     return result
 
 
+_LINKED_RESOURCE_TABLES = {
+    "boards": ("board_id", BOARD_GENESIS_OBJECT_TYPE),
+    "channels": ("channel_id", CHANNEL_GENESIS_OBJECT_TYPE),
+    "file_areas": ("area_id", FILE_AREA_GENESIS_OBJECT_TYPE),
+}
+
+
+def retain_linked_genesis(db: Database, table: str, resource_id: str) -> None:
+    """
+    Issue #669: keep a Linked resource's genesis in `link_events` before the
+    SysOp deletes the resource, so `uncarried_resource_ids` can go on
+    declaring it after the local row is gone. A carried resource's genesis is
+    already there; one this node originated lives only in its own row's
+    `link_genesis_json` (`link_board` and its siblings never call
+    `save_event`), so without this a deleted origin would be declared as
+    neither carried nor not carried, and every peer carrying it would resend
+    it and everything under it on every pass. A resource that was never
+    Linked has nothing to keep.
+    """
+    id_column, object_type = _LINKED_RESOURCE_TABLES[table]
+    row = db.connection.execute(
+        f"SELECT link_genesis_json FROM {table} WHERE {id_column} = ?", (resource_id,)
+    ).fetchone()
+    if row is None or row["link_genesis_json"] is None:
+        return
+    genesis = json.loads(row["link_genesis_json"])
+    save_event(
+        db,
+        sender_fingerprint=genesis["envelope"]["payload"]["origin_fingerprint"],
+        content_id=event_content_id(genesis["envelope"]),
+        object_type=object_type,
+        envelope=genesis,
+    )
+
+
 def carried_board_ids(db: Database) -> list[str]:
     """
     Every `board_id` this node currently has *some* Linked copy of

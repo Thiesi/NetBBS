@@ -2479,7 +2479,9 @@ budget all three kinds share: a declined board with a couple of hundred posts,
 sorting early, would be the only thing the requester ever received from anyone
 carrying it. So the request carries a signed `not_carried` list, by kind, of
 the resources the requester holds a genesis for and has no local copy of, and
-the responder leaves them out. The existing maps cannot say this, since their
+the responder leaves them out. Deleting a Linked resource keeps its genesis on
+file for this, including one this node originated, whose genesis otherwise
+lives only in its own row. The existing maps cannot say this, since their
 values are known-ID sets and an offered board's posts were never received. The
 field is part of the signed payload only when it names something, so a request
 without it signs exactly as before; and it is sent only to a responder whose
