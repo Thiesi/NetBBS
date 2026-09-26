@@ -425,3 +425,36 @@ def test_every_real_time_socket_in_netbbs_link_is_opened_by_the_helper():
         if path.name != "realtime_proxy.py" and "open_connection(" in path.read_text(encoding="utf-8")
     ]
     assert offenders == []
+
+
+@pytest.mark.parametrize("url", ["https://carrier:s3cret@proxy.example:3128", "http://carrier:s3cret@proxy.example:99999"])
+def test_a_proxy_configuration_error_never_carries_the_credentials(monkeypatch, caplog, url):
+    """Callers log dial failures verbatim; a misconfigured proxy URL must not
+    put its password in the log -- and the status screen must say why."""
+    monkeypatch.setenv("HTTP_PROXY", url)
+    with caplog.at_level(logging.INFO):
+        with pytest.raises(RealtimeProxyError) as raised:
+            proxy_for("bob.example")
+
+    assert "s3cret" not in str(raised.value) and "carrier" not in str(raised.value)
+    assert all("s3cret" not in record.getMessage() for record in caplog.records)
+    assert REALTIME_PROXY_STATUS.ok is False
+    assert "proxy.example" in REALTIME_PROXY_STATUS.proxy and "s3cret" not in REALTIME_PROXY_STATUS.proxy
+
+
+@pytest.mark.parametrize("url", ["http://[bad", "http://user:secret@"])
+def test_a_malformed_proxy_url_does_not_break_the_status_line_or_leak(monkeypatch, url):
+    monkeypatch.setenv("HTTP_PROXY", url)
+    text, ok = realtime_proxy.describe_proxy_status()
+    assert "secret" not in text and ok is None
+
+
+def test_basic_credentials_are_encoded_the_way_aiohttp_encodes_them():
+    """Latin-1, aiohttp's default, so both halves of Link send the same bytes."""
+    assert realtime_proxy._basic("carrier", "sécret") == "Basic " + base64.b64encode(
+        "carrier:sécret".encode("latin-1")
+    ).decode("ascii")
+
+
+def test_an_internationalized_host_is_dialled_by_its_a_label():
+    assert validate_authority("bbs.münchen.example", 8862) == ("bbs.xn--mnchen-3ya.example", 8862)

@@ -10037,7 +10037,7 @@ def test_link_status_screen_names_a_configured_proxy_without_its_credentials(db,
     asyncio.run(admin_menu(session, lane, sysop, link_context=_link_context()))
 
     text = _normalized_visible(_written_text(session))
-    assert "Live proxy: squid.example:3128 -- configured, not used by a live connection yet" in text
+    assert "Live proxy: http://squid.example:3128 -- configured, not used by a live connection yet" in text
     assert "hunter2" not in text and "carrier" not in text
 
 

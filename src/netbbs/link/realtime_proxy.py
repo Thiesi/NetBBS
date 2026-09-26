@@ -103,13 +103,14 @@ class RealtimeProxyStatus:
         self.ok: bool = False
         self.at: float | None = None
 
-    def record(self, proxy: ProxyEndpoint, outcome: str, *, ok: bool) -> None:
-        changed = (proxy.label, outcome) != (self.proxy, self.outcome)
-        self.proxy, self.outcome, self.ok, self.at = proxy.label, outcome, ok, time.time()
+    def record(self, proxy: ProxyEndpoint, outcome: str, *, ok: bool, label: str | None = None) -> None:
+        label = label if label is not None else proxy.label
+        changed = (label, outcome) != (self.proxy, self.outcome)
+        self.proxy, self.outcome, self.ok, self.at = label, outcome, ok, time.time()
         if changed:
             _logger.log(
                 logging.INFO if ok else logging.WARNING,
-                "real-time Link through proxy %s: %s", proxy.label, outcome,
+                "real-time Link through proxy %s: %s", label, outcome,
             )
 
 
@@ -117,9 +118,10 @@ REALTIME_PROXY_STATUS = RealtimeProxyStatus()
 
 
 def validate_authority(host: object, port: object) -> tuple[str, int]:
-    """`(host, port)` if they form a strict authority: a DNS hostname, an IPv4
-    literal or an IPv6 literal, and a port in range. Raises
-    `RealtimeTargetError` otherwise."""
+    """`(host, port)` if they form a strict authority: a DNS hostname (an
+    internationalized one returned in its IDNA A-label form), an IPv4 literal
+    or an IPv6 literal, and a port in range. Raises `RealtimeTargetError`
+    otherwise."""
     if not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535:
         raise RealtimeTargetError(f"invalid real-time port {port!r}")
     if not isinstance(host, str) or not host:
@@ -129,6 +131,13 @@ def validate_authority(host: object, port: object) -> tuple[str, int]:
         return host, port
     except ValueError:
         pass
+    if not host.isascii():
+        # An internationalized name, which the direct socket and aiohttp both
+        # resolve through IDNA: dial and send its A-label form.
+        try:
+            host = host.encode("idna").decode("ascii")
+        except UnicodeError:
+            raise RealtimeTargetError(f"invalid real-time host {host!r}") from None
     name = host[:-1] if host.endswith(".") else host
     if len(name) > 253 or not all(_HOSTNAME_LABEL.match(label) for label in name.split(".")):
         raise RealtimeTargetError(f"invalid real-time host {host!r}")
@@ -159,7 +168,15 @@ def _netrc_authorization(proxy_host: str) -> str | None:
 
 
 def _basic(user: str, password: str) -> str:
-    return "Basic " + base64.b64encode(f"{user}:{password}".encode("utf-8")).decode("ascii")
+    """Encoded as `aiohttp.BasicAuth` encodes it (Latin-1 by default), so the
+    proxy sees the same credentials from the tunnel as from the asynchronous
+    half. Credentials Latin-1 cannot carry fall back to UTF-8."""
+    raw = f"{user}:{password}"
+    try:
+        encoded = raw.encode("latin-1")
+    except UnicodeEncodeError:
+        encoded = raw.encode("utf-8")
+    return "Basic " + base64.b64encode(encoded).decode("ascii")
 
 
 def proxy_for(host: str) -> ProxyEndpoint | None:
@@ -174,15 +191,13 @@ def proxy_for(host: str) -> ProxyEndpoint | None:
         return None
     if urllib.request.proxy_bypass(host):
         return None
-    parts = urllib.parse.urlsplit(url if "://" in url else f"http://{url}")
-    if parts.scheme != "http" or not parts.hostname:
-        raise RealtimeProxyError(
-            f"proxy {url!r} is not an http:// proxy, which is all real-time Link can tunnel through"
-        )
     try:
+        parts = urllib.parse.urlsplit(url if "://" in url else f"http://{url}")
         port = parts.port or 80
-    except ValueError as exc:
-        raise RealtimeProxyError(f"proxy {url!r} has an invalid port") from exc
+    except ValueError:
+        raise _configuration_error(url, "is not a valid proxy URL") from None
+    if parts.scheme != "http" or not parts.hostname:
+        raise _configuration_error(url, "is not an http:// proxy, which is all real-time Link can tunnel through")
     if parts.username is not None:
         authorization = _basic(
             urllib.parse.unquote(parts.username), urllib.parse.unquote(parts.password or "")
@@ -190,6 +205,35 @@ def proxy_for(host: str) -> ProxyEndpoint | None:
     else:
         authorization = _netrc_authorization(parts.hostname)
     return ProxyEndpoint(parts.hostname, port, authorization)
+
+
+def redacted_proxy(url: str) -> str:
+    """A proxy URL fit for a log line or the status screen: scheme and
+    host:port, never credentials, and never the raw string when it will not
+    parse."""
+    try:
+        parts = urllib.parse.urlsplit(url if "://" in url else f"http://{url}")
+        where = parts.hostname or ""
+    except ValueError:
+        return "an unparseable proxy URL"
+    try:
+        port = parts.port
+    except ValueError:
+        port = None
+    if not where:
+        return f"a {parts.scheme or 'proxy'} URL with no host"
+    return f"{parts.scheme}://{where}" + (f":{port}" if port else "")
+
+
+def _configuration_error(url: str, problem: str) -> RealtimeProxyError:
+    """The error for a proxy URL that applies but cannot be used, recorded on
+    the status screen too: the connector that meets it swallows every dial
+    failure, so this is the only place the SysOp would see why live Link is
+    down."""
+    label = redacted_proxy(url)
+    error = RealtimeProxyError(f"{label} {problem}")
+    REALTIME_PROXY_STATUS.record(ProxyEndpoint(label, 0, None), f"{problem}", ok=False, label=label)
+    return error
 
 
 async def open_realtime_connection(host: str, port: int, *, handshake_follows: bool = True) -> RealtimeConnection:
@@ -216,7 +260,12 @@ async def _open_tunnel(
     try:
         async with asyncio.timeout(PROXY_TIMEOUT_SECONDS):
             try:
-                reader, writer = await asyncio.open_connection(proxy.host, proxy.port)
+                # `limit` bounds `readuntil` below, so a proxy cannot make this
+                # buffer more than the ceiling before its answer is refused. It
+                # only paces `readexactly`, which the Noise framing uses after.
+                reader, writer = await asyncio.open_connection(
+                    proxy.host, proxy.port, limit=MAX_PROXY_ANSWER_BYTES
+                )
             except OSError as exc:
                 raise RealtimeProxyError(f"proxy unreachable ({exc})") from exc
             authority = _connect_authority(host, port)
@@ -302,9 +351,4 @@ def describe_proxy_status() -> tuple[str, bool | None] | None:
     url = proxies.get("http") or proxies.get("https")
     if not url:
         return None
-    parts = urllib.parse.urlsplit(url if "://" in url else f"http://{url}")
-    try:
-        where = f"{parts.hostname}:{parts.port or 80}" if parts.hostname else url
-    except ValueError:
-        where = parts.hostname or "?"
-    return f"{where} -- configured, not used by a live connection yet", None
+    return f"{redacted_proxy(url)} -- configured, not used by a live connection yet", None
