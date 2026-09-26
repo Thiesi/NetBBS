@@ -412,7 +412,7 @@ async def run_link_sync(
         pass_seeds = list(dict.fromkeys(seeds + reliable))
         reached_network = False
         for seed_url in pass_seeds:
-            succeeded = await _sync_one_seed(
+            succeeded = await _sync_seed_safely(
                 node, session, seed_url, own_hello_provider, lane,
                 max_carried_boards=max_carried_boards, max_carried_channels=max_carried_channels,
                 max_carried_file_areas=max_carried_file_areas,
@@ -893,7 +893,10 @@ async def _sync_one_seed(
                 node, session, seed_url, seed_peer.fingerprint, lane,
                 refresh_identity_claims=getattr(own_hello_provider, "refresh", None),
             )
-        except LinkTransportError as exc:
+        except (LinkTransportError, LinkProtocolError) as exc:
+            # A refused list (a responder on a version that sent more than
+            # this node accepts, issue #703) costs this pass its candidates
+            # and nothing else.
             _logger.warning("Link sync: could not request a peer list from seed %s: %s", seed_url, exc)
 
     configured_reporters = await lane.run(list_trusted_reporter_fingerprints)
@@ -1828,6 +1831,24 @@ async def _try_addresses_via(base_urls: list[str], attempt: Callable[[str], Awai
     return False
 
 
+async def _sync_seed_safely(node: LinkNode, session: ClientSession, seed_url: str, *args, **kwargs) -> bool:
+    """`_sync_one_seed`, whose failure ends that seed's pass and nothing else.
+
+    Issue #703: one peer's response raised past every handler, and the
+    exception ended the whole sync task, silencing the node's outbound Link
+    until a restart -- which reproduced it on the very next pass. A seed that
+    misbehaves in a way no step anticipated is logged with its traceback and
+    counted as unreached, so the other seeds and the next pass still run.
+    """
+    try:
+        return await _sync_one_seed(node, session, seed_url, *args, **kwargs)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        _logger.exception("Link sync: the pass with seed %s failed unexpectedly", seed_url)
+        return False
+
+
 async def _try_candidate_fallback(
     node: LinkNode,
     session: ClientSession,
@@ -1895,7 +1916,7 @@ async def _try_candidate_fallback(
             continue
         attempted += 1
         succeeded = await _try_addresses_via(
-            base_urls, lambda url: _sync_one_seed(
+            base_urls, lambda url: _sync_seed_safely(
                 node, session, url, own_hello_provider, lane,
                 enforce_trust_policy=enforce_trust_policy,
                 fallback_offsets=fallback_offsets,
