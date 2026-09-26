@@ -1044,3 +1044,20 @@ def test_a_rehearsal_budget_spans_every_drain_of_the_session(db, door, sysop, bo
     assert drain(db, door, tmp_path, rehearsal=True, rehearsed=spend) == (0, 1)
     assert _result(db, door, first)["would"] == "posted"
     assert _result(db, door, second)["would"] == "rejected"
+
+
+def test_a_truncated_final_scan_says_so_even_when_it_found_requests(db, door, sysop, board, tmp_path, monkeypatch):
+    """Visible requests are answered one by one; whatever the bound hid still
+    gets a receipt, on the normal path and when the authority has lapsed."""
+    from netbbs.doors import outbound
+
+    monkeypatch.setattr(outbound, "_MAX_REQUESTS_SCANNED", 3)
+    _enable(db, door, sysop, board)
+    for index in range(5):
+        _request(tmp_path, name=f"p{index}", subject="Hi", body="...")
+
+    posted, refused = drain(db, door, tmp_path)
+    receipts = [json.loads(path.read_text()) for path in results_dir(db, door.id).glob("*.result.json")]
+    hidden = [receipt for receipt in receipts if receipt["request"] == ""]
+    assert len(hidden) == 1 and "were not seen" in hidden[0]["reason"]
+    assert posted + refused == 3 + 1
