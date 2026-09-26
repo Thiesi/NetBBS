@@ -33,7 +33,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from netbbs.auth.users import User
-from netbbs.boards.boards import Board
+from netbbs.boards.boards import Board, usable_max_age_days
 from netbbs.boards.posts import Post
 from netbbs.communities import get_effective_min_age, get_effective_name_requirement
 from netbbs.link.events import (
@@ -245,6 +245,10 @@ def link_board(
     """
     if is_board_linked(db, board):
         raise LinkBoardsError(f"board {board.name!r} is already Linked")
+    if default_max_post_age_days is not None and usable_max_age_days(default_max_post_age_days) is None:
+        raise LinkBoardsError(
+            f"recommended maximum post age must be at least 1 day, got {default_max_post_age_days}"
+        )
 
     genesis = build_board_genesis(
         signing_identity=node_identity.signing_key,
@@ -395,7 +399,7 @@ def materialize_carried_board(
             payload.get("default_min_write_level", 0),
             payload["created_at"],
             int(payload.get("default_moderated", False)),
-            payload.get("default_max_post_age_days"),
+            usable_max_age_days(payload.get("default_max_post_age_days")),
             payload.get("default_min_age"),
             payload.get("default_name_requirement"),
             json.dumps(genesis.to_dict()),
