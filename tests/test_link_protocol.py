@@ -2926,6 +2926,30 @@ def test_build_peer_list_returns_own_verified_peers_descriptors(tmp_path, clock)
     bob.close()
 
 
+def test_build_peer_list_never_exceeds_what_a_receiver_accepts(tmp_path, clock, monkeypatch):
+    """Issue #703: a node that had met more peers than a receiver accepts in
+    one list sent every requester a list it refused -- and the refusal ended
+    the requester's whole sync task. The list is capped, freshest first."""
+    import netbbs.link.protocol as protocol
+
+    monkeypatch.setattr(protocol, "_MAX_PEER_LIST_ENTRIES_PER_REQUEST", 2)
+    alice = spawn_node(tmp_path, "alice")
+    alice_node = LinkNode(identity=alice.identity)
+    peers = [spawn_node(tmp_path, f"peer-{i}") for i in range(3)]
+    for peer in peers:
+        clock.advance(seconds=60)
+        alice_node.handle_hello(_hello_bytes(LinkNode(identity=peer.identity), clock=clock))
+
+    peer_list = alice_node.build_peer_list()
+
+    assert [d.payload["subject_fingerprint"] for d in peer_list.descriptors] == [
+        peers[2].fingerprint, peers[1].fingerprint,
+    ]
+    receiver = LinkNode(identity=spawn_node(tmp_path, "receiver").identity)
+    receiver.handle_hello(_hello_bytes(alice_node, clock=clock))
+    receiver.handle_peer_list(alice.fingerprint, peer_list)  # accepted, not refused
+
+
 def test_handle_peer_list_records_new_candidates(tmp_path, clock):
     alice = spawn_node(tmp_path, "alice")
     bob = spawn_node(tmp_path, "bob")
