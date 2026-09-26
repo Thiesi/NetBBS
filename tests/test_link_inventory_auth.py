@@ -351,3 +351,22 @@ def test_a_malformed_not_carried_is_a_malformed_request(tmp_path, clock, not_car
         InventoryRequest.from_dict(data)
     alice.close()
     bob.close()
+
+
+def test_the_not_carried_declaration_is_bounded_and_sampled_fresh():
+    """A peer can keep sending geneses to a node past its carry cap; declaring
+    every one would grow each request until the responder refused it (413)."""
+    from netbbs.link.store import bound_not_carried
+
+    many = {"boards": tuple(f"b{i:05d}" for i in range(30)), "channels": tuple(f"c{i:05d}" for i in range(30))}
+    small = {"boards": ("b1",)}
+    assert bound_not_carried(small, limit=10) is small
+
+    samples = [bound_not_carried(many, limit=10) for _ in range(20)]
+    for sample in samples:
+        assert sum(len(ids) for ids in sample.values()) == 10
+        assert set(sample) <= {"boards", "channels"}
+        for kind, ids in sample.items():
+            assert set(ids) <= set(many[kind])
+    # A fresh sample each time, so no fixed subset is left out on every pass.
+    assert len({tuple(sorted((k, i) for k, ids in s.items() for i in ids)) for s in samples}) > 1

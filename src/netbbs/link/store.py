@@ -716,6 +716,33 @@ def uncarried_resource_ids(db: Database) -> dict[str, tuple[str, ...]]:
     return result
 
 
+MAX_NOT_CARRIED_DECLARED = 5000
+"""Issue #669: the most resource IDs one request declares as not carried --
+about 340 KB, well inside the responder's 2 MiB body limit beside the carried
+maps. The stored genesis set is not bounded by anything this node controls: a
+peer can keep sending geneses to a node past its carry cap, and each one is
+kept. Declaring them all would grow every request until the responder refused
+it with 413 and sync stopped altogether."""
+
+
+def bound_not_carried(
+    not_carried: dict[str, tuple[str, ...]], *, limit: int = MAX_NOT_CARRIED_DECLARED
+) -> dict[str, tuple[str, ...]]:
+    """Cap `not_carried` at `limit` IDs in total. Over the cap, each request
+    declares a fresh random sample: no fixed subset is left out on every pass,
+    so whatever is undeclared this time costs one resend, not a standing
+    starvation, and no request ever outgrows the responder's limit."""
+    pairs = [(kind, resource_id) for kind, ids in not_carried.items() for resource_id in ids]
+    if len(pairs) <= limit:
+        return not_carried
+    chosen = sorted(secrets.SystemRandom().sample(pairs, limit))
+    bounded: dict[str, tuple[str, ...]] = {}
+    for kind, resource_id in chosen:
+        bounded.setdefault(kind, ())
+        bounded[kind] += (resource_id,)
+    return bounded
+
+
 _LINKED_RESOURCE_TABLES = {
     "boards": ("board_id", BOARD_GENESIS_OBJECT_TYPE),
     "channels": ("channel_id", CHANNEL_GENESIS_OBJECT_TYPE),
@@ -851,7 +878,9 @@ def build_inventory_request(
                 mapping[resource_id] = tuple(
                     dict.fromkeys([*mapping.get(resource_id, ()), *sorted(content_ids)])
                 )
-    not_carried = uncarried_resource_ids(db) if include_inventory and declare_not_carried else {}
+    not_carried = (
+        bound_not_carried(uncarried_resource_ids(db)) if include_inventory and declare_not_carried else {}
+    )
     created_at = utc_now_iso()
     nonce = secrets.token_hex(16)
     signature = sign_inventory_request(

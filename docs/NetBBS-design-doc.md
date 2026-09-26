@@ -2481,7 +2481,11 @@ carrying it. So the request carries a signed `not_carried` list, by kind, of
 the resources the requester holds a genesis for and has no local copy of, and
 the responder leaves them out. Deleting a Linked resource keeps its genesis on
 file for this, including one this node originated, whose genesis otherwise
-lives only in its own row. The existing maps cannot say this, since their
+lives only in its own row. The list is capped at 5,000 IDs per request: the stored
+genesis set is not bounded by anything the node controls, since a peer can keep
+sending geneses to a node past its cap, and an unbounded list would grow until
+every request was refused. Over the cap each request declares a fresh random
+sample, so what goes undeclared costs a resend, never a fixed starvation. The existing maps cannot say this, since their
 values are known-ID sets and an offered board's posts were never received. The
 field is part of the signed payload only when it names something, so a request
 without it signs exactly as before; and it is sent only to a responder whose
