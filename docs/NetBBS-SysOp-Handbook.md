@@ -481,8 +481,18 @@ The
 [developer handbook's configuration reference](NetBBS-Developer-Handbook.md#node-configuration-reference)
 lists the less common transport and quota settings.
 
-Create a local resource before promoting it to linked scope. To carry a
-remote resource, use its Link browsing/carry actions. Carrying a message board
+Create a local resource before promoting it to linked scope. Linked boards,
+channels and file areas from other nodes are carried automatically up to the
+`max_carried_boards` / `max_carried_channels` / `max_carried_file_areas` caps
+(500 each). Past a cap, a new one is not lost: it waits under **Link status →
+Offered**, with its origin and why, until you **Accept** it (not limited by the
+cap) or **Exclude** it. Set a cap to 0 to carry only what you accept. Lowering a
+cap removes nothing already carried. Deleting a carried resource excludes it:
+it does not come back on the next sync, and **Link status → Excluded** lists
+it. Link status shows `carried/cap` for all three kinds and how many are
+offered and excluded.
+
+To carry a remote resource, use its Link browsing/carry actions. Carrying a message board
 creates a local browsable copy; file catalogues do not automatically download
 all file contents. Ask the other SysOp to verify both sides when first testing
 publication. Hello/discovery alone does not prove content arrived.

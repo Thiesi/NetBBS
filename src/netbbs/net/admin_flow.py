@@ -58,6 +58,7 @@ import shlex
 import sqlite3
 import sys
 from pathlib import Path
+import dataclasses
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Sequence
 from zoneinfo import available_timezones
@@ -225,7 +226,7 @@ from netbbs.link.boards import (
     queue_approved_board_post_if_linked,
     rebuild_carried_post_materialization,
 )
-from netbbs.link.channels import LinkChannelsError, is_channel_linked, link_channel
+from netbbs.link.channels import LinkChannelsError, carried_channel_count, is_channel_linked, link_channel
 from netbbs.link.diagnostics import (
     DiagnosticLogEntry,
     list_diagnostic_log_entries,
@@ -233,6 +234,7 @@ from netbbs.link.diagnostics import (
 )
 from netbbs.link.files import (
     LinkFilesError,
+    carried_file_area_count,
     is_area_linked,
     link_file_area,
     queue_file_descriptor_if_linked,
@@ -262,8 +264,20 @@ from netbbs.link.remote_attestation import (
     remove_attestation_recipient,
     set_remote_attestation_override,
 )
+from netbbs.link.carry import (
+    EXCLUDED,
+    KIND_LABELS,
+    OFFERED,
+    CarryDecision,
+    CarryDecisionError,
+    accept_offer,
+    carry_decision_counts,
+    count_carry_decisions,
+    exclude_offer,
+    list_carry_decisions,
+)
 from netbbs.link.realtime_proxy import describe_proxy_status
-from netbbs.link.store import introduced_by, retain_linked_genesis
+from netbbs.link.store import clear_deletion_record, introduced_by, retain_linked_genesis
 from netbbs.link.trust_carriage import relays_refusing_trust_deposits
 from netbbs.link.onboarding import (
     Participation,
@@ -7676,8 +7690,20 @@ async def _link_status_sections(
 
     content = [Field("Linked boards", str(len(node.boards)))]
     if config is not None:
-        carried = await lane.run(carried_board_count, link_context.node_identity.fingerprint)
-        content.append(Field("Carried boards", f"{carried}/{config.max_carried_boards}"))
+        # Issue #683: every kind the carry caps govern, not boards alone.
+        own = link_context.node_identity.fingerprint
+        for label, counter, cap in (
+            ("Carried boards", carried_board_count, config.max_carried_boards),
+            ("Carried channels", carried_channel_count, config.max_carried_channels),
+            ("Carried file areas", carried_file_area_count, config.max_carried_file_areas),
+        ):
+            content.append(Field(label, f"{await lane.run(counter, own)}/{cap}"))
+    offered, excluded = await _carry_decision_totals(lane)
+    content.append(Field(
+        "Offered", f"{offered} waiting to be accepted" if offered else "none",
+        color=WARNING_COLOR if offered else MUTED_COLOR,
+    ))
+    content.append(Field("Excluded", str(excluded) if excluded else "none", color=VALUE_COLOR if excluded else MUTED_COLOR))
     content.append(Field("Known events", str(len(node.known_event_ids))))
     content.append(Field("Post-edit chains", str(len(node.post_edits))))
     sections.append(Section("Content", content))
@@ -7771,6 +7797,137 @@ async def _link_peer_detail(
     )
 
 
+# -- carry decisions: offered and excluded resources (design doc §9.3, --------
+# -- issue #683) ---------------------------------------------------------------
+
+
+_CARRY_REASONS = {
+    "cap": "arrived when this node was already at its carry cap",
+    "refused": "cannot be carried as it stands here (its name or id is taken)",
+    "deleted": "deleted here while it was carried",
+    "sysop": "declined by a SysOp",
+    "migrated": "held without a local copy before carry decisions were recorded",
+}
+
+
+async def _carry_decision_totals(lane: DatabaseLane) -> tuple[int, int]:
+    counts = await lane.run(carry_decision_counts)
+    offered = sum(n for (_kind, state), n in counts.items() if state == OFFERED)
+    excluded = sum(n for (_kind, state), n in counts.items() if state == EXCLUDED)
+    return offered, excluded
+
+
+def _carry_decision_sections(decision: CarryDecision, *, origin_label: str, decided: str) -> list[Section]:
+    rows: list[Field | Note] = [
+        Field("Kind", KIND_LABELS[decision.kind]),
+        Field("Name", decision.name),
+    ]
+    if decision.description:
+        rows.append(Field("Description", decision.description))
+    rows.append(Field("Origin", origin_label))
+    rows.append(Field("Why", _CARRY_REASONS.get(decision.reason, decision.reason)))
+    rows.append(Field("Since", decided))
+    if decision.state == OFFERED:
+        rows.append(Note(
+            "Accepting carries it here: a local copy is created now and its content arrives with "
+            "the next sync passes. The carry cap limits only what arrives on its own, not what "
+            "you accept."
+        ))
+    else:
+        rows.append(Note("Not carried on this node. Its events are not fetched, and peers are told so."))
+    return [Section("Link resource", rows)]
+
+
+async def _carry_decisions_screen(
+    session: Session, lane: DatabaseLane, actor: User, *, link_context: LinkContext, state: str,
+) -> None:
+    """Picker over the offered (or excluded) resources, then one resource's
+    screen, with `[A]ccept` and `E[x]clude` for an offer (issue #683)."""
+    node = link_context.link_node
+    title = "Offered to this node" if state == OFFERED else "Excluded from this node"
+    message = None
+    while True:
+        # A resource's name and description come from a remote node's genesis:
+        # sanitized once here, before anything below styles them.
+        decisions = [
+            dataclasses.replace(
+                d, name=sanitize_text(d.name),
+                description=sanitize_text(d.description) if d.description else None,
+            )
+            for d in await lane.run(list_carry_decisions, state)
+        ]
+        total = await lane.run(count_carry_decisions, state)
+        display_format, display_timezone = await lane.run(resolve_display_preferences)
+        chrome = await _load_chrome(lane, actor)
+
+        def _origin_label(fingerprint: str) -> str:
+            peer = node.peers.get(fingerprint)
+            label = identity_for_peer(peer).label if peer is not None else (fingerprint or "unknown")
+            return sanitize_text(label)
+
+        selected = await pick_item(
+            session, decisions,
+            name_of=lambda d: d.name,
+            stable_id_of=lambda d: d.ref,
+            description_of=lambda d: f"{KIND_LABELS[d.kind]} from {_origin_label(d.origin_fingerprint)}",
+            title=title if total <= len(decisions) else f"{title} (newest {len(decisions)} of {total})",
+            empty_message="Nothing here.",
+            redraw_in_place=chrome.redraw_in_place,
+            unicode_style=chrome.unicode_style,
+            collapsed=chrome.collapsed,
+            accent_color=chrome.accent_color,
+            header_color=chrome.header_color,
+        )
+        if selected is None:
+            return
+        decided = format_for_display(
+            selected.decided_at, override_format=display_format, override_timezone=display_timezone
+        )
+        actions = []
+        if state == OFFERED:
+            actions += [("a", menu_key("A", "ccept")), ("x", menu_key("x", "clude", prefix="E"))]
+        actions.append(_BACK_ACTION)
+        choice, _page = await show_detail(
+            session,
+            title=_detail_title(
+                session, chrome, selected.name, breadcrumb=("SysOp", "Operations", "Link status", title),
+            ),
+            sections=_carry_decision_sections(
+                selected, origin_label=_origin_label(selected.origin_fingerprint), decided=decided
+            ),
+            actions=actions, message=message,
+            redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+        )
+        message = None
+        if choice == "a":
+            try:
+                await lane.run(
+                    accept_offer, selected.kind, selected.resource_id, actor=actor,
+                    max_remote_files_per_area=(
+                        link_context.link_config.max_remote_files_per_area
+                        if link_context.link_config is not None else None
+                    ),
+                )
+            except CarryDecisionError as exc:
+                _announce_line(session, colored(f"Could not accept {selected.name!r}: {exc}", fg_color=ERROR_COLOR))
+            else:
+                _announce_line(
+                    session,
+                    f"{selected.name!r} is carried now; its content arrives with the next sync passes.",
+                )
+                if not await lane.run(list_carry_decisions, state):
+                    return
+        elif choice == "x":
+            try:
+                await lane.run(exclude_offer, selected.kind, selected.resource_id, actor=actor)
+            except CarryDecisionError as exc:
+                _announce_line(session, colored(f"Could not exclude {selected.name!r}: {exc}", fg_color=ERROR_COLOR))
+            else:
+                _announce_line(session, f"{selected.name!r} excluded; it is not carried on this node.")
+                if not await lane.run(list_carry_decisions, state):
+                    return
+
+
 async def _link_status_screen(
     session: Session, lane: DatabaseLane, actor: User, *, link_context: LinkContext,
     node_controls: NodeControls | None = None,
@@ -7818,6 +7975,12 @@ async def _link_status_screen(
             actions.append(("a", menu_key("A", "cknowledge identity changes")))
         # Issue #624: the node's own keys and their rotation.
         actions.append(("k", menu_key("K", "eys")))
+        # Issue #683: what this node holds and does not carry.
+        offered, excluded = await _carry_decision_totals(lane)
+        if offered:
+            actions.append(("o", menu_key("O", "ffered")))
+        if excluded:
+            actions.append(("x", menu_key("x", "cluded", prefix="E")))
         actions.append(_BACK_ACTION)
         choice, page = await show_detail(
             session,
@@ -7845,6 +8008,10 @@ async def _link_status_screen(
             for notice in identity_notices[:5]:
                 await lane.run(dismiss_identity_observation, notice.id)
             message = colored("Identity changes acknowledged.", fg_color=SUCCESS_COLOR)
+        elif choice == "o":
+            await _carry_decisions_screen(session, lane, actor, link_context=link_context, state=OFFERED)
+        elif choice == "x":
+            await _carry_decisions_screen(session, lane, actor, link_context=link_context, state=EXCLUDED)
 
 
 # -- node keys: guided operational-key rotation (design doc §4.5, ------------
@@ -14492,11 +14659,20 @@ async def _delete_board_screen(session: Session, lane: DatabaseLane, actor: User
     if confirmation != board.name:
         _announce_line(session, "Cancelled.")
         return False
-    # Issue #669: so a Linked board stays declared as not carried here.
-    await lane.run(retain_linked_genesis, "boards", board.board_id)
-    await lane.run(delete_board, board, deleted_by=actor)
-    _announce_line(session, f"{board.name!r} deleted.")
+    # Issues #669/#683: a Linked board keeps its genesis and is recorded as
+    # excluded, so it stays declared as not carried and does not come back.
+    kept = await lane.run(retain_linked_genesis, "boards", board.board_id, actor_user_id=actor.id)
+    try:
+        await lane.run(delete_board, board, deleted_by=actor)
+    except BaseException:
+        if kept:
+            await lane.run(clear_deletion_record, "boards", board.board_id)
+        raise
+    _announce_line(session, f"{board.name!r} deleted." + (_EXCLUDED_AFTER_DELETE if kept else ""))
     return True
+
+
+_EXCLUDED_AFTER_DELETE = " It is excluded from Link here and will not come back; Link status lists it."
 
 
 async def _pending_posts_screen(
@@ -15246,10 +15422,16 @@ async def _delete_area_screen(session: Session, lane: DatabaseLane, actor: User,
     if confirmation != area.name:
         _announce_line(session, "Cancelled.")
         return False
-    # Issue #669: so a Linked file area stays declared as not carried here.
-    await lane.run(retain_linked_genesis, "file_areas", area.area_id)
-    await lane.run(delete_file_area, area, deleted_by=actor)
-    _announce_line(session, f"{area.name!r} deleted.")
+    # Issues #669/#683: a Linked file area keeps its genesis and is recorded as
+    # excluded, so it stays declared as not carried and does not come back.
+    kept = await lane.run(retain_linked_genesis, "file_areas", area.area_id, actor_user_id=actor.id)
+    try:
+        await lane.run(delete_file_area, area, deleted_by=actor)
+    except BaseException:
+        if kept:
+            await lane.run(clear_deletion_record, "file_areas", area.area_id)
+        raise
+    _announce_line(session, f"{area.name!r} deleted." + (_EXCLUDED_AFTER_DELETE if kept else ""))
     return True
 
 
@@ -17280,10 +17462,16 @@ async def _delete_channel_screen(session: Session, lane: DatabaseLane, actor: Us
     if confirmation != channel.name:
         _announce_line(session, "Cancelled.")
         return False
-    # Issue #669: so a Linked channel stays declared as not carried here.
-    await lane.run(retain_linked_genesis, "channels", channel.channel_id)
-    await lane.run(delete_channel, channel, deleted_by=actor)
-    _announce_line(session, f"{channel.name!r} deleted.")
+    # Issues #669/#683: a Linked channel keeps its genesis and is recorded as
+    # excluded, so it stays declared as not carried and does not come back.
+    kept = await lane.run(retain_linked_genesis, "channels", channel.channel_id, actor_user_id=actor.id)
+    try:
+        await lane.run(delete_channel, channel, deleted_by=actor)
+    except BaseException:
+        if kept:
+            await lane.run(clear_deletion_record, "channels", channel.channel_id)
+        raise
+    _announce_line(session, f"{channel.name!r} deleted." + (_EXCLUDED_AFTER_DELETE if kept else ""))
     return True
 
 

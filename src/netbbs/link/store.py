@@ -513,7 +513,10 @@ _BOARD_SCOPED_OBJECT_TYPES = frozenset(
 )
 
 
-def save_event(db: Database, *, sender_fingerprint: str, content_id: str, object_type: str, envelope: dict) -> None:
+def save_event(
+    db: Database, *, sender_fingerprint: str, content_id: str, object_type: str, envelope: dict,
+    commit: bool = True,
+) -> None:
     """
     Record one newly-accepted event. Called once per content_id
     `handle_events` returned as newly accepted -- an event already on
@@ -572,7 +575,10 @@ def save_event(db: Database, *, sender_fingerprint: str, content_id: str, object
         """,
         (content_id, sender_fingerprint, object_type, json.dumps(envelope), now, board_id, channel_id, file_area_id),
     )
-    db.connection.commit()
+    # Issue #683: `commit=False` lets `netbbs.link.carry` write this and the
+    # carry decision it belongs with in one transaction.
+    if commit:
+        db.connection.commit()
     if object_type == KEY_TRANSITION_OBJECT_TYPE:
         # Issue #86: purge on write, scoped to the same object type this
         # write just touched -- the same shape LinkDiagnosticLogHandler.
@@ -680,9 +686,14 @@ def uncarried_resource_ids(db: Database) -> dict[str, tuple[str, ...]]:
     Issue #669: every resource this node has accepted a genesis for and has
     no local row for, by inventory kind -- a carry-quota refusal, a SysOp's
     deletion of a carried resource, a refused `mrc:` channel (issue #300), or
-    the genesis crash window. Until issue #683 records those states, this is
-    inferred from `link_events` exactly the way `inventory_wanted_ids` infers
-    "seen and declined".
+    the genesis crash window.
+
+    Issue #683 records those states in `link_carry_decisions`, and every
+    offered or excluded resource is included. The inference from `link_events`
+    stays alongside it as a floor, so a gap between recording and deleting
+    never leaves a resource in neither set; and a resource with a carried
+    local row is never included, so a stale decision cannot hide one this node
+    does carry.
 
     Such a resource is absent from what `build_inventory_request` declares,
     and a responder reads absent as "never seen" (issue #94), so it used to
@@ -714,8 +725,14 @@ def uncarried_resource_ids(db: Database) -> dict[str, tuple[str, ...]]:
                 ORDER BY {column}""",
             (object_type,),
         ).fetchall()
-        if rows:
-            result[kind] = tuple(row["resource_id"] for row in rows)
+        recorded = db.connection.execute(
+            f"""SELECT resource_id FROM link_carry_decisions
+                WHERE kind = ? AND resource_id NOT IN ({local_ids})""",
+            (kind,),
+        ).fetchall()
+        ids = sorted({row["resource_id"] for row in rows} | {row["resource_id"] for row in recorded})
+        if ids:
+            result[kind] = tuple(ids)
     return result
 
 
@@ -753,7 +770,9 @@ _LINKED_RESOURCE_TABLES = {
 }
 
 
-def retain_linked_genesis(db: Database, table: str, resource_id: str) -> None:
+def retain_linked_genesis(
+    db: Database, table: str, resource_id: str, *, actor_user_id: int | None = None
+) -> bool:
     """
     Issue #669: keep a Linked resource's genesis in `link_events` before the
     SysOp deletes the resource, so `uncarried_resource_ids` can go on
@@ -764,21 +783,64 @@ def retain_linked_genesis(db: Database, table: str, resource_id: str) -> None:
     neither carried nor not carried, and every peer carrying it would resend
     it and everything under it on every pass. A resource that was never
     Linked has nothing to keep.
+
+    Issue #683: the same transaction records the resource as excluded
+    (`deleted`), so it is "not carried on this node" by record rather than by
+    inference, and appears on the SysOp's excluded list. Returns whether
+    anything was kept; `clear_deletion_record` undoes it if the deletion that
+    follows fails.
     """
     id_column, object_type = _LINKED_RESOURCE_TABLES[table]
     row = db.connection.execute(
         f"SELECT link_genesis_json FROM {table} WHERE {id_column} = ?", (resource_id,)
     ).fetchone()
     if row is None or row["link_genesis_json"] is None:
-        return
+        return False
     genesis = json.loads(row["link_genesis_json"])
-    save_event(
-        db,
-        sender_fingerprint=genesis["envelope"]["payload"]["origin_fingerprint"],
-        content_id=event_content_id(genesis["envelope"]),
-        object_type=object_type,
-        envelope=genesis,
+    db.connection.execute("BEGIN IMMEDIATE")
+    try:
+        save_event(
+            db,
+            sender_fingerprint=genesis["envelope"]["payload"]["origin_fingerprint"],
+            content_id=event_content_id(genesis["envelope"]),
+            object_type=object_type,
+            envelope=genesis,
+            commit=False,
+        )
+        db.connection.execute(
+            """
+            INSERT INTO link_carry_decisions (kind, resource_id, state, reason, decided_at, actor_user_id)
+            VALUES (?, ?, 'excluded', 'deleted', ?, ?)
+            ON CONFLICT(kind, resource_id) DO UPDATE SET
+                state = 'excluded', reason = 'deleted',
+                decided_at = excluded.decided_at, actor_user_id = excluded.actor_user_id
+            """,
+            (table, resource_id, utc_now_iso(), actor_user_id),
+        )
+    except BaseException:
+        db.connection.rollback()
+        raise
+    db.connection.commit()
+    return True
+
+
+def clear_deletion_record(db: Database, table: str, resource_id: str) -> None:
+    """Undo `retain_linked_genesis`'s exclusion record when the deletion it
+    was written for did not happen. The kept genesis stays: it is harmless,
+    and the resource is carried again by its local row."""
+    db.connection.execute(
+        "DELETE FROM link_carry_decisions WHERE kind = ? AND resource_id = ? AND reason = 'deleted'",
+        (table, resource_id),
     )
+    db.connection.commit()
+
+
+def event_is_stored(db: Database, content_id: str) -> bool:
+    """Whether `link_events` holds `content_id` -- what "known" has to mean for
+    an event this node could not project (issue #683)."""
+    return db.connection.execute(
+        "SELECT 1 FROM link_events WHERE content_id = ?", (content_id,)
+    ).fetchone() is not None
 
 
 def carried_board_ids(db: Database) -> list[str]:
