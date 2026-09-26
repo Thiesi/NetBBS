@@ -5884,7 +5884,15 @@ directory) and not only at the end (a flood would pass `netbbs.backup`'s scan
 ceiling mid-drain). `limit`/`final` let an in-session tick take a few requests
 while only the final drain refuses leftovers. A rehearsal's would-be spend is
 carried across one session's drains by the caller (`rehearsed`), since
-rehearsal posts are never persisted.
+rehearsal posts are never persisted. The ticker
+(`runtime._drain_while_running`) asks `has_requests` -- the same question the
+drain's scan asks, in a worker thread -- before queueing a lane job, so an idle
+door costs the shared lane nothing; it is cancelled before the final drain,
+and a lane job it already queued still runs first because the lane is one
+FIFO worker. A VM door's guest-visible receipt copy (`vm.copy_receipts`) is
+reconciled with the retained receipts every tick, relative to descriptors
+opened without following links, staging each copy as `.part` and renaming it
+into place.
 A VM guest can write its node directory, so the drop directory is guest-
 controlled: `outbound` or any request in it may be a symlink to a host path.
 `_DropDir` opens it once with `O_DIRECTORY|O_NOFOLLOW` and makes every scan,

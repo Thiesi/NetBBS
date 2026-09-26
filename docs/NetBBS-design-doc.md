@@ -7257,7 +7257,9 @@ Compatibility extension (issues #296/#297):
   exactly-once delivery out of them. Processing is at-most-once, though: a
   drain claims each request by renaming it out of the request pattern before
   reading it, so no later drain can see it again even if its removal fails --
-  the property that makes draining during a session safe. A SysOp's test
+  the property that makes draining during a session safe. A running door's
+  requests are picked up every two seconds, a few at a time, and once more at
+  exit; only the drain at exit refuses what is left over. A SysOp's test
   launch is drained too, but answered with a `rehearsal` verdict: nothing is
   posted, debited or audit-logged. Reads of any
   kind remain out of scope, and the hook is available to locally-launched
