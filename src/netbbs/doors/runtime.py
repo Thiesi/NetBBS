@@ -488,12 +488,14 @@ async def _drain_while_running(lane, door, workdir, node_identity, rehearsal, *,
     while True:
         await asyncio.sleep(interval or _OUTBOUND_TICK_SECONDS)
         try:
-            if not await asyncio.to_thread(has_requests, workdir):
-                continue
-            await lane.run(drain_outbound, door, workdir,
-                           node_identity=node_identity() if callable(node_identity) else node_identity,
-                           rehearsal=rehearsal, limit=_OUTBOUND_TICK_LIMIT, final=False)
+            if await asyncio.to_thread(has_requests, workdir):
+                await lane.run(drain_outbound, door, workdir,
+                               node_identity=node_identity() if callable(node_identity) else node_identity,
+                               rehearsal=rehearsal, limit=_OUTBOUND_TICK_LIMIT, final=False)
             if receipts is not None:
+                # Every tick, not only after this session drained: another
+                # session of the same door may have been answered, and a native
+                # door would see that receipt in the shared directory at once.
                 from netbbs.doors.vm import copy_receipts
                 await asyncio.to_thread(copy_receipts, receipts, workdir, RESULTS_KEPT)
         except Exception as exc:

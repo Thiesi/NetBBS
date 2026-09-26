@@ -299,29 +299,138 @@ def publish_guest_info(directory: Path, info_path: Path, info: dict, results_kep
     return info
 
 
+#: Largest receipt copied into a guest. Receipts NetBBS writes are a few
+#: hundred bytes; the bound only guards the read.
+_RECEIPT_BYTES = 64 * 1024
+
+
 def copy_receipts(source: Path, directory: Path, results_kept: int) -> None:
     """Bring the guest's copy of the door's receipts up to date.
 
     Only finished receipts (a `.part` is still being written), only the newest
     the node keeps anyway, and only those the guest does not have yet, so a
-    tick costs a directory listing when nothing has changed.
-    """
-    from netbbs.doors.outbound import RESULT_SUFFIX
+    tick costs two bounded listings when nothing has changed.
 
-    target = directory / GUEST_RESULTS_DIRNAME
+    `directory` is the guest's own node export, written by the guest while
+    this runs, so nothing in it is trusted: `outbound-results` may have been
+    replaced by a link to a host path, or filled with names. Everything here
+    is done relative to descriptors opened without following links; a link in
+    place of the directory is removed and a real directory made; each receipt
+    is staged and renamed into place, so a guest polling the directory never
+    reads half of one.
+    """
+    from netbbs.doors.outbound import _FD_SAFE, RESULT_SUFFIX
+
+    try:
+        with os.scandir(source) as entries:
+            names = sorted(entry.name for entry in entries
+                           if entry.name.endswith(RESULT_SUFFIX) and entry.is_file(follow_symlinks=False))
+    except FileNotFoundError:
+        names = []  # no receipt yet: the node makes the directory on the first
+    except OSError:
+        return
+    # No early return when there are none yet: the directory itself is part
+    # of what the guest is promised, and it lists it before its first receipt.
+    names = names[-results_kept:]
+    if not _FD_SAFE:
+        # Development hosts only: no VM door runs where descriptors cannot be
+        # pinned, so there is no guest to defend against.
+        _copy_receipts_by_path(source, directory / GUEST_RESULTS_DIRNAME, names)
+        return
+    nofollow_dir = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    try:
+        node = os.open(directory, nofollow_dir)
+    except OSError:
+        return
+    try:
+        target = _pinned_subdirectory(node, GUEST_RESULTS_DIRNAME)
+        if target is None:
+            return
+        try:
+            have = _bounded_names(target, 4 * results_kept)
+            for name in names:
+                if name not in have:
+                    _stage_and_publish(source / name, target, name)
+        finally:
+            os.close(target)
+    finally:
+        os.close(node)
+
+
+def _pinned_subdirectory(parent: int, name: str) -> int | None:
+    """A descriptor for `name` in `parent` as a real directory, made if need be."""
+    nofollow_dir = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    for _ in range(2):
+        try:
+            return os.open(name, nofollow_dir, dir_fd=parent)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            # A link or a file where the directory belongs: the guest's, so
+            # removing the link itself (never its target) is ours to do.
+            try:
+                os.unlink(name, dir_fd=parent)
+            except OSError:
+                return None
+        try:
+            os.mkdir(name, 0o755, dir_fd=parent)
+        except FileExistsError:
+            continue
+        except OSError:
+            return None
+    return None
+
+
+def _bounded_names(directory: int, limit: int) -> set[str]:
+    names: set[str] = set()
+    try:
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                if len(names) >= limit:
+                    break
+                names.add(entry.name)
+    except OSError:
+        pass
+    return names
+
+
+def _stage_and_publish(source: Path, target: int, name: str) -> None:
+    try:
+        with open(source, "rb") as receipt:
+            data = receipt.read(_RECEIPT_BYTES + 1)
+    except OSError:
+        return
+    if len(data) > _RECEIPT_BYTES:
+        return
+    staging = name + ".part"
+    try:
+        try:
+            os.unlink(staging, dir_fd=target)
+        except FileNotFoundError:
+            pass
+        descriptor = os.open(staging, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644,
+                             dir_fd=target)
+        with os.fdopen(descriptor, "wb") as out:
+            out.write(data)
+        # rename(2) replaces a link at `name` rather than following it.
+        os.rename(staging, name, src_dir_fd=target, dst_dir_fd=target)
+    except OSError:
+        return
+
+
+def _copy_receipts_by_path(source: Path, target: Path, names: list[str]) -> None:
     try:
         target.mkdir(exist_ok=True)
         have = {entry.name for entry in target.iterdir()}
-        receipts = sorted(entry for entry in source.iterdir()
-                          if entry.name.endswith(RESULT_SUFFIX) and entry.is_file()
-                          and not entry.is_symlink())[-results_kept:]
     except OSError:
         return
-    for receipt in receipts:
-        if receipt.name in have:
+    for name in names:
+        if name in have:
             continue
         try:
-            (target / receipt.name).write_bytes(receipt.read_bytes())
+            staging = target / (name + ".part")
+            staging.write_bytes((source / name).read_bytes())
+            staging.replace(target / name)
         except OSError:
             continue
 

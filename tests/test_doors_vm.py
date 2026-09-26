@@ -496,3 +496,75 @@ def test_a_vm_door_sees_its_receipt_during_the_session(db, lane, player, tmp_pat
     assert _play(lane, door, player).reason == "exited"
     receipts = json.loads((tmp_path / "game" / "live-receipt").read_text())
     assert [receipt["status"] for receipt in receipts if receipt["request"] == "live"] == ["posted"]
+
+
+# -- the receipt copy writes into a guest-writable directory -----------------
+
+
+def _receipts(tmp_path, count=2):
+    source = tmp_path / "door-outbound"
+    source.mkdir()
+    for index in range(count):
+        (source / f"launch.{index}.post.result.json").write_text(f'{{"n": {index}}}')
+    node = tmp_path / "node"
+    node.mkdir()
+    return source, node
+
+
+@posix_only
+def test_a_receipt_directory_swapped_for_a_link_is_not_written_through(tmp_path):
+    """The guest writes its node export while the copy runs. A link where the
+    receipt directory belongs must never let NetBBS write a host path."""
+    source, node = _receipts(tmp_path)
+    host = tmp_path / "host"
+    host.mkdir()
+    (node / "outbound-results").symlink_to(host, target_is_directory=True)
+
+    vm.copy_receipts(source, node, results_kept=10)
+
+    assert list(host.iterdir()) == []
+    copied = node / "outbound-results"
+    assert copied.is_dir() and not copied.is_symlink()
+    assert sorted(path.name for path in copied.iterdir()) == sorted(path.name for path in source.iterdir())
+
+
+@posix_only
+def test_a_staging_name_planted_as_a_link_is_not_written_through(tmp_path):
+    """The guest can guess the staging name; a link planted there is removed,
+    never opened."""
+    source, node = _receipts(tmp_path, count=1)
+    (node / "outbound-results").mkdir()
+    victim = tmp_path / "victim"
+    victim.write_text("untouched")
+    (node / "outbound-results" / "launch.0.post.result.json.part").symlink_to(victim)
+
+    vm.copy_receipts(source, node, results_kept=10)
+
+    assert victim.read_text() == "untouched"
+    copied = node / "outbound-results" / "launch.0.post.result.json"
+    assert not copied.is_symlink() and copied.read_text() == '{"n": 0}'
+
+
+def test_the_copy_never_exposes_a_partial_receipt_name(tmp_path, monkeypatch):
+    """Staged under a name the guest ignores, then renamed into place."""
+    source, node = _receipts(tmp_path, count=1)
+    seen = []
+    real_replace = vm.os.replace
+
+    def watching(src, dst, *args, **kwargs):
+        seen.append((str(src), str(dst)))
+        return real_replace(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(vm.os, "replace", watching)
+    monkeypatch.setattr(vm.os, "rename", watching)
+    vm.copy_receipts(source, node, results_kept=10)
+    assert seen and all(src.endswith(".part") and dst.endswith(".result.json") for src, dst in seen)
+
+
+@posix_only
+def test_the_receipt_directory_exists_before_the_first_receipt(tmp_path):
+    source = tmp_path / "door-outbound"  # not made yet: no receipt has been written
+    node = tmp_path / "node"
+    node.mkdir()
+    vm.copy_receipts(source, node, results_kept=10)
+    assert (node / "outbound-results").is_dir()

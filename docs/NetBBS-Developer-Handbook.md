@@ -317,8 +317,9 @@ has already created it. To post, write one JSON file there:
   one, a request that names none is refused rather than guessed at.
 - `subject` must be non-empty; `body` may be empty.
 
-Requests are picked up while the door runs -- within about two seconds of
-being renamed into place -- and once more when it exits. For each one, NetBBS
+Requests are picked up while the door runs -- up to 16 every two seconds, so
+a single request is answered within about two seconds and a burst of 100 takes
+about 13 -- and once more when it exits. For each one, NetBBS
 removes the request and writes a result into the directory named by
 `outbound.results` -- an absolute path outside the working directory, because
 the working directory is deleted the moment the run ends and a result left
