@@ -115,15 +115,15 @@ def _stays_on_screen_until_the_next_prompt(session, marker):
 def test_a_board_outcome_is_shown_on_the_redrawn_page(db, alice):
     board = create_board(db, "general", creator=alice)
     create_post(db, board, alice, "Subject", "Body")
-    session = FakeSession(["e", "1", "", "/edit 1", "Revised", "", "s", "b"])
+    session = FakeSession(["1", "e", "", "/edit 1", "Revised", "", "s", "b", "b"])
 
     asyncio.run(board_flow._show_board(session, db, board, alice))
 
-    # The last screen drawn is the board page, and the outcome is on it,
-    # right above its prompt -- not on the review screen it replaced.
-    screen = session.after_last_clear()
-    assert "Post updated." in screen
-    assert screen.index("Post updated.") < screen.rindex("Choice:")
+    # An edit returns to the post it edited (issue #679's reader), and the
+    # outcome is on that screen, right above its prompt -- not on the
+    # review screen the reader replaced.
+    screen = _stays_on_screen_until_the_next_prompt(session, "Post updated.")
+    assert "[E]dit" in screen
     assert pending_notices(session) == []
 
 
@@ -161,13 +161,13 @@ def test_the_remove_action_uses_one_verb_throughout(db, alice):
         db, alice, object_type="board", object_id=board.id, permissions=BoardPermission.DELETE, granted_by=alice
     )
     create_post(db, board, alice, "Subject", "Body")
-    session = FakeSession(["t", "1", "y", "b"])
+    session = FakeSession(["1", "t", "y", "b", "b"])
 
     asyncio.run(board_flow._show_board(session, db, board, alice))
 
     text = session.visible()
     assert "Remove pos[t]" in text
-    assert "Remove which post number" in text
+    assert 'Remove "Subject"?' in text
     assert "ombstone" not in text
 
 

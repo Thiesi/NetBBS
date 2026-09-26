@@ -26,7 +26,7 @@ from netbbs.boards.boards import Board
 from netbbs.boards.content_id import compute_content_id
 from netbbs.boards.limits import MAX_BODY_BYTES, MAX_SUBJECT_BYTES
 from netbbs.config import get_expiry_grace_period_days
-from netbbs.link.enforcement import envelope_content_visible
+from netbbs.link.enforcement import envelope_content_visible, link_content_visible
 from netbbs.moderation import BoardPermission, has_permission, record_action
 from netbbs.permissions import require_level
 from netbbs.search import reindex_post
@@ -455,6 +455,33 @@ def get_post(db: Database, post_id: str) -> Post:
     if row is None:
         raise PostError(f"no such post: {post_id!r}")
     return _row_to_post(row)
+
+
+def visible_post(db: Database, post_id: str) -> Post | None:
+    """The post `post_id` belongs to, as the feed would show it right now --
+    its current approved revision -- or `None` when the feed would not show
+    it at all: expired, pending, deleted, or its signed author hidden by
+    trust (design doc §12.8).
+
+    For a caller-facing screen that names another post, such as a reply's
+    "reply to ..." (issue #679). `get_post` is deliberately unfiltered and
+    exact-revision, which is right for reply-parent resolution and wrong
+    for anything a caller reads."""
+    row = db.connection.execute(
+        "SELECT root_post_id, board_id FROM posts WHERE post_id = ?", (post_id,)
+    ).fetchone()
+    if row is None:
+        return None
+    root = db.connection.execute(
+        f"""
+        SELECT root.* FROM posts root
+        WHERE root.post_id = ? AND root.board_id = ? AND {_HAS_APPROVED_VERSION_SQL}
+        """,
+        (row["root_post_id"], row["board_id"]),
+    ).fetchone()
+    if root is None or not link_content_visible(db, root["post_id"]):
+        return None
+    return _resolve_current_version(db, root)
 
 
 def _resolve_current_version(db: Database, root_row: sqlite3.Row) -> Post:
@@ -1062,6 +1089,15 @@ def _cutoff_iso(days: int) -> str:
     stored `created_at` strings, same as `list_posts_page`'s cursors."""
     cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days)
     return cutoff.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def sweep_expired_posts(db: Database, board: Board) -> None:
+    """Bring `board`'s expiry state up to date. Expiry is swept lazily, on
+    the reads that show a board; any other surface that reports on posts
+    -- an unread count on the board list or in [N]ew scan -- runs this
+    first, or it counts posts past their age that the board itself would
+    no longer show (Codex review on #719)."""
+    _sweep_expired_posts(db, board)
 
 
 def _sweep_expired_posts(db: Database, board: Board) -> None:

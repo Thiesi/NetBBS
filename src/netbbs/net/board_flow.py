@@ -21,7 +21,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
-from netbbs.activity import record_board_seen
+from netbbs.activity import board_seen_arrival_id, record_board_seen, unread_post_count
 from netbbs.attestation import format_name_for_resource, meets_age, meets_name_requirement
 from netbbs.auth.users import User, get_user_by_id
 from netbbs.boards import (
@@ -35,6 +35,7 @@ from netbbs.boards import (
     list_boards,
     list_posts_page,
     tombstone_post,
+    visible_post,
 )
 from netbbs.boards.categories import Category, list_subcategories, list_top_level_categories
 from netbbs.boards.categories import get_category_by_id as get_board_category_by_id
@@ -45,7 +46,7 @@ from netbbs.communities import (
     get_effective_min_write_level,
     get_effective_name_requirement,
 )
-from netbbs.link.node_profiles import present_link_author_label
+from netbbs.link.node_profiles import identity_for_fingerprint, present_link_author_label
 from netbbs.link.remote_attestation import format_remote_name_for_resource
 from netbbs.link.trust import TrustSubject
 from netbbs.link.boards import (
@@ -61,16 +62,19 @@ from netbbs.link.boards import (
 from netbbs.moderation import BoardPermission, has_permission
 from netbbs.net.board_list_banner import load_board_list_banner
 from netbbs.net.breadcrumb_preference import breadcrumb_collapsed_enabled
-from netbbs.net.char_input import reject_unhandled_key
+from netbbs.net.chat_flow import NAME_GATE_NOTE
+from netbbs.net.char_input import HELP_KEY, REDRAW_KEY, EditorKey, EditorKeyKind, reject_unhandled_key
 from netbbs.net.color_depth_preference import effective_truecolor
 from netbbs.net.composition import ReviewAction, edit_line_body, read_prefilled_field, review_composition
 from netbbs.net.confirm import prompt_yes_no
+from netbbs.net.detail_view import show_detail
 from netbbs.net.draft_storage import delete_draft, drafts_directory, load_draft
 from netbbs.net.editor_preference import fullscreen_editor_enabled
+from netbbs.net.help_overlay import show_help
 from netbbs.net.menu_description_preference import menu_description_level
 from netbbs.net.node_theme import effective_accent_color, effective_header_color, effective_header_color_256
-from netbbs.net.notices import announce, write_notices
-from netbbs.net.picker import pick_item
+from netbbs.net.notices import announce, pending_notice_rows, take_notices, write_notices
+from netbbs.net.picker import ListColumn, pick_item
 from netbbs.net.prose_editor import edit_prose
 from netbbs.net.redraw_preference import redraw_in_place_enabled
 from netbbs.net.session import Session, write_prompt
@@ -78,6 +82,7 @@ from netbbs.net.sort_ui import SORT_MODE_LABELS, prompt_sort_change
 from netbbs.net.unicode_style_preference import unicode_style_enabled
 from netbbs.permissions import meets_level
 from netbbs.rendering import (
+    LABEL_COLOR,
     METADATA_COLOR,
     MUTED_COLOR,
     RULE_COLOR,
@@ -92,12 +97,24 @@ from netbbs.rendering import (
     sanitize_text,
     screen_title,
 )
+from netbbs.rendering.ansi import strip_ansi
+from netbbs.rendering.detail import Section, Styled
+from netbbs.rendering.reflow import wrap_terminal_text
+from netbbs.rendering.width import cut_to_width, display_width, wrap_to_width
 from netbbs.signature import append_signature, get_signature
 from netbbs.sort_preferences import get_effective_sort_mode, set_sort_preference
 from netbbs.storage.database import Database
 from netbbs.timeutil import format_for_display
 
 _MAX_PLAIN_POST_LINES = 200
+
+
+# The board list's table (issue #679): activity is fixed-width so it can be
+# scanned down the page; "about" is the flexible last column.
+_BOARD_LIST_COLUMNS = [
+    ListColumn("activity", len("not visited yet"), MUTED_COLOR),
+    ListColumn("about", 30, MUTED_COLOR),
+]
 
 
 async def _browse_boards(
@@ -245,6 +262,15 @@ async def _browse_boards_in_category(
     )
     boards_here, categories_here = _load(current_mode)
     category_name = get_board_category_by_id(db, category_id).name if category_id is not None else None
+    # Where the caller came from, carried onto the board's own screens
+    # (issue #679): the Community (or "Uncategorized") and the category.
+    # Continues the path this picker shows: the Community (or
+    # "Uncategorized") is above "Message boards", a category below it.
+    board_breadcrumb = (
+        *((sanitize_text(title_prefix),) if title_prefix else ()),
+        "Message boards",
+        *((sanitize_text(category_name),) if category_name else ()),
+    )
     community = get_community(db, effective_community_id)
     community_name = community.name if community is not None else None
     mode_box = {"mode": current_mode}
@@ -269,6 +295,43 @@ async def _browse_boards_in_category(
     header_color = effective_header_color(session, db)
     title = "Message boards" if title_prefix is not None else "Available message boards"
     picker_breadcrumb = (title_prefix,) if title_prefix is not None else ()
+    description_level = menu_description_level(db, user)
+    about_separator = " · " if unicode_style else " - "
+
+    # What `[N]ew scan` already knows, on the list a caller picks from
+    # (issue #679): whether a board has anything new, and whether it is
+    # Linked or asks for a verified name before posting (design doc §3.6
+    # puts the gate note ahead of the free-form description).
+    def _activity(item: Category | Board) -> tuple[str, int]:
+        if isinstance(item, Category):
+            return "", MUTED_COLOR
+        count = unread_post_count(db, user, item)
+        if count is None:
+            return "not visited yet", MUTED_COLOR
+        if count == 0:
+            return "caught up", MUTED_COLOR
+        return f"{count} new", SUCCESS_COLOR
+
+    def _about(item: Category | Board) -> str:
+        if isinstance(item, Category):
+            return item.description or "(category)"
+        parts = []
+        if is_board_linked(db, item):
+            parts.append("[LINK]")
+        if not meets_name_requirement(db, user, get_effective_name_requirement(db, item)):
+            parts.append(NAME_GATE_NOTE)
+        if item.description:
+            parts.append(item.description)
+        return about_separator.join(parts)
+
+    def _columns_of(item: Category | Board) -> list[str | tuple[str, int]]:
+        return [_activity(item), _about(item)]
+
+    def _prose_of(item: Category | Board) -> str | None:
+        """The same facts as one line, for a terminal too narrow for the
+        table -- activity first, since that is what a caller scans for."""
+        activity, _ = _activity(item)
+        return about_separator.join(part for part in (activity, _about(item)) if part) or None
 
     if not categories_here:
         async def on_sort_flat() -> list[Board] | None:
@@ -284,7 +347,10 @@ async def _browse_boards_in_category(
             boards_here,
             name_of=lambda b: b.name,
             stable_id_of=lambda b: b.id,
-            description_of=lambda b: b.description,
+            description_of=_prose_of,
+            columns=_BOARD_LIST_COLUMNS,
+            column_values_of=_columns_of,
+            description_level=description_level,
             title=title,
             breadcrumb=picker_breadcrumb,
             empty_message="No message boards are available to you yet.",
@@ -298,18 +364,13 @@ async def _browse_boards_in_category(
             masthead=board_masthead,
         )
         if board is not None:
-            await _show_board(session, db, board, user, link_context=link_context)
+            await _show_board(session, db, board, user, link_context=link_context, breadcrumb=board_breadcrumb)
         return
 
     mixed: list[Category | Board] = [*categories_here, *boards_here]
 
     def render_name(item: Category | Board) -> str:
         return f"[{item.name}]" if isinstance(item, Category) else item.name
-
-    def render_description(item: Category | Board) -> str | None:
-        if isinstance(item, Category):
-            return item.description or "(category)"
-        return item.description
 
     def stable_id(item: Category | Board) -> int:
         return item.id if isinstance(item, Board) else -item.id
@@ -329,7 +390,10 @@ async def _browse_boards_in_category(
         stable_id_of=stable_id,
         on_sort=on_sort_mixed,
         sort_label=_sort_label,
-        description_of=render_description,
+        description_of=_prose_of,
+        columns=_BOARD_LIST_COLUMNS,
+        column_values_of=_columns_of,
+        description_level=description_level,
         title=title,
         breadcrumb=picker_breadcrumb,
         empty_message="No message boards are available to you yet.",
@@ -350,7 +414,7 @@ async def _browse_boards_in_category(
             link_context=link_context,
         )
     else:
-        await _show_board(session, db, selected, user, link_context=link_context)
+        await _show_board(session, db, selected, user, link_context=link_context, breadcrumb=board_breadcrumb)
 
 
 def _can_edit_post(db: Database, post: Post, user: User) -> bool:
@@ -379,58 +443,237 @@ def _can_tombstone_post(db: Database, post: Post, user: User) -> bool:
     return has_permission(db, user, object_type="board", object_id=post.board_id, permission=BoardPermission.DELETE)
 
 
-async def _render_board_page(
-    session: Session,
-    db: Database,
-    board_name: str,
-    page: PostPage,
-    user: User,
-    *,
-    can_post: bool,
-    name_requirement: str | None,
-    description_level: str,
-    redraw_in_place: bool,
-    unicode_style: bool = False,
-    collapsed: bool = False,
-    has_draft: bool = False,
-    closed: bool = False,
-) -> None:
-    """Renders one page of posts plus its navigation options — the unit
-    that should be redrawn on an actual page change (initial entry,
-    Older/Newer/Recent), not on every loop iteration regardless of
-    whether anything changed. `has_draft` (issue #282) adds a notice
-    line and a `[D]raft` entry for a saved new-post draft, in place of
-    the modal "[E]dit it, [D]elete it, or [I]gnore" question that used
-    to interrupt every entry to the board before its first post was
-    even shown."""
-    await _render_post_page(
-        session, db, board_name, page, user, name_requirement=name_requirement, redraw_in_place=redraw_in_place,
-        unicode_style=unicode_style, collapsed=collapsed,
-    )
+# -- the post list (issue #679) ------------------------------------------------
+#
+# A board page is a list: one row per post, as many rows as the terminal
+# holds, with a cursor. A post is read one at a time in `_read_post`, where its
+# actions live. This replaced a page of five posts with their full bodies
+# inline, which scrolled its own header away on any post longer than a few
+# lines and left actions to pick their post by a typed digit.
+
+# Fewer rows than this are not a list worth paging; more than this is a wall.
+_MIN_LIST_ROWS = 3
+_MAX_LIST_ROWS = 30
+# Below this width the row is prose ("subject -- author, date") instead of
+# columns (design doc §3.6: a table that does not fit becomes prose again).
+_TABLE_MIN_WIDTH = 60
+_NEW_MARKER = "new"
+# The two-column lead ("> " or "  ") and the four two-space gaps between
+# the five columns, plus one column kept free: a row that reaches the
+# last column makes many terminals wrap the cursor onto the next row.
+_ROW_FURNITURE = 2 + 4 * 2 + 1
+_AUTHOR_MAX_WIDTH = 24
+_SUBJECT_MIN_WIDTH = 8
+_HINT_MIN_HEIGHT = 20
+_DESCRIPTION_ROWS = 2
+# A list with fewer rows than this is worth trading the action bar's
+# descriptions for.
+_COMFORTABLE_LIST_ROWS = 6
+# Rows around the list that are neither header nor action bar: the blank
+# row, the column heading, the two rules, the blank row after, the hint
+# and the prompt.
+_LIST_FURNITURE_ROWS = 7
+
+
+def _read_only_reason(db: Database, user: User, board: Board, *, closed: bool) -> str | None:
+    """Why `[P]ost` is not offered, when the caller can read but not post
+    (design doc §3.6: tell a caller why something present will refuse them).
+    `None` when they can post. A closed board says so in its own notice."""
     if closed:
-        await session.write_line(colored(f"\r\n{_CLOSED_BOARD_NOTICE}", fg_color=MUTED_COLOR))
-    if has_draft:
-        await session.write_line(colored(f"\r\n{_SAVED_DRAFT_NOTICE}", fg_color=MUTED_COLOR))
+        return None
+    write_level = get_effective_min_write_level(db, board)
+    if not meets_level(user, write_level):
+        return f"Read only: posting needs level {write_level}."
+    if not meets_name_requirement(db, user, get_effective_name_requirement(db, board)):
+        return f"Read only: posting {NAME_GATE_NOTE}."
+    if not meets_age(db, user, get_effective_min_age(db, board)):
+        return "Read only: posting has an age requirement you do not meet."
+    return None
+
+
+def _linked_note(db: Database, board: Board, link_context: LinkContext | None) -> str | None:
+    """"linked from X" for a board this node carries, "Linked" for one it
+    originated -- the marker remote files already carry and boards lacked."""
+    if not is_board_linked(db, board):
+        return None
+    origin = board_origin_fingerprint(db, board)
+    if link_context is not None and origin == link_context.node_identity.fingerprint:
+        return "Linked"
+    return f"linked from {identity_for_fingerprint(db, origin).label}"
+
+
+def _post_row_cells(db: Database, post: Post, *, name_requirement: str | None) -> tuple[str, str, str]:
+    """Subject, author and date as plain cells. Tabs become spaces before
+    anything is measured: `sanitize_text` keeps a tab, the width helpers
+    count it as no column, and the transport writes it as one -- a subject
+    full of tabs would otherwise overrun its column and the page budget."""
+    subject = sanitize_text(post.subject).replace("\t", " ")
+    author = strip_ansi(_author_display_name(db, post, name_requirement=name_requirement)).replace("\t", " ")
+    when = format_for_display(post.created_at, db)
+    return subject, author, when
+
+
+def _column_widths(
+    cells: list[tuple[str, str, str]], *, width: int, number_width: int
+) -> tuple[int, int, int] | None:
+    """(subject, author, date) widths that fit `width`, or `None` when no
+    readable table fits and the rows should be prose instead. The author
+    column gives way before the subject does: which post it is matters
+    more than who wrote it, and the reader shows the author in full."""
+    if width < _TABLE_MIN_WIDTH:
+        return None
+    date_width = max([display_width(w) for _, _, w in cells] + [len("Posted")])
+    available = width - number_width - len(_NEW_MARKER) - date_width - _ROW_FURNITURE
+    author_width = min(
+        _AUTHOR_MAX_WIDTH,
+        max([display_width(a) for _, a, _ in cells] + [len("Author")]),
+        max(len("Author"), available // 3),
+    )
+    subject_width = available - author_width
+    if subject_width < _SUBJECT_MIN_WIDTH:
+        return None
+    return subject_width, author_width, date_width
+
+
+def _post_list_rows(
+    db: Database,
+    posts: list[Post],
+    *,
+    width: int,
+    highlighted: int | None,
+    new_ids: set[int],
+    name_requirement: str | None,
+    accent: int | tuple[int, int, int],
+) -> list[str]:
+    """One row per post, fitted to `width` in display columns. The number is
+    what a digit key opens; the highlighted row is drawn in reverse video,
+    the way the file area draws its cursor."""
+    cells = [_post_row_cells(db, post, name_requirement=name_requirement) for post in posts]
+    number_width = len(str(len(posts)))
+    rows: list[str] = []
+    widths = _column_widths(cells, width=width, number_width=number_width)
+    if widths is None:
+        for index, (post, (subject, author, when)) in enumerate(zip(posts, cells)):
+            marker = f"{_NEW_MARKER} " if post.id in new_ids else ""
+            # The date goes first when the row is this narrow: subject and
+            # author say which post it is, and the reader shows the date.
+            plain = cut_to_width(f"{index + 1:>{number_width}} {marker}{subject} -- {author}", width - 1)
+            rows.append(
+                colored(plain, reverse=True) if index == highlighted
+                else colored(plain, fg_color=MUTED_COLOR if post.tombstoned_at else None)
+            )
+        return rows
+    subject_width, author_width, date_width = widths
+    marker_width = len(_NEW_MARKER)
+    for index, (post, (subject, author, when)) in enumerate(zip(posts, cells)):
+        number = f"{index + 1:>{number_width}}"
+        subject_cell = _pad(cut_to_width(subject, subject_width), subject_width)
+        marker_cell = _pad(_NEW_MARKER if post.id in new_ids else "", marker_width)
+        author_cell = _pad(cut_to_width(author, author_width), author_width)
+        date_cell = _pad(cut_to_width(when, date_width), date_width)
+        if index == highlighted:
+            rows.append(colored(
+                f"> {number}  {subject_cell}  {marker_cell}  {author_cell}  {date_cell}", reverse=True
+            ))
+            continue
+        rows.append(
+            "  "
+            + colored(number, fg_color=accent)
+            + "  "
+            + colored(subject_cell, fg_color=MUTED_COLOR if post.tombstoned_at else None)
+            + "  "
+            + colored(marker_cell, fg_color=SUCCESS_COLOR, bold=True)
+            + "  "
+            + colored(author_cell, fg_color=METADATA_COLOR)
+            + "  "
+            + colored(date_cell, fg_color=METADATA_COLOR)
+        )
+    return rows
+
+
+def _post_list_heading(posts: list[Post], *, width: int, db: Database, name_requirement: str | None) -> str | None:
+    """The column heading row, or `None` below the table width."""
+    if not posts:
+        return None
+    cells = [_post_row_cells(db, post, name_requirement=name_requirement) for post in posts]
+    number_width = len(str(len(posts)))
+    widths = _column_widths(cells, width=width, number_width=number_width)
+    if widths is None:
+        return None
+    subject_width, author_width, date_width = widths
+    marker_width = len(_NEW_MARKER)
+    text = (
+        f"  {'#':>{number_width}}  {_pad('Subject', subject_width)}  {' ' * marker_width}  "
+        f"{_pad('Author', author_width)}  {_pad('Posted', date_width)}"
+    )
+    return colored(text.rstrip(), fg_color=LABEL_COLOR, bold=True)
+
+
+def _pad(text: str, width: int) -> str:
+    return text + " " * max(0, width - display_width(text))
+
+
+def _list_options(
+    page: PostPage, *, can_post: bool, has_draft: bool, row_count: int
+) -> list[MenuEntry]:
     options = []
+    if row_count:
+        keys = "1" if row_count == 1 else f"1-{min(row_count, 9)}"
+        options.append(MenuEntry(label=menu_key(keys, "/Enter read"), brief="Read a post"))
     if page.has_older:
         options.append(MenuEntry(label=menu_key("O", "lder"), brief="Show older posts"))
     if page.has_newer:
         options.append(MenuEntry(label=menu_key("N", "ewer"), brief="Show newer posts"))
         options.append(MenuEntry(label=menu_key("R", "ecent"), brief="Jump to the newest page"))
-    if any(_can_edit_post(db, post, user) for post in page.posts):
-        options.append(MenuEntry(label=menu_key("E", "dit"), brief="Edit one of your posts"))
-    if any(_can_tombstone_post(db, post, user) for post in page.posts):
-        options.append(MenuEntry(label=menu_key("t", prefix="Remove pos"), brief="Replace a post with a removal marker"))
     if can_post:
         options.append(MenuEntry(label=menu_key("P", "ost"), brief="Write a new post"))
     if has_draft:
         options.append(_DRAFT_MENU_ENTRY)
     options.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to the previous menu"))
-    await session.write_line(
-        f"\r\n{menu_row(options, width=session.terminal_width, height=session.terminal_height, description_level=description_level)}"
-    )
-    await write_notices(session)
-    await session.write("Choice: ")
+    return options
+
+
+def _bounded_rows(text: str, width: int, rows: int) -> list[str]:
+    """`text` wrapped to `width` (one column kept free) and cut to `rows`
+    rows, the last ending in "..." when anything was cut."""
+    wrapped = wrap_to_width(" ".join(text.split()), max(1, width - 1)) or [""]
+    if len(wrapped) <= rows:
+        return wrapped
+    kept = wrapped[:rows]
+    kept[-1] = cut_to_width(kept[-1], max(1, width - 4)) + "..."
+    return kept
+
+
+def _count_rows(text: str, width: int) -> int:
+    return wrap_terminal_text(text, max(1, width)).count("\r\n") + 1 if text else 0
+
+
+async def _read_list_key(session: Session) -> tuple[EditorKey, bool]:
+    """A structured key, so Up/Down/Enter arrive as keys, with the plain
+    `read_key` fallback lightweight sessions need. The flag says whether the
+    key was echoed (only a `read_key` echoes), so a rejection erases only
+    what was drawn -- the same contract `detail_view` keeps."""
+    read_editor_key = getattr(session, "read_editor_key", None)
+    if read_editor_key is not None:
+        try:
+            return await read_editor_key(distinguish_ctrl_h=True), False
+        except NotImplementedError:
+            pass
+    return EditorKey(EditorKeyKind.CHAR, char=await session.read_key()), True
+
+
+_LIST_HELP = [
+    "Up/Down      move the highlight",
+    "Enter, 1-9   read the highlighted post, or post number N",
+    "O / N / R    older posts, newer posts, the newest page",
+    "P            write a new post (when you may post here)",
+    "D            resume or discard a saved draft",
+    "Ctrl-L       redraw the list",
+    "B            back to the list of boards",
+    "",
+    "Reading a post: Edit, Remove, Next and Previous post live there,",
+    "and PgUp/PgDn page a long post.",
+]
 
 
 _SAVED_DRAFT_NOTICE = "You have a saved post draft for this message board from an earlier session."
@@ -458,10 +701,17 @@ async def _show_board(
     *,
     link_context: LinkContext | None = None,
     initial_cursor: tuple[str, str] | None = None,
+    breadcrumb: tuple[str, ...] = ("Message boards",),
 ) -> None:
     """
     Show `board`, one bounded page of posts at a time (design doc,
     issue #10) — never the whole board, however large its history.
+
+    The page is a list, one row per post, as many rows as the terminal
+    holds (issue #679); a post is read one at a time in `_read_post`,
+    which is also where the post's own actions are. `breadcrumb` is the
+    path between the node's name and the board's: the Community and
+    category the caller came through, around "Message boards".
 
     Opens on the *newest* page, confirmed with Thiesi over keeping the
     old oldest-first default: an active board's most recent activity is
@@ -499,38 +749,252 @@ async def _show_board(
     redraw_in_place = redraw_in_place_enabled(db, user)
     unicode_style = unicode_style_enabled(db, user)
     collapsed = breadcrumb_collapsed_enabled(db, user)
+    truecolor = effective_truecolor(session, db, user)
+    name_requirement = get_effective_name_requirement(db, board)
+    read_only_reason = None if can_post else _read_only_reason(db, user, board, closed=closed)
+    linked_note = _linked_note(db, board, link_context)
+    # Taken before this visit moves the read cursor, so what was new when the
+    # caller arrived stays marked while they page and read (issue #679).
+    seen_floor = board_seen_arrival_id(db, user, board)
+    unread_on_entry = unread_post_count(db, user, board) or 0
+    separator = " · " if unicode_style else " - "
 
-    def _refetch_current_page() -> PostPage:
+    def _new_ids(current_page: PostPage) -> set[int]:
+        if seen_floor is None:
+            return set()
+        return {post.id for post in current_page.posts if post.id > seen_floor}
+
+    def _frame(current_page: PostPage, *, row_count: int | None = None) -> tuple[str, str]:
+        """Everything above the list's rows and everything below them."""
+        subtitle = ["Older posts" if current_page.has_newer else "Newest posts"]
+        if unread_on_entry:
+            subtitle.append(f"{unread_on_entry} new")
+        if linked_note:
+            subtitle.append(linked_note)
+        header = screen_title(
+            board_name,
+            breadcrumb=(session.node_display_name, *breadcrumb),
+            subtitle=separator.join(subtitle),
+            width=session.terminal_width,
+            clear=redraw_in_place,
+            unicode_style=unicode_style, collapsed=collapsed,
+            header_color=effective_header_color(session, db),
+            node_name_gradient=session.node_name_gradient,
+        )
+        notes = []
+        if board.description:
+            # At most two rows: a description has no length limit and can
+            # arrive over Link, and the list is what the caller came for
+            # (Codex review on #719).
+            notes.extend(
+                colored(row, fg_color=MUTED_COLOR)
+                for row in _bounded_rows(sanitize_text(board.description), session.terminal_width, _DESCRIPTION_ROWS)
+            )
+        if closed:
+            notes.append(colored(_CLOSED_BOARD_NOTICE, fg_color=MUTED_COLOR))
+        elif read_only_reason:
+            notes.append(colored(read_only_reason, fg_color=MUTED_COLOR))
+        has_draft = _has_saved_draft()
+        if has_draft:
+            notes.append(colored(_SAVED_DRAFT_NOTICE, fg_color=MUTED_COLOR))
+        above = "\r\n".join(["", header, *notes])
+        options = _list_options(
+            current_page, can_post=can_post, has_draft=has_draft,
+            row_count=len(current_page.posts) if row_count is None else row_count,
+        )
+        # Descriptions double the action bar. Where they would leave the
+        # list fewer rows than a page worth having, the bar goes compact:
+        # the posts are what the caller came for (Codex review on #719).
+        # Decided against the busiest bar this board can draw, the one the
+        # page budget measures, so the budget and the drawn frame agree.
+        busiest = menu_row(
+            _list_options(
+                PostPage(posts=[], has_older=True, has_newer=True),
+                can_post=can_post, has_draft=has_draft, row_count=9,
+            ),
+            width=session.terminal_width, height=session.terminal_height,
+            description_level=description_level,
+        )
+        room = (
+            session.terminal_height - _count_rows(above, session.terminal_width)
+            - _count_rows(busiest, session.terminal_width) - _LIST_FURNITURE_ROWS
+        )
+        compact = description_level != "off" and room < _COMFORTABLE_LIST_ROWS
+        menu = menu_row(
+            options, width=session.terminal_width, height=session.terminal_height,
+            description_level="off" if compact else description_level,
+        )
+        below_rows = [menu]
+        # A hint is the first thing a short terminal can spare: the list's
+        # rows are what the caller came for.
+        if session.terminal_height >= _HINT_MIN_HEIGHT:
+            below_rows.append(colored("(Up/Down to move, Ctrl-H for help)", fg_color=MUTED_COLOR))
+        below = "\r\n".join(below_rows)
+        return above, below
+
+    def _page_limit() -> int:
+        """As many rows as fit under the frame, measured against the
+        busiest frame this board can draw -- a page does not change size
+        because [N]ewer appeared on it."""
+        width = session.terminal_width
+        # Nine rows, so the read entry is in the action bar exactly as a
+        # populated page draws it (Codex review on #719).
+        above, below = _frame(PostPage(posts=[], has_older=True, has_newer=True), row_count=9)
+        fixed = (
+            _count_rows(above, width) + 1 + (1 if width >= _TABLE_MIN_WIDTH else 0) + 2 + 1
+            + _count_rows(below, width) + pending_notice_rows(session) + 1
+        )
+        return max(_MIN_LIST_ROWS, min(_MAX_LIST_ROWS, session.terminal_height - fixed))
+
+    async def _render(current_page: PostPage, highlighted: int | None) -> None:
+        width = session.terminal_width
+        above, below = _frame(current_page)
+        rule = colored(
+            ("─" if unicode_style else "-") * min(width, 78),
+            fg_color=238 if truecolor else RULE_COLOR,
+        )
+        lines = [above, ""]
+        heading = _post_list_heading(current_page.posts, width=width, db=db, name_requirement=name_requirement)
+        if heading is not None:
+            lines.append(heading)
+        lines.append(rule)
+        lines.extend(_post_list_rows(
+            db, current_page.posts, width=width, highlighted=highlighted,
+            new_ids=_new_ids(current_page), name_requirement=name_requirement,
+            accent=effective_accent_color(session, db),
+        ))
+        lines.extend([rule, "", below])
+        for line in lines:
+            await session.write_line(line)
+        await write_notices(session)
+        await session.write("Choice: ")
+
+    def _refetch_current_page(*, limit: int | None = None) -> PostPage:
         """Re-fetches whichever page is currently on screen, using the
         exact cursor that produced it -- not always the newest page.
         Needed after an in-place edit (which never moves a post's feed
         position, see netbbs.boards.posts._resolve_current_version)
         so [E]diting a post doesn't also silently jump the SysOp back
         to page one as an unrelated side effect."""
+        rows = limit if limit is not None else _page_limit()
         if page_anchor is None:
-            return list_posts_page(db, board, user)
+            return list_posts_page(db, board, user, limit=rows)
         mode, cursor = page_anchor
-        return list_posts_page(db, board, user, **{mode: cursor})
+        return list_posts_page(db, board, user, limit=rows, **{mode: cursor})
 
-    async def _render_and_advance_cursor(current_page: PostPage) -> None:
+    async def _render_and_advance_cursor(current_page: PostPage, highlighted: int | None = None) -> None:
         """The one place every render in this loop funnels through
         (issue #56) -- advances `user`'s board read cursor to whatever
         is now newest on screen. A no-op when the page is empty (the
         empty-board early return above never reaches here at all, but
         an Older/Newer navigation could in principle land on an empty
         result if a page emptied out from under a live session)."""
-        await _render_board_page(
-            session, db, board_name, current_page, user, can_post=can_post,
-            name_requirement=get_effective_name_requirement(db, board),
-            description_level=description_level,
-            redraw_in_place=redraw_in_place,
-            unicode_style=unicode_style,
-            collapsed=collapsed,
-            has_draft=_has_saved_draft(),
-            closed=closed,
-        )
+        await _render(current_page, highlighted)
         if current_page.posts:
             record_board_seen(db, user, board, current_page.posts[-1])
+
+    async def _read_post(index: int) -> int | None:
+        """Read `page.posts[index]`, one post to a screen, and step to the
+        post before or after it -- across page boundaries -- until
+        `[B]ack`. Returns the index, on the page now current, of the post
+        last read, so the list comes back with the cursor on it -- or
+        `None` when the page emptied while the caller read (a removal, a
+        trust change, the expiry sweep) and there is no post to put it on.
+
+        Built on `show_detail`, which keeps the title, the byline and the
+        action bar on screen while a long post pages under them."""
+        nonlocal page, page_anchor
+        detail_page = 0
+        while True:
+            post = page.posts[index]
+            # Recorded as it is shown, one post at a time: stepping through a
+            # page the list never drew must not leave those posts unread if
+            # the connection drops before [B]ack (Codex review on #719).
+            # `record_board_seen` only ever moves forward.
+            record_board_seen(db, user, board, post)
+            width = session.terminal_width
+            title = screen_title(
+                sanitize_text(post.subject),
+                breadcrumb=(session.node_display_name, *breadcrumb, board_name),
+                width=width,
+                clear=False,
+                unicode_style=unicode_style, collapsed=collapsed,
+                header_color=effective_header_color(session, db),
+                node_name_gradient=session.node_name_gradient,
+            )
+            byline = _post_byline(
+                db, post, name_requirement=name_requirement, is_new=post.id in _new_ids(page),
+                separator=separator, width=width,
+            )
+            body_rows = _render_quoted_body(sanitize_text(post.body, allow_newlines=True), width).split("\r\n")
+            has_previous = index > 0 or page.has_older
+            has_next = index < len(page.posts) - 1 or page.has_newer
+            actions = []
+            if _can_edit_post(db, post, user):
+                actions.append(("e", menu_key("E", "dit")))
+            if _can_tombstone_post(db, post, user):
+                actions.append(("t", menu_key("t", prefix="Remove pos")))
+            if has_next:
+                actions.append(("n", menu_key("N", "ext post")))
+            if has_previous:
+                actions.append(("p", menu_key("P", "revious post")))
+            actions.append(("b", menu_key("B", "ack")))
+            key, detail_page = await show_detail(
+                session,
+                title=title,
+                sections=[Section(None, [Styled(body_rows)])],
+                actions=actions,
+                redraw_in_place=redraw_in_place,
+                unicode_style=unicode_style,
+                page=detail_page,
+                preamble=byline,
+                message="\r\n".join(take_notices(session)) or None,
+            )
+            if key == "b":
+                return index
+            if key in ("e", "t"):
+                root = post.root_post_id
+                if key == "e":
+                    await _edit_existing_post(session, db, board, post, user, link_context=link_context)
+                else:
+                    await _tombstone_existing_post(session, db, board, post, user, link_context=link_context)
+                # The same number of rows as the page the reader is on: an
+                # outcome notice now pending takes a row from a fresh budget,
+                # and a page one post shorter could drop the post just acted
+                # on (Codex review on #719).
+                page = _refetch_current_page(limit=len(page.posts))
+                if not page.posts:
+                    page_anchor = None
+                    page = _refetch_current_page()
+                    return None
+                index = next(
+                    (i for i, p in enumerate(page.posts) if p.root_post_id == root),
+                    min(index, len(page.posts) - 1),
+                )
+                continue
+            detail_page = 0
+            if key == "n":
+                if index < len(page.posts) - 1:
+                    index += 1
+                    continue
+                newest = page.posts[-1]
+                page_anchor = ("after", (newest.created_at, newest.post_id))
+                page = _refetch_current_page()
+                index = 0
+            else:
+                if index > 0:
+                    index -= 1
+                    continue
+                oldest = page.posts[0]
+                page_anchor = ("before", (oldest.created_at, oldest.post_id))
+                page = _refetch_current_page()
+                index = len(page.posts) - 1
+            if not page.posts:
+                # Emptied from under the caller (a post removed, a trust
+                # change): back to the newest page rather than a blank one.
+                page_anchor = None
+                page = _refetch_current_page()
+                return None
 
     async def _compose_new_post(*, initial_body: str | None = None) -> None:
         # `[P]ost` is a hotkey followed straight by a line prompt: an Enter
@@ -669,7 +1133,10 @@ async def _show_board(
             await session.write(reject_unhandled_key(choice))
 
     page_anchor: tuple[str, tuple[str, str]] | None = ("after", initial_cursor) if initial_cursor else None
-    page = list_posts_page(db, board, user, after=initial_cursor) if initial_cursor else list_posts_page(db, board, user)
+    page = (
+        list_posts_page(db, board, user, after=initial_cursor, limit=_page_limit())
+        if initial_cursor else list_posts_page(db, board, user, limit=_page_limit())
+    )
     if initial_cursor and not page.posts:
         # Nothing newer than the cursor `[N]ew scan` jumped in with --
         # the user is caught up, not looking at a genuinely empty board.
@@ -677,7 +1144,7 @@ async def _show_board(
         # "has no posts yet" path below, which would falsely claim the
         # board is empty and (worse) prompt to compose the first post.
         page_anchor = None
-        page = list_posts_page(db, board, user)
+        page = list_posts_page(db, board, user, limit=_page_limit())
     if not page.posts:
         # Dogfood report: this used to skip straight to composing the
         # first post whenever the caller could write, with no [P]ost/
@@ -698,13 +1165,15 @@ async def _show_board(
         async def _draw_empty_board() -> bool:
             has_draft = _has_saved_draft()
             await session.write_line(
-                f"\r\n{screen_title(board_name, breadcrumb=(session.node_display_name, 'Message boards'), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, header_color=header_color, node_name_gradient=session.node_name_gradient)}"
+                f"\r\n{screen_title(board_name, breadcrumb=(session.node_display_name, *breadcrumb), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, header_color=header_color, node_name_gradient=session.node_name_gradient)}"
             )
             await session.write_line(
                 f"\r\n{empty_state('This message board has no posts yet', detail='It is ready for its first conversation.', width=session.terminal_width, header_color=header_color)}"
             )
             if closed:
                 await session.write_line(colored(f"\r\n{_CLOSED_BOARD_NOTICE}", fg_color=MUTED_COLOR))
+            elif read_only_reason:
+                await session.write_line(colored(f"\r\n{read_only_reason}", fg_color=MUTED_COLOR))
             if has_draft:
                 await session.write_line(colored(f"\r\n{_SAVED_DRAFT_NOTICE}", fg_color=MUTED_COLOR))
             options = []
@@ -737,7 +1206,7 @@ async def _show_board(
             if (choice == "p" and can_post) or (choice == "d" and has_draft):
                 await session.write_line("")
                 await _saved_draft_menu(from_post=choice == "p")
-                page = list_posts_page(db, board, user)
+                page = list_posts_page(db, board, user, limit=_page_limit())
                 if page.posts:
                     # A post was actually created (not cancelled) --
                     # fall through to the ordinary render+navigation
@@ -748,71 +1217,123 @@ async def _show_board(
                 continue
             await session.write(reject_unhandled_key(choice))
 
-    await _render_and_advance_cursor(page)
+    # A [N]ew scan or [F]ind jump opens the list with its target at the top;
+    # the cursor starts on it, so Enter reads what the caller came for.
+    highlighted: int | None = 0 if page_anchor is not None else None
+    await _render_and_advance_cursor(page, highlighted)
     while True:
-        choice = (await session.read_key()).lower()
+        key, echoed = await _read_list_key(session)
+        char = key.char.lower() if key.kind == EditorKeyKind.CHAR and key.char else ""
 
-        if choice == "o" and page.has_older:
-            await session.write_line("")
+        async def _moved_on() -> None:
+            # A key `read_key` echoed leaves the cursor after it; start the
+            # next output on a fresh line, as every hotkey here always has.
+            if echoed:
+                await session.write_line("")
+
+        if key.kind in (EditorKeyKind.UP, EditorKeyKind.DOWN) and page.posts:
+            step = -1 if key.kind == EditorKeyKind.UP else 1
+            if highlighted is None:
+                highlighted = 0 if step == 1 else len(page.posts) - 1
+            else:
+                highlighted = (highlighted + step) % len(page.posts)
+            await _render(page, highlighted)
+        elif (
+            (key.kind == EditorKeyKind.ENTER or char in ("\r", "\n"))
+            and highlighted is not None and highlighted < len(page.posts)
+        ):
+            await _moved_on()
+            highlighted = await _read_post(highlighted)
+            await _render_and_advance_cursor(page, highlighted)
+        elif len(char) == 1 and char in "123456789" and int(char) <= min(9, len(page.posts)):
+            await _moved_on()
+            highlighted = await _read_post(int(char) - 1)
+            await _render_and_advance_cursor(page, highlighted)
+        elif (key.kind == EditorKeyKind.CTRL and key.char == "l") or char == REDRAW_KEY:
+            # The refetch runs at today's budget -- a consumed notice or a
+            # resized terminal can change it, and a newest page then gains
+            # older posts in front -- so the highlight follows the post it
+            # was on, not its row number (Codex review on #719).
+            was_on = (
+                page.posts[highlighted].post_id
+                if highlighted is not None and highlighted < len(page.posts) else None
+            )
+            page = _refetch_current_page()
+            if was_on is not None and page.posts:
+                highlighted = next(
+                    (i for i, listed in enumerate(page.posts) if listed.post_id == was_on),
+                    min(highlighted, len(page.posts) - 1),
+                )
+            else:
+                highlighted = None
+            await _render_and_advance_cursor(page, highlighted)
+        elif (key.kind == EditorKeyKind.CTRL and key.char == "h") or char == HELP_KEY:
+            await show_help(
+                session, "Message board keys", _LIST_HELP,
+                header_color=effective_header_color_256(db), unicode_style=unicode_style,
+            )
+            await _render(page, highlighted)
+        elif char == "o" and page.has_older:
+            await _moved_on()
             oldest = page.posts[0]
             page_anchor = ("before", (oldest.created_at, oldest.post_id))
             page = _refetch_current_page()
+            highlighted = None
             await _render_and_advance_cursor(page)
-        elif choice == "n" and page.has_newer:
-            await session.write_line("")
+        elif char == "n" and page.has_newer:
+            await _moved_on()
             newest = page.posts[-1]
             page_anchor = ("after", (newest.created_at, newest.post_id))
             page = _refetch_current_page()
+            highlighted = None
             await _render_and_advance_cursor(page)
-        elif choice == "r" and page.has_newer:
-            await session.write_line("")
+        elif char == "r" and page.has_newer:
+            await _moved_on()
             page_anchor = None
             page = _refetch_current_page()
+            highlighted = None
             await _render_and_advance_cursor(page)
-        elif choice == "e" and any(_can_edit_post(db, post, user) for post in page.posts):
-            await session.write_line("")
-            await _edit_existing_post(session, db, board, page, user, link_context=link_context)
-            page = _refetch_current_page()
-            await _render_and_advance_cursor(page)
-        elif choice == "t" and any(_can_tombstone_post(db, post, user) for post in page.posts):
-            await session.write_line("")
-            await _tombstone_existing_post(session, db, board, page, user, link_context=link_context)
-            page = _refetch_current_page()
-            await _render_and_advance_cursor(page)
-        elif choice == "p" and can_post:
-            await session.write_line("")
+        elif char == "p" and can_post:
+            await _moved_on()
             if await _saved_draft_menu(from_post=True):
                 page_anchor = None  # a freshly-created post always lands on the newest page
-            page = _refetch_current_page()
-            await _render_and_advance_cursor(page)
-        elif choice == "d" and _has_saved_draft():
-            await session.write_line("")
+                highlighted = None
+                page = _refetch_current_page()
+            else:
+                # Nothing was posted: the same page at the same size, so a
+                # notice now pending cannot drop the highlighted row.
+                page = _refetch_current_page(limit=len(page.posts) or None)
+            await _render_and_advance_cursor(page, highlighted)
+        elif char == "d" and _has_saved_draft():
+            await _moved_on()
             if await _saved_draft_menu():
                 page_anchor = None  # a resumed-and-posted draft lands on the newest page too
-            page = _refetch_current_page()
-            await _render_and_advance_cursor(page)
-        elif choice == "b":
-            await session.write_line("")
+                highlighted = None
+                page = _refetch_current_page()
+            else:
+                # Discarded or left: same page, same size (Codex review on
+                # #719) -- "Draft deleted." must not cost the highlighted row.
+                page = _refetch_current_page(limit=len(page.posts) or None)
+            await _render_and_advance_cursor(page, highlighted)
+        elif char == "b":
+            await _moved_on()
             return
         else:
-            await session.write(reject_unhandled_key(choice))
+            await session.write(reject_unhandled_key(key.char) if echoed and key.char else "\a")
 
 
 async def _edit_existing_post(
     session: Session,
     db: Database,
     board: Board,
-    page: PostPage,
+    post: Post,
     user: User,
     *,
     link_context: LinkContext | None = None,
 ) -> None:
     """
-    Edit one of the posts currently on screen -- selected by the
-    page-relative `[N]` position `_render_post_page` prints next to
-    each one, since a board page is at most 5 posts, too small to
-    justify pulling in the real picker (`netbbs.net.picker.pick_item`)
-    just to choose one (design doc).
+    Edit `post`, the one the reader is showing (issue #679: actions live
+    where the post is, rather than asking for a page-relative number).
 
     Authorization is checked *before* prompting for any new content
     (`_can_edit_post`, the same rule `edit_post` itself enforces) so a
@@ -828,14 +1349,6 @@ async def _edit_existing_post(
     edit stays purely local, not propagated (see `queue_board_post_
     moderator_edit_if_linked`'s own docstring for why).
     """
-    await write_prompt(session, f"Edit which post number [1-{len(page.posts)}]? ")
-    choice = (await session.read_key()).strip()
-    if not choice.isdigit() or not (1 <= int(choice) <= len(page.posts)):
-        announce(session, "Not a valid post number.", tone="muted")
-        return
-    post = page.posts[int(choice) - 1]
-    await session.write_line("")
-
     if not _can_edit_post(db, post, user):
         announce(session, "You can't edit that post.", tone="muted")
         return
@@ -964,15 +1477,15 @@ async def _tombstone_existing_post(
     session: Session,
     db: Database,
     board: Board,
-    page: PostPage,
+    post: Post,
     user: User,
     *,
     link_context: LinkContext | None = None,
 ) -> None:
     """
-    `[T]ombstone` one of the posts currently on screen (design doc §9.5,
-    issue #88) -- selected the same page-relative way `_edit_existing_
-    post` already is. Redacts the post to a placeholder revision
+    Remove `post`, the one the reader is showing (design doc §9.5, issue
+    #88; issue #679 moved the action into the reader). Redacts the post
+    to a placeholder revision
     (`netbbs.boards.posts.tombstone_post`) rather than deleting it
     outright, so the edit chain and any reply's `parent_post_id` stay
     intact -- there was no existing live UI action to redact an
@@ -986,14 +1499,6 @@ async def _tombstone_existing_post(
     `queue_board_post_moderator_edit_if_linked` (see that function's own
     docstring).
     """
-    await write_prompt(session, f"Remove which post number [1-{len(page.posts)}]? ")
-    choice = (await session.read_key()).strip()
-    if not choice.isdigit() or not (1 <= int(choice) <= len(page.posts)):
-        announce(session, "Not a valid post number.", tone="muted")
-        return
-    post = page.posts[int(choice) - 1]
-    await session.write_line("")
-
     if not _can_tombstone_post(db, post, user):
         announce(session, "You can't remove that post.", tone="muted")
         return
@@ -1161,70 +1666,33 @@ def _render_quoted_body(body: str, width: int) -> str:
     return "\r\n".join(rendered)
 
 
-async def _render_post_page(
-    session: Session,
-    db: Database,
-    board_name: str,
-    page: PostPage,
-    user: User,
-    *,
-    name_requirement: str | None,
-    redraw_in_place: bool = False,
-    unicode_style: bool = False,
-    collapsed: bool = False,
-) -> None:
-    header = screen_title(
-        board_name,
-        breadcrumb=(session.node_display_name, "Message boards"),
-        subtitle=f"{len(page.posts)} post{'s' if len(page.posts) != 1 else ''} on this page",
-        width=session.terminal_width,
-        clear=redraw_in_place,
-        unicode_style=unicode_style, collapsed=collapsed,
-        header_color=effective_header_color(session, db),
-    node_name_gradient=session.node_name_gradient)
-    await session.write_line(f"\r\n{header}")
-    accent = effective_accent_color(session, db)
-    for position, post in enumerate(page.posts, start=1):
-        if position > 1:
-            rule_char = "─" if unicode_style else "-"
-            divider_color = 238 if effective_truecolor(session, db, user) else RULE_COLOR
-            await session.write_line(colored(rule_char * min(session.terminal_width, 78), fg_color=divider_color))
-        when = format_for_display(post.created_at, db)
-        # A tombstoned post's own placeholder text says what happened
-        # to it; `is_edited` is False for it (_resolve_current_version).
-        edited_marker = f" {badge('edited')}" if post.is_edited else ""
-        author_display = _author_display_name(db, post, name_requirement=name_requirement)
-        # Position numbers are 1-indexed *within this page only* -- not
-        # a stable identity across page changes, purely a same-screen
-        # selector for [E]dit (design doc -- prose editor:
-        # editing an existing post), the same "how do you pick one item
-        # currently on screen" role a picker's page-relative numbering
-        # already plays elsewhere, just inline here since a board page
-        # is at most 5 posts, too small to need a real picker for it.
-        #
-        # Built from three separately-colored segments, not one
-        # colored() call wrapping the whole line -- author_display may
-        # already contain its own colored+reset unit (the
-        # verified-name formatting), and nesting that inside a single
-        # outer colored() would have the inner segment's own reset code
-        # clear the outer ACCENT_COLOR early, leaving the trailing
-        # "(timestamp)" text in the terminal's default color instead.
-        post_header = (
-            colored(f"[{position}] {sanitize_text(post.subject)} -- ", fg_color=accent)
-            + author_display
-            + colored(f" ({when})", fg_color=METADATA_COLOR)
-            + edited_marker
-        )
-        await session.write_line(f"\r\n{post_header}")
-        # Reflowed to this specific session's actual detected width
-        # (NAWS-negotiated, or the 80-column default — see
-        # netbbs.net.session.Session.terminal_width), not a fixed
-        # assumption, per the design doc's "must degrade gracefully
-        # above 40x24 minimum" requirement. Sanitized *before* reflow,
-        # not after — textwrap's width math counts raw characters, so a
-        # stray control byte would also throw off wrapping, not just be
-        # a display-safety concern. allow_newlines=True: a post body is
-        # genuinely multi-line content (paragraph breaks), unlike the
-        # single-line fields above -- see sanitize_text's docstring.
-        body = sanitize_text(post.body, allow_newlines=True)
-        await session.write_line(_render_quoted_body(body, session.terminal_width))
+def _post_byline(
+    db: Database, post: Post, *, name_requirement: str | None, is_new: bool, separator: str,
+    width: int,
+) -> list[str]:
+    """The reader's lines under the subject: who, when, and what state the
+    post is in -- edited, new to this caller -- and then which post it
+    answers, on a row of its own cut to `width`: a parent's subject runs to
+    `MAX_SUBJECT_BYTES`, and wrapped it would take the rows the body is
+    paged into (Codex review on #719)."""
+    parts = [
+        _author_display_name(db, post, name_requirement=name_requirement),
+        colored(format_for_display(post.created_at, db), fg_color=METADATA_COLOR),
+    ]
+    if post.is_edited:
+        parts.append(badge("edited"))
+    if is_new:
+        parts.append(badge("new", tone="success"))
+    if post.parent_post_id is not None:
+        # As the feed shows the parent now: its current subject, and nothing
+        # at all for a parent that is expired, pending or trust-hidden.
+        parent = visible_post(db, post.parent_post_id)
+        if parent is not None:
+            reply = f'reply to "{sanitize_text(parent.subject)}"'
+            if display_width(reply) > width - 1:
+                reply = cut_to_width(reply, max(1, width - 4)) + "..."
+            return [
+                colored(separator, fg_color=METADATA_COLOR).join(parts),
+                colored(reply, fg_color=METADATA_COLOR),
+            ]
+    return [colored(separator, fg_color=METADATA_COLOR).join(parts)]

@@ -506,7 +506,12 @@ def test_find_loops_back_to_results_after_viewing_a_hit(db, lane, alice):
     create_post(db, board, alice, "quokkatown first", "quokkatown " + "pad " * 10 + "firstviewmarker")
     create_post(db, board, alice, "quokkatown second", "quokkatown " + "pad " * 10 + "secondviewmarker")
 
-    session = _run_main_menu(db, lane, alice, ["f", "quokkatown", "0", "1", "b", "0", "2", "b", "b", "l", "y"])
+    # A hit opens its board's list with the cursor on the post (issue #679);
+    # Enter reads it, and [B]ack twice returns to the results.
+    session = _run_main_menu(
+        db, lane, alice,
+        ["f", "quokkatown", "0", "1", "\r", "b", "b", "0", "2", "\r", "b", "b", "b", "l", "y"],
+    )
 
     text = _visible_text(session)
     assert "firstviewmarker" in text

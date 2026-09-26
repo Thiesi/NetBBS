@@ -566,7 +566,7 @@ from netbbs.rendering import (
     visible_width,
     wrap_to_width,
 )
-from netbbs.rendering.detail import Field, Note, Section, Table, render_sections
+from netbbs.rendering.detail import Field, Note, Section, Styled, Table, render_sections
 from netbbs.rendering.reflow import wrap_terminal_text
 from netbbs.net import notices as _notices
 from netbbs.guest import (
@@ -14829,48 +14829,6 @@ async def _pending_posts_screen(
         await _post_action_screen(session, lane, actor, selected, board, link_context=link_context)
 
 
-async def _draw_post_action(
-    session: Session, post: Post, description_level: str, redraw_in_place: bool,
-    unicode_style: bool,
-    collapsed: bool,
-    header_color: int | tuple[int, int, int] = HEADER_COLOR,
-    *,
-    status_line: str,
-    when: str,
-) -> None:
-    await session.write_line(
-        "\r\n" + screen_title(sanitize_text(post.subject),
-            breadcrumb=(session.node_display_name,), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
-            header_color=header_color, node_name_gradient=session.node_name_gradient)
-    )
-    await session.write_line(status_line)
-    # What the moderator is deciding about, then the post itself under its own
-    # heading: the body used to follow a bare "By:" line with nothing between
-    # them, and the pin/exempt toggles below had no state shown anywhere.
-    panel_rows = await _write_sections(session, [Section("Pending post", [
-        Field("By", post.author_label, color=AUTHOR_COLOR),
-        Field("Posted", when, color=DATE_COLOR),
-        Field("Pinned", _yes_no(post.pinned)),
-        Field("Exempt from auto-purge", _yes_no(post.exempt_from_expiry)),
-    ], paired=True)], unicode_style=unicode_style)
-    await session.write_line("")
-    await session.write_line(colored("MESSAGE", fg_color=METADATA_COLOR, bold=True))
-    body = reflow(sanitize_text(post.body, allow_newlines=True), width=session.terminal_width)
-    await session.write_line(colored(body, fg_color=VALUE_COLOR))
-    options = _fitted_menu(
-        [
-            MenuEntry(label=menu_key("A", "pprove"), brief="Publish this pending post"),
-            MenuEntry(label=menu_key("R", "eject"), brief="Delete this pending post"),
-            MenuEntry(label=menu_key("P", "in toggle"), brief="Toggle showing at the top"),
-            MenuEntry(label=menu_key("X", "empt toggle"), brief="Toggle exempt from auto-purge"),
-            MenuEntry(label=menu_key("B", "ack"), brief="Return to the pending list"),
-        ],
-        description_level, session=session, used_rows=panel_rows + 6 + body.count("\r\n") + 1,
-    )
-    await session.write_line(f"\r\n{options}")
-    await _choice_prompt(session)
-
-
 async def _post_action_screen(
     session: Session,
     lane: DatabaseLane,
@@ -14880,7 +14838,10 @@ async def _post_action_screen(
     *,
     link_context: LinkContext | None = None,
 ) -> None:
-    description_level = await lane.run(menu_description_level, actor)
+    """One pending post, on the same paged reader a caller reads posts with
+    (issue #679): the facts and the action bar stay on screen while a long
+    body pages under them, which matters most here -- a moderator reads the
+    whole post before approving it."""
     unicode_style = await lane.run(unicode_style_enabled, actor)
     collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
     redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
@@ -14888,20 +14849,46 @@ async def _post_action_screen(
     status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
     display_format, display_timezone = await lane.run(resolve_display_preferences)
     when = format_for_display(post.created_at, override_format=display_format, override_timezone=display_timezone)
-    await _draw_post_action(session, post, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line, when=when)
+    actions = [
+        ("a", menu_key("A", "pprove")),
+        ("r", menu_key("R", "eject")),
+        ("p", menu_key("P", "in toggle")),
+        ("x", menu_key("X", "empt toggle")),
+        ("b", menu_key("B", "ack")),
+    ]
+    page = 0
     while True:
-        choice = (await session.read_key()).lower()
-
+        title = screen_title(
+            sanitize_text(post.subject),
+            breadcrumb=(session.node_display_name,), width=session.terminal_width, clear=False,
+            unicode_style=unicode_style, collapsed=collapsed,
+            header_color=header_color, node_name_gradient=session.node_name_gradient,
+        )
+        body = reflow(sanitize_text(post.body, allow_newlines=True), width=session.terminal_width)
+        body_rows = [colored(line, fg_color=VALUE_COLOR) if line else "" for line in body.splitlines()]
+        # What the moderator is deciding about, then the post itself under its
+        # own heading, with the pin and exempt state the toggles change.
+        sections = [
+            Section("Pending post", [
+                Field("By", post.author_label, color=AUTHOR_COLOR),
+                Field("Posted", when, color=DATE_COLOR),
+                Field("Pinned", _yes_no(post.pinned)),
+                Field("Exempt from auto-purge", _yes_no(post.exempt_from_expiry)),
+            ], paired=True),
+            Section("Message", [Styled(body_rows)]),
+        ]
+        choice, page = await show_detail(
+            session, title=title, sections=sections, actions=actions,
+            redraw_in_place=redraw_in_place, unicode_style=unicode_style, page=page,
+            preamble=[status_line],
+        )
         if choice == "b":
-            await session.write_line("")
             return
-        elif choice == "a":
-            await session.write_line("")
+        if choice == "a":
             try:
                 approved = await lane.run(approve_post, post, approved_by=actor)
             except PostError as exc:
                 _announce(session, f"Error: {exc}", error=True)
-                await _draw_post_action(session, post, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line, when=when)
                 continue
             if link_context is not None:
                 await lane.run(
@@ -14909,26 +14896,18 @@ async def _post_action_screen(
                 )
             _announce_line(session, "Approved.")
             return
-        elif choice == "r":
-            await session.write_line("")
+        if choice == "r":
             try:
                 await lane.run(delete_post, post, deleted_by=actor)
             except PostError as exc:
                 _announce(session, f"Error: {exc}", error=True)
-                await _draw_post_action(session, post, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line, when=when)
                 continue
             _announce_line(session, "Rejected.")
             return
-        elif choice == "p":
-            await session.write_line("")
+        if choice == "p":
             post = await lane.run(set_post_pinned, post, not post.pinned, changed_by=actor)
-            await _draw_post_action(session, post, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line, when=when)
-        elif choice == "x":
-            await session.write_line("")
-            post = await lane.run(set_post_exempt, post, not post.exempt_from_expiry, changed_by=actor)
-            await _draw_post_action(session, post, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line, when=when)
         else:
-            await session.write(reject_unhandled_key(choice))
+            post = await lane.run(set_post_exempt, post, not post.exempt_from_expiry, changed_by=actor)
 
 
 # -- file areas ----------------------------------------------------------

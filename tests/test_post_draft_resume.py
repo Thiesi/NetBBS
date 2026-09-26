@@ -321,7 +321,7 @@ def test_exit_while_editing_an_existing_post_saves_a_draft(db, alice):
 
     board = create_board(db, "general", creator=alice)
     create_post(db, board, alice, "Original subject", "Original body")
-    session = FakeSession(["e", "1", "", "/exit", "b", ""])
+    session = FakeSession(["1", "e", "", "/exit", "b", "b"])
     asyncio.run(board_flow._show_board(session, db, board, alice))
     text = _written_text(session)
     assert "Draft saved" in text
@@ -336,12 +336,12 @@ def test_reopening_an_edited_post_offers_recovery_of_its_saved_draft(db, alice):
 
     board = create_board(db, "general", creator=alice)
     create_post(db, board, alice, "Original subject", "Original body")
-    exit_session = FakeSession(["e", "1", "", "A line added before leaving", "/exit", "b", ""])
+    exit_session = FakeSession(["1", "e", "", "A line added before leaving", "/exit", "b", "b"])
     asyncio.run(board_flow._show_board(exit_session, db, board, alice))
 
     # Re-opening the *same* post's [E]dit again hits the existing
     # crash-recovery prompt inside _compose_body -- "y" resumes it.
-    reopen_session = FakeSession(["e", "1", "", "y", "/done", "s", "b", ""])
+    reopen_session = FakeSession(["1", "e", "", "y", "/done", "s", "b", "b"])
     asyncio.run(board_flow._show_board(reopen_session, db, board, alice))
     assert "Post updated" in _written_text(reopen_session)
     assert list_posts_page(db, board, alice).posts[0].body == "Original body\nA line added before leaving"

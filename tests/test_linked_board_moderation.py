@@ -448,14 +448,14 @@ def test_a_closed_board_offers_no_post_action_and_says_why(db, remote, alice):
     text = session.visible()
     assert "This message board is closed. It can be read, but it takes no new posts." in text
     assert "[P]ost" not in text
-    assert "Subject" not in text  # "p" was refused, not taken as [P]ost
+    assert "Subject: " not in text  # "p" was refused, not taken as [P]ost
 
 
 def test_removing_a_carried_post_on_a_non_origin_node_says_it_stays_local(db, remote, sysop):
     board = _carried_board(db, remote)
     _carry(db, remote, subject="Carried subject")
 
-    session = _Session(["t", "1", "y", "b"])
+    session = _Session(["1", "t", "y", "b", "b"])
     asyncio.run(board_flow._show_board(session, db, board, sysop))
 
     text = session.visible()
@@ -471,7 +471,7 @@ def test_removing_a_post_on_the_origin_node_is_not_called_local(db, sysop, alice
     create_post(db, board, alice, "Local subject", "Body")
     link_context = LinkContext(link_node=LinkNode(identity=node_identity))
 
-    session = _Session(["t", "1", "y", "b"])
+    session = _Session(["1", "t", "y", "b", "b"])
     asyncio.run(board_flow._show_board(session, db, board, sysop, link_context=link_context))
 
     text = session.visible()
