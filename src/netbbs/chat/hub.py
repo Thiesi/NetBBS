@@ -298,9 +298,10 @@ class ChatHub:
     def close_channel(self, channel_name: str) -> int:
         """
         Move every session out of `channel_name`, which has just stopped
-        existing for callers: each participant's queue gets a
-        `ChannelClosed`, as a priority event (see `send_to`), so a stalled
-        queue cannot drop it. Returns how many sessions were told.
+        existing for callers: each participant's queue is emptied and gets
+        a `ChannelClosed`. Emptied first, so a slow reader does not render
+        a backlog of a channel that is gone before it learns it has to go.
+        Returns how many sessions were told.
 
         Participants leave by themselves as their chat loops unwind; this
         does not remove them, so their own `leave` bookkeeping (and the
@@ -308,7 +309,9 @@ class ChatHub:
         """
         participants = list(self._channels.get(channel_name, {}).values())
         for queue in participants:
-            self._deliver(queue, ChannelClosed(), priority=True)
+            while not queue.empty():
+                queue.get_nowait()
+            queue.put_nowait(ChannelClosed())
         return len(participants)
 
     def last_activity(self, channel_name: str) -> str | None:

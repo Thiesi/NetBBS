@@ -17307,10 +17307,12 @@ async def _retire_open_room_screen(
     except MrcSettingsError as exc:
         _announce_line(session, colored(str(exc), fg_color=MUTED_COLOR))
         return False
+    _announce_line(session, f"Retired {channel.name!r}.")
+    # Callers first: the retirement has committed, and a bridge refresh that
+    # fails must not leave anyone inside a room that is gone.
+    _move_callers_out(session, chat_hub, channel)
     if mrc_bridge is not None:
         await mrc_bridge.refresh_channel_mappings()
-    _announce_line(session, f"Retired {channel.name!r}.")
-    _move_callers_out(session, chat_hub, channel)
     if mrc_bridge is None:
         _announce_line(session, colored(_MRC_STANDALONE_NOTE, fg_color=MUTED_COLOR))
     return True

@@ -140,7 +140,7 @@ from netbbs.chat.categories import Category, get_category_by_id, list_subcategor
 from netbbs.communities import get_community, get_effective_min_age, get_effective_name_requirement
 from netbbs.directory import VCard, get_vcard
 from netbbs.link.boards import LinkContext
-from netbbs.link.channels import queue_channel_message_if_linked
+from netbbs.link.channels import get_channel_by_channel_id, queue_channel_message_if_linked
 from netbbs.link.node_profiles import (
     identity_for_fingerprint,
     identity_for_peer,
@@ -1164,13 +1164,13 @@ _NO_LONGER_QUALIFIES_MESSAGE = (
 
 
 def _fresh_channel(db: Database, channel: Channel) -> Channel | None:
-    """`channel` re-read by name, or `None` once it is gone -- deleted, or a
-    carried channel the SysOp has hidden (issue #683), which the lookup no
-    longer returns. A session sitting in it must degrade, not crash."""
-    try:
-        return get_channel_by_name(db, channel.name)
-    except ChannelError:
-        return None
+    """`channel` re-read by its `channel_id`, or `None` once it is gone --
+    deleted, or a carried channel the SysOp has hidden (issue #683), which
+    the lookup no longer returns. By identity, not name (issue #716): a
+    rename (the standalone admin CLI allows one while callers are inside) is
+    still this channel, and a new channel that took the name, or SQLite's
+    freed row id, is not."""
+    return get_channel_by_channel_id(db, channel.channel_id)
 
 
 def _channel_closed_message(channel: Channel) -> str:
@@ -1180,11 +1180,9 @@ def _channel_closed_message(channel: Channel) -> str:
 
 
 def _channel_still_open(db: Database, channel: Channel) -> bool:
-    """Whether `channel` is still there for callers: not deleted, not a
-    carried channel the SysOp hid, and not replaced by a new channel that
-    took its name (issue #716)."""
-    current = _fresh_channel(db, channel)
-    return current is not None and current.channel_id == channel.channel_id
+    """Whether `channel` is still there for callers: not deleted and not a
+    carried channel the SysOp hid (issue #716)."""
+    return _fresh_channel(db, channel) is not None
 
 
 def _record_presence_event(db: Database, channel: Channel, user: User, kind: str) -> ChannelMessage | None:
@@ -1225,7 +1223,7 @@ def _meets_live_participation_requirements(db: Database, channel: Channel, user:
     accepts a send — the two paths whose broadcast now carries
     verified-name styling (`_chat_author_label`).
 
-    Re-fetches `channel` fresh via `get_channel_by_name` rather than
+    Re-fetches `channel` fresh via `_fresh_channel` (by `channel_id`) rather than
     trusting the frozen snapshot passed in — acting on a stale snapshot
     here specifically risks letting a since-disqualified speaker keep
     posting under styling that claims a verification they no longer
@@ -4138,7 +4136,7 @@ def _render_chat_status_line(
     thread, so every read here (`get_nick`, `_own_channel_privileges`,
     `is_muted`, `format_for_display`) stays a plain synchronous call.
 
-    Re-fetches `channel` fresh via `get_channel_by_name` rather than
+    Re-fetches `channel` fresh via `_fresh_channel` (by `channel_id`) rather than
     trusting the frozen snapshot passed in -- the same reasoning
     `_meets_live_participation_requirements` already applies, and
     exactly the gap its own docstring flags ("not just showing a stale
@@ -4699,6 +4697,9 @@ async def _chat_loop(
     # Issue #716: set when this channel was closed under the caller, which
     # sends them back to the channel list rather than out of chat.
     closed = {"closed": False}
+    # Whether Link peers were told this caller joined, so they are told of a
+    # leave only then (a close before the join announcement owes them none).
+    announced = {"live_join": False}
     # Design doc §8.10.2, issue #148: the live real-time subscribe
     # attempt (started below, once this channel's join is fully set up)
     # is a background task, not awaited inline -- same "ancillary task
@@ -4783,6 +4784,7 @@ async def _chat_loop(
         if recorded_join is None:
             # Issue #716: closed after this caller was let in but before
             # `hub.join` made them reachable by `ChatHub.close_channel`.
+            closed["closed"] = True
             announce(session, _channel_closed_message(channel), tone="muted")
             return _ToPicker()
         await hub.broadcast(channel.name, recorded_join, exclude={participant_id})
@@ -4790,6 +4792,7 @@ async def _chat_loop(
             await link_context.realtime_bridge.broadcast_local_presence_live(
                 channel, change="join", username=user.username
             )
+            announced["live_join"] = True
         # Issue #275: a bridged channel is the caller's opt-in to appear
         # on a public, unauthenticated network under their handle -- say
         # so once, in the join banner, before announcing them to the hub.
@@ -5467,9 +5470,10 @@ async def _chat_loop(
             value = task.result()  # re-raise, e.g. SessionClosedError from a dropped connection
             if task is send_task:
                 outcome = value
-        if receive_task in done and closed["closed"]:
+        if receive_task in done and closed["closed"] and outcome is None:
             # Issue #716: moved out of a closed channel -- to the channel
-            # list, where the reason is carried; nothing to hold for.
+            # list, where the reason is carried; nothing to hold for. A
+            # command that finished in the same tick (/quit, /join) wins.
             discard_buffered_input = getattr(session, "discard_buffered_input", None)
             if discard_buffered_input is not None:
                 await discard_buffered_input()
@@ -5594,11 +5598,16 @@ async def _chat_loop(
                     pass
         hub.leave(channel.name, participant_id)
         # Issue #716: a closed channel records no leave -- a deleted one
-        # has no row to hold it, a hidden one is kept as it was.
-        recorded_leave = await lane.run(_record_presence_event, channel, user, "leave")
+        # has no row to hold it, a hidden one is kept as it was. Decided by
+        # the close this session was told of, not re-read: a Restore (or a
+        # reopened MRC room, whose id is derived from its name) landing
+        # before this unwinds must not gain a leave either.
+        recorded_leave = (
+            None if closed["closed"] else await lane.run(_record_presence_event, channel, user, "leave")
+        )
         if recorded_leave is not None:
             await hub.broadcast(channel.name, recorded_leave, exclude={participant_id})
-        if link_context is not None and link_context.realtime_bridge is not None:
+        if announced["live_join"] and link_context is not None and link_context.realtime_bridge is not None:
             await link_context.realtime_bridge.broadcast_local_presence_live(
                 channel, change="leave", username=user.username
             )

@@ -2780,12 +2780,16 @@ the column.
 **Closing a channel under its callers (issue #716).** A SysOp path that makes a
 channel stop existing for callers (delete, hide, MRC retire) must call
 `ChatHub.close_channel(name)` after its transaction commits; `_move_callers_out`
-in `admin_flow` does it for the three today. `_chat_loop` records its join and
-leave through `_record_presence_event`, which checks the channel is still the
-same one (by `channel_id` -- SQLite reuses a freed row id) in the same lane job
-as the insert: with `foreign_keys = ON` a leave into a deleted channel used to
-raise on the way out, and one into a hidden channel would have changed what
-Restore brings back.
+in `admin_flow` does it for the three today, before any fallible follow-up such
+as an MRC mapping refresh. `close_channel` empties the queue first, so the close
+is the next thing a slow reader sees. `_chat_loop` records its join through
+`_record_presence_event`, which checks the channel still exists in the same
+lane job as the insert; a session told of the close records no leave at all,
+decided by that notice rather than re-read (a Restore can land before it
+unwinds). With `foreign_keys = ON` a leave into a deleted channel used to raise
+on the way out, and one into a hidden channel would change what Restore brings
+back. `_fresh_channel` re-reads by `channel_id`, not name: the standalone admin
+CLI can rename a channel with callers inside, and SQLite reuses a freed row id.
 
 **"Known" means stored (issue #683).** `handle_events` adds every accepted
 content ID to `LinkNode.known_event_ids`, and a later copy of a known ID is

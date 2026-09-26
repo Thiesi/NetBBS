@@ -17,12 +17,14 @@ import asyncio
 import pytest
 
 from netbbs.auth.users import SYSOP_LEVEL, create_user
-from netbbs.chat.channels import create_channel, delete_channel, get_channel_by_name
+from types import SimpleNamespace
+
+from netbbs.chat.channels import create_channel, delete_channel, get_channel_by_name, update_channel
 from netbbs.chat.hub import ChannelClosed, ChatHub, ParticipantId
 from netbbs.chat.mailbox import MessageMailbox
 from netbbs.chat.presence import PresenceRegistry
 from netbbs.chat.scrollback import get_scrollback
-from netbbs.link.carry import accept_genesis, hide_carried_resource
+from netbbs.link.carry import accept_genesis, hide_carried_resource, restore_excluded
 from netbbs.link.events import build_channel_genesis
 from netbbs.link.node_identity import bootstrap_node_identity
 from netbbs.mrc.settings import OpenRoomSettings, materialize_open_room, save_open_room_settings
@@ -108,20 +110,23 @@ def _carried_channel(db, own, remote, sysop):
 # -- the hub -------------------------------------------------------------------
 
 
-def test_close_channel_reaches_every_participant_even_a_stalled_one():
+def test_close_channel_supersedes_a_stalled_participants_backlog():
     hub = ChatHub(queue_maxsize=2)
     stalled = hub.join("lobby", ParticipantId("alice", 1))
     idle = hub.join("lobby", ParticipantId("bob", 2))
     other = hub.join("elsewhere", ParticipantId("carol", 3))
     for n in range(5):
         asyncio.run(hub.broadcast("lobby", f"line {n}"))
+    asyncio.run(hub.broadcast("elsewhere", "still here"))
 
     assert hub.close_channel("lobby") == 2
 
+    # The close is the next thing each reader sees, not the end of a backlog
+    # of a channel that is gone.
     for queue in (stalled, idle):
-        drained = [queue.get_nowait() for _ in range(queue.qsize())]
-        assert isinstance(drained[-1], ChannelClosed)
-    assert other.empty()
+        assert queue.qsize() == 1
+        assert isinstance(queue.get_nowait(), ChannelClosed)
+    assert other.get_nowait() == "still here"
     # Participants leave by themselves as their loops unwind.
     assert hub.participant_count("lobby") == 2
 
@@ -205,6 +210,73 @@ def test_sending_into_a_channel_closed_elsewhere_names_the_real_reason(db, sysop
     # even where SQLite hands it the freed row id.
     create_channel(db, "lobby", creator=alice)
     assert chat_flow._live_send_refusal(db, channel, alice) == "#lobby was closed by the SysOp."
+
+
+def test_a_restore_before_the_caller_unwinds_still_gains_no_leave(db, lane, hub, own, remote, sysop, alice):
+    from netbbs.managed_dns.state import set_node_fingerprint
+
+    set_node_fingerprint(db, own.fingerprint)
+    channel = _carried_channel(db, own, remote, sysop)
+    session = FakeSession([])
+
+    async def scenario():
+        task = await _enter(lane, hub, channel, alice, session)
+        await lane.run(hide_carried_resource, "channels", CHANNEL_ID, actor=sysop)
+        hub.close_channel(channel.name)
+        # Restored before the caller's loop has had a turn to unwind: the
+        # database says "open" again by the time it records its leave.
+        restore_excluded(db, "channels", CHANNEL_ID, actor=sysop)
+        return await asyncio.wait_for(task, timeout=5)
+
+    assert isinstance(asyncio.run(scenario()), chat_flow._ToPicker)
+    assert [m.kind for m in get_scrollback(db, channel)] == ["join"]
+
+
+def test_a_close_before_the_join_was_announced_tells_link_peers_nothing(db, lane, hub, sysop, alice):
+    channel = create_channel(db, "lobby", creator=sysop)
+    delete_channel(db, channel, deleted_by=sysop)
+    told = []
+
+    class _Bridge:
+        async def broadcast_local_presence_live(self, channel, *, change, username):
+            told.append(change)
+
+    link_context = SimpleNamespace(realtime_bridge=_Bridge(), realtime_registry=None)
+
+    action = asyncio.run(asyncio.wait_for(
+        chat_flow._chat_loop(
+            FakeSession([]), lane, hub, PresenceRegistry(), MessageMailbox(), InputHistory(), channel, alice,
+            link_context=link_context,
+        ),
+        timeout=5,
+    ))
+
+    assert isinstance(action, chat_flow._ToPicker)
+    assert told == []
+
+
+def test_a_rename_is_not_a_close(db, lane, hub, sysop, alice):
+    # The standalone admin CLI may rename a channel with callers inside.
+    channel = create_channel(db, "lobby", creator=sysop)
+    session = FakeSession([])
+
+    async def scenario():
+        task = await _enter(lane, hub, channel, alice, session)
+        await lane.run(lambda d: update_channel(
+            d, channel, name="parlour", description=channel.description, min_level=channel.min_level,
+            category_id=channel.category_id, pinned=channel.pinned, hidden=channel.hidden,
+            members_only=channel.members_only, allow_member_invites=channel.allow_member_invites,
+            min_age=channel.min_age, name_requirement=channel.name_requirement,
+            community_id=channel.community_id, changed_by=sysop,
+        ))
+        assert await lane.run(chat_flow._live_send_refusal, channel, alice) is None
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+    # Its leave is recorded like any other.
+    assert [m.kind for m in get_scrollback(db, channel)] == ["join", "leave"]
 
 
 # -- the SysOp console -----------------------------------------------------------
