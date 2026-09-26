@@ -834,7 +834,16 @@ Multipart accounting (issue #511), established the hard way in #508:
 - Two counters, never merged: the stream's total against
   `max_upload_bytes + MULTIPART_FRAMING_ALLOWANCE`, and the file's own bytes
   against `max_upload_bytes`, which is also what the empty-file check reads.
-- Parts after `file` are never read, so they are neither counted nor drained.
+- What follows `file` is drained through the counted stream before the handler
+  answers. #508 measured that aiohttp does not *buffer* an unread trailer, but
+  it does read and discard one after the handler returns, for up to its
+  ten-second `lingering_time`, outside the transfer slot, deadline and bound.
+  Closing instead is worse: unread bytes make the close a TCP reset, which can
+  lose the success response in the ordinary case of an unread closing
+  boundary.
+- A single line longer than the request stream's high-water mark (512 KiB)
+  raises `LineTooLong` inside aiohttp before the counter sees it; the wrapper
+  turns that into 413.
 
 The page's transfer JavaScript has a Node harness,
 `tests/fixtures/transfer_web_shim.cjs`, with DOM, `fetch`, `FormData` and

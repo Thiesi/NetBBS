@@ -119,7 +119,14 @@
     // reverse proxy serves the page under (`/bbs/` -> `/bbs/transfer/...`).
     try {
       var token = new URL(url).pathname.split("/").pop();
-      return new URL("transfer/" + token, window.location.href).href;
+      // The page's own path as a directory: a proxy can serve it at
+      // `/bbs` as well as `/bbs/`, and resolving against `/bbs` would drop
+      // the prefix (Codex review of #702). A last segment with a dot in it
+      // (`/index.html`) is a file and is left alone.
+      var page = new URL(window.location.href);
+      var last = page.pathname.split("/").pop();
+      if (last && last.indexOf(".") === -1) page.pathname += "/";
+      return new URL("transfer/" + token, page).href;
     } catch (error) {
       return url;
     }

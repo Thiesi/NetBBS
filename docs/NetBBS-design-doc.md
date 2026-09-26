@@ -1444,8 +1444,8 @@ listener on a wildcard address) says so rather than printing a URL that fails.
 
 `max_upload_bytes` bounds the *file*, identically over Zmodem and HTTP. An HTTP
 upload as a whole may cost the node that plus a small fixed framing allowance,
-whatever its shape: preamble, skipped fields and part headers all count, and a
-request past the bound is refused (issue #511).
+whatever its shape: preamble, part headers and every part before or after the
+file count, and a request past the bound is refused (issue #511).
 
 A `HEAD` on a transfer link answers with the status a `GET` would, the reason in
 `X-NetBBS-Transfer-Message`, and spends nothing. The browser page relies on it:

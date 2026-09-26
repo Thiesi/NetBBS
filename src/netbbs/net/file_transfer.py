@@ -102,6 +102,13 @@ room for a browser's framing (a few hundred bytes) and a handful of small
 form fields, and nothing like room for a preamble or a skipped part big
 enough to matter."""
 
+MAX_CONCURRENT_PROBES = 16
+"""How many `HEAD` probes may be resolving against the database at once.
+
+A probe spends nothing and holds no transfer slot, so without its own bound
+anyone with one live link could queue unlimited work on the foreground lane
+(Codex review of #702). Past it a probe answers 429, as a busy node does."""
+
 DEFAULT_MAX_OUTSTANDING_GRANTS = 128
 """A ceiling on unredeemed grants across the whole node. Every caller
 can mint these, so the table is remotely influenced and needs a bound
@@ -411,6 +418,7 @@ class TransferGateway:
         self._lane = lane
         self._uploads_in_flight = 0
         self._downloads_in_flight = 0
+        self._probes_in_flight = 0
         self._max_concurrent_uploads = max_concurrent_uploads
         # A callable, not a value: a node builds its listeners before it
         # loads its Link identity, so asking at construction time would
@@ -462,10 +470,15 @@ class TransferGateway:
         if grant.direction == UPLOAD:
             # A GET serves the upload form, so a GET would succeed.
             return web.Response(status=200, headers={"Cache-Control": "no-store"})
+        if self._probes_in_flight >= MAX_CONCURRENT_PROBES:
+            return _head_refusal(429, "This node is already busy sending files. Try again in a moment.")
+        self._probes_in_flight += 1
         try:
             resolved = await self._lane.run(resolve, grant)
         except TransferError as exc:
             return _head_refusal(403, str(exc))
+        finally:
+            self._probes_in_flight -= 1
         if self._downloads_in_flight >= self._max_concurrent_uploads:
             return _head_refusal(429, "This node is already busy sending files. Try again in a moment.")
         # A StreamResponse, so Content-Length can be the file's size rather
@@ -787,6 +800,14 @@ async def _receive_upload(request, temp_path: Path, *, max_bytes: int) -> tuple[
                 if written > max_bytes:
                     raise web.HTTPRequestEntityTooLarge(max_size=max_bytes, actual_size=written)
                 handle.write(chunk)
+            # Whatever follows the file -- the closing boundary, trailing
+            # parts, an epilogue -- is read here, through the counted
+            # stream, inside this upload's slot, deadline and request bound
+            # (Codex review of #702). Left unread, aiohttp reads and
+            # discards it anyway after the handler returns, for up to its
+            # ten-second lingering time and outside all three.
+            while await counted.read(64 * 1024):
+                pass
         else:
             async for chunk in request.content.iter_chunked(64 * 1024):
                 written += len(chunk)
@@ -808,9 +829,8 @@ class _CountingStream:
     pushes back with `unread_data` is subtracted, so a byte it reads twice
     is counted once.
 
-    Parts after the file are never read at all: the handler stops at the
-    `file` part, and aiohttp does not drain the rest into the process.
-    Draining them to count them would consume bytes that are ignored today.
+    The handler drains whatever follows the `file` part through this too,
+    so trailing parts count like any other byte of the request.
     """
 
     def __init__(self, content, *, limit: int) -> None:
@@ -830,7 +850,19 @@ class _CountingStream:
         return self._count(await self._content.read(n))
 
     async def readline(self, **kwargs) -> bytes:
-        return self._count(await self._content.readline(**kwargs))
+        from aiohttp import web
+        from aiohttp.http_exceptions import LineTooLong
+
+        try:
+            line = await self._content.readline(**kwargs)
+        except (LineTooLong, ValueError) as exc:
+            # One line past aiohttp's own per-line ceiling: a request this
+            # handler would refuse as too large anyway, so say that rather
+            # than let it surface as a 500 (Codex review of #702).
+            raise web.HTTPRequestEntityTooLarge(
+                max_size=self._limit, actual_size=self.total + 1,
+            ) from exc
+        return self._count(line)
 
     def at_eof(self) -> bool:
         return self._content.at_eof()

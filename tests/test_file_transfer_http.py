@@ -497,16 +497,42 @@ def test_an_empty_file_part_is_refused_however_it_is_padded(node):
     assert list_files_page(node.db, area, alice).entries == []
 
 
-def test_a_part_after_the_file_is_not_charged(node):
-    """Parts after `file` are never read, so they cost the node nothing
-    and are not counted -- counting them would mean draining them."""
+def test_a_part_after_the_file_counts_against_the_request(node):
+    """Left unread, a trailing part is read and discarded by aiohttp after
+    the handler returns, for up to its lingering time and outside the
+    transfer slot, deadline and bound -- so it is drained, counted, here."""
     alice = create_user(node.db, "alice", password="hunter2", user_level=10)
     area = create_file_area(node.db, "docs", creator=alice)
     set_max_upload_bytes(node.db, 64)
 
     body = _multipart(("file", "tiny.txt", b"hello"), ("trailer", None, b"t" * 200_000))
+    assert _post_multipart(node, alice, area, body) == 413
+    assert list_files_page(node.db, area, alice).entries == []
+
+
+def test_a_small_trailing_part_is_harmless(node):
+    alice = create_user(node.db, "alice", password="hunter2", user_level=10)
+    area = create_file_area(node.db, "docs", creator=alice)
+    set_max_upload_bytes(node.db, 64)
+
+    body = _multipart(("file", "tiny.txt", b"hello"), ("note", None, b"thanks"))
     assert _post_multipart(node, alice, area, body) == 200
     assert list_files_page(node.db, area, alice).entries[0].filename == "tiny.txt"
+
+
+def test_one_overlong_preamble_line_is_refused_as_too_large(node):
+    """One preamble line longer than the request stream's high-water mark
+    (512 KiB here) makes aiohttp raise before the counter sees the line;
+    that is a too-large request, not a 400 or 500. The file limit is set
+    high so that the per-line ceiling, not the request bound, is what
+    trips."""
+    alice = create_user(node.db, "alice", password="hunter2", user_level=10)
+    area = create_file_area(node.db, "docs", creator=alice)
+    set_max_upload_bytes(node.db, 2_000_000)
+
+    body = _multipart(("file", "tiny.txt", b"hello"), preamble=b"x" * 700_000 + b"\r\n")
+    assert _post_multipart(node, alice, area, body) == 413
+    assert list_files_page(node.db, area, alice).entries == []
 
 
 def test_an_empty_upload_is_refused(node):
@@ -706,3 +732,22 @@ def test_a_failed_rollback_does_not_reverse_a_stored_upload(tmp_path, monkeypatc
         assert [e.filename for e in list_files_page(running.db, area, alice).entries] == ["notes.txt"]
     finally:
         running.close()
+
+
+def test_head_probes_have_their_own_bound(node, monkeypatch):
+    """A probe holds no transfer slot, so it gets a ceiling of its own on
+    work queued against the database; past it, a busy answer."""
+    from netbbs.net import file_transfer
+
+    monkeypatch.setattr(file_transfer, "MAX_CONCURRENT_PROBES", 0)
+    alice = create_user(node.db, "alice", password="hunter2", user_level=10)
+    area = create_file_area(node.db, "docs", creator=alice)
+    entry = upload_file(node.db, area, alice, "game.zip", b"payload")
+
+    def url():
+        grant = node.grants.issue(direction=DOWNLOAD, user=alice, area=area, file_id=entry.file_id)
+        return f"{node.base}/transfer/{grant.token}"
+
+    status, message, _ = _head(node, url)
+    assert status == 429
+    assert "busy" in message
