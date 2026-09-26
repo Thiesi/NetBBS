@@ -460,6 +460,9 @@ def test_a_sysop_testing_a_door_does_not_publish_what_it_wrote(db, lane, sysop, 
 
     assert asyncio.run(_run(FakeSession(), lane, door, sysop, rehearsal=True)).reason == "exited"
     assert _posts(db, board, sysop) == []
+    # ...but the door still hears what would have happened.
+    (receipt,) = [json.loads(path.read_text()) for path in results_dir(db, door.id).glob("*.result.json")]
+    assert (receipt["status"], receipt["would"]) == ("rehearsal", "posted")
 
     # The same door, played rather than tested, does post.
     assert asyncio.run(_run(FakeSession(), lane, door, sysop)).reason == "exited"
@@ -555,14 +558,15 @@ def test_scanning_a_flooded_drop_directory_stays_bounded(db, door, sysop, board,
     """The drain runs on the shared DatabaseLane. Materializing and sorting a
     whole directory first would let one buggy door stall every caller's
     database work in proportion to whatever it wrote."""
-    from netbbs.doors.outbound import _MAX_REQUESTS_SCANNED, _scan_requests
+    from netbbs.doors.outbound import _MAX_REQUESTS_SCANNED, _DropDir, _scan_requests
 
     directory = tmp_path / OUTBOUND_DIRNAME
     directory.mkdir(exist_ok=True)
     for index in range(_MAX_REQUESTS_SCANNED + 25):
         (directory / f"post{index:05d}.json").write_text("{}", encoding="utf-8")
 
-    found, truncated = _scan_requests(directory)
+    with _DropDir(directory) as drop:
+        found, truncated = _scan_requests(drop)
 
     assert len(found) == _MAX_REQUESTS_SCANNED
     assert truncated is True
@@ -753,3 +757,307 @@ def test_a_refusal_quotes_a_doors_own_text_back_at_it_bounded(db, door, sysop, b
     assert len(result["reason"]) < 400
     written = next(results_dir(db, door.id).glob("*.result.json"))
     assert written.stat().st_size < 64 * 1024, "a receipt a backup would not carry"
+
+
+# -- slice 2 groundwork: repeated drains and rehearsal verdicts ---------------
+
+
+def test_a_request_is_answered_once_even_when_it_cannot_be_removed(db, door, sysop, board, tmp_path, monkeypatch):
+    """Once drains run during a session, a request that survives its own
+    answer would post again on every tick. Claiming it before reading is
+    what prevents that; removing it afterwards is only housekeeping."""
+    from netbbs.doors import outbound
+
+    monkeypatch.setattr(outbound, "_release", lambda drop, claimed: None)  # every delete fails
+    _enable(db, door, sysop, board)
+    request = _request(tmp_path, subject="Once", body="...")
+
+    assert drain(db, door, tmp_path, final=False) == (1, 0)
+    assert drain(db, door, tmp_path, final=False) == (0, 0)
+    assert drain(db, door, tmp_path) == (0, 0)
+    assert len(_posts(db, board, sysop)) == 1
+    assert _result(db, door, request)["status"] == "posted"
+
+
+def test_a_request_that_cannot_be_claimed_is_left_unread(db, door, sysop, board, tmp_path, monkeypatch):
+    from netbbs.doors import outbound
+
+    _enable(db, door, sysop, board)
+    request = _request(tmp_path, subject="Later", body="...")
+
+    def refuse(*args, **kwargs):
+        raise PermissionError("locked")
+
+    monkeypatch.setattr(outbound._DropDir, "replace", refuse)
+    assert drain(db, door, tmp_path, final=False) == (0, 0)
+    assert request.exists() and _posts(db, board, sysop) == []
+
+    monkeypatch.undo()
+    assert drain(db, door, tmp_path) == (1, 0)
+
+
+def test_a_reused_request_name_keeps_every_receipt(db, door, sysop, board, tmp_path):
+    """A door posting during its session will call every request post.json;
+    the second one's receipt must not replace the first one's."""
+    _enable(db, door, sysop, board)
+    first = _request(tmp_path, name="post", subject="One", body="...")
+    assert drain(db, door, tmp_path, final=False) == (1, 0)
+    _request(tmp_path, name="post", subject="Two", body="...")
+    assert drain(db, door, tmp_path) == (1, 0)
+
+    receipts = _results(db, door, first)
+    assert [receipt["status"] for receipt in receipts] == ["posted", "posted"]
+    assert len({receipt["post_id"] for receipt in receipts}) == 2
+
+
+def test_a_drain_during_the_session_takes_a_few_and_leaves_the_rest(db, door, sysop, board, tmp_path):
+    _enable(db, door, sysop, board, posts_per_hour=20)
+    for index in range(5):
+        _request(tmp_path, name=f"p{index}", subject=f"Post {index}", body="...")
+
+    assert drain(db, door, tmp_path, limit=2, final=False) == (2, 0)
+    assert len(list((tmp_path / OUTBOUND_DIRNAME).glob("*.json"))) == 3
+    assert drain(db, door, tmp_path, limit=2, final=False) == (2, 0)
+    # Only the final drain refuses what is left over.
+    assert drain(db, door, tmp_path, limit=0) == (0, 1)
+    assert "not processed" in _result(db, door, tmp_path / OUTBOUND_DIRNAME / "p4.json")["reason"]
+
+
+def test_a_rehearsal_says_what_would_have_happened_and_does_nothing(db, door, sysop, board, tmp_path):
+    """A SysOp testing a door sees its posting logic judged -- allowlist,
+    shape, rate -- without a post, a rate debit or an audit entry."""
+    _enable(db, door, sysop, board)
+    good = _request(tmp_path, name="good", subject="Season 1", body="...")
+    stray = _request(tmp_path, name="stray", subject="Hi", body="...", board="Private")
+    before = len(list_actions_for_object(db, "door", door.id))
+
+    assert drain(db, door, tmp_path, rehearsal=True) == (1, 1)
+
+    would_post = _result(db, door, good)
+    assert (would_post["status"], would_post["would"], would_post["board"]) == ("rehearsal", "posted", "Chronicle")
+    assert "post_id" not in would_post
+    would_refuse = _result(db, door, stray)
+    assert (would_refuse["status"], would_refuse["would"]) == ("rehearsal", "rejected")
+    assert "not allowlisted" in would_refuse["reason"]
+
+    assert _posts(db, board, sysop) == []
+    assert db.connection.execute(
+        "SELECT COUNT(*) FROM door_outbound_history WHERE door_id = ?", (door.id,)).fetchone()[0] == 0
+    assert len(list_actions_for_object(db, "door", door.id)) == before
+    assert not [entry for entry in list_actions_for_object(db, "board", board.id)
+                if entry.action == "door_outbound_post"]
+
+
+def test_a_rehearsal_is_judged_against_the_real_rate_budget(db, door, sysop, board, tmp_path):
+    _enable(db, door, sysop, board, posts_per_hour=1)
+    _request(tmp_path, name="real", subject="Real", body="...")
+    assert drain(db, door, tmp_path) == (1, 0)
+
+    rehearsed = _request(tmp_path, name="rehearsed", subject="Again", body="...")
+    assert drain(db, door, tmp_path, rehearsal=True) == (0, 1)
+    receipt = _result(db, door, rehearsed)
+    assert receipt["would"] == "rejected" and "rate limit" in receipt["reason"]
+
+
+# -- slice 2 groundwork, review round 1 -------------------------------------
+
+
+def test_a_rehearsal_meets_the_same_checks_as_a_real_post(db, door, sysop, board, tmp_path):
+    """Judged by the real post, rolled back -- not by a copy of its checks."""
+    from netbbs.boards.limits import MAX_BODY_BYTES
+
+    _enable(db, door, sysop, board)
+    oversized = _request(tmp_path, name="big", subject="Big", body="x" * (MAX_BODY_BYTES + 1))
+
+    assert drain(db, door, tmp_path, rehearsal=True) == (0, 1)
+    receipt = _result(db, door, oversized)
+    assert (receipt["status"], receipt["would"]) == ("rehearsal", "rejected")
+    assert _posts(db, board, sysop) == []
+
+
+def test_a_rehearsal_spends_its_budget_within_the_drain(db, door, sysop, board, tmp_path):
+    """Five rehearsed requests under a ceiling of one: one would post."""
+    _enable(db, door, sysop, board, posts_per_hour=1)
+    requests = [_request(tmp_path, name=f"r{index}", subject="Hi", body="...") for index in range(5)]
+
+    assert drain(db, door, tmp_path, rehearsal=True) == (1, 4)
+    verdicts = [_result(db, door, request)["would"] for request in requests]
+    assert verdicts == ["posted", "rejected", "rejected", "rejected", "rejected"]
+    assert db.connection.execute(
+        "SELECT COUNT(*) FROM door_outbound_history WHERE door_id = ?", (door.id,)).fetchone()[0] == 0
+
+
+def test_a_switched_off_hook_still_honours_a_ticks_limit(db, door, sysop, board, tmp_path):
+    _enable(db, door, sysop, board)
+    disable_outbound(db, door, disabled_by=sysop)
+    for index in range(5):
+        _request(tmp_path, name=f"p{index}", subject="Hi", body="...")
+
+    assert drain(db, door, tmp_path, limit=2, final=False) == (0, 2)
+    assert len(list((tmp_path / OUTBOUND_DIRNAME).glob("*.json"))) == 3
+
+
+@pytest.mark.skipif(__import__("os").name != "posix", reason="Windows MAX_PATH, not the 255-byte limit")
+def test_a_long_request_name_can_still_be_claimed_and_answered(db, door, sysop, board, tmp_path):
+    """A request name near the 255-byte limit must not become a claim or a
+    receipt name the filesystem refuses -- after the post has committed."""
+    _enable(db, door, sysop, board)
+    name = "n" * 200
+    request = _request(tmp_path, name=name, subject="Long", body="...")
+
+    assert drain(db, door, tmp_path) == (1, 0)
+    (receipt,) = [json.loads(path.read_text()) for path in results_dir(db, door.id).glob("*.result.json")]
+    assert receipt["request"] == name and receipt["status"] == "posted"
+    assert all(len(path.name) < 200 for path in results_dir(db, door.id).iterdir())
+    assert not request.exists()
+
+
+# -- slice 2 groundwork, review round 2: a guest-writable drop directory -------
+
+posix_only = pytest.mark.skipif(__import__("os").name != "posix", reason="symlinks and dir fds are POSIX")
+
+
+def test_entries_that_are_not_requests_count_against_the_scan_bound(tmp_path):
+    """Otherwise a door fills its drop directory with other names and every
+    tick walks all of them on the shared lane."""
+    from netbbs.doors.outbound import _MAX_REQUESTS_SCANNED, _DropDir, _scan_requests
+
+    directory = tmp_path / OUTBOUND_DIRNAME
+    directory.mkdir()
+    for index in range(_MAX_REQUESTS_SCANNED + 5):
+        (directory / f"junk{index:05d}.txt").write_text("", encoding="utf-8")
+
+    with _DropDir(directory) as drop:
+        found, truncated = _scan_requests(drop)
+    assert found == [] and truncated is True
+
+
+@posix_only
+def test_a_drop_directory_swapped_for_a_link_is_not_followed(db, door, sysop, board, tmp_path):
+    """A VM guest writes its node directory. Pointing `outbound` at a host
+    directory must not make NetBBS read, rename or delete what is there."""
+    _enable(db, door, sysop, board)
+    host = tmp_path / "host-files"
+    host.mkdir()
+    precious = host / "settings.json"
+    precious.write_text('{"subject": "leak", "body": "secret"}', encoding="utf-8")
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    (workdir / OUTBOUND_DIRNAME).symlink_to(host, target_is_directory=True)
+
+    assert drain(db, door, workdir) == (0, 0)
+    assert precious.read_text(encoding="utf-8").startswith('{"subject"')
+    assert sorted(path.name for path in host.iterdir()) == ["settings.json"]
+    assert _posts(db, board, sysop) == []
+
+
+@posix_only
+def test_a_request_that_is_a_link_to_a_host_file_is_never_read(db, door, sysop, board, tmp_path):
+    _enable(db, door, sysop, board)
+    secret = tmp_path / "secret.json"
+    secret.write_text('{"subject": "leak", "body": "secret"}', encoding="utf-8")
+    directory = tmp_path / OUTBOUND_DIRNAME
+    directory.mkdir()
+    (directory / "post.json").symlink_to(secret)
+
+    assert drain(db, door, tmp_path) == (0, 0)
+    assert secret.exists() and _posts(db, board, sysop) == []
+
+
+def test_the_last_drain_answers_a_request_it_could_not_take(db, door, sysop, board, tmp_path, monkeypatch):
+    """A tick may leave an unclaimable request for later; the final drain is
+    the last chance, so the door hears why instead of nothing."""
+    from netbbs.doors import outbound
+
+    _enable(db, door, sysop, board)
+    request = _request(tmp_path, subject="Stuck", body="...")
+
+    def refuse(*args, **kwargs):
+        raise PermissionError("locked")
+
+    # Only the claim fails; the receipt writer's own rename must still work.
+    monkeypatch.setattr(outbound._DropDir, "replace", refuse)
+    assert drain(db, door, tmp_path) == (0, 1)
+    receipt = _result(db, door, request)
+    assert receipt["status"] == "rejected" and "could not be taken" in receipt["reason"]
+    assert _posts(db, board, sysop) == []
+
+
+@posix_only
+def test_the_drop_directory_is_really_pinned_on_posix():
+    """The symlink defence silently degraded to path checks on NetBSD once,
+    because one capability test named the wrong function. Assert the real
+    thing is in force on every POSIX host this suite runs on."""
+    from netbbs.doors.outbound import _FD_SAFE
+
+    assert _FD_SAFE is True
+
+
+# -- slice 2 groundwork, review round 3 -------------------------------------
+
+
+def test_a_flood_never_pushes_receipts_past_the_backup_ceiling(db, door, sysop, board, tmp_path, monkeypatch):
+    """A backup running while a flood is answered must not find more receipts
+    than it will scan -- it would fail the whole backup."""
+    from netbbs.backup import _DOOR_OUTBOUND_SCAN_FACTOR
+    from netbbs.doors import outbound
+
+    _enable(db, door, sysop, board)
+    peak = []
+    real_write = outbound._write_result
+
+    def watching(*args, **kwargs):
+        real_write(*args, **kwargs)
+        peak.append(len(list(results_dir(db, door.id).glob("*.result.json"))))
+
+    monkeypatch.setattr(outbound, "_write_result", watching)
+    for index in range(outbound.RESULTS_KEPT + 200):
+        _request(tmp_path, name=f"f{index:05d}", subject="x", body="...")
+    drain(db, door, tmp_path)
+
+    assert max(peak) < _DOOR_OUTBOUND_SCAN_FACTOR * outbound.RESULTS_KEPT
+    assert max(peak) <= outbound.RESULTS_KEPT + outbound._PRUNE_EVERY
+
+
+def test_requests_hidden_by_the_scan_bound_are_not_lost_silently(db, door, sysop, board, tmp_path):
+    from netbbs.doors.outbound import _MAX_REQUESTS_SCANNED
+
+    _enable(db, door, sysop, board)
+    directory = tmp_path / OUTBOUND_DIRNAME
+    directory.mkdir()
+    for index in range(_MAX_REQUESTS_SCANNED + 5):
+        (directory / f"junk{index:05d}.txt").write_text("", encoding="utf-8")
+
+    assert drain(db, door, tmp_path) == (0, 1)
+    (receipt,) = [json.loads(path.read_text()) for path in results_dir(db, door.id).glob("*.result.json")]
+    assert receipt["request"] == "" and "were not seen" in receipt["reason"]
+
+
+def test_a_rehearsal_budget_spans_every_drain_of_the_session(db, door, sysop, board, tmp_path):
+    """A live rehearsal is drained every tick; its would-be spend must carry
+    over, as a real session's persisted debits do."""
+    _enable(db, door, sysop, board, posts_per_hour=1)
+    spend = {"posts": 0}
+    first = _request(tmp_path, name="first", subject="One", body="...")
+    assert drain(db, door, tmp_path, rehearsal=True, final=False, rehearsed=spend) == (1, 0)
+    second = _request(tmp_path, name="second", subject="Two", body="...")
+    assert drain(db, door, tmp_path, rehearsal=True, rehearsed=spend) == (0, 1)
+    assert _result(db, door, first)["would"] == "posted"
+    assert _result(db, door, second)["would"] == "rejected"
+
+
+def test_a_truncated_final_scan_says_so_even_when_it_found_requests(db, door, sysop, board, tmp_path, monkeypatch):
+    """Visible requests are answered one by one; whatever the bound hid still
+    gets a receipt, on the normal path and when the authority has lapsed."""
+    from netbbs.doors import outbound
+
+    monkeypatch.setattr(outbound, "_MAX_REQUESTS_SCANNED", 3)
+    _enable(db, door, sysop, board)
+    for index in range(5):
+        _request(tmp_path, name=f"p{index}", subject="Hi", body="...")
+
+    posted, refused = drain(db, door, tmp_path)
+    receipts = [json.loads(path.read_text()) for path in results_dir(db, door.id).glob("*.result.json")]
+    hidden = [receipt for receipt in receipts if receipt["request"] == ""]
+    assert len(hidden) == 1 and "were not seen" in hidden[0]["reason"]
+    assert posted + refused == 3 + 1

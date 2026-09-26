@@ -5844,6 +5844,31 @@ never-drained qemu stdout pipe stalls the guest once its console fills it;
 the runtime's diagnostics task drains socketpair doors' stdout, and any
 test harness must too.
 
+The door outbound hook's `drain` (issue #520) must be safe to repeat, so a
+request is claimed -- renamed out of the request pattern, to a bounded
+`_short(name) + ".claimed"` (a prefix plus a hash once a name passes 64
+bytes, so a name near the 255-byte limit can still be claimed) -- *before* it
+is read. At-most-once rests on that rename, never on deleting the request
+afterwards, whose failure must be harmless. A request that cannot be claimed
+is left for the next drain; the final drain answers it instead. Receipt names
+carry a `time.time_ns()` sequence and a bounded form of the request name
+because an in-session door reuses request names; doors are contractually
+forbidden to construct them. Receipts are pruned every `_PRUNE_EVERY` writes
+and at the end of each drain -- not per receipt (it globs, stats and sorts the
+directory) and not only at the end (a flood would pass `netbbs.backup`'s scan
+ceiling mid-drain). `limit`/`final` let an in-session tick take a few requests
+while only the final drain refuses leftovers. A rehearsal's would-be spend is
+carried across one session's drains by the caller (`rehearsed`), since
+rehearsal posts are never persisted.
+A VM guest can write its node directory, so the drop directory is guest-
+controlled: `outbound` or any request in it may be a symlink to a host path.
+`_DropDir` opens it once with `O_DIRECTORY|O_NOFOLLOW` and makes every scan,
+rename, read (`O_NOFOLLOW|O_NONBLOCK`, regular files only, bounded) and
+unlink relative to that descriptor; the scan bound counts entries looked at,
+not matches. Without it a guest could make the drain read, rename and delete
+host `*.json` files as the service account. Any new host-side operation on a
+guest-writable path must follow the same rule.
+
 Legacy configuration parsers need byte-level validation against the actual
 program. LORD 4.07 silently ignores LF-only node files; install its NODE1.DAT
 with CRLF. Global War's distributed 2.7 executable stalls with bare values

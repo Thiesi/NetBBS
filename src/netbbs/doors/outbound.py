@@ -36,12 +36,15 @@ a result file saying what happened and why.
 from __future__ import annotations
 
 import datetime
+import hashlib
 import json
 import logging
 import os
+import stat
 import re
 import shutil
 import sqlite3
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -63,6 +66,14 @@ _logger = logging.getLogger(__name__)
 #: republish uses, in the other direction.
 OUTBOUND_DIRNAME = "outbound"
 _REQUEST_SUFFIX = ".json"
+#: What a request is renamed to the moment a drain takes it, before a byte of
+#: it is read. It no longer matches the request pattern, so no later drain --
+#: the next in-session tick, or the one at exit -- can see it again, whatever
+#: happens to it afterwards. Removing the file once answered is housekeeping,
+#: not the guarantee: a failed delete once meant a request survived, harmless
+#: while the drain ran only at exit and the working directory went with it,
+#: and a second post on every later tick once it did not.
+_CLAIMED_SUFFIX = ".claimed"
 
 #: How a result file is named. Public because `netbbs.backup` captures these
 #: files as node state and has to recognize the ones NetBBS itself wrote.
@@ -450,26 +461,110 @@ def _is_request(name: str) -> bool:
     return lowered.endswith(_REQUEST_SUFFIX) and not lowered.endswith(RESULT_SUFFIX)
 
 
-def _scan_requests(directory: Path) -> tuple[list[Path], bool]:
-    """Finished requests in `directory`, bounded; and whether we stopped early.
+#: Whether this platform can pin a directory by descriptor and work relative
+#: to it. True on NetBSD and Linux; the fallback exists for development on
+#: Windows, where no door runs in a VM and there is no boundary to defend.
+#: `os.rename`, not `os.replace`: on POSIX both are renameat(2), which replaces
+#: its target, but NetBSD's Python lists only `os.rename` in `supports_dir_fd`
+#: -- checking for `os.replace` silently turned the pinning off there.
+_FD_SAFE = (os.name == "posix" and hasattr(os, "O_NOFOLLOW") and hasattr(os, "O_DIRECTORY")
+            and os.open in os.supports_dir_fd and os.rename in os.supports_dir_fd
+            and os.unlink in os.supports_dir_fd and os.mkdir in os.supports_dir_fd
+            and os.scandir in os.supports_fd)
 
-    `os.scandir` with an explicit bound rather than `sorted(iterdir())`: the
-    latter materializes and orders the whole directory before any cap can
-    apply, so a door stuck in a write loop would make this allocate in
-    proportion to whatever it wrote -- and the drain runs on the shared
-    `DatabaseLane`, so every other caller's database work would wait behind it.
+
+class _DropDir:
+    """A door's drop directory, pinned so a symlink cannot redirect it.
+
+    For a native door this is belt and braces: it runs as the BBS user and
+    could do anything these operations could. A VM door is the reason it
+    exists (issue #474). Its guest writes to the node directory through 9p,
+    and could replace `outbound` -- or any request in it -- with a symlink to
+    a host path; a drain following it would read, rename and delete host files
+    as the service account, which is exactly the reach the VM is there to
+    take away. So the directory is opened once, without following a link, and
+    every scan, rename, read and delete is made relative to that descriptor.
     """
-    found: list[Path] = []
+
+    def __init__(self, path: Path):
+        self.path = path
+        if _FD_SAFE:
+            self.fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        else:
+            if not stat.S_ISDIR(os.lstat(path).st_mode):
+                raise NotADirectoryError(str(path))
+            self.fd = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        if self.fd is not None:
+            os.close(self.fd)
+
+    def scandir(self):
+        return os.scandir(self.fd if self.fd is not None else self.path)
+
+    def replace(self, source: str, target: str) -> None:
+        if self.fd is not None:
+            os.rename(source, target, src_dir_fd=self.fd, dst_dir_fd=self.fd)
+        else:
+            os.replace(self.path / source, self.path / target)
+
+    def unlink(self, name: str) -> None:
+        if self.fd is not None:
+            os.unlink(name, dir_fd=self.fd)
+        else:
+            (self.path / name).unlink()
+
+    def read(self, name: str, limit: int) -> bytes | None:
+        """A regular file's bytes, or None if it is larger than `limit`.
+
+        Never follows a link, never blocks on a FIFO, and never reads more
+        than `limit` bytes into this process whatever the file claims to be.
+        """
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        if self.fd is not None:
+            descriptor = os.open(name, flags, dir_fd=self.fd)
+        else:
+            descriptor = os.open(self.path / name, flags | getattr(os, "O_BINARY", 0))
+        with os.fdopen(descriptor, "rb") as source:
+            if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+                raise OSError(f"{name} is not a regular file")
+            data = source.read(limit + 1)
+        return None if len(data) > limit else data
+
+
+def _open_drop_dir(workdir: Path) -> _DropDir | None:
+    try:
+        return _DropDir(workdir / OUTBOUND_DIRNAME)
+    except OSError:
+        # Absent, or not a real directory -- a link, say. Either way there is
+        # nothing here this drain will read.
+        return None
+
+
+def _scan_requests(drop: _DropDir) -> tuple[list[str], bool]:
+    """Finished requests in the drop directory, bounded; and whether we stopped early.
+
+    Bounded by entries *looked at*, not by requests found: a door can fill the
+    directory with names that are not requests, and a bound that only counted
+    matches would enumerate all of them, on the shared `DatabaseLane`, on
+    every in-session tick. Only regular files count, judged without following
+    a link. `os.scandir` rather than `sorted(iterdir())` for the same reason:
+    the latter materializes the whole directory before any bound applies.
+    """
+    found: list[str] = []
     truncated = False
     try:
-        with os.scandir(directory) as entries:
-            for entry in entries:
-                if len(found) >= _MAX_REQUESTS_SCANNED:
+        with drop.scandir() as entries:
+            for scanned, entry in enumerate(entries):
+                if scanned >= _MAX_REQUESTS_SCANNED:
                     truncated = True
                     break
                 try:
-                    if entry.is_file() and _is_request(entry.name):
-                        found.append(Path(entry.path))
+                    if _is_request(entry.name) and entry.is_file(follow_symlinks=False):
+                        found.append(entry.name)
                 except OSError:
                     continue
     except OSError:
@@ -479,14 +574,112 @@ def _scan_requests(directory: Path) -> tuple[list[Path], bool]:
     return sorted(found), truncated
 
 
-def _refuse_all(db: Database, door, launch: str, requests: list[Path], reason: str) -> int:
-    """Answer every request in `requests` with the same refusal."""
-    for request in requests:
-        _write_result(db, door.id, launch, request, {"status": "rejected", "reason": reason})
-    return len(requests)
+def _claim(drop: _DropDir, name: str) -> str | None:
+    """Take a request out of the drop directory's pattern, or None if we cannot.
+
+    A request we cannot claim is not read: an unclaimable request that was
+    processed anyway is exactly the one a later drain would process again.
+    """
+    # Hashed, not appended to: a door's request name may already be near the
+    # filesystem's 255-byte limit, and a claim that cannot be named is a
+    # request that can never be answered.
+    claimed = _short(name) + _CLAIMED_SUFFIX
+    try:
+        drop.replace(name, claimed)
+    except OSError as exc:
+        _logger.warning("could not claim door outbound request %s: %s", name, exc)
+        return None
+    return claimed
 
 
-def _discard_all(requests: list[Path]) -> int:
+def _release(drop: _DropDir, claimed: str) -> None:
+    try:
+        drop.unlink(claimed)
+    except OSError:
+        pass
+
+
+def _stem(name: str) -> str:
+    return name[: -len(_REQUEST_SUFFIX)]
+
+
+#: Longest piece of a door's own request name that NetBBS puts into a name of
+#: its own. The receipt payload always carries the full name; the file name
+#: only has to be unique and readable.
+_NAME_PIECE_CHARS = 64
+
+
+def _short(name: str) -> str:
+    """`name` if it is short, else a readable prefix plus a hash of all of it.
+
+    Measured and hashed with `surrogateescape`: on POSIX a door may name a
+    file with bytes that are not UTF-8, and `os.scandir` hands those back as
+    lone surrogates, which a strict encode would turn into an exception that
+    stopped the drain.
+    """
+    encoded = name.encode("utf-8", errors="surrogateescape")
+    if len(encoded) <= _NAME_PIECE_CHARS:
+        return name
+    digest = hashlib.sha256(encoded).hexdigest()[:16]
+    return name[:_NAME_PIECE_CHARS // 4] + "-" + digest
+
+
+#: How many receipts a drain writes between prunes. A final drain can answer
+#: up to `_MAX_REQUESTS_SCANNED` requests; pruning only at its end would let a
+#: door's receipt directory pass `netbbs.backup`'s scan ceiling (a multiple of
+#: `RESULTS_KEPT`) mid-drain and fail a backup running at that moment.
+_PRUNE_EVERY = 64
+
+
+class _Receipts:
+    """Counts one drain's receipts and prunes every `_PRUNE_EVERY` of them."""
+
+    def __init__(self, directory: Path):
+        self.directory = directory
+        self.written = 0
+
+    def note(self) -> None:
+        self.written += 1
+        if self.written % _PRUNE_EVERY == 0:
+            _prune_results(self.directory)
+
+
+#: What a receipt says when the scan bound hid requests from the drain. Its
+#: `request` is empty: it answers for the drop directory, not for one file.
+_HIDDEN = ("the drop directory held more entries than one drain looks at; any requests "
+           "beyond them were not seen and were discarded")
+
+
+_UNCLAIMABLE = ("the request could not be taken for processing (it could not be renamed); "
+                "it was not read")
+
+
+def _refuse_all(db: Database, door, launch: str, drop: _DropDir, names: list[str], reason: str,
+                *, rehearsal: bool = False, final: bool = True, receipts: _Receipts | None = None) -> int:
+    """Answer every request in `names` with the same refusal."""
+    answered = 0
+    for name in names:
+        claimed = _claim(drop, name)
+        if claimed is None:
+            if final:
+                _write_result(db, door.id, launch, _stem(name),
+                              {"status": "rejected", "reason": _UNCLAIMABLE}, rehearsal=rehearsal)
+                answered += 1
+                if receipts is not None:
+                    receipts.note()
+            continue
+        try:
+            _write_result(db, door.id, launch, _stem(name), {"status": "rejected", "reason": reason},
+                          rehearsal=rehearsal)
+            answered += 1
+            if receipts is not None:
+                receipts.note()
+        finally:
+            _release(drop, claimed)
+    return answered
+
+
+def _discard_all(drop: _DropDir, names: list[str]) -> int:
     """Drop requests without recording anything.
 
     Used only when the hook is switched off. Writing a refusal would recreate
@@ -495,12 +688,12 @@ def _discard_all(requests: list[Path]) -> int:
     the next launch, so nothing tells it where to look. The absent block is
     the signal, and it is one the door already has to handle.
     """
-    for request in requests:
+    for name in names:
         try:
-            request.unlink(missing_ok=True)
+            drop.unlink(name)
         except OSError:
             pass
-    return len(requests)
+    return len(names)
 
 
 def results_root(db_path: Path) -> Path:
@@ -531,8 +724,9 @@ def _prune_results(directory: Path) -> None:
             pass
 
 
-def _write_result(db: Database, door_id: int, launch: str, request: Path, payload: dict) -> None:
-    """Record the outcome durably, then drop the request.
+def _write_result(db: Database, door_id: int, launch: str, stem: str, payload: dict,
+                  *, rehearsal: bool = False) -> None:
+    """Record the outcome durably.
 
     Not written beside the request. The drop directory lives in the door's
     per-launch working directory, which is deleted the moment the run ends --
@@ -547,17 +741,23 @@ def _write_result(db: Database, door_id: int, launch: str, request: Path, payloa
     per-door, basename-only path let the second drain overwrite the first
     door's outcome before it had been read, so a door could read a result
     belonging to somebody else's request. The payload names the request it
-    answers for the same reason.
+    answers for the same reason. And by the moment it was answered, because a
+    door draining during its session will reuse a request name too -- the
+    second `post.json` of a session is a new request, and its receipt must not
+    replace the first one's. Doors are told never to construct the name.
 
     Temp-then-rename for the same reason the door is asked to use it: a door
-    polling for its result must never read half a file. The request itself is
-    removed once answered, so the drop directory does not accumulate work
-    already done.
+    polling for its result must never read half a file.
+
+    A rehearsal's receipt says what *would* have happened, under a status no
+    door can mistake for a real outcome.
     """
     directory = results_dir(db, door_id)
-    stem = request.name[: -len(_REQUEST_SUFFIX)]
+    if rehearsal:
+        payload = {"status": "rehearsal", "would": payload["status"],
+                   **{key: value for key, value in payload.items() if key != "status"}}
     payload = {**payload, "request": stem, "at": utc_now_iso()}
-    result = directory / f"{launch}.{stem}{RESULT_SUFFIX}"
+    result = directory / f"{launch}.{time.time_ns()}.{_short(stem)}{RESULT_SUFFIX}"
     staging = result.with_name(result.name + ".part")
     try:
         directory.mkdir(parents=True, exist_ok=True)
@@ -565,84 +765,152 @@ def _write_result(db: Database, door_id: int, launch: str, request: Path, payloa
         staging.replace(result)
     except OSError as exc:
         _logger.warning("could not write door outbound result %s: %s", result, exc)
-    finally:
-        try:
-            request.unlink(missing_ok=True)
-        except OSError:
-            pass
-    _prune_results(directory)
 
 
-def drain(db: Database, door, workdir: Path, *, node_identity=None) -> tuple[int, int]:
-    """Process every request a door left behind, returning (posted, refused).
+def drain(db: Database, door, workdir: Path, *, node_identity=None, rehearsal: bool = False,
+          limit: int = _MAX_REQUESTS_PER_DRAIN, final: bool = True,
+          rehearsed: dict | None = None) -> tuple[int, int]:
+    """Process the requests a door has written, returning (posted, refused).
 
-    Called once the door has exited, so nothing here races the door's own
-    writes. Every request we look at is answered: a refusal is a result file
-    the door can read on its next launch, never a silent drop and never a
-    queue -- holding a post to publish later would mean publishing it after a
-    SysOp revoked the allowlist. Requests beyond `_MAX_REQUESTS_PER_DRAIN`
-    are the exception and are discarded unanswered along with the working
-    directory: a door which wrote more than that in one session is already
-    past any ceiling a SysOp set, and answering an unbounded pile would make
-    session teardown proportional to whatever it chose to write.
+    Safe to call repeatedly, including while the door is still writing: each
+    request is claimed before it is read (`_claim`), so it is answered at most
+    once, and a request still being written is invisible until the door
+    renames it into place. Every request we look at is answered: a refusal is
+    a result file the door can read, never a silent drop and never a queue --
+    holding a post to publish later would mean publishing it after a SysOp
+    revoked the allowlist.
+
+    `limit` bounds how many requests one call handles, so a drain during a
+    session is a short job on the shared lane. A non-`final` drain leaves the
+    rest for the next call. The `final` one, at exit, answers what it can and
+    refuses the remainder: a door which wrote more than that in one go is
+    already past any ceiling a SysOp set, and answering an unbounded pile
+    would make session teardown proportional to whatever it chose to write.
+
+    A `rehearsal` (a SysOp testing the door) is checked exactly as a real
+    session is -- allowlist, rate, shape -- and answered with what would have
+    happened, but nothing is posted, debited or audit-logged. Its would-be
+    spend is kept in `rehearsed`, which a caller draining one session several
+    times passes to every call, so the rate verdicts span the whole session
+    the way a real one's persisted debits do.
 
     Failures here never propagate into the caller's shutdown path. A door
     that has already exited cleanly must not be reported as having crashed
     because its drop directory was unreadable.
     """
-    directory = workdir / OUTBOUND_DIRNAME
-    requests, truncated = _scan_requests(directory)
+    drop = _open_drop_dir(workdir)
+    if drop is None:
+        return 0, 0
+    with drop:
+        return _drain(db, door, workdir, drop, node_identity=node_identity, rehearsal=rehearsal,
+                      limit=limit, final=final, rehearsed=rehearsed)
+
+
+def _drain(db: Database, door, workdir: Path, drop: _DropDir, *, node_identity, rehearsal: bool,
+           limit: int, final: bool, rehearsed: dict | None) -> tuple[int, int]:
+    requests, truncated = _scan_requests(drop)
     # The working directory is freshly made per launch, so its name
     # distinguishes concurrent sessions of the same door from each other.
     launch = workdir.name
 
     config = outbound_config(db, door.id)
     if config is None:
-        return 0, _discard_all(requests)
+        return 0, _discard_all(drop, requests if final else requests[:limit])
+    receipts = _Receipts(results_dir(db, door.id))
+    hidden = 0
+    if final and truncated:
+        # The bound hid whatever lies beyond it, and this is the last drain
+        # before the directory goes. Say so once, whatever else this drain
+        # finds or does, rather than let those requests vanish silently.
+        _write_result(db, door.id, launch, "", {"status": "rejected", "reason": _HIDDEN},
+                      rehearsal=rehearsal)
+        receipts.note()
+        hidden = 1
+    if not requests:
+        _prune_results(receipts.directory)
+        return 0, hidden
 
-    # A door posts on a named SysOp's authority. If that account is gone the
-    # authority has lapsed with it, and there would also be no actor to
-    # audit-log the post against -- so the hook stops until a SysOp switches
-    # it on again, rather than posting unattributably.
-    actor = get_user_by_id(db, config.enabled_by_user_id) if config.enabled_by_user_id else None
-    if actor is None:
-        return 0, _refuse_all(db, door, launch, requests,
-                              "the account which enabled this door's outbound no longer exists; "
-                              "a SysOp must switch it on again")
+    try:
+        # A door posts on a named SysOp's authority. If that account is gone
+        # the authority has lapsed with it, and there would also be no actor to
+        # audit-log the post against -- so the hook stops until a SysOp
+        # switches it on again, rather than posting unattributably.
+        actor = get_user_by_id(db, config.enabled_by_user_id) if config.enabled_by_user_id else None
+        if actor is None:
+            return 0, hidden + _refuse_all(db, door, launch, drop, requests if final else requests[:limit],
+                                  "the account which enabled this door's outbound no longer exists; "
+                                  "a SysOp must switch it on again", rehearsal=rehearsal, final=final,
+                                  receipts=receipts)
 
-    posted = refused = 0
-    for request in requests[:_MAX_REQUESTS_PER_DRAIN]:
-        reason = _handle_one(db, door, config, actor, launch, request, node_identity=node_identity)
-        if reason is None:
-            posted += 1
-        else:
-            refused += 1
-            _log_refusal_once_per_window(db, door, config, actor, reason)
-            config = outbound_config(db, door.id) or config
-    overflow = requests[_MAX_REQUESTS_PER_DRAIN:]
-    if overflow or truncated:
-        refused += _refuse_all(
-            db, door, launch, overflow,
-            f"more than {_MAX_REQUESTS_PER_DRAIN} requests in one session; "
-            "the rest were not processed")
-        _log_refusal_once_per_window(db, door, config, actor, "per-session request flood")
-    return posted, refused
+        posted, refused = 0, hidden
+        # What a rehearsal would have spent so far in this drain. Never
+        # persisted, but counted, so the fifth rehearsed request under a
+        # ceiling of one is told what a real session would tell it.
+        if rehearsed is None:
+            rehearsed = {"posts": 0}
+        for name in requests[:limit]:
+            claimed = _claim(drop, name)
+            if claimed is None:
+                # A later tick may manage it. The final drain is the last
+                # chance, so there the door hears why rather than nothing.
+                if final:
+                    _write_result(db, door.id, launch, _stem(name),
+                                  {"status": "rejected", "reason": _UNCLAIMABLE}, rehearsal=rehearsal)
+                    refused += 1
+                    receipts.note()
+                continue
+            try:
+                reason = _handle_one(db, door, config, actor, launch, _stem(name), drop, claimed,
+                                     node_identity=node_identity, rehearsal=rehearsal,
+                                     rehearsed=rehearsed)
+            finally:
+                _release(drop, claimed)
+            receipts.note()
+            if reason is None:
+                posted += 1
+            else:
+                refused += 1
+                if not rehearsal:
+                    _log_refusal_once_per_window(db, door, config, actor, reason)
+                    config = outbound_config(db, door.id) or config
+        overflow = requests[limit:]
+        if final and overflow:
+            refused += _refuse_all(
+                db, door, launch, drop, overflow,
+                f"more than {limit} requests in one session; "
+                "the rest were not processed", rehearsal=rehearsal, receipts=receipts)
+        if final and (overflow or truncated) and not rehearsal:
+            _log_refusal_once_per_window(db, door, config, actor, "per-session request flood")
+        return posted, refused
+    finally:
+        # Once per drain, not once per receipt: pruning globs, stats and sorts
+        # the whole directory, and a drain can write hundreds of receipts.
+        _prune_results(results_dir(db, door.id))
 
 
 def _handle_one(db: Database, door, config: OutboundConfig, actor: User, launch: str,
-                request: Path, *, node_identity=None) -> str | None:
-    """Post one request, or return the reason it was refused."""
+                stem: str, drop: _DropDir, claimed: str, *, node_identity=None,
+                rehearsal: bool = False, rehearsed: dict | None = None) -> str | None:
+    """Post one claimed request, or return the reason it was refused.
+
+    `claimed` is the request's name inside `drop` once claimed; `stem` is the
+    name the door gave it, which is what its receipt answers to.
+    """
+    def answer(payload: dict) -> None:
+        _write_result(db, door.id, launch, stem, payload, rehearsal=rehearsal)
+
     try:
         # Checked before reading, not after parsing. A door can stream a file
         # to disk without it counting against its own RLIMIT_AS, and reading
         # it whole would allocate all of it inside NetBBS, on the shared lane.
-        if request.stat().st_size > _MAX_REQUEST_BYTES:
-            _write_result(db, door.id, launch, request, {
+        raw = drop.read(claimed, _MAX_REQUEST_BYTES)
+        if raw is None:
+            answer({
                 "status": "rejected",
                 "reason": f"request is larger than {_MAX_REQUEST_BYTES} bytes",
             })
             return "oversized request"
-        payload = json.loads(request.read_text(encoding="utf-8"))
+        payload = json.loads(raw.decode("utf-8"))
     except Exception:
         # Deliberately broad, and the second finding of this shape: a lone
         # surrogate produced a UnicodeEncodeError, deep nesting produces a
@@ -653,15 +921,15 @@ def _handle_one(db: Database, door, config: OutboundConfig, actor: User, launch:
         # nothing will retry. The door controls these bytes entirely, so any
         # failure to read them is its problem to hear about, not ours to
         # classify.
-        _write_result(db, door.id, launch, request, {"status": "rejected", "reason": "request is not readable JSON"})
+        answer({"status": "rejected", "reason": "request is not readable JSON"})
         return "malformed request"
     if not isinstance(payload, dict):
-        _write_result(db, door.id, launch, request, {"status": "rejected", "reason": "request must be a JSON object"})
+        answer({"status": "rejected", "reason": "request must be a JSON object"})
         return "malformed request"
 
     subject, body = payload.get("subject"), payload.get("body")
     if not isinstance(subject, str) or not isinstance(body, str) or not subject.strip():
-        _write_result(db, door.id, launch, request, {"status": "rejected",
+        answer({"status": "rejected",
                                 "reason": "request needs a non-empty 'subject' and a 'body' string"})
         return "malformed request"
     if not _is_storable(subject) or not _is_storable(body):
@@ -670,7 +938,7 @@ def _handle_one(db: Database, door, config: OutboundConfig, actor: User, launch:
         # which cannot be encoded as UTF-8. Left to reach SQLite it raises
         # outside the exceptions this drain expects, so one malformed request
         # would stop every later one in the same session being answered.
-        _write_result(db, door.id, launch, request, {
+        answer({
             "status": "rejected",
             "reason": "request contains text which is not valid Unicode",
         })
@@ -678,12 +946,13 @@ def _handle_one(db: Database, door, config: OutboundConfig, actor: User, launch:
 
     board, problem = _resolve_board(db, door.id, payload.get("board"))
     if board is None:
-        _write_result(db, door.id, launch, request, {"status": "rejected", "reason": problem})
+        answer({"status": "rejected", "reason": problem})
         return problem
 
-    if _recent_post_count(db, door.id) >= config.posts_per_hour:
+    spent = _recent_post_count(db, door.id) + (rehearsed or {}).get("posts", 0)
+    if spent >= config.posts_per_hour:
         reason = f"rate limit reached ({config.posts_per_hour} posts per hour)"
-        _write_result(db, door.id, launch, request, {"status": "rejected", "reason": reason})
+        answer({"status": "rejected", "reason": reason})
         return reason
 
     # One transaction for the post, the rate debit and the audit entry. The
@@ -696,6 +965,16 @@ def _handle_one(db: Database, door, config: OutboundConfig, actor: User, launch:
     db.connection.execute("BEGIN IMMEDIATE")
     try:
         post = create_labelled_post(db, board, config.label, subject, body, commit=False)
+        if rehearsal:
+            # The real post, rolled back: a rehearsal is judged by exactly the
+            # checks a real one meets -- content limits, a closed board --
+            # rather than by a copy of them that can drift. No post, no rate
+            # debit, no audit entry survives.
+            db.connection.rollback()
+            if rehearsed is not None:
+                rehearsed["posts"] += 1
+            answer({"status": "posted", "board": board.name, "moderated": board.moderated})
+            return None
         db.connection.execute(
             "INSERT INTO door_outbound_history (door_id, created_at) VALUES (?, ?)",
             (door.id, utc_now_iso()),
@@ -706,7 +985,7 @@ def _handle_one(db: Database, door, config: OutboundConfig, actor: User, launch:
             detail=f"door={door.name!r} label={config.label!r} post={post.post_id}")
     except PostError as exc:
         db.connection.rollback()
-        _write_result(db, door.id, launch, request, {"status": "rejected", "reason": str(exc)})
+        answer({"status": "rejected", "reason": str(exc)})
         return "post refused"
     except (sqlite3.Error, OSError, ValueError):
         db.connection.rollback()
@@ -730,7 +1009,7 @@ def _handle_one(db: Database, door, config: OutboundConfig, actor: User, launch:
             # door might act on by posting again.
             _logger.warning("could not queue door post %s for Link: %s", post.post_id, exc)
 
-    _write_result(db, door.id, launch, request, {"status": "posted", "post_id": post.post_id,
+    answer({"status": "posted", "post_id": post.post_id,
                             "board": board.name, "moderated": board.moderated})
     return None
 

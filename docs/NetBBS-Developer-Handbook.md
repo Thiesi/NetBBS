@@ -269,7 +269,8 @@ ceiling; the default is six posts. Normal board moderation still applies.
 
 A live node with Link identity can queue a successful linked-board post for
 federation. A standalone admin launch has no live Link context. SysOp
-compatibility tests are rehearsals and do not publish outbound requests.
+compatibility tests are rehearsals: they publish nothing, and each request is
+answered with what would have happened.
 This interface currently posts to message boards; it does not send chat,
 private mail, or arbitrary administrative operations.
 
@@ -292,8 +293,11 @@ test for it:
 
 If `"rehearsal": true` is present, a SysOp is *testing* this door rather than
 a caller playing it. The drop directory works exactly as it always does, so
-your posting path is exercised, but nothing written is published and no result
-comes back. Say so rather than reporting a post you did not make.
+your posting path is exercised, but nothing written is published and nothing
+counts against the rate ceiling. Each request is still answered, with
+`"status": "rehearsal"` and a `"would"` field saying what a real session would
+have got -- `"posted"` (with the `board`) or `"rejected"` (with the `reason`).
+Say so rather than reporting a post you did not make.
 
 `directory` is relative to the directory holding `door_info.json`, and NetBBS
 has already created it. To post, write one JSON file there:
@@ -319,9 +323,14 @@ an absolute path outside the working directory, because the working directory
 is deleted the moment the run ends and a result left there could never be read
 by anyone.
 
-Result files are named `<launch>.<your request name>.result.json`, where
-`<launch>` differs for every run. Do not construct that name: read the
-directory, parse each file, and match on the `request` field it carries. This
+Each request is answered exactly once: NetBBS takes it out of the drop
+directory before reading it, so reusing a request name for a later request is
+fine -- it is a new request with a receipt of its own.
+
+Result files are named `<launch>.<sequence>.<your request name>.result.json`,
+where `<launch>` differs for every run and `<sequence>` for every answer. Do
+not construct that name: read the directory, parse each file, and match on the
+`request` field it carries. This
 is what lets two sessions of the same door run at once without one
 overwriting the other's outcome — which matters for any door that permits
 more than one player at a time.
@@ -356,6 +365,7 @@ Reasons you can expect to see, and what they mean for the door:
 | `rate limit reached` | Try again later; the ceiling is in `posts_per_hour`. |
 | `larger than` | The request exceeded the size limit and was not read. |
 | `requests in one session` | You wrote more in one session than a drain answers. |
+| `were not seen` | Your drop directory held more entries than one drain looks at. This receipt's `request` is empty: it answers for the directory, not one file. |
 | `switch it on again` | The account that enabled the hook is gone, so it has lapsed until a SysOp vouches for the door again. |
 
 Results are bounded receipts, not an indefinitely retained event stream. A

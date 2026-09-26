@@ -7208,7 +7208,12 @@ Compatibility extension (issues #296/#297):
   captures them before its database snapshot, and a restore pairs the receipts
   it carries with the database generation they describe. They remain a bounded,
   best-effort record rather than a publication ledger, so a door may not read
-  exactly-once delivery out of them. Reads of any
+  exactly-once delivery out of them. Processing is at-most-once, though: a
+  drain claims each request by renaming it out of the request pattern before
+  reading it, so no later drain can see it again even if its removal fails --
+  the property that makes draining during a session safe. A SysOp's test
+  launch is drained too, but answered with a `rehearsal` verdict: nothing is
+  posted, debited or audit-logged. Reads of any
   kind remain out of scope, and the hook is available to locally-launched
   doors only -- a remote registration shares no filesystem, and a DOS guest
   cannot read the launch metadata that names the drop directory.
