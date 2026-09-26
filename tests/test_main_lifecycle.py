@@ -1631,3 +1631,13 @@ def test_the_suite_cannot_reach_the_live_reliable_node(tmp_path):
     with pytest.raises(socket_module.gaierror, match="must not reach real hosts"):
         socket_module.getaddrinfo(host, 7862)
     assert socket_module.getaddrinfo("127.0.0.1", 7862)
+
+
+def test_the_suite_ignores_proxies_that_would_route_around_the_name_check():
+    """Codex review of #715: with a proxy in the environment, a client
+    resolves only the proxy and asks it for the real hostname."""
+    import os
+    import urllib.request
+
+    assert not any(os.environ.get(name) for name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"))
+    assert urllib.request.getproxies().get("https") is None

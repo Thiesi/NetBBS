@@ -74,9 +74,20 @@ def _local_only_getaddrinfo(host, *args, **kwargs):
     return _real_getaddrinfo(host, *args, **kwargs)
 
 
+# Environment proxies would route around the name check: aiohttp
+# (`trust_env=True`) and urllib resolve only the proxy and hand it the real
+# hostname (Codex review of #715).
+_PROXY_VARIABLES = (
+    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "WS_PROXY", "WSS_PROXY",
+    "http_proxy", "https_proxy", "all_proxy", "ws_proxy", "wss_proxy",
+)
+
+
 @pytest.fixture(autouse=True)
 def _no_real_network(monkeypatch):
     monkeypatch.setattr(socket, "getaddrinfo", _local_only_getaddrinfo)
+    for variable in _PROXY_VARIABLES:
+        monkeypatch.delenv(variable, raising=False)
     yield
 
 
