@@ -29,6 +29,7 @@ event loop, never inside a lane-dispatched function body).
 from __future__ import annotations
 
 import json
+import sqlite3
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -1439,26 +1440,51 @@ def _resolve_edit_chain_predecessors(db: Database, edited_post: Post) -> tuple[B
     `edit_of_post_id` would give peers a `previous_event_id` they refuse.
     """
     root_row = db.connection.execute(
-        "SELECT link_event_json FROM posts WHERE post_id = ?", (edited_post.root_post_id,)
+        "SELECT post_id, link_event_json FROM posts WHERE post_id = ?", (edited_post.root_post_id,)
     ).fetchone()
-    if root_row is None or root_row["link_event_json"] is None:
+    if root_row is None:
         return None
-    root_post = BoardPost.from_dict(json.loads(root_row["link_event_json"]))
+    root_envelope = _chain_row_event(db, root_row)
+    if root_envelope is None:
+        return None
+    root_post = BoardPost.from_dict(root_envelope)
 
     predecessor_row = db.connection.execute(
         """
-        SELECT link_event_json FROM posts
+        SELECT post_id, link_event_json FROM posts
         WHERE root_post_id = ? AND board_id = ? AND status = 'approved' AND post_id != ?
         ORDER BY created_at DESC, id DESC
         LIMIT 1
         """,
         (edited_post.root_post_id, edited_post.board_id, edited_post.post_id),
     ).fetchone()
-    if predecessor_row is None or predecessor_row["link_event_json"] is None:
+    if predecessor_row is None:
         return None
-    previous_event_id = event_content_id(json.loads(predecessor_row["link_event_json"])["envelope"])
+    predecessor_envelope = _chain_row_event(db, predecessor_row)
+    if predecessor_envelope is None:
+        return None
+    previous_event_id = event_content_id(predecessor_envelope["envelope"])
 
     return root_post, previous_event_id
+
+
+def _chain_row_event(db: Database, row: sqlite3.Row) -> dict | None:
+    """The signed event behind one revision row of a post's chain: the event
+    this node queued for it (`link_event_json`), or, for a row materialized
+    from another node, the retained envelope its `post_id` names in
+    `link_events`. `None` for a revision that is on no chain the network
+    knows (written before the board was Linked, or kept local).
+
+    Carried rows keep their event only in `link_events`. Reading only
+    `link_event_json` made every post by a remote author look off-chain, so
+    the origin's moderator edits and tombstones of those posts -- the case
+    §9.5 exists for -- were never signed (issue #677)."""
+    if row["link_event_json"] is not None:
+        return json.loads(row["link_event_json"])
+    retained = db.connection.execute(
+        "SELECT envelope_json FROM link_events WHERE content_id = ?", (row["post_id"],)
+    ).fetchone()
+    return None if retained is None else json.loads(retained["envelope_json"])
 
 
 def queue_board_post_moderator_edit_if_linked(

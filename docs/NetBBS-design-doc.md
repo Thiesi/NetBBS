@@ -3297,6 +3297,12 @@ post` both refuse to extend a chain whose current head is already
 tombstoned. Requires `BoardPermission.DELETE`, no author bypass, matching
 `delete_post`'s existing rule exactly.
 
+An origin's moderator edit or tombstone of a post written by a *remote*
+author is chained from that post's retained events: a carried revision keeps
+its signed event only in `link_events`, never in `posts.link_event_json`
+(issue #677; until then such posts looked off-chain and the origin's
+moderation of them was never sent).
+
 **A local tombstone is terminal on the node that made it** (issue #677). A
 carrying node's moderator may remove a post locally even though the removal
 is never propagated. A `board_post_edit` or `board_post_moderator_edit`

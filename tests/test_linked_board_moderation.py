@@ -603,3 +603,80 @@ def test_every_remote_edit_after_a_local_tombstone_is_retained(db, remote, alice
     }
     assert retained == {first.content_id, second.content_id}
     assert list_posts_page(db, board, alice).posts[0].subject == "[removed by moderator]"
+
+
+# -- Codex review round 3 ----------------------------------------------------
+
+
+def _remote_post_on_our_board(db, board, remote, *, subject="remote subject"):
+    post = build_board_post(
+        signing_identity=remote.signing_key,
+        home_node_fingerprint=remote.fingerprint,
+        local_user_id="wanderer",
+        board_id=board.board_id,
+        subject=subject,
+        body="remote body",
+        created_at="2026-01-01T00:00:00Z",
+    )
+    return materialize_carried_post(db, post, sender_fingerprint=remote.fingerprint)
+
+
+def test_the_origin_signs_its_moderator_edit_of_a_remote_authors_post(db, sysop, remote, node_identity):
+    """Carried rows keep their event only in `link_events`; the chain
+    lookup read only `link_event_json`, so an origin could never send a
+    moderator edit of a post a remote author wrote."""
+    from netbbs.link.boards import queue_board_post_moderator_edit_if_linked
+
+    board = create_board(db, "general", creator=sysop)
+    link_board(db, board, node_identity=node_identity)
+    carried = _remote_post_on_our_board(db, board, remote)
+
+    edited = edit_post(db, carried, board, subject=carried.subject, body="[moderated]", edited_by=sysop)
+    event = queue_board_post_moderator_edit_if_linked(db, edited, board, node_identity=node_identity, edited_by=sysop)
+
+    assert event is not None
+    assert event.payload["root_post_id"] == carried.post_id
+    assert event.payload["previous_event_id"] == carried.post_id
+
+
+def test_the_origin_signs_its_tombstone_of_a_remote_authors_post(db, sysop, remote, node_identity):
+    from netbbs.link.boards import queue_board_post_tombstone_if_linked
+
+    board = create_board(db, "general", creator=sysop)
+    link_board(db, board, node_identity=node_identity)
+    carried = _remote_post_on_our_board(db, board, remote)
+
+    tombstoned = tombstone_post(db, carried, board, tombstoned_by=sysop)
+    event = queue_board_post_tombstone_if_linked(db, tombstoned, board, node_identity=node_identity)
+
+    assert event is not None
+    assert event.payload["previous_event_id"] == carried.post_id
+
+
+def test_replies_to_you_asks_trust_once_per_author(db, remote, alice, monkeypatch):
+    from netbbs.activity import unread_replies_to
+    from netbbs.link import enforcement
+
+    board = _carried_board(db, remote)
+    mine = create_post(db, board, alice, "question", "anyone?")
+    for minute in range(10):
+        reply = build_board_post(
+            signing_identity=remote.signing_key,
+            home_node_fingerprint=remote.fingerprint,
+            local_user_id="wanderer" if minute % 2 else "rover",
+            board_id=BOARD_ID,
+            subject=f"re {minute}",
+            body="answer",
+            created_at=f"2026-01-01T00:{minute:02d}:00Z",
+            parent_post_id=mine.post_id,
+        )
+        materialize_carried_post(db, reply, sender_fingerprint=remote.fingerprint)
+    calls = []
+    real = enforcement.content_visible_for_subject
+    monkeypatch.setattr(
+        enforcement, "content_visible_for_subject",
+        lambda db_, subject: calls.append(subject) or real(db_, subject),
+    )
+
+    assert len(unread_replies_to(db, alice)) == 10
+    assert len(calls) == 2

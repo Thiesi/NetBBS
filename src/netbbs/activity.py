@@ -62,7 +62,7 @@ from netbbs.chat.channels import Channel
 from netbbs.chat.scrollback import ChannelMessage
 from netbbs.files.areas import FileArea
 from netbbs.files.entries import FileEntry
-from netbbs.link.enforcement import envelope_content_visible, link_content_visible
+from netbbs.link.enforcement import envelope_content_visible
 from netbbs.storage.database import Database
 from netbbs.timeutil import utc_now_iso
 
@@ -236,8 +236,9 @@ def unread_replies_to(db: Database, user: User) -> list[Post]:
     including any reply, is still unread)."""
     rows = db.connection.execute(
         """
-        SELECT root.* FROM posts root
+        SELECT root.*, e.envelope_json AS link_envelope_json FROM posts root
         JOIN posts parent ON parent.post_id = root.parent_post_id
+        LEFT JOIN link_events e ON e.content_id = root.post_id
         WHERE parent.author_user_id = ?
           AND root.post_id = root.root_post_id
           AND EXISTS (
@@ -248,7 +249,13 @@ def unread_replies_to(db: Database, user: User) -> list[Post]:
         """,
         (user.id,),
     ).fetchall()
-    replies = [_root_row_to_post(row) for row in rows if link_content_visible(db, row["post_id"])]
+    # Trust-hidden replies are skipped, deciding once per author (issue #677).
+    author_cache: dict = {}
+    replies = [
+        _root_row_to_post(row) for row in rows
+        if row["link_envelope_json"] is None
+        or envelope_content_visible(db, row["link_envelope_json"], author_cache=author_cache)
+    ]
 
     unread = []
     for reply in replies:
