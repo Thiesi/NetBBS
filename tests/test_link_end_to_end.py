@@ -1350,7 +1350,12 @@ def test_remote_file_browse_and_fetch_via_the_live_interactive_ui_flow(tmp_path)
     asyncio.run(scenario())
 
     try:
-        output = "".join(ui_session.written)
+        # The outcome is announced for the screen the caller returns to
+        # (`netbbs.net.notices`, issue #680); this test stops before that
+        # screen is drawn, so it reads what is still queued too.
+        from netbbs.net.notices import pending_notices
+
+        output = "".join(ui_session.written) + "".join(pending_notices(ui_session))
         assert "fetched and verified" in output
 
         # Ordinary local read path -- not a raw row check.

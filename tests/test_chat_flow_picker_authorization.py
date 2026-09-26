@@ -17,6 +17,8 @@ mixed-input scenario (menu keys plus a fullscreen editor).
 from __future__ import annotations
 
 import asyncio
+
+from netbbs.net.notices import pending_notices
 import re
 
 import pytest
@@ -183,7 +185,7 @@ def test_hidden_channel_with_no_invitation_is_invisible_to_an_unrelated_user(db,
     # Nothing to select -- the picker has no channels at all for carol.
     session = asyncio.run(_run(lane, hub, presence, carol, []))
 
-    assert "No chat channels are available" in _written_text(session)
+    assert "No chat channels are available" in _written_text(session) + "".join(pending_notices(session))
 
 
 def test_leaving_and_reselecting_via_the_picker_succeeds_from_persistent_membership(db, lane, hub, presence, alice, bob):
@@ -249,7 +251,7 @@ def test_min_age_gate_hides_the_channel_from_the_picker(db, lane, hub, presence,
     # channel never even appears in the picker's list.
     session = asyncio.run(_run(lane, hub, presence, bob, []))
 
-    assert "No chat channels are available" in _written_text(session)
+    assert "No chat channels are available" in _written_text(session) + "".join(pending_notices(session))
 
 
 def test_min_age_gate_allows_entry_once_met(db, lane, hub, presence, alice, bob):

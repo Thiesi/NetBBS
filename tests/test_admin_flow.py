@@ -10193,3 +10193,22 @@ def test_deleting_a_carried_board_from_elsewhere_hides_it_and_excluded_restores_
     assert "'Retro Hardware' restored" in text
     assert get_board_by_name(db, "Retro Hardware").board_id == "e" * 64
     assert carry_decision_counts(db) == {}
+
+
+def test_a_closed_boards_detail_shows_the_closure_reason(db, lane, sysop):
+    """Issue #680: the reason is part of the signed closure, and the board
+    detail screen -- the one place a SysOp looks at a closed board -- never
+    showed it."""
+    from netbbs.boards.boards import create_board
+    from netbbs.link.boards import close_board_if_linked, link_board
+
+    board = create_board(db, "General", creator=sysop)
+    link_context = _link_context()
+    link_board(db, board, node_identity=link_context.node_identity)
+    closure = close_board_if_linked(db, board, node_identity=link_context.node_identity, reason="archived")
+    link_context.link_node.board_closures[board.board_id] = closure
+
+    session = FakeSession(["m", "m", "l", "0", "1", "b", "b", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
+
+    assert "Closure reason: archived" in _normalized_visible(_written_text(session))

@@ -92,9 +92,12 @@ def test_an_empty_picker_says_create_is_available():
 def test_an_empty_picker_with_no_create_still_returns_immediately():
     """Every existing caller is unchanged: nothing to do here but
     leave, so leaving is automatic as before."""
+    from netbbs.net.notices import pending_notices
+
     result, session = _pick([], [])
     assert result is None
-    assert "No Communities exist yet." in session.plain
+    # Announced for the screen this returns to (issue #680).
+    assert any("No Communities exist yet." in line for line in pending_notices(session))
 
 
 # -- Also on a populated list -----------------------------------------

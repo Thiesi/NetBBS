@@ -87,7 +87,13 @@ def test_masthead_appears_above_the_populated_list():
     assert text.index("=== MY MASTHEAD ===") < text.index("Test")
 
 
-def test_masthead_appears_above_the_truly_empty_non_refreshable_list():
+def test_a_truly_empty_non_refreshable_list_announces_and_draws_nothing():
+    """Issue #680: with nothing to pick and nothing to do but leave, the
+    picker returns straight into its parent's redraw. Anything it drew --
+    masthead or message -- would be erased by that redraw's clear, so it
+    draws nothing and announces the message for the parent screen instead."""
+    from netbbs.net.notices import take_notices
+
     session = FakeSession([])
 
     asyncio.run(
@@ -96,10 +102,8 @@ def test_masthead_appears_above_the_truly_empty_non_refreshable_list():
             title="Test", empty_message="Nothing here.", masthead="=== MY MASTHEAD ===",
         )
     )
-    text = _written(session)
-    assert "=== MY MASTHEAD ===" in text
-    assert "Nothing here." in text
-    assert text.index("=== MY MASTHEAD ===") < text.index("Nothing here.")
+    assert _written(session) == ""
+    assert any("Nothing here." in line for line in take_notices(session))
 
 
 def test_masthead_appears_above_a_refreshable_empty_list():

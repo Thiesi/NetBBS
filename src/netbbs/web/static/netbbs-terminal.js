@@ -110,12 +110,62 @@
   // link is already scoped to one caller, one file or area, and one use
   // by the server, and nothing here can widen it.
 
+  function transferUrl(url) {
+    // The link the BBS hands over is built from `[web] public_url`, which
+    // need not be the origin this page was reached on (issue #511): a
+    // cross-origin fetch cannot read the response, and the endpoint sends
+    // no CORS headers. Resolving the token against this page's own address
+    // is same-origin by construction and keeps whatever path prefix a
+    // reverse proxy serves the page under (`/bbs/` -> `/bbs/transfer/...`).
+    try {
+      var token = new URL(url).pathname.split("/").pop();
+      // The page's own path as a directory, always: the node serves this
+      // page only at `/`, so whatever path the browser shows is the mount
+      // point itself -- `/`, or a proxy prefix with or without its slash.
+      // Resolving against `/bbs` rather than `/bbs/` would drop the prefix
+      // (Codex review of #702), and a prefix may contain a dot.
+      var page = new URL(window.location.href);
+      if (!page.pathname.endsWith("/")) page.pathname += "/";
+      return new URL("transfer/" + token, page).href;
+    } catch (error) {
+      return url;
+    }
+  }
+
   function startDownload(url, filename) {
+    var target = transferUrl(url);
+    if (typeof fetch !== "function") {
+      saveDownload(target, filename);
+      return;
+    }
+    // Probe first (issue #511): an `<a download>` saves whatever comes
+    // back under the requested name, so a refused download would land as
+    // a file that looks like the one asked for. HEAD spends nothing and
+    // answers as the GET would; only a yes starts the real download, which
+    // the anchor then streams to disk rather than this page buffering it.
+    fetch(target, { method: "HEAD", cache: "no-store", credentials: "same-origin" })
+      .then(function (response) {
+        if (response.ok) {
+          saveDownload(target, filename);
+          return;
+        }
+        var reason = response.headers.get("X-NetBBS-Transfer-Message") ||
+          ("The BBS refused the download (HTTP " + response.status + ").");
+        showTransferNotice("Download failed", reason,
+          response.status === 429 ? function () { startDownload(url, filename); } : null);
+      })
+      .catch(function () {
+        showTransferNotice("Download failed",
+          "Could not reach the BBS to start the download. Ask it for a new link.", null);
+      });
+  }
+
+  function saveDownload(target, filename) {
     // An anchor click rather than assigning window.location, so the tab
     // keeps the live terminal session rather than navigating away from
     // it mid-transfer.
     var link = document.createElement("a");
-    link.href = url;
+    link.href = target;
     if (filename) link.download = filename;
     link.rel = "noopener";
     document.body.appendChild(link);
@@ -123,7 +173,48 @@
     document.body.removeChild(link);
   }
 
+  function showTransferNotice(title, message, retry) {
+    var existing = document.getElementById("transfer-panel");
+    if (existing) existing.remove();
+
+    var panel = document.createElement("div");
+    panel.id = "transfer-panel";
+    panel.className = "transfer-panel";
+    var card = document.createElement("div");
+    card.className = "transfer-card";
+    var heading = document.createElement("h2");
+    heading.textContent = title;
+    var body = document.createElement("p");
+    body.className = "transfer-status";
+    // textContent, never innerHTML: the reason is the server's text.
+    body.textContent = message;
+    card.appendChild(heading);
+    card.appendChild(body);
+    var buttons = document.createElement("p");
+    function close() {
+      panel.remove();
+      term.focus();
+    }
+    if (retry) {
+      var again = document.createElement("button");
+      again.type = "button";
+      again.textContent = "Try again";
+      again.addEventListener("click", function () { close(); retry(); });
+      buttons.appendChild(again);
+    }
+    var dismiss = document.createElement("button");
+    dismiss.type = "button";
+    dismiss.textContent = "Close";
+    dismiss.addEventListener("click", close);
+    buttons.appendChild(dismiss);
+    card.appendChild(buttons);
+    panel.appendChild(card);
+    document.body.appendChild(panel);
+    dismiss.focus();
+  }
+
   function openUploadPanel(url) {
+    url = transferUrl(url);
     var existing = document.getElementById("transfer-panel");
     if (existing) existing.remove();
 
