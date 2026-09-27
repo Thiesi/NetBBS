@@ -323,7 +323,7 @@ def test_a_session_torn_down_mid_install_still_audits_what_landed(db, lane, syso
     lands anyway must not be skipped with the session."""
     import threading
 
-    import netbbs.net.admin_flow as module
+    import netbbs.net.file_transfer as module
 
     release = threading.Event()
     started = threading.Event()
@@ -339,7 +339,7 @@ def test_a_session_torn_down_mid_install_still_audits_what_landed(db, lane, syso
     source = _staged(tmp_path, b"ART")
 
     async def scenario():
-        task = asyncio.create_task(module._install_and_record(lane, sysop, target, source, sent_as="a.ans"))
+        task = asyncio.create_task(module.install_and_record(lane, sysop, target, source, sent_as="a.ans"))
         await asyncio.to_thread(started.wait, 5)
         task.cancel()
         await asyncio.sleep(0.05)

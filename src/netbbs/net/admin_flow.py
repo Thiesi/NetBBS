@@ -392,7 +392,7 @@ from netbbs.net.char_input import (
 from netbbs.net.confirm import prompt_yes_no, prompt_yes_no_or_keep
 from netbbs.config import get_max_upload_bytes
 from netbbs.files.storage import new_incoming_temp_path
-from netbbs.net.file_transfer import UPLOAD, record_sysop_upload
+from netbbs.net.file_transfer import UPLOAD, install_and_record
 from netbbs.sysop_uploads import (
     BANNER as SYSOP_UPLOAD_BANNER,
     DOOR_FILE as SYSOP_UPLOAD_DOOR_FILE,
@@ -400,7 +400,6 @@ from netbbs.sysop_uploads import (
     SysOpUploadTarget,
     destination_problem,
     door_filename_error,
-    install_upload,
 )
 from netbbs.net.draft_storage import DraftPruneReport, prune_stale_drafts
 from netbbs.net.help_overlay import show_help
@@ -10075,7 +10074,7 @@ async def _receive_sysop_upload(
             _announce(session, f"Upload failed: {exc}", error=True)
             return
         try:
-            size = await _install_and_record(lane, actor, target, temp_path, sent_as=received.filename)
+            size = await install_and_record(lane, actor, target, temp_path, sent_as=received.filename)
         except SysOpUploadError as exc:
             _announce(session, f"Upload failed: {exc}", error=True)
             return
@@ -10100,30 +10099,6 @@ async def _receive_sysop_upload(
         f"Whatever you send is saved as {target.destination}, up to {target.max_bytes} bytes. {then}",
         color=MUTED_COLOR,
     )
-
-
-async def _install_and_record(
-    lane: DatabaseLane, actor: User, target: SysOpUploadTarget, temp_path: Path, *, sent_as: str,
-) -> int:
-    """Install a received upload and audit it as one owned unit.
-
-    A running copy cannot be cancelled -- it finishes on its worker thread
-    whatever happens to this session -- so a session torn down meanwhile
-    (a SysOp demoted mid-upload, say) must not skip the audit record of a
-    file that did land. The work runs as its own task, shielded; on
-    cancellation it is waited for, and the cancellation then continues."""
-
-    async def _work() -> int:
-        size = await asyncio.to_thread(install_upload, target, temp_path)
-        await lane.run(record_sysop_upload, actor, target, size=size, sent_as=sent_as)
-        return size
-
-    task = asyncio.ensure_future(_work())
-    try:
-        return await asyncio.shield(task)
-    except asyncio.CancelledError:
-        await asyncio.gather(task, return_exceptions=True)
-        raise
 
 
 async def _upload_banner_piece(

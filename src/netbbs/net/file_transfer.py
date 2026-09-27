@@ -737,7 +737,7 @@ class TransferGateway:
         from aiohttp import web
 
         try:
-            size = await asyncio.to_thread(install_upload, target, temp_path)
+            size = await install_and_record(self._lane, resolved.user, target, temp_path, sent_as=filename)
         except SysOpUploadError as exc:
             raise web.HTTPBadRequest(text=str(exc)) from exc
         except OSError as exc:
@@ -745,7 +745,6 @@ class TransferGateway:
             raise web.HTTPInsufficientStorage(
                 text=f"This node could not write {target.label}: {exc.strerror or exc}"
             ) from exc
-        await self._lane.run(record_sysop_upload, resolved.user, target, size=size, sent_as=filename)
         _logger.info("transfer: %r uploaded %s (%d bytes)", resolved.user.username, target.label, size)
         return web.json_response({
             "filename": target.destination.name,
@@ -753,6 +752,29 @@ class TransferGateway:
             "status": "installed",
             "description": None,
         })
+
+
+async def install_and_record(lane, user: User, target: SysOpUploadTarget, temp_path: Path, *, sent_as: str) -> int:
+    """Install a SysOp upload and audit it as one owned unit (issue #728).
+
+    A running copy cannot be cancelled -- it finishes on its worker thread
+    whatever happens to the caller -- so a caller torn down meanwhile (a web
+    handler at shutdown, a console session whose SysOp was demoted) must not
+    skip the audit record of a file that did land. The work runs as its own
+    task, shielded; on cancellation it is waited for, and the cancellation
+    then continues. Shared by the browser and the Zmodem routes."""
+
+    async def _work() -> int:
+        size = await asyncio.to_thread(install_upload, target, temp_path)
+        await lane.run(record_sysop_upload, user, target, size=size, sent_as=sent_as)
+        return size
+
+    task = asyncio.ensure_future(_work())
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        await asyncio.gather(task, return_exceptions=True)
+        raise
 
 
 def record_sysop_upload(db: Database, user: User, target: SysOpUploadTarget, *, size: int, sent_as: str) -> None:
