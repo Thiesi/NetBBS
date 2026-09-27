@@ -205,8 +205,11 @@ def validate_value(setting: PolicySetting, value: Any) -> Any:
         try:
             value = float(value)
         except OverflowError as exc:
-            raise PolicyValueError(too_big) from exc
-    if not math.isfinite(value):
+            # Either sign: say what the setting takes, not just the upper end.
+            raise PolicyValueError(f"{setting.label} must be a finite number.") from exc
+    # An int is always finite, and `math.isfinite` would convert it to a
+    # float first -- which overflows for a few hundred digits either sign.
+    if setting.kind is not int and not math.isfinite(value):
         raise PolicyValueError(f"{setting.label} must be a finite number.")
     if setting.minimum is not None:
         too_low, low = value < setting.minimum, f"at least {format_value(setting, setting.minimum)}"

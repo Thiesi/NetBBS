@@ -128,6 +128,9 @@ def test_a_stored_value_that_no_longer_validates_is_skipped(db):
         # Hundreds of digits: rejected, not an OverflowError.
         ("link.max_peers", 10**400, False),
         ("link.sync_interval_seconds", 10**400, False),
+        ("link.max_peers", -(10**400), False),
+        ("link.max_carried_boards", -(10**400), False),
+        ("link.sync_interval_seconds", -(10**400), False),
         # A refill rate is divided down to tokens per second.
         ("throttle.global_refill_per_minute", 5e-324, False),
         ("link.request_rate_refill_per_minute", 0.001, False),
