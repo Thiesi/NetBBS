@@ -1125,3 +1125,25 @@ def test_search_indexes_an_art_posts_signature_as_post_text(db, alice):
 
     indexed = db.connection.execute("SELECT body FROM post_search").fetchone()[0]
     assert indexed == "A|12B\n-- \nAlice"
+
+
+def test_an_art_edit_checks_the_drawing_it_resumes_before_asking_anything(db, alice):
+    """A saved edit draft too wide for this terminal is refused after the
+    Resume choice and before the subject; one that fits is offered even
+    when the published drawing does not (Codex review on #753)."""
+    from netbbs.rendering import ScreenBuffer, encode_ansi_bytes, parse_ansi_into_buffer
+
+    board = create_board(db, "general", creator=alice, allow_color=True)
+    post = create_post(db, board, alice, "Drawn", "#" * 45, layout="art")
+    draft = board_flow._post_draft_path(db, kind="art_edit", board=board, user=alice, root_post_id=post.root_post_id)
+    draft.parent.mkdir(parents=True, exist_ok=True)
+    canvas = ScreenBuffer(80, 5)
+    parse_ansi_into_buffer("#" * 70, canvas)
+    draft.write_bytes(encode_ansi_bytes(canvas))
+    session = FakeSession(["1", "e", "r", "b", "b"], width=50, height=24)
+
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+
+    assert "You have a saved drawing" in session.visible()
+    assert "This drawing is 70x1" in session.visible()
+    assert draft.exists()

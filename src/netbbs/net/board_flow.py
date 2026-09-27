@@ -1476,10 +1476,10 @@ async def _edit_existing_post(
         return
     # An art post is revised in the editor that drew it (issue #711), with
     # a draft slot of its own: the prose editors' recovery must never be
-    # handed a canvas. One the terminal cannot hold is refused first.
+    # handed a canvas. Its saved draft is offered first; then the drawing
+    # chosen -- the draft, or the post -- must fit this terminal, before
+    # anything is asked (Codex review on #753).
     art = post.layout == "art"
-    if art and _art_canvas(session, split_signature(post.body)[0]) is None:
-        return  # said why; asked nothing
     initial_body = post.body
     if art:
         art_draft = _post_draft_path(db, kind="art_edit", board=board, user=user, root_post_id=post.root_post_id)
@@ -1490,6 +1490,8 @@ async def _edit_existing_post(
             # The drawing from the draft, under this post's own signature.
             signature_block = split_signature(post.body)[1]
             initial_body = _recovered_drawing(art_draft) + (f"\x1b[0m{signature_block}" if signature_block else "")
+        if _art_canvas(session, split_signature(initial_body)[0]) is None:
+            return  # said why; the draft stays
 
     subject = await read_prefilled_field(session, "Subject", post.subject)
 
