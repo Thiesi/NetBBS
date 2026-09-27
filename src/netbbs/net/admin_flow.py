@@ -3575,7 +3575,8 @@ def _node_reference_field(
             # Most recently contacted first; ties (peers stored in the same
             # instant) broken by label so the list order is deterministic.
             items.sort(key=lambda item: item[0])
-            items.sort(key=lambda item: contact[item[1]], reverse=True)
+            # A peer never contacted directly (#766) sorts last.
+            items.sort(key=lambda item: contact[item[1]] or "", reverse=True)
             return items
 
         choices: list[tuple[int, str, str | None]] = [(0, "(type a name, DNS name, or technical identity)", None)]

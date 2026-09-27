@@ -2271,6 +2271,74 @@ def test_request_peer_list_refreshes_local_claims_before_persisting_known_peer(t
         bob.close()
 
 
+def test_peer_list_refresh_is_not_contact_but_a_hello_is(tmp_path):
+    """Issue #766: carol's descriptor, refreshed secondhand from bob's peer
+    list, must not make carol look recently contacted; the hello with bob
+    itself must, on both ends."""
+    from netbbs.link.store import load_peer_last_contact, save_peer
+
+    long_ago = "2020-01-01T00:00:00+00:00"
+    alice_identity = bootstrap_node_identity("contact-alice")
+    bob_identity = bootstrap_node_identity("contact-bob")
+    carol_identity = bootstrap_node_identity("contact-carol")
+    alice_node = LinkNode(identity=alice_identity)
+    bob_node = LinkNode(identity=bob_identity)
+    carol_node = LinkNode(identity=carol_identity)
+    alice = _NodeDb(tmp_path, "contact-alice")
+    bob = _NodeDb(tmp_path, "contact-bob")
+
+    old_carol = carol_node.handle_hello(carol_node.build_hello(
+        addresses=None, outgoing_only=True, created_at="2026-09-04T09:00:00+00:00",
+    ))
+    alice_node.peers[old_carol.fingerprint] = old_carol
+    save_peer(alice.db, old_carol)
+    bob_node.handle_hello(carol_node.build_hello(
+        addresses=None, outgoing_only=True, created_at="2026-09-04T09:01:00+00:00",
+    ))
+
+    def age(db):
+        # Explicit timestamps: consecutive utc_now_iso() calls can be equal
+        # on Windows.
+        db.connection.execute(
+            "UPDATE link_peers SET updated_at = ?, last_direct_contact_at = ?", (long_ago, long_ago)
+        )
+        db.connection.commit()
+
+    async def scenario(*, ask_for_peers: bool):
+        bob_server = await _run_server(bob_node, lambda: _hello_for(bob_node), bob.lane)
+        try:
+            async with aiohttp.ClientSession() as session:
+                base_url = f"http://127.0.0.1:{bob_server.port}"
+                await dial_hello(alice_node, session, base_url, _hello_for(alice_node), alice.lane)
+                if ask_for_peers:
+                    return await request_peer_list(
+                        alice_node, session, base_url, bob_identity.fingerprint, alice.lane
+                    )
+                return None
+        finally:
+            await bob_server.stop()
+
+    try:
+        asyncio.run(scenario(ask_for_peers=False))
+        age(alice.db)
+        age(bob.db)
+
+        recorded = asyncio.run(scenario(ask_for_peers=True))
+
+        assert recorded == [carol_identity.fingerprint]
+        carol_row = alice.db.connection.execute(
+            "SELECT updated_at FROM link_peers WHERE fingerprint = ?", (carol_identity.fingerprint,)
+        ).fetchone()
+        assert carol_row["updated_at"] > long_ago  # the secondhand refresh was persisted
+        alice_contact = load_peer_last_contact(alice.db)
+        assert alice_contact[carol_identity.fingerprint] == long_ago
+        assert alice_contact[bob_identity.fingerprint] > long_ago
+        assert load_peer_last_contact(bob.db)[alice_identity.fingerprint] > long_ago
+    finally:
+        alice.close()
+        bob.close()
+
+
 # -- relay consent: a real synchronous request/response round trip --------
 
 

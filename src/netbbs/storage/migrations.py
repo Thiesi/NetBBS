@@ -3128,4 +3128,18 @@ MIGRATIONS = [
            );
         """,
     ),
+    Migration(
+        description=(
+            "Issue #766: `last_direct_contact_at` on link_peers -- when this node last "
+            "heard from a peer itself (a hello or an events exchange), which the SysOp's "
+            "Link status and trust node picker show as last contact. `updated_at` also "
+            "moves when a peer's descriptor arrives secondhand in another node's peer "
+            "list, so a dead peer looked live. Existing rows start from `updated_at`, "
+            "the best information there is."
+        ),
+        sql="""
+        ALTER TABLE link_peers ADD COLUMN last_direct_contact_at TEXT;
+        UPDATE link_peers SET last_direct_contact_at = updated_at;
+        """,
+    ),
 ]
