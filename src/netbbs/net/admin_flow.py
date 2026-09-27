@@ -6565,6 +6565,16 @@ async def _install_release_screen(
         environment, refusal = None, str(exc)
     if refusal is None and identity_dir is None:
         refusal = "This session cannot create the pre-upgrade backup (no identity directory is configured for it)."
+    backup_root = None
+    if refusal is None:
+        # The configured backup destination (issue #727), checked the way the
+        # Backup screen checks it. The pre-upgrade backup goes there like any
+        # other, and one that has gone or been unmounted refuses the install
+        # here rather than after the download.
+        try:
+            backup_root = await lane.run(check_backup_destination, db_path, identity_dir)
+        except (BackupScheduleError, OSError) as exc:
+            refusal = f"The pre-upgrade backup has nowhere usable to go: {exc}"
 
     breadcrumb = ("SysOp", "Settings", "Update")
     title = _detail_title(session, chrome, f"Install {release.tag_name}", breadcrumb=breadcrumb)
@@ -6582,7 +6592,7 @@ async def _install_release_screen(
     extras = ", ".join(environment.extras) if environment.extras else "none"
     plan = [
         Field("1. Download", f"netbbs-{release.tag_name.lstrip('vV')} wheel from GitHub, checked against its SHA-256"),
-        Field("2. Back up", f"this node, to {default_backup_destination(db_path).parent}"),
+        Field("2. Back up", f"this node, to {backup_root}"),
         Field("3. Install", f"into {environment.python} with extras: {extras}"),
         Field(
             "4. Restart",
@@ -6621,7 +6631,7 @@ async def _install_release_screen(
     async with _INSTALL_IN_PROGRESS:
         await _run_install(
             session, lane, actor, node_controls, release,
-            environment=environment, db_path=db_path, identity_dir=identity_dir,
+            environment=environment, db_path=db_path, identity_dir=identity_dir, backup_root=backup_root,
             restarting=restarting, current_version=current_version, breadcrumb=breadcrumb, delay=delay,
         )
 
@@ -6634,7 +6644,7 @@ _INSTALL_IN_PROGRESS = asyncio.Lock()
 
 async def _run_install(
     session: Session, lane: DatabaseLane, actor: User, node_controls: NodeControls, release: ReleaseInfo, *,
-    environment: InstallEnvironment, db_path: Path, identity_dir: Path, restarting: bool,
+    environment: InstallEnvironment, db_path: Path, identity_dir: Path, backup_root: Path, restarting: bool,
     current_version: str, breadcrumb: tuple[str, ...], delay: int,
 ) -> None:
     """Steps 1-4 of `_install_release_screen`, holding `_INSTALL_IN_PROGRESS`."""
@@ -6666,7 +6676,8 @@ async def _run_install(
     await session.write_line(colored("Backing up this node...", fg_color=MUTED_COLOR))
     try:
         backup_path = await _create_live_backup_owned(
-            db_path=db_path, identity_dir=identity_dir, destination=default_backup_destination(db_path),
+            db_path=db_path, identity_dir=identity_dir,
+            destination=default_backup_destination(db_path, root=backup_root),
         )
     except (BackupError, OSError, sqlite3.Error) as exc:
         await _fail("backup", str(exc))
