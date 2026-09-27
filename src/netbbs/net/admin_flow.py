@@ -2290,6 +2290,7 @@ async def _draw_system_menu(
     await session.write_line("\r\n" + screen_title("Settings",
             breadcrumb=(session.node_display_name,), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, header_color=header_color, node_name_gradient=session.node_name_gradient))
 
+    panel: list[str] = []
     if session.terminal_height >= 18:
         # GitHub issue #206: "current values at a glance," not counts --
         # unlike Users/Content (registered accounts, boards/files),
@@ -2411,8 +2412,18 @@ async def _draw_system_menu(
         MenuEntry(label=menu_key("P", "olicy trust"), brief="Federation trust policy"),
     ]
     option_list.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to the SysOp console"))
+    # The panel above takes rows from the menu, as on Users, Content and
+    # Operations: descriptions give way before anything overflows.
+    effective_desc_level, available_menu_height, desc_degraded = _degrade_description_level(
+        panel=panel, unicode_style=unicode_style, description_level=description_level,
+        entry_count=len(option_list), terminal_width=session.terminal_width,
+        terminal_height=session.terminal_height,
+    )
     await session.write_line(
-        _menu_row(option_list, description_level, width=session.terminal_width, height=session.terminal_height)
+        _menu_row(
+            option_list, effective_desc_level, width=session.terminal_width,
+            height=available_menu_height, degraded=desc_degraded,
+        )
     )
     await _choice_prompt(session)
 
