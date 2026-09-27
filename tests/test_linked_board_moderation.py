@@ -857,3 +857,39 @@ def test_the_migration_keeps_rejections_made_before_it(tmp_path, monkeypatch, re
         assert _post_row(db, held.post_id) is None
     finally:
         db.close()
+
+
+
+def test_the_migration_takes_down_a_refused_post_an_earlier_repair_restored(tmp_path, monkeypatch, remote):
+    from netbbs.storage import database as database_module
+    from netbbs.storage.migrations import MIGRATIONS
+    import netbbs.link.boards as link_boards
+
+    index = next(i for i, m in enumerate(MIGRATIONS) if "post_rejections" in m.description)
+    monkeypatch.setattr(database_module, "MIGRATIONS", MIGRATIONS[:index])
+    monkeypatch.setattr(link_boards, "_rejected_here", lambda db, content_id: False)
+    path = tmp_path / "node.db"
+    old = Database(path)
+    sysop = create_user(old, "sysop", password="hunter2", user_level=SYSOP_LEVEL)
+    _carried_board(old, remote)
+    restored = _carry(old, remote, subject="refused, then repaired back")
+    kept = _carry(old, remote, subject="never refused", minute=1)
+    # Rejected earlier (logged), then republished by a repair: the row is live.
+    old.connection.execute(
+        "INSERT INTO moderation_log (actor_user_id, action, object_type, object_id, detail, created_at) "
+        "VALUES (?, 'reject', 'board', ?, ?, ?)",
+        (sysop.id, restored.board_id, restored.post_id, NOW),
+    )
+    old.connection.commit()
+    old.close()
+    monkeypatch.undo()
+
+    db = Database(path)
+    try:
+        assert _post_row(db, restored.post_id) is None
+        assert _post_row(db, kept.post_id) is not None
+        assert db.connection.execute(
+            "SELECT 1 FROM post_search WHERE root_post_id = ?", (restored.post_id,)
+        ).fetchone() is None
+    finally:
+        db.close()

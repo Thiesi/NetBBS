@@ -3531,9 +3531,10 @@ reindex_post(db, board_id, root_post_id)`, the same call every other
 `posts` write path already makes, right after each materialization.
 
 **Repairing a gap.** Because persistence and projection are now atomic for
-new events, the only way a `board_post`/`board_post_edit` in `link_events`
-can lack a corresponding `posts` row is a node that carried boards *before*
-this feature shipped. A repair pass — scan `link_events` for `board_post`/
+new events, a `board_post`/`board_post_edit` in `link_events` lacks a
+corresponding `posts` row only where a node carried boards *before* this
+feature shipped, where the expiry sweep deleted it, or where a moderator
+rejected it -- and a rejection is recorded so that it stays that way (below). A repair pass — scan `link_events` for `board_post`/
 `board_post_edit` rows with no matching `posts.post_id`, and materialize them
 in chain order — closes that one-time gap and doubles as the "supported
 rebuild path" issue #73's own acceptance criteria ask for, the same

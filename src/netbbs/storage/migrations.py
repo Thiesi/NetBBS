@@ -3214,6 +3214,20 @@ MIGRATIONS = [
          WHERE m.action = 'reject' AND m.object_type = 'board' AND m.detail IS NOT NULL
            AND m.object_id IN (SELECT id FROM boards)
          ORDER BY m.id;
+
+        -- A refused carried post an earlier repair already brought back is
+        -- taken down again, where nothing depends on it: a root with no
+        -- replies and no revisions (anything else keeps its row, for a
+        -- moderator to remove). Its search entry goes with it.
+        CREATE TEMP TABLE resurrected_rejections AS
+        SELECT p.post_id FROM posts p JOIN post_rejections r ON r.post_id = p.post_id
+         WHERE p.post_id = p.root_post_id
+           AND EXISTS (SELECT 1 FROM link_events e WHERE e.content_id = p.post_id)
+           AND NOT EXISTS (SELECT 1 FROM posts c WHERE c.parent_post_id = p.post_id)
+           AND NOT EXISTS (SELECT 1 FROM posts c WHERE c.root_post_id = p.post_id AND c.post_id != p.post_id);
+        DELETE FROM post_search WHERE root_post_id IN (SELECT post_id FROM resurrected_rejections);
+        DELETE FROM posts WHERE post_id IN (SELECT post_id FROM resurrected_rejections);
+        DROP TABLE resurrected_rejections;
         """,
     ),
 ]
