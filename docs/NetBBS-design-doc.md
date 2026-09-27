@@ -4739,8 +4739,8 @@ active game sessions. The world ownership, limits and rollback contract is recor
 in the War Dialer storage decision in ?16; manual activation is in the door guide.
 
 Voidrunner coverage (issue #310): ordinary CLI and SysOp node backups include the
-effective `VOIDRUNNER_SAVE_DIR` (or legacy home-directory default), when present,
-under a checksummed `voidrunner/` component.
+node's Voidrunner save directory (`<db>.doors/voidrunner/`, or the SysOp's
+`VOIDRUNNER_SAVE_DIR`), when present, under a checksummed `voidrunner/` component.
 
 How that directory is chosen is itself part of the contract (issue #555), because
 the door and the backup CLI are different processes and need not share a `HOME`:
@@ -4750,9 +4750,10 @@ directory it would hand a door, once its listeners are bound, and the CLI reads
 that. Three provenances exist and are reported differently, because they carry
 different amounts of confidence: an **operator-supplied** `--voidrunner-save-dir`
 wins over everything; a **node-recorded** path is authoritative, so finding it
-empty is a fact about the node; and an **unrecorded** lookup falls back to the
-calling process's own home and is a guess, reported as one whether or not that
-directory happens to exist. A guess that finds files is the dangerous case -- an
+empty is a fact about the node; an unrecorded node whose `<db>.doors/voidrunner/`
+exists is the same fact, derived from the database path rather than read; and an
+**unrecorded** lookup with neither falls back to the calling process's own home
+and is a guess, reported as one whether or not that directory happens to exist. A guess that finds files is the dangerous case -- an
 operator who once ran a node from their shell has exactly that directory, holding
 exactly the wrong careers -- so it is captured but never presented as a finding.
 The chosen directory and its provenance are written into the manifest as captured,
@@ -4986,7 +4987,10 @@ including:
   implemented, wired into `netbbs.link.mail`/`netbbs.link.sync`, and
   surfaced as an `[O]utbox` SysOp screen);
 - sync-lag and historical/trend peer-health visibility (a read-only current-
-  state view — peer count/mode, dial-reliability score, last contact, relay
+  state view — peer count/mode, dial-reliability score, last contact (the
+  last hello or events exchange with the peer itself; its descriptor
+  refreshed secondhand from another node's peer list, or its mail picked
+  up from a relay, does not count — issue #766), relay
   activity, board/event counters, and relay-mailbox size — is available in
   the SysOp menu's `[L]ink status` screen; per-seed health has nothing to
   show yet, since no per-seed success/failure tracking exists);
@@ -6903,7 +6907,11 @@ fuel, range and the number of uncharted contacts. Survey charts every new system
 within 2 + scanner tier + navigator bonus connection hops, in stable distance/ID
 order. It advances no day and consumes no encounter RNG; no contacts or insufficient
 fuel means no charge. Valid survey contracts complete through ordinary discovery
-rules in the same checkpoint as fuel spending and chart updates.
+rules in the same checkpoint as fuel spending and chart updates, but a contract a
+scan completes pays half its reward (`REMOTE_SURVEY_PAYOUT_PERCENT`); arriving
+pays it in full. At full pay a scanner made surveys close to free income -- two
+fuel, no jump, no day -- and the contract asks for the trip (issue #648). The
+contract details and the scan terms both state the half-pay figure.
 
 The report retains each discovered system's name, station, economy and danger,
 plus mission outcomes, using height-aware pages. It creates no remote price
@@ -7214,6 +7222,10 @@ and not the rest is how the color was lost one slice at a time. It is
 unconditional rather than following the host's `redraw_in_place` preference,
 which is opt-in because clearing a *menu* costs scrollback a caller may still
 want; a door's own screens are not that, and War Dialer has always cleared.
+The hand-off into a door does follow the preference: the host clears before
+launching for a caller who redraws in place, because the door is a new screen
+and its title card otherwise arrived under the remains of the door picker
+(issue #648). A caller who scrolls keeps the picker in their scrollback.
 
 What that replaces has to survive it. The launch banner is wiped by the first
 deck the caller lands on, and everything it said is on that deck already -- the
@@ -7435,12 +7447,22 @@ pilots may play concurrently. Lock files remain in place and must not be deleted
 while the service is running. This requires a local filesystem with working OS
 locks and atomic replacement; cross-host shared directories are not supported.
 
-The resolved save directory is the installation namespace. The legacy default
-`~/.netbbs/voidrunner_saves` remains unchanged. SysOps running multiple independent
-nodes under one OS account must set a different `VOIDRUNNER_SAVE_DIR` for each
-NetBBS service; NetBBS passes this specific setting as an absolute path to doors.
-Changing a node's display name does not change career identity. See the door guide
-for the manual directory move and service configuration steps.
+The resolved save directory is the installation namespace, and it belongs to
+one node: `<db path>.doors/voidrunner/`, beside War Dialer's world, unless the
+SysOp sets `VOIDRUNNER_SAVE_DIR`. The node resolves it and passes it to every
+launch as an absolute path; the door's own `~/.netbbs/voidrunner_saves` fallback
+is for standalone play only. That home-directory path was the node default until
+issue #648, and it made every node one OS account ran share careers by user id.
+On its first start after the change, a node with no override whose own record
+names the legacy directory copies it into its own under the legacy directory's
+maintenance gate, staged and renamed into place whole. The record is the evidence
+the careers are this node's: a brand-new node under the same account has none, and
+never adopts careers another node left there, since user ids do not transfer. A
+target that already holds careers is never overwritten. It copies rather than moves, because a second node
+under the same account may still be reading it; each node then owns its copy. A
+busy or unreadable legacy directory is left alone and the node keeps using it
+until a later start copies it. Changing a node's display name does not change
+career identity. See the door guide for the upgrade and override steps.
 
 Hall of Fame records are retained independently at `scores/<user_id>.json`; only
 the displayed ranking is limited to 20. A `leaderboard.json` from before those
@@ -9119,13 +9141,21 @@ measurable constraints, not proof of fun or fair balance. Human multi-day
 playtests remain required.
 
 The ten hourly rates are $2, $2, $2, $3, $1, $2, $3, $2, $1 and $2 in map order:
-$480/day for the entire map versus $600 expected gross from fifteen trades. A
+$480/day for the entire map versus $495 expected gross from fifteen trades. A
 capture attempt costs one turn and the role-specific cash price below, win or lose;
 success additionally commits one available member. Ordinary recruitment costs
 $75/turn; an owned Carrier Switch offers the service below. Expansion competes with
-recruitment and defense for the same cash budget. Trade remains $20-$60 without
-a cash prerequisite; after a bust resets Heat, even minimum trade payouts fund
-recovery from one to three available crew within ten turns.
+recruitment and defense for the same cash budget. Trade pays $20-$60 without
+a cash prerequisite for the first three Trades of a turn-day; each later Trade in
+the same turn-day lowers the top of the range by $5, to $20-$40, and the count
+resets with the turns (issue #649, world schema 11). Twelve Trades in a row had
+taken a first visit from $300 to $728 with no bust risk, so cash was a solved
+problem from the first session even though Trade earns no Rank. Only the top
+moves: the $20 minimum is what bust recovery is sized on, and the taper keeps
+fifteen Trades above the map's $480. A steeper cut ($5 off both ends per Trade,
+to $5-$15) was rejected because it broke both targets. After a bust resets Heat,
+even minimum trade payouts fund recovery from one to three available crew within
+ten turns.
 
 A first successful capture awards 50 Rank per player/exchange/season. Holding
 territory earns one Rank per six exchange-hours, combining fractional time across
@@ -9550,7 +9580,7 @@ before world creation; it never falls back to Guest. Caller messages remain clea
 and SysOp diagnostics are bounded. Commands do not activate or redeploy services.
 
 **World schema compatibility.** SQLite `user_version=1` identifies the original
-War Dialer schema; the current version is 10. `user_version=2` added shared-crew
+War Dialer schema; the current version is 11. `user_version=2` added shared-crew
 resource semantics without
 changing its column layout. A complete unversioned world is adopted through a
 numbered migration; its additive fields, retained history and version marker

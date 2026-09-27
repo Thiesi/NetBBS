@@ -16,6 +16,8 @@
 [38;5;248m    Search boards, files, and mail[0m       [38;5;248m    Read and send private mail[0m
                                            [[1m[38;5;46mH[0m]istory
                                          [38;5;248m    Your recent sessions[0m
+                                           P[[1m[38;5;46mr[0m]evious callers
+                                         [38;5;248m    Who else called this node[0m
                                            [[1m[38;5;46mW[0m]ho's online
                                          [38;5;248m    See who's connected now[0m
                                            [[1m[38;5;46mV[0m]erify
@@ -27,4 +29,4 @@
   [[1m[38;5;46mL[0m]ogoff
 [38;5;248m    Disconnect from this node[0m
 
-[38;5;213m22[0m[38;5;248m:[0m[38;5;213m55[0m[38;5;248m:[0m[38;5;213m22[0m Choice: 
+[38;5;213m20[0m[38;5;248m:[0m[38;5;213m55[0m[38;5;248m:[0m[38;5;213m31[0m Choice: 

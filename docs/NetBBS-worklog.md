@@ -4143,11 +4143,15 @@ listeners are bound, and the CLI reads it (#555). Before that fix the CLI's
 default followed its own process environment, which differs from the service's
 `HOME` whenever `examples/netbbs.rc` started the node -- so a backup taken from
 an operator's shell captured no careers and said so in a sentence that read like
-a fact about the node. Two states remain and are reported differently: a
-recorded-but-empty directory is a fact about the node, while an unrecorded
-lookup (a database that has not started since the fix) falls back to the calling
-process's home and is labelled a guess, whether or not that path happens to
-exist. Explicit `--voidrunner-save-dir` remains authoritative and is still the
+a fact about the node. Three states are reported differently: a
+recorded-but-empty directory is a fact about the node; so is an unrecorded
+database whose `<db>.doors/voidrunner/` exists, the default since #648, which is
+derived from the database path rather than from anyone's home; and an unrecorded
+lookup with neither falls back to the calling process's home and is labelled a
+guess, whether or not that path happens to exist. The record also carries the
+#648 migration: only a node whose record names the legacy home directory adopts
+or copies it, because careers are keyed by user id and a brand-new node's users
+are not the old node's. Explicit `--voidrunner-save-dir` remains authoritative and is still the
 right instruction for any layout that differs from the handbook's.
 
 Outbound door receipts under `door-outbound/` are a captured component (#556).

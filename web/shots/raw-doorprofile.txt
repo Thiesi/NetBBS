@@ -1,8 +1,8 @@
-External installs are manual. See docs/NetBBS-door-guide.md. Templates need
-local paths and game setup.
 
 [1m[38;5;51mHarbor Lights / Door compatibility[0m
 [38;5;240m----------------------------------[0m
+[38;5;248mExternal installs are manual. See docs/NetBBS-door-guide.md. Templates need
+local paths and game setup.[0m
 [1m[38;5;246mRUNTIME[0m
 [38;5;75m  Setup template:[0m                    [38;5;248m(none)[0m
 [38;5;75m  Import JSON:[0m                       [38;5;248m(none)[0m

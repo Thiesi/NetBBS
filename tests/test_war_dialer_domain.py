@@ -649,6 +649,20 @@ def test_captured_defenders_return_once_even_with_an_old_owner_session(db_path):
     conn.close()
 
 
+def test_one_captured_defender_is_reported_in_the_singular(db_path):
+    # "1 defenders returned" reached the feed, the log and the receipt (#649).
+    conn, now, attacker, owner = _rivals(db_path)
+    wd.resolve_root_exchange(conn, owner, 1, now, FixedRandom())
+    wd.resolve_root_exchange(conn, attacker, 1, now, FixedRandom())
+    summary = wd.history_events(conn, owner.user_id)[0].summary_text
+    assert "1 defender returned to your available crew." in summary
+    conn.close()
+
+
+def test_counted_agrees_with_its_number():
+    assert [wd.counted(n, "turn") for n in (0, 1, 2)] == ["0 turns", "1 turn", "2 turns"]
+
+
 def test_abandon_and_reclaim_cannot_farm_capture_rank_even_after_restart(db_path):
     conn, now, actor, _ = _rivals(db_path)
     wd.resolve_root_exchange(conn, actor, 1, now, FixedRandom())
@@ -1352,7 +1366,7 @@ def _legacy_income_world(db_path):
     old_schema = schema.replace(addition, "")
     values = asdict(a)
     values.pop("income_remainder")
-    for column in wd._ECONOMY_COLUMNS | wd._OPERATION_COLUMNS | {"raid_shield_until", "specialty", "support", "insignia"}:
+    for column in wd._ECONOMY_COLUMNS | wd._OPERATION_COLUMNS | {"raid_shield_until", "specialty", "support", "insignia", "turns_trading"}:
         values.pop(column)
     conn.execute("DROP TABLE players")
     conn.execute(old_schema)
@@ -1955,7 +1969,7 @@ def test_full_map_daily_income_stays_below_fifteen_average_trades(db_path):
     cash_before = actor.cash
     after = wd.refresh_player(conn, 1, now + wd.DAY)
     income = after.cash - cash_before
-    assert income == 480 <= wd.TURNS_PER_DAY * sum(wd.TRADE_WAREZ_RANGE) / 2
+    assert income == 480 <= _expected_turn_day_of_trades()
     assert after.control_rank == 40
     assert after.exchanges_taken_total == 10 and len(after.captured_exchanges) == 10
     conn.close()
@@ -2320,6 +2334,7 @@ def _downgrade_operations_fixture(conn):
     conn.execute("UPDATE exchanges SET garrison=0, controlled_since=NULL WHERE controller_user_id IS NULL")
     conn.execute("DROP TABLE season_results")
     conn.execute("DROP TABLE seasons")
+    conn.execute("ALTER TABLE players DROP COLUMN turns_trading")
     conn.execute("ALTER TABLE players DROP COLUMN insignia")
     conn.execute("DROP TABLE scene")
     conn.execute("ALTER TABLE exchanges DROP COLUMN npc_key")
@@ -2603,6 +2618,7 @@ def test_exchange_role_upgrade_preserves_world_and_rolls_back_version_failure(db
     conn.execute('ALTER TABLE exchanges DROP COLUMN npc_key')
     conn.execute('ALTER TABLE exchanges DROP COLUMN npc_return_at')
     conn.execute('ALTER TABLE exchanges DROP COLUMN role')
+    conn.execute('ALTER TABLE players DROP COLUMN turns_trading')
     conn.execute('PRAGMA user_version=6')
     before = list(conn.iterdump())
     original = [tuple(row) for row in conn.execute('SELECT * FROM exchanges')]
@@ -2722,6 +2738,7 @@ def test_neutral_upgrade_preserves_human_ownership_and_rolls_back_marker_failure
     conn.execute('DROP TABLE scene')
     conn.execute('ALTER TABLE exchanges DROP COLUMN npc_key')
     conn.execute('ALTER TABLE exchanges DROP COLUMN npc_return_at')
+    conn.execute('ALTER TABLE players DROP COLUMN turns_trading')
     conn.execute('PRAGMA user_version=7')
     before = list(conn.iterdump())
     def deny_version(action, name, value, *args):
@@ -2837,6 +2854,7 @@ def test_scene_upgrade_is_atomic_and_does_not_invent_old_bulletins(db_path):
     conn.execute("DROP TABLE seasons")
     conn.execute('ALTER TABLE players DROP COLUMN insignia')
     conn.execute('DROP TABLE scene')
+    conn.execute('ALTER TABLE players DROP COLUMN turns_trading')
     conn.execute('PRAGMA user_version=8')
     before = list(conn.iterdump())
     def deny_version(action, name, value, *args):
@@ -2964,6 +2982,7 @@ def test_archive_schema_upgrade_is_atomic_and_does_not_backfill_unknown_history(
     conn, now, actor, _ = _rivals(db_path)
     conn.execute('DROP TABLE season_results')
     conn.execute('DROP TABLE seasons')
+    conn.execute('ALTER TABLE players DROP COLUMN turns_trading')
     conn.execute('PRAGMA user_version=9')
     before = list(conn.iterdump())
     def deny_version(action, name, value, *args):
@@ -2974,6 +2993,83 @@ def test_archive_schema_upgrade_is_atomic_and_does_not_backfill_unknown_history(
     assert list(conn.iterdump()) == before
     wd.ensure_schema(conn)
     assert wd.read_player(conn, 1) == actor and conn.execute('SELECT COUNT(*) FROM seasons').fetchone()[0] == 0
+    before = list(conn.iterdump())
+    wd.ensure_schema(conn)
+    assert list(conn.iterdump()) == before
+    conn.close()
+
+
+def _expected_turn_day_of_trades() -> float:
+    """Fifteen Trades in one turn-day, at the taper's expected payouts."""
+    player = wd.Player(0, "x", 0, 1, 0, 0, 0, 0, 0.0, "", 0, "", None, 1, "")
+    total = 0.0
+    for count in range(wd.TURNS_PER_DAY):
+        player.turns_trading = count
+        low, high = wd.trade_payout_range(player)
+        total += (low + high) / 2
+    return total
+
+
+def test_trade_tapers_after_three_in_a_turn_day_and_keeps_its_floor(db_path):
+    # Issue #649: twelve Trades in a row paid the same $20-$60 every time.
+    conn, now, actor, _ = _rivals(db_path)
+    ranges = []
+    for _ in range(8):
+        ranges.append(wd.trade_payout_range(actor))
+        wd.resolve_trade_warez(conn, actor, now, FixedRandom())
+    assert ranges == [(20, 60), (20, 60), (20, 60), (20, 55), (20, 50), (20, 45), (20, 40), (20, 40)]
+    assert wd.read_player(conn, actor.user_id).turns_trading == 8
+    # Other actions spend turns without counting as Trades.
+    wd.resolve_recruit(conn, actor, now)
+    assert wd.read_player(conn, actor.user_id).turns_trading == 8
+    conn.close()
+
+
+def test_trade_taper_keeps_the_design_documents_economy_targets():
+    # Fifteen average Trades still out-earn the whole map's passive income
+    # ($480/day), and the minimum payout -- what bust recovery is sized on --
+    # never moves.
+    assert 480 <= _expected_turn_day_of_trades() == 495
+    player = wd.Player(0, "x", 0, 1, 0, 0, 0, 0, 0.0, "", 0, "", None, 1, "")
+    for count in range(wd.TURNS_PER_DAY):
+        player.turns_trading = count
+        assert wd.trade_payout_range(player)[0] == wd.TRADE_WAREZ_RANGE[0]
+
+
+def test_trade_taper_resets_when_the_turns_refill_and_at_a_new_season(db_path):
+    conn, now, actor, _ = _rivals(db_path)
+    for _ in range(5):
+        wd.resolve_trade_warez(conn, actor, now, FixedRandom())
+    assert wd.trade_payout_range(actor) == (20, 45)
+    refilled = wd.refresh_player(conn, actor.user_id, now + wd.DAY)
+    assert (refilled.turns_used, refilled.turns_trading) == (0, 0)
+    assert wd.trade_payout_range(refilled) == wd.TRADE_WAREZ_RANGE
+    player = wd.read_player(conn, actor.user_id)
+    player.turns_trading = 9
+    wd.reset_player_for_season(player, player.season_number + 1, now)
+    assert player.turns_trading == 0
+    conn.close()
+
+
+def test_trade_count_upgrade_is_atomic_and_starts_everyone_at_zero(db_path):
+    conn, now, actor, _ = _rivals(db_path)
+    wd.resolve_trade_warez(conn, actor, now, FixedRandom())
+    conn.execute('ALTER TABLE players DROP COLUMN turns_trading')
+    conn.execute('PRAGMA user_version=10')
+    before = list(conn.iterdump())
+
+    def deny_version(action, name, value, *args):
+        return sqlite3.SQLITE_DENY if action == sqlite3.SQLITE_PRAGMA and name == 'user_version' and value == '11' else sqlite3.SQLITE_OK
+
+    conn.set_authorizer(deny_version)
+    with pytest.raises(sqlite3.DatabaseError):
+        wd.ensure_schema(conn)
+    conn.set_authorizer(None)
+    assert list(conn.iterdump()) == before
+    wd.ensure_schema(conn)
+    assert conn.execute('PRAGMA user_version').fetchone()[0] == 11
+    upgraded = wd.read_player(conn, actor.user_id)
+    assert upgraded.turns_trading == 0 and upgraded.turns_used == 1 and upgraded.cash == actor.cash
     before = list(conn.iterdump())
     wd.ensure_schema(conn)
     assert list(conn.iterdump()) == before

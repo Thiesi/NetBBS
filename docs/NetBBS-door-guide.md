@@ -88,8 +88,8 @@ refuses to silently create a replacement. Choose an explicit override or complet
 the migration. An explicit path for a new independent node deliberately selects
 its own world; it does not adopt the old world's users or records.
 
-War Dialer records schema version 10 in SQLite `user_version`. It validates that
-marker at startup, and the first permitted launch upgrades the world to schema 10
+War Dialer records schema version 11 in SQLite `user_version`. It validates that
+marker at startup, and the first permitted launch upgrades the world to schema 11
 transactionally. A failed upgrade rolls back its schema/data changes and version
 marker. Newer versions, incomplete or unrelated schemas, and corrupt files are
 refused with a caller-facing error; startup does not replace them with an empty
@@ -97,7 +97,7 @@ world. Existing zero-byte files are also refused. First creation atomically
 publishes a complete database and requires a filesystem supporting hard links; an
 unsupported filesystem fails clearly.
 
-Old binaries refuse schema 10: never mix game versions against one world. Stop
+Old binaries refuse schema 11: never mix game versions against one world. Stop
 active sessions and take a verified backup including the world component before
 activating a version that upgrades.
 
@@ -243,26 +243,45 @@ restore activation checks remain separate from automated Windows tests.
 
 ## Voidrunner careers and concurrent sessions
 
-Voidrunner stores careers outside its disposable session directory, under
-`~/.netbbs/voidrunner_saves` by default. This default is shared by NetBBS services
-running under the same OS account. Pilot identity is the numeric BBS user ID
-within this directory, so independent nodes must use independent save directories.
+Voidrunner stores careers outside its disposable session directory, in the
+node's own `<database>.doors/voidrunner/` -- beside War Dialer's world, so
+`netbbs.db` keeps them in `netbbs.db.doors/voidrunner/`. Pilot identity is the
+numeric BBS user ID within this directory, and the directory belongs to one node:
+two nodes run by one OS account no longer share careers.
 
-**Manual SysOp configuration:** set `VOIDRUNNER_SAVE_DIR` to a distinct absolute
-directory in each NetBBS service's environment, then restart that service. NetBBS
-passes this specific override through its restricted door environment. Standalone
-Voidrunner also honors it. Do not use a node display name as a directory identity.
+**Upgrading from the home-directory default:** before this, careers lived in
+`~/.netbbs/voidrunner_saves`, one directory for every node the OS account ran. On
+its first start after the upgrade a node that was using that directory -- its
+own record says so -- copies it into its own,
+taking the careers, the `scores` subdirectory and the legacy `leaderboard.json`,
+and logs where it copied from. It copies rather than moves, so a second node run
+by the same account still finds the careers it had; each node then plays its own
+copy. The copy waits for a quiet moment: if a pilot is playing from the old
+directory at startup, the node keeps using the old directory and tries again at
+its next start. A node set up after the upgrade starts with an empty directory
+rather than adopting another node's careers. So does a node upgraded straight
+from v7.4.0 or earlier, which never recorded the directory it used: before its
+first start, either set `VOIDRUNNER_SAVE_DIR` to the old directory or, with the
+node stopped, copy its contents into `<database>.doors/voidrunner/`. Once every node has started on the
+new version, and no standalone Voidrunner run by the account uses it, the old
+directory is no longer read and can be removed. If two nodes shared it, both copies hold
+both nodes' careers under overlapping user IDs, exactly as the shared directory
+did; inspect ownership before removing a career from either.
 
-**Manual move of existing data:** stop every service/standalone game using the
-old directory, retain a copy of the whole directory, move its contents into the
-chosen directory, set the override, then restart. Include all numeric career
-JSON files, the `scores` subdirectory, and the retained legacy `leaderboard.json`.
-If independent nodes previously shared the default, their overlapping numeric
-IDs cannot be assigned safely by an automatic migration; inspect ownership before
-copying careers. Merely pointing at an empty directory starts a separate set of
-careers. Ordinary node backups include this directory as described below.
+**Choosing another place:** set `VOIDRUNNER_SAVE_DIR` to an absolute directory in
+the NetBBS service's environment, then restart it. NetBBS passes it through its
+restricted door environment, no copy is made, and standalone Voidrunner honors it
+too. A node already running with the override keeps using it. Merely pointing at
+an empty directory starts a separate set of careers. Ordinary node backups include
+the directory in use, as described below.
 
-One session may own a pilot at a time. A second launch displays an in-use message
+One session may own a pilot at a time. A second launch -- the same caller in a
+second session, say -- is turned away with one line, `Your pilot is already flying
+in another session. Leave that one first.`, and returns to the door list after the
+usual single keypress; a launch while a backup, restore or other save maintenance
+holds the directory says
+`Voidrunner's saves are busy with maintenance. Try again shortly.` instead.
+Either way the game exits normally, so session history does not record a crash,
 and leaves the career unchanged; different pilots can play together. OS locks
 release even if the game is killed. The small `.USER_ID.lock` files remain and
 are not evidence of a stuck session; never delete them while games are running.
@@ -345,11 +364,12 @@ backup containing Voidrunner requires an explicit destination; the source path
 recorded in the archive never chooses where restoration writes:
 
 ```text
-python -m netbbs.backup restore --from backup-2026-09-08 --db netbbs.db --identity-dir netbbs_identity --voidrunner-to /srv/netbbs/voidrunner
+python -m netbbs.backup restore --from backup-2026-09-08 --db netbbs.db --identity-dir netbbs_identity --voidrunner-to netbbs.db.doors/voidrunner
 ```
 
-**Manual activation:** configure the restored service's `VOIDRUNNER_SAVE_DIR` to
-that destination before restarting. The target must be a separate game directory;
+**Activation:** restoring into the node's own `<database>.doors/voidrunner/`
+needs no setting; the restore says so. Any other destination needs the restored
+service's `VOIDRUNNER_SAVE_DIR` set to it before restarting. The target must be a separate game directory;
 restore refuses overlap with node/backup paths or unrelated files. Game data can
 live on another filesystem: staging and rollback stay beside its target. The
 ordinary retained rollback directory contains `voidrunner-rollback.json` naming
