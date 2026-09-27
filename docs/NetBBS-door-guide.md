@@ -278,8 +278,9 @@ the directory in use, as described below.
 One session may own a pilot at a time. A second launch -- the same caller in a
 second session, say -- is turned away with one line, `Your pilot is already flying
 in another session. Leave that one first.`, and returns to the door list after the
-usual single keypress; a launch during a backup or restore says
-`Voidrunner's saves are being backed up or restored. Try again shortly.` instead.
+usual single keypress; a launch while a backup, restore or other save maintenance
+holds the directory says
+`Voidrunner's saves are busy with maintenance. Try again shortly.` instead.
 Either way the game exits normally, so session history does not record a crash,
 and leaves the career unchanged; different pilots can play together. OS locks
 release even if the game is killed. The small `.USER_ID.lock` files remain and
