@@ -386,3 +386,27 @@ def test_the_worker_rechecks_the_destination_right_before_the_backup(db, lane, s
     assert "Next season failed:" in _normalized_visible(_written_text(session))
     assert world_status(db.path, path)["stored_season"] == "1"
     assert not elsewhere.exists(), "the mount point was not recreated"
+
+
+def test_a_failed_node_audit_still_reports_the_change_as_done(db, lane, sysop, identity_dir, monkeypatch):
+    """Codex review, PR #744: the rollover committed, so the SysOp is told it
+    is done, and separately that the node audit entry is missing."""
+    import sqlite3
+
+    from netbbs.net import admin_flow
+
+    _war_dialer_door(db, sysop)
+    path = _war_dialer_world(db)
+    set_maintenance(db.path, path, True)
+
+    def _disk_full(*args, **kwargs):
+        raise sqlite3.OperationalError("database or disk is full")
+
+    monkeypatch.setattr(admin_flow, "record_action", _disk_full)
+    session = FakeSession(_war_dialer_world_keys("n", "rollover", path.name))
+    _live(session, lane, sysop, identity_dir)
+    text = _normalized_visible(_written_text(session))
+
+    assert "Next season done: season 2 has started." in text
+    assert "Audit log entry for it could not be written (database or disk is full)" in text
+    assert world_status(db.path, path)["stored_season"] == "2"

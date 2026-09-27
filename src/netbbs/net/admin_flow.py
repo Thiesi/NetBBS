@@ -18441,19 +18441,28 @@ async def _war_dialer_competition_flow(
                   error=True)
         return
     await session.write_line(colored("Backing up the node, then changing the competition...", fg_color=MUTED_COLOR))
+    audit_failure: str | None = None
+
     async def _record(outcome: _CompetitionOutcome) -> None:
         # Runs even if this session drops while the change is in flight: a
         # change that happened must reach the node's audit log.
+        nonlocal audit_failure
         if outcome.status is None:
             return
         entry = outcome.status["recent_operations"][-1] if outcome.status["recent_operations"] else {}
-        await lane.run(
-            record_action, actor=actor, action="war_dialer_reset" if reset else "war_dialer_season",
-            object_type="door", object_id=door.id,
-            detail=f"door={door.name!r} world={str(world)!r} "
-                   f"season={entry.get('before_season')}->{entry.get('after_season')} "
-                   f"backup={str(destination)!r} reason={reason!r}",
-        )
+        try:
+            await lane.run(
+                record_action, actor=actor, action="war_dialer_reset" if reset else "war_dialer_season",
+                object_type="door", object_id=door.id,
+                detail=f"door={door.name!r} world={str(world)!r} "
+                       f"season={entry.get('before_season')}->{entry.get('after_season')} "
+                       f"backup={str(destination)!r} reason={reason!r}",
+            )
+        except (sqlite3.Error, OSError) as exc:
+            # The change is committed; say that, and that only the node's
+            # own record of it is missing (the world's audit has it).
+            _logger.exception("War Dialer %s committed but its node audit entry failed", what)
+            audit_failure = sanitize_text(str(exc))[:300]
 
     outcome = await _owned_worker(
         _war_dialer_change_competition, finish=_record, db_path=db_path, world=world, identity_dir=identity_dir,
@@ -18473,6 +18482,9 @@ async def _war_dialer_competition_flow(
         return
     _announce(session, f"{what} done: season {outcome.status['stored_season']} has started. Backup: {destination}. "
               "Maintenance is still on; switch it off when you have checked the world.")
+    if audit_failure is not None:
+        _announce(session, f"The node's Audit log entry for it could not be written ({audit_failure}); "
+                  "the world's own audit records the change.", error=True)
 
 
 async def _war_dialer_world_screen(session: Session, lane: DatabaseLane, actor: User, door: Door, *,
