@@ -2396,7 +2396,8 @@ reaches the signing board, as opposed to the Link `addresses` a node dials
 (issue #767, §8.12). Each is `telnet://host:port`, `ssh://host:port` or an
 `https://` URL, at most 300 bytes. It is the SysOp's own statement, since no
 node can see the port-forward or proxy in front of its listeners. A node that has
-never stated it publishes `[web] public_url` when that is an `https://` URL,
+never stated it publishes `[web] public_url` when that is an `https://` URL
+within the same 300 bytes,
 the one caller-facing address a SysOp has already declared, or nothing. The field is display-only: a reader
 drops a malformed entry and a malformed list reads as empty, as for
 `live_relays`, and never refuses the hello over it. An older node keeps and
@@ -3336,7 +3337,7 @@ SysOp's shows more.
 
 **What is listed.** Every node this one has completed a hello with, every
 node a carrier has introduced (§8.11), and every node that is the origin of a
-board or file area this node carries, even after its introduced identity was
+board, file area or linked channel this node carries, even after its introduced identity was
 displaced from the bounded store; such a node is listed under whatever name
 this node still has for it. For callers the list leaves out every node
 that is quarantined or blocked in any of the identity, resource or content
@@ -3352,7 +3353,8 @@ themselves (§8.3), and there is no directory. The screen says so in its title,
 "Nodes known to <board>", and nowhere else.
 
 **What a caller sees.** Per node: its friendly name and DNS name; how this
-board knows it, *direct* (met) or *via <carrier>* (introduced); when it was
+board knows it, *direct* (met) or *via <carrier>* (introduced; *via another
+node* when the carrier is itself left off the caller's list); when it was
 last heard of, as a relative time, marked stale past 30 days; and, in its
 detail view, the `dial_in` addresses its descriptor carries (§8.2) and the
 boards and file areas this board carries from it that this caller could open
@@ -3361,8 +3363,8 @@ and reliability are never shown to callers: they are how nodes reach each
 other, and a caller cannot use them.
 
 **Last heard.** The later of this node's own last direct contact with it (a
-completed hello or events exchange, or an authenticated real-time session
-being established; issue #766) and the `created_at` of its
+completed hello or events exchange, or an authenticated real-time session for
+as long as it stays open; issue #766) and the `created_at` of its
 newest valid descriptor, but never later than the time this node first
 stored that descriptor, so a descriptor dated in the future cannot keep a node
 fresh. A node signs a fresh
@@ -3375,7 +3377,10 @@ not removed.
 
 **The SysOp's view.** The same list, plus the nodes callers do not see:
 peer-list candidates, marked unverified and never shown to callers, since a
-candidate has completed no hello and names nobody who vouched for it; and
+candidate has completed no hello and names nobody who vouched for it. A
+candidate's descriptor is unverified, so it has no last-heard time; its row
+shows *never heard from* and, labelled as such, when a peer list first
+named it; and
 quarantined and blocked nodes, with the state of each dimension. Each row adds the Link
 addresses, relay roles and reliability. It replaces the peer list behind the
 Link status screen.
