@@ -16621,7 +16621,7 @@ async def _door_outbound_screen(session: Session, lane: DatabaseLane, actor: Use
                 MenuEntry(label=menu_key("R", "evoke a board"), brief="Stop it posting to one"),
                 MenuEntry(label=menu_key("C", "eiling"), brief="Posts per hour"),
                 MenuEntry(label=menu_key("L", "et it chat in a channel"),
-                          brief="Let it speak in one more chat channel"),
+                          brief="Let it chat in one more channel"),
                 MenuEntry(label=menu_key("D", "rop a channel"), brief="Stop it speaking in one"),
                 MenuEntry(label=menu_key("H", "ourly chat lines"), brief="Chat lines per hour"),
             ]
