@@ -414,6 +414,23 @@ def test_voidrunner_cli_create_and_restore_reports_activation_step(tmp_path, db_
     assert (target / "77.json").exists()
 
 
+def test_voidrunner_restore_into_the_nodes_own_directory_needs_no_setting(tmp_path, db_path, identity_dir, capsys):
+    """`<db>.doors/voidrunner/` is where the node looks without being told
+    (issue #648), so restoring there leaves nothing to configure."""
+    from netbbs.doors.runtime import node_voidrunner_save_dir
+
+    game = _populate_voidrunner()
+    source, target = tmp_path / "backup", node_voidrunner_save_dir(db_path)
+    main(["create", "--db", str(db_path), "--identity-dir", str(identity_dir), "--to", str(source),
+          "--voidrunner-save-dir", str(game)])
+    main(["restore", "--db", str(db_path), "--identity-dir", str(identity_dir), "--from", str(source),
+          "--voidrunner-to", str(target)])
+    output = capsys.readouterr().out
+    output = " ".join(output.split())  # the CLI wraps to the terminal width
+    assert "the node's own save directory" in output and "MANUAL: configure" not in output
+    assert (target / "77.json").exists()
+
+
 @contextlib.contextmanager
 def _real_pilot_lease(directory, ready):
     import subprocess
