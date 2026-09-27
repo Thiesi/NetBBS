@@ -3545,6 +3545,19 @@ reclaim already established — purely additive (fills in a missing row from
 an already-verified signed event, never deletes or rewrites anything), so
 unlike blob reclaim it needs no dry-run/confirm step.
 
+**A rejection is a record, not only a deletion** (issue #692). Rejecting a
+held post or edit deletes its `posts` row, but a carried one's signed event
+stays in `link_events`. The repair pass would take that as a gap and publish
+the refused post again. So every rejection, local or carried, is written to
+`post_rejections`: the post id (for a carried post, its event's `content_id`),
+the board, who, when, and an optional reason. Every materialization path
+skips a recorded id: the repair pass, and a carried post or author edit
+arriving again. The signed event is kept, since local moderation never
+rewrites it. A post the repair pass does restore gets the status sync would
+have given it: this node's moderation, and a hold where the author's trust
+requires approval. The same record is where a rejection's reason and the
+author's notice come from (issue #678).
+
 Linked resources are carried by default within the supported topology. Every
 genesis a node has accepted is in exactly one recorded state (issue #561):
 **carried** (a local row), **offered** (it arrived past the automatic-intake

@@ -3185,4 +3185,23 @@ MIGRATIONS = [
            );
         """,
     ),
+    Migration(
+        description=(
+            "Issue #692: `post_rejections` records every post a moderator rejected here -- "
+            "local or carried, a new post or an edit -- by its `post_id` (for a carried post, "
+            "its event's content id), with who, when and an optional reason. Rejecting still "
+            "deletes the post row; this record is what makes the decision last. A carried "
+            "post's signed event is kept (§9.3), so without it `[R]epair carried posts` "
+            "re-materialized, and published, the post the moderator refused."
+        ),
+        sql="""
+        CREATE TABLE post_rejections (
+            post_id              TEXT PRIMARY KEY,
+            board_id             INTEGER NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
+            rejected_by_user_id  INTEGER REFERENCES users(id) ON DELETE SET NULL,
+            rejected_at          TEXT NOT NULL,
+            reason               TEXT
+        );
+        """,
+    ),
 ]

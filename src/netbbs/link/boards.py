@@ -37,6 +37,7 @@ from netbbs.auth.users import User, get_user_by_id
 from netbbs.boards.boards import Board, usable_max_age_days
 from netbbs.boards.posts import Post
 from netbbs.communities import get_effective_min_age, get_effective_name_requirement
+from netbbs.link.enforcement import decide_event_authorship, ensure_event_author_subject
 from netbbs.link.events import (
     BOARD_CLOSURE_OBJECT_TYPE,
     BOARD_ORIGIN_TRANSFER_OFFER_OBJECT_TYPE,
@@ -529,7 +530,9 @@ def materialize_carried_post(
             payload["board_id"],
         ),
     )
-    if not _remote_author_meets_board_identity_policy(db, payload["author"], board_row):
+    if _rejected_here(db, post.content_id) or not _remote_author_meets_board_identity_policy(
+        db, payload["author"], board_row
+    ):
         # The signed event is kept, only its projection is refused -- which is
         # what makes the rebuild path below a real recovery rather than a
         # claim. Committed, not rolled back: `link_events` is the record that
@@ -673,7 +676,7 @@ def materialize_carried_post_edit(
             payload["board_id"],
         ),
     )
-    if status is None:
+    if status is None or _rejected_here(db, edit.content_id):
         db.connection.commit()
         return None
     db.connection.execute(
@@ -696,6 +699,24 @@ def materialize_carried_post_edit(
     return _post_from_row(
         db.connection.execute("SELECT * FROM posts WHERE post_id = ?", (edit.content_id,)).fetchone()
     )
+
+
+def _rejected_here(db: Database, content_id: str) -> bool:
+    """Whether a moderator here rejected the post or edit `content_id`
+    (issue #692). Its signed event is still kept; it is only never shown
+    again, whichever path would project it."""
+    return db.connection.execute(
+        "SELECT 1 FROM post_rejections WHERE post_id = ?", (content_id,)
+    ).fetchone() is not None
+
+
+def _rebuild_status(db: Database, envelope: dict, sender_fingerprint: str) -> str:
+    """The status sync would give a post or author edit it projects: held
+    when the author's trust says their posts need approval. Local
+    moderation is applied by the materialize functions themselves."""
+    ensure_event_author_subject(db, envelope)
+    decision = decide_event_authorship(db, envelope, transport_peer_fingerprint=sender_fingerprint)
+    return "pending" if decision.requires_approval else "approved"
 
 
 def _predecessor_projected(db: Database, previous_event_id: str) -> bool:
@@ -930,8 +951,12 @@ def rebuild_carried_post_materialization(db: Database, *, board_id: str | None =
 
     `board_id` limits the pass to one board (issue #683: accepting an offer
     reprojects only that board's stored content). The unscoped pass would also
-    recreate posts a moderator removed or the expiry sweep deleted on every
-    other carried board, whose events are kept on purpose.
+    recreate posts the expiry sweep deleted on every other carried board,
+    whose events are kept on purpose.
+
+    A post or edit a moderator rejected here is never re-materialized
+    (issue #692: `post_rejections`), and one that is gets the status sync
+    would have given it -- this node's moderation and the author's trust.
     """
     scope = "" if board_id is None else " AND board_id = ?"
     scope_args = () if board_id is None else (board_id,)
@@ -942,7 +967,8 @@ def rebuild_carried_post_materialization(db: Database, *, board_id: str | None =
             """
             SELECT content_id, sender_fingerprint, object_type, envelope_json
             FROM link_events
-            WHERE object_type IN (?, ?, ?, ?) AND content_id NOT IN (SELECT post_id FROM posts)"""
+            WHERE object_type IN (?, ?, ?, ?) AND content_id NOT IN (SELECT post_id FROM posts)
+              AND content_id NOT IN (SELECT post_id FROM post_rejections)"""
             + scope + """
             ORDER BY received_at ASC
             """,
@@ -956,11 +982,13 @@ def rebuild_carried_post_materialization(db: Database, *, board_id: str | None =
             envelope = json.loads(row["envelope_json"])
             if row["object_type"] == BOARD_POST_OBJECT_TYPE:
                 result = materialize_carried_post(
-                    db, BoardPost.from_dict(envelope), sender_fingerprint=row["sender_fingerprint"]
+                    db, BoardPost.from_dict(envelope), sender_fingerprint=row["sender_fingerprint"],
+                    initial_status=_rebuild_status(db, envelope, row["sender_fingerprint"]),
                 )
             elif row["object_type"] == BOARD_POST_EDIT_OBJECT_TYPE:
                 result = materialize_carried_post_edit(
-                    db, BoardPostEdit.from_dict(envelope), sender_fingerprint=row["sender_fingerprint"]
+                    db, BoardPostEdit.from_dict(envelope), sender_fingerprint=row["sender_fingerprint"],
+                    initial_status=_rebuild_status(db, envelope, row["sender_fingerprint"]),
                 )
             elif row["object_type"] == BOARD_POST_MODERATOR_EDIT_OBJECT_TYPE:
                 result = materialize_carried_board_post_moderator_edit(

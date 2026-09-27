@@ -717,3 +717,105 @@ def test_replies_to_you_asks_trust_once_per_author(db, remote, alice, monkeypatc
 
     assert len(unread_replies_to(db, alice)) == 10
     assert len(calls) == 2
+
+
+
+# -- issue #692: a rejection survives [R]epair carried posts --------------------------
+
+
+def _rebuild(db):
+    from netbbs.link.boards import rebuild_carried_post_materialization
+
+    return rebuild_carried_post_materialization(db)
+
+
+def _post_row(db, post_id):
+    return db.connection.execute("SELECT status FROM posts WHERE post_id = ?", (post_id,)).fetchone()
+
+
+def test_a_rejected_carried_post_stays_gone_after_repair(db, sysop, remote):
+    from netbbs.boards.posts import delete_post
+
+    _carried_board(db, remote, moderated=True)
+    held = _carry(db, remote, subject="refused")
+    assert held.status == "pending"
+
+    delete_post(db, held, deleted_by=sysop, reason="off topic")
+    _rebuild(db)
+
+    assert _post_row(db, held.post_id) is None
+    row = db.connection.execute("SELECT * FROM post_rejections WHERE post_id = ?", (held.post_id,)).fetchone()
+    assert row["rejected_by_user_id"] == sysop.id and row["reason"] == "off topic"
+    # The signed event is kept (design doc §9.3).
+    assert db.connection.execute(
+        "SELECT 1 FROM link_events WHERE content_id = ?", (held.post_id,)
+    ).fetchone() is not None
+
+
+def test_a_rejected_carried_edit_stays_gone_after_repair(db, sysop, remote):
+    from netbbs.boards.posts import delete_post
+
+    _carried_board(db, remote, moderated=True)
+    root = _carry(db, remote)
+    root = approve_post(db, root, approved_by=sysop)
+    edit = materialize_carried_post_edit(
+        db, _remote_edit(remote, root, previous=root.post_id, body="refused text"),
+        sender_fingerprint=remote.fingerprint,
+    )
+    assert edit.status == "pending"
+
+    delete_post(db, edit, deleted_by=sysop)
+    _rebuild(db)
+
+    assert _post_row(db, edit.post_id) is None
+    assert get_post(db, root.post_id).body == "first post"
+
+
+def test_a_rejected_carried_post_is_not_projected_by_any_path(db, sysop, remote):
+    from netbbs.boards.posts import delete_post
+
+    _carried_board(db, remote, moderated=True)
+    event = _remote_post(remote, subject="refused")
+    held = materialize_carried_post(db, event, sender_fingerprint=remote.fingerprint)
+    delete_post(db, held, deleted_by=sysop)
+
+    assert materialize_carried_post(db, event, sender_fingerprint=remote.fingerprint) is None
+
+
+def test_repair_holds_a_post_whose_author_trust_holds_for_approval(db, remote):
+    """A post repair does bring back gets the status sync would give it."""
+    _carried_board(db, remote)
+    missing = _carry(db, remote, subject="restored")
+    db.connection.execute("DELETE FROM posts WHERE post_id = ?", (missing.post_id,))
+    db.connection.commit()
+    home = TrustSubject.node(remote.fingerprint)
+    register_subject(db, home, first_accepted_at=NOW, now_iso=NOW)
+    for dimension in TrustDimension:
+        set_trust_override(db, home, dimension, TrustState.ESTABLISHED, reason="test", now_iso=NOW)
+    _set_trust(db, remote, "wanderer", TrustState.PROBATIONARY)
+
+    assert _rebuild(db) == 1
+    assert _post_row(db, missing.post_id)["status"] == "pending"
+
+
+def test_repair_still_restores_a_post_that_was_never_rejected(db, remote):
+    _carried_board(db, remote)
+    missing = _carry(db, remote, subject="restored")
+    db.connection.execute("DELETE FROM posts WHERE post_id = ?", (missing.post_id,))
+    db.connection.commit()
+
+    assert _rebuild(db) == 1
+    assert _post_row(db, missing.post_id)["status"] == "approved"
+
+
+def test_rejecting_a_local_post_records_it_too(db, sysop, alice):
+    from netbbs.boards.posts import delete_post
+
+    board = create_board(db, "general", creator=sysop, moderated=True)
+    held = create_post(db, board, alice, "refused", "text")
+
+    delete_post(db, held, deleted_by=sysop)
+
+    assert db.connection.execute(
+        "SELECT board_id FROM post_rejections WHERE post_id = ?", (held.post_id,)
+    ).fetchone()[0] == board.id
