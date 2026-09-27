@@ -17150,10 +17150,17 @@ def _war_dialer_world_state(db_path: Path, world: Path) -> tuple[dict | None, st
 def _war_dialer_set_maintenance(db_path: Path, world: Path, enabled: bool, operator: str) -> str | None:
     from netbbs.doors.bundled import war_dialer as wd
     from netbbs.doors.war_dialer_admin import set_maintenance
+    # Shares the competition lock: switching maintenance off while a season
+    # change runs would let a caller in between its backup and its commit,
+    # making the backup older than the state it claims to precede.
+    if not _WAR_DIALER_COMPETITION_LOCK.acquire(blocking=False):
+        return "a War Dialer competition change is running; try again when it finishes"
     try:
         set_maintenance(db_path, world, enabled, operator=operator)
     except (BackupError, wd.WorldStateError, OSError, sqlite3.Error, ValueError) as exc:
         return wd._event_plain(str(exc))[:500]
+    finally:
+        _WAR_DIALER_COMPETITION_LOCK.release()
     return None
 
 

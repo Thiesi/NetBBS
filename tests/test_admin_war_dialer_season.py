@@ -265,3 +265,20 @@ def test_a_backup_that_failed_verification_is_not_called_a_backup(db, lane, syso
     assert "is not a usable backup" in text
     assert "verified backup taken first remains" not in text
     assert world_status(db.path, path)["stored_season"] == "1"
+
+
+def test_maintenance_cannot_be_switched_while_a_competition_change_runs(db, lane, sysop):
+    """Codex review, PR #744: switching maintenance off mid-change would let
+    a caller in between the backup and the commit."""
+    from netbbs.net import admin_flow
+
+    _war_dialer_door(db, sysop)
+    path = _war_dialer_world(db)
+    set_maintenance(db.path, path, True)
+
+    session = FakeSession(_war_dialer_world_keys("m"))
+    with admin_flow._WAR_DIALER_COMPETITION_LOCK:
+        asyncio.run(admin_menu(session, lane, sysop))
+
+    assert "competition change is running" in _normalized_visible(_written_text(session))
+    assert world_status(db.path, path)["maintenance"] == "on"
