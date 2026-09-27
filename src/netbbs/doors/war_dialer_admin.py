@@ -24,13 +24,18 @@ def _target(db_path: Path, world: Path) -> Path:
     return world
 
 
-def _audit(conn, action, *, reason="", backup_path=None, before=None, after=None):
+def _os_operator() -> str:
+    """The CLI's operator label: the local OS account running the command."""
+    return os.environ.get("USERNAME") or os.environ.get("USER") or "local SysOp"
+
+
+def _audit(conn, action, *, operator=None, reason="", backup_path=None, before=None, after=None):
     row = conn.execute("SELECT value FROM meta WHERE key='sysop_audit'").fetchone()
     entries = json.loads(row[0]) if row else []
     if not isinstance(entries, list):
         raise backup.BackupError("World audit data is invalid; preserve the world for recovery.")
     entry = {"at": wd.to_iso(wd.now_utc()), "action": action,
-             "operator": (os.environ.get("USERNAME") or os.environ.get("USER") or "local SysOp")[:80],
+             "operator": (operator or _os_operator())[:80],
              "reason": reason[:240], "before_season": before, "after_season": after}
     if backup_path is not None:
         entry["backup"] = str(backup_path.resolve())[:1024]
@@ -59,14 +64,18 @@ def world_status(db_path: Path, world: Path) -> dict:
         return result
 
 
-def set_maintenance(db_path: Path, world: Path, enabled: bool) -> None:
+def set_maintenance(db_path: Path, world: Path, enabled: bool, *, operator: str | None = None) -> None:
+    """Close or reopen a world to new callers; refuses while any session is inside.
+
+    `operator` labels the world's own audit entry: the SysOp account when the
+    console calls this, the OS account (the default) from the CLI."""
     world = _target(db_path, world)
     with backup._war_dialer_maintenance(world), contextlib.closing(wd.connect(world)) as conn:
         with wd._write_transaction(conn):
             value = "on" if enabled else "off"
             conn.execute("INSERT INTO meta (key,value) VALUES ('maintenance',?) "
                          "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (value,))
-            _audit(conn, "maintenance " + value)
+            _audit(conn, "maintenance " + value, operator=operator)
 
 
 def change_competition(db_path: Path, world: Path, *, identity_dir: Path, backup_to: Path,
