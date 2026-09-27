@@ -13,7 +13,8 @@ looking at it:
   topped up from the newest rotated file (`netbbs.log.1`) only while the
   active one is shorter than that, and never from older generations;
 - at most `MAX_ENTRIES` parsed entries are kept, the newest;
-- a follow poll reads at most `MAX_FOLLOW_BYTES` of new text.
+- a follow poll reads at most `MAX_FOLLOW_BYTES` of new text, and holds back
+  at most `MAX_HELD_CHARS` of an entry that may still be growing.
 
 Neither file is read through a symlink: the log lives in the node's state
 directory, and a link there pointing elsewhere is not something a remote
@@ -28,6 +29,7 @@ reaches a terminal is masked.
 
 from __future__ import annotations
 
+import codecs
 import os
 import re
 import stat
@@ -39,6 +41,7 @@ NODE_LOG_FILENAME = "netbbs.log"
 MAX_READ_BYTES = 512 * 1024
 MAX_ENTRIES = 2000
 MAX_FOLLOW_BYTES = 64 * 1024
+MAX_HELD_CHARS = 64 * 1024
 
 #: Standard logging level names, lowest first.
 LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
@@ -136,18 +139,23 @@ def _describe(path: Path, exc: OSError) -> str:
     return f"could not read {path.name}: {exc.strerror or exc}"
 
 
-def _read_tail(path: Path, budget: int) -> tuple[str, bool]:
-    """The last `budget` bytes of `path` as text, and whether any were left
-    out. A read that starts mid-file drops its first, partial line."""
+def _read_tail(path: Path, budget: int) -> tuple[str, bool, int]:
+    """The last `budget` bytes of `path` as text, whether any were left out,
+    and how many bytes were read. A read that starts mid-line drops that
+    partial first line; one that starts exactly at a line keeps it."""
     with _open_regular(path) as handle:
         size = os.fstat(handle.fileno()).st_size
         start = max(0, size - budget)
-        handle.seek(start)
-        data = handle.read(budget)
-    text = data.decode("utf-8", errors="replace")
+        # One byte more, to see whether `start` begins a line.
+        handle.seek(max(0, start - 1))
+        data = handle.read(budget + (1 if start > 0 else 0))
     if start > 0:
+        starts_a_line = data[:1] == b"\n"
+        data = data[1:]
+    text = data.decode("utf-8", errors="replace")
+    if start > 0 and not starts_a_line:
         _, _, text = text.partition("\n")
-    return text, start > 0
+    return text, start > 0, len(data)
 
 
 def parse_log_lines(lines: list[str], *, first_id: int = 0) -> list[NodeLogEntry]:
@@ -187,17 +195,22 @@ def read_node_log(path: Path, *, max_bytes: int = MAX_READ_BYTES, max_entries: i
         result.missing = True
         return result
     try:
-        active_text, active_cut = _read_tail(path, max_bytes)
+        active_text, active_cut, active_bytes = _read_tail(path, max_bytes)
         text = active_text
         truncated = active_cut
         rotated = path.with_name(path.name + ".1")
-        remaining = max_bytes - len(active_text.encode("utf-8", errors="replace"))
+        remaining = max_bytes - active_bytes
         if not active_cut and remaining > 0 and rotated.exists() and _refuse_symlink(rotated) is None:
             try:
-                older_text, older_cut = _read_tail(rotated, remaining)
+                older_text, older_cut, _ = _read_tail(rotated, remaining)
             except _NotRegularFile:
                 truncated = True
             else:
+                # A generation that ended mid-line (a crash before rotation)
+                # must not glue its last fragment onto the active file's
+                # first entry.
+                if older_text and not older_text.endswith("\n"):
+                    older_text += "\n"
                 text = older_text + text
                 # Beyond `.1` there may be `.2` to `.5`; this read never reaches them.
                 truncated = older_cut or rotated.with_name(path.name + ".2").exists()
@@ -230,13 +243,19 @@ class NodeLogFollower:
 
     Starts at the current end of the file. A file that shrinks, or is
     replaced by a new one, was rotated: reading restarts at its beginning.
-    A line still being written is held back until its newline arrives."""
+    A line still being written is held back until its newline arrives, and
+    the newest entry is held back until the next entry starts, a poll finds
+    nothing new, or it outgrows `MAX_HELD_CHARS` -- so a traceback that
+    arrives across two reads stays with its entry. Bytes are decoded
+    incrementally, so a character split across two reads survives."""
 
     def __init__(self, path: Path) -> None:
         self.path = path
         self._offset = 0
         self._identity: tuple[int, int] | None = None
         self._partial = ""
+        self._held: list[str] = []
+        self._decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         self._next_id = 0
         try:
             if _refuse_symlink(path) is None and path.exists():
@@ -252,27 +271,49 @@ class NodeLogFollower:
         refusal = _refuse_symlink(self.path)
         if refusal is not None:
             return [], refusal
+        finished: list[str] = []
         try:
             if not self.path.exists():
-                return [], None
+                return self._emit(self._take_held()), None
             with _open_regular(self.path) as handle:
                 info = os.fstat(handle.fileno())
                 identity = (info.st_dev, info.st_ino)
                 if identity != self._identity or info.st_size < self._offset:
+                    # Rotated: whatever was held belongs to a file that is done.
+                    finished = self._take_held()
                     self._identity = identity
                     self._offset = 0
                     self._partial = ""
+                    self._decoder.reset()
                 handle.seek(self._offset)
                 data = handle.read(MAX_FOLLOW_BYTES)
         except OSError as exc:
             return [], _describe(self.path, exc)
         self._offset += len(data)
-        text = self._partial + data.decode("utf-8", errors="replace")
+        text = self._partial + self._decoder.decode(data)
         complete, newline, rest = text.rpartition("\n")
-        if not newline:
+        if newline:
+            self._partial = rest
+            lines = self._held + complete.split("\n")
+        else:
             self._partial = text
-            return [], None
-        self._partial = rest
-        entries = parse_log_lines(complete.split("\n"), first_id=self._next_id)
+            lines = list(self._held)
+        self._held = []
+        if data:
+            last_header = max(
+                (index for index, line in enumerate(lines) if _ENTRY_START.match(redact(line.rstrip("\r")))),
+                default=None,
+            )
+            if last_header is not None and sum(len(line) for line in lines[last_header:]) <= MAX_HELD_CHARS:
+                self._held = lines[last_header:]
+                lines = lines[:last_header]
+        return self._emit(finished) + self._emit(lines), None
+
+    def _take_held(self) -> list[str]:
+        held, self._held = self._held, []
+        return held
+
+    def _emit(self, lines: list[str]) -> list[NodeLogEntry]:
+        entries = parse_log_lines(lines, first_id=self._next_id)
         self._next_id += len(entries)
-        return entries, None
+        return entries

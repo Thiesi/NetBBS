@@ -156,11 +156,16 @@ def test_follower_reads_only_what_is_appended_and_holds_partial_lines(tmp_path):
     with open(path, "a", encoding="utf-8") as handle:
         handle.write(_line("ERROR", "new one"))
         handle.write("2026-09-27 10:00:02 WARNING:netbbs.net:half a li")
+    # "new one" may still be followed by a traceback: held back for now.
     entries, error = follower.poll()
-    assert error is None and [e.message for e in entries] == ["new one"]
+    assert error is None and entries == []
 
     with open(path, "a", encoding="utf-8") as handle:
         handle.write("ne\n")
+    # The next entry has started, so "new one" is complete.
+    entries, _ = follower.poll()
+    assert [e.message for e in entries] == ["new one"]
+    # A poll that finds nothing new releases the held entry.
     entries, _ = follower.poll()
     assert [e.message for e in entries] == ["half a line"]
 
@@ -174,7 +179,71 @@ def test_follower_restarts_at_the_top_of_a_rotated_file(tmp_path):
     path.write_text(_line("ERROR", "fresh file"), encoding="utf-8")
 
     entries, _ = follower.poll()
+    entries += follower.poll()[0]
     assert [e.message for e in entries] == ["fresh file"]
+
+
+def test_follower_keeps_a_traceback_split_across_polls_with_its_entry(tmp_path, monkeypatch):
+    """Review round 2 on PR #739: a poll ending between an error line and
+    its traceback emitted the entry, and the next poll dropped the orphaned
+    traceback lines."""
+    import netbbs.node_log as node_log
+
+    path = tmp_path / "netbbs.log"
+    path.write_text("", encoding="utf-8")
+    follower = NodeLogFollower(path)
+    header = _line("ERROR", "upload failed")
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(header + "Traceback (most recent call last):\nOSError: disk full\n" + _line("INFO", "next"))
+    # The first read ends right after the error line.
+    monkeypatch.setattr(node_log, "MAX_FOLLOW_BYTES", len(header.encode()))
+
+    entries = []
+    for _ in range(10):
+        entries += follower.poll()[0]
+
+    error = next(e for e in entries if e.message == "upload failed")
+    assert error.continuation == ("Traceback (most recent call last):", "OSError: disk full")
+
+
+def test_follower_decodes_a_character_split_across_polls(tmp_path, monkeypatch):
+    import netbbs.node_log as node_log
+
+    path = tmp_path / "netbbs.log"
+    path.write_text("", encoding="utf-8")
+    follower = NodeLogFollower(path)
+    line = _line("ERROR", "user Jürgen failed")
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(line)
+    # Split inside the two-byte "ü".
+    monkeypatch.setattr(node_log, "MAX_FOLLOW_BYTES", line.encode().index("ü".encode()) + 1)
+
+    entries = []
+    for _ in range(10):
+        entries += follower.poll()[0]
+
+    assert [e.message for e in entries] == ["user Jürgen failed"]
+
+
+def test_a_tail_starting_exactly_at_a_line_keeps_that_line(tmp_path):
+    path = tmp_path / "netbbs.log"
+    newest = _line("ERROR", "the one that matters").encode()
+    path.write_bytes(_line("INFO", "older").encode() + newest)
+
+    result = read_node_log(path, max_bytes=len(newest))
+
+    assert [e.message for e in result.entries] == ["the one that matters"]
+    assert result.truncated
+
+
+def test_a_rotated_file_ending_mid_line_does_not_swallow_the_newest_entry(tmp_path):
+    path = tmp_path / "netbbs.log"
+    (tmp_path / "netbbs.log.1").write_text(_line("INFO", "before the crash") + "2026-09-27 09:00:00 ERROR:x:cut sh", encoding="utf-8")
+    path.write_text(_line("CRITICAL", "startup failed"), encoding="utf-8")
+
+    result = read_node_log(path)
+
+    assert result.entries[-1].level == "CRITICAL" and result.entries[-1].message == "startup failed"
 
 
 def test_follower_poll_is_bounded(tmp_path):
