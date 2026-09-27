@@ -30,7 +30,7 @@ from netbbs.net.redraw_preference import redraw_in_place_enabled
 from netbbs.net.session import Session
 from netbbs.net.unicode_style_preference import unicode_style_enabled
 from netbbs.permissions import meets_level
-from netbbs.rendering import MUTED_COLOR, colored, sanitize_text
+from netbbs.rendering import MUTED_COLOR, clear_screen, colored, sanitize_text
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 
@@ -151,6 +151,12 @@ async def browse_doors(
             )
             continue
 
+        # A caller who redraws in place expects each screen to replace the
+        # last, and the door is a new screen: without this its title card
+        # scrolled in under the remains of the picker (issue #648). Cleared
+        # before the remote-service notice, which must stay readable.
+        if redraw_in_place:
+            await session.write(clear_screen())
         if door.profile and door.profile.adapter == "rlogin":
             await session.write_line("Remote service: " + sanitize_text(door.profile.options["service_name"]) +
                                      ". Its operator receives your game identity and controls game data and availability.")
