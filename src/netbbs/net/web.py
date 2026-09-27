@@ -53,6 +53,7 @@ from netbbs.net.char_input import (
     REDRAW_KEY,
     REFRESH_KEY,
     CandidateListPrinter,
+    ColorCode,
     Completer,
     EditorKey,
     EditorKeyKind,
@@ -68,6 +69,7 @@ from netbbs.net.char_input import (
     redraw_tail,
 )
 from netbbs.net.session import Session, SessionClosedError, clamp_terminal_size
+from netbbs.rendering.pipe_codes import PastedColor
 from netbbs.rendering.width import char_width, display_width
 
 _logger = logging.getLogger(__name__)
@@ -151,7 +153,7 @@ class _SpecialKey:
     name: str
 
 
-def _parse_input_events(data: str) -> list[str | _SpecialKey]:
+def _parse_input_events(data: str) -> list[str | _SpecialKey | _AltKey | ColorCode]:
     """
     Splits a raw `onData` string into plain characters and recognized
     `_SpecialKey`s (arrow keys, Home/End, Delete, Insert — design doc),
@@ -163,8 +165,12 @@ def _parse_input_events(data: str) -> list[str | _SpecialKey]:
     already delivers a complete escape sequence in one event for a
     single keypress, unlike a raw byte stream where bytes can arrive
     split across separate reads, so there's nothing to peek for.
+
+    A pasted SGR (``ESC [ <digits and ;> m``) is kept as a `ColorCode`
+    (issue #754), as `char_input` does, for a post editor to turn into
+    pipe codes; every other reader skips it.
     """
-    out: list[str | _SpecialKey] = []
+    out: list[str | _SpecialKey | _AltKey | ColorCode] = []
     i = 0
     while i < len(data):
         if data[i] == _ESC and i + 1 < len(data):
@@ -180,6 +186,8 @@ def _parse_input_events(data: str) -> list[str | _SpecialKey]:
                     )
                     if key is not None:
                         out.append(_SpecialKey(key))
+                    elif final == "m" and all(c == ";" or "0" <= c <= "9" for c in params):
+                        out.append(ColorCode(params))
                     i = j + 1
                 else:
                     i = len(data)
@@ -224,6 +232,9 @@ class WebSession(Session):
             maxsize=_MAX_QUEUED_CHARS
         )
         self._pushed_back_item: str | _SpecialKey | None = None
+        # Pipe codes a pasted SGR became (issue #754), read as if typed
+        # next -- after a pushed-back item, which was read before them.
+        self._typed_pipe_codes: list[str] = []
         self._door_queue: asyncio.Queue[int | None] = asyncio.Queue(maxsize=_MAX_QUEUED_CHARS)
         self._door_active = False
         self._door_stream = 0
@@ -345,6 +356,8 @@ class WebSession(Session):
         if self._pushed_back_item is not None:
             item = self._pushed_back_item
             self._pushed_back_item = None
+        elif self._typed_pipe_codes:
+            item = self._typed_pipe_codes.pop(0)
         else:
             item = await self._char_queue.get()
         if item is None:
@@ -395,6 +408,7 @@ class WebSession(Session):
 
     def _clear_door_input(self) -> None:
         self._pushed_back_item = None
+        self._typed_pipe_codes.clear()
         for queue in (self._char_queue, self._door_queue):
             while not queue.empty():
                 queue.get_nowait()
@@ -466,6 +480,7 @@ class WebSession(Session):
         cancellable: bool = False,
         viewport: int | Callable[[], int] | None = None,
         viewport_owns_row: bool = False,
+        pasted_color: PastedColor | None = None,
     ) -> str:
         """
         Read one line, with the same cursor-addressable editing,
@@ -494,7 +509,7 @@ class WebSession(Session):
         return await self._read_line_editable(
             history, completer, live_buffer=live_buffer, lock=lock,
             list_candidates=list_candidates, initial=initial, cancellable=cancellable,
-            viewport=viewport, viewport_owns_row=viewport_owns_row,
+            viewport=viewport, viewport_owns_row=viewport_owns_row, pasted_color=pasted_color,
         )
 
     async def _read_line_masked(self) -> str:
@@ -528,6 +543,7 @@ class WebSession(Session):
         cancellable: bool = False,
         viewport: int | Callable[[], int] | None = None,
         viewport_owns_row: bool = False,
+        pasted_color: PastedColor | None = None,
     ) -> str:
         # Issue #529, mirroring `netbbs.net.char_input._read_line_
         # editable` exactly -- this transport is a separate
@@ -597,6 +613,13 @@ class WebSession(Session):
                         # changed is that they no longer arrive as two
                         # items a cancellable read could mistake for a
                         # bare Escape followed by a keypress.
+                        continue
+
+                    if isinstance(item, ColorCode):
+                        # Issue #754, as in `char_input`: typed as its
+                        # pipe codes where the caller asked, else dropped.
+                        if pasted_color is not None:
+                            self._typed_pipe_codes.extend(pasted_color.translate(item.params))
                         continue
 
                     if isinstance(item, _SpecialKey):
@@ -831,7 +854,9 @@ class WebSession(Session):
             await self.write(char if echo else "*")
         return char
 
-    async def read_editor_key(self, *, distinguish_ctrl_h: bool = False) -> EditorKey:
+    async def read_editor_key(
+        self, *, distinguish_ctrl_h: bool = False, pasted_color: PastedColor | None = None
+    ) -> EditorKey:
         """
         See the `Session.read_editor_key` docstring. Built directly on
         `_read_item` (the same queue `read_line`'s cursor-aware path
@@ -853,15 +878,23 @@ class WebSession(Session):
         becomes `EditorKeyKind.CTRL, char="h"` instead of BACKSPACE
         when set, `_DEL` (0x7F) is unaffected either way.
         """
-        item = await self._read_item()
-        if isinstance(item, _AltKey):
-            # Not a key this editor surfaces, same as INSERT below.
-            return await self.read_editor_key(distinguish_ctrl_h=distinguish_ctrl_h)
-        if isinstance(item, _SpecialKey):
-            kind = _SPECIAL_TO_EDITOR_KIND.get(item.name)
-            if kind is not None:
-                return EditorKey(kind)
-            return await self.read_editor_key(distinguish_ctrl_h=distinguish_ctrl_h)  # e.g. INSERT -- not surfaced, keep reading
+        # A loop, not recursion (Codex review on #779): one permitted key
+        # event can hold over a thousand `ESC[m`, and skipping each by
+        # calling this method again ran out of call stack.
+        while True:
+            item = await self._read_item()
+            if isinstance(item, ColorCode):
+                if pasted_color is not None:
+                    self._typed_pipe_codes.extend(pasted_color.translate(item.params))
+                continue
+            if isinstance(item, _AltKey):
+                continue  # not a key this editor surfaces, same as INSERT below
+            if isinstance(item, _SpecialKey):
+                kind = _SPECIAL_TO_EDITOR_KIND.get(item.name)
+                if kind is not None:
+                    return EditorKey(kind)
+                continue  # e.g. INSERT -- not surfaced, keep reading
+            break
 
         char = item
         if char in (_CR, _LF):

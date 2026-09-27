@@ -8,7 +8,7 @@ import re
 import pytest
 
 from netbbs.net.char_input import EditorKey, EditorKeyKind
-from netbbs.net.confirm import prompt_yes_no, prompt_yes_no_or_keep
+from netbbs.net.confirm import prompt_yes_no
 from netbbs.net.session import Session, SessionClosedError
 
 
@@ -125,45 +125,6 @@ def test_hint_highlights_the_default_letter():
     text2 = _written_text(session2)
     assert "\x1b[38;5;46mN\x1b[0m" in text2
     assert "\x1b[38;5;46my\x1b[0m" not in text2
-
-
-# -- prompt_yes_no_or_keep -----------------------------------------------------
-
-
-def test_bare_enter_keeps_current_true():
-    session = FakeSession([_ENTER])
-    assert asyncio.run(prompt_yes_no_or_keep(session, "Pinned?", current=True)) is True
-
-
-def test_bare_enter_keeps_current_false():
-    session = FakeSession([_ENTER])
-    assert asyncio.run(prompt_yes_no_or_keep(session, "Pinned?", current=False)) is False
-
-
-def test_explicit_y_overrides_current_false():
-    session = FakeSession([_char("y")])
-    assert asyncio.run(prompt_yes_no_or_keep(session, "Pinned?", current=False)) is True
-
-
-def test_explicit_n_overrides_current_true():
-    session = FakeSession([_char("n")])
-    assert asyncio.run(prompt_yes_no_or_keep(session, "Pinned?", current=True)) is False
-
-
-def test_invalid_key_cannot_keep_current():
-    session = FakeSession([_char("x"), _char("n")])
-    assert asyncio.run(prompt_yes_no_or_keep(session, "Pinned?", current=True)) is False
-    assert "\a" in _written_text(session)
-
-
-def test_keep_hint_shows_only_the_current_value():
-    session = FakeSession([_ENTER])
-    asyncio.run(prompt_yes_no_or_keep(session, "Pinned?", current=True))
-    assert "[y]" in _visible(session)
-
-    session2 = FakeSession([_ENTER])
-    asyncio.run(prompt_yes_no_or_keep(session2, "Pinned?", current=False))
-    assert "[N]" in _visible(session2)
 
 
 def test_accepted_choice_is_echoed_and_ends_the_input_row():

@@ -88,7 +88,7 @@ def test_settings_menu_lists_inter_bbs_chat(db, lane, sysop):
 
 def test_mrc_settings_screen_shows_defaults_and_applies_without_a_node(db, lane, sysop):
     # s: Settings, i: MRC screen, e/y: enable, h: host, n: site name, s: save, b/b/b: back out.
-    session = FakeSession(["s", "i", "e", "y", "h", "hub.example.org", "n", "My Board", "s", "b", "b", "b"])
+    session = FakeSession(["s", "i", "e", "h", "hub.example.org", "n", "My Board", "s", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop))
     text = _visible(_written_text(session))
     assert "Multi Relay Chat is a public, unauthenticated" in text
@@ -104,7 +104,7 @@ def test_saving_mrc_on_with_nothing_reachable_warns_the_sysop(db, lane, sysop):
     # MRC on bridges nothing by itself: with open rooms off and no channel
     # mapped the link comes up and no caller can see any of it.
     warning = "No caller can reach MRC yet"
-    session = FakeSession(["s", "i", "e", "y", "s", "b", "b", "b"])
+    session = FakeSession(["s", "i", "e", "s", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop))
     assert warning in _visible(_written_text(session))
     # o: open rooms on -- callers have a way in, and nothing is said.
@@ -115,14 +115,14 @@ def test_saving_mrc_on_with_nothing_reachable_warns_the_sysop(db, lane, sysop):
 
 def test_saving_mrc_on_with_a_mapped_channel_says_nothing(db, lane, sysop, lobby):
     set_mrc_room(db, lobby, "lobby")
-    session = FakeSession(["s", "i", "e", "y", "s", "b", "b", "b"])
+    session = FakeSession(["s", "i", "e", "s", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop))
     assert load_mrc_settings(db).enabled
     assert "No caller can reach MRC yet" not in _visible(_written_text(session))
 
 
 def test_mrc_settings_tls_toggle_follows_the_well_known_port(db, lane, sysop):
-    session = FakeSession(["s", "i", "t", "n", "s", "b", "b", "b"])
+    session = FakeSession(["s", "i", "t", "s", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop))
     saved = load_mrc_settings(db)
     assert saved.tls is False and saved.port == 5000
@@ -145,7 +145,7 @@ def test_mrc_settings_save_reconnects_the_running_bridge(db, lane, sysop, lobby)
             assert bridge.state is MrcState.DISABLED
             set_mrc_room(db, lobby, "lobby")
             session = FakeSession([
-                "s", "i", "e", "y", "h", "127.0.0.1", "p", str(fake.port), "t", "n", "n", "Test Board", "s",
+                "s", "i", "e", "h", "127.0.0.1", "p", str(fake.port), "t", "n", "Test Board", "s",
                 "b", "b", "b",
             ])
             await admin_menu(session, lane, sysop, node_controls=_controls(bridge))
@@ -290,7 +290,7 @@ def test_saving_mrc_settings_on_a_running_bridge_confirms_on_the_redrawn_screen(
         try:
             set_mrc_room(db, lobby, "lobby")
             session = ScriptedSession([
-                "s", "i", "e", "y", "h", "127.0.0.1", "p", str(fake.port), "t", "n", "n", "Test Board", "s",
+                "s", "i", "e", "h", "127.0.0.1", "p", str(fake.port), "t", "n", "Test Board", "s",
             ])
             with pytest.raises(_Exhausted):
                 await admin_menu(session, lane, operator, node_controls=_controls(bridge))

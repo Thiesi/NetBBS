@@ -110,8 +110,9 @@ def set_root_activity(session: Any, label: str | None) -> None:
     session.activity = (cleaned,) if cleaned else ()
 
 
-def describe(trail: tuple[str, ...], *, authenticated: bool) -> str:
-    """The one-line form the monitor shows."""
+def describe(trail: tuple[str, ...], *, authenticated: bool, separator: str = " › ") -> str:
+    """The one-line form the monitor shows. `separator` is " > " for a
+    SysOp who turned Unicode styling off."""
     if trail:
-        return " › ".join(trail)
+        return separator.join(trail)
     return "Main menu" if authenticated else "Logging in"

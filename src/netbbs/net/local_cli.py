@@ -28,6 +28,7 @@ from typing import Callable
 from netbbs.net import char_input, local_terminal
 from netbbs.net.char_input import Completer, InputHistory, LiveInputBuffer
 from netbbs.net.session import Session, SessionClosedError
+from netbbs.rendering.pipe_codes import PastedColor
 
 
 class LocalCLISession(Session):
@@ -106,6 +107,7 @@ class LocalCLISession(Session):
         cancellable: bool = False,
         viewport: int | Callable[[], int] | None = None,
         viewport_owns_row: bool = False,
+        pasted_color: PastedColor | None = None,
     ) -> str:
         # live_buffer/lock/list_candidates are never actually passed by
         # this session's one caller (the standalone `python -m
@@ -116,6 +118,7 @@ class LocalCLISession(Session):
             self, self.write, echo, history, completer,
             live_buffer=live_buffer, lock=lock, list_candidates=list_candidates,
             initial=initial, cancellable=cancellable, viewport=viewport, viewport_owns_row=viewport_owns_row,
+            pasted_color=pasted_color,
         )
 
     async def read_key(self, echo: bool = True) -> str:
@@ -136,8 +139,12 @@ class LocalCLISession(Session):
         # any such pause and see nothing happen.
         return await char_input.read_any_key(self, self.write, echo)
 
-    async def read_editor_key(self, *, distinguish_ctrl_h: bool = False) -> char_input.EditorKey:
-        return await char_input.read_editor_key(self, distinguish_ctrl_h=distinguish_ctrl_h)
+    async def read_editor_key(
+        self, *, distinguish_ctrl_h: bool = False, pasted_color: PastedColor | None = None
+    ) -> char_input.EditorKey:
+        return await char_input.read_editor_key(
+            self, distinguish_ctrl_h=distinguish_ctrl_h, pasted_color=pasted_color
+        )
 
     async def discard_buffered_enter(self) -> None:
         await char_input.discard_buffered_enter(self)
