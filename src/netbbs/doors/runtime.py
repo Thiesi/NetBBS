@@ -203,35 +203,121 @@ def war_dialer_path_problem(door, world_path: Path | None) -> str | None:
 VOIDRUNNER_SAVE_DIR_CONFIG_KEY = "voidrunner_save_dir"
 
 
+#: The node's own Voidrunner directory, beside War Dialer's world (issue #648).
+VOIDRUNNER_DIRNAME = "voidrunner"
+
+
+def node_voidrunner_save_dir(db_path: Path) -> Path:
+    """`<db path>.doors/voidrunner/`: this node's careers, by construction."""
+    node_path = Path(db_path).resolve()
+    return node_path.parent / (node_path.name + ".doors") / VOIDRUNNER_DIRNAME
+
+
+def legacy_voidrunner_save_dir() -> Path | None:
+    """`~/.netbbs/voidrunner_saves`, where careers lived before issue #648.
+
+    Keyed by the OS account rather than the node, so two nodes run by one
+    user shared every career by user id -- which is why it is no longer
+    the default. `None` when this process has no home directory at all.
+    """
+    try:
+        return Path.home().resolve() / ".netbbs" / "voidrunner_saves"
+    except RuntimeError:
+        return None
+
+
+def _holds_careers(directory: Path | None) -> bool:
+    """Whether a directory has anything Voidrunner would miss: a career,
+    a score, or the pre-scores leaderboard. Lock files alone do not count."""
+    if directory is None or not directory.is_dir():
+        return False
+    return any(directory.glob("*.json")) or any((directory / "scores").glob("*.json"))
+
+
+def voidrunner_save_dir(db_path: Path) -> Path:
+    """Where this node's Voidrunner careers live.
+
+    `VOIDRUNNER_SAVE_DIR` wins when the SysOp set it. Otherwise the node's
+    own `<db path>.doors/voidrunner/`, except while careers remain only in
+    the legacy home directory -- a node whose first-start copy
+    (`migrate_voidrunner_saves`) could not run yet keeps playing the
+    careers it has rather than opening an empty directory beside them.
+    """
+    if override := os.environ.get("VOIDRUNNER_SAVE_DIR"):
+        return Path(override).expanduser().resolve()
+    own = node_voidrunner_save_dir(db_path)
+    if own.exists():
+        return own
+    legacy = legacy_voidrunner_save_dir()
+    return legacy if _holds_careers(legacy) else own
+
+
+def migrate_voidrunner_saves(db_path: Path) -> Path | None:
+    """Copy legacy careers into the node's own directory once; return the
+    directory copied from, or `None` when there was nothing to do.
+
+    Runs at startup before the node records its save directory. A copy,
+    not a move: the legacy directory belongs to the OS account, and a
+    second node under the same account may be reading it -- moving it
+    would hand that node's callers an empty career list. Each node takes
+    its own copy and the two stop sharing from then on.
+
+    The copy is made under the legacy directory's maintenance gate, so no
+    pilot is mid-checkpoint, into a staging directory renamed into place
+    whole: a node killed half-way leaves no partial directory that
+    `voidrunner_save_dir` would mistake for the real one. A busy or
+    unreadable legacy directory is left alone and tried again at the next
+    start; until then the node keeps using it.
+    """
+    if os.environ.get("VOIDRUNNER_SAVE_DIR"):
+        return None
+    own = node_voidrunner_save_dir(db_path)
+    legacy = legacy_voidrunner_save_dir()
+    if own.exists() or not _holds_careers(legacy):
+        return None
+    from netbbs.backup import BackupError, _voidrunner_files
+    from netbbs.doors.bundled.voidrunner import PilotBusy, maintenance_session
+
+    staging = own.with_name(own.name + ".migrating")
+    try:
+        shutil.rmtree(staging, ignore_errors=True)
+        with maintenance_session(legacy):
+            for relative in _voidrunner_files(legacy):
+                target = staging / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(legacy / relative, target)
+            os.replace(staging, own)
+    except (PilotBusy, BackupError, OSError) as exc:
+        shutil.rmtree(staging, ignore_errors=True)
+        _logger.warning("Voidrunner careers were not copied from %s to %s (%s); this node keeps using %s "
+                        "and will try again at its next start.", legacy, own, exc, legacy)
+        return None
+    _logger.warning("Voidrunner careers copied from %s to %s. This node no longer reads %s; remove it "
+                    "once no other NetBBS node run by this account uses it.", legacy, own, legacy)
+    return legacy
+
+
 def record_voidrunner_save_dir(db) -> Path:
     """Store where this node's doors keep their Voidrunner saves, and
     return it.
 
-    The location is a pure function of the *node process's* environment
-    -- `VOIDRUNNER_SAVE_DIR` if set, else `Path.home()/.netbbs/
-    voidrunner_saves` -- which is exactly what `_door_environment` below
-    hands a launched door. That is the whole problem this exists to fix:
-    a node started by `examples/netbbs.rc` runs with `HOME=<state dir>`,
-    while `python -m netbbs.backup` run from a SysOp's shell has their
-    own HOME, so the two processes resolved `Path.home()` differently
-    and the documented backup command quietly captured no careers at
-    all -- exit 0, with a line that read like a fact about the node
-    ("no save directory found") when it was a fact about the
-    environment the CLI happened to inherit.
-
-    War Dialer was never exposed because v7.0.0 moved its world to
-    `<db path>.doors/`, derived from an argument the backup already has.
-    Voidrunner's saves cannot be moved the same way without stranding
-    every existing career, so the node writes down the answer instead.
+    The location is `voidrunner_save_dir`, which `run_door` also hands
+    every launched door, so the node and the backup CLI agree by
+    construction. That is the whole problem this exists to fix (issue
+    #555): the saves used to default to `Path.home()`, and a node started
+    by `examples/netbbs.rc` runs with `HOME=<state dir>` while
+    `python -m netbbs.backup` run from a SysOp's shell has their own HOME,
+    so the documented backup command quietly captured no careers at all.
+    The default is now derived from the database path (issue #648), which
+    the CLI has too; the record still decides a `VOIDRUNNER_SAVE_DIR`
+    override and a legacy directory not yet copied.
 
     Read before write, and written only when it has actually changed --
     an unconditional write would take SQLite's write lock on a path that
     runs at every startup, for a value that changes approximately never.
     See `_minted_once` for the same reasoning at greater length.
     """
-    from netbbs.doors.bundled.voidrunner import _default_save_dir
-
-    resolved = _default_save_dir()
+    resolved = voidrunner_save_dir(db.path)
     row = db.connection.execute(
         "SELECT value FROM node_config WHERE key = ?", (VOIDRUNNER_SAVE_DIR_CONFIG_KEY,)
     ).fetchone()
@@ -245,16 +331,17 @@ def record_voidrunner_save_dir(db) -> Path:
     return resolved
 
 
-def _door_environment(info_path, war_dialer_path=None):
+def _door_environment(info_path, war_dialer_path=None, voidrunner_dir=None):
     env = {"NETBBS_DOOR_INFO": str(info_path)}
     try:
         env["USERPROFILE" if os.name == "nt" else "HOME"] = str(Path.home())
     except RuntimeError:
         pass
-    # A deliberate, narrow persistent-data override; resolve before entering
-    # the disposable door cwd. Never forward the complete parent environment.
-    if save_dir := os.environ.get("VOIDRUNNER_SAVE_DIR"):
-        env["VOIDRUNNER_SAVE_DIR"] = str(Path(save_dir).expanduser().resolve())
+    # A deliberate, narrow persistent-data location, resolved by the node
+    # (`voidrunner_save_dir`) before entering the disposable door cwd. Never
+    # forward the complete parent environment.
+    if voidrunner_dir is not None:
+        env["VOIDRUNNER_SAVE_DIR"] = str(voidrunner_dir)
     if war_dialer_path is not None:
         env["WAR_DIALER_DB_PATH"] = str(war_dialer_path)
     return env
@@ -662,7 +749,8 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
         info = json.loads(info_path.read_text(encoding="utf-8"))
         width = profile.width if profile and profile.width else session.terminal_width
         height = profile.height if profile and profile.height else session.terminal_height
-        env = _door_environment(info_path, world_path)
+        env = _door_environment(info_path, world_path,
+                                await lane.run(lambda db: voidrunner_save_dir(db.path)))
         # Decided before the spawn, because the guard has to be in place before
         # there is a child to inherit it.
         vouched = (os.name == "posix" and bundled_follows_resize(door)

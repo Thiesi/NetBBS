@@ -43,7 +43,7 @@ from netbbs.link.onboarding import participation_accepted
 from netbbs.link.key_rotation import KeyRotator, resign_own_content
 from netbbs.link.node_identity import NodeIdentityError, load_or_bootstrap_node_identity
 from netbbs.link.protocol import HelloMessage, LinkNode
-from netbbs.doors.runtime import record_voidrunner_save_dir
+from netbbs.doors.runtime import migrate_voidrunner_saves, record_voidrunner_save_dir
 from netbbs.link.onboarding import (
     mark_link_has_run, record_link_reachability, resolve_link_enabled, set_configured_link_enabled,
 )
@@ -1288,7 +1288,9 @@ async def run(
         # only then fail on the bound port. The live node would keep
         # saving where it always did while every backup looked somewhere
         # else. Past this line the ports are ours, so the process
-        # claiming to be this node is this node.
+        # claiming to be this node is this node. The one-time copy of legacy
+        # careers belongs here for the same reason (issue #648).
+        migrate_voidrunner_saves(db.path)
         record_voidrunner_save_dir(db)
         # Issue #730, and for the same reason: a second launch that fails on
         # the bound port must not overwrite what the running node resolved.

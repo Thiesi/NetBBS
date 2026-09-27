@@ -21,7 +21,7 @@ import pytest
 
 from netbbs.auth.users import create_user
 from netbbs.doors import create_door
-from netbbs.doors.runtime import DoorRunResult, run_door
+from netbbs.doors.runtime import DoorRunResult, node_voidrunner_save_dir, run_door
 from netbbs.net.session import Session, SessionClosedError
 from netbbs.rendering.ansi import strip_ansi
 from netbbs.rendering.width import display_width
@@ -473,8 +473,8 @@ def test_the_real_space_trading_door_plays_a_full_opening_loop_through_run_door(
     door = create_door(db, "Voidrunner", sys.executable, args=(str(_VOIDRUNNER_PATH),), creator=player)
     session = FakeSession()
     session.terminal_width = 40
-    save_dir = door_home / ".netbbs" / "voidrunner_saves"
-    save_path = save_dir / f"{player.id}.json"
+    # Beside the node's database, not under the door's home (issue #648).
+    save_path = node_voidrunner_save_dir(db.path) / f"{player.id}.json"
 
     async def scenario():
         task = asyncio.create_task(_run(session, lane, door, player))
@@ -502,6 +502,7 @@ def test_the_real_space_trading_door_plays_a_full_opening_loop_through_run_door(
     ]
     assert not overflows
     assert save_path.exists()  # the door manages its own save, unmediated by NetBBS
+    assert not (door_home / ".netbbs" / "voidrunner_saves").exists()
 
 
 def test_voidrunner_directory_override_reaches_real_door_without_parent_secrets(
@@ -518,6 +519,19 @@ def test_voidrunner_directory_override_reaches_real_door_without_parent_secrets(
     env = json.loads(bytes(session.written).decode())
     assert env["VOIDRUNNER_SAVE_DIR"] == str(tmp_path / "node-two-careers")
     assert "NETBBS_TEST_SECRET" not in env
+
+
+def test_every_door_is_told_the_nodes_own_voidrunner_directory(db, lane, player, tmp_path, monkeypatch):
+    """Without an override the door is still handed a directory, so it
+    never falls back to its standalone home-directory default (#648)."""
+    monkeypatch.delenv("VOIDRUNNER_SAVE_DIR", raising=False)
+    script = _write_script(tmp_path, "check_env.py", "import os, json; print(json.dumps(dict(os.environ)))")
+    door = create_door(db, "Environment check", sys.executable, args=(str(script),), creator=player)
+    session = FakeSession()
+    result = asyncio.run(_run(session, lane, door, player))
+    assert result.exit_code == 0
+    env = json.loads(bytes(session.written).decode())
+    assert env["VOIDRUNNER_SAVE_DIR"] == str(node_voidrunner_save_dir(db.path))
 
 
 def test_voidrunner_recovery_back_is_a_normal_door_exit(db, lane, player, tmp_path, monkeypatch):

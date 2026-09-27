@@ -6928,7 +6928,7 @@ async def _backup_status_screen(
             # it was matters only to the backup CLI, which is a different
             # process with a different home (issue #555).
             Field(
-                "Voidrunner source", str(voidrunner_save_directory()[0]),
+                "Voidrunner source", str(await lane.run(lambda db: voidrunner_save_directory(db.path)[0])),
                 note="Includes saved careers and scores when this directory exists. "
                      "Close Voidrunner sessions before creating a backup.",
             ),
