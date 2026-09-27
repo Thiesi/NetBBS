@@ -80,7 +80,7 @@ class LocalCLISession(Session):
     def terminal_height(self, value: int) -> None:
         self._height_override = value
 
-    async def write(self, text: str) -> None:
+    async def _send_text(self, text: str) -> None:
         # Same CRLF normalization TelnetSession.write performs, and for
         # the same reason: raw/cbreak mode
         # (netbbs.net.local_terminal.raw_terminal) disables the
@@ -89,7 +89,7 @@ class LocalCLISession(Session):
         sys.stdout.write(normalized)
         sys.stdout.flush()
 
-    async def write_raw(self, data: bytes) -> None:
+    async def _send_raw(self, data: bytes) -> None:
         sys.stdout.buffer.write(data)
         sys.stdout.buffer.flush()
 

@@ -11,11 +11,17 @@ a given user connected through.
 from __future__ import annotations
 
 import asyncio
+import codecs
+import logging
 import time
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Awaitable, Callable
 
 from netbbs.rendering.reflow import wrap_terminal_text
+from netbbs.rendering.terminal_emulator import TerminalEmulator
+
+_logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     # Deferred/type-checking-only: netbbs.net.char_input itself imports
@@ -235,13 +241,98 @@ class Session(ABC):
     #: the chat session that captured it.
     pinned_notice_hook: Callable[[str], Awaitable[None]] | None = None
 
+    #: True while a binary protocol (Zmodem) owns the byte stream: its
+    #: frames are not terminal output and must not reach the screen copy.
+    #: Set through `binary_transfer()`.
+    binary_transfer_active: bool = False
+
+    #: The server-side copy of this caller's screen (issue #764), created
+    #: on the first write. See `screen_copy`.
+    _screen_copy: TerminalEmulator | None = None
+    _raw_decoder: codecs.IncrementalDecoder | None = None
+
     def note_input(self) -> None:
         """Record that the client just sent input; see `last_input_at`."""
         self.last_input_at = time.monotonic()
 
-    @abstractmethod
+    # -- output: one shared layer below every transport (issue #764) ------
+    #
+    # `write` and `write_raw` are concrete here and final in spirit: they
+    # feed the screen copy, then hand the bytes to the transport's
+    # `_send_text`/`_send_raw`. A transport implements those two, never
+    # `write` itself, so no transport can send output the copy misses.
+    # (A test double may still override `write` outright; it has no
+    # caller behind it to copy.)
+
     async def write(self, text: str) -> None:
-        """Send raw text to the client, no trailing newline added."""
+        """Send text to the client, no trailing newline added. Bare `\\n`
+        becomes `\\r\\n` on every transport."""
+        self._copy_output(_normalize_newlines(text))
+        await self._send_text(text)
+
+    async def write_raw(self, data: bytes) -> None:
+        """
+        Send raw bytes to the client exactly as given — no CRLF
+        normalization, no UTF-8 encoding (the caller already has bytes),
+        no line terminator added.
+
+        Deliberately separate from `write`, which exists for human-
+        readable text and performs both of those transforms — a binary
+        protocol like ZMODEM (`netbbs.net.zmodem`) needs bytes to arrive
+        completely unmodified, including any 0x0A/0x0D/0xFF values that
+        happen to appear in a ZDLE-escaped frame or raw file content,
+        which `write` would otherwise corrupt.
+
+        Outside a binary transfer, raw output is a door's UTF-8 terminal
+        stream (`netbbs.doors.runtime.DoorTerminal` transcodes CP437), and
+        the screen copy decodes it as such.
+        """
+        if not self.binary_transfer_active:
+            if self._raw_decoder is None:
+                self._raw_decoder = codecs.getincrementaldecoder("utf-8")("replace")
+            self._copy_output(self._raw_decoder.decode(data))
+        await self._send_raw(data)
+
+    async def _send_text(self, text: str) -> None:
+        """The transport's own text send; see `write`."""
+        raise NotImplementedError
+
+    async def _send_raw(self, data: bytes) -> None:
+        """The transport's own raw send; see `write_raw`."""
+        raise NotImplementedError
+
+    def screen_copy(self) -> TerminalEmulator:
+        """What this caller's terminal shows now, as far as NetBBS's own
+        output can tell (issue #764): the SysOp's snoop view reads it, and
+        a break-in chat repaints the caller from it. Follows the
+        terminal's reported size."""
+        width, height = self.terminal_width, self.terminal_height
+        if self._screen_copy is None:
+            self._screen_copy = TerminalEmulator(width, height)
+        else:
+            self._screen_copy.resize(width, height)
+        return self._screen_copy
+
+    def _copy_output(self, text: str) -> None:
+        if not text:
+            return
+        try:
+            self.screen_copy().feed(text)
+        except Exception:  # pragma: no cover - a copy bug must never cost a caller their session
+            _logger.exception("screen copy failed; starting a fresh one")
+            self._screen_copy = None
+
+    @contextmanager
+    def binary_transfer(self):
+        """Mark a binary protocol's span on the byte stream (Zmodem), so
+        its frames stay out of the screen copy."""
+        previous = self.binary_transfer_active
+        self.binary_transfer_active = True
+        try:
+            yield
+        finally:
+            self.binary_transfer_active = previous
+            self._raw_decoder = None
 
     async def enter_door_mode(self, *, encoding: str = "utf-8", width: int | None = None,
                               height: int | None = None) -> None:
@@ -424,20 +515,13 @@ class Session(ABC):
         escape-sequence handling built for human keyboard input.
         """
 
-    @abstractmethod
-    async def write_raw(self, data: bytes) -> None:
-        """
-        Send raw bytes to the client exactly as given — no CRLF
-        normalization, no UTF-8 encoding (the caller already has bytes),
-        no line terminator added.
 
-        Deliberately separate from `write`, which exists for human-
-        readable text and performs both of those transforms — a binary
-        protocol like ZMODEM (`netbbs.net.zmodem`) needs bytes to arrive
-        completely unmodified, including any 0x0A/0x0D/0xFF values that
-        happen to appear in a ZDLE-escaped frame or raw file content,
-        which `write` would otherwise corrupt.
-        """
+
+def _normalize_newlines(text: str) -> str:
+    """What every transport puts on the wire for `write`: a bare LF
+    becomes CRLF. The screen copy is fed the same, or it would see a line
+    feed without its carriage return."""
+    return text.replace("\r\n", "\n").replace("\n", "\r\n")
 
 
 async def write_prompt(session: Session, text: str) -> None:

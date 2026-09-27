@@ -2351,6 +2351,33 @@ A stand-in session that forwards attributes with `__getattr__`
 (`admin_flow._TrailingOutput`) forwards reads only. It must forward `activity`
 writes explicitly, or the trail lands on the stand-in, where nothing looks.
 
+### Session output passes through one layer: the screen copy (issue #764)
+
+`Session.write` and `Session.write_raw` are concrete in the base class and
+final in spirit. They feed the session's screen copy
+(`Session.screen_copy()`, a `netbbs.rendering.terminal_emulator
+.TerminalEmulator`), then call the transport's `_send_text`/`_send_raw`.
+
+- **A transport implements only the send half.** Overriding `write` would send
+  output the copy never sees, and snoop and break-in restore would then show
+  something other than what the caller sees. Test doubles may still override
+  `write`: they have no caller behind them.
+- **`write` feeds the copy the text as it goes on the wire,** with bare LF made
+  CRLF exactly as every transport does. `write_raw` is decoded as UTF-8: a
+  door's CP437 is already transcoded by `DoorTerminal` before it gets there.
+- **Binary protocols bracket their span with `session.binary_transfer()`.**
+  `zmodem.send_file` and `receive_file` do this themselves, so no caller can
+  forget. Zmodem frames are not terminal output and would fill the copy with
+  garbage.
+- **The emulator must never raise into the session.** A feed error is logged
+  and the copy starts afresh. Unknown sequences are consumed and ignored.
+  Coverage aims at what NetBBS, the bundled doors and common ANSI-BBS doors
+  emit, not at being a full xterm.
+- **The copy runs for every session, always.** Break-in restore (#765)
+  depends on it, so it can't be switched on only while someone watches.
+  Keep the emulator's per-character path cheap. The PR for #764 has the
+  measured cost.
+
 ---
 
 ## 8. Async ownership, shutdown, and background tasks

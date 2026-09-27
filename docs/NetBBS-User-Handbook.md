@@ -96,6 +96,15 @@ controls incoming body and nickname colors, including scrollback.
 Ordinary NetBBS Link mail is protected between nodes but does
 not hide its contents from the home-node operators.
 
+### What the SysOp can see
+
+As on most BBSes, the SysOp of the node you are connected to can watch your
+session live. They see your screen as you see it, including chat and private
+messages, and what you type where it shows on screen. Passwords are not shown
+as you type them, so they are never visible this way. You are not told while
+it happens, but the node keeps a log of every time a SysOp watches a session.
+The last line of chat's `/help` says the same.
+
 ## Exchange files
 
 Open a file area and select an upload or download action. Use the browser

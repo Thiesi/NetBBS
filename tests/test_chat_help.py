@@ -314,3 +314,21 @@ def test_question_mark_alias_accepts_a_command_argument(db, lane, hub, presence,
     output = strip_ansi(_written_text(session))
     assert "/finger <user>" in output
     assert "Show a user's public profile." in output
+
+
+def test_bare_help_ends_with_the_snoop_disclosure(db, lane, hub, presence, alice, channel):
+    # Issue #764: the SysOp may watch any live session without telling the
+    # caller at the time; /help's full list is where callers are told.
+    session = asyncio.run(_run(lane, hub, presence, channel, alice, ["/help", "/quit"]))
+    output = strip_ansi(_written_text(session))
+    assert chat_flow.SNOOP_DISCLOSURE in output
+    assert output.index(chat_flow.SNOOP_DISCLOSURE) > output.index("/quit")
+
+
+def test_help_for_one_command_does_not_repeat_the_disclosure(db, lane, hub, presence, alice, channel):
+    session = asyncio.run(_run(lane, hub, presence, channel, alice, ["/help finger", "/quit"]))
+    assert chat_flow.SNOOP_DISCLOSURE not in strip_ansi(_written_text(session))
+
+
+def test_the_disclosure_fits_the_narrowest_supported_terminal():
+    assert len(chat_flow.SNOOP_DISCLOSURE) <= 40

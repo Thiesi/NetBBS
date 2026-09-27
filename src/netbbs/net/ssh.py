@@ -154,7 +154,7 @@ class SSHSession(Session):
         else:
             self.truecolor_diagnostic = "SSH client did not forward COLORTERM; using 256-color"
 
-    async def write(self, text: str) -> None:
+    async def _send_text(self, text: str) -> None:
         # Same CRLF normalization TelnetSession.write performs, and the
         # same reasoning for why: rendering utilities produce bare '\n'
         # internally, and Session.write_line only appends '\r\n' once at
@@ -167,7 +167,7 @@ class SSHSession(Session):
         except (BrokenPipeError, ConnectionResetError) as exc:
             raise SessionClosedError("client disconnected during write") from exc
 
-    async def write_raw(self, data: bytes) -> None:
+    async def _send_raw(self, data: bytes) -> None:
         # No escaping needed, unlike TelnetSession.write_raw's IAC
         # doubling — an SSH channel in binary mode (see this module's
         # docstring re: encoding=None) is already 8-bit clean with no

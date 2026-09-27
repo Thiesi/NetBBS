@@ -1855,6 +1855,14 @@ class _ShowHelp:
     accent_color: int
     header_color: int
     message: str | None = None
+    footer: str | None = None
+
+
+#: Shown under the full `/help` list (issue #764). The SysOp can watch any
+#: live session from the Monitor without the caller being told at the
+#: time -- a maintainer decision (tracker #761) that is only fair if it is
+#: said somewhere a caller actually looks. Short enough for 40 columns.
+SNOOP_DISCLOSURE = "The SysOp can watch any live session."
 
 
 # What a command handler returns after running: `None` means "continue
@@ -2391,6 +2399,7 @@ async def _show_help_pages(
     header_color: int = HEADER_COLOR,
     page_writer: _HelpPageWriter | None = None,
     message: str | None = None,
+    footer: str | None = None,
 ) -> None:
     async def write_direct(
         lines: Sequence[str], _width: int, _height: int, _pinned: bool,
@@ -2446,6 +2455,9 @@ async def _show_help_pages(
             lines.append(
                 colored(f"More -- press any key [{page_number}/{projected_count}]", fg_color=MUTED_COLOR)
             )
+        elif footer:
+            # The last page's spare row, the one "More" takes on the others.
+            lines.append(colored(footer, fg_color=MUTED_COLOR))
         if not await write_page(lines, width, height, pinned):
             continue
         remaining = next_remaining
@@ -2501,7 +2513,7 @@ async def _handle_help(ctx: ChatCommandContext, args: str) -> ChatAction:
         )
 
     entries, accent_color, header_color = await ctx.lane.run(_visible_help)
-    return _ShowHelp(entries, accent_color, header_color)
+    return _ShowHelp(entries, accent_color, header_color, footer=SNOOP_DISCLOSURE)
 
 
 async def _dispatch_command(ctx: ChatCommandContext, line: str) -> ChatAction | None:
@@ -5138,6 +5150,7 @@ async def _chat_loop(
                             header_color=action.header_color,
                             page_writer=write_help_page,
                             message=action.message,
+                            footer=action.footer,
                         )
                     finally:
                         async with lock:

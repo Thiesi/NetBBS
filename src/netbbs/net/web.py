@@ -362,7 +362,7 @@ class WebSession(Session):
             if isinstance(item, str):
                 return item
 
-    async def write(self, text: str) -> None:
+    async def _send_text(self, text: str) -> None:
         # Same CRLF normalization TelnetSession.write/SSHSession.write
         # perform, and the same reasoning: xterm.js is a real terminal
         # emulator, not a browser textarea — it needs an explicit CR to
@@ -373,7 +373,7 @@ class WebSession(Session):
         except (ConnectionResetError, RuntimeError) as exc:
             raise SessionClosedError("client disconnected during write") from exc
 
-    async def write_raw(self, data: bytes) -> None:
+    async def _send_raw(self, data: bytes) -> None:
         if not self._door_active:
             raise NotImplementedError("raw web I/O requires door mode; Zmodem is unavailable")
         try:

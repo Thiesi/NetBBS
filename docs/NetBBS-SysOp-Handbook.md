@@ -768,7 +768,11 @@ Under **Operations → Node and sessions**:
   - It shows each caller's transport, address, time on, idle time, terminal
     size and where they are, for example "Boards › Retro" or
     "Doors › Voidrunner".
-  - Up/Down selects a caller. **Message** sends them a line. **Kick** opens
+  - Up/Down selects a caller. **Snoop** shows their screen live, as they see
+    it, until you press any key. The caller is not told at the time. Chat's
+    `/help` and the User Handbook say that you can do this, and the node log
+    records every snoop: who watched whom, and for how long.
+    **Message** sends them a line. **Kick** opens
     the same disconnect screen as **Who**: an optional message, then
     **Disconnect**, which is recorded in the audit log. **Unwind** sends them
     back to the main menu.
