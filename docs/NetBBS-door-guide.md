@@ -109,17 +109,26 @@ delete the world, or copy only a live database file as a recovery shortcut.
 
 ### SysOp status, maintenance and competition controls
 
-**MANUAL — outside NetBBS:** use the local CLI with the owning node database and
-its configured world path, in the same service environment:
-`python -m netbbs.doors.war_dialer_admin --db /srv/bbs/netbbs.db --world /srv/bbs/netbbs.db.doors/war-dialer.db status`.
-Status is read-only: it shows the path, schema, node namespace, maintenance state,
-stored season, row counts and ten recent operations. It does not settle clocks,
-create a missing world or acquire a session guard. Errors are bounded diagnostics.
+In the SysOp console, open the War Dialer door under **Content → Doors** and
+choose **[W]orld**. The screen shows the world this door plays (the same path
+the launcher and the backup use), its schema, node namespace, maintenance state,
+stored season, row counts and ten recent operations, and switches maintenance
+on and off. Only a door that launches War Dialer offers **[W]orld**; with several
+War Dialer doors, each shows its own world. A world nobody has played yet does
+not exist, and the screen says so rather than creating it.
 
-Replace `status` with `maintenance on` to close the world to new callers. Active
-sessions must be closed first; an idle session also blocks the change. The flag
-persists across restart. Use `maintenance off` to reopen the world after checking
-it. A caller arriving during maintenance, or in the moment a live backup
+The same status and switch are on the local CLI, with the owning node database
+and its configured world path, in the same service environment:
+`python -m netbbs.doors.war_dialer_admin --db /srv/bbs/netbbs.db --world /srv/bbs/netbbs.db.doors/war-dialer.db status`.
+Status is read-only: it does not settle clocks, create a missing world or acquire
+a session guard. Errors are bounded diagnostics.
+
+Maintenance on (`maintenance on` on the CLI) closes the world to new callers.
+Active sessions must be closed first; an idle session also blocks the change,
+and the console shows that refusal instead of switching. The flag persists across
+restart. Switch it off (`maintenance off`) to reopen the world after checking it.
+The world's audit names the SysOp account for a console change and the local OS
+account for a CLI one; the console change is also in the node's **Audit log**. A caller arriving during maintenance, or in the moment a live backup
 holds the world, is told it is closed and to try again later. (A season change
 needs the node stopped, so nobody arrives during one; they arrive while the flag
 is still on around it.) The game then ends
@@ -127,7 +136,7 @@ normally: door-session history records an ordinary exit, not a crash, so the
 crashes listed there are real ones.
 No operator command starts, stops or redeploys the BBS service for you.
 
-**MANUAL — outside NetBBS, season advance or reset:**
+**MANUAL — outside NetBBS, season advance or reset** (CLI only for now):
 
 1. Close game sessions, enable maintenance and stop the node service. Use `status`
    to review the selected path and competition before proceeding.

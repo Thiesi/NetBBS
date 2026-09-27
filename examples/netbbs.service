@@ -40,6 +40,13 @@ TimeoutStopSec=90
 
 Restart=on-failure
 RestartSec=5
+# Installing a release from Settings -> Update (issue #731) ends with the
+# node shutting down gracefully and exiting with status 75, so that it comes
+# back up as the new version. Restart=on-failure alone already restarts on
+# 75; these two lines also restart it under any other Restart= policy and keep
+# it from being logged as a failure.
+RestartForceExitStatus=75
+SuccessExitStatus=75
 
 # Hardening (optional, safe defaults for a network-facing service with
 # no need to touch anything outside its own state directory). Loosen

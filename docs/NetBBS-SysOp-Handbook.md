@@ -252,8 +252,10 @@ public_url = "https://bbs.example.org"
 ```
 
 Point the HTTPS proxy at that local port, forwarding WebSocket upgrades as
-well as ordinary requests. Set its upload body limit at least as high as
-NetBBS's configured upload cap. Use a real hostname and certificate;
+well as ordinary requests. Set its upload body limit at least 1 MiB above
+NetBBS's upload cap (**Settings → Limits & retention**, 100 MiB by default):
+a browser upload carries form framing on top of the file.
+Use a real hostname and certificate;
 `bbs.example.org` is a placeholder. Restart after changing listener settings.
 
 `public_url` supplies the externally reachable base address for transfer links.
@@ -281,7 +283,7 @@ NetBBS Link health when enabled. Refresh it after making changes elsewhere.
 | Users | Accounts, registration, levels, approval, identity-verifier grants |
 | Content | Message boards, file areas, chat channels, Communities, doors, moderation |
 | Operations | Sessions, maintenance, audit log, backups, Link diagnostics |
-| Settings | Branding, timestamps, node name, network participation, update checks |
+| Settings | Branding, timestamps, node name, network participation, update checks, limits and retention |
 
 Quick actions lead to the same screens. Use the displayed keys rather than
 old menu letters from release notes. **Back** leaves a screen. Draft editors
@@ -431,6 +433,10 @@ NetBBS can supervise it and exposes Start, Halt, Restart, and its recent log
 on the door detail screen. Install/update the service yourself; stop it before
 copying its data. Do not raise a game's session count until its concurrent
 save handling has been tested.
+
+A War Dialer door's detail screen adds **[W]orld**: the world's status and recent
+SysOp operations, and a maintenance switch that closes it to new callers. Season
+advance and reset stay on the CLI; the [door guide](NetBBS-door-guide.md) has both.
 
 A door may request permission to post to message boards. **Outbound** is off
 by default and configured per door: choose an allowlist and posting limit.
@@ -728,6 +734,16 @@ and recent errors. Choose welcome/masthead/banner presets through Settings;
 preview before applying, or place your own files as described under
 [Custom banners and mastheads](#custom-banners-and-mastheads). Timestamp format and display timezone are node-wide.
 
+**Settings → Limits & retention** holds four node-wide values, saved together
+and applied without a restart:
+
+| Setting | Default | Effect |
+| --- | --- | --- |
+| Upload cap | 100 MiB | Largest single upload, over Zmodem and the browser. Keep a reverse proxy's body limit at least 1 MiB higher. |
+| Grace before deletion | 7 days | How long an expired post or file waits before it is deleted. An expired file can be recovered from its area until then. |
+| Invitation expiry | 7 days | When an unaccepted channel invitation lapses. Clear the field for invitations that never expire. |
+| Chat scrollback | 100 messages | Lines each channel keeps, carried Link channels included. Lowering it trims a channel the next time someone speaks there. |
+
 Under **Operations → Node and sessions**:
 
 - **Maintenance** blocks new non-SysOp logins.
@@ -739,6 +755,12 @@ These controls require a live node session. For a stopped node, use the host's
 service controls. Use **Audit log** to see administrative and moderation
 activity. Storage garbage collection and draft pruning show the proposed work
 before confirmation; review it instead of deleting files directly.
+
+**Operations → Search indexes** compares what **Find** searches with the posts,
+files and chat messages themselves, and shows how many entries are missing,
+stale or left over. **Rebuild** replaces the indexes from that content; it
+cannot lose any. It also works from `python -m netbbs.admin`, and
+`python -m netbbs.search check|rebuild --db PATH` does the same from a script.
 
 ### Custom banners and mastheads
 
@@ -914,7 +936,47 @@ appear on the SysOp dashboard and **Settings → Update**. You can check manuall
 toggle the schedule, and set an optional GitHub token for a higher API limit.
 These checks do not download, install, restart, or interrupt callers.
 
-**MANUAL — on the host:**
+### Installing from Settings → Update
+
+When a check has found a newer release, **[I]nstall vX** appears on
+**Settings → Update** on the live node. It first shows the plan, and does
+nothing until you choose **[I]nstall now** and answer yes. Read the release
+notes first, and stop games and companion services, as for any upgrade. The
+steps run in order, and a failure stops the rest and says why:
+
+1. Download the release's wheel from GitHub and check it against the SHA-256
+   digest the release publishes. A wheel without a published digest is not
+   installed.
+2. Back up this node to `netbbs_backups/` beside the database, the same as
+   **Backup → Create backup now**.
+3. `pip install` the wheel into the environment NetBBS runs from, with the same
+   extras. pip also fetches any newer dependency the release needs. The install
+   is refused for a system Python (not a virtual environment), a development
+   checkout, or an environment the service account cannot write. A failed pip
+   run shows its last lines of output.
+4. Restart, or not, as **[R]estart after install** says:
+   - **auto** restarts under systemd, detected, and not under NetBSD rc.d.
+   - **yes** declares that your service manager restarts NetBBS when it exits.
+   - **no** always stops after installing.
+
+   A restart warns callers and waits the configured shutdown delay. The node
+   then exits with status 75, and the service manager starts the new version.
+   Without a restart, the screen tells you to restart the service yourself. Do
+   it promptly: until then, the old version runs with the new files on disk.
+
+After the restart, the Update screen says whether the node came back as the
+version that was installed.
+
+**MANUAL — on the host, units installed from an earlier release:** the shipped
+`netbbs.service` now carries `RestartForceExitStatus=75` and
+`SuccessExitStatus=75`. An older unit with `Restart=on-failure` already restarts
+on 75, but logs it as a failure. Add both lines, then run
+`systemctl daemon-reload`.
+
+Rolling back stays a host procedure: stop the service, install the previous
+release's wheel, restore the backup from step 2, and start the service.
+
+**MANUAL — on the host (the by-hand route, always available):**
 
 1. Read the selected release's notes. Record the current version and paths.
 2. Stop games/services and create a backup; verify its game coverage and keep
@@ -947,6 +1009,7 @@ DNS registration, or backups is a separate, deliberate operator action.
 | Browser terminal or upload fails | Check HTTPS proxy/WebSocket forwarding, upload limits, web listener, and `public_url`. |
 | Terminal offers no file-transfer link | Enable/configure the web listener and its public URL, or use a Zmodem-capable client. |
 | Link will not start | Check the `web` extra, effective participation setting, and a non-placeholder node name. |
+| **Find** misses content callers can open, or lists removed content | **Operations → Search indexes**: check, then **Rebuild** if it reports drift. |
 | Peers connect but content is missing | Check carry/subscription decisions, trust state, Outbox, and Diagnostics. Use Repair carried posts only for local materialization repair. |
 | Game is busy, fails, or loses state | Check its session limit, Compatibility setup, Last diagnostic, service state, and actual persistent paths. |
 | Backup says `Voidrunner: NOT CAPTURED` | The node has not started since v7.4.1, so it has recorded no save directory and the CLI fell back to your shell's home. Start the node once, or rerun with explicit `--voidrunner-save-dir`. |

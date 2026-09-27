@@ -19,8 +19,11 @@ it with your service manager. NetBBS itself is not distributed through PyPI or
 pkgsrc; disregard older package-index shorthand in historical service comments.
 Follow the handbook's exact release-wheel installation commands.
 
-The Linux unit restarts on failure. NetBSD rc.d starts, stops, and reports status
-but does not continuously supervise/restart a crashed node. The NetBSD account
+The Linux unit restarts on failure, and on exit status 75, which a node uses
+after installing a release from **Settings → Update** so that it comes back as
+the new version. NetBSD rc.d starts, stops, and reports status but does not
+continuously supervise/restart a crashed node, so an install there stops after
+the install step and you restart the service yourself. The NetBSD account
 needs a Bourne-compatible login shell for the supplied `su` launch.
 Confirm both service status and a real login after installation.
 
