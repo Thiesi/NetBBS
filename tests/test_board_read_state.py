@@ -443,3 +443,21 @@ def test_a_stale_board_does_not_take_a_replacements_read_state(db, alice, bob, m
     ensure_board_baseline(db, bob, old)
 
     assert unread_post_count(db, bob, replacement) is None  # never visited
+
+
+def test_a_late_baseline_does_not_overwrite_one_already_made(db, alice, bob, monkeypatch):
+    """Two sessions of one account both find no cursor; the one that
+    writes second must not replace the other's floor (Codex review)."""
+    board = create_board(db, "general", creator=alice)
+    ensure_board_baseline(db, bob, board)
+    posts = _posts(db, board, alice, 2, monkeypatch)
+    mark_board_read(db, bob, board)
+    raised = _floor(db, bob, board)
+    # The stale session looked before any of that happened: no cursor, and
+    # an empty board.
+    monkeypatch.setattr(activity, "_get_cursor", lambda *args: None)
+    monkeypatch.setattr(activity, "_newest_visible", lambda *args, **kwargs: None)
+    activity.ensure_board_baseline(db, bob, board)
+    monkeypatch.undo()
+
+    assert _floor(db, bob, board) == raised == posts[-1].id

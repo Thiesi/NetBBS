@@ -232,12 +232,20 @@ def ensure_board_baseline(db: Database, user: User, board: Board) -> None:
     sweep_expired_posts(db, board)
     newest = _newest_visible(db, board, by_feed=False)
     newest_feed = _newest_visible(db, board, by_feed=True)
-    _upsert_cursor(
-        db, user, _BOARD, board.id,
-        last_seen_created_at=newest_feed[1] if newest_feed else "",
-        last_seen_stable_id=newest_feed[2] if newest_feed else "",
-        last_seen_arrival_id=newest[0] if newest else 0,
+    # Insert-if-absent: another session of the same account may have made
+    # its baseline, and read further, since the check above (Codex review
+    # on #723). Only the first baseline counts.
+    db.connection.execute(
+        "INSERT INTO user_read_cursors (user_id, object_type, object_id, last_seen_created_at, "
+        "last_seen_stable_id, last_seen_arrival_id, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(user_id, object_type, object_id) DO NOTHING",
+        (
+            user.id, _BOARD, board.id,
+            newest_feed[1] if newest_feed else "", newest_feed[2] if newest_feed else "",
+            newest[0] if newest else 0, utc_now_iso(),
+        ),
     )
+    db.connection.commit()
 
 
 def _opened_ids(db: Database, user: User, board_id: int) -> set[int]:
