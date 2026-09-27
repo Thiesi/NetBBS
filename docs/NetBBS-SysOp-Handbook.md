@@ -840,7 +840,7 @@ Files, keys, and game saves also live outside it. For `/var/lib/netbbs/netbbs.db
 | Managed-DNS state and credentials | Database plus credential files beside it |
 | SSH host key and custom banners | Files beside the database that begin with its file name minus `.db`, e.g. `netbbs_ssh_host_key` and `netbbs_welcome_banner.ans` (see [Custom banners and mastheads](#custom-banners-and-mastheads)) |
 | War Dialer world | `/var/lib/netbbs/netbbs.db.doors/war-dialer.db`, unless overridden |
-| Voidrunner careers | Service account's `~/.netbbs/voidrunner_saves/`, unless `VOIDRUNNER_SAVE_DIR` overrides it |
+| Voidrunner careers | `/var/lib/netbbs/netbbs.db.doors/voidrunner/`, unless `VOIDRUNNER_SAVE_DIR` overrides it (a node upgraded from the old default copies the service account's `~/.netbbs/voidrunner_saves/` there at its first start) |
 | Third-party games | Each door's installation directory and any author-documented external state |
 | TOML and service configuration | `/etc/netbbs/` and the installed service files |
 | Logs | `netbbs.log` beside the database, plus service-manager output |
@@ -877,37 +877,35 @@ run is not retried until the next scheduled time. The running node makes the
 backups; `python -m netbbs.admin` only changes the settings.
 
 For a one-off destination or a script, use the installed backup CLI. Run it
-as an account able to read all node state. **Pin the real Voidrunner path**:
+as an account able to read all node state:
 
 ```sh
 sudo -u netbbs /var/lib/netbbs/.venv/bin/python -m netbbs.backup create \
   --db /var/lib/netbbs/netbbs.db \
   --identity-dir /var/lib/netbbs/netbbs_identity \
-  --voidrunner-save-dir /var/lib/netbbs/.netbbs/voidrunner_saves \
   --to /var/lib/netbbs/backups/pre-upgrade-20260913
 ```
 
 The destination must not already exist; choose a fresh name for each backup.
-The Voidrunner path above matches the service layout in this handbook. Use the
-path shown by the live Backup screen if yours differs.
 
-**Why the path is worth pinning** ([#555](https://github.com/Thiesi/NetBBS/issues/555)):
-Voidrunner keeps its careers under the home directory of whichever account
-started the node, and `examples/netbbs.rc` starts it with `HOME` set to the
-state directory. A backup CLI run from your own shell has your own `HOME`. Up
-to v7.4.0 the two resolved differently and the CLI silently captured no
-careers at all -- exit 0, with a line reading "no save directory found", which
-sounds like a statement about the node and was a statement about the shell.
+Voidrunner careers live beside the database, in `netbbs.db.doors/voidrunner/`,
+so the CLI finds them from `--db` alone. The node also records the directory it
+uses at startup, and the CLI reads that first, so a `VOIDRUNNER_SAVE_DIR`
+override is followed too. They used to live under the home directory of
+whichever account started the node, which a CLI run from your own shell does
+not share: up to v7.4.0 that silently captured no careers at all
+([#555](https://github.com/Thiesi/NetBBS/issues/555)). Two cases still need you:
 
-From v7.4.1 the node records its own save directory at startup and the CLI
-reads it, so the default is correct without a flag. Two cases still need you:
-
-- A node that has not yet started since upgrading has recorded nothing. The
-  CLI says so in as many words -- `Voidrunner: NOT CAPTURED` -- rather than
-  reporting an empty directory as an empty node. Start the node once, or pass
-  the flag.
-- A layout that differs from this handbook's still needs `--voidrunner-save-dir`.
-  Use the path shown on the live Backup screen.
+- A node upgraded from that home-directory default that has not yet started
+  since. The CLI says so in as many words -- `Voidrunner: NOT CAPTURED` or
+  `GUESSED LOCATION` -- rather than reporting an empty directory as an empty
+  node. Start the node once (it copies the careers into place), or pass
+  `--voidrunner-save-dir` with the old directory. A node upgraded straight from
+  v7.4.0 or earlier never recorded that directory, so it does **not** copy the
+  careers: set `VOIDRUNNER_SAVE_DIR` to the old directory before its first start,
+  or copy its contents into `netbbs.db.doors/voidrunner/` with the node stopped.
+- A directory you chose yourself, when the node has not recorded it. Pass
+  `--voidrunner-save-dir` with the path shown on the live Backup screen.
 
 Read the coverage output either way. An absent Voidrunner component will not
 magically reappear during restore.
@@ -944,7 +942,7 @@ sudo -u netbbs /var/lib/netbbs/.venv/bin/python -m netbbs.backup restore \
   --from /path/to/backup \
   --db /var/lib/netbbs/netbbs.db \
   --identity-dir /var/lib/netbbs/netbbs_identity \
-  --voidrunner-to /var/lib/netbbs/.netbbs/voidrunner_saves \
+  --voidrunner-to /var/lib/netbbs/netbbs.db.doors/voidrunner \
   --war-dialer-to 1=/var/lib/netbbs/netbbs.db.doors/war-dialer.db
 ```
 
@@ -958,8 +956,9 @@ directory and reports its location; it does not delete that directory later.
 
 **MANUAL:** restore external door installations from `door-installs/` if included,
 restore service/TOML settings, and ensure the service uses the restored game paths.
-Set `VOIDRUNNER_SAVE_DIR` to the chosen destination if it differs from the service's
-default. Restore never changes that environment setting for you. Do not run the
+Careers restored into the node's own `netbbs.db.doors/voidrunner/` need no
+setting. Anywhere else, set `VOIDRUNNER_SAVE_DIR` to that destination; restore
+never changes that environment setting for you. Do not run the
 same restored Link identity on two live nodes.
 
 Restart, log in, read a post, retrieve a file, check Link identity/peers, and enter

@@ -635,7 +635,7 @@ def test_real_process_incomplete_escape_exits_without_action(tmp_path):
     with _running_door(tmp_path) as (process, path, wait_for, send, output, reach, screen):
         wait_for(DIAL)
         send(b"\x1b[")
-        assert process.wait(timeout=PROC_WAIT) == 1
+        assert process.wait(timeout=PROC_WAIT) == 0  # the door said why itself (#649)
         assert process.stderr.read() == b""
         conn = wd.connect(path)
         assert wd.read_player(conn, 0).turns_used == 0
@@ -913,7 +913,7 @@ def test_extended_x10_mouse_encoding_stops_without_spending_a_turn(tmp_path, sta
             assert all(e.controller_user_id is None for e in wd.list_exchanges(conn))
         finally:
             conn.close()
-        assert process.wait(timeout=PROC_WAIT) == 1
+        assert process.wait(timeout=PROC_WAIT) == 0  # the door said why itself (#649)
         assert b"Unsupported mouse encoding" in output
         assert process.stderr.read() == b""
 
@@ -1266,7 +1266,9 @@ def test_text_screen_pages_preserve_content_with_clear_back_path(monkeypatch, wi
         assert len(lines) <= height
         assert all(sum(wd._char_width(ch) for ch in line) <= width for line in lines)
         # Same reasoning as `wait_for`: the gap is the grid's, not the bar's.
-        assert " ".join(lines[-1].split()) == "[N] Next [P] Prev [B] Back"
+        # A single page offers no page turn (issue #649).
+        assert " ".join(lines[-1].split()) == ("[N] Next [P] Prev [B] Back" if len(screens) > 1
+                                               else "[B] Back")
     assert "".join(written).count("界") == 200
 
 
@@ -4304,13 +4306,14 @@ def test_no_world_is_migrated_for_a_tone(tmp_path):
     happened -- and it would cost a schema version that older game binaries refuse
     outright.
     """
-    assert wd.WORLD_SCHEMA_VERSION == 10
-    assert not hasattr(wd, "_migrate_world_v11")
+    # 11 counts Trades for the taper (issue #649); it touches no receipt.
+    assert wd.WORLD_SCHEMA_VERSION == 11
+    assert not hasattr(wd, "_migrate_world_v12")
     source = _WAR_DIALER_PATH.read_text(encoding="utf-8")
     assert "UPDATE events SET actor_handle=NULL" not in source
     # A world at the shipped version is opened, not upgraded.
     conn, _ = _painted_world(tmp_path, "noupgrade.db")
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 10
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 11
     conn.close()
 
 
@@ -4563,3 +4566,158 @@ def test_a_door_waiting_for_input_still_publishes_its_first_screen(tmp_path):
     state.mkdir()
     pages = gallery.capture(door, state, b"^", 80, 24, {}, expect=False)
     assert "W A R   D I A L E R" in "".join(pages)
+
+
+# ---------------------------------------------------------------------------
+# Issue #649: small things from the 2026-09-18 playtest.
+
+def _bar_keys(written) -> set[str]:
+    return set(re.findall(r"\[([A-Z])\]", _last_screen(written)))
+
+
+@pytest.mark.parametrize("standings", [False, True])
+def test_a_one_page_directory_offers_no_page_turn(tmp_path, monkeypatch, standings):
+    conn, _ = _painted_world(tmp_path)
+    written: list[str] = []
+    monkeypatch.setattr(wd, "out", written.append)
+    monkeypatch.setattr(wd, "read_menu_choice", lambda valid: "B")
+    wd.show_player_directory(wd.Palette(False), conn, 1, 80, 24, standings=standings)
+    assert "page 1/" not in _last_screen(written)
+    assert "B" in _bar_keys(written) and not {"N", "P"} & _bar_keys(written)
+    conn.close()
+
+
+def test_a_page_turn_is_offered_where_it_goes_somewhere(monkeypatch):
+    written: list[str] = []
+    monkeypatch.setattr(wd, "out", written.append)
+    monkeypatch.setattr(wd, "read_menu_choice", lambda valid: "B")
+    palette = wd.Palette(False)
+    wd.show_text_pages(palette, "LONG", [f"Paragraph {n} " * 8 for n in range(40)], 40, 12)
+    assert _bar_keys(written) == {"N", "P", "B"}
+    written.clear()
+    # One page of this batch, another batch after it: Next fetches it, Prev has
+    # nowhere to go.
+    wd.show_text_pages(palette, "BATCH", ["One short page."], 40, 12, more_after=True)
+    assert _bar_keys(written) == {"N", "B"}
+
+
+def test_an_empty_event_log_offers_only_back(tmp_path, monkeypatch):
+    conn = wd.connect(tmp_path / "empty-log.db")
+    wd.ensure_schema(conn)
+    written: list[str] = []
+    monkeypatch.setattr(wd, "out", written.append)
+    monkeypatch.setattr(wd, "read_menu_choice", lambda valid: "B")
+    wd.show_event_history(wd.Palette(False), conn, 1, 80, 24)
+    screen = "".join(written).split(CLEAR)[-2]  # the log, before the exit clear
+    assert wd.NO_EVENTS in _ANSI_RE.sub("", screen)
+    assert _bar_keys(screen) == {"B"}
+    conn.close()
+
+
+def test_one_page_picker_offers_no_page_turn(monkeypatch):
+    written: list[str] = []
+    monkeypatch.setattr(wd, "out", written.append)
+    monkeypatch.setattr(wd, "read_menu_choice", lambda valid: "B")
+    wd.pick_record_page(wd.Palette(False), "ROOT EXCHANGE", [(["Only one"], True)], 80, 24)
+    assert "N" not in _bar_keys(written) and "P" not in _bar_keys(written)
+    assert {"1", "B", "Q"} <= set(re.findall(r"\[(\w)\]", _last_screen(written)))
+
+
+def test_an_empty_feed_says_nothing_has_happened_to_you():
+    rows = wd.feed(wd.Palette(False), [], 60)
+    assert [_ANSI_RE.sub("", row) for row in rows] == ["Nothing has happened to you yet."]
+
+
+@pytest.mark.parametrize("action", ["trade", "recruit", "job", "crew", "root"])
+def test_out_of_turns_is_said_once_per_preview(tmp_path, action):
+    conn, now = _painted_world(tmp_path)
+    conn.execute("UPDATE players SET turns_used=? WHERE user_id=1", (wd.TURNS_PER_DAY,))
+    conn.commit()
+    player = wd.refresh_player(conn, 1, now)
+    target = {"job": wd.JobChoice(1, 1), "crew": wd.CrewChoice("stash"),
+              "root": next((e for e in wd.list_exchanges(conn, 1) if e.controller_user_id is None),
+                           None)}.get(action)
+    cards = wd.stakes_cards(wd.Palette(False), action, player, target, 72)
+    text = " ".join(_ANSI_RE.sub("", row) for _, rows in cards for row in rows)
+    assert [heading for heading, _ in cards].count("UNAVAILABLE") == 1
+    assert text.count("No turns.") == 1, text
+    conn.close()
+
+
+@pytest.mark.parametrize("step", ["case", "execute"])
+def test_an_operation_step_says_out_of_turns_once(tmp_path, step):
+    conn, now = _painted_world(tmp_path)
+    stage = {"case": 0, "execute": 2}[step]
+    conn.execute("UPDATE players SET turns_used=?, operation_contract=1, operation_approach=1, "
+                 "operation_stage=? WHERE user_id=1", (wd.TURNS_PER_DAY, stage))
+    conn.commit()
+    player = wd.refresh_player(conn, 1, now)
+    cards = wd.operation_step_cards(wd.Palette(False), player, step, wd.JobChoice(1, 1), 72)
+    text = " ".join(_ANSI_RE.sub("", row) for _, rows in cards for row in rows)
+    assert text.count("No turns.") == 1, text
+    conn.close()
+
+
+def test_a_refusal_the_card_does_not_say_stays_in_the_terms(tmp_path):
+    conn, now = _painted_world(tmp_path)
+    conn.execute("UPDATE players SET turns_used=?, specialty='phreakers' WHERE user_id=1",
+                 (wd.TURNS_PER_DAY,))
+    conn.commit()
+    player = wd.refresh_player(conn, 1, now)
+    cards = dict(wd.stakes_cards(wd.Palette(False), "crew", player,
+                                 wd.CrewChoice("phreakers"), 72))
+    unavailable = _ANSI_RE.sub("", " ".join(cards["UNAVAILABLE"]))
+    terms = _ANSI_RE.sub("", " ".join(cards["TERMS"]))
+    assert "already trained" in unavailable and "No turns." not in unavailable
+    assert "No turns." in terms
+    conn.close()
+
+
+def test_root_entries_for_unclaimed_and_owned_exchanges_are_the_same_height(tmp_path):
+    conn, now = _painted_world(tmp_path)
+    palette = wd.Palette(False)
+    player = wd.refresh_player(conn, 1, now)
+    inner = wd._panel_width(palette, 79) - 4  # the Root picker at 80 columns
+    exchanges = wd.list_exchanges(conn, 1)
+    unclaimed = next(e for e in exchanges if not wd.exchange_occupied(e))
+    rival = next(e for e in exchanges if e.controller_user_id == 2)
+    rows = wd.exchange_entry_rows(palette, unclaimed, player, inner)
+    assert "owner none" in _ANSI_RE.sub("", " ".join(rows))
+    assert len(rows) == len(wd.exchange_entry_rows(palette, rival, player, inner)) == 2
+    conn.close()
+
+
+def test_input_sequence_exit_is_not_reported_as_a_crash(tmp_path, monkeypatch):
+    path = tmp_path / "paste.db"
+
+    class Output(io.StringIO):
+        def reconfigure(self, **kwargs):
+            pass
+
+    def pasted(*args, **kwargs):
+        raise wd.InputSequenceError("Paste too long. Reconnect and use single keys.")
+
+    output = Output()
+    monkeypatch.setattr(wd.sys, "stdout", output)
+    monkeypatch.setattr(wd, "_load_door_info", lambda: {"user_id": 0, "handle": "Guest"})
+    monkeypatch.setattr(wd, "_resolve_db_path", lambda: path)
+    monkeypatch.setattr(wd, "read_menu_choice", pasted)
+    monkeypatch.setattr(wd, "read_input_key", pasted)
+    monkeypatch.setattr(wd, "press_any_key", pasted)
+    # Status 0: the door's own sentence is the explanation; nonzero would add
+    # the host's "exited unexpectedly" under it.
+    assert wd.main() == 0
+    assert "Paste too long. Reconnect and use single keys." in _ANSI_RE.sub("", output.getvalue())
+
+
+def test_trade_preview_quotes_the_tapered_range_and_says_why(tmp_path):
+    # Issue #649: the preview is where a caller sees the taper before paying.
+    conn, now = _painted_world(tmp_path)
+    player = wd.refresh_player(conn, 1, now)
+    fresh = "\n".join(wd.action_preview_lines("trade", player))
+    assert "Gross payout: $20-$60" in fresh and "turn-day" not in fresh
+    player.turns_trading = 5
+    tapered = "\n".join(wd.action_preview_lines("trade", player))
+    assert "Gross payout: $20-$45" in tapered
+    assert "Trade 6 of this turn-day" in tapered and "back to $60 when your turns refill" in tapered
+    conn.close()

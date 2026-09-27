@@ -3575,7 +3575,8 @@ def _node_reference_field(
             # Most recently contacted first; ties (peers stored in the same
             # instant) broken by label so the list order is deterministic.
             items.sort(key=lambda item: item[0])
-            items.sort(key=lambda item: contact[item[1]], reverse=True)
+            # A peer never contacted directly (#766) sorts last.
+            items.sort(key=lambda item: contact[item[1]] or "", reverse=True)
             return items
 
         choices: list[tuple[int, str, str | None]] = [(0, "(type a name, DNS name, or technical identity)", None)]
@@ -6928,7 +6929,7 @@ async def _backup_status_screen(
             # it was matters only to the backup CLI, which is a different
             # process with a different home (issue #555).
             Field(
-                "Voidrunner source", str(voidrunner_save_directory()[0]),
+                "Voidrunner source", str(await lane.run(lambda db: voidrunner_save_directory(db.path)[0])),
                 note="Includes saved careers and scores when this directory exists. "
                      "Close Voidrunner sessions before creating a backup.",
             ),
@@ -16539,7 +16540,9 @@ async def _post_action_screen(
             header_color=header_color, node_name_gradient=session.node_name_gradient,
         )
         # As the board's readers will see it, in every mode (issue #711).
-        body_rows = post_body_rows(post.body, session.terminal_width, body_mode, truecolor=truecolor)
+        body_rows = post_body_rows(
+            post.body, session.terminal_width, body_mode, truecolor=truecolor, layout=post.layout
+        )
         # What the moderator is deciding about, then the post itself under its
         # own heading, with the pin and exempt state the toggles change.
         sections = [

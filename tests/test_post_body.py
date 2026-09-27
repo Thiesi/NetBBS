@@ -169,6 +169,52 @@ def test_uncolored_modes_lay_out_like_the_plain_reader(mode):
     assert ("|12" in rows[0]) == (mode == "text")
 
 
+# -- art posts (issue #711) ---------------------------------------------------------
+
+from netbbs.rendering import ScreenBuffer, encode_ansi_bytes, parse_ansi_into_buffer  # noqa: E402
+from netbbs.rendering.post_body import art_body_from_editor, art_body_rows  # noqa: E402
+
+
+def _canvas(text: str, width: int = 80, height: int = 10) -> bytes:
+    buffer = ScreenBuffer(width, height)
+    parse_ansi_into_buffer(text, buffer)
+    return encode_ansi_bytes(buffer)
+
+
+def test_a_canvas_becomes_a_body_as_wide_and_tall_as_the_drawing():
+    body = art_body_from_editor(_canvas(f"{ESC}[31mHI{ESC}[0m there\r\n{ESC}[44m    {ESC}[0m"))
+
+    lines = body.split("\n")
+    assert len(lines) == 2  # the eight blank rows below are dropped
+    assert _SGR.sub("", lines[0]) == "HI there"  # blank default cells trimmed
+    assert _SGR.sub("", lines[1]) == "    "  # a colored background is part of the picture
+
+
+def test_an_art_post_keeps_its_lines():
+    body = "short\nlines stay\nas drawn"
+
+    rows = art_body_rows(styled_post_body(body), 80)
+
+    assert [_SGR.sub("", row) for row in rows] == ["short", "lines stay", "as drawn"]
+    # The same body as prose is one reflowed paragraph.
+    assert len(post_body_rows(body, 80, "color", truecolor=True)) == 1
+
+
+def test_a_wide_art_line_wraps_at_the_column_with_its_color():
+    body = f"{ESC}[31m" + "#" * 80
+
+    rows = art_body_rows(styled_post_body(body), 40)
+
+    assert [len(_SGR.sub("", row)) for row in rows] == [40, 40]
+    assert rows[1].startswith(f"{ESC}[31m")
+
+
+@pytest.mark.parametrize("mode", ["plain", "text"])
+def test_an_art_post_keeps_its_lines_without_color(mode):
+    rows = post_body_rows("|12one\ntwo", 80, mode, truecolor=False, layout="art")
+
+    assert len(rows) == 2 and ESC not in rows[0] + rows[1]
+
 # -- Codex review on #750 ---------------------------------------------------------
 
 
@@ -208,3 +254,67 @@ def test_quote_text_stays_muted_around_an_authors_color():
     # Muted before the author's color, and muted again after their reset.
     assert row.index(muted) < row.index("plain")
     assert muted in row[row.index("after") - 20:row.index("after")]
+
+
+# -- Codex review on #753 ---------------------------------------------------------
+
+
+def test_a_full_width_colored_stripe_keeps_every_cell():
+    from netbbs.rendering.reflow import wrap_terminal_text
+
+    stripe = f"{ESC}[44m" + " " * 80 + f"{ESC}[0m"
+
+    assert wrap_terminal_text(stripe, 80) == stripe
+    # Indentation before content still leaves that content room.
+    assert wrap_terminal_text(" " * 85 + "X", 80) == " " * 79 + "X"
+
+
+def test_editor_output_is_read_as_cp437():
+    data = "\u251c\u2310".encode("cp437")  # bytes C3 A9: valid UTF-8 for another character
+
+    assert art_body_from_editor(data) == "\u251c\u2310"
+
+
+def test_a_tab_in_an_art_post_is_one_column():
+    rows = art_body_rows("A\tB", 2)
+
+    assert [_SGR.sub("", row) for row in rows] == ["A ", "B"]
+
+
+
+@pytest.mark.parametrize("mode", ["color", "plain", "text"])
+def test_pipe_codes_in_an_art_post_are_painted_text(mode):
+    rows = post_body_rows("A|12B", 80, mode, truecolor=True, layout="art")
+
+    assert _SGR.sub("", rows[0]) == "A|12B"
+
+
+
+def test_a_restored_blank_keeps_the_style_written_before_it():
+    from netbbs.rendering.reflow import wrap_terminal_text
+
+    row = " " * 79 + f"{ESC}[41m {ESC}[0m"
+
+    assert wrap_terminal_text(row, 80) == row
+    # Capped indentation before content: dropped, its styling kept.
+    assert wrap_terminal_text(" " * 85 + f"{ESC}[31mX", 80) == " " * 79 + f"{ESC}[31mX"
+
+
+def test_a_signature_under_a_drawing_reads_as_post_text():
+    body = f"A|12B{ESC}[0m\n-- \n|12Alice"
+
+    rows = post_body_rows(body, 80, "color", truecolor=True, layout="art")
+
+    visible = [_SGR.sub("", row) for row in rows]
+    assert visible == ["A|12B", "-- ", "Alice"]
+    assert f"{ESC}[38;5;9m" in rows[2]
+
+
+def test_a_painted_delimiter_line_is_not_a_signature():
+    from netbbs.rendering.post_body import split_signature
+
+    drawing = "title\n-- \nA|12B"
+
+    assert split_signature(drawing) == (drawing, "")
+    rows = post_body_rows(drawing, 80, "color", truecolor=True, layout="art")
+    assert _SGR.sub("", rows[-1]) == "A|12B"

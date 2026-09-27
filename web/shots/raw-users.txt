@@ -12,8 +12,8 @@
 [38;5;248m    Add a new user account[0m               [38;5;248m    Toggle account access[0m
   [[1m[38;5;46mL[0m]ist users                             [[1m[38;5;46mD[0m]elete user
 [38;5;248m    Browse and edit accounts[0m             [38;5;248m    Permanently remove a user[0m
-  [[1m[38;5;46mR[0m]egistration                           [[1m[38;5;46mB[0m]ack
-[38;5;248m    Signup policy settings[0m               [38;5;248m    Return to the SysOp console[0m
-  [[1m[38;5;46mP[0m]romote/demote
-[38;5;248m    Change a user's level[0m
+  [[1m[38;5;46mR[0m]egistration                           Re[[1m[38;5;46mt[0m]ired names
+[38;5;248m    Signup policy settings[0m               [38;5;248m    Names held for deleted accounts[0m
+  [[1m[38;5;46mP[0m]romote/demote                         [[1m[38;5;46mB[0m]ack
+[38;5;248m    Change a user's level[0m                [38;5;248m    Return to the SysOp console[0m
 Choice: 

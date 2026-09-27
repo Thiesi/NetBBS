@@ -3128,4 +3128,61 @@ MIGRATIONS = [
            );
         """,
     ),
+    Migration(
+        description=(
+            "Issue #766: `last_direct_contact_at` on link_peers -- when this node last "
+            "heard from a peer itself (a hello or an events exchange), which the SysOp's "
+            "Link status and trust node picker show as last contact. `updated_at` also "
+            "moves when a peer's descriptor arrives secondhand in another node's peer "
+            "list, so a dead peer looked live. Existing rows start from `updated_at`, "
+            "the best information there is."
+        ),
+        sql="""
+        ALTER TABLE link_peers ADD COLUMN last_direct_contact_at TEXT;
+        UPDATE link_peers SET last_direct_contact_at = updated_at;
+        """,
+    ),
+    Migration(
+        description=(
+            "Issue #711: `layout` on posts -- `prose` (reflowed to the reader's width) or "
+            "`art` (written in the ANSI art editor: every line stays a line). Set by the "
+            "editor that wrote the post, on its root row; its edits follow the root. A "
+            "carried post takes it from the optional `layout` field of its `board_post` "
+            "event, and is prose without one."
+        ),
+        sql="""
+        ALTER TABLE posts ADD COLUMN layout TEXT NOT NULL DEFAULT 'prose' CHECK (layout IN ('prose', 'art'));
+
+        -- A revision -- an edit, a moderator edit, a tombstone, local or
+        -- carried -- takes its root's layout, so a pending edit of an art
+        -- post shows as art in the moderator's preview too.
+        CREATE TRIGGER trg_posts_revision_layout AFTER INSERT ON posts
+        WHEN NEW.post_id != NEW.root_post_id
+        BEGIN
+            UPDATE posts SET layout = COALESCE(
+                (SELECT r.layout FROM posts r WHERE r.post_id = NEW.root_post_id AND r.board_id = NEW.board_id),
+                'prose'
+            )
+            WHERE id = NEW.id;
+        END;
+
+        -- A node upgraded after it already carried art posts materialized
+        -- them as prose; their retained signed events still say "art".
+        UPDATE posts SET layout = 'art'
+         WHERE post_id = root_post_id
+           AND post_id IN (
+               SELECT content_id FROM link_events
+                WHERE object_type = 'board_post'
+                  AND json_extract(envelope_json, '$.envelope.payload.layout') = 'art'
+           );
+        UPDATE posts SET layout = (
+            SELECT r.layout FROM posts r WHERE r.post_id = posts.root_post_id AND r.board_id = posts.board_id
+        )
+         WHERE post_id != root_post_id
+           AND EXISTS (
+               SELECT 1 FROM posts r
+                WHERE r.post_id = posts.root_post_id AND r.board_id = posts.board_id AND r.layout = 'art'
+           );
+        """,
+    ),
 ]

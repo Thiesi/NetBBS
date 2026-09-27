@@ -391,7 +391,7 @@ def test_restore_keeps_lock_inodes_and_excludes_launch_after_game_switch(
             result = subprocess.run([sys.executable, vr.__file__], input=b"Q", capture_output=True,
                                     env=dict(os.environ, NETBBS_DOOR_INFO=str(info)), timeout=60)
             assert result.returncode == 0
-            assert b"maintenance is in progress" in b" ".join(result.stdout.split())
+            assert b"saves are busy with maintenance" in b" ".join(result.stdout.split())
             checked.append(name)
 
     monkeypatch.setattr(backup_module, "_switch_one", check_switch)
@@ -411,6 +411,23 @@ def test_voidrunner_cli_create_and_restore_reports_activation_step(tmp_path, db_
           "--voidrunner-to", str(target)])
     output = capsys.readouterr().out
     assert "MANUAL" in output and "VOIDRUNNER_SAVE_DIR" in output
+    assert (target / "77.json").exists()
+
+
+def test_voidrunner_restore_into_the_nodes_own_directory_needs_no_setting(tmp_path, db_path, identity_dir, capsys):
+    """`<db>.doors/voidrunner/` is where the node looks without being told
+    (issue #648), so restoring there leaves nothing to configure."""
+    from netbbs.doors.runtime import node_voidrunner_save_dir
+
+    game = _populate_voidrunner()
+    source, target = tmp_path / "backup", node_voidrunner_save_dir(db_path)
+    main(["create", "--db", str(db_path), "--identity-dir", str(identity_dir), "--to", str(source),
+          "--voidrunner-save-dir", str(game)])
+    main(["restore", "--db", str(db_path), "--identity-dir", str(identity_dir), "--from", str(source),
+          "--voidrunner-to", str(target)])
+    output = capsys.readouterr().out
+    output = " ".join(output.split())  # the CLI wraps to the terminal width
+    assert "the node's own save directory" in output and "MANUAL: configure" not in output
     assert (target / "77.json").exists()
 
 
@@ -488,7 +505,7 @@ def test_maintenance_prevents_a_new_real_game_launch(tmp_path):
     with vr.maintenance_session(game):
         result = subprocess.run([sys.executable, vr.__file__], input=b"Q", capture_output=True,
                                 env=dict(os.environ, NETBBS_DOOR_INFO=str(info)), timeout=60)
-    assert result.returncode == 0 and b"maintenance is in progress" in b" ".join(result.stdout.split())
+    assert result.returncode == 0 and b"saves are busy with maintenance" in b" ".join(result.stdout.split())
     assert _retained_game_bytes(game) == before
 
 

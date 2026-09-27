@@ -16,8 +16,10 @@ and deletes its scratch working directory after every session (see
 `netbbs.doors.runtime`'s own docstring) -- a door manages any save data
 entirely itself. This door keeps one JSON save file per caller, keyed by
 the drop-file's stable numeric `user_id` (never the handle, which can
-change), under `VOIDRUNNER_SAVE_DIR` if set, else `~/.netbbs/
-voidrunner_saves/`. Completed station actions commit before their success
+change), under `VOIDRUNNER_SAVE_DIR`. NetBBS always sets it, to the node's
+own `<db path>.doors/voidrunner/` unless the SysOp chose another place
+(`netbbs.doors.runtime.voidrunner_save_dir`); standalone, the door falls back
+to `~/.netbbs/voidrunner_saves/`. Completed station actions commit before their success
 message, including actions inside nested menus. Each completed auto-route
 hop also commits without requiring the player to leave the chart. One process
 holds the pilot session lock from load through its final checkpoint. Writes
@@ -32,11 +34,9 @@ script's own path: this module now ships as real installed package data
 (`netbbs.doors.bundled`, resolved via `importlib.resources` -- see
 `netbbs.doors.bundled.resolve_bundled_door_path`), and an installed
 package's own directory is routinely read-only and/or wiped clean on
-every upgrade, neither of which a save file can tolerate. A production
-node with an unusual layout should set `VOIDRUNNER_SAVE_DIR` explicitly
-rather than rely on the home-directory default holding for its own
-service account. NetBBS forwards this explicit directory override; different
-installations sharing an OS account need distinct directories.
+every upgrade, neither of which a save file can tolerate. Nor is it the
+home directory under NetBBS: that is shared by every node one OS account
+runs, and two nodes read each other's careers by user id (issue #648).
 
 **Architecture** (deliberate, for a reason beyond this door): the rules
 of the game -- galaxy generation, pricing, combat resolution, mission
@@ -4283,6 +4283,18 @@ class PilotBusy(Exception):
     """Another process owns this pilot's complete read/play/write session."""
 
 
+# A launch knows which lock turned it away, and the caller needs to know too:
+# closing another session and waiting out a backup are different advice. Both
+# stay `PilotBusy`, so a caller that only needs "not now" still catches one
+# class (issue #771).
+class PilotInUse(PilotBusy):
+    """This pilot is already flying in another session."""
+
+
+class SavesInMaintenance(PilotBusy):
+    """A backup, restore or other maintenance holds the save directory."""
+
+
 @contextlib.contextmanager
 def _file_lease(path: Path, *, wait: float = 0):
     """Hold a stable OS lock; never unlink its inode while another opener exists."""
@@ -4327,8 +4339,16 @@ def _maintenance_gate(save_dir: Path):
 def pilot_session(save_dir: Path, user_id: int):
     save_dir = save_dir.resolve()
     with contextlib.ExitStack() as lease:
-        with _maintenance_gate(save_dir):
-            lease.enter_context(_file_lease(save_dir / f".{user_id}.lock"))
+        try:
+            with _maintenance_gate(save_dir):
+                try:
+                    lease.enter_context(_file_lease(save_dir / f".{user_id}.lock"))
+                except PilotBusy as exc:
+                    raise PilotInUse from exc
+        except PilotInUse:
+            raise
+        except PilotBusy as exc:
+            raise SavesInMaintenance from exc
         yield
 
 
@@ -10797,13 +10817,15 @@ def main() -> int:
             else:
                 continue
             world.commit()
-    except PilotBusy:
-        out_line(f"{p.gold}This pilot already has an active Voidrunner session, or save maintenance is in progress. "
-                 f"Close that session or wait for maintenance to finish, then try again.{RESET}")
-        try:
-            pause(p)
-        except EOFError:
-            pass
+    except PilotBusy as exc:
+        # One line and no pause of its own: the host says "Left Voidrunner" and
+        # asks for the only key, the way War Dialer turns a caller away (#650).
+        # A second keypress for a door that never opened was the complaint.
+        # Status 0, because nonzero is reported as a crash (issue #771).
+        out_line(f"{p.gold}" + ("Your pilot is already flying in another session. Leave that one first."
+                                if isinstance(exc, PilotInUse) else
+                                "Voidrunner's saves are busy with maintenance. Try again shortly.")
+                 + RESET)
         return 0
     except ResumeError as exc:
         out_line(f"{p.wrong}{exc} Play has stopped; your saved career is unchanged. "

@@ -199,6 +199,12 @@ async def capture(exchanges: int) -> str:
         channel = create_channel(db, "lobby", creator=sysop)
 
         await fake.start()
+        # The remote speakers never log in to the fake hub, so its USERLIST
+        # reply would leave them out and the status bar would read `0 MRC`
+        # over a room full of their lines. Seat them in the room first.
+        for line in (*EARLIER, *(i for i, _ in LIVE if i is not None)):
+            nick, site, *_ = line.split("~")
+            fake.users[(site.lower(), nick.lower())] = "lobby"
         save_mrc_settings(db, MrcSettings(enabled=True, host=DEFAULT_HOST, port=5000,
                                           tls=False, site_name=NODE_NAME))
         set_mrc_room(db, channel, "lobby")

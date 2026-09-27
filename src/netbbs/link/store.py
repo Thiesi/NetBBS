@@ -334,23 +334,28 @@ def load_link_node(db: Database, identity: NodeIdentity) -> LinkNode:
     return node
 
 
-def load_peer_last_contact(db: Database) -> dict[str, str]:
+def load_peer_last_contact(db: Database) -> dict[str, str | None]:
     """
-    fingerprint -> `link_peers.updated_at` (ISO 8601) for every peer
-    this node has ever completed a hello or events exchange with --
-    issue #60's SysOp Link-status screen needs "when did we last hear
-    from this peer" for display, but `load_link_node` above deliberately
-    doesn't reconstruct this column onto the in-memory `PeerRecord`
-    (no protocol-shape change for a value nothing but display ever
-    needs). Callers wanting it query separately, here.
+    fingerprint -> `link_peers.last_direct_contact_at` (ISO 8601) for
+    every stored peer -- issue #60's SysOp Link-status screen needs
+    "when did we last hear from this peer" for display, but
+    `load_link_node` above deliberately doesn't reconstruct this column
+    onto the in-memory `PeerRecord` (no protocol-shape change for a
+    value nothing but display ever needs). Callers wanting it query
+    separately, here.
+
+    Issue #766: this is the last *direct* contact (a hello or an events
+    exchange with the peer itself), not `updated_at`, which a
+    descriptor refreshed secondhand from another node's peer list also
+    rewrites. `None` for a stored peer never heard from directly.
     """
     return {
-        row["fingerprint"]: row["updated_at"]
-        for row in db.connection.execute("SELECT fingerprint, updated_at FROM link_peers")
+        row["fingerprint"]: row["last_direct_contact_at"]
+        for row in db.connection.execute("SELECT fingerprint, last_direct_contact_at FROM link_peers")
     }
 
 
-def save_peer(db: Database, peer: PeerRecord) -> None:
+def save_peer(db: Database, peer: PeerRecord, *, direct_contact: bool = True) -> None:
     """
     Upsert one peer's current record. Called after any successful
     `handle_hello`/`handle_events` unconditionally, not only when the
@@ -358,6 +363,12 @@ def save_peer(db: Database, peer: PeerRecord) -> None:
     "harmless no-op" tolerance for a redundant write at this project's
     declared scale (§14), rather than this module owning the extra
     complexity of tracking what's already on disk.
+
+    `direct_contact` (issue #766): whether this save follows contact with
+    the peer itself, which stamps `last_direct_contact_at`. A caller
+    persisting what it learned about the peer from someone else -- its
+    descriptor in another node's peer list, its mail picked up from a
+    relay -- passes `False`, and the peer's last contact stays as it was.
 
     Also deletes any on-disk candidate row for the same fingerprint --
     mirrors `LinkNode.handle_hello`'s own in-memory
@@ -369,22 +380,26 @@ def save_peer(db: Database, peer: PeerRecord) -> None:
     from netbbs.link.node_profiles import record_peer_identity_observation
 
     record_peer_identity_observation(db, peer)
+    now = utc_now_iso()
     db.connection.execute(
         """
-        INSERT INTO link_peers (fingerprint, root_public_key, transitions_json, descriptor_json, updated_at)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO link_peers
+            (fingerprint, root_public_key, transitions_json, descriptor_json, updated_at, last_direct_contact_at)
+        VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT(fingerprint) DO UPDATE SET
             root_public_key = excluded.root_public_key,
             transitions_json = excluded.transitions_json,
             descriptor_json = excluded.descriptor_json,
-            updated_at = excluded.updated_at
+            updated_at = excluded.updated_at,
+            last_direct_contact_at = COALESCE(excluded.last_direct_contact_at, link_peers.last_direct_contact_at)
         """,
         (
             peer.fingerprint,
             base64.b64encode(peer.root_public_key).decode("ascii"),
             json.dumps([t.to_dict() for t in peer.transitions]),
             json.dumps(peer.descriptor.to_dict()),
-            utc_now_iso(),
+            now,
+            now if direct_contact else None,
         ),
     )
     db.connection.execute("DELETE FROM link_peer_candidates WHERE fingerprint = ?", (peer.fingerprint,))
