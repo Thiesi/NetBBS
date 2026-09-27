@@ -3187,6 +3187,65 @@ MIGRATIONS = [
     ),
     Migration(
         description=(
+            "Issue #692: `post_rejections` records every post a moderator rejected here -- "
+            "local or carried, a new post or an edit -- by its `post_id` (for a carried post, "
+            "its event's content id), with who, when and an optional reason. Rejecting still "
+            "deletes the post row; this record is what makes the decision last. A carried "
+            "post's signed event is kept (§9.3), so without it `[R]epair carried posts` "
+            "re-materialized, and published, the post the moderator refused. Earlier "
+            "rejections are taken from the moderation log."
+        ),
+        sql="""
+        CREATE TABLE post_rejections (
+            post_id              TEXT PRIMARY KEY,
+            board_id             INTEGER NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
+            rejected_by_user_id  INTEGER REFERENCES users(id) ON DELETE SET NULL,
+            rejected_at          TEXT NOT NULL,
+            reason               TEXT
+        );
+
+        -- Rejections made before this table existed are in the moderation
+        -- log (`delete_post` logged each with the post id as its detail).
+        -- Without them the first repair after upgrading would republish
+        -- every post already refused.
+        INSERT OR IGNORE INTO post_rejections (post_id, board_id, rejected_by_user_id, rejected_at)
+        SELECT m.detail, m.object_id, m.actor_user_id, m.created_at
+          FROM moderation_log m
+         WHERE m.action = 'reject' AND m.object_type = 'board' AND m.detail IS NOT NULL
+           AND m.object_id IN (SELECT id FROM boards)
+         ORDER BY m.id;
+
+        -- A refused carried post an earlier repair already brought back is
+        -- taken down again, where nothing depends on it: a root with no
+        -- replies and no revisions (anything else keeps its row, for a
+        -- moderator to remove). Its search entry goes with it.
+        -- An edit with no later edit built on it is taken down the same way,
+        -- and its post's search entry falls back to the version before it.
+        CREATE TEMP TABLE resurrected_rejections AS
+        SELECT p.post_id, p.root_post_id, p.board_id FROM posts p JOIN post_rejections r ON r.post_id = p.post_id
+         WHERE EXISTS (SELECT 1 FROM link_events e WHERE e.content_id = p.post_id)
+           AND NOT EXISTS (SELECT 1 FROM posts c WHERE c.parent_post_id = p.post_id)
+           AND NOT EXISTS (SELECT 1 FROM posts c WHERE c.edit_of_post_id = p.post_id)
+           AND (p.post_id != p.root_post_id
+                OR NOT EXISTS (SELECT 1 FROM posts c WHERE c.root_post_id = p.post_id AND c.post_id != p.post_id));
+        DELETE FROM post_search WHERE root_post_id IN (SELECT root_post_id FROM resurrected_rejections);
+        DELETE FROM posts WHERE post_id IN (SELECT post_id FROM resurrected_rejections);
+        INSERT INTO post_search (subject, body, board_id, root_post_id)
+        SELECT p.subject, netbbs_plain_post_body(p.body), p.board_id, p.root_post_id
+          FROM posts p
+         WHERE p.root_post_id IN (SELECT root_post_id FROM resurrected_rejections)
+           AND p.status = 'approved'
+           AND p.id = (
+               SELECT q.id FROM posts q
+                WHERE q.root_post_id = p.root_post_id AND q.board_id = p.board_id AND q.status = 'approved'
+                ORDER BY q.created_at DESC, q.id DESC
+                LIMIT 1
+           );
+        DROP TABLE resurrected_rejections;
+        """,
+    ),
+    Migration(
+        description=(
             "Issue #777: `descriptor_first_stored_at` on link_peers, link_introduced_identities "
             "and link_peer_candidates -- when this node first stored the descriptor the row now "
             "holds, moved only when the descriptor itself changes. The node map (design doc "
