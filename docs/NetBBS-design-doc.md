@@ -1761,8 +1761,8 @@ is needed for mail; issue #56's mail bullet is already satisfied.
 
 Boards, file areas, and channels need a per-user, per-container **read
 cursor**, not an unbounded per-item flag — per-item read state for a
-potentially unbounded board would itself be an unbounded table. Boards add a
-*bounded* per-post set on top of the cursor (issue #710, below). One new table holds it:
+potentially unbounded board would itself be an unbounded table. One table,
+`user_read_cursors`, holds the cursors, with an
 `(user_id, object_type, object_id)` primary key, where `object_type` is
 `board`/`channel`/`file_area` and `object_id` is that resource's own local
 integer id (the same id `community_id`/category columns already reference —
@@ -1770,18 +1770,22 @@ never the content-addressed `post_id`/`file_id`, which only identifies one
 item, not a container). Its payload is the newest item's ordering key the
 user has already seen:
 
-- boards and file areas already page with a stable `(created_at, post_id)` /
-  `(created_at, file_id)` keyset cursor (the existing `list_posts_page`/
-  file-listing implementation) — the read cursor stores exactly that same
-  tuple shape, so "what's unread" is the identical tuple comparison keyset
-  pagination already performs for `after=`, just anchored at the user's own
-  cursor instead of a page boundary;
+- **boards** work differently since issue #710: a post is read once opened,
+  so a board cursor's arrival id is a *floor* and a second, bounded table
+  (`user_board_opened_posts`) holds the posts opened above it. The model is
+  "Boards: a post is read once it is opened" below; the rest of this list
+  describes file areas and channels;
+- file areas already page with a stable `(created_at, file_id)` keyset
+  cursor (the existing file-listing implementation) — the read cursor
+  stores exactly that same tuple shape, so "what's unread" is the identical
+  tuple comparison keyset pagination already performs for `after=`, just
+  anchored at the user's own cursor instead of a page boundary;
 - channel scrollback has no revision concept and is already ordered by a
   plain monotonic message id, so a channel's cursor is just that id.
 
 An **edit never resets read state**: an edit's root post keeps the original
-`created_at`/`post_id` (§6.1), which is exactly what the cursor comparison
-keys on — a post a user has already scrolled past stays "read" after a later
+`created_at`/`post_id` and row id (§6.1), which is exactly what the read
+state keys on — a post a user has already read stays "read" after a later
 typo fix, matching normal reader expectance. **Expiry and deletion cannot
 corrupt a cursor**: an expired post keeps its `post_id` reachable until
 nothing references it, and even final hard-deletion only ever removes an

@@ -1081,7 +1081,9 @@ async def _show_board(
                 return False
             # A caller's own post is not news to them (issue #710). A held
             # one is recorded too, so it is not new when it is approved.
-            record_post_opened(db, user, board, post)
+            if record_post_opened(db, user, board, post):
+                # The opened-set cap gave other unread posts up as read.
+                unread["count"] = unread_post_count(db, user, board) or 0
             if link_context is not None:
                 queue_board_post_if_linked(db, post, board, node_identity=link_context.node_identity)
             if post.status == "pending":

@@ -425,3 +425,21 @@ def test_a_stale_open_does_not_mark_a_post_that_reused_its_row_id(db, alice, bob
     record_post_opened(db, bob, board, posts[1])
 
     assert replacement.id in unread_post_ids(db, bob, board, [replacement])
+
+
+def test_a_stale_board_does_not_take_a_replacements_read_state(db, alice, bob, monkeypatch):
+    """`boards.id` is reused once the newest board is deleted; a caller
+    still holding the old board must not write read state for the new one
+    (Codex review on #723)."""
+    from netbbs.boards.boards import delete_board
+
+    sysop = create_user(db, "sysop", password="hunter2", user_level=SYSOP_LEVEL)
+    old = create_board(db, "old", creator=alice)
+    delete_board(db, old, deleted_by=sysop)
+    replacement = create_board(db, "replacement", creator=alice)
+    assert replacement.id == old.id  # SQLite reused the row id
+
+    mark_board_read(db, bob, old)
+    ensure_board_baseline(db, bob, old)
+
+    assert unread_post_count(db, bob, replacement) is None  # never visited

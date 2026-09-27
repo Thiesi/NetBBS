@@ -723,3 +723,21 @@ def test_the_new_count_follows_posts_the_cap_gave_up(db, alice, monkeypatch):
     count = unread_post_count(db, alice, board)
     assert count == 2
     assert f"{count} new" in session.screens()[-1]
+
+
+def test_publishing_recounts_when_the_cap_gives_posts_up(db, alice, monkeypatch):
+    from netbbs import activity
+
+    monkeypatch.setattr(activity, "OPENED_POSTS_CAP", 1)
+    board = create_board(db, "general", creator=alice)
+    ensure_board_baseline(db, alice, board)
+    posts = _posts(db, board, alice, 3, monkeypatch)
+    record_post_opened(db, alice, board, posts[2])  # 0 and 1 unread
+    monkeypatch.setattr(posts_module, "utc_now_iso", lambda: "2026-01-02T00:00:00.000000Z")
+    session = FakeSession(["p", "Hello", "Body", "", "p", "b"])
+
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+
+    assert unread_post_count(db, alice, board) == 0
+    last = session.screens()[-1]
+    assert "[M]ark all read" not in last and " new" not in last.split("\n")[1]

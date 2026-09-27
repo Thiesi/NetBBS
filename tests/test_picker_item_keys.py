@@ -130,3 +130,33 @@ def test_the_acted_on_row_stays_highlighted_when_its_outcome_shrinks_the_page():
     ))
 
     assert acted_on and selected == acted_on[0]
+
+
+def test_shifting_the_window_for_the_acted_on_row_skips_no_row():
+    """On a page after the first, the outcome line shifts the window to keep
+    the acted-on row; [P]rev then shows the rows the shift moved off the
+    top, not the page before them (Codex review on #723)."""
+    import re
+
+    from netbbs.net.notices import announce
+
+    names = [f"item {i:02d}" for i in range(60)]
+    session = FakeSession(["n", "UP", "m", "p", "b"])
+
+    async def _mark(item: str):
+        announce(session, f"{item}: done.")
+        return None
+
+    asyncio.run(pick_item(
+        session, names,
+        name_of=lambda item: item,
+        stable_id_of=lambda item: names.index(item) + 1,
+        title="Things",
+        empty_message="Nothing here.",
+        item_keys={"m": _mark},
+    ))
+
+    renders = "".join(session.written).split("Things")
+    second_page_first = re.findall(r"item \d\d", renders[2])[0]
+    after_prev = re.findall(r"item \d\d", renders[-1])
+    assert second_page_first in after_prev

@@ -49,7 +49,7 @@ from netbbs.net.help_overlay import show_help
 from netbbs.rendering.ansi import strip_ansi
 from netbbs.rendering.reflow import wrap_terminal_text
 from netbbs.net.notices import announce, with_notices
-from netbbs.net.session import Session, write_preformatted_line
+from netbbs.net.session import Session, write_preformatted_line, write_prompt
 from netbbs.rendering import (
     ACCENT_COLOR,
     ERROR_COLOR,
@@ -885,6 +885,10 @@ async def pick_item(
         if keep_row is not None:
             if keep_row < len(working_set):
                 if keep_row >= page_start + page_size:
+                    # The rows the shift moves off the top stay reachable:
+                    # [P]rev goes back to the page as it started (Codex
+                    # review on #723).
+                    page_history.append(page_start)
                     page_start = keep_row - page_size + 1
                 highlighted = keep_row - page_start
             keep_row = None
@@ -1455,12 +1459,12 @@ async def pick_item(
                     await session.write(reject_keystroke())
                     continue
                 await session.write_line("")
-                await session.write("Which #: ")
+                await write_prompt(session, "Which #: ")
                 raw = (await session.read_line()).strip()
                 target = next((item for item in items if str(stable_id_of(item)) == raw), None)
                 if target is None:
                     await session.write_line(colored("Out of range.", fg_color=ERROR_COLOR))
-                    await session.write("Choice: ")
+                    await write_prompt(session, "Choice: ")
                     continue
             acted_on = (
                 page_start + highlighted if highlighted is not None and highlighted < len(page_items) else None

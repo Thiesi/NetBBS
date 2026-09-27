@@ -208,7 +208,11 @@ def _board_exists(db: Database, board: Board) -> bool:
     -- a SysOp deletes it mid-visit -- and a read-state write must then do
     nothing rather than recreate rows for a board that is gone (Codex
     review on #723)."""
-    return db.connection.execute("SELECT 1 FROM boards WHERE id = ?", (board.id,)).fetchone() is not None
+    # By its content id too: `boards.id` can be reused once the newest
+    # board is deleted, and a replacement must not take this one's reads.
+    return db.connection.execute(
+        "SELECT 1 FROM boards WHERE id = ? AND board_id = ?", (board.id, board.board_id)
+    ).fetchone() is not None
 
 
 def _newest_visible(db: Database, board: Board, *, by_feed: bool) -> tuple[int, str, str] | None:
