@@ -6474,7 +6474,9 @@ def test_update_screen_reports_newer_release_without_auto_applying(db, lane, sys
     text = _visible(_written_text(session))
     assert "● UPDATE AVAILABLE" in text
     assert "v999.0.0" in text
-    assert "Automatic download/apply is not yet available" in text
+    # A check never installs anything by itself (issue #731); it points at
+    # the key that does.
+    assert "[I]nstall v999.0.0 installs it." in text
     _, outcome = get_last_check_summary(db)
     assert outcome == "newer release available: v999.0.0"
 
