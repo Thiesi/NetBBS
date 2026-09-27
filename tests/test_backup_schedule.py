@@ -701,3 +701,11 @@ def test_standalone_console_refuses_a_destination_inside_the_nodes_identity_dir(
 
     assert backup_root(db, db.path) == db.path.parent / "node_backups"
     assert "identity directory" in _normalized_visible(_written_text(session))
+
+
+def test_a_destination_inside_the_voidrunner_saves_is_refused(db_path, tmp_path):
+    """`create_backup` refuses it, so the setting must too (Codex review)."""
+    saves = tmp_path / "voidrunner-careers" / "sub"
+    saves.mkdir(parents=True)
+    with pytest.raises(BackupScheduleError, match="Voidrunner"):
+        validate_destination(saves, db_path=db_path)

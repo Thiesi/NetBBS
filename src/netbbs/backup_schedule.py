@@ -207,12 +207,18 @@ def validate_destination(
         raise BackupScheduleError(f"{path} is not an existing directory.")
     if not os.access(path, os.W_OK | os.X_OK):
         raise BackupScheduleError(f"The node's account cannot write to {path}.")
+    from netbbs.backup import _door_outbound_root_for, voidrunner_save_directory
+
     resolved = path.resolve()
     # A backup copies these trees; a destination inside one would copy every
-    # earlier backup into each new one.
+    # earlier backup into each new one, and `create_backup` refuses some of
+    # them outright -- so a destination accepted here must be one it takes
+    # (Codex review).
     for tree, what in (
         (db_path.parent / f"{db_path.stem}_files", "the node's file storage"),
         (identity_dir, "the node's identity directory"),
+        (voidrunner_save_directory(db_path)[0], "the Voidrunner save directory"),
+        (_door_outbound_root_for(db_path), "the door outbound receipts"),
     ):
         if tree is not None and (resolved == tree.resolve() or resolved.is_relative_to(tree.resolve())):
             raise BackupScheduleError(f"The destination cannot be inside {what}.")
@@ -256,8 +262,7 @@ def set_destination_setting(db: Database, path: Path | None, *, db_path: Path,
                             identity_dir: Path | None = None) -> None:
     """`None` returns to the default beside the database."""
     if path is None:
-        set_config(db, _DESTINATION_KEY, "")
-        set_config(db, _DESTINATION_DEVICE_KEY, "")
+        _store_destination(db, "", "")
         return
     validate_destination(path, db_path=db_path, identity_dir=identity_dir)
     # Retention deletes a scheduled backup's whole tree; a destination inside
@@ -266,8 +271,19 @@ def set_destination_setting(db: Database, path: Path | None, *, db_path: Path,
     for _, recorded in list_scheduled_backups(db):
         if resolved == recorded.resolve() or resolved.is_relative_to(recorded.resolve()):
             raise BackupScheduleError(f"The destination cannot be inside an earlier backup ({recorded}).")
-    set_config(db, _DESTINATION_KEY, str(path))
-    set_config(db, _DESTINATION_DEVICE_KEY, str(os.stat(path).st_dev))
+    _store_destination(db, str(path), str(os.stat(path).st_dev))
+
+
+def _store_destination(db: Database, path: str, device: str) -> None:
+    # Together or not at all: a destination stored without its device would
+    # switch the unmounted-disk check off (Codex review).
+    with db.connection:
+        for key, value in ((_DESTINATION_KEY, path), (_DESTINATION_DEVICE_KEY, device)):
+            db.connection.execute(
+                "INSERT INTO node_config (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, value),
+            )
 
 
 # -- slots -----------------------------------------------------------------
