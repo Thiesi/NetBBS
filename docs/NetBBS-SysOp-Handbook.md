@@ -799,9 +799,28 @@ log can contain changes not yet written into that file.
 Stop active games before capture; halt companion services. The BBS itself may
 stay running for a supported database backup. From a live SysOp console,
 **Backup → Create backup now** writes a timestamped directory under
-`netbbs_backups/` beside the database. Check the reported path and game coverage.
+`netbbs_backups/` beside the database, or under the destination you set. Check
+the reported path and game coverage.
 
-For a scheduled job or chosen destination, use the installed backup CLI. Run it
+**Backup → Schedule & destination** sets both without a cron job:
+
+- **Frequency** off, daily or weekly, at a **Time** (24-hour, in the node's
+  display timezone) and, for weekly, a **Weekday**. A node that was not running
+  at that time makes one backup when it next starts.
+- **Keep** the newest N scheduled backups (default 7). Older *scheduled* ones
+  are deleted; backups you create yourself, and anything else in the folder,
+  are never touched.
+- **Destination**: an existing folder the node's account can write to, used by
+  every backup. Empty means the default beside the database. A destination that
+  disappears (an unmounted disk) makes the backup fail rather than write to the
+  disk underneath.
+
+The Backup screen and the dashboard show the next run, and the backup history
+lists each scheduled run's outcome, including a skipped one and why. A failed
+run is not retried until the next scheduled time. The running node makes the
+backups; `python -m netbbs.admin` only changes the settings.
+
+For a one-off destination or a script, use the installed backup CLI. Run it
 as an account able to read all node state. **Pin the real Voidrunner path**:
 
 ```sh
@@ -845,8 +864,9 @@ Stop games/services first. A missing or unreadable requested installation fails
 the backup. Symlinks are copied as links, not followed to external data.
 
 **MANUAL — outside NetBBS:** copy completed backups off the machine, protect
-them as secrets, encrypt them if needed, and arrange retention. Backups contain
-private keys and account data. Neither off-site transfer nor rotation is built in.
+them as secrets, and encrypt them if needed. Backups contain private keys and
+account data. Off-site transfer is not built in, and retention covers only the
+schedule's own backups on this machine.
 Also preserve TOML, service configuration, and any game data outside the captured
 paths. Inspect `manifest.json` and the coverage messages before relying on an archive.
 

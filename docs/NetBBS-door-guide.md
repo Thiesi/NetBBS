@@ -174,8 +174,11 @@ The component supports at most 64 worlds, each at most 512 MiB.
 
 **MANUAL — inside NetBBS:** close War Dialer sessions before taking a node backup.
 An idle session still counts. Backup fails clearly if a world is active. The BBS
-itself may remain running. **MANUAL — outside NetBBS:** recurring backups and
-retention remain operator/cron jobs; use the same service environment and account.
+itself may remain running. Recurring backups and their retention can be set on
+the Backup screen (**Schedule & destination**); a scheduled run that finds a
+world active is skipped and recorded, and the next scheduled time is its retry.
+If you drive backups from cron instead, use the same service environment and
+account.
 
 **MANUAL — outside NetBBS, verified restore:**
 

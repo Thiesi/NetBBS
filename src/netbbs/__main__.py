@@ -23,6 +23,7 @@ from pathlib import Path
 
 from netbbs.auth.users import count_sysops
 from netbbs.backup import remove_pid_file, write_pid_file
+from netbbs.backup_schedule import run_backup_scheduler
 from netbbs.chat import ChatHub, DirectChatInvites, MessageMailbox, PresenceRegistry
 from netbbs.config import is_node_display_name_placeholder
 from netbbs.files.storage import purge_incoming_staging
@@ -735,6 +736,26 @@ async def run(
             )
 
     update_check_task.add_done_callback(_log_update_check_failure)
+
+    # Issue #727: the node runs the SysOp's backup schedule itself (off by
+    # default) instead of the SysOp keeping a cron job beside it. Same
+    # "general node maintenance, runs regardless of Link" shape as the two
+    # tasks above; a pass that is creating a backup when shutdown comes is
+    # left to finish rather than cut off (see `run_backup_scheduler`).
+    backup_schedule_task = asyncio.create_task(run_backup_scheduler(config.db_path, config.identity_dir))
+
+    def _log_backup_schedule_failure(task: asyncio.Task) -> None:
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            _logger.error(
+                "backup scheduler task failed -- scheduled backups will not run again this node "
+                "uptime (Create backup now is unaffected)",
+                exc_info=exc,
+            )
+
+    backup_schedule_task.add_done_callback(_log_backup_schedule_failure)
 
     # Issue #201: same "runs regardless of Link configuration, general
     # node maintenance" shape as update_check_task just above -- managed-
@@ -1461,6 +1482,7 @@ async def run(
 
         await _drain_immediately(daybreak_task)
         await _drain_immediately(update_check_task)
+        await _drain_immediately(backup_schedule_task)
         # A single heartbeat call is quick, idempotent, and retry-safe
         # (worst case, cutting it off mid-flight just means "this pass's
         # heartbeat didn't complete, the next one retries") -- none of

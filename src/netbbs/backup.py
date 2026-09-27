@@ -207,10 +207,11 @@ def _database_filename_from_manifest(manifest: dict) -> str:
     return _validate_database_filename(manifest.get("database_filename", _LEGACY_DB_FILENAME))
 
 
-def default_backup_destination(db_path: Path, *, created_at: str | None = None) -> Path:
+def default_backup_destination(db_path: Path, *, created_at: str | None = None, root: Path | None = None) -> Path:
     """Return a fresh, human-readable destination for an in-session backup.
 
-    Managed backups live beside the database under ``<db-stem>_backups``.
+    Managed backups live beside the database under ``<db-stem>_backups``,
+    or under ``root`` when the SysOp configured a destination (issue #727).
     A numeric suffix avoids reusing an existing directory when two backups
     share a timestamp; :func:`create_backup` remains the final atomic guard
     against a concurrent creator winning the same path.
@@ -220,7 +221,8 @@ def default_backup_destination(db_path: Path, *, created_at: str | None = None) 
     if instant.tzinfo is None:
         instant = instant.replace(tzinfo=timezone.utc)
     timestamp = instant.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    root = db_path.parent / f"{db_path.stem}_backups"
+    if root is None:
+        root = db_path.parent / f"{db_path.stem}_backups"
     base = root / f"backup-{timestamp}"
     destination = base
     suffix = 2
@@ -1082,7 +1084,7 @@ def _discard_incomplete_backup(destination: Path, exc: BaseException) -> None:
 
 
 def create_backup(*, db_path: Path, identity_dir: Path, destination: Path,
-                  voidrunner_save_dir: Path | None = None) -> Path:
+                  voidrunner_save_dir: Path | None = None, trigger: str = "manual") -> Path:
     """
     Create a complete, self-contained backup of one node's recoverable
     state at `destination` (created fresh -- refuses if it already
@@ -1111,6 +1113,9 @@ def create_backup(*, db_path: Path, identity_dir: Path, destination: Path,
     (`netbbs.files.storage`'s own layout), so restore verifies it by
     recomputing and comparing against the filename, not against
     anything recorded here.
+
+    `trigger` is `"manual"` or `"scheduled"` (issue #727); it only labels
+    the run in the node's backup history.
 
     Returns `destination`.
     """
@@ -1230,7 +1235,7 @@ def create_backup(*, db_path: Path, identity_dir: Path, destination: Path,
         _discard_incomplete_backup(destination, exc)
         raise
 
-    _record_backup_state(db_path, destination)
+    _record_backup_state(db_path, destination, trigger=trigger)
     return destination
 
 
@@ -1242,7 +1247,7 @@ def _read_user_version(db_path: Path) -> int:
         connection.close()
 
 
-def _record_backup_state(db_path: Path, destination: Path) -> None:
+def _record_backup_state(db_path: Path, destination: Path, *, trigger: str = "manual") -> None:
     """Best-effort: opening a full `Database` here (unlike the rest of
     this module) is deliberate, since `netbbs.config`'s key-value
     helpers need one -- but a failure to record this bookkeeping must
@@ -1262,7 +1267,8 @@ def _record_backup_state(db_path: Path, destination: Path) -> None:
                         (_LAST_BACKUP_PATH_CONFIG_KEY, str(destination)),
                     ),
                 )
-            record_operational_run(db, "backup", "succeeded", detail=str(destination))
+            outcome = "succeeded" if trigger == "manual" else f"succeeded ({trigger})"
+            record_operational_run(db, "backup", outcome, detail=str(destination))
         finally:
             db.close()
     except Exception:

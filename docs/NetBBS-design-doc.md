@@ -4687,13 +4687,47 @@ operation, never a DB-only one.
 `python -m netbbs.backup {create,restore}` CLI in the same spirit as
 `python -m netbbs.admin`. `create_backup` is also exposed through the live
 SysOp `[K] Backup` screen: it uses the running node's effective database and
-identity paths, chooses a fresh timestamped directory under
-`db_path.parent / f"{db_path.stem}_backups"`, requires confirmation, and runs
+identity paths, chooses a fresh timestamped directory under the backup
+destination -- `db_path.parent / f"{db_path.stem}_backups"` unless the SysOp
+configured another directory (issue #727) -- requires confirmation, and runs
 the blocking snapshot/copy work off the asyncio event loop. The CLI remains
-the path-selectable, cron-schedulable entry point. There is no built-in
-scheduler; recurring backups are still driven by cron or another external
-operator trigger. Restore remains CLI-only and offline because it replaces
-the node's state.
+the path-selectable, scriptable entry point. Restore remains CLI-only and
+offline because it replaces the node's state.
+
+**Scheduled backups (issue #727).** The node itself can run backups on a
+schedule the SysOp sets on the Backup screen: off (the default), daily, or
+weekly on one weekday, at a wall-clock time in the node's display timezone.
+This is a deliberate exception to "maintenance runs only when a SysOp asks"
+(the repair and GC screens), for the same reason the release check is one: a
+backup nobody remembers to take is the failure it exists to prevent, and the
+alternative was a cron job every SysOp had to write and keep beside the node.
+The rules:
+
+- A *slot* is one scheduled moment, handled at most once whatever its
+  outcome. A failed or skipped slot (an active War Dialer world, a missing
+  identity directory, a destination that has gone) is recorded in the backup
+  history and not retried; the next slot is the retry.
+- A node that was down across one or more slots makes exactly one catch-up
+  backup when it next runs. Saving a changed schedule counts from that
+  moment, so switching one on never fires for a slot already in the past.
+- Retention keeps the newest N (default 7) of the schedule's *own* backups.
+  Each is recorded in `scheduled_backups` when it succeeds, and only recorded
+  directories that still hold a manifest are ever deleted; a manual backup,
+  or anything else in the destination, is never touched. A failed deletion is
+  reported and retried on the next pass.
+- The destination, when set, is an existing absolute directory the node can
+  write to, outside the file storage and identity trees a backup copies. It
+  is never created: a destination that has disappeared (an unmounted disk)
+  fails the backup rather than filling the disk beneath it.
+- Scheduled runs follow the same Door installations toggle as manual ones.
+- A pass runs in a worker thread with its own database handle. Shutdown does
+  not cut a running backup off: the task's cancellation leaves the worker to
+  finish (and logs its outcome), so the process exits once the backup is
+  complete rather than leaving a half-written directory.
+- The standalone `python -m netbbs.admin` edits the schedule but does not
+  run it.
+
+Copying backups off the machine, and encrypting them, remain the SysOp's.
 
 `create_backup(*, db_path, identity_dir, destination)`:
 

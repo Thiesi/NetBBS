@@ -3008,4 +3008,20 @@ MIGRATIONS = [
         );
         """,
     ),
+    Migration(
+        description=(
+            "Issue #727: `scheduled_backups` records every backup the node's own backup "
+            "schedule created, so retention can delete old ones without ever touching a "
+            "manual backup or anything else in the destination directory. A row is written "
+            "only after its backup succeeded, and removed when retention deletes the "
+            "directory (or finds it already gone)."
+        ),
+        sql="""
+        CREATE TABLE scheduled_backups (
+            id          INTEGER PRIMARY KEY,
+            path        TEXT NOT NULL UNIQUE,
+            created_at  TEXT NOT NULL
+        );
+        """,
+    ),
 ]

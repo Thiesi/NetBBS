@@ -98,6 +98,23 @@ from netbbs.backup import (
     voidrunner_save_directory,
     get_last_backup_summary,
 )
+from netbbs.backup_schedule import (
+    FREQUENCIES as BACKUP_FREQUENCIES,
+    MAX_KEEP as BACKUP_MAX_KEEP,
+    WEEKDAY_NAMES,
+    BackupSchedule,
+    BackupScheduleError,
+    backup_root,
+    default_backup_root,
+    get_destination_setting as get_backup_destination_setting,
+    load_schedule as load_backup_schedule,
+    parse_time as parse_backup_time,
+    save_schedule as save_backup_schedule,
+    schedule_status,
+    set_destination_setting as set_backup_destination_setting,
+    validate_destination as validate_backup_destination,
+    validate_schedule as validate_backup_schedule,
+)
 from netbbs.managed_dns.state import (
     get_node_fingerprint as get_cached_node_fingerprint,
     get_admin_token as get_managed_dns_admin_token,
@@ -732,6 +749,17 @@ def _get_display_backup_summary(db: Database) -> tuple[str | None, str | None]:
     )
 
 
+def _get_display_next_backup(db: Database) -> str | None:
+    """When the backup schedule runs next, for display; `None` while it is off
+    (issue #727)."""
+    status = schedule_status(db)
+    if not status.schedule.enabled:
+        return None
+    if status.overdue:
+        return "due now"
+    return format_for_display(status.next_run.isoformat(), db) if status.next_run else None
+
+
 async def _load_condensed_status_line(lane: DatabaseLane, *, unicode_style: bool, terminal_width: int) -> str:
     """DB-only backup context (GitHub issue #206) for every screen in this
     module that doesn't already show the richer full panel Users/Content/
@@ -1328,6 +1356,7 @@ async def _draw_admin_menu(
             "total_files": sum(count_visible_files(db, area)[0] for area in all_areas),
             **_link_health_snapshot(db, link_context),
             "backup": _get_display_backup_summary(db),
+            "next_backup": _get_display_next_backup(db),
             "update": get_display_check_summary(db),
             "description_level": menu_description_level(db, actor),
             "redraw_in_place": redraw_in_place_enabled(db, actor),
@@ -1452,6 +1481,8 @@ async def _draw_admin_menu(
         "  Backup: "
         + (sanitize_text(_fit(backup_at, 10)) if backup_at else colored("never", fg_color=WARNING_COLOR))
     )
+    if state.get("next_backup") is not None:
+        health.append("  Next backup: " + sanitize_text(_fit(state["next_backup"], 15)))
     health.append(
         "  Update check: "
         + (
@@ -1612,11 +1643,21 @@ def _compact_dashboard_panel(
     def _fit(text: str, used: int) -> str:
         return cut_to_width(text, max(1, width - used)) if unicode_style else text
 
-    panel.append(
-        _label("BACKUP")
-        + (colored(sanitize_text(_fit(backup_at, label_width)), fg_color=VALUE_COLOR) if backup_at
-           else colored("never", fg_color=WARNING_COLOR))
-    )
+    # Issue #727: with a schedule on, the same row says when the next one
+    # runs, rather than a row of its own on the screen with least room.
+    next_backup = state.get("next_backup")
+    if next_backup is not None:
+        backup_value = f"{backup_at or 'never'}  next {next_backup}"
+        panel.append(
+            _label("BACKUP")
+            + colored(sanitize_text(_fit(backup_value, label_width)), fg_color=VALUE_COLOR if backup_at else WARNING_COLOR)
+        )
+    else:
+        panel.append(
+            _label("BACKUP")
+            + (colored(sanitize_text(_fit(backup_at, label_width)), fg_color=VALUE_COLOR) if backup_at
+               else colored("never", fg_color=WARNING_COLOR))
+        )
     panel.append(
         _label("UPDATES")
         + (colored(sanitize_text(_fit(update_outcome or update_at or "completed", label_width)), fg_color=VALUE_COLOR)
@@ -6455,10 +6496,13 @@ async def _backup_status_screen(
             ),
         ]))
 
+        sections.append(await _backup_schedule_section(lane, db_path, standalone=not can_create))
+
         if can_create:
             actions = [
                 ("c", menu_key("C", "reate backup now")),
                 ("d", menu_key("D", "oor installations: " + ("on" if installs_on else "off"))),
+                ("s", menu_key("S", "chedule & destination")),
                 _BACK_ACTION,
             ]
         else:
@@ -6466,7 +6510,7 @@ async def _backup_status_screen(
                 "Live backup creation is unavailable in standalone admin. "
                 "Run 'python -m netbbs.backup create --to <path>' instead."
             )]))
-            actions = [_BACK_ACTION]
+            actions = [("s", menu_key("S", "chedule & destination")), _BACK_ACTION]
 
         choice, page = await show_detail(
             session,
@@ -6479,6 +6523,9 @@ async def _backup_status_screen(
         )
         if choice == "b":
             return
+        if choice == "s":
+            await _backup_schedule_editor(session, lane, actor, db_path=db_path, identity_dir=identity_dir)
+            continue
         if choice == "d":
             # A toggle toggles (AGENTS.md, design doc §3.5). The setting is
             # reversible and changes nothing until the next backup runs, so it
@@ -6493,7 +6540,21 @@ async def _backup_status_screen(
                 )
             )
             continue
-        destination = default_backup_destination(db_path)
+        root = await lane.run(backup_root, db_path)
+        if root != default_backup_root(db_path):
+            # A configured destination that has since gone (an unmounted
+            # disk) must not be recreated as an empty directory on the disk
+            # underneath it.
+            try:
+                validate_backup_destination(root, db_path=db_path, identity_dir=identity_dir)
+            except BackupScheduleError as exc:
+                _announce_styled(
+                    session,
+                    status_badge("BACKUP FAILED", tone="error", unicode_style=unicode_style)
+                    + " " + colored(sanitize_text(str(exc)), fg_color=ERROR_COLOR),
+                )
+                continue
+        destination = default_backup_destination(db_path, root=root)
         await session.write_line(
             "\r\n"
             + colored("Destination: ", fg_color=LABEL_COLOR)
@@ -6545,6 +6606,151 @@ async def _backup_status_screen(
                     session, "The backup completed, but its SysOp audit entry could not be recorded.",
                     color=WARNING_COLOR,
                 )
+
+
+async def _backup_schedule_section(lane: DatabaseLane, db_path: Path, *, standalone: bool) -> Section:
+    """The schedule, when it runs next, what it keeps, and where backups go
+    (issue #727)."""
+
+    def _load(db: Database):
+        return schedule_status(db), get_backup_destination_setting(db)
+
+    status, configured = await lane.run(_load)
+    schedule = status.schedule
+    rows: list[Field | Note | Table] = [Field("Schedule", schedule.describe(), bold=schedule.enabled)]
+    if schedule.enabled:
+        if status.overdue:
+            next_text = "due now -- runs within a minute of the node running"
+        elif status.next_run is not None:
+            next_text = await lane.run(lambda db: format_for_display(status.next_run.isoformat(), db))
+        else:
+            next_text = "--"
+        rows.append(Field("Next run", next_text, color=DATE_COLOR))
+        rows.append(Field("Keeps", f"the newest {schedule.keep} scheduled backups"))
+    rows.append(Field(
+        "Destination", str(configured or default_backup_root(db_path)), color=METADATA_COLOR,
+        note=None if configured else "the default, beside the database",
+    ))
+    if schedule.enabled:
+        rows.append(Note(
+            "Only backups the schedule made are ever deleted, and only past the newest "
+            + str(schedule.keep) + ". Backups you create yourself are kept until you remove them."
+        ))
+    if standalone:
+        rows.append(Note(
+            "The running node makes scheduled backups; this console only changes the settings."
+        ))
+    return Section("Schedule", rows)
+
+
+async def _backup_schedule_editor(
+    session: Session, lane: DatabaseLane, actor: User, *, db_path: Path, identity_dir: Path | None,
+) -> None:
+    """Draft editor for the backup schedule and destination (issue #727).
+
+    Nothing is written before `[S]ave`. Saving a changed schedule counts from
+    that moment, so switching it on never fires for a slot already past."""
+    current, configured = await lane.run(
+        lambda db: (load_backup_schedule(db), get_backup_destination_setting(db))
+    )
+    draft: dict = {
+        "frequency": current.frequency,
+        "time": current.time_text,
+        "weekday": current.weekday,
+        "keep": current.keep,
+        "destination": str(configured) if configured else "",
+    }
+
+    fields = [
+        FieldSpec(
+            key="frequency", hotkey="f", menu_text=menu_key("F", "requency"), label="Frequency",
+            render=lambda d: d["frequency"],
+            prompt=choice_field("frequency", list(BACKUP_FREQUENCIES)),
+            step=choice_step("frequency", list(BACKUP_FREQUENCIES)),
+            brief="Off, daily or weekly",
+            help="Off makes no scheduled backups. Daily and weekly run at the time below, in the node's display timezone.",
+        ),
+        FieldSpec(
+            key="time", hotkey="t", menu_text=menu_key("T", "ime"), label="Time",
+            render=lambda d: d["time"], prompt=text_field("time"),
+            brief="24-hour, node's timezone",
+            help=(
+                "The wall-clock time the backup starts, as HH:MM on a 24-hour clock, in the node's "
+                "display timezone (Settings, Timestamp format). A node that was not running then "
+                "makes one backup when it next starts."
+            ),
+        ),
+        FieldSpec(
+            key="weekday", hotkey="w", menu_text=menu_key("W", "eekday"), label="Weekday (weekly)",
+            render=lambda d: WEEKDAY_NAMES[d["weekday"]],
+            prompt=choice_field("weekday", list(range(7))), step=choice_step("weekday", list(range(7))),
+            brief="Which day a weekly one runs",
+        ),
+        FieldSpec(
+            key="keep", hotkey="k", menu_text=menu_key("K", "eep"), label="Keep",
+            render=lambda d: f"newest {d['keep']} scheduled backups",
+            prompt=_int_field("keep", f"Scheduled backups to keep (1-{BACKUP_MAX_KEEP})"),
+            brief="Older scheduled ones are deleted",
+            help=(
+                "After each scheduled backup, older scheduled backups beyond this many are deleted. "
+                "Only backups the schedule itself made are ever deleted; backups made with Create "
+                "backup now, or anything else in the destination, are never touched."
+            ),
+        ),
+        FieldSpec(
+            key="destination", hotkey="d", menu_text=menu_key("D", "estination"), label="Destination",
+            render=lambda d: d["destination"] or f"(default) {default_backup_root(db_path)}",
+            prompt=_optional_text_field("destination"),
+            brief="Folder for every backup",
+            help=(
+                "An existing directory the node's account can write to, as an absolute path. Both "
+                "Create backup now and scheduled backups go there. Empty returns to the default "
+                "beside the database. This is still on this machine: copy backups off it yourself."
+            ),
+        ),
+    ]
+
+    async def save(draft: dict) -> bool:
+        hour, minute = parse_backup_time(draft["time"])
+        candidate = BackupSchedule(
+            frequency=draft["frequency"], hour=hour, minute=minute,
+            weekday=int(draft["weekday"]), keep=int(draft["keep"]),
+        )
+        validate_backup_schedule(candidate)
+        raw_destination = (draft["destination"] or "").strip()
+        destination = Path(raw_destination) if raw_destination else None
+
+        def _persist(db: Database) -> bool:
+            if destination is not None:
+                validate_backup_destination(destination, db_path=db_path, identity_dir=identity_dir)
+            schedule_changed = candidate != load_backup_schedule(db)
+            if schedule_changed:
+                save_backup_schedule(db, candidate)
+            set_backup_destination_setting(db, destination, db_path=db_path, identity_dir=identity_dir)
+            record_action(
+                db, actor=actor, action="set_backup_schedule",
+                detail=f"schedule={candidate.describe()} keep={candidate.keep} "
+                       f"destination={destination or 'default'}",
+            )
+            return schedule_changed
+
+        await lane.run(_persist)
+        _announce_line(session, f"Backup schedule: {candidate.describe()}.")
+        return True
+
+    await edit_resource_draft(
+        session, lane,
+        title="Backup schedule",
+        subtitle="Scheduled backups, how many to keep, and where backups go.",
+        fields=fields, draft=draft, save=save, error_type=BackupScheduleError,
+        save_menu_text=menu_key("S", "ave"), back_menu_text=menu_key("B", "ack"),
+        description_level=await lane.run(menu_description_level, actor),
+        redraw_in_place=await lane.run(redraw_in_place_enabled, actor),
+        unicode_style=await lane.run(unicode_style_enabled, actor),
+        collapsed=await lane.run(breadcrumb_collapsed_enabled, actor),
+        accent_color=await lane.run(effective_accent_color_256),
+        header_color=await lane.run(effective_header_color_256),
+    )
 
 
 _MANAGED_DNS_ACTIVE_STATUSES = (ManagedDnsRegistrationStatus.PENDING, ManagedDnsRegistrationStatus.MATURED)
