@@ -933,7 +933,7 @@ def test_a_recovered_art_draft_too_big_for_the_terminal_is_kept_not_opened(db, a
     canvas = ScreenBuffer(80, 5)
     parse_ansi_into_buffer("#" * 70, canvas)
     draft.write_bytes(encode_ansi_bytes(canvas))
-    session = FakeSession(["a", "Drawing", "b"], width=50, height=24)
+    session = FakeSession(["a", "r", "Drawing", "b"], width=50, height=24)
 
     asyncio.run(board_flow._show_board(session, db, board, alice))
 
@@ -1076,3 +1076,52 @@ def test_the_migration_restores_art_posts_carried_before_the_upgrade(tmp_path, m
         assert layouts[edit.post_id] == "art"
     finally:
         upgraded.close()
+
+
+def _art_draft(db, board, user, text):
+    from netbbs.rendering import ScreenBuffer, encode_ansi_bytes, parse_ansi_into_buffer
+
+    draft = board_flow._post_draft_path(db, kind="art", board=board, user=user)
+    draft.parent.mkdir(parents=True, exist_ok=True)
+    canvas = ScreenBuffer(80, 5)
+    parse_ansi_into_buffer(text, canvas)
+    draft.write_bytes(encode_ansi_bytes(canvas))
+    return draft
+
+
+def test_an_art_draft_is_offered_first_and_enter_does_not_discard_it(db, alice):
+    """Resume, Discard or Back, before the subject; no unlabeled default
+    throws the drawing away (Codex review on #753)."""
+    board = create_board(db, "general", creator=alice, allow_color=True)
+    draft = _art_draft(db, board, alice, "saved")
+    session = FakeSession(["a", "\r", "b", "b"])
+
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+
+    assert "You have a saved drawing" in session.visible()
+    assert draft.exists()
+
+
+def test_a_resumed_art_draft_opens_in_the_editor(db, alice, monkeypatch):
+    board = create_board(db, "general", creator=alice, allow_color=True)
+    _art_draft(db, board, alice, "saved")
+    seen = {}
+
+    async def _editor(session, *, initial_bytes, offer_recovery, **kwargs):
+        seen["canvas"], seen["offer_recovery"] = initial_bytes.decode("utf-8"), offer_recovery
+        return None
+
+    monkeypatch.setattr(board_flow, "edit_ansi_art", _editor)
+    session = FakeSession(["a", "r", "Drawing", "b"])
+
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+
+    assert "saved" in seen["canvas"] and seen["offer_recovery"] is False
+
+
+def test_search_indexes_an_art_posts_signature_as_post_text(db, alice):
+    board = create_board(db, "general", creator=alice, allow_color=True)
+    create_post(db, board, alice, "Drawn", "A|12B\x1b[0m\n-- \n|12Alice", layout="art")
+
+    indexed = db.connection.execute("SELECT body FROM post_search").fetchone()[0]
+    assert indexed == "A|12B\n-- \nAlice"

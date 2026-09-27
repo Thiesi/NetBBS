@@ -552,7 +552,12 @@ def indexed_post_body(body: str, layout: str) -> str:
     """What search indexes for a body: its plain text -- and for an art
     post, whose characters are what was painted, pipe-code-shaped text
     stays (Codex review on #753)."""
-    return post_body_text(body) if layout == "art" else plain_post_body(body)
+    if layout != "art":
+        return plain_post_body(body)
+    # The signature under a drawing is post text, indexed as the reader
+    # shows it (Codex review on #753).
+    drawing, signature = split_signature(body)
+    return post_body_text(drawing) + (plain_post_body(signature) if signature else "")
 
 
 def art_body_rows(rendered: str, width: int) -> list[str]:

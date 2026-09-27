@@ -1114,14 +1114,18 @@ async def _show_board(
         discard_buffered_enter = getattr(session, "discard_buffered_enter", None)
         if discard_buffered_enter is not None:
             await discard_buffered_enter()
+        draft_path = _post_draft_path(db, kind="art", board=board, user=user)
+        choice = await _art_draft_choice(session, db, user, draft_path)
+        if choice == "back":
+            return False
+        resumed = _recovered_drawing(draft_path) if choice == "resume" else None
         await session.write_line("")
         await write_prompt(session, "Subject (or press Enter to cancel): ")
         subject = (await session.read_line()).strip()
         if not subject:
             announce(session, "Post cancelled.", tone="muted")
             return False
-        draft_path = _post_draft_path(db, kind="art", board=board, user=user)
-        body = await _draw_body(session, db, user, initial_text=None, draft_path=draft_path)
+        body = await _draw_body(session, db, user, initial_text=resumed, draft_path=draft_path)
         if body is None:
             announce(session, "Post cancelled.", tone="muted")
             return True
@@ -1471,6 +1475,15 @@ async def _edit_existing_post(
     art = post.layout == "art"
     if art and _art_canvas(session, split_signature(post.body)[0]) is None:
         return  # said why; asked nothing
+    initial_body = post.body
+    if art:
+        art_draft = _post_draft_path(db, kind="art_edit", board=board, user=user, root_post_id=post.root_post_id)
+        choice = await _art_draft_choice(session, db, user, art_draft)
+        if choice == "back":
+            return
+        if choice == "resume":
+            # The drawing from the draft, under this post's own signature.
+            initial_body = _recovered_drawing(art_draft) + split_signature(post.body)[1]
 
     subject = await read_prefilled_field(session, "Subject", post.subject)
 
@@ -1479,7 +1492,7 @@ async def _edit_existing_post(
     )
     draft_saved_notice = "Draft saved -- you'll be offered it next time you edit this post."
     editor = _draw_body if art else _compose_body
-    body = await editor(session, db, user, initial_text=post.body, draft_path=edit_draft_path)
+    body = await editor(session, db, user, initial_text=initial_body, draft_path=edit_draft_path)
     if body is None:
         # Issue #149: /exit or /quit leaves this revision's draft on
         # disk instead of deleting it -- same distinguishing check as
@@ -1730,6 +1743,47 @@ def _art_canvas(session: Session, drawing: str | None) -> tuple[int, int] | None
     return width, height
 
 
+async def _art_draft_choice(session: Session, db: Database, user: User, draft_path: Path) -> str:
+    """An art draft left by an earlier session, offered before anything
+    else is asked: ``"resume"``, ``"discard"`` (deleted, and said so), or
+    ``"back"``; ``"none"`` when there is no draft. A drawing is never lost
+    to an unlabeled default (Codex review on #753)."""
+    if not draft_path.exists():
+        return "none"
+    await session.write_line(colored(
+        "\r\nYou have a saved drawing from an earlier session.", fg_color=MUTED_COLOR
+    ))
+    await session.write_line(menu_row(
+        [
+            MenuEntry(label=menu_key("R", "esume"), brief="Open it in the art editor"),
+            MenuEntry(label=menu_key("D", "iscard"), brief="Delete it and start over"),
+            MenuEntry(label=menu_key("B", "ack"), brief="Leave it for later"),
+        ],
+        width=session.terminal_width, height=session.terminal_height,
+        description_level=menu_description_level(db, user),
+    ))
+    await write_prompt(session, "Choice: ")
+    while True:
+        choice = (await session.read_key()).lower()
+        if choice == "r":
+            await session.write_line("")
+            return "resume"
+        if choice == "d":
+            await session.write_line("")
+            delete_draft(draft_path)
+            announce(session, "Drawing deleted.", tone="muted")
+            return "discard"
+        if choice == "b":
+            await session.write_line("")
+            return "back"
+        await session.write(reject_unhandled_key(choice))
+
+
+def _recovered_drawing(draft_path: Path) -> str:
+    """The drawing an art draft holds, as a body."""
+    return art_body_from_editor(draft_path.read_bytes())
+
+
 async def _draw_body(
     session: Session, db: Database, user: User, *, initial_text: str | None, draft_path: Path
 ) -> str | None:
@@ -1750,11 +1804,11 @@ async def _draw_body(
         # tabs are one column as a reader sees them (Codex review on #753).
         initial_text, signature_block = split_signature(initial_text)
         initial_text = styled_post_body(initial_text, pipe_codes=False).replace("\t", " ")
-    # The editor resumes a draft it autosaved in place of `initial_text`;
-    # that draft must fit this terminal just the same (Codex review on #753).
-    recovered = art_body_from_editor(draft_path.read_bytes()) if draft_path.exists() else None
+    # A saved draft is the caller's to offer (`_art_draft_choice`), so the
+    # editor never asks -- or discards one on a bare Enter (Codex review on
+    # #753). A resumed draft arrives as `initial_text`, checked like any.
     canvas = _art_canvas(session, initial_text)
-    if canvas is None or (recovered and _art_canvas(session, recovered) is None):
+    if canvas is None:
         return None
     width, height = canvas
     initial_bytes = initial_text.replace("\n", "\r\n").encode("utf-8") if initial_text else None
@@ -1767,6 +1821,7 @@ async def _draw_body(
         redraw_in_place=redraw_in_place_enabled(db, user),
         unicode_style=unicode_style_enabled(db, user),
         collapsed=breadcrumb_collapsed_enabled(db, user),
+        offer_recovery=False,
     )
     if data is None:
         return None

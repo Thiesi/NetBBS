@@ -708,3 +708,19 @@ def test_a_recovered_draft_is_read_as_the_cp437_the_editor_wrote(tmp_path):
 
     saved = asyncio.run(scenario())
     assert saved.decode("cp437").startswith("\x1b[0m\u251c\u2310")
+
+
+
+def test_without_recovery_the_editor_asks_nothing_and_keeps_the_draft(tmp_path):
+    draft = tmp_path / "d.draft"
+    draft.write_bytes(b"DRAFT")
+
+    async def scenario():
+        session = FakeSession(["CTRL+X"])  # nothing changed: quit without asking
+        return await edit_ansi_art(
+            session, initial_bytes=b"GIVEN", draft_path=draft, autosave_interval_seconds=9999,
+            offer_recovery=False,
+        )
+
+    assert asyncio.run(scenario()) is None
+    assert draft.exists()

@@ -138,6 +138,7 @@ async def edit_ansi_art(
     redraw_in_place: bool = False,
     unicode_style: bool = False,
     collapsed: bool = False,
+    offer_recovery: bool = True,
 ) -> bytes | None:
     """
     Run a WYSIWYG ANSI art editing session against `session`, returning
@@ -151,16 +152,21 @@ async def edit_ansi_art(
     (`SessionClosedError` propagating out of a key read) leaves it in
     place -- that's the recovery path working as intended, not a bug
     to catch.
+
+    `offer_recovery` False leaves the draft decision to a caller that has
+    already made it with its own Resume/Discard/Back choice (a board's art
+    post, issue #711): nothing is asked, `initial_bytes` is loaded, and a
+    draft on disk stays until this session's autosave or save replaces it.
     """
     buffer = ScreenBuffer(width, height)
 
     loaded_bytes: bytes | None = None
     from_draft = False
-    if draft_path.exists() and await _offer_draft_recovery(session):
+    if offer_recovery and draft_path.exists() and await _offer_draft_recovery(session):
         loaded_bytes = draft_path.read_bytes()
         from_draft = True
     else:
-        if draft_path.exists():
+        if offer_recovery and draft_path.exists():
             draft_path.unlink()
         loaded_bytes = initial_bytes
 
