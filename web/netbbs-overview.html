@@ -256,7 +256,7 @@
         <div class="cat">
           <h3>Doors &amp; games</h3>
           <ul>
-            <li><b>Sandboxed door API</b> — subprocess isolation, enforced CPU/memory/process limits, no shell access.</li>
+            <li><b>Door runtime</b> — each door is its own subprocess, started without a shell, under enforced CPU, memory, time and process limits. Those are resource limits, not a sandbox: a native door can read what the service account can, so install only doors you trust.</li>
             <li><b>Classic DOS doors</b> — LORD, TradeWars 2002 and Global War through an operator-installed DOSBox-X, over an emulated serial/FOSSIL link.</li>
             <li><b>Native and remote</b> — stdio, a controlling terminal, a private DOOR32 socket, or an allowlisted remote door service.</li>
             <li><b>Doors from other platforms</b> — a door built for another operating system runs in its own qemu guest per caller, with no network and only two shared directories. POSIX hosts only.</li>
