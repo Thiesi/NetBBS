@@ -44,10 +44,11 @@ def sysop(db):
     return create_user(db, "sysop", password="hunter2", user_level=SYSOP_LEVEL)
 
 
-def _record(identity, *, name: str) -> PeerRecord:
+def _record(identity, *, name: str, dial_in=None) -> PeerRecord:
     descriptor = build_endpoint_descriptor(
         signing_identity=identity.signing_key, subject_fingerprint=identity.fingerprint,
         addresses=None, outgoing_only=True, created_at="2026-09-01T00:00:00+00:00", friendly_name=name,
+        dial_in=dial_in,
     )
     return PeerRecord(
         fingerprint=identity.fingerprint, root_public_key=bytes(identity.root.verify_key),
@@ -139,3 +140,24 @@ def test_the_node_map_level_refuses_a_level_above_sysop(db, lane, sysop):
 
     assert "Node map level must be 0-255." in _visible(_written_text(session))
     assert get_node_map_min_level(db) == 0
+
+
+def test_the_sysop_detail_shows_dial_in_addresses_and_drops_bad_ones(db, lane, sysop):
+    link_context = _link_context()
+    peer = bootstrap_node_identity("peer")
+    save_peer(db, _record(peer, name="Harbor BBS", dial_in=[
+    "telnet://harbor.example.org:23",
+    "http://plain.example.org/",
+    "telnet://evil.example.org:23\x1b]0;pwned\x07",
+    "https://harbor.example.org/web",
+]))
+
+    session = FakeSession(["s", "l", "p", "0", "1", "b", "b", "b", "b", "b"])
+    session.terminal_height = 60
+    asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
+
+    raw = _written_text(session)
+    detail = _detail(_visible(raw), "Harbor BBS")
+    assert "DIAL IN Address: telnet://harbor.example.org:23 Address: https://harbor.example.org/web" in detail
+    assert "plain.example.org" not in detail and "evil.example.org" not in detail
+    assert "pwned" not in raw and "\x1b]" not in raw

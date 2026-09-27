@@ -23,6 +23,7 @@ from netbbs.communities import get_effective_min_age, get_effective_min_read_lev
 from netbbs.config import get_node_display_name, get_node_map_min_level
 from netbbs.files.areas import list_file_areas
 from netbbs.link.boards import LinkContext
+from netbbs.link.dial_in import advertised_dial_in
 from netbbs.link.node_map import (
     CANDIDATE,
     ORIGIN,
@@ -160,13 +161,11 @@ def row_description(entry: NodeMapEntry, *, now: datetime) -> str:
 
 def _dial_in_lines(entry: NodeMapEntry) -> list[str]:
     """The caller-facing `dial_in` addresses of `entry`'s signed descriptor
-    (§8.2), already validated and sanitized.
-
-    TODO(#777 slice 1): the `dial_in` field and its validating reader land in
-    slice 1 of issue #777. Once it merges, read `entry.descriptor_payload`
-    through that reader here. Until then nothing is read, so nothing is
-    shown."""
-    return []
+    (§8.2), in the signer's order: validated by `advertised_dial_in`, which
+    drops a malformed entry and never raises, then sanitized before the
+    panel styles and wraps them. An origin-only node has no descriptor on
+    file, so none."""
+    return [sanitize_text(address.url) for address in advertised_dial_in(entry.descriptor_payload)]
 
 
 def node_sections(

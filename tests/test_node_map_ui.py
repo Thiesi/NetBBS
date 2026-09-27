@@ -56,11 +56,12 @@ class FakeSession:
         return re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", "".join(self.written))
 
 
-def _record(identity, *, name: str, dns: str | None = None, addresses=None) -> PeerRecord:
+def _record(identity, *, name: str, dns: str | None = None, addresses=None, dial_in=None) -> PeerRecord:
     descriptor = build_endpoint_descriptor(
         signing_identity=identity.signing_key, subject_fingerprint=identity.fingerprint,
         addresses=addresses, outgoing_only=addresses is None,
         created_at="2026-09-01T00:00:00+00:00", friendly_name=name, canonical_dns_name=dns,
+        dial_in=dial_in,
     )
     return PeerRecord(
         fingerprint=identity.fingerprint, root_public_key=bytes(identity.root.verify_key),
@@ -198,3 +199,61 @@ def test_hidden_nodes_are_left_off_and_their_introductions_say_another_node(rig)
     assert "Far Board" in text
     assert "via another node" in text
     assert "Blocked Carrier" not in text
+
+
+# A descriptor's dial-in list as its signer wrote it: two valid entries, a
+# plain http:// one the reader refuses, and one carrying a terminal control
+# sequence (an OSC that would retitle the caller's window).
+HOSTILE_DIAL_IN = [
+    "telnet://harbor.example.org:23",
+    "http://plain.example.org/",
+    "telnet://evil.example.org:23\x1b]0;pwned\x07",
+    "https://harbor.example.org/web",
+]
+
+
+def test_the_detail_view_shows_the_nodes_dial_in_addresses(rig):
+    db, lane, own, link_context = rig
+    peer = bootstrap_node_identity("peer")
+    save_peer(db, _record(peer, name="Harbor BBS", dial_in=HOSTILE_DIAL_IN))
+    viewer = create_user(db, "alice", password="hunter2", user_level=10)
+    session = FakeSession(["m", "0", "1", "b", "b", "b"])
+
+    _browse(session, db, lane, viewer, link_context)
+
+    raw = "".join(session.written)
+    text = session.visible_output
+    detail = text[text.index("DIAL IN"):]
+    detail = detail[: detail.index("CARRIED HERE")]
+    assert detail.index("telnet://harbor.example.org:23") < detail.index("https://harbor.example.org/web")
+    assert "plain.example.org" not in text
+    assert "evil.example.org" not in text
+    assert "pwned" not in raw and "\x1b]" not in raw and "\x07" not in raw
+
+
+def test_a_node_without_dial_in_says_none_published(rig):
+    db, lane, own, link_context = rig
+    peer = bootstrap_node_identity("peer")
+    save_peer(db, _record(peer, name="Quiet BBS"))
+    viewer = create_user(db, "alice", password="hunter2", user_level=10)
+    session = FakeSession(["m", "0", "1", "b", "b", "b"])
+
+    _browse(session, db, lane, viewer, link_context)
+
+    assert re.search(r"DIAL IN\s+Addresses:\s+none published", session.visible_output)
+
+
+def test_a_long_dial_in_address_wraps_at_the_terminal_width(rig):
+    db, lane, own, link_context = rig
+    peer = bootstrap_node_identity("peer")
+    long_url = "https://harbor.example.org/" + "a" * 120
+    save_peer(db, _record(peer, name="Harbor BBS", dial_in=[long_url]))
+    viewer = create_user(db, "alice", password="hunter2", user_level=10)
+    session = FakeSession(["m", "0", "1", "b", "b", "b"])
+    session.terminal_width = 40
+
+    _browse(session, db, lane, viewer, link_context)
+
+    text = session.visible_output
+    assert all(len(line) <= 40 for line in text.replace("\r", "").split("\n"))
+    assert "a" * 20 in text  # the address is wrapped, not dropped
