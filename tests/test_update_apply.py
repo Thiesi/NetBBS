@@ -521,6 +521,50 @@ def test_install_without_restart_says_to_restart_the_service(db, lane, sysop, mo
     assert "restart the service to run it" in get_last_check_summary(db)[1]
 
 
+def test_the_pre_upgrade_backup_goes_to_the_configured_destination(db, lane, sysop, monkeypatch, tmp_path):
+    """Issue #727 x #731: the installer built its backup path beside the
+    database whatever the SysOp had configured, and the live backup then
+    refused it as "the backup destination changed" -- so with a destination
+    set, every console install failed at the backup step."""
+    from netbbs.backup_schedule import set_destination_setting
+
+    identity = tmp_path / "identity"
+    identity.mkdir()
+    offsite = tmp_path / "offsite"
+    offsite.mkdir()
+    set_destination_setting(db, offsite, db_path=db.path, identity_dir=identity)
+    _cache_newer_release(db)
+    set_restart_mode(db, "no")
+    calls = _install_fakes(monkeypatch, tmp_path)
+
+    session = FakeSession(["s", "u", "i", "i", "y", "b", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop, node_controls=_node_controls(backup_identity_dir=identity)))
+
+    [backup] = [destination for step, destination in calls if step == "backup"]
+    assert backup.parent == offsite
+
+
+def test_an_unusable_backup_destination_refuses_the_install_before_downloading(
+        db, lane, sysop, monkeypatch, tmp_path):
+    from netbbs.backup_schedule import set_destination_setting
+
+    identity = tmp_path / "identity"
+    identity.mkdir()
+    offsite = tmp_path / "offsite"
+    offsite.mkdir()
+    set_destination_setting(db, offsite, db_path=db.path, identity_dir=identity)
+    offsite.rmdir()
+    _cache_newer_release(db)
+    calls = _install_fakes(monkeypatch, tmp_path)
+
+    session = FakeSession(["s", "u", "i", "b", "b", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop, node_controls=_node_controls(backup_identity_dir=identity)))
+
+    text = _normalized_visible(_written_text(session))
+    assert "not possible here" in text and "nowhere usable to go" in text
+    assert calls == [], "nothing downloaded, backed up or installed"
+
+
 def test_install_with_restart_shuts_down_and_requests_the_restart_status(db, lane, sysop, monkeypatch, tmp_path):
     _cache_newer_release(db)
     set_restart_mode(db, "yes")
