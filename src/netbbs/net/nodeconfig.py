@@ -467,6 +467,12 @@ class NodeConfig:
     # everything else may be tuned there. Not part of equality: two configs
     # with the same values behave the same wherever they came from.
     explicit_keys: frozenset[str] = field(default_factory=frozenset, compare=False)
+    # Issue #748: where each supplied setting came from -- `section.name` to
+    # "config file" or "command line" (the later wins), for every section,
+    # not only the policy ones above. Read-only display; not part of equality.
+    setting_sources: dict[str, str] = field(default_factory=dict, compare=False)
+    # The `--config` file this configuration was read from, if any.
+    config_file: Path | None = field(default=None, compare=False)
 
     def validate(self) -> None:
         for name, transport in (("telnet", self.telnet), ("ssh", self.ssh), ("web", self.web)):
@@ -999,9 +1005,16 @@ def _apply_toml(config: NodeConfig, data: dict) -> NodeConfig:
         table = data.get(section, {})
         if isinstance(table, dict):
             explicit.update(f"{section}.{key}" for key in table)
+    sources = dict(config.setting_sources)
+    for section in known_tables:
+        table = data.get(section, {})
+        if isinstance(table, dict):
+            sources.update({f"{section}.{key}": "config file" for key in table})
 
     return NodeConfig(
         explicit_keys=frozenset(explicit),
+        setting_sources=sources,
+        config_file=config.config_file,
         db_path=db_path,
         identity_dir=identity_dir,
         node_name=node_name,
@@ -1024,6 +1037,19 @@ def _apply_cli_overrides(config: NodeConfig, args: argparse.Namespace) -> NodeCo
     }
     if cli_explicit:
         config = replace(config, explicit_keys=config.explicit_keys | cli_explicit)
+    # Issue #748: which settings the command line supplied, for display.
+    cli_sources = set(cli_explicit)
+    for key, value in (("database.path", args.db), ("node.identity_dir", args.identity_dir),
+                       ("node.name", args.node_name), ("managed_dns.service_url", args.managed_dns_service_url)):
+        if value is not None:
+            cli_sources.add(key)
+    for transport in _TRANSPORTS:
+        for name in ("enabled", "host", "port"):
+            if getattr(args, f"{transport}_{name}") is not None:
+                cli_sources.add(f"{transport}.{name}")
+    if cli_sources:
+        config = replace(config, setting_sources={
+            **config.setting_sources, **{key: "command line" for key in cli_sources}})
     if args.db is not None:
         config = replace(config, db_path=args.db)
     if args.identity_dir is not None:
@@ -1205,7 +1231,7 @@ def load_config(argv: list[str] | None = None) -> NodeConfig:
 
     config = NodeConfig()
     if args.config is not None:
-        config = _apply_toml(config, _load_toml(args.config))
+        config = _apply_toml(replace(config, config_file=args.config), _load_toml(args.config))
     config = _apply_cli_overrides(config, args)
     config.validate()
     return config

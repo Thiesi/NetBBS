@@ -186,7 +186,15 @@ Link limits, the login throttle and the shutdown delays can be set either way.
 live relay bounds, login throttle and shutdown delays, grouped. A value there
 applies the next time the node starts. A key your TOML file or a command-line
 option sets still wins: the screen shows it as *set in config* and does not let
-you change it there. Remove it from the TOML file to manage it from the console. Run `python -m netbbs --help` using the installed
+you change it there. Remove it from the TOML file to manage it from the console.
+
+The listeners, `public_url`, Link addresses, paths and managed-DNS service stay
+in TOML and on the command line only, because a wrong value set from inside
+NetBBS could lock you out of the session you would need to fix it. You can still
+see them: **Settings → Network & login limits → Node c[o]nfiguration** lists each
+one as the node resolved it at its last start, with its TOML key and whether the
+value came from the config file, the command line or the default. It works in
+`python -m netbbs.admin` too, and never shows the managed-DNS admin token. Run `python -m netbbs --help` using the installed
 interpreter for all supported switches. A TOML file is read only when supplied
 with `--config`; placing `netbbs.toml` in the working directory is not enough.
 
@@ -1038,6 +1046,7 @@ DNS registration, or backups is a separate, deliberate operator action.
 | Caller cannot log in | Check maintenance mode, pending approval, disabled account, and login throttling before resetting credentials. |
 | Caller can read but cannot contribute | Check write/join gates, age/name attestations, moderator grants, and inherited Community settings. |
 | Browser terminal or upload fails | Check HTTPS proxy/WebSocket forwarding, upload limits, web listener, and `public_url`. |
+| Callers or peers cannot reach the address you expect | Compare **Settings → Network & login limits → Node configuration** (what the node actually bound and advertises, and where each value came from) with your TOML file and the service's command line. |
 | Terminal offers no file-transfer link | Enable/configure the web listener and its public URL, or use a Zmodem-capable client. |
 | Link will not start | Check the `web` extra, effective participation setting, and a non-placeholder node name. |
 | **Find** misses content callers can open, or lists removed content | **Operations → Search indexes**: check, then **Rebuild** if it reports drift. |
