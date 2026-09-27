@@ -662,3 +662,34 @@ def test_entry_numbers_survive_a_refresh_that_moves_the_window():
     assert [e.id for e in first] == [1, 2, 3, 4]
     assert [(e.message, e.id) for e in second[:3]] == [("b", 2), ("b", 3), ("c", 4)]
     assert second[3].id == 5 and ("d", 5) not in by_first
+
+
+def test_an_idle_poll_keeps_an_entry_whose_traceback_line_is_half_written(tmp_path):
+    """Codex review, PR #739."""
+    path = tmp_path / "netbbs.log"
+    path.write_text("", encoding="utf-8")
+    follower = NodeLogFollower(path)
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(_line("ERROR", "upload failed") + "Traceback (most rec")
+    assert follower.poll()[0] == []
+    assert follower.poll()[0] == [], "idle, but the traceback line is unfinished"
+
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write("ent call last):\n")
+    entries = follower.poll()[0] + follower.poll()[0]
+
+    assert [e.message for e in entries] == ["upload failed"]
+    assert entries[0].continuation == ("Traceback (most recent call last):",)
+
+
+def test_the_entry_number_map_forgets_entries_gone_from_the_window():
+    """Codex review, PR #739: the map is as bounded as a read."""
+    from netbbs.node_log import StableEntryIds
+
+    ids = StableEntryIds()
+    for start in range(0, 500, 50):
+        ids.apply(parse_log_lines([_line("ERROR", f"m{i}").rstrip("\n") for i in range(start, start + 50)]))
+
+    assert len(ids._known) == 50
+    last = ids.apply(parse_log_lines([_line("ERROR", "fresh").rstrip("\n")]))
+    assert last[0].id == 501, "numbers are never reused"

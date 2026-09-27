@@ -283,15 +283,23 @@ class StableEntryIds:
     def apply(self, entries: list[NodeLogEntry]) -> list[NodeLogEntry]:
         seen: dict[tuple, int] = {}
         numbered = []
+        current: dict[tuple, int] = {}
         for entry in entries:
             text = (entry.when, entry.level, entry.logger, entry.message, entry.continuation)
             occurrence = seen.get(text, 0)
             seen[text] = occurrence + 1
             key = (*text, occurrence)
-            if key not in self._known:
-                self._known[key] = self._next
+            number = self._known.get(key)
+            if number is None:
+                number = self._next
                 self._next += 1
-            numbered.append(dataclasses.replace(entry, id=self._known[key]))
+            current[key] = number
+            numbered.append(dataclasses.replace(entry, id=number))
+        # Only what this read holds is remembered: the window only moves
+        # forward, so an entry gone from it does not come back, and the map
+        # stays as bounded as the read (`MAX_ENTRIES`). `_next` never goes
+        # back, so a forgotten number is never reused.
+        self._known = current
         return numbered
 
 
@@ -383,7 +391,10 @@ class NodeLogFollower:
         if len(self._partial) > MAX_HELD_CHARS:
             self._partial = self._partial[:MAX_HELD_CHARS] + " [line cut: longer than NetBBS shows]"
             self._discarding = True
-        if hold and data:
+        # An idle poll releases the held entry only once no line of it is
+        # still half-written; otherwise the rest of that line would arrive
+        # later with no header to belong to.
+        if hold and (data or self._partial):
             last_header = max(
                 (index for index, line in enumerate(lines) if _ENTRY_START.match(redact(line.rstrip("\r")))),
                 default=None,
