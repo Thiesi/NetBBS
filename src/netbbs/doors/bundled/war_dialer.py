@@ -142,6 +142,11 @@ def clock(moment: datetime) -> str:
     return moment.astimezone(_DISPLAY_TZ).strftime("%H:%M")
 
 
+def counted(number: int, noun: str) -> str:
+    """`1 defender`, `2 defenders`: a count and its noun, agreeing (issue #649)."""
+    return f"{number} {noun}{'' if number == 1 else 's'}"
+
+
 def _load_door_info() -> dict:
     default = {
         "handle": "Guest",
@@ -2547,7 +2552,7 @@ def resolve_root_exchange(
             record_scene(conn, "capture", exchange.id, now, actor_handle=actor.handle)
         if success and prior_controller is not None:
             record_event(conn, prior_controller, actor.handle,
-                         f"{actor.handle} rooted your exchange, {exchange.name}! {prior_garrison} defenders returned to your available crew.", now)
+                         f"{actor.handle} rooted your exchange, {exchange.name}! {counted(prior_garrison, 'defender')} returned to your available crew.", now)
         elif not success and prior_controller is not None:
             record_event(conn, prior_controller, actor.handle, f"{actor.handle} tried to root {exchange.name} and failed.", now)
     return success, exchange.name, busted
@@ -2926,6 +2931,12 @@ def table(p: Palette, headers: list[str], rows: list[list], aligns: str,
     return out_rows
 
 
+# The feed and the log hold what happened *to* the caller -- raids, captures,
+# the season -- not the caller's own moves. "No recorded events" right after a
+# first capture read as if the capture had not registered (issue #649).
+NO_EVENTS = "Nothing has happened to you yet."
+
+
 def feed(p: Palette, events: list[GameEvent], width: int, *, limit: int = 6) -> list[str]:
     """The latest receipts, toned by who caused them.
 
@@ -2949,7 +2960,7 @@ def feed(p: Palette, events: list[GameEvent], width: int, *, limit: int = 6) -> 
         tone = p.magenta if hostile else p.ink
         rows.append(bullet + " " + sty(p.grey, stamp) + " " + sty(tone, wrapped[0]))
         rows.extend(" " * _dlen(lead) + sty(tone, line) for line in wrapped[1:])
-    return rows or [sty(p.grey, "No recorded events yet.")]
+    return rows or [sty(p.grey, NO_EVENTS)]
 
 
 def key_bar(p: Palette, entries: tuple, width: int, budget: int) -> list[str]:
@@ -3170,6 +3181,23 @@ PICK_BAR = (("N", "Next", "Next"), ("P", "Prev", "Prev"), ("B", "Back", "Back"),
 
 LOG_BAR = (("N", "Next", "Next"), ("P", "Prev", "Prev"), ("A", "Ack page", "Ack"),
            ("B", "Back", "Back"))
+
+
+def page_turns(entries: tuple, pages: int, *, more_before: bool = False,
+               more_after: bool = False) -> tuple:
+    """A bar's entries without a page turn that has nowhere to go.
+
+    An empty Event Log, the Rival Directory and the standings offered [N] Next
+    and [P] Prev on their only page (issue #649). A batch beyond this one --
+    `more_before`/`more_after` -- is somewhere to go. The keys stay readable
+    either way; they are only no longer advertised.
+    """
+    dropped = set()
+    if pages <= 1 and not more_after:
+        dropped.add("N")
+    if pages <= 1 and not more_before:
+        dropped.add("P")
+    return tuple(entry for entry in entries if entry[0] not in dropped)
 
 
 def _panel_framed(p: "Palette", width: int) -> bool:
@@ -3411,7 +3439,7 @@ def event_pages(p: Palette, events: list[GameEvent], width: int,
         lines.extend((line, event.id if index == len(record_lines) - 1 else None)
                      for index, line in enumerate(record_lines))
     if not lines:
-        lines = [(sty(p.grey, "No recorded events."), None)]
+        lines = [(sty(p.grey, NO_EVENTS), None)]
     body_rows = max(1, body_rows)
     return [lines[index:index + body_rows] for index in range(0, len(lines), body_rows)]
 
@@ -3438,6 +3466,11 @@ def show_event_history(
            if unseen_only else key_bar(p, LOG_BAR, width, 1))
     body_rows = max(1, height - len(bar) - frame_cost(p, width))
     pages = event_pages(p, events, _panel_width(p, width), body_rows)
+    if not unseen_only:
+        # Laid out with every key so the page budget holds; offered without the
+        # ones that would do nothing here (issue #649).
+        bar = key_bar(p, tuple(entry for entry in page_turns(LOG_BAR, len(pages))
+                               if events or entry[0] != "A"), width, 1)
     page_index = 0
     while True:
         page = pages[page_index]
@@ -3487,7 +3520,7 @@ def operation_visit_budget(player: Player, *, in_hub: bool = False) -> str:
     cash = 0 if player.operation_stage == 2 else 50
     remaining = TURNS_PER_DAY - player.turns_used
     label = "Saved operation" if player.operation_stage else "New operation"
-    text = f"{label}: {turns} turn{'s' if turns != 1 else ''} and ${cash} to the next execution; {remaining} turns available."
+    text = f"{label}: {counted(turns, 'turn')} and ${cash} to the next execution; {counted(remaining, 'turn')} available."
     text += " Select this entry to preview each step." if in_hub else " [O] Ops previews each step."
     if player.cash < cash:
         text += f" Need ${cash - player.cash} more before Prepare."
@@ -3748,6 +3781,8 @@ def show_text_pages(p: Palette, title: str, paragraphs: list[str], width: int, h
     }
     footer = max(len(rows) for rows in bars.values())
     pages = paginate_cards(blocks, height - footer - frame_cost(p, width))
+    bars["pages"] = key_bar(p, page_turns(TEXT_BAR, len(pages), more_before=more_before,
+                                          more_after=more_after), width, 1)
     index = len(pages) - 1 if start_last else 0
     revealed = False
     while True:
@@ -4508,7 +4543,11 @@ def exchange_entry_rows(p: Palette, exchange: Exchange, player: Player | None,
     rows = compose([sty(style + BOLD, glyph + " " + _fit(exchange_short_name(exchange), 22)),
                     badge(p, _fit(role.upper(), 16)),
                     label_value(p, "capture", f"${capture_cost(exchange)}", style=p.amber)], width)
-    chunks = [label_value(p, "owner", _fit(owner_label(exchange), 20), style=style),
+    # `owner none`, not `owner unclaimed`: the longer word pushed an unclaimed
+    # exchange's odds onto a row of their own, so the list's entries had uneven
+    # heights (issue #649). The hollow glyph already says nobody holds it.
+    owner = owner_label(exchange) if exchange_occupied(exchange) else "none"
+    chunks = [label_value(p, "owner", _fit(owner, 20), style=style),
               sty(p.grey, "defence") + " " + dots(p, exchange.garrison, 4, cap=4)
               + sty(p.grey, f" {defence}"),
               label_value(p, "income", f"${exchange.income_per_hour}/hr", style=p.amber)]
@@ -4565,8 +4604,8 @@ def show_territory(p: Palette, conn: sqlite3.Connection, width: int, height: int
             mine = sum(1 for exchange in exchanges
                        if viewer_id is not None and exchange.controller_user_id == viewer_id)
             held = f"yours {mine}/{len(exchanges)}"
-        footer = key_bar(p, (("N", "Next", "Next"), ("P", "Prev", "Prev"),
-                             ("B", "Back", "Back")), width, 1)
+        footer = key_bar(p, TEXT_BAR, width, 1)
+        inspect: list[str] = []
         if keys:
             # A run of digits is written as a range rather than listed: ten
             # bracketed keys spend two rows of a twelve-row terminal, and the
@@ -4575,8 +4614,10 @@ def show_territory(p: Palette, conn: sqlite3.Connection, width: int, height: int
                       + sty(p.amber + BOLD, f"[{keys[-2]}]"),
                       sty(p.amber + BOLD, f"[{keys[-1]}]")] if len(keys) > 4
                      else [sty(p.amber + BOLD, f"[{key}]") for key in keys])
-            footer = compose([sty(p.grey, "inspect")] + shown, width, gap=" ") + footer
-        pages = paginate_cards(cards, max(1, height - len(footer) - frame_cost(p, width)))
+            inspect = compose([sty(p.grey, "inspect")] + shown, width, gap=" ")
+        pages = paginate_cards(cards, max(1, height - len(inspect) - len(footer)
+                                          - frame_cost(p, width)))
+        footer = inspect + key_bar(p, page_turns(TEXT_BAR, len(pages)), width, 1)
         index = 0
         while True:
             out(f"{ESC}[2J{ESC}[H")
@@ -4911,12 +4952,27 @@ def stakes_cards(p: Palette, action: str, player: Player, target, width: int, *,
         cards.append(("UNAVAILABLE", prose_rows(p, blocked, width, style=p.alarm)))
     # The head card already carries the season, the turns and the cash balance
     # as chips; everything else action_preview_lines says is the authoritative
-    # wording of the terms and is kept exactly as it is.
+    # wording of the terms and is kept exactly as it is -- less any Unavailable
+    # line the card above already says.
     if terms is None:
         terms = action_preview_lines(action, player, target, operation=operation)
-    terms = [line for line in terms if not line.startswith("Season ")]
+    terms = [line for line in unrepeated_terms(terms, blocked) if not line.startswith("Season ")]
     cards.append(("TERMS", prose_card(p, terms + list(extra), width)))
     return cards
+
+
+def unrepeated_terms(terms: list[str], blocked: str | None) -> list[str]:
+    """The terms without an `Unavailable:` line the UNAVAILABLE card already says.
+
+    Out of turns, a preview printed its refusal under UNAVAILABLE and again
+    word for word inside TERMS (issue #649); an operation's Execute preview
+    carried it a third time. A line saying something the card does not -- a
+    turn shortfall behind a crew purchase's own refusal -- is kept.
+    """
+    if not blocked:
+        return list(terms)
+    return [line for line in terms
+            if not (line.startswith("Unavailable: ") and line[len("Unavailable: "):] in blocked)]
 
 
 def confirm_action(p: Palette, conn: sqlite3.Connection, player: Player, action: str,
@@ -5058,6 +5114,8 @@ def pick_record_page(p: Palette, title: str, records: list[tuple[list[str], bool
         heading, spent = "", 0
     entry_capacity = max(1, capacity - (1 if heading else 0))
     pages = _paginate_entries(p, entries, max(1, capacity - spent), entry_capacity)
+    bar = key_bar(p, page_turns(PICK_BAR, len(pages), more_before=more_before,
+                                more_after=more_after), width, 1)
     index = len(pages) - 1 if start_last else 0
     while True:
         keys = "".join(key for _, key in pages[index])
@@ -5626,7 +5684,7 @@ def operation_step_cards(p: Palette, player: Player, step: str, choice: JobChoic
     cards = chain + [("", head), ("STAKES", stakes)]
     if reason := operation_block_reason(player, step):
         cards.append(("UNAVAILABLE", prose_rows(p, reason, width, style=p.alarm)))
-    cards.append(("TERMS", prose_card(p, terms, width)))
+    cards.append(("TERMS", prose_card(p, unrepeated_terms(terms, reason), width)))
     return cards
 
 
@@ -5822,7 +5880,13 @@ def main() -> int:
     except WorldClosed as exc:
         out_line(f"{palette.gold}{exc}{RESET}")
         return 0  # turned away on purpose; nonzero would be reported as a crash
-    except (InputSequenceError, WorldStateError) as exc:
+    except InputSequenceError as exc:
+        # A paste or a mouse report ends the visit on purpose, and the sentence
+        # above says why and what to do. Nonzero would add the host's "exited
+        # unexpectedly" under it, in a second voice (issue #649).
+        out_line(f"  {palette.bad}{exc}{RESET}")
+        return 0
+    except WorldStateError as exc:
         out_line(f"  {palette.bad}{exc}{RESET}")
         return 1
     except (sqlite3.DatabaseError, OSError) as exc:

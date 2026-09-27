@@ -235,6 +235,13 @@ WALKS: dict[str, list[tuple[str, bytes]]] = {
         ("Raid targets", b"R"),
         ("Raid preview", b"R#N%"),
         ("Log", b"H"),
+        # A caller nothing has happened to yet: the feed and the log both say so
+        # (issue #649), on fresh worlds. The guide takes any key, and `N*` is the
+        # one way past it that ends: the switchboard redraws its last page on
+        # Next, where it ignores Enter without drawing anything, so `\r*`
+        # waited for a screen that never came. `P*` then returns to page one.
+        ("Switchboard, nothing yet", b"N*P*N%"),
+        ("Log, nothing yet", b"N*H"),
         ("Contract board", b"J"),
         # An action's preview is two pickers deep: the board, the approach, and
         # only then the terms the player is actually asked to accept. Each of the
@@ -398,7 +405,8 @@ PREPARE_IT = b"\r" + b"O1?1?" + b"N*" + b"A"    # continue the saved one, previe
 # first-visit guide exists only before there is a career, and `base_fixture` was
 # driving it and throwing the screens away. A fresh state costs this panel the
 # door's own registration, which is what a new caller pays too.
-FRESH: dict[str, set[str]] = {"war_dialer": {"First visit"}}
+FRESH: dict[str, set[str]] = {"war_dialer": {"First visit", "Switchboard, nothing yet",
+                                             "Log, nothing yet"}}
 
 
 def _rewind_anchor(door: pathlib.Path, state: pathlib.Path, back) -> None:
@@ -513,6 +521,8 @@ SHOWS: dict[str, dict[str, str]] = {
         "Raid targets": "RAID TARGETS",
         "Raid preview": "RAID PREVIEW",
         "Log": "EVENT LOG",
+        "Switchboard, nothing yet": "Nothing has happened",
+        "Log, nothing yet": "Nothing has happened",
         "Contract board": "CONTRACT BOARD",
         "Choose approach": "CHOOSE APPROACH",
         "Job preview": "JOB PREVIEW",
