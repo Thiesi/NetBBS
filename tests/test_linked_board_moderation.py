@@ -957,3 +957,102 @@ def test_the_migration_takes_down_a_refused_edit_an_earlier_repair_restored(tmp_
         assert [row[0] for row in indexed] == ["first post"]
     finally:
         db.close()
+
+
+
+def test_revisions_of_a_rejected_root_are_kept_for_relay_not_shown(tmp_path, remote):
+    """An author edit, a moderator edit and a tombstone of a rejected root
+    are retained -- through transport persistence too, where an event not
+    stored is forgotten (Codex review on #780)."""
+    from netbbs.boards.posts import delete_post
+    from netbbs.link.boards import materialize_carried_board_post_tombstone
+    from netbbs.link.events import build_board_post_tombstone
+
+    db = Database(tmp_path / "node.db")
+    try:
+        sysop = create_user(db, "sysop", password="hunter2", user_level=SYSOP_LEVEL)
+        _carried_board(db, remote, moderated=True)
+        root = _carry(db, remote)
+        delete_post(db, root, deleted_by=sysop)
+
+        edit = _remote_edit(remote, root, previous=root.post_id, body="later text")
+        node = LinkNode(identity=bootstrap_node_identity("roanoke"))
+        node.events[edit.content_id] = edit.to_dict()
+        lane = DatabaseLane(db.path)
+        try:
+            asyncio.run(
+                persist_accepted_events(
+                    lane, node, [edit.content_id], sender_fingerprint=remote.fingerprint,
+                    max_carried_boards=None,
+                )
+            )
+        finally:
+            lane.close()
+        assert edit.content_id in node.events  # not forgotten
+        moderator_edit = build_board_post_moderator_edit(
+            signing_identity=remote.signing_key, board_id=BOARD_ID, root_post_id=root.post_id,
+            previous_event_id=edit.content_id, subject="hello", body="by the origin",
+            created_at="2026-01-03T00:00:00Z",
+        )
+        tombstone = build_board_post_tombstone(
+            signing_identity=remote.signing_key, board_id=BOARD_ID, root_post_id=root.post_id,
+            previous_event_id=moderator_edit.content_id, subject="hello", body="[removed]", reason=None,
+            created_at="2026-01-04T00:00:00Z",
+        )
+        assert materialize_carried_board_post_moderator_edit(
+            db, moderator_edit, sender_fingerprint=remote.fingerprint
+        ) is None
+        assert materialize_carried_board_post_tombstone(db, tombstone, sender_fingerprint=remote.fingerprint) is None
+
+        for event in (edit, moderator_edit, tombstone):
+            assert _retained(db, event.content_id)
+            assert _post_row(db, event.content_id) is None
+    finally:
+        db.close()
+
+
+def test_moderator_edits_and_tombstones_past_a_rejected_edit_are_kept(db, sysop, remote):
+    from netbbs.boards.posts import delete_post
+    from netbbs.link.boards import materialize_carried_board_post_tombstone
+    from netbbs.link.events import build_board_post_tombstone
+
+    _carried_board(db, remote, moderated=True)
+    root = approve_post(db, _carry(db, remote), approved_by=sysop)
+    rejected_event = _remote_edit(remote, root, previous=root.post_id, body="refused text")
+    delete_post(
+        db, materialize_carried_post_edit(db, rejected_event, sender_fingerprint=remote.fingerprint),
+        deleted_by=sysop,
+    )
+    moderator_edit = build_board_post_moderator_edit(
+        signing_identity=remote.signing_key, board_id=BOARD_ID, root_post_id=root.post_id,
+        previous_event_id=rejected_event.content_id, subject="hello", body="by the origin",
+        created_at="2026-01-03T00:00:00Z",
+    )
+    tombstone = build_board_post_tombstone(
+        signing_identity=remote.signing_key, board_id=BOARD_ID, root_post_id=root.post_id,
+        previous_event_id=moderator_edit.content_id, subject="hello", body="[removed]", reason=None,
+        created_at="2026-01-04T00:00:00Z",
+    )
+
+    assert materialize_carried_board_post_moderator_edit(db, moderator_edit, sender_fingerprint=remote.fingerprint) is None
+    assert materialize_carried_board_post_tombstone(db, tombstone, sender_fingerprint=remote.fingerprint) is None
+    assert _retained(db, moderator_edit.content_id) and _retained(db, tombstone.content_id)
+    assert get_post(db, root.post_id).body == "first post"
+
+
+def test_a_stale_reject_does_not_undo_another_moderators_approval(db, sysop, alice):
+    """Two moderators open the same held post; one approves first (Codex
+    review on #780)."""
+    from netbbs.boards.posts import PostError, delete_post
+
+    board = create_board(db, "general", creator=sysop, moderated=True)
+    stale = create_post(db, board, alice, "held", "text")
+    approve_post(db, stale, approved_by=sysop)
+
+    with pytest.raises(PostError, match="already decided"):
+        delete_post(db, stale, deleted_by=sysop)
+
+    assert get_post(db, stale.post_id).status == "approved"
+    assert db.connection.execute(
+        "SELECT 1 FROM post_rejections WHERE post_id = ?", (stale.post_id,)
+    ).fetchone() is None

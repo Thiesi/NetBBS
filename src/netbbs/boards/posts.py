@@ -921,6 +921,13 @@ def delete_post(db: Database, post: Post, *, deleted_by: User, reason: str | Non
         raise PostError("cannot delete this post: it " + ", and ".join(reasons))
 
     action = "reject" if post.status == "pending" else "delete"
+    current = db.connection.execute("SELECT status FROM posts WHERE id = ?", (post.id,)).fetchone()
+    if current is None or current["status"] != post.status:
+        # Another moderator decided first -- approved it, or rejected it
+        # already. A decision made on a stale copy must not delete an
+        # approved post, nor record a rejection nobody made of it (Codex
+        # review on #780).
+        raise PostError("this post was already decided by another moderator")
     if action == "reject":
         # A rejection is recorded, not only carried out (issue #692): for a
         # carried post the signed event is kept, and without this record
