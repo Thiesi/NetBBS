@@ -693,3 +693,28 @@ def test_the_entry_number_map_forgets_entries_gone_from_the_window():
     assert len(ids._known) == 50
     last = ids.apply(parse_log_lines([_line("ERROR", "fresh").rstrip("\n")]))
     assert last[0].id == 501, "numbers are never reused"
+
+
+def test_an_unreadable_rotated_file_during_follow_is_reported(tmp_path, monkeypatch):
+    """Codex review, PR #739: a failed drain must not look like a clean
+    switch to the new file."""
+    import netbbs.node_log as node_log
+
+    path = tmp_path / "netbbs.log"
+    path.write_text(_line("INFO", "before"), encoding="utf-8")
+    follower = NodeLogFollower(path)
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(_line("ERROR", "written just before rotation"))
+    path.replace(tmp_path / "netbbs.log.1")
+    path.write_text(_line("ERROR", "new file"), encoding="utf-8")
+    real = node_log._open_regular
+
+    def _deny_rotated(target):
+        if target.name.endswith(".1"):
+            raise PermissionError(13, "Permission denied")
+        return real(target)
+
+    monkeypatch.setattr(node_log, "_open_regular", _deny_rotated)
+    _, notice = follower.poll()
+
+    assert notice is not None and "rotated" in notice and "Permission denied" in notice

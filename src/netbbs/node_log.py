@@ -423,8 +423,9 @@ class NodeLogFollower:
                     return [], None
                 handle.seek(self._offset)
                 data = handle.read(MAX_FOLLOW_BYTES)
-        except OSError:
-            return [], None
+        except OSError as exc:
+            return [], (f"The log rotated, and {_describe(rotated, exc)}; lines written just before the "
+                        "rotation are not shown here.")
         skipped = info.st_size - self._offset - len(data)
         notice = (
             f"The log rotated after a burst; {skipped} bytes written just before it are not shown here "
