@@ -36,6 +36,16 @@ HIDE_CURSOR = "\x1b[?25l"
 SHOW_CURSOR = "\x1b[?25h"
 
 
+async def write_quietly(session: Session, text: str) -> None:
+    """Best-effort terminal housekeeping (cursor visibility) on a path that
+    may already be unwinding from a closed connection: a failure here must
+    not replace the error that is already propagating."""
+    try:
+        await session.write(text)
+    except (SessionClosedError, OSError):
+        pass
+
+
 class KeyOutcome(enum.Enum):
     """What `on_key` tells the loop to do next."""
 
@@ -65,18 +75,25 @@ def paint_text(
     Out-of-range rows paint nothing, so a caller laying out a screen for
     a terminal that turned out too short needs no bounds checks of its
     own. Double-width glyphs take two cells, and one that would straddle
-    the limit is dropped rather than half-drawn."""
+    the limit is dropped rather than half-drawn. A zero-width combining
+    mark joins the cell before it, so decomposed text keeps its accents."""
     if not 0 <= row < buffer.height:
         return col
+    col = max(0, col)
     limit = buffer.width if width is None else min(buffer.width, col + max(0, width))
+    last: int | None = None
     for ch in text:
         if not ch.isprintable():
             ch = " "
         cells = char_width(ch)
         if cells <= 0:
+            if last is not None:
+                cell = buffer.get_cell(row, last)
+                buffer.write_cell(row, last, cell.char + ch, fg=cell.fg, bg=cell.bg, bold=cell.bold)
             continue
         if col + cells > limit:
             break
+        last = col
         if cells == 2:
             buffer.write_wide_cell(row, col, ch, fg=fg, bg=bg, bold=bold)
         else:
@@ -115,6 +132,7 @@ async def run_live_screen(
     *,
     paint: Callable[[ScreenBuffer], None],
     on_key: Callable[[EditorKey], Awaitable[KeyOutcome]],
+    on_notice: Callable[[str], None],
     interval: float,
 ) -> None:
     """Show `paint`'s frame, repainted every `interval` seconds and after
@@ -123,12 +141,28 @@ async def run_live_screen(
     Ctrl-L repaints everything, as on every other screen. A change of
     terminal size does too, since every cell may have moved. The screen
     is cleared on the way out, so whatever the caller draws next starts
-    clean."""
+    clean.
+
+    An out-of-band notice (a SysOp's message, a shutdown broadcast) would
+    otherwise be written wherever the last frame left the cursor, and a
+    diff against a frame the terminal no longer shows would never repair
+    it. While this screen runs, such notices go to `on_notice` instead,
+    through `Session.pinned_notice_hook`, and the screen repaints at once
+    so `paint` can show them."""
     previous: Snapshot | None = None
     size: tuple[int, int] | None = None
     key_task: asyncio.Task | None = None
-    await session.write(HIDE_CURSOR)
+    notice_arrived = asyncio.Event()
+    notice_task: asyncio.Task | None = None
+
+    async def take_notice(text: str) -> None:
+        on_notice(text)
+        notice_arrived.set()
+
+    outer_hook = session.pinned_notice_hook
+    session.pinned_notice_hook = take_notice
     try:
+        await session.write(HIDE_CURSOR)
         while True:
             current_size = (session.terminal_width, session.terminal_height)
             buffer = ScreenBuffer(*current_size)
@@ -144,7 +178,14 @@ async def run_live_screen(
 
             if key_task is None:
                 key_task = asyncio.create_task(_read_key(session))
-            done, _pending = await asyncio.wait({key_task}, timeout=interval)
+            if notice_task is None:
+                notice_task = asyncio.create_task(notice_arrived.wait())
+            done, _pending = await asyncio.wait(
+                {key_task, notice_task}, timeout=interval, return_when=asyncio.FIRST_COMPLETED
+            )
+            if notice_task in done:
+                notice_arrived.clear()
+                notice_task = None
             if key_task not in done:
                 continue
             key, key_task = key_task.result(), None
@@ -157,11 +198,9 @@ async def run_live_screen(
             if outcome is KeyOutcome.REPAINT:
                 previous = None
     finally:
-        if key_task is not None:
-            key_task.cancel()
-            await asyncio.gather(key_task, return_exceptions=True)
-        try:
-            await session.write(SHOW_CURSOR + clear_screen())
-        except (SessionClosedError, OSError):
-            # The connection is already gone: nothing to restore.
-            pass
+        session.pinned_notice_hook = outer_hook
+        leftovers = [task for task in (key_task, notice_task) if task is not None]
+        for task in leftovers:
+            task.cancel()
+        await asyncio.gather(*leftovers, return_exceptions=True)
+        await write_quietly(session, SHOW_CURSOR + clear_screen())

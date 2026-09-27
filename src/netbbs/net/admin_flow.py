@@ -10289,7 +10289,10 @@ async def _node_menu(session: Session, lane: DatabaseLane, actor: User, node_con
             await _who_screen(session, lane, actor, node_controls)
             await _draw_node_menu(session, node_controls, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == "o":
-            await monitor_screen(session, lane, actor, node_controls)
+            await monitor_screen(
+                session, lane, actor, node_controls,
+                disconnect=lambda entry: disconnect_session_draft(session, lane, actor, node_controls, entry),
+            )
             await _draw_node_menu(session, node_controls, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == "s":
             await session.write_line("")
@@ -10448,7 +10451,15 @@ async def _who_screen(session: Session, lane: DatabaseLane, actor: User, node_co
             colored("That's your own session -- use Logoff instead.", fg_color=MUTED_COLOR)
         )
         return
+    await disconnect_session_draft(session, lane, actor, node_controls, selected)
 
+
+async def disconnect_session_draft(
+    session: Session, lane: DatabaseLane, actor: User, node_controls: NodeControls, selected: SessionSummary
+) -> None:
+    """The disconnect screen for one session, shared by Who and the live
+    Monitor's Kick (issue #763). Its outcome is announced, for whichever
+    screen is drawn next."""
     # Issue #282: this used to be "Disconnect X?" followed by a
     # mandatory-looking "Message ... (optional):" line prompt with no
     # way back once the question was answered. Now a one-field draft
@@ -10487,6 +10498,7 @@ async def _who_screen(session: Session, lane: DatabaseLane, actor: User, node_co
             record_action, actor=actor, action="disconnect_session",
             target_user_id=target_user_id, detail=f"{detail}, message={message!r}",
         )
+        node_controls.session_registry.note_event(f"{actor.username} disconnected {name}")
         _announce_line(session, colored(f"{name!r} disconnected.", fg_color=SUCCESS_COLOR))
         return True
 

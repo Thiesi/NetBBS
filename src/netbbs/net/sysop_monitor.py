@@ -7,8 +7,8 @@ Built on `netbbs.net.live_screen`. Everything a tick paints comes from
 memory: the session registry (who, since when, idle time and activity,
 issue #762), the maintenance and shutdown schedulers, and the MRC bridge's
 status snapshot. The database is touched only on entry (display
-preferences) and by an action the SysOp takes (the moderation log entry
-for a disconnect), never by the refresh.
+preferences) and by an action the SysOp takes (Kick is the Who screen's
+own disconnect draft, audit log entry included), never by the refresh.
 
 Snoop (#764) and break-in chat (#765) join the action bar when they land.
 """
@@ -20,17 +20,26 @@ import time
 from dataclasses import dataclass, field
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from netbbs.auth.users import AuthError, User, get_user_by_username
-from netbbs.moderation.log import record_action
+from typing import Awaitable, Callable
+
+from netbbs.auth.users import User
+from netbbs.net import notices
 from netbbs.net.char_input import EditorKey, EditorKeyKind
-from netbbs.net.confirm import prompt_yes_no
-from netbbs.net.live_screen import HIDE_CURSOR, SHOW_CURSOR, KeyOutcome, fill_row, paint_text, run_live_screen
+from netbbs.net.live_screen import (
+    HIDE_CURSOR,
+    SHOW_CURSOR,
+    KeyOutcome,
+    fill_row,
+    paint_text,
+    run_live_screen,
+    write_quietly,
+)
 from netbbs.net.session import Session, write_prompt
 from netbbs.net.session_activity import describe, records_activity
 from netbbs.net.session_registry import SessionSummary
 from netbbs.net.shutdown import NodeControls, format_remaining_seconds
 from netbbs.rendering import sanitize_text
-from netbbs.rendering.ansi import clear_line, colored, move_cursor
+from netbbs.rendering.ansi import clear_line, colored, move_cursor, strip_ansi
 from netbbs.rendering.screen_buffer import ScreenBuffer
 from netbbs.rendering.theme import (
     ACCENT_COLOR,
@@ -93,13 +102,18 @@ _VIA = {"telnet": "tel", "ssh": "ssh", "web": "web", "local": "loc"}
 ORDERS = ("time on", "idle", "user")
 
 
-def layout_columns(width: int) -> tuple[list[Column], int]:
+def layout_columns(width: int, *, id_width: int = 3) -> tuple[list[Column], int]:
     """The columns that fit `width`, and the width left for "doing".
 
-    Columns in `DROP_ORDER` are dropped one at a time until "doing" has
-    `DOING_MIN_WIDTH`. On a terminal too narrow even then, "doing" gets
-    what is left, possibly nothing."""
-    columns = list(COLUMNS)
+    The id column grows to `id_width`: session ids are never reused within
+    a run, so after a thousand connections they need four digits, and a
+    cut id would make two rows look like one. Columns in `DROP_ORDER` are
+    dropped one at a time until "doing" has `DOING_MIN_WIDTH`. On a
+    terminal too narrow even then, "doing" gets what is left, possibly
+    nothing."""
+    columns = [
+        Column(c.key, c.heading, max(c.width, id_width), c.right) if c.key == "id" else c for c in COLUMNS
+    ]
     dropping = list(DROP_ORDER)
 
     def doing_width() -> int:
@@ -124,14 +138,6 @@ def short_duration(seconds: float) -> str:
     if days >= 10:
         return f"{min(days, 9999)}d"
     return f"{days}d{seconds % 86400 // 3600:02d}h"
-
-
-def _connected_seconds(entry: SessionSummary, now: datetime.datetime) -> float:
-    try:
-        connected = datetime.datetime.fromisoformat(entry.connected_at.replace("Z", "+00:00"))
-    except ValueError:
-        return 0.0
-    return (now - connected).total_seconds()
 
 
 def fit_doing(trail: tuple[str, ...], width: int, *, authenticated: bool) -> str:
@@ -179,7 +185,7 @@ def _name_cell(entry: SessionSummary, viewer: Session) -> tuple[str, int]:
     return sanitize_text(entry.username), PRIVILEGE_COLOR if entry.is_sysop else ACCENT_COLOR
 
 
-def _cell_text(column: Column, entry: SessionSummary, now: datetime.datetime) -> str:
+def _cell_text(column: Column, entry: SessionSummary) -> str:
     session = entry.session
     if column.key == "id":
         return str(entry.session_id)
@@ -189,7 +195,7 @@ def _cell_text(column: Column, entry: SessionSummary, now: datetime.datetime) ->
     if column.key == "peer":
         return entry.peer_address or "-"
     if column.key == "on":
-        return short_duration(_connected_seconds(entry, now))
+        return short_duration(entry.connected_seconds)
     if column.key == "idle":
         return short_duration(entry.idle_seconds)
     if column.key == "term":
@@ -198,7 +204,9 @@ def _cell_text(column: Column, entry: SessionSummary, now: datetime.datetime) ->
 
 
 def _fit(text: str, column: Column) -> str:
-    text = text[: column.width]
+    if len(text) > column.width:
+        # Marked, so two long names sharing a prefix don't look identical.
+        text = text[: column.width - 1] + "…"
     return text.rjust(column.width) if column.right else text.ljust(column.width)
 
 
@@ -252,7 +260,6 @@ def _paint_action_bar(buffer: ScreenBuffer, row: int, state: MonitorState) -> No
 def paint_monitor(buffer: ScreenBuffer, state: MonitorState, controls: NodeControls) -> None:
     """One frame. Pure apart from reading the in-memory node state."""
     registry = controls.session_registry
-    now = datetime.datetime.now(datetime.timezone.utc)
     entries = sort_entries(registry.list_entries(), state.order)
     height = buffer.height
 
@@ -269,7 +276,8 @@ def paint_monitor(buffer: ScreenBuffer, state: MonitorState, controls: NodeContr
     first_row = 2
     capacity = max(0, table_bottom - first_row)
 
-    columns, doing_width = layout_columns(buffer.width)
+    id_width = max((len(str(entry.session_id)) for entry in entries), default=1)
+    columns, doing_width = layout_columns(buffer.width, id_width=id_width)
     col = 0
     for column in columns:
         col = paint_text(buffer, 1, col, _fit(column.heading, column) + " ", fg=LABEL_COLOR, bold=True)
@@ -303,7 +311,7 @@ def paint_monitor(buffer: ScreenBuffer, state: MonitorState, controls: NodeContr
                 name, color = _name_cell(entry, state.viewer)
                 text, bold = _fit(name, column), entry.is_sysop
             else:
-                text, color, bold = _fit(_cell_text(column, entry, now), column), VALUE_COLOR, False
+                text, color, bold = _fit(_cell_text(column, entry), column), VALUE_COLOR, False
                 if column.key == "id":
                     color = METADATA_COLOR
             col = paint_text(buffer, row, col, text + " ", fg=color, bg=bg, bold=bold)
@@ -311,7 +319,8 @@ def paint_monitor(buffer: ScreenBuffer, state: MonitorState, controls: NodeContr
         paint_text(buffer, row, col, doing, width=doing_width, fg=EMPHASIS_COLOR if selected else VALUE_COLOR, bg=bg)
     hidden_below = len(entries) - state.top - len(visible)
     if hidden_below > 0 and capacity:
-        paint_text(buffer, table_bottom - 1, buffer.width - 12, f" ↓ {hidden_below} more ", fg=METADATA_COLOR)
+        marker = f" ↓ {hidden_below} more "
+        paint_text(buffer, table_bottom - 1, max(0, buffer.width - len(marker)), marker, fg=METADATA_COLOR)
 
     if event_rows:
         paint_text(buffer, table_bottom, 0, "─" * buffer.width, fg=RULE_COLOR)
@@ -347,15 +356,7 @@ async def _ask_on_bottom_row(session: Session, prompt: str) -> str:
     try:
         return (await session.read_line()).strip()
     finally:
-        await session.write(HIDE_CURSOR)
-
-
-async def _confirm_on_bottom_row(session: Session, prompt: str) -> bool:
-    await session.write(move_cursor(session.terminal_height, 1) + clear_line() + SHOW_CURSOR)
-    try:
-        return await prompt_yes_no(session, prompt, default=False)
-    finally:
-        await session.write(HIDE_CURSOR)
+        await write_quietly(session, HIDE_CURSOR)
 
 
 async def _message(session: Session, state: MonitorState, controls: NodeControls, entry: SessionSummary) -> None:
@@ -373,38 +374,25 @@ async def _message(session: Session, state: MonitorState, controls: NodeControls
         state.say(f"{_label(entry)} is no longer connected.", ERROR_COLOR)
 
 
-async def _kick(
-    session: Session, lane: DatabaseLane, actor: User, state: MonitorState, controls: NodeControls,
-    entry: SessionSummary,
-) -> None:
-    """The Who screen's disconnect (`admin_flow._who_screen`), from here:
-    the optional message is delivered before the connection closes, and
-    the disconnect lands in the moderation log the same way."""
-    name = _label(entry)
-    reason = await _ask_on_bottom_row(session, f"Message for {name} before disconnecting (optional): ")
-    if not await _confirm_on_bottom_row(session, f"Disconnect {name} now?"):
-        state.say("Not disconnected.")
+#: How an outcome line reads, from how it starts (`admin_flow._announce_line`
+#: colours the same way).
+_NEUTRAL_OUTCOMES = ("Cancelled", "No change", "Not ")
+
+
+def _take_outcome(session: Session, state: MonitorState) -> None:
+    """Show the last outcome another screen announced (the disconnect
+    draft's), on this screen's outcome line."""
+    lines = [strip_ansi(line).strip() for line in notices.take_notices(session)]
+    lines = [line for line in lines if line]
+    if not lines:
         return
-    registry = controls.session_registry
-    if reason:
-        await registry.notify_one(
-            entry.session, colored(f"\r\n*** {sanitize_text(reason)} ***", fg_color=ALERT_COLOR, bold=True)
-        )
-    if not await registry.disconnect_one(entry.session):
-        state.say(f"{name} is no longer connected.", ERROR_COLOR)
-        return
-    target_user_id: int | None = None
-    if entry.username is not None:
-        try:
-            target_user_id = (await lane.run(get_user_by_username, entry.username)).id
-        except AuthError:
-            pass  # account no longer exists -- log by peer address only
-    await lane.run(
-        record_action, actor=actor, action="disconnect_session", target_user_id=target_user_id,
-        detail=f"peer address {entry.peer_address or 'unknown'}, message={reason or None!r}",
-    )
-    registry.note_event(f"{actor.username} disconnected {name}")
-    state.say(f"{name} disconnected.", SUCCESS_COLOR)
+    text = lines[-1]
+    if "gone" in text or "no longer" in text:
+        state.say(text, ERROR_COLOR)
+    elif text.startswith(_NEUTRAL_OUTCOMES):
+        state.say(text, MUTED_COLOR)
+    else:
+        state.say(text, SUCCESS_COLOR)
 
 
 def _unwind(state: MonitorState, controls: NodeControls, entry: SessionSummary) -> None:
@@ -428,8 +416,20 @@ def _move(state: MonitorState, controls: NodeControls, step: int) -> None:
 
 
 @records_activity("Monitor")
-async def monitor_screen(session: Session, lane: DatabaseLane, actor: User, controls: NodeControls) -> None:
-    """Show the live monitor until the SysOp leaves it."""
+async def monitor_screen(
+    session: Session,
+    lane: DatabaseLane,
+    actor: User,
+    controls: NodeControls,
+    *,
+    disconnect: Callable[[SessionSummary], Awaitable[None]],
+) -> None:
+    """Show the live monitor until the SysOp leaves it.
+
+    `disconnect` is the Who screen's disconnect draft
+    (`admin_flow.disconnect_session_draft`): an optional message and an
+    explicit Disconnect, not a chain of questions (design doc §3.5), and
+    one audit-log path for both screens."""
     _format, timezone_name = await lane.run(resolve_display_preferences)
     try:
         timezone: datetime.tzinfo = ZoneInfo(timezone_name)
@@ -476,12 +476,19 @@ async def monitor_screen(session: Session, lane: DatabaseLane, actor: User, cont
         if choice == "m":
             await _message(session, state, controls, entry)
         else:
-            await _kick(session, lane, actor, state, controls, entry)
+            await disconnect(entry)
+            _take_outcome(session, state)
         return KeyOutcome.REPAINT
+
+    def on_notice(text: str) -> None:
+        # A message or broadcast for the SysOp: shown on the outcome line
+        # rather than written over the table.
+        state.say(" ".join(strip_ansi(text).split()), ALERT_COLOR)
 
     await run_live_screen(
         session,
         paint=lambda buffer: paint_monitor(buffer, state, controls),
         on_key=on_key,
+        on_notice=on_notice,
         interval=REFRESH_SECONDS,
     )

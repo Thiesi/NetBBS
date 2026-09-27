@@ -9,7 +9,7 @@ import pytest
 from netbbs.auth.users import SYSOP_LEVEL, create_user
 from netbbs.moderation.log import list_recent_actions
 from netbbs.net import sysop_monitor
-from netbbs.net.admin_flow import admin_menu
+from netbbs.net.admin_flow import admin_menu, disconnect_session_draft
 from netbbs.net.char_input import EditorKey, EditorKeyKind
 from netbbs.net.live_screen import SHOW_CURSOR, KeyOutcome, run_live_screen
 from netbbs.net.maintenance import MaintenanceMode
@@ -114,6 +114,13 @@ async def _connect(registry: ActiveSessionRegistry, session: Session, username: 
     task = asyncio.create_task(connection())
     await ready.wait()
     return task
+
+
+def _monitor(viewer, lane, sysop, controls):
+    return sysop_monitor.monitor_screen(
+        viewer, lane, sysop, controls,
+        disconnect=lambda entry: disconnect_session_draft(viewer, lane, sysop, controls, entry),
+    )
 
 
 def _rows(buffer: ScreenBuffer) -> list[str]:
@@ -255,7 +262,7 @@ def test_ticks_repaint_only_what_changed_and_never_touch_the_database(db, lane, 
         viewer, alice = QueueSession(), QueueSession()
         tasks = [await _connect(controls.session_registry, viewer, "sysop"),
                  await _connect(controls.session_registry, alice, "alice")]
-        monitor = asyncio.create_task(sysop_monitor.monitor_screen(viewer, lane, sysop, controls))
+        monitor = asyncio.create_task(_monitor(viewer, lane, sysop, controls))
         await _until(lambda: "Main menu" in viewer.text())
         entry_calls = len(calls)
         alice.activity = ("Doors", "Voidrunner")
@@ -281,7 +288,7 @@ def test_resize_and_ctrl_l_repaint_everything(db, lane, sysop, monkeypatch):
         controls = _controls()
         viewer = QueueSession()
         task = await _connect(controls.session_registry, viewer, "sysop")
-        monitor = asyncio.create_task(sysop_monitor.monitor_screen(viewer, lane, sysop, controls))
+        monitor = asyncio.create_task(_monitor(viewer, lane, sysop, controls))
         clears = lambda: sum(chunk.count("\x1b[2J") for chunk in viewer.written)  # noqa: E731
         await _until(lambda: clears() == 1)
         viewer.terminal_width = 100
@@ -311,7 +318,9 @@ def test_a_pending_key_read_survives_ticks_and_is_cleaned_up_on_cancel():
         async def on_key(key):
             return KeyOutcome.CONTINUE
 
-        screen = asyncio.create_task(run_live_screen(session, paint=lambda b: None, on_key=on_key, interval=0.01))
+        screen = asyncio.create_task(
+            run_live_screen(session, paint=lambda b: None, on_key=on_key, on_notice=lambda text: None, interval=0.01)
+        )
         await asyncio.sleep(0.08)
         assert len(reads) == 1, "a tick started a second key read"
         screen.cancel()
@@ -338,7 +347,7 @@ def test_message_reaches_the_selected_caller(db, lane, sysop):
         viewer, alice = QueueSession(), QueueSession()
         tasks = [await _connect(controls.session_registry, viewer, "sysop"),
                  await _connect(controls.session_registry, alice, "alice")]
-        monitor = asyncio.create_task(sysop_monitor.monitor_screen(viewer, lane, sysop, controls))
+        monitor = asyncio.create_task(_monitor(viewer, lane, sysop, controls))
         _select(viewer, controls, "alice")
         for key in ("m", "time to log off soon"):
             viewer.inputs.put_nowait(key)
@@ -360,11 +369,12 @@ def test_kick_disconnects_logs_and_says_so(db, lane, sysop):
         create_user(db, "alice", password="hunter2")
         tasks = [await _connect(controls.session_registry, viewer, "sysop"),
                  await _connect(controls.session_registry, alice, "alice")]
-        monitor = asyncio.create_task(sysop_monitor.monitor_screen(viewer, lane, sysop, controls))
+        monitor = asyncio.create_task(_monitor(viewer, lane, sysop, controls))
         _select(viewer, controls, "alice")
-        for key in ("k", "maintenance", "y"):
+        # Who's disconnect draft: [M]essage, then [D]isconnect and confirm.
+        for key in ("k", "m", "maintenance", "d", "y"):
             viewer.inputs.put_nowait(key)
-        await _until(lambda: "alice disconnected." in viewer.text())
+        await _until(lambda: "'alice' disconnected." in viewer.text())
         assert tasks[1].done()
         assert "*** maintenance ***" in strip_ansi("".join(alice.written))
         assert any("sysop disconnected alice" in e.text for e in controls.session_registry.recent_events())
@@ -384,12 +394,15 @@ def test_kick_can_be_declined(db, lane, sysop):
         viewer, alice = QueueSession(), QueueSession()
         tasks = [await _connect(controls.session_registry, viewer, "sysop"),
                  await _connect(controls.session_registry, alice, "alice")]
-        monitor = asyncio.create_task(sysop_monitor.monitor_screen(viewer, lane, sysop, controls))
+        monitor = asyncio.create_task(_monitor(viewer, lane, sysop, controls))
         _select(viewer, controls, "alice")
-        for key in ("k", "", "n"):
+        mark = len(viewer.written)
+        for key in ("k", "d", "n", "b"):
             viewer.inputs.put_nowait(key)
-        await _until(lambda: "Not disconnected." in viewer.text())
+        await _until(lambda: "DOING" in strip_ansi("".join(viewer.written[mark:])) and viewer.inputs.empty())
+        await asyncio.sleep(0.05)
         assert not tasks[1].done()
+        assert "Cancelled." in viewer.text()
         viewer.inputs.put_nowait("q")
         await monitor
         for task in tasks:
@@ -405,7 +418,7 @@ def test_unwind_is_refused_outside_the_main_menu_and_sent_inside_it(db, lane, sy
         registry = controls.session_registry
         viewer, alice = QueueSession(), QueueSession()
         tasks = [await _connect(registry, viewer, "sysop"), await _connect(registry, alice, "alice")]
-        monitor = asyncio.create_task(sysop_monitor.monitor_screen(viewer, lane, sysop, controls))
+        monitor = asyncio.create_task(_monitor(viewer, lane, sysop, controls))
         _select(viewer, controls, "alice")
         viewer.inputs.put_nowait("u")
         await _until(lambda: "can't be sent back right now" in viewer.text())
@@ -426,7 +439,7 @@ def test_actions_on_your_own_session_are_refused(db, lane, sysop):
         controls = _controls()
         viewer = QueueSession()
         task = await _connect(controls.session_registry, viewer, "sysop")
-        monitor = asyncio.create_task(sysop_monitor.monitor_screen(viewer, lane, sysop, controls))
+        monitor = asyncio.create_task(_monitor(viewer, lane, sysop, controls))
         viewer.inputs.put_nowait("k")
         await _until(lambda: "That's your own session." in viewer.text())
         viewer.inputs.put_nowait("q")
@@ -464,6 +477,93 @@ def test_any_terminal_size_paints_without_error(size):
         tasks = [await _connect(registry, s, f"user{i}") for i, s in enumerate(sessions)]
         buffer = ScreenBuffer(*size)
         paint_monitor(buffer, MonitorState(viewer=sessions[0]), controls)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+# -- review follow-ups -------------------------------------------------------
+
+
+def test_a_notice_for_the_sysop_lands_on_the_outcome_line_not_over_the_table(db, lane, sysop, monkeypatch):
+    monkeypatch.setattr(sysop_monitor, "REFRESH_SECONDS", 10.0)  # only the notice may repaint
+
+    async def scenario():
+        controls = _controls()
+        viewer = QueueSession()
+        task = await _connect(controls.session_registry, viewer, "sysop")
+        monitor = asyncio.create_task(_monitor(viewer, lane, sysop, controls))
+        await _until(lambda: "DOING" in viewer.text())
+        mark = len(viewer.written)
+        assert await controls.session_registry.notify_one(viewer, "\r\n*** Node going down in 5 minutes ***")
+        await _until(lambda: "Node going down in 5 minutes" in strip_ansi("".join(viewer.written[mark:])))
+        # Painted as cells, never written raw with its line breaks.
+        assert not any("\r\n" in chunk for chunk in viewer.written[mark:])
+        viewer.inputs.put_nowait("q")
+        await monitor
+        assert viewer.pinned_notice_hook is None
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_combining_marks_keep_their_accent():
+    from netbbs.net.live_screen import paint_text
+
+    buffer = ScreenBuffer(10, 1)
+    end = paint_text(buffer, 0, 0, "Cafe\u0301!")
+    assert end == 5
+    assert _rows(buffer)[0].startswith("Cafe\u0301!")
+
+
+def test_long_ids_and_names_stay_distinguishable():
+    async def scenario():
+        controls = _controls()
+        registry = controls.session_registry
+        registry._next_session_id = 1000
+        viewer, a, b = QueueSession(), QueueSession(), QueueSession()
+        tasks = [await _connect(registry, viewer, "sysop"),
+                 await _connect(registry, a, "averyverylongname_one"),
+                 await _connect(registry, b, "averyverylongname_two")]
+        buffer = ScreenBuffer(80, 24)
+        paint_monitor(buffer, MonitorState(viewer=viewer), controls)
+        text = "\n".join(_rows(buffer))
+        assert "1001" in text and "1002" in text
+        assert "averyverylo…" in text
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_time_online_follows_the_monotonic_clock(monkeypatch):
+    from netbbs.net import session_registry
+
+    clock = [500.0]
+    monkeypatch.setattr(session_registry.time, "monotonic", lambda: clock[0])
+
+    async def scenario():
+        registry = ActiveSessionRegistry()
+        session = QueueSession()
+        registry.enter(session)
+        clock[0] = 500.0 + 3725
+        (entry,) = registry.list_entries()
+        assert entry.connected_seconds == 3725
+        registry.leave(session)
+
+    asyncio.run(scenario())
+
+
+def test_the_more_marker_fits_a_very_narrow_terminal():
+    async def scenario():
+        controls = _controls()
+        sessions = [QueueSession() for _ in range(20)]
+        tasks = [await _connect(controls.session_registry, s, f"u{i}") for i, s in enumerate(sessions)]
+        paint_monitor(ScreenBuffer(8, 14), MonitorState(viewer=sessions[0]), controls)
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)

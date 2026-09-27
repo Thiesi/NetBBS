@@ -91,6 +91,10 @@ class SessionSummary:
     idle_seconds: float = 0.0
     activity: tuple[str, ...] = ()
     is_sysop: bool = False
+    # Issue #763: time online, from the monotonic clock, so a host clock
+    # step cannot freeze or inflate it the way subtracting two wall-clock
+    # `connected_at` readings would.
+    connected_seconds: float = 0.0
 
 
 #: How many recent session events the SysOp monitor can show (issue #763).
@@ -293,6 +297,7 @@ class ActiveSessionRegistry:
                 idle_seconds=max(0.0, now - since),
                 activity=tuple(getattr(session, "activity", ())),
                 is_sysop=entry.is_sysop,
+                connected_seconds=max(0.0, now - entry.entered_monotonic),
             ))
         return summaries
 

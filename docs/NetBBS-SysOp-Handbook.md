@@ -768,11 +768,13 @@ Under **Operations → Node and sessions**:
   - It shows each caller's transport, address, time on, idle time, terminal
     size and where they are, for example "Boards › Retro" or
     "Doors › Voidrunner".
-  - Up/Down selects a caller. **Message** sends them a line. **Kick**
-    disconnects them after an optional message and records it in the audit
-    log, like **Who**. **Unwind** sends them back to the main menu.
+  - Up/Down selects a caller. **Message** sends them a line. **Kick** opens
+    the same disconnect screen as **Who**: an optional message, then
+    **Disconnect**, which is recorded in the audit log. **Unwind** sends them
+    back to the main menu.
   - **Order** sorts by time on, idle time or name. Below the table are the
-    most recent logins and logoffs.
+    most recent logins, logoffs and disconnects. A message or broadcast sent
+    to you while the Monitor is open appears on the line above the keys.
   - On a terminal narrower than 80 columns, the address, terminal size and
     transport columns are left out, in that order.
 - **Who** lists sessions and disconnects one.
