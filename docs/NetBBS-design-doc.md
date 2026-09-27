@@ -1999,34 +1999,79 @@ is visible on the SysOp dashboard and update-settings screen. The
 operator-visible switch controls the startup/daily checks only; manual checks
 remain available when it is off.
 
-The supported apply model is currently operator-driven:
+**Installing from the console (issue #731).** When the last check found a newer
+release, a SysOp on the live node can press `[I]nstall vX` on the Update screen.
+The screen shows the plan first and does nothing until `[I]nstall now` and a
+final yes. The steps run in order, and each one that fails stops the rest and
+records why:
 
-- create a complete backup from the live SysOp `[K] Backup` screen, or use
-  `python -m netbbs.backup create` when a custom destination or external
-  scheduler is required;
-- stop the service through its supervisor, allowing the normal graceful drain;
-- install the selected wheel from the official GitHub release into the same
-  virtual environment, preserving the installation's extras;
-- start the service, at which point pending database migrations apply
-  automatically and startup integrity checks run;
-- if startup fails, reinstall the previous release and restore the pre-upgrade
-  backup so application code and database schema roll back together.
+1. **Download.** The node asks the release API for that tag and takes the one
+   asset named `netbbs-<version>-py3-none-any.whl`. It refuses a draft or
+   pre-release, an asset whose address is not under the project's
+   `releases/download/<tag>/`, an implausible size, and an asset without a
+   published `sha256:` digest. The download is HTTPS end to end, redirects
+   included. It is bounded by the announced size (64 MiB at most) and 300
+   seconds. It is written under a temporary name and kept, beside the
+   database in `<db-stem>_updates/`, only when its SHA-256 matches the digest.
+2. **Back up.** A complete live backup, exactly as Backup's Create does. A
+   refused backup, for example with a War Dialer world in use, stops the
+   install.
+3. **Install.** `pip install` of the verified wheel into the interpreter the
+   node runs on, with the extras this installation has. An extra counts when
+   every requirement it names is installed; `dev` never counts. pip resolves
+   dependencies as usual, so a release that needs a newer dependency fetches
+   it from the package index. The node refuses to install:
+   - outside a virtual environment;
+   - from an editable or VCS install;
+   - where the service account cannot write the environment.
 
-`netbbs.selfupdate` also contains safe archive extraction, database snapshot,
-and pending/confirm/rollback primitives. They are tested in isolation but are
-not called by any command, menu, or node-lifecycle path. There is no automated
-apply, process re-exec, startup confirmation, or automated rollback today.
+   pip runs as an owned subprocess, bounded at 900 seconds, and only the tail
+   of its output is kept, for the failure screen. A fresh interpreter then
+   reports the installed version. Anything other than the target counts as a
+   failed install.
+4. **Restart.** The node records the install, then does one of two things:
+   - It shuts down gracefully: callers are warned and the configured delay
+     applies. It then exits with status 75, so the service manager starts the
+     new build.
+   - It stops there and tells the SysOp to restart the service.
 
-The future automated apply target, which remains unimplemented, is to drain
-live sessions, stage the new release and a database snapshot, re-exec into the
-new release, retain the previous release until startup succeeds, and restore
-both the previous release and snapshot after failed startup. Wiring this target
-requires a separate design and operational-validation pass, particularly for
-ownership under systemd/rc.d.
+   Which one is the SysOp's declaration under `[R]estart after install`. The
+   setting is `auto` by default, which trusts detection: systemd's
+   `INVOCATION_ID` counts as a supervisor that restarts NetBBS, and NetBSD
+   rc.d, which does not restart a stopped node, is not detected. The request
+   for status 75 holds only while that restart shutdown is the one in
+   charge. A SysOp who cancels it, or a SIGTERM that replaces it, withdraws
+   it, because a service manager stopping the node must leave it stopped.
+   The shipped systemd unit restarts on 75 under `Restart=on-failure`, and
+   also lists 75 under `RestartForceExitStatus=` and `SuccessExitStatus=`.
 
-HTTPS and GitHub are currently the update trust boundary. Additional release
-signing is not required by the present design, though it remains a possible
-hardening step.
+The next start compares the version it runs with the recorded target and
+records the outcome for the Update screen: "installed vX and restarted into
+it", or "installed vX, but this node started as vY".
+
+Between the install and the restart, the old process keeps running with the
+new files on disk. A module imported for the first time in that window would
+come from the new release. That is why the restart path follows the install
+immediately, and why the no-restart outcome says plainly to restart now.
+
+**Not automated:** rolling back. Going back means reinstalling the previous
+release's wheel and then restoring the pre-upgrade backup the install just
+made, so that code and schema roll back together. The operator-driven
+procedure remains fully supported: back up, stop the service, install the
+release wheel into the same environment with the same extras, start.
+
+`netbbs.selfupdate` also still contains tarball extraction, database snapshot
+and pending/confirm/rollback primitives from an earlier re-exec design. No
+command, menu or lifecycle path calls them.
+
+HTTPS and GitHub are the update trust boundary. The digest the install checks
+comes from the same release API over the same TLS. It proves the bytes are the
+ones GitHub holds for that asset, so a truncated, corrupted or swapped download
+fails. It does not prove that a maintainer signed them. An asset without a
+digest is refused rather than installed on TLS alone. Release signing remains
+a possible hardening step and is not required by the present design. GitHub
+computes asset digests on upload, so the release recipe needs no extra step;
+it must attach the wheel under its standard name.
 
 GitHub Releases and tagged source are the only official NetBBS distribution
 and update channel. `pip` is used to install an official release wheel; it is
@@ -5485,9 +5530,9 @@ guessing at compatibility rules for a wire change nobody has designed.
 The database and protocol halves use separate compatibility mechanisms.
 Database migrations are atomic, a newer-than-supported schema is rejected at
 startup, and the supported operator procedure requires a complete pre-upgrade
-backup so code and schema can be restored together. `netbbs.selfupdate` has
-isolated snapshot and rollback primitives, but no production path invokes
-them around startup; automated database rollback is therefore not implemented.
+backup so code and schema can be restored together. An install from the
+console (§6.7) takes that backup itself; automated database rollback is not
+implemented.
 The wire-protocol check above is independently implemented in
 `netbbs.link.protocol`, where received envelopes are version-gated without
 coupling Link compatibility to release installation.
@@ -7542,12 +7587,10 @@ runtime-linking gap documented in the worklog §10), persistent
 state paths, backup/restore (linking the existing disaster-recovery
 drill), upgrading, version/schema compatibility, and uninstalling
 without losing data. `python -m netbbs --version` (issue #82) prints
-the release version and expected schema number together. Documented,
-not implemented: `netbbs.selfupdate`'s existing download/snapshot/
-rollback plumbing has no wired apply-and-restart command yet — a
-deliberate prior deferral, not a gap this issue asked to close; manually
+the release version and expected schema number together. Installing a
+release from the console arrived later (§6.7, issue #731); manually
 installing an official GitHub-release wheel into the node's virtual
-environment is what's actually supported today.
+environment remains supported.
 
 ### Issue #74 — FTS index integrity checks and rebuild tooling — closed
 
