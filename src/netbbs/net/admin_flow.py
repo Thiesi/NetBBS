@@ -1840,6 +1840,16 @@ async def _draw_users_menu(session: Session, *, stats: dict[str, Any]) -> None:
 # -- system submenu ----------------------------------------------------------
 
 
+def _diagnostics_available(node_controls: NodeControls | None, link_context: LinkContext | None) -> bool:
+    """Whether the bounded diagnostic log is worth offering.
+
+    It is written by Link *and* by the MRC bridge (issue #275), and MRC can
+    be switched on live without Link -- so on any running node the log is
+    worth reading. Operations and Settings' hidden aliases share this one
+    gate (issue #732: Settings once required Link alone)."""
+    return link_context is not None or node_controls is not None
+
+
 async def _operations_menu(
     session: Session,
     lane: DatabaseLane,
@@ -1871,7 +1881,7 @@ async def _operations_menu(
     # part of this snapshot -- they read `node_controls` directly, in
     # memory, so recomputing them every loop iteration is free.
     state = await lane.run(_load_ops)
-    diagnostics_available = link_context is not None or node_controls is not None
+    diagnostics_available = _diagnostics_available(node_controls, link_context)
     while True:
         unicode_style = state["unicode_style"]
         collapsed = state["collapsed"]
@@ -2016,9 +2026,6 @@ async def _operations_menu(
                 MenuEntry(label=menu_key("L", "ink status"), brief="NetBBS Link peer/network health"),
                 MenuEntry(label=menu_key("O", "utbox"), brief="Pending outgoing Link work items"),
             ])
-        # The bounded diagnostic log is written by Link *and* by the MRC
-        # bridge (issue #275), and MRC can be switched on live without
-        # Link -- so on any running node the log is worth reading.
         if diagnostics_available:
             options.extend([
                 MenuEntry(label=menu_key("D", "iagnostics"), brief="Recent Link and MRC diagnostics"),
@@ -2209,12 +2216,12 @@ async def _system_menu(
             await _repair_carried_posts_screen(session, lane, actor)
             stats = await lane.run(_load_settings_stats)
             await _draw_system_menu(session, node_controls, link_context, stats=stats)
-        elif choice == "d" and link_context is not None:
+        elif choice == "d" and _diagnostics_available(node_controls, link_context):
             await session.write_line("")
             await _diagnostic_log_screen(session, lane, actor)
             stats = await lane.run(_load_settings_stats)
             await _draw_system_menu(session, node_controls, link_context, stats=stats)
-        elif choice == "f" and link_context is not None:
+        elif choice == "f" and _diagnostics_available(node_controls, link_context):
             await session.write_line("")
             await _diagnostic_log_tail_screen(session, lane)
             stats = await lane.run(_load_settings_stats)
