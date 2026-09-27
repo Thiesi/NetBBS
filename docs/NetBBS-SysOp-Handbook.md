@@ -730,7 +730,9 @@ Under **Operations → Node and sessions**:
 
 These controls require a live node session. For a stopped node, use the host's
 service controls. Use **Audit log** to see administrative and moderation
-activity. Storage garbage collection and draft pruning show the proposed work
+activity, and **Node log** to read the newest part of `netbbs.log`: warnings and
+errors first, **Level** to show errors only or everything, **Follow** to watch
+new lines. Storage garbage collection and draft pruning show the proposed work
 before confirmation; review it instead of deleting files directly.
 
 ### Custom banners and mastheads
@@ -944,6 +946,12 @@ before the application's rotating log opens. That service capture is not
 self-rotating, so arrange rotation or an appropriate output policy yourself.
 The application's `netbbs.log` rotates at 10 MiB with five retained backups
 (up to about 60 MiB including the active file).
+
+**Operations → Node log** reads that file from inside NetBBS, including from
+`python -m netbbs.admin` while the node is stopped. It shows the newest 512 KiB,
+topped up from `netbbs.log.1` after a rotation, and says when older lines exist
+that it does not show. It cannot show failures from before the log opened; for
+those, use the service manager's output above.
 
 Link Diagnostics is a bounded warning/error log, not a transcript of all
 content. The administrative Audit log answers who changed a setting or moderated

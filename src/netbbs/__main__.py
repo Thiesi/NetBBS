@@ -26,6 +26,7 @@ from netbbs.backup import remove_pid_file, write_pid_file
 from netbbs.chat import ChatHub, DirectChatInvites, MessageMailbox, PresenceRegistry
 from netbbs.config import is_node_display_name_placeholder
 from netbbs.files.storage import purge_incoming_staging
+from netbbs.node_log import node_log_path
 from netbbs.session_history import reconcile_interrupted_sessions
 from netbbs.link.boards import LinkConfigSnapshot, LinkContext
 from netbbs import __version__
@@ -1607,7 +1608,7 @@ async def main() -> None:
     # rather than an operator-chosen path -- consistent with db_path's
     # own CWD-relative default, and one less thing to configure for a
     # deployment that hasn't asked for anything fancier.
-    log_path = config.db_path.parent / "netbbs.log"
+    log_path = node_log_path(config.db_path)
     logging.getLogger().addHandler(_create_log_file_handler(log_path))
 
     shutdown_event = asyncio.Event()

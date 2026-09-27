@@ -348,6 +348,14 @@ from netbbs.moderation.log import (
     record_action_without_commit,
 )
 from netbbs.mrc.protocol import display_roster_entry, room_name_error
+from netbbs.node_log import (
+    NodeLogEntry,
+    NodeLogFollower,
+    entries_at_or_above,
+    level_rank,
+    node_log_path,
+    read_node_log,
+)
 from netbbs.mrc.bridge import MrcBridge, MrcState, MrcStatus
 from netbbs.mrc.settings import (
     MrcChannelMapping,
@@ -2008,6 +2016,7 @@ async def _operations_menu(
             MenuEntry(label=menu_key("K", "up", prefix="Bac"), brief="Create and review complete backups"),
             MenuEntry(label=menu_key("P", "rune drafts"), brief="Clean up old unsaved drafts"),
             MenuEntry(label=menu_key("A", "udit log"), brief="Moderation action history"),
+            MenuEntry(label=menu_key("g", prefix="Node lo"), brief="Warnings and errors in netbbs.log"),
         ]
         if node_controls is not None:
             options.insert(0, MenuEntry(label=menu_key("N", "ode and sessions"), brief="Sessions, shutdown, and drain"))
@@ -2083,6 +2092,9 @@ async def _operations_menu(
             state = await lane.run(_load_ops)
         elif choice == "a":
             await _audit_log_screen(session, lane, actor)
+            state = await lane.run(_load_ops)
+        elif choice == "g":
+            await _node_log_screen(session, lane, actor)
             state = await lane.run(_load_ops)
         else:
             await session.write(reject_unhandled_key(choice))
@@ -8677,6 +8689,170 @@ async def _diagnostic_log_tail_screen(session: Session, lane: DatabaseLane) -> N
             for entry in new_entries:
                 await session.write_line(_diagnostic_entry_line(entry, session.terminal_width))
                 last_id = entry.id
+    finally:
+        if not key_task.done():
+            key_task.cancel()
+            await asyncio.gather(key_task, return_exceptions=True)
+    await session.write_line("")
+
+
+# `[L]evel` on the node log cycles through these floors, in this order.
+_NODE_LOG_FLOORS = ("WARNING", "ERROR", "INFO")
+_NODE_LOG_FLOOR_LABELS = {"WARNING": "warnings and errors", "ERROR": "errors only", "INFO": "everything"}
+
+
+def _node_log_line(entry: NodeLogEntry, width: int) -> str:
+    segments: list[tuple[str, int | None]] = [
+        (f"{entry.when}  ", MUTED_COLOR),
+        (f"[{entry.level}] ", _diagnostic_level_color(entry.level) if level_rank(entry.level) >= level_rank("WARNING") else MUTED_COLOR),
+        (f"{sanitize_text(entry.logger)}: ", MUTED_COLOR),
+        (sanitize_text(entry.message), None),
+    ]
+    return colored_truncate(segments, width)
+
+
+async def _node_log_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
+    """Issue #729: the node's own `netbbs.log`, read-only and bounded.
+
+    The diagnostic log only holds what Link and the MRC bridge report; the
+    listener errors, transfer failures and banner fallbacks the node logs
+    elsewhere were readable only on the host. This reads the newest part of
+    the file (`netbbs.node_log`'s bounds), warnings and errors first,
+    `[L]evel` widening or narrowing that, `[F]ollow` watching new lines.
+
+    Works in the standalone `python -m netbbs.admin` console as well: the log
+    is a file beside the database, and a node that will not start is exactly
+    when its log is wanted."""
+    chrome = await _load_chrome(lane, actor)
+    db_path = await lane.run(lambda db: db.path)
+    path = node_log_path(db_path)
+    log = await asyncio.to_thread(read_node_log, path)
+    if log.error is not None or log.missing:
+        note = (
+            log.error if log.error is not None
+            else f"There is no {path.name} beside the database yet. The node creates it when it starts."
+        )
+        await _show_report(
+            session, lane, actor, "Node log", breadcrumb=("SysOp", "Operations"),
+            sections=[Section(None, [Field("File", str(path)), Note(note)])],
+        )
+        return
+
+    state = {"floor": _NODE_LOG_FLOORS[0], "ascending": False}
+
+    def _view() -> list[NodeLogEntry]:
+        shown = entries_at_or_above(log.entries, state["floor"])
+        return shown if state["ascending"] else list(reversed(shown))
+
+    async def _reload() -> list[NodeLogEntry]:
+        nonlocal log
+        log = await asyncio.to_thread(read_node_log, path)
+        return _view()
+
+    async def _flip_order() -> list[NodeLogEntry]:
+        state["ascending"] = not state["ascending"]
+        return _view()
+
+    async def _cycle_floor() -> list[NodeLogEntry]:
+        position = _NODE_LOG_FLOORS.index(state["floor"])
+        state["floor"] = _NODE_LOG_FLOORS[(position + 1) % len(_NODE_LOG_FLOORS)]
+        return _view()
+
+    async def _follow() -> list[NodeLogEntry]:
+        await _node_log_tail_screen(session, lane, path, floor=state["floor"])
+        return await _reload()
+
+    def _standing() -> str:
+        label = f"Showing {_NODE_LOG_FLOOR_LABELS[state['floor']]}"
+        return label + ("; older lines are not shown" if log.truncated else "")
+
+    def _row_segments(entry: NodeLogEntry) -> list[tuple[str, int | None]]:
+        level_color = (
+            _diagnostic_level_color(entry.level) if level_rank(entry.level) >= level_rank("WARNING")
+            else MUTED_COLOR
+        )
+        return [
+            (entry.when, METADATA_COLOR),
+            ("  ", None),
+            (entry.level, level_color),
+            ("  ", None),
+            (entry.logger, chrome.accent_color),
+        ]
+
+    reopen_at: int | None = None
+    while True:
+        selected = await pick_item(
+            session, _view(),
+            name_of=lambda entry: f"{entry.when}  {entry.level}  {entry.logger}",
+            stable_id_of=lambda entry: entry.id,
+            description_of=lambda entry: entry.message,
+            name_segments_of=_row_segments,
+            title="Node log",
+            breadcrumb=("SysOp", "Operations"),
+            empty_message=f"No {_NODE_LOG_FLOOR_LABELS[state['floor']]} in the newest part of {path.name}.",
+            start_stable_id=reopen_at,
+            refresh=_reload,
+            on_sort=_flip_order,
+            sort_label=lambda: "oldest first" if state["ascending"] else "newest first",
+            live_keys={"l": _cycle_floor, "f": _follow},
+            live_nav=[
+                MenuEntry(label=menu_key("L", "evel"), brief="Warnings / errors / everything"),
+                MenuEntry(label=menu_key("F", "ollow"), brief="Watch new lines as they are written"),
+            ],
+            live_label=_standing,
+            redraw_in_place=chrome.redraw_in_place,
+            unicode_style=chrome.unicode_style,
+            collapsed=chrome.collapsed,
+            accent_color=chrome.accent_color,
+            header_color=chrome.header_color,
+        )
+        if selected is None:
+            return
+        reopen_at = selected.id
+        rows: list[Field | Note] = [
+            Field("When", selected.when, color=DATE_COLOR),
+            Field("Level", selected.level, color=_diagnostic_level_color(selected.level), bold=True),
+            Field("Logger", selected.logger, color=METADATA_COLOR),
+            Field("Message", selected.message),
+        ]
+        sections = [Section(None, rows)]
+        if selected.continuation:
+            sections.append(Section("Continued", [Note(line, color=VALUE_COLOR) for line in selected.continuation]))
+        await show_detail(
+            session,
+            title=_detail_title(session, chrome, "Log entry", breadcrumb=("SysOp", "Operations", "Node log")),
+            sections=sections,
+            actions=[_BACK_ACTION],
+            redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+        )
+
+
+async def _node_log_tail_screen(session: Session, lane: DatabaseLane, path: Path, *, floor: str) -> None:
+    """Live view of new node-log lines at or above `floor`; any key stops it.
+
+    Same task ownership as `_diagnostic_log_tail_screen`: the pending
+    `read_key()` is cancelled and gathered on every exit path."""
+    await session.write_line(
+        colored(
+            f"\r\nNode log (live, {_NODE_LOG_FLOOR_LABELS[floor]}) -- press any key to stop.",
+            fg_color=await lane.run(effective_header_color_256), bold=True,
+        )
+    )
+    await session.write_line(colored("Watching for new lines.", fg_color=MUTED_COLOR))
+    follower = await asyncio.to_thread(NodeLogFollower, path)
+    last_error: str | None = None
+    key_task = asyncio.create_task(session.read_key())
+    try:
+        while True:
+            done, _pending = await asyncio.wait({key_task}, timeout=_DIAGNOSTIC_TAIL_POLL_INTERVAL_SECONDS)
+            if key_task in done:
+                break
+            entries, error = await asyncio.to_thread(follower.poll)
+            if error is not None and error != last_error:
+                await session.write_line(colored(sanitize_text(error), fg_color=ERROR_COLOR))
+            last_error = error
+            for entry in entries_at_or_above(entries, floor):
+                await session.write_line(_node_log_line(entry, session.terminal_width))
     finally:
         if not key_task.done():
             key_task.cancel()
