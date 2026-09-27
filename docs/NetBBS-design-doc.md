@@ -2398,6 +2398,18 @@ version signs carries the same list. Two exist: `inventory_not_carried` (issue
 #669) and `inventory_pages` (issue #685), both for signed `InventoryRequest`
 fields (§8.8).
 
+A descriptor may also carry `dial_in`: up to four URLs at which a *caller*
+reaches the signing board, as opposed to the Link `addresses` a node dials
+(issue #767, §8.12). Each is `telnet://host:port`, `ssh://host:port` or an
+`https://` URL, at most 300 bytes. It is the SysOp's own statement, since no
+node can see the port-forward or proxy in front of its listeners. A node that has
+never stated it publishes `[web] public_url` when that is an `https://` URL
+within the same 300 bytes,
+the one caller-facing address a SysOp has already declared, or nothing. The field is display-only: a reader
+drops a malformed entry and a malformed list reads as empty, as for
+`live_relays`, and never refuses the hello over it. An older node keeps and
+forwards the field inside the signed envelope without reading it.
+
 The protocol logic remains transport-independent. The `aiohttp` adapter is the
 boundary translating protocol messages to real HTTP requests and responses.
 
@@ -3322,6 +3334,71 @@ SysOp's: establish or block the nodes concerned. Declaring it is not a claim to 
 one: a responder that lacks the event would ask for it back, and a node only
 ever pushes what it originated. An event that is *wrong*, from a peer, still
 ends the response there; what was accepted before it is kept and persisted.
+
+### 8.12 The node map (issue #767)
+
+The node map lists the other NetBBS boards this node knows, how it knows each
+one, when it last heard of it, and how a caller dials it. It is the network's
+BBS list, as one board sees it. Callers and the SysOp see the same screen; the
+SysOp's shows more.
+
+**What is listed.** Every node this one has completed a hello with, every
+node a carrier has introduced (§8.11), and every node that is the origin of a
+board, file area or linked channel this node carries, even after its introduced identity was
+displaced from the bounded store; such a node is listed under whatever name
+this node still has for it, or the unknown-node label, and every field no longer
+on file (provenance, dial-in, last heard, addresses) reads *unknown*. A node is
+listed once, from its best-verified source: met before introduced, introduced
+before candidate. For callers the list leaves out every node
+that is quarantined or blocked in any of the identity, resource or content
+dimensions (§12.2): this node refuses or withholds something of theirs,
+so leaving them off tells a caller the truth about what reaches them here.
+Operational reachability is not a trust state and hides nothing. Probation is not a reason to leave a node off; nearly every new
+node is on probation. A node cannot ask to be left off. The list's worth is
+that a missing board is one that callers cannot reach through this board,
+because this board either does not know it or refuses its content. A list
+that other SysOps could punch holes in would lose that meaning. The
+list is not the whole network: peers pass on only the nodes they have met
+themselves (§8.3), and there is no directory. The screen says so in its title,
+"Nodes known to <board>", and nowhere else.
+
+**What a caller sees.** Per node: its friendly name and DNS name; how this
+board knows it, *direct* (met) or *via <carrier>* (introduced; *via another
+node* when the carrier is itself left off the caller's list); when it was
+last heard of, as a relative time, marked stale past 30 days; and, in its
+detail view, the `dial_in` addresses its descriptor carries (§8.2) and the
+boards and file areas this board carries from it that this caller could open
+anyway, filtered by the same read gates as ordinary browsing. Link addresses, relay roles
+and reliability are never shown to callers: they are how nodes reach each
+other, and a caller cannot use them.
+
+**Last heard.** The later of this node's own last direct contact with it (a
+completed hello or events exchange, or an authenticated real-time session for
+as long as it stays open; issue #766) and the `created_at` of its
+newest valid descriptor, but never later than the time this node first
+stored that descriptor, so a descriptor dated in the future cannot keep a node
+fresh. A node signs a fresh
+descriptor for every hello it builds, so that time is the node's own signed
+statement that it was running, and a carrier who passes it on can withhold a
+newer one but not forge one. A node that has never been heard from directly
+still has one. Knowledge secondhand about a node's *address*, which peer lists
+also refresh, is not contact and never advances it. Stale nodes are marked,
+not removed.
+
+**The SysOp's view.** The same list, plus the nodes callers do not see:
+peer-list candidates, marked unverified and never shown to callers, since a
+candidate has completed no hello and names nobody who vouched for it. A
+candidate's descriptor is unverified, so it has no last-heard time; its row
+shows *never heard from* and, labelled as such, when a peer list first
+named it; and
+quarantined and blocked nodes, with the state of each dimension. Each row adds the Link
+addresses, relay roles and reliability. It replaces the peer list behind the
+Link status screen.
+
+**Who may open it.** A node-wide minimum level set in the SysOp console,
+defaulting to 0. A guest is an account (§4.6), so a SysOp who wants the map
+kept from guests sets the level above the guest account's. On a node with Link
+disabled the entry is not shown.
 
 ## 9. Linked boards and resource lifecycle
 
@@ -11694,6 +11771,71 @@ editor that drew the post, so `board_post_edit` and the moderator edit carry no
 layout: a revision takes its root's. The local `posts.layout` column is
 meaningful on the root row. Rejected: a layout per revision, which would let one
 edit turn a drawing into reflowed prose with nothing to say why.
+
+### Issue #767 — the node map — decided
+
+A caller had no way to see which boards the network holds, and a SysOp could
+see only the nodes this one had met. Normative description: §8.12, and §8.2 for
+`dial_in`.
+
+**Decision 1 — callers and the SysOp, one screen.** The SysOp's view is the
+same list with more rows and columns, and replaces the peer list behind Link
+status. Rejected: a SysOp-only screen, which leaves callers the one audience
+that needs a BBS list most; and two screens, which would drift apart.
+
+**Decision 2 — guests through the level, not a toggle.** Guest login is an
+account and no code branches on it (§4.6), so the map has a minimum level like
+everything else a SysOp gates. Rejected: a guest switch on the map, which is
+the first thing §4.6 rules out.
+
+**Decision 3 — unverified candidates are the SysOp's alone.** A peer-list
+candidate has completed no hello and names nobody who vouched for it, and
+anyone can put a name on one. Introduced nodes are listed for callers: they
+carry a verified bundle and name their carrier.
+
+**Decision 4 — no opt-out.** A board missing from the list must mean callers
+cannot reach it through this board. With an opt-out it could also mean its
+SysOp asked, and a caller could no longer tell whether a missing board is
+unreachable or merely unlisted; a list that says it may be incomplete is one
+nobody trusts.
+The one gap that remains is structural, that nodes pass on only nodes they have
+met, and the title states it. Rejected: an `unlisted` descriptor flag. Leaving
+quarantined and blocked nodes off the caller view is not an opt-out: it is
+this board's own judgement, and such a node is unreachable through this board,
+which is exactly what its absence tells a caller.
+
+**Decision 5 — "last heard" is first-hand or signed by the node.** Contact
+this node observed, or a descriptor time the node signed itself. Rejected: the
+peer record's update time, which a peer list refreshes secondhand and which
+made dead peers look live (issue #766); and the time a carrier's bundle
+arrived, which says when this node asked, not when the other one ran. The
+signed time is capped at when this node first stored it, because a skewed
+or dishonest clock could otherwise date a descriptor years ahead and never
+go stale.
+
+**Decision 6 — dial-in addresses are signed by the board they describe, and
+stated by its SysOp.** They travel in the descriptor because a descriptor
+reaches every node that knows the board, introduced ones included, and a
+carrier cannot alter it. They are stated rather than derived because a node
+cannot see what is in front of its listeners (the issue #201 entry, Decision
+6); the SysOp's screen suggests entries from the node's DNS name and
+listener ports, and publishes nothing the SysOp has not saved, except an
+`https://` `[web] public_url`, which the SysOp has already stated. Rejected: deriving them from
+the listener ports, which on the shipped defaults would advertise ports that
+nobody can dial from outside; and a new wire message, when an optional
+descriptor field is how #669 already extended the descriptor. Plain `http://`
+is not accepted, for the reason the #201 entry gives for the web listener.
+
+**Decision 7 — a bad dial-in claim costs only itself.** Malformed entries are
+dropped where they are read and never fail a hello. Rejected: refusing the
+hello, as invalid profile claims are, which would let a typo in a display field
+cut a node off from Link.
+
+**Not done, deliberately.** A drawn topology: nodes do not record who passed
+on a candidate, and edges beyond this node's own would be guesses. Jumping from
+a node's detail view into its boards. Removing stale nodes by age.
+Reachability claims beyond direct and introduced, such as whether Link mail
+reaches a node.
 
 ### SFTP over the SSH transport — declined
 
