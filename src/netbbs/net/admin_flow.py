@@ -442,7 +442,7 @@ from netbbs.net.char_input import (
     EditorKeyKind,
     reject_unhandled_key,
 )
-from netbbs.net.confirm import prompt_yes_no, prompt_yes_no_or_keep
+from netbbs.net.confirm import prompt_yes_no
 from netbbs.config import get_max_upload_bytes
 from netbbs.files.storage import new_incoming_temp_path
 from netbbs.net.file_transfer import UPLOAD, install_and_record
@@ -464,6 +464,7 @@ from netbbs.net.resource_editor import (
     write_field_message,
     FieldSpec,
     bool_field,
+    bool_step,
     choice_field,
     choice_step,
     edit_resource_draft as _edit_resource_draft,
@@ -8249,13 +8250,16 @@ async def _mrc_settings_screen(
     mrc_bridge = node_controls.mrc_bridge if node_controls is not None else None
     unicode_style = await lane.run(unicode_style_enabled, actor)
 
-    async def _tls_field(session: Session, lane: DatabaseLane, draft: dict) -> None:
+    def _toggle_tls(draft: dict, direction: int = 1) -> None:
         was = bool(draft.get("tls"))
-        draft["tls"] = await prompt_yes_no_or_keep(session, "Use TLS to reach the hub?", current=was)
+        draft["tls"] = not was
         # The two well-known hub ports differ only by transport; follow
         # the toggle unless the SysOp chose a custom port.
-        if draft["tls"] != was and draft.get("port") == default_port_for(was):
+        if draft.get("port") == default_port_for(was):
             draft["port"] = default_port_for(draft["tls"])
+
+    async def _tls_field(session: Session, lane: DatabaseLane, draft: dict) -> None:
+        _toggle_tls(draft)
 
     def _preamble(draft: dict) -> str:
         lines = [
@@ -8275,7 +8279,7 @@ async def _mrc_settings_screen(
         FieldSpec(
             key="enabled", hotkey="e", menu_text=menu_key("E", "nable/Disable"), label="Enabled",
             render=lambda d: "yes" if d["enabled"] else "no",
-            prompt=bool_field("enabled", "Connect this node to the MRC hub?"),
+            prompt=bool_field("enabled"), step=bool_step("enabled"),
             brief="Switch the hub link on or off", section="Hub",
             help="Off by default. Even when on, only channels you bridge individually reach the network.",
         ),
@@ -8292,7 +8296,7 @@ async def _mrc_settings_screen(
         ),
         FieldSpec(
             key="tls", hotkey="t", menu_text=menu_key("T", "LS"), label="TLS",
-            render=lambda d: "yes" if d["tls"] else "no", prompt=_tls_field,
+            render=lambda d: "yes" if d["tls"] else "no", prompt=_tls_field, step=_toggle_tls,
             brief="Encrypt the hub connection", section="Hub",
             help="Recommended. The hub's certificate is verified against the system CA store.",
         ),
@@ -14975,7 +14979,7 @@ def _community_field_specs() -> list[FieldSpec]:
         FieldSpec(
             key="hidden", hotkey="h", menu_text=menu_key("H", "idden"), label="Hidden",
             render=lambda d: "yes" if d.get("hidden") else "no",
-            prompt=bool_field("hidden", "Hidden?"),
+            prompt=bool_field("hidden"), step=bool_step("hidden"),
             brief="Hide from the communities list",
             help=(
                 "Delists this Community from ordinary browsing without deleting it. A SysOp "
@@ -15408,7 +15412,7 @@ def _board_field_specs(
         FieldSpec(
             key="pinned", hotkey="p", menu_text=menu_key("P", "inned"), label="Pinned",
             render=lambda d: "yes" if d.get("pinned") else "no",
-            prompt=bool_field("pinned", "Pinned?"),
+            prompt=bool_field("pinned"), step=bool_step("pinned"),
             brief="Shown at the top of listings",
             help="Shown at the top of board listings, above unpinned boards, regardless of sort order.",
             section="Organization",
@@ -15416,7 +15420,7 @@ def _board_field_specs(
         FieldSpec(
             key="moderated", hotkey="m", menu_text=menu_key("M", "oderated"), label="Moderated",
             render=lambda d: "yes" if d.get("moderated") else "no",
-            prompt=bool_field("moderated", "Moderated (posts need approval)?"),
+            prompt=bool_field("moderated"), step=bool_step("moderated"),
             brief="New posts need approval first",
             help="New posts need a moderator or SysOp to approve them before anyone else can see them.",
             section="Moderation",
@@ -16839,7 +16843,7 @@ def _area_field_specs(
         FieldSpec(
             key="pinned", hotkey="p", menu_text=menu_key("P", "inned"), label="Pinned",
             render=lambda d: "yes" if d.get("pinned") else "no",
-            prompt=bool_field("pinned", "Pinned?"),
+            prompt=bool_field("pinned"), step=bool_step("pinned"),
             brief="Shown at the top of listings",
             help="Shown at the top of file-area listings, above unpinned areas, regardless of sort order.",
             section="Organization",
@@ -16847,7 +16851,7 @@ def _area_field_specs(
         FieldSpec(
             key="moderated", hotkey="m", menu_text=menu_key("M", "oderated"), label="Moderated",
             render=lambda d: "yes" if d.get("moderated") else "no",
-            prompt=bool_field("moderated", "Moderated (uploads need approval)?"),
+            prompt=bool_field("moderated"), step=bool_step("moderated"),
             brief="New uploads need approval first",
             help="New uploads need a moderator or SysOp to approve them before anyone else can download them.",
             section="Moderation",
@@ -17671,7 +17675,7 @@ def _door_field_specs(*, actor: User) -> list[FieldSpec]:
         FieldSpec(
             key="pinned", hotkey="i", menu_text=menu_key("i", "nned", prefix="P"), label="Pinned",
             render=lambda d: "yes" if d.get("pinned") else "no",
-            prompt=bool_field("pinned", "Pinned?"),
+            prompt=bool_field("pinned"), step=bool_step("pinned"),
             brief="Shown at the top of listings",
             help="Shown at the top of door listings, above unpinned doors, regardless of sort order.",
         ),
@@ -19091,7 +19095,7 @@ def _channel_field_specs(
         FieldSpec(
             key="pinned", hotkey="p", menu_text=menu_key("P", "inned"), label="Pinned",
             render=lambda d: "yes" if d.get("pinned") else "no",
-            prompt=bool_field("pinned", "Pinned?"),
+            prompt=bool_field("pinned"), step=bool_step("pinned"),
             brief="Shown at the top of listings",
             help="Shown at the top of channel listings, above unpinned channels, regardless of sort order.",
             section="Organization",
@@ -19099,7 +19103,7 @@ def _channel_field_specs(
         FieldSpec(
             key="hidden", hotkey="h", menu_text=menu_key("H", "idden"), label="Hidden",
             render=lambda d: "yes" if d.get("hidden") else "no",
-            prompt=bool_field("hidden", "Hidden (omitted from listings)?"),
+            prompt=bool_field("hidden"), step=bool_step("hidden"),
             brief="Omitted from channel listings",
             help=(
                 "Delists this channel from ordinary browsing without deleting it. Members "
@@ -19111,7 +19115,7 @@ def _channel_field_specs(
         FieldSpec(
             key="members_only", hotkey="m", menu_text=menu_key("M", "embers-only"), label="Members-only",
             render=lambda d: "yes" if d.get("members_only") else "no",
-            prompt=bool_field("members_only", "Members-only (invite-only access)?"),
+            prompt=bool_field("members_only"), step=bool_step("members_only"),
             brief="Only invited members may join",
             help="When on, a caller can only join via an invite from an existing member -- browsing to it isn't enough.",
             section="Membership",
@@ -19120,7 +19124,7 @@ def _channel_field_specs(
             key="allow_member_invites", hotkey="i", menu_text=menu_key("I", "nvites"),
             label="Allow member invites",
             render=lambda d: "yes" if d.get("allow_member_invites") else "no",
-            prompt=bool_field("allow_member_invites", "Allow members to invite others?"),
+            prompt=bool_field("allow_member_invites"), step=bool_step("allow_member_invites"),
             brief="Members can invite others too",
             help=(
                 "When on, any regular member can invite someone else, not just a moderator/"
