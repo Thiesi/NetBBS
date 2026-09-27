@@ -181,7 +181,27 @@ def test_an_unreadable_legacy_directory_does_not_stop_the_node(db, node_home, mo
 
     monkeypatch.setattr(Path, "iterdir", iterdir)
     assert migrate_voidrunner_saves(db) is None
-    assert voidrunner_save_dir(db) == node_voidrunner_save_dir(db.path)
+    # Not taken for empty (#759 review): the node stays on it and keeps the
+    # record that says so, so the copy is retried once it can be read.
+    assert voidrunner_save_dir(db) == legacy
+    assert record_voidrunner_save_dir(db) == legacy
+    monkeypatch.setattr(Path, "iterdir", real_iterdir)
+    assert migrate_voidrunner_saves(db) == legacy
+
+
+def test_a_target_holding_foreign_files_is_not_taken_for_a_finished_copy(db, node_home, monkeypatch):
+    """#759 review: a `.keep` or README in a pre-created target is not a
+    career. The node warns and stays on the legacy careers."""
+    _as_home(monkeypatch, node_home)
+    _upgraded(db, node_home)
+    legacy = _legacy_careers(node_home)
+    own = node_voidrunner_save_dir(db.path)
+    own.mkdir(parents=True)
+    (own / ".keep").write_bytes(b"")
+
+    assert migrate_voidrunner_saves(db) is None
+    assert voidrunner_save_dir(db) == legacy.resolve()
+    assert not (own / "5.json").exists()
 
 
 def test_nothing_is_copied_when_the_sysop_chose_a_directory(db, node_home, tmp_path, monkeypatch):

@@ -227,26 +227,29 @@ def legacy_voidrunner_save_dir() -> Path | None:
         return None
 
 
-def _holds_careers(directory: Path | None) -> bool:
-    """Whether a directory has anything Voidrunner would miss: a career, a
-    retained copy of one, a score, the pre-scores leaderboard. Lock and
-    temporary files alone do not count, and an unreadable directory counts
-    as holding nothing -- the door could not play from it either -- with a
-    warning, rather than stopping the node at startup."""
+def _careers_in(directory: Path | None) -> bool | None:
+    """Whether a directory holds Voidrunner data: `True` for careers,
+    scores or retained copies -- anything the backup component would
+    capture -- `False` for nothing (absent, empty, lock files only), and
+    `None` when it cannot be trusted either way: unreadable, or holding
+    entries Voidrunner never writes.
+
+    The third answer is why this is not a bool (#759 review). A node moves
+    off the legacy directory only for a `True` from its own, and an
+    unreadable legacy directory is not `False`: treating it as empty would
+    record the empty target and forget the careers were ever this node's.
+    """
     if directory is None:
         return False
+    from netbbs.backup import BackupError, _voidrunner_files
+
     try:
         if not directory.is_dir():
             return False
-        for entry in directory.iterdir():
-            if entry.name == "scores" and entry.is_dir():
-                if any(entry.iterdir()):
-                    return True
-            elif not re.fullmatch(r"\.(?:[0-9]+|maintenance)\.lock|\..+\.tmp", entry.name):
-                return True
-    except OSError as exc:
-        _logger.warning("Voidrunner save directory %s could not be read: %s", directory, exc)
-    return False
+        return bool(_voidrunner_files(directory))
+    except (BackupError, OSError) as exc:
+        _logger.warning("Voidrunner save directory %s cannot be used as it stands: %s", directory, exc)
+        return None
 
 
 def _recorded_voidrunner_save_dir(db) -> str | None:
@@ -285,10 +288,10 @@ def voidrunner_save_dir(db) -> Path:
     if override := os.environ.get("VOIDRUNNER_SAVE_DIR"):
         return Path(override).expanduser().resolve()
     own = node_voidrunner_save_dir(db.path)
-    if _holds_careers(own):
+    if _careers_in(own) is True:
         return own
     legacy = _legacy_owned_by(db)
-    return legacy if _holds_careers(legacy) else own
+    return legacy if _careers_in(legacy) is not False else own
 
 
 def migrate_voidrunner_saves(db) -> Path | None:
@@ -308,16 +311,18 @@ def migrate_voidrunner_saves(db) -> Path | None:
     `voidrunner_save_dir` would mistake for the real one. A target that
     exists but holds only lock files -- pre-created for ownership, say --
     is replaced; one that holds careers of its own is never overwritten,
-    and wins. A busy or unreadable legacy directory is left alone and tried
-    again at the next start; until then the node keeps using it.
+    and wins; one holding anything else is left alone with a warning. A
+    busy or unreadable legacy directory is left alone too. Each of those
+    keeps the node on the legacy directory, and its record naming it, so
+    the next start tries again.
     """
     if os.environ.get("VOIDRUNNER_SAVE_DIR"):
         return None
     own = node_voidrunner_save_dir(db.path)
     legacy = _legacy_owned_by(db)
-    if not _holds_careers(legacy):
+    if legacy is None or _careers_in(legacy) is False:
         return None
-    if _holds_careers(own):
+    if _careers_in(own) is True:
         _logger.warning("Voidrunner careers exist both in %s and in %s; this node uses %s and copies nothing.",
                         own, legacy, own)
         return None
