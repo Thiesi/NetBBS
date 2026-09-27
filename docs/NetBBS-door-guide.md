@@ -259,7 +259,10 @@ by the same account still finds the careers it had; each node then plays its own
 copy. The copy waits for a quiet moment: if a pilot is playing from the old
 directory at startup, the node keeps using the old directory and tries again at
 its next start. A node set up after the upgrade starts with an empty directory
-rather than adopting another node's careers. Once every node has started on the
+rather than adopting another node's careers. So does a node upgraded straight
+from v7.4.0 or earlier, which never recorded the directory it used: before its
+first start, either set `VOIDRUNNER_SAVE_DIR` to the old directory or, with the
+node stopped, copy its contents into `<database>.doors/voidrunner/`. Once every node has started on the
 new version, and no standalone Voidrunner run by the account uses it, the old
 directory is no longer read and can be removed. If two nodes shared it, both copies hold
 both nodes' careers under overlapping user IDs, exactly as the shared directory

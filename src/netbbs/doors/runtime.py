@@ -15,6 +15,7 @@ import re
 import secrets
 import shutil
 import signal
+import stat
 import socket
 import sqlite3
 import sys
@@ -244,9 +245,13 @@ def _careers_in(directory: Path | None) -> bool | None:
     from netbbs.backup import BackupError, _voidrunner_files
 
     try:
-        if not directory.is_dir():
-            return False
+        # `stat`, not `is_dir`: `is_dir` answers False for a directory it could
+        # not stat, which would make an I/O error look like an absent one.
+        if not stat.S_ISDIR(directory.stat().st_mode):
+            return None
         return bool(_voidrunner_files(directory))
+    except FileNotFoundError:
+        return False
     except (BackupError, OSError) as exc:
         _logger.warning("Voidrunner save directory %s cannot be used as it stands: %s", directory, exc)
         return None

@@ -900,7 +900,10 @@ not share: up to v7.4.0 that silently captured no careers at all
   since. The CLI says so in as many words -- `Voidrunner: NOT CAPTURED` or
   `GUESSED LOCATION` -- rather than reporting an empty directory as an empty
   node. Start the node once (it copies the careers into place), or pass
-  `--voidrunner-save-dir` with the old directory.
+  `--voidrunner-save-dir` with the old directory. A node upgraded straight from
+  v7.4.0 or earlier never recorded that directory, so it does **not** copy the
+  careers: set `VOIDRUNNER_SAVE_DIR` to the old directory before its first start,
+  or copy its contents into `netbbs.db.doors/voidrunner/` with the node stopped.
 - A directory you chose yourself, when the node has not recorded it. Pass
   `--voidrunner-save-dir` with the path shown on the live Backup screen.
 
