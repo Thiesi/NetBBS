@@ -243,6 +243,9 @@ WALKS: dict[str, list[tuple[str, bytes]]] = {
         ("Choose approach", b"J1?"),
         ("Job preview", b"J1?1?N%"),
         ("Trade preview", b"TN%"),
+        # The same preview once the turn-day's Trades have tapered the payout
+        # (issue #649); SETUP makes the Trades.
+        ("Trade preview, tapered", b"TN%"),
         ("Recruit preview", b"CN%"),
         # Recruiting is the one action whose outcome is fixed, so the result
         # screen it commits to is the same in every panel.
@@ -469,6 +472,10 @@ SETUP: dict[str, dict[str, bytes]] = {
         "Abandon preview": CASE_AN_OPERATION,
         "Operation abandoned": CASE_AN_OPERATION,
         "Execute preview": CASE_AN_OPERATION + PREPARE_IT,
+        # Five Trades, each previewed, accepted and its result dismissed: the
+        # sixth preview is past the three full payouts, whatever the fixture
+        # itself traded while it was being built.
+        "Trade preview, tapered": (b"T" + b"N*" + b"A" + b"\r") * 5,
     },
 }
 
@@ -510,6 +517,7 @@ SHOWS: dict[str, dict[str, str]] = {
         "Choose approach": "CHOOSE APPROACH",
         "Job preview": "JOB PREVIEW",
         "Trade preview": "TRADE PREVIEW",
+        "Trade preview, tapered": "turn-day",
         "Recruit preview": "RECRUIT PREVIEW",
         "Action result": "ACTION RESULT",
         "Crew development": "CREW DEVELOPMENT",
