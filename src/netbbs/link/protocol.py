@@ -2045,6 +2045,7 @@ class LinkNode:
         self, *, addresses: list[dict] | None, outgoing_only: bool, created_at: str,
         live_relays: list[str] | None = None,
         friendly_name: str | None = None, canonical_dns_name: str | None = None,
+        dial_in: list[str] | tuple[str, ...] | None = None,
     ) -> HelloMessage:
         """Build this node's own hello bundle. `addresses`/
         `outgoing_only`/`created_at` are the caller's to supply (node
@@ -2067,6 +2068,7 @@ class LinkNode:
             live_relays=live_relays or None,
             friendly_name=friendly_name,
             canonical_dns_name=canonical_dns_name,
+            dial_in=dial_in,
         )
         return HelloMessage(
             root_public_key=bytes(self.identity.root.verify_key),
