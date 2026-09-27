@@ -4499,35 +4499,40 @@ data globs aligned. Curate for materially different composition, density,
 and silhouette within each registry; palette-only recolors create the
 illusion of choice and should not be retained as separate samples.
 
-### Self-update: checking is wired up, applying is not (issue #82)
+### Self-update: installing from the console (issues #82, #731)
 
-`netbbs.selfupdate` has real, fully unit-tested plumbing to check GitHub Releases
-(`check_latest_release`/`is_newer`) and download/extract a new release
-tarball with a DB-snapshot-before-migration safety net and a pending/
-confirm/rollback state machine (`prepare_update`/`confirm_update`/
-`roll_back_update`/`download_and_extract_release`). Grepping the whole
-`src/` tree confirms these four functions have **zero callers anywhere
-outside `selfupdate.py` itself** — only `check_latest_release` is
-actually wired into product code, and only as a read-only "is a newer
-release available" check surfaced in the SysOp menu's manual
-update-check screen and the daily scheduled check
-(`run_scheduled_update_check`). Nothing anywhere calls `prepare_update`
-to actually start applying an update.
+Checks never install anything. `netbbs.update_apply` installs a release only
+when a SysOp chooses it on the Update screen; design doc §6.7 holds the steps.
+It installs the release wheel with pip into the running interpreter's
+environment. The older tarball/re-exec primitives in `netbbs.selfupdate`
+(`prepare_update`/`confirm_update`/`roll_back_update`) have no caller; they
+belong to an earlier re-exec design and are not part of the wheel path.
 
-This is confirmed intentional, not an overlooked gap:
-`run_scheduled_update_check`'s own docstring already states the
-apply/restart flow "isn't safely wired up yet, a real, substantially
-higher-stakes decision deliberately not bundled into this." The
-operator-facing upgrade path documented in
-[SysOp handbook](NetBBS-SysOp-Handbook.md) is therefore installing the selected
-official GitHub-release wheel with pip (relying on `Database.__init__`'s
-own automatic-migration-or-fail-clearly behavior for schema safety), not this
-module's tarball/execv mechanism. Wiring `prepare_update`/
-`confirm_update`/`roll_back_update` into an actual command someday
-needs its own deliberate design pass (process re-exec semantics under a
-service supervisor in particular), not an assumption that it's most of
-the way there just because the pieces already exist and are tested in
-isolation.
+Invariants that are easy to break:
+
+- **The restart request is process-global state in `netbbs.update_apply`.**
+  `__main__.main` reads it after `run()` returns and exits with status 75.
+  `admin_flow` sets it. This only works because both import the module at
+  startup, so they share the one module object. Imported lazily after an
+  install, the module could come from the new files on disk, carrying a
+  flag nobody set. Keep those imports at module top.
+- **The request belongs to the shutdown task.** `run_restart_shutdown`
+  clears it on cancellation. A SysOp's cancel and a SIGTERM's replacement
+  (`SequenceScheduler.schedule` cancels whatever it replaces) must both
+  leave a stopped node stopped. Do not set the flag anywhere else.
+- **Between install and restart, the old process runs over new files.**
+  Anything imported for the first time in that window is the new code. The
+  restart shutdown follows the install immediately for that reason.
+- **pip, the version check and the record are one uncancellable unit.**
+  `_run_to_completion` keeps them running when the SysOp's session is
+  cancelled (Who, a shutdown's `disconnect_all`), because pip killed
+  mid-replacement, or a missing record after it, leaves a changed
+  environment that nothing reports. The restart is armed after that unit
+  finishes, and only when no other shutdown is scheduled by then.
+- **Never test against the shared venv.** Tests fake the pip subprocess
+  boundary (`admin_flow.run_bounded`). `run_bounded`'s own tests run only
+  harmless `python -c` children. A real `pip install` from a test would
+  replace the editable install every session shares.
 
 ### GitHub's unauthenticated release-check rate limit, and what actually fixes it
 
