@@ -173,6 +173,7 @@ from netbbs.doors import (
     create_door,
     custom_doors_dir,
     delete_door,
+    get_door,
     get_door_by_name,
     list_doors,
     update_door,
@@ -16398,7 +16399,7 @@ async def _door_detail_screen(session: Session, lane: DatabaseLane, actor: User,
         elif choice == "o":
             await _door_outbound_screen(session, lane, actor, door)
             await _draw_door_detail(session, lane, door, description_level=description_level, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, door_services=door_services)
-        elif choice == "w" and await lane.run(_is_war_dialer_door, door):
+        elif choice == "w" and await asyncio.to_thread(_is_war_dialer_door, await lane.run(_node_db_path), door):
             await _war_dialer_world_screen(session, lane, actor, door)
             await _draw_door_detail(session, lane, door, description_level=description_level, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, door_services=door_services)
         elif choice in {"s", "h", "r", "v"} and door_services is not None and door.profile and door.profile.service:
@@ -16444,7 +16445,7 @@ async def _draw_door_detail(
         MenuEntry(label=menu_key("D", "elete"), brief="Permanently remove this door"),
         MenuEntry(label=menu_key("B", "ack"), brief="Return to the list"),
     ]
-    if await lane.run(_is_war_dialer_door, door):
+    if await asyncio.to_thread(_is_war_dialer_door, await lane.run(_node_db_path), door):
         options.insert(4, MenuEntry(label=menu_key("W", "orld"), brief="Status and maintenance"))
     # Issue #466: only a door which actually declares a service says anything
     # about one, so the overwhelming majority of doors look exactly as before.
@@ -16785,30 +16786,35 @@ async def _door_service_action(session: Session, lane: DatabaseLane, actor: User
     _announce_line(session, f"{verb} requested. Current state: {door_services.status(door.id).summary()}")
 
 
-def _war_dialer_world_of(db: Database, door: Door) -> tuple[Path, Path | None, str | None]:
-    """The node database, and the world this door plays, or why it cannot say.
+def _war_dialer_world_of(db_path: Path, door: Door) -> tuple[Path | None, str | None]:
+    """The world this door plays, or why it cannot say.
 
     `war_dialer_world_path` and `war_dialer_path_problem` are the resolution
     and preflight the launcher and the backup use, so the world shown here is
     the one callers are actually in, and a path the launcher would refuse (a
     legacy world still waiting to be migrated) is reported, not called unplayed.
+    Both touch the filesystem, so callers run this in a thread, never on the
+    database lane (as the launcher does).
     """
+    from types import SimpleNamespace
+
     from netbbs.doors.runtime import war_dialer_path_problem, war_dialer_world_path
     try:
-        world = war_dialer_world_path(db, door)
-        return db.path, world, war_dialer_path_problem(door, world)
+        world = war_dialer_world_path(SimpleNamespace(path=db_path), door)
+        return world, war_dialer_path_problem(door, world)
     except (ValueError, OSError, RuntimeError) as exc:
-        return db.path, None, str(exc)
+        return None, str(exc)
 
 
-def _is_war_dialer_door(db: Database, door: Door) -> bool:
-    from netbbs.doors.runtime import war_dialer_world_path
-    try:
-        return war_dialer_world_path(db, door) is not None
-    except (ValueError, OSError, RuntimeError):
-        # Only a War Dialer launch (or an explicit world override) gets this
-        # far; the world screen reports the reason.
-        return True
+def _is_war_dialer_door(db_path: Path, door: Door) -> bool:
+    world, problem = _war_dialer_world_of(db_path, door)
+    # A resolution failure only happens for a War Dialer launch (or an explicit
+    # world override); the world screen reports the reason.
+    return world is not None or problem is not None
+
+
+def _node_db_path(db: Database) -> Path:
+    return db.path
 
 
 def _war_dialer_world_state(db_path: Path, world: Path) -> tuple[dict | None, str | None]:
@@ -16871,9 +16877,17 @@ async def _war_dialer_world_screen(session: Session, lane: DatabaseLane, actor: 
     meets. Season and reset stay on the CLI, which requires a stopped node.
     """
     page = 0
+    db_path = await lane.run(_node_db_path)
     while True:
         chrome = await _load_chrome(lane, actor)
-        db_path, world, problem = await lane.run(_war_dialer_world_of, door)
+        # Re-read the registration every time: another SysOp may have pointed
+        # this door at a different world since the screen last drew.
+        current = await lane.run(get_door, door.id)
+        if current is None:
+            _announce(session, "Cannot show the world: this door was deleted.", error=True)
+            return
+        door = current
+        world, problem = await asyncio.to_thread(_war_dialer_world_of, db_path, door)
         status = None
         if world is not None and problem is None:
             status, problem = await asyncio.to_thread(_war_dialer_world_state, db_path, world)
@@ -16923,6 +16937,11 @@ async def _war_dialer_world_screen(session: Session, lane: DatabaseLane, actor: 
             return
         elif choice == "m" and status is not None:
             enable = status["maintenance"] != "on"
+            latest = await lane.run(get_door, door.id)
+            if latest is None or (await asyncio.to_thread(_war_dialer_world_of, db_path, latest))[0] != world:
+                _announce(session, "This door's world changed while the screen was open; showing it now. "
+                          "Nothing was switched.", error=True)
+                continue
             failure = await asyncio.to_thread(_war_dialer_set_maintenance, db_path, world, enable, actor.username)
             if failure is not None:
                 _announce(session, f"Could not switch maintenance {'on' if enable else 'off'}: {failure}",
