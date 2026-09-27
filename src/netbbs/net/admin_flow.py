@@ -10498,7 +10498,7 @@ async def disconnect_session_draft(
             record_action, actor=actor, action="disconnect_session",
             target_user_id=target_user_id, detail=f"{detail}, message={message!r}",
         )
-        node_controls.session_registry.note_event(f"{actor.username} disconnected {name}")
+        node_controls.session_registry.note_event(f"disconnected by {actor.username}: {name}")
         _announce_line(session, colored(f"{name!r} disconnected.", fg_color=SUCCESS_COLOR))
         return True
 

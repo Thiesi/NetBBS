@@ -197,7 +197,7 @@ def test_the_table_shows_who_is_doing_what():
         assert "Boards › Retro" in alice_row
         assert any("(login)" in row and "Logging in" in row for row in rows)
         assert any("sysop" in row and "Main menu" in row for row in rows)
-        assert "alice logged in (ssh)" in "\n".join(rows)
+        assert "login (ssh): alice" in "\n".join(rows)
         assert "[M]essage" in rows[-1] and "[K]ick" in rows[-1] and "[U]nwind" in rows[-1]
         for task in tasks:
             task.cancel()
@@ -376,7 +376,7 @@ def test_kick_disconnects_logs_and_says_so(db, lane, sysop):
         await _until(lambda: "'alice' disconnected." in viewer.text())
         assert tasks[1].done()
         assert "*** maintenance ***" in strip_ansi("".join(alice.written))
-        assert any("sysop disconnected alice" in e.text for e in controls.session_registry.recent_events())
+        assert any("disconnected by sysop: alice" in e.text for e in controls.session_registry.recent_events())
         viewer.inputs.put_nowait("q")
         await monitor
         tasks[0].cancel()
@@ -686,6 +686,25 @@ def test_the_header_keeps_its_flags_on_a_narrow_terminal():
         header = _rows(buffer)[0]
         assert "drain in" in header
         assert header.startswith("A Very")
+
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_the_most_urgent_flag_survives_when_flags_alone_overflow():
+    async def scenario():
+        controls = _controls()
+        viewer = QueueSession(width=40)
+        task = await _connect(controls.session_registry, viewer, "sysop")
+        controls.maintenance.is_lockdown_active = lambda: True
+        for scheduler in (controls.drain_scheduler, controls.shutdown_scheduler):
+            scheduler.is_scheduled = lambda: True
+            scheduler.remaining_seconds = lambda: 5400
+        buffer = ScreenBuffer(40, 24)
+        paint_monitor(buffer, MonitorState(viewer=viewer), controls)
+        assert "shutdown in" in _rows(buffer)[0]
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
 

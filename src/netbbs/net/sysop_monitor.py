@@ -276,15 +276,17 @@ def _paint_node_name(buffer: ScreenBuffer, name: str, state: MonitorState) -> in
 
 
 def _header_flags(controls: NodeControls) -> list[tuple[str, int]]:
+    """Most urgent first, so that on a terminal too narrow for all of them
+    the one that clips is the least urgent."""
     flags: list[tuple[str, int]] = []
-    if controls.maintenance.is_lockdown_active():
-        flags.append(("MAINTENANCE", ALERT_COLOR))
-    if controls.drain_scheduler.is_scheduled():
-        flags.append((f"drain in {format_remaining_seconds(controls.drain_scheduler.remaining_seconds())}", ALERT_COLOR))
     if controls.shutdown_scheduler.is_scheduled():
         flags.append(
             (f"shutdown in {format_remaining_seconds(controls.shutdown_scheduler.remaining_seconds())}", ALERT_COLOR)
         )
+    if controls.drain_scheduler.is_scheduled():
+        flags.append((f"drain in {format_remaining_seconds(controls.drain_scheduler.remaining_seconds())}", ALERT_COLOR))
+    if controls.maintenance.is_lockdown_active():
+        flags.append(("MAINTENANCE", ALERT_COLOR))
     bridge = controls.mrc_bridge
     if bridge is not None:
         mrc_state = bridge.status().state.value

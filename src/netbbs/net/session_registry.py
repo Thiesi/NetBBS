@@ -132,7 +132,9 @@ class ActiveSessionRegistry:
         self._events: deque[SessionEvent] = deque(maxlen=RECENT_EVENT_LIMIT)
 
     def note_event(self, text: str) -> None:
-        """Add a line to the monitor's event tail."""
+        """Add a line to the monitor's event tail. Lead with what happened
+        ("login (ssh): alice"): a narrow screen cuts the end of the line, and
+        names may be long."""
         self._events.append(SessionEvent(at=datetime.datetime.now(datetime.timezone.utc), text=text))
 
     def recent_events(self) -> list[SessionEvent]:
@@ -166,7 +168,7 @@ class ActiveSessionRegistry:
     def leave(self, session: Session) -> None:
         entry = self._sessions.pop(session, None)
         if entry is not None and entry.username is not None:
-            self.note_event(f"{entry.username} left")
+            self.note_event(f"left: {entry.username}")
 
     def mark_authenticated(self, session: Session, username: str, *, is_sysop: bool = False) -> None:
         """Records which account `session` authenticated as, once login
@@ -184,7 +186,7 @@ class ActiveSessionRegistry:
         if entry is not None:
             entry.username = username
             entry.is_sysop = is_sysop
-            self.note_event(f"{username} logged in ({getattr(session, 'transport_name', 'unknown')})")
+            self.note_event(f"login ({getattr(session, 'transport_name', 'unknown')}): {username}")
 
     # -- live access changes (issue #659) ------------------------------------
     #
