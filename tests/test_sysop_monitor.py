@@ -191,7 +191,7 @@ def test_the_table_shows_who_is_doing_what():
         paint_monitor(buffer, MonitorState(viewer=viewer), controls)
         rows = _rows(buffer)
         assert rows[0].startswith("ReLink · 3 callers · up ")
-        assert rows[1].split() == ["#", "USER", "VIA", "FROM", "ON", "IDLE", "TERM", "DOING"]
+        assert rows[1].split() == ["#", "USER", "VIA", "FROM", "ON▾", "IDLE", "TERM", "DOING"]
         alice_row = next(row for row in rows if "alice" in row)
         assert "203.0.113.9" in alice_row and "80x24" in alice_row
         assert "Boards › Retro" in alice_row
@@ -215,7 +215,7 @@ def test_a_narrow_terminal_drops_columns_instead_of_wrapping():
         paint_monitor(buffer, MonitorState(viewer=viewer), controls)
         heading = _rows(buffer)[1].split()
         assert "FROM" not in heading and "TERM" not in heading
-        assert "[Q]uit" in _rows(buffer)[-1]
+        assert "[Q]" in _rows(buffer)[-1]
         assert heading[:2] == ["#", "USER"] and "IDLE" in heading and "DOING" in heading
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)

@@ -223,7 +223,7 @@ class SSHSession(Session):
 
     # -- char_input.ByteSource ------------------------------------------
 
-    async def read_byte(self) -> int | None:
+    async def _receive_byte(self) -> int | None:
         """
         Read and return the next actual DATA byte from the client, or
         `None` if what was read was purely an SSH transport-level action
@@ -249,7 +249,7 @@ class SSHSession(Session):
         self.note_input()
         return data[0]
 
-    async def read_byte_with_timeout(self, timeout: float) -> int | None:
+    async def _receive_byte_with_timeout(self, timeout: float) -> int | None:
         """Bounded peek, matching `TelnetSession.read_byte_with_timeout`
         — see that method's docstring."""
         try:

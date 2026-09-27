@@ -2378,6 +2378,35 @@ final in spirit. They feed the session's screen copy
   Keep the emulator's per-character path cheap. The PR for #764 has the
   measured cost.
 
+### Break-in suspends a session's I/O, never its task (issue #765)
+
+A SysOp's break-in chat must put the caller back exactly where they were.
+So it never cancels or signals the caller's task; it redirects that
+session's I/O underneath it.
+
+- **Input.** `Session.read_byte` and `read_byte_with_timeout` are concrete in
+  the base class. Byte-stream transports (Telnet, SSH, the local CLI)
+  implement `_receive_byte` and `_receive_byte_with_timeout`. While
+  `begin_break_in` is in effect, every received byte goes to the chat's
+  queue, and the caller's own pending read keeps waiting. The caller's task
+  is itself the pump that delivers their keys to the chat. The web transport
+  receives input as websocket events and diverts there
+  (`WebSession._handle_event`), door keys included.
+- **Output.** While held, `write` and `write_raw` still feed the screen copy
+  but send nothing. The chat draws with `write_through`, which bypasses both
+  the hold and the copy.
+- **Restore.** `end_break_in` repaints from the copy and then releases. It
+  repeats the repaint if the copy changed while the repaint was being sent
+  (`_copy_generation`), and nothing is awaited between the last check and
+  the release, so no write can fall in the gap. It runs in a `finally`, so a
+  SysOp disconnect also restores the caller.
+- **Consequences.**
+  - A half-typed line survives: it lives in the caller's own line state and
+    in the copy.
+  - A door keeps running unattended, so the Monitor warns first.
+  - A binary transfer is refused a break-in: diverting its byte stream would
+    corrupt it.
+
 ---
 
 ## 8. Async ownership, shutdown, and background tasks

@@ -289,6 +289,15 @@ class WebSession(Session):
 
     async def _handle_event(self, event: dict) -> None:
         event_type = event.get("type")
+        if event_type in ("key", "door_key") and self._break_in_input is not None:
+            # Issue #765: a SysOp's break-in chat has the keyboard; neither
+            # the menu's nor the door's queue sees these keys.
+            data = event.get("data")
+            if isinstance(data, str) and data:
+                self.note_input()
+                for value in data[:_MAX_KEY_EVENT_LENGTH].encode("utf-8", errors="replace"):
+                    self._divert(value)
+            return
         if event_type == "door_key":
             if not self._door_active or event.get("stream") != self._door_stream:
                 return
