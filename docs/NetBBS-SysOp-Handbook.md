@@ -1046,7 +1046,7 @@ DNS registration, or backups is a separate, deliberate operator action.
 | Caller cannot log in | Check maintenance mode, pending approval, disabled account, and login throttling before resetting credentials. |
 | Caller can read but cannot contribute | Check write/join gates, age/name attestations, moderator grants, and inherited Community settings. |
 | Browser terminal or upload fails | Check HTTPS proxy/WebSocket forwarding, upload limits, web listener, and `public_url`. |
-| Callers or peers cannot reach the address you expect | Compare **Settings → Network & login limits → Node configuration** (what the node actually bound and advertises, and where each value came from) with your TOML file and the service's command line. |
+| Callers or peers cannot reach the address you expect | Compare **Settings → Network & login limits → Node configuration** (the configuration the node resolved at its last start, the addresses it advertises, and where each value came from; a listener whose optional extra is missing is listed but was not started, and the service output says so) with your TOML file and the service's command line. |
 | Terminal offers no file-transfer link | Enable/configure the web listener and its public URL, or use a Zmodem-capable client. |
 | Link will not start | Check the `web` extra, effective participation setting, and a non-placeholder node name. |
 | **Find** misses content callers can open, or lists removed content | **Operations → Search indexes**: check, then **Rebuild** if it reports drift. |

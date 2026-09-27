@@ -66,7 +66,36 @@ def test_an_unset_realtime_port_shows_the_port_it_resolves_to():
     rows = _by_key(bootstrap_rows(NodeConfig()))
     link_port = NodeConfig().link.port
     assert rows["link.realtime_port"].value == f"{link_port + 1000} (port + 1000)"
-    assert rows["link.enabled"].value == "decided by Join NetBBS Link"
+    assert (rows["link.enabled"].value, rows["link.enabled"].source) == ("not decided yet", "Join NetBBS Link")
+
+
+def test_link_participation_is_named_as_the_source_once_resolved():
+    """Codex review, PR #749: `run()` resolves an unset `[link] enabled` from
+    the participation answer before recording; that is not a default."""
+    from netbbs.net.nodeconfig import LinkConfig
+
+    resolved = replace(NodeConfig(), link=replace(LinkConfig(), enabled=True))
+    rows = _by_key(bootstrap_rows(resolved))
+    assert (rows["link.enabled"].value, rows["link.enabled"].source) == ("on", "Join NetBBS Link")
+
+    explicit = load_config(["--disable-link"])
+    rows = _by_key(bootstrap_rows(explicit))
+    assert (rows["link.enabled"].value, rows["link.enabled"].source) == ("off", "command line")
+
+
+def test_advertised_ports_show_what_peers_are_told():
+    """Codex review, PR #749: unset advertised ports fall back like the hello."""
+    from netbbs.net.nodeconfig import LinkConfig
+
+    full_peer = replace(NodeConfig(), link=replace(LinkConfig(), outgoing_only=False, advertised_host="bbs.example.org"))
+    rows = _by_key(bootstrap_rows(full_peer))
+    port = full_peer.link.port
+    assert rows["link.advertised_port"].value == f"{port} (= port)"
+    assert rows["link.realtime_advertised_port"].value == f"{port + 1000} (= real-time port)"
+
+    outgoing = replace(NodeConfig(), link=replace(LinkConfig(), outgoing_only=True))
+    rows = _by_key(bootstrap_rows(outgoing))
+    assert rows["link.advertised_port"].value == "not advertised (outgoing only)"
 
 
 def test_snapshot_round_trips_and_a_bad_one_reads_as_absent(db):
@@ -129,5 +158,5 @@ def test_the_screen_shows_values_and_their_sources_but_no_secret(db, lane, sysop
     assert "ssh.port 2022 config file" in text
     assert "database.path " in text and " command line" in text
     assert "managed_dns.admin_token set default" in text
-    assert "link.advertised_host not set default" in text
+    assert "link.advertised_host not advertised" in text
     assert _SECRET not in _written_text(session)

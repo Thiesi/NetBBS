@@ -7976,7 +7976,9 @@ async def _policy_settings_screen(session: Session, lane: DatabaseLane, actor: U
 _NODE_CONFIGURATION_NOTE = (
     "Read-only. The node reads these once when it starts, from its config file and command line; "
     "change them there and restart. They cannot be changed here: a wrong listener or address set "
-    "from inside NetBBS could lock you out of the session you would need to fix it."
+    "from inside NetBBS could lock you out of the session you would need to fix it. This is the "
+    "configuration the node resolved; a listener whose optional extra is not installed is listed "
+    "but was not started (the service output says so)."
 )
 
 

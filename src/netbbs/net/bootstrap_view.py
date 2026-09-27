@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from netbbs.config import get_config, set_config_without_commit
+from netbbs.net.nodeconfig import effective_realtime_port
 from netbbs.storage.database import Database
 
 SNAPSHOT_KEY = "bootstrap_startup_snapshot"
@@ -73,18 +74,32 @@ def bootstrap_rows(config) -> list[BootstrapRow]:
         add("Listeners", f"{name}.public_url", f"{label} public URL", transport.public_url or "not set")
 
     link = config.link
-    add("NetBBS Link", "link.enabled", "Link",
-        "decided by Join NetBBS Link" if link.enabled is None else _flag(link.enabled))
+    if "link.enabled" in sources:
+        add("NetBBS Link", "link.enabled", "Link", _flag(bool(link.enabled)))
+    else:
+        # Unset in config: the SysOp's participation answer decided it
+        # (`run()` resolves it before this is recorded), not a default.
+        rows.append(BootstrapRow(
+            "NetBBS Link", "link.enabled", "Link",
+            "not decided yet" if link.enabled is None else _flag(link.enabled), "Join NetBBS Link"))
     add("NetBBS Link", "link.host", "Bind address", link.host)
     add("NetBBS Link", "link.port", "Port", str(link.port))
+    realtime = effective_realtime_port(link)
     add("NetBBS Link", "link.realtime_port", "Real-time port",
-        str(link.realtime_port) if link.realtime_port is not None else f"{link.port + 1000} (port + 1000)")
+        str(realtime) if link.realtime_port is not None else f"{realtime} (port + 1000)")
     add("NetBBS Link", "link.outgoing_only", "Outgoing only", "yes" if link.outgoing_only else "no (full peer)")
-    add("NetBBS Link", "link.advertised_host", "Advertised host", link.advertised_host or "not set")
+    # What peers are told, with the same fallbacks the hello uses; an
+    # outgoing-only node advertises no address at all.
+    unadvertised = "not advertised (outgoing only)"
+    add("NetBBS Link", "link.advertised_host", "Advertised host",
+        unadvertised if link.outgoing_only else (link.advertised_host or "not set"))
     add("NetBBS Link", "link.advertised_port", "Advertised port",
-        str(link.advertised_port) if link.advertised_port is not None else "not set")
+        unadvertised if link.outgoing_only
+        else str(link.advertised_port) if link.advertised_port is not None else f"{link.port} (= port)")
     add("NetBBS Link", "link.realtime_advertised_port", "Advertised real-time port",
-        str(link.realtime_advertised_port) if link.realtime_advertised_port is not None else "not set")
+        unadvertised if link.outgoing_only
+        else str(link.realtime_advertised_port) if link.realtime_advertised_port is not None
+        else f"{realtime} (= real-time port)")
 
     dns = config.managed_dns
     add("Managed DNS", "managed_dns.service_url", "Service URL", dns.service_url or "the project's service")
