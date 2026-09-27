@@ -320,3 +320,42 @@ def test_a_session_dropped_while_the_audit_is_written_still_records_it(db, lane,
 
     entry = list_recent_actions(db, limit=1)[0]
     assert (entry.action, entry.object_id) == ("war_dialer_season", door.id)
+
+
+def test_the_backup_goes_to_the_configured_destination(db, lane, sysop, identity_dir, tmp_path):
+    """Issue #727's destination applies to the season backup too."""
+    from netbbs.backup_schedule import set_destination_setting
+
+    _war_dialer_door(db, sysop)
+    path = _war_dialer_world(db)
+    set_maintenance(db.path, path, True)
+    elsewhere = tmp_path / "second-disk"
+    elsewhere.mkdir()
+    set_destination_setting(db, elsewhere, db_path=db.path, identity_dir=identity_dir)
+
+    session = FakeSession(_war_dialer_world_keys("n", "rollover", path.name))
+    _live(session, lane, sysop, identity_dir)
+
+    assert world_status(db.path, path)["stored_season"] == "2"
+    [backup] = sorted(elsewhere.iterdir())
+    assert (backup / "manifest.json").exists()
+    assert _backups(db) == []
+
+
+def test_a_destination_that_is_gone_stops_the_change(db, lane, sysop, identity_dir, tmp_path):
+    from netbbs.backup_schedule import set_destination_setting
+
+    _war_dialer_door(db, sysop)
+    path = _war_dialer_world(db)
+    set_maintenance(db.path, path, True)
+    elsewhere = tmp_path / "unmounted"
+    elsewhere.mkdir()
+    set_destination_setting(db, elsewhere, db_path=db.path, identity_dir=identity_dir)
+    elsewhere.rmdir()
+
+    session = FakeSession(_war_dialer_world_keys("n"))
+    _live(session, lane, sysop, identity_dir)
+
+    assert "needs a usable backup destination first" in _normalized_visible(_written_text(session))
+    assert world_status(db.path, path)["stored_season"] == "1"
+    assert not elsewhere.exists()

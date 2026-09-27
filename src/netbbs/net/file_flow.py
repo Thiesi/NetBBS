@@ -90,6 +90,7 @@ from netbbs.net.file_transfer import (
     DOWNLOAD,
     UPLOAD,
     TransferError,
+    TransferGrant,
     TransferGrants,
 )
 from netbbs.link.boards import LinkContext
@@ -1967,6 +1968,31 @@ async def _offer_transfer_link(
     caller has to understand, so both facts are stated every time
     rather than documented somewhere they will not look.
     """
+    await offer_grant(
+        session, transfers,
+        mint=lambda: transfers.issue(
+            direction=direction, user=user, area=area,
+            file_id=entry.file_id if entry is not None else None,
+        ),
+        direction=direction, what=what_of(direction, area, entry),
+        filename=entry.filename if entry is not None else None,
+    )
+
+
+async def offer_grant(
+    session: Session,
+    transfers: TransferGrants,
+    *,
+    mint: Callable[[], TransferGrant],
+    direction: str,
+    what: str,
+    filename: str | None = None,
+) -> bool:
+    """Mint one grant with `mint` and put its link on screen, or say why
+    there is none. Shared by the file area and by the SysOp's own uploads
+    (issue #728), which differ only in what the grant is for.
+    `what` finishes "Open this in a browser to ...". Returns whether a link
+    was handed out; every refusal has already been announced."""
     # Decided before anything is minted (Codex review): a grant issued
     # on a node that cannot express a URL, to a session with no page to
     # hand a relative one to, is a token nobody can redeem -- and 128 of
@@ -1982,7 +2008,7 @@ async def _offer_transfer_link(
                 fg_color=ERROR_COLOR,
             )
         )
-        return
+        return False
 
     try:
         # Called straight, not through the lane (Codex review):
@@ -1990,13 +2016,10 @@ async def _offer_transfer_link(
         # and running `issue()` on a worker thread while an HTTP request
         # redeems on the loop is two threads mutating the same dict --
         # including while `_sweep` iterates it.
-        grant = transfers.issue(
-            direction=direction, user=user, area=area,
-            file_id=entry.file_id if entry is not None else None,
-        )
+        grant = mint()
     except TransferError as exc:
         announce_styled(session, colored(f"\r\n{exc}", fg_color=ERROR_COLOR))
-        return
+        return False
 
     url = transfers.url_for(grant)
     offer_transfer = getattr(session, "offer_transfer", None)
@@ -2006,19 +2029,18 @@ async def _offer_transfer_link(
         # (Codex review) -- and it works on exactly the default
         # loopback-bound node that cannot name itself absolutely.
         if await offer_transfer(
-            direction=direction, url=f"/transfer/{grant.token}",
-            filename=entry.filename if entry is not None else None,
+            direction=direction, url=f"/transfer/{grant.token}", filename=filename,
         ):
             announce_styled(
                 session,
                 colored(
-                    f"\r\nYour browser is handling the {what_of(direction, area, entry)}."
+                    f"\r\nYour browser is handling the {what}."
                     if direction == DOWNLOAD
                     else "\r\nPick a file in your browser to upload it.",
                     fg_color=MUTED_COLOR,
                 )
             )
-            return
+            return True
     if url is None:
         # A node whose SysOp never told it how it is reached cannot
         # print a URL that works. Saying which setting is missing beats
@@ -2031,9 +2053,7 @@ async def _offer_transfer_link(
                 fg_color=ERROR_COLOR,
             )
         )
-        return
-
-    what = what_of(direction, area, entry)
+        return False
 
     # A caller who is already in a browser should not have to select a
     # URL off a terminal and open it by hand (issue #475): the page is
@@ -2043,8 +2063,7 @@ async def _offer_transfer_link(
     handled = False
     if offer_transfer is not None:
         handled = await offer_transfer(
-            direction=direction, url=url,
-            filename=entry.filename if entry is not None else None,
+            direction=direction, url=url, filename=filename,
         )
     if handled:
         # The frame reaching the socket is not the page acting on it
@@ -2063,7 +2082,7 @@ async def _offer_transfer_link(
         )
         announce_styled(session, colored("If nothing happened, open this instead:", fg_color=MUTED_COLOR))
         announce_styled(session, f"  {colored(url, fg_color=VALUE_COLOR)}")
-        return
+        return True
 
     announce_styled(session, colored(f"\r\nOpen this in a browser to {what}:", fg_color=MUTED_COLOR))
     announce_styled(session, f"  {colored(url, fg_color=VALUE_COLOR)}")
@@ -2074,6 +2093,7 @@ async def _offer_transfer_link(
             fg_color=MUTED_COLOR,
         )
     )
+    return True
 
 
 async def _transfer_link_screen(

@@ -10,6 +10,9 @@ NetBBS supplies integration and three bundled games: Retro Trivia, Voidrunner,
 and War Dialer. Third-party games and their execution environments are installed
 by the SysOp. **MANUAL — outside NetBBS** identifies work on the host or in another
 program. NetBBS does not download games, obtain licenses, or install emulators.
+A single script of your own can be sent from inside NetBBS with **Content → Doors
+→ Upload** and then registered with **From disk**; installations with runtimes,
+several files or their own directory layout still go onto the host directly.
 
 ## Find the procedure you need
 
@@ -136,8 +139,9 @@ No operator command starts, stops or redeploys the BBS service for you.
 node, **[N]ext season** starts the next numbered season and **Reset [c]ompetition**
 also clears receipts. Both need maintenance on first, then ask for a reason
 (1-240 characters, recorded in the world's audit) and the exact world filename.
-A complete node backup is taken under `netbbs_backups/` beside the database and
-verified before anything changes; the result line names it. The node keeps
+A complete node backup is taken in the backup destination (**Operations → Backup**,
+`netbbs_backups/` beside the database unless changed) and verified before anything
+changes; the result line names it. The node keeps
 running: maintenance keeps callers out, and a caller still inside the world
 stops the change with nothing altered. Maintenance stays on afterwards, so check
 the world and then switch it off. The standalone `python -m netbbs.admin`
@@ -193,8 +197,11 @@ The component supports at most 64 worlds, each at most 512 MiB.
 
 **MANUAL — inside NetBBS:** close War Dialer sessions before taking a node backup.
 An idle session still counts. Backup fails clearly if a world is active. The BBS
-itself may remain running. **MANUAL — outside NetBBS:** recurring backups and
-retention remain operator/cron jobs; use the same service environment and account.
+itself may remain running. Recurring backups and their retention can be set on
+the Backup screen (**Schedule & destination**); a scheduled run that finds a
+world active is skipped and recorded, and the next scheduled time is its retry.
+If you drive backups from cron instead, use the same service environment and
+account.
 
 **MANUAL — outside NetBBS, verified restore:**
 
