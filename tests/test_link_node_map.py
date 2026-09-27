@@ -837,3 +837,93 @@ def test_a_real_loopback_realtime_session_advances_the_peers_last_contact(tmp_pa
     finally:
         listener_lane.close()
         listener_db.close()
+
+
+def test_an_established_introduced_node_in_a_live_session_is_heard_and_stays_introduced(tmp_path):
+    """Real-time admission can let in a node known only by introduction once
+    the SysOp has established it, and its open session is contact. It is
+    recorded on the introduction and never makes the node a peer."""
+    from netbbs.link.transport import LinkRealtimeServer, LinkRealtimeSessionRegistry, dial_realtime_session
+    from netbbs.storage.execution import DatabaseLane
+
+    listener_db = Database(tmp_path / "listener.db")
+    listener_lane = DatabaseLane(listener_db.path)
+    listener = bootstrap_node_identity("listener")
+    carrier = bootstrap_node_identity("carrier")
+    dialer = bootstrap_node_identity("dialer")
+    save_peer(listener_db, _record(carrier, name="Carrier"))
+    save_introduced_identity(
+        listener_db, _record(dialer, name="Introduced Dialer", created_at="2026-01-01T00:00:00+00:00"),
+        introduced_by=carrier.fingerprint,
+    )
+    _set(listener_db, "link_introduced_identities", dialer.fingerprint,
+         descriptor_first_stored_at="2026-01-01T00:00:00.000000Z")
+    for dimension in (TrustDimension.IDENTITY_INTEGRITY, TrustDimension.RESOURCE_BEHAVIOR):
+        _block(listener_db, dialer.fingerprint, dimension, TrustState.ESTABLISHED)
+
+    def _entry():
+        return _by_fp(build_node_map(
+            listener_db, own_fingerprint=listener.fingerprint, sysop=False, now=datetime.now(timezone.utc),
+        ))[dialer.fingerprint]
+
+    assert _entry().last_heard == datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    async def _record_contact(fingerprint: str, at: str) -> None:
+        await listener_lane.run(record_direct_contact, fingerprint, at)
+
+    async def _ignore(session, frame) -> None:
+        return None
+
+    async def scenario() -> None:
+        listener_registry = LinkRealtimeSessionRegistry(
+            own_fingerprint=listener.fingerprint, on_contact=_record_contact,
+        )
+        dialer_registry = LinkRealtimeSessionRegistry(own_fingerprint=dialer.fingerprint)
+        server = LinkRealtimeServer(
+            host="127.0.0.1", port=0, identity=listener, registry=listener_registry, on_frame=_ignore,
+            lane=listener_lane, enforce_trust_policy=True,
+        )
+        await server.start()
+        try:
+            await dial_realtime_session(
+                "127.0.0.1", server.port, dialer, on_frame=_ignore, registry=dialer_registry,
+            )
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + 5.0
+            while _entry().last_heard <= datetime(2026, 1, 2, tzinfo=timezone.utc) and loop.time() < deadline:
+                await asyncio.sleep(0.02)
+            assert listener_registry.get(dialer.fingerprint) is not None  # the session is open
+            heard = _entry()
+            assert heard.last_heard > datetime(2026, 1, 2, tzinfo=timezone.utc)
+            assert heard.source == INTRODUCED and heard.relationship == "via Carrier"
+        finally:
+            await dialer_registry.close_all(reason="test_done")
+            await listener_registry.close_all(reason="test_done")
+            await server.stop()
+
+    try:
+        asyncio.run(scenario())
+        assert listener_db.connection.execute(
+            "SELECT COUNT(*) FROM link_peers WHERE fingerprint = ?", (dialer.fingerprint,)
+        ).fetchone()[0] == 0
+    finally:
+        listener_lane.close()
+        listener_db.close()
+
+
+def test_record_direct_contact_reaches_an_introduced_row(db):
+    carrier = bootstrap_node_identity("carrier")
+    introduced = bootstrap_node_identity("introduced")
+    save_introduced_identity(db, _record(introduced), introduced_by=carrier.fingerprint)
+
+    record_direct_contact(db, introduced.fingerprint, "2026-09-10T00:00:00.000000Z")
+    record_direct_contact(db, introduced.fingerprint, "2026-09-05T00:00:00.000000Z")
+    # A later re-introduction does not wipe it.
+    save_introduced_identity(db, _record(introduced), introduced_by=carrier.fingerprint)
+
+    row = db.connection.execute(
+        "SELECT last_direct_contact_at FROM link_introduced_identities WHERE fingerprint = ?",
+        (introduced.fingerprint,),
+    ).fetchone()
+    assert row[0] == "2026-09-10T00:00:00.000000Z"
+    assert db.connection.execute("SELECT COUNT(*) FROM link_peers").fetchone()[0] == 0

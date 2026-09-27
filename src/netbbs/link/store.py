@@ -374,20 +374,24 @@ def descriptor_first_stored_at(db: Database, fingerprint: str, descriptor: Endpo
 
 
 def record_direct_contact(db: Database, fingerprint: str, at: str | None = None) -> None:
-    """Advance a completed peer's `last_direct_contact_at` to `at` (issue #777).
+    """Advance a node's `last_direct_contact_at` to `at` (issue #777).
 
     For contact that is not a hello or an events exchange: an authenticated
     real-time session, which counts as contact for as long as it stays open
-    (design doc §8.12). Never moves the time backwards, and does nothing for a
-    node that is not a completed peer -- there is no row to hold it, and the
-    session alone does not make one.
+    (design doc §8.12). Recorded on whichever row holds the node: its
+    `link_peers` row, or -- for an introduced node the SysOp has established,
+    which real-time admission lets in without a hello -- its
+    `link_introduced_identities` row. It is never promoted to a peer: a row
+    in `link_peers` means a completed hello (§8.11). Never moves the time
+    backwards, and does nothing for a node with neither row.
     """
     when = at or utc_now_iso()
-    db.connection.execute(
-        """UPDATE link_peers SET last_direct_contact_at = ?
-           WHERE fingerprint = ? AND (last_direct_contact_at IS NULL OR last_direct_contact_at < ?)""",
-        (when, fingerprint, when),
-    )
+    for table in ("link_peers", "link_introduced_identities"):
+        db.connection.execute(
+            f"""UPDATE {table} SET last_direct_contact_at = ?
+                WHERE fingerprint = ? AND (last_direct_contact_at IS NULL OR last_direct_contact_at < ?)""",
+            (when, fingerprint, when),
+        )
     db.connection.commit()
 
 

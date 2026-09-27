@@ -3196,13 +3196,17 @@ MIGRATIONS = [
             "Existing rows start from `updated_at`, the best information there is: it is no "
             "earlier than the descriptor was first stored. `link_node_numbers` gives each node "
             "the map lists a small permanent number, assigned the first time the map meets it "
-            "and never reused, so that #3 means the same node to every caller and the SysOp."
+            "and never reused, so that #3 means the same node to every caller and the SysOp. "
+            "`last_direct_contact_at` on link_introduced_identities: an introduced node the "
+            "SysOp has established may hold an authenticated real-time session with this one "
+            "without ever completing a hello, and that session is contact; it starts empty."
         ),
         sql="""
         ALTER TABLE link_peers ADD COLUMN descriptor_first_stored_at TEXT;
         UPDATE link_peers SET descriptor_first_stored_at = updated_at;
         ALTER TABLE link_introduced_identities ADD COLUMN descriptor_first_stored_at TEXT;
         UPDATE link_introduced_identities SET descriptor_first_stored_at = updated_at;
+        ALTER TABLE link_introduced_identities ADD COLUMN last_direct_contact_at TEXT;
         ALTER TABLE link_peer_candidates ADD COLUMN descriptor_first_stored_at TEXT;
         ALTER TABLE link_peer_candidates ADD COLUMN first_named_at TEXT;
         UPDATE link_peer_candidates SET descriptor_first_stored_at = updated_at, first_named_at = updated_at;

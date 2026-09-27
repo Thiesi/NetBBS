@@ -313,11 +313,12 @@ def _gather(db: Database, own_fingerprint: str, *, include_candidates: bool) -> 
             last_direct_contact_at=row["last_direct_contact_at"],
         ))
     for row in db.connection.execute(
-        "SELECT fingerprint, descriptor_json, descriptor_first_stored_at, introduced_by "
-        "FROM link_introduced_identities"
+        "SELECT fingerprint, descriptor_json, descriptor_first_stored_at, introduced_by, "
+        "last_direct_contact_at FROM link_introduced_identities"
     ):
         _offer(_Known(
             row["fingerprint"], INTRODUCED, row["descriptor_json"], row["descriptor_first_stored_at"],
+            last_direct_contact_at=row["last_direct_contact_at"],
             introduced_by=row["introduced_by"],
         ))
     if include_candidates:
