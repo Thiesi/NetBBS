@@ -46,6 +46,7 @@ from netbbs.rendering.pipe_codes import BACKGROUND_CODES, FOREGROUND_CODES, cga_
 from netbbs.rendering.reflow import reflow, wrap_terminal_text
 from netbbs.rendering.sanitize import sanitize_text
 from netbbs.rendering.theme import MUTED_COLOR
+from netbbs.rendering.width import char_width
 
 ESC = "\x1b"
 # Where an escape sequence can start: ESC, and the 8-bit C1 introducers
@@ -232,13 +233,16 @@ def _pipe_colors(text: str) -> str:
     return _COLOR_PIPE_RE.sub(_replace, text)
 
 
-def styled_post_body(body: str, *, truecolor: bool = True) -> str:
+def styled_post_body(body: str, *, truecolor: bool = True, pipe_codes: bool = True) -> str:
     """`body` as a reader with color sees it: sanitized text, allowed SGR,
-    and pipe codes as SGR, ending in a reset if any color was used."""
+    and pipe codes as SGR, ending in a reset if any color was used.
+    `pipe_codes` False leaves them as text: an art post's characters are
+    what was painted (Codex review on #753)."""
     parts: list[str] = []
     for kind, value in _tokens(body):
         if kind == "text":
-            parts.append(_pipe_colors(sanitize_text(value, allow_newlines=True)))
+            safe = sanitize_text(value, allow_newlines=True)
+            parts.append(_pipe_colors(safe) if pipe_codes else safe)
         else:
             parts.extend(_filtered_sgr(value, truecolor=truecolor))
     styled = "".join(parts)
@@ -453,14 +457,149 @@ def _ends_in_default_foreground(params: list[int]) -> bool:
     return bool(default)
 
 
-def post_body_rows(body: str, width: int, mode: str, *, truecolor: bool) -> list[str]:
+def post_body_rows(body: str, width: int, mode: str, *, truecolor: bool, layout: str = "prose") -> list[str]:
     """A post body as reader rows at `width`, in `mode`
     (`netbbs.rendering.post_body.post_body_mode`): colored, or text laid
     out by `quoted_body`. The one layout the reader, the review
-    preview and the pending-post screen share (issue #711)."""
+    preview and the pending-post screen share (issue #711).
+
+    A post written in the ANSI art editor (`layout` ``art``) keeps its
+    lines in every mode: `art_body_rows`."""
+    if layout == "art":
+        # Its color is the SGR the editor wrote; a pipe code in it is painted
+        # text, so it is never read as color or removed as a code. The
+        # signature under it was not painted: it reads as any post text
+        # does, its lines kept (Codex review on #753).
+        drawing, signature = split_signature(body)
+        drawn = (
+            styled_post_body(drawing, truecolor=truecolor, pipe_codes=False) if mode == "color"
+            else post_body_text(drawing)
+        )
+        signed = render_post_body(signature, mode, truecolor=truecolor) if signature else ""
+        return art_body_rows(drawn + signed, width)
     if mode == "color":
         return colored_body_rows(styled_post_body(body, truecolor=truecolor), width)
     return quoted_body(render_post_body(body, mode), width).split("\r\n")
+
+
+# -- art posts ------------------------------------------------------------------
+
+LAYOUTS = ("prose", "art")
+
+
+def art_body_from_editor(data: bytes) -> str:
+    """The body an ANSI art editor canvas (`netbbs.net.ansi_editor.
+    edit_ansi_art`'s saved bytes) becomes: its rows as lines, each
+    trimmed of trailing blank cells in the default style, and trailing
+    blank rows dropped. The canvas is a fixed width; a post is as wide
+    as what was drawn."""
+    trimmed: list[str] = []
+    # The editor always writes CP437 (`encode_ansi_bytes`); guessing UTF-8
+    # first, as for an uploaded file, would read two glyphs whose bytes
+    # happen to form a UTF-8 sequence as one other character (Codex
+    # review on #753).
+    for line in data.decode("cp437").replace("\r\n", "\n").split("\n"):
+        styles = _SGR_RE.findall(line)
+        # Trailing spaces are blank only in the default style; under a
+        # colored background they are part of the picture.
+        if not styles or styles[-1] in ("", "0"):
+            line = line.rstrip(" ")
+        trimmed.append(line)
+    while trimmed and not _visible(trimmed[-1]):
+        trimmed.pop()
+    return "\n".join(trimmed)
+
+
+# What `netbbs.signature.append_signature` puts between a body and its
+# signature.
+SIGNATURE_DELIMITER = "\n-- \n"
+
+
+# What an art post's appended signature follows: the reset the art path
+# writes after the drawing, then the delimiter. A painted "-- " row never
+# has this form -- every canvas row starts with its own reset, and the
+# canvas trims the delimiter's trailing space -- so a drawing that shows
+# a "-- " line is never split (Codex review on #753).
+ART_SIGNATURE_MARK = RESET + SIGNATURE_DELIMITER
+
+
+def split_signature(body: str) -> tuple[str, str]:
+    """An art post's drawing (with the reset that ends it) and the
+    signature block appended under it (the delimiter included, `""` if
+    there is none). The block was never on the canvas: it is set aside
+    when the drawing is reopened, and read as ordinary post text."""
+    if ART_SIGNATURE_MARK not in body:
+        return body, ""
+    drawing, signature = body.rsplit(ART_SIGNATURE_MARK, 1)
+    return drawing + RESET, SIGNATURE_DELIMITER + signature
+
+
+def art_styles_editable(drawing: str) -> bool:
+    """Whether the art editor can hold `drawing`'s styles. Its canvas keeps
+    foreground, background and bold per cell; underline and blink -- both
+    allowed in a post, and possible in one carried from elsewhere -- would
+    be lost by saving (Codex review on #753)."""
+    for match in _SGR_RE.finditer(drawing):
+        params = _sgr_params(match.group(1))
+        if params is None:
+            continue
+        index = 0
+        while index < len(params):
+            code = params[index]
+            if code in (38, 48):
+                mode = params[index + 1] if index + 1 < len(params) else None
+                index += 3 if mode == 5 else 5 if mode == 2 else len(params)
+                continue
+            if code in (4, 5):
+                return False
+            index += 1
+    return True
+
+
+def indexed_post_body(body: str, layout: str) -> str:
+    """What search indexes for a body: its plain text -- and for an art
+    post, whose characters are what was painted, pipe-code-shaped text
+    stays (Codex review on #753)."""
+    if layout != "art":
+        return plain_post_body(body)
+    # The signature under a drawing is post text, indexed as the reader
+    # shows it (Codex review on #753).
+    drawing, signature = split_signature(body)
+    return post_body_text(drawing) + (plain_post_body(signature) if signature else "")
+
+
+def art_body_rows(rendered: str, width: int) -> list[str]:
+    """An art post's rendered body as rows at `width`: every line stays a
+    line; only a line wider than `width` wraps, cut at the column, not at
+    a word, with its color carried onto the next row."""
+    rows: list[str] = []
+    for line in rendered.replace("\r\n", "\n").split("\n"):
+        # A tab is one column, as the terminal writer draws it (Codex
+        # review on #753).
+        rows.extend(_hard_wrap(line.replace("\t", " "), max(1, width)))
+    return self_contained_rows(rows)
+
+
+def _hard_wrap(line: str, width: int) -> list[str]:
+    """`line` cut into rows of at most `width` display columns, escape
+    sequences kept with the text that follows them."""
+    rows: list[str] = []
+    current: list[str] = []
+    used = 0
+    position = 0
+    for match in _SGR_RE.finditer(line + f"{CSI}m"):
+        for char in line[position:match.start()]:
+            char_columns = char_width(char)
+            if used + char_columns > width and used > 0:
+                rows.append("".join(current))
+                current, used = [], 0
+            current.append(char)
+            used += char_columns
+        if match.start() < len(line):
+            current.append(match.group(0))
+        position = match.end()
+    rows.append("".join(current))
+    return rows
 
 
 def quoted_body(body: str, width: int) -> str:

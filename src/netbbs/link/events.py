@@ -715,9 +715,16 @@ def build_board_post(
     created_at: str,
     parent_post_id: str | None = None,
     nonce: str | None = None,
+    layout: str | None = None,
 ) -> BoardPost:
     """
     Build and sign one `board_post` event, per design doc.
+
+    `layout` (issue #711, design doc §16) is set only for a post written
+    in the ANSI art editor (`"art"`), whose lines a reader keeps; it is
+    omitted otherwise, never `null`. An optional field, so a node that
+    predates it keeps the signed bytes and relays them, and shows the post
+    as prose (§7.5).
 
     Only the `node_vouched_user` author tier is built
     (design doc, confirmed with Thiesi): the server holds no
@@ -760,6 +767,8 @@ def build_board_post(
     }
     if parent_post_id is not None:
         payload["parent_post_id"] = parent_post_id
+    if layout is not None:
+        payload["layout"] = layout
 
     envelope = build_envelope(BOARD_POST_OBJECT_TYPE, payload)
     signature = signing_identity.sign(canonical_bytes(envelope))

@@ -436,6 +436,7 @@ def _post_from_row(row) -> Post:
         status=row["status"], pinned=bool(row["pinned"]), exempt_from_expiry=bool(row["exempt_from_expiry"]),
         root_post_id=row["root_post_id"], edit_of_post_id=row["edit_of_post_id"],
         tombstoned_at=row["tombstoned_at"],
+        layout=row["layout"] if "layout" in row.keys() else "prose",
     )
 
 
@@ -548,6 +549,10 @@ def materialize_carried_post(
             payload["subject"], payload["body"], payload["created_at"], initial_status, post.content_id,
         ),
     )
+    if payload.get("layout") == "art":
+        # Issue #711: the only layout besides the default. Anything else --
+        # absent, or a value this node does not know -- is prose.
+        db.connection.execute("UPDATE posts SET layout = 'art' WHERE post_id = ?", (post.content_id,))
     reindex_post(db, board_local_id, post.content_id)
     db.connection.commit()
 
@@ -1285,6 +1290,7 @@ def queue_board_post_if_linked(
         body=post.body,
         created_at=post.created_at,
         parent_post_id=link_parent_post_id,
+        layout=post.layout if post.layout != "prose" else None,
     )
 
     db.connection.execute(

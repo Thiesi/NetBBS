@@ -82,6 +82,7 @@ from netbbs.net.node_theme import effective_accent_color, effective_header_color
 from netbbs.net.notices import announce, pending_notice_rows, take_notices, write_notices
 from netbbs.net.picker import ListColumn, pick_item
 from netbbs.net.prose_editor import edit_prose
+from netbbs.net.ansi_editor import edit_ansi_art
 from netbbs.net.post_color_preference import post_colors_enabled
 from netbbs.net.redraw_preference import redraw_in_place_enabled
 from netbbs.net.session import Session, write_prompt
@@ -106,7 +107,14 @@ from netbbs.rendering import (
 )
 from netbbs.rendering.ansi import strip_ansi
 from netbbs.rendering.detail import Section, Styled
-from netbbs.rendering.post_body import post_body_mode, post_body_rows
+from netbbs.rendering.post_body import (
+    art_body_from_editor,
+    art_styles_editable,
+    post_body_mode,
+    post_body_rows,
+    split_signature,
+    styled_post_body,
+)
 from netbbs.rendering.reflow import wrap_terminal_text
 from netbbs.rendering.width import cut_to_width, display_width, wrap_to_width
 from netbbs.signature import append_signature, get_signature
@@ -622,7 +630,8 @@ def _pad(text: str, width: int) -> str:
 
 
 def _list_options(
-    page: PostPage, *, can_post: bool, has_draft: bool, row_count: int, has_unread: bool
+    page: PostPage, *, can_post: bool, has_draft: bool, row_count: int, has_unread: bool,
+    can_draw: bool = False,
 ) -> list[MenuEntry]:
     options = []
     if row_count:
@@ -635,6 +644,8 @@ def _list_options(
         options.append(MenuEntry(label=menu_key("R", "ecent"), brief="Jump to the newest page"))
     if can_post:
         options.append(MenuEntry(label=menu_key("P", "ost"), brief="Write a new post"))
+    if can_draw:
+        options.append(MenuEntry(label=menu_key("A", "rt post"), brief="Draw a post in the ANSI art editor"))
     if has_draft:
         options.append(_DRAFT_MENU_ENTRY)
     if has_unread:
@@ -677,6 +688,7 @@ _LIST_HELP = [
     "Enter, 1-9   read the highlighted post, or post number N",
     "O / N / R    older posts, newer posts, the newest page",
     "P            write a new post (when you may post here)",
+    "A            draw a post in the ANSI art editor (boards with color)",
     "D            resume or discard a saved draft",
     "M            count every post on this board as read",
     "Ctrl-L       redraw the list",
@@ -765,6 +777,9 @@ async def _show_board(
     body_mode = post_body_mode(
         board_allows_color=board.allow_color, reader_wants_color=post_colors_enabled(db, user)
     )
+    # The ANSI art editor is a third way to write a post, on a board that
+    # shows color (issue #711).
+    can_draw = can_post and board.allow_color
     name_requirement = get_effective_name_requirement(db, board)
     read_only_reason = None if can_post else _read_only_reason(db, user, board, closed=closed)
     linked_note = _linked_note(db, board, link_context)
@@ -819,7 +834,7 @@ async def _show_board(
         options = _list_options(
             current_page, can_post=can_post, has_draft=has_draft,
             row_count=len(current_page.posts) if row_count is None else row_count,
-            has_unread=unread["menu"],
+            has_unread=unread["menu"], can_draw=can_draw,
         )
         # Descriptions double the action bar. Where they would leave the
         # list fewer rows than a page worth having, the bar goes compact:
@@ -830,6 +845,7 @@ async def _show_board(
             _list_options(
                 PostPage(posts=[], has_older=True, has_newer=True),
                 can_post=can_post, has_draft=has_draft, row_count=9, has_unread=unread["menu"],
+                can_draw=can_draw,
             ),
             width=session.terminal_width, height=session.terminal_height,
             description_level=description_level,
@@ -974,7 +990,7 @@ async def _show_board(
                 db, post, name_requirement=name_requirement, is_new=was_new,
                 separator=separator, width=width,
             )
-            body_rows = post_body_rows(post.body, width, body_mode, truecolor=truecolor)
+            body_rows = post_body_rows(post.body, width, body_mode, truecolor=truecolor, layout=post.layout)
             has_previous = index > 0 or page.has_older
             has_next = index < len(page.posts) - 1 or page.has_newer
             actions = []
@@ -1051,7 +1067,8 @@ async def _show_board(
         discard_buffered_enter = getattr(session, "discard_buffered_enter", None)
         if discard_buffered_enter is not None:
             await discard_buffered_enter()
-        await session.write("\r\nSubject (or press Enter to cancel): ")
+        await session.write_line("")
+        await write_prompt(session, "Subject (or press Enter to cancel): ")
         subject = (await session.read_line()).strip()
         if not subject:
             announce(session, "Post cancelled.", tone="muted")
@@ -1081,28 +1098,6 @@ async def _show_board(
             else:
                 announce(session, "Post cancelled.", tone="muted")
             return
-        async def _publish(subject: str, body: str) -> bool:
-            try:
-                post = create_post(db, board, user, subject, body)
-            except PostError as exc:
-                announce(session, f"Could not create post: {exc}", tone="muted")
-                return False
-            # A caller's own post is not news to them (issue #710). A held
-            # one is recorded too, so it is not new when it is approved.
-            if record_post_opened(db, user, board, post):
-                # The opened-set cap gave other unread posts up as read.
-                unread["count"] = unread_post_count(db, user, board) or 0
-            if link_context is not None:
-                queue_board_post_if_linked(db, post, board, node_identity=link_context.node_identity)
-            if post.status == "pending":
-                # A moderated board holds the post back; the page the
-                # caller returns to lists approved posts only, so
-                # "Posted" would describe a post they cannot find.
-                announce(session, "Submitted. It will appear once a moderator approves it.")
-            else:
-                announce(session, "Posted.")
-            return True
-
         await _review_and_commit(
             session, db, user, board, subject=subject, body=body, draft_path=draft_path,
             commit_key="p", commit_label="ost", commit_brief="Publish this post",
@@ -1110,6 +1105,73 @@ async def _show_board(
             draft_saved_notice="Draft saved -- you'll be offered it next time you visit this message board.",
             commit=_publish,
         )
+
+    async def _compose_art_post() -> bool:
+        """[A]rt post (issue #711): a subject, then the ANSI art editor,
+        then the same review and publishing a written post gets. The post
+        keeps its lines. Returns whether the editor was opened, so the
+        caller moves to the newest page only when a post may exist."""
+        discard_buffered_enter = getattr(session, "discard_buffered_enter", None)
+        if discard_buffered_enter is not None:
+            await discard_buffered_enter()
+        draft_path = _post_draft_path(db, kind="art", board=board, user=user)
+        choice = await _art_draft_choice(session, db, user, draft_path)
+        if choice == "back":
+            return False
+        resumed = _recovered_drawing(draft_path) if choice == "resume" else None
+        # Before the subject: a terminal the editor cannot open on, or one
+        # too small for the resumed drawing, is said so before anything is
+        # typed for nothing (Codex review on #753). The draft stays.
+        if _art_canvas(session, resumed) is None:
+            return False
+        await session.write_line("")
+        await write_prompt(session, "Subject (or press Enter to cancel): ")
+        subject = (await session.read_line()).strip()
+        if not subject:
+            announce(session, "Post cancelled.", tone="muted")
+            return False
+        body = await _draw_body(session, db, user, initial_text=resumed, draft_path=draft_path)
+        if body is None:
+            announce(session, "Post cancelled.", tone="muted")
+            return True
+        # The signature every composed post gets, as lines under the
+        # drawing (Codex review on #753).
+        signature = get_signature(db, user)
+        if signature:
+            # Reset first: a drawing whose last row fills its last column
+            # ends without one, and the signature would take its color.
+            body = append_signature(body + "\x1b[0m", signature)
+        await _review_and_commit(
+            session, db, user, board, subject=subject, body=body, draft_path=draft_path,
+            commit_key="p", commit_label="ost", commit_brief="Publish this post",
+            cancelled_notice="Post cancelled.",
+            draft_saved_notice="Draft saved -- the art editor offers it the next time you draw here.",
+            commit=lambda subject, body: _publish(subject, body, layout="art"),
+            layout="art",
+        )
+        return True
+
+    async def _publish(subject: str, body: str, *, layout: str = "prose") -> bool:
+        try:
+            post = create_post(db, board, user, subject, body, layout=layout)
+        except PostError as exc:
+            announce(session, f"Could not create post: {exc}", tone="muted")
+            return False
+        # A caller's own post is not news to them (issue #710). A held
+        # one is recorded too, so it is not new when it is approved.
+        if record_post_opened(db, user, board, post):
+            # The opened-set cap gave other unread posts up as read.
+            unread["count"] = unread_post_count(db, user, board) or 0
+        if link_context is not None:
+            queue_board_post_if_linked(db, post, board, node_identity=link_context.node_identity)
+        if post.status == "pending":
+            # A moderated board holds the post back; the page the
+            # caller returns to lists approved posts only, so
+            # "Posted" would describe a post they cannot find.
+            announce(session, "Submitted. It will appear once a moderator approves it.")
+        else:
+            announce(session, "Posted.")
+        return True
 
     def _has_saved_draft() -> bool:
         # Gated on `can_post` the same way [P]ost itself already is: no
@@ -1232,6 +1294,8 @@ async def _show_board(
             options = []
             if can_post:
                 options.append(MenuEntry(label=menu_key("P", "ost"), brief="Write the first post"))
+            if can_draw:
+                options.append(MenuEntry(label=menu_key("A", "rt post"), brief="Draw the first post"))
             if has_draft:
                 options.append(_DRAFT_MENU_ENTRY)
             options.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to the previous menu"))
@@ -1256,9 +1320,12 @@ async def _show_board(
             if choice == "b":
                 await session.write_line("")
                 return
-            if (choice == "p" and can_post) or (choice == "d" and has_draft):
+            if (choice == "p" and can_post) or (choice == "d" and has_draft) or (choice == "a" and can_draw):
                 await session.write_line("")
-                await _saved_draft_menu(from_post=choice == "p")
+                if choice == "a":
+                    await _compose_art_post()
+                else:
+                    await _saved_draft_menu(from_post=choice == "p")
                 page = list_posts_page(db, board, user, limit=_page_limit())
                 if page.posts:
                     # A post was actually created (not cancelled) --
@@ -1341,6 +1408,15 @@ async def _show_board(
                 # Nothing was posted: the same page, the highlight kept.
                 page, highlighted = _refetch_keeping(page, highlighted)
             await _render_fresh(page, highlighted)
+        elif char == "a" and can_draw:
+            await _moved_on()
+            if await _compose_art_post():
+                page_anchor = None  # a new post lands on the newest page
+                highlighted = None
+                page = _refetch_current_page()
+            else:
+                page, highlighted = _refetch_keeping(page, highlighted)
+            await _render_fresh(page, highlighted)
         elif char == "d" and _has_saved_draft():
             await _moved_on()
             if await _saved_draft_menu():
@@ -1398,14 +1474,33 @@ async def _edit_existing_post(
     if not _can_edit_post(db, post, user):
         announce(session, "You can't edit that post.", tone="muted")
         return
+    # An art post is revised in the editor that drew it (issue #711), with
+    # a draft slot of its own: the prose editors' recovery must never be
+    # handed a canvas. Its saved draft is offered first; then the drawing
+    # chosen -- the draft, or the post -- must fit this terminal, before
+    # anything is asked (Codex review on #753).
+    art = post.layout == "art"
+    initial_body = post.body
+    if art:
+        art_draft = _post_draft_path(db, kind="art_edit", board=board, user=user, root_post_id=post.root_post_id)
+        choice = await _art_draft_choice(session, db, user, art_draft)
+        if choice == "back":
+            return
+        if choice == "resume":
+            # The drawing from the draft, under this post's own signature.
+            signature_block = split_signature(post.body)[1]
+            initial_body = _recovered_drawing(art_draft) + (f"\x1b[0m{signature_block}" if signature_block else "")
+        if _art_canvas(session, split_signature(initial_body)[0]) is None:
+            return  # said why; the draft stays
 
     subject = await read_prefilled_field(session, "Subject", post.subject)
 
     edit_draft_path = _post_draft_path(
-        db, kind="edit", board=board, user=user, root_post_id=post.root_post_id
+        db, kind="art_edit" if art else "edit", board=board, user=user, root_post_id=post.root_post_id
     )
     draft_saved_notice = "Draft saved -- you'll be offered it next time you edit this post."
-    body = await _compose_body(session, db, user, initial_text=post.body, draft_path=edit_draft_path)
+    editor = _draw_body if art else _compose_body
+    body = await editor(session, db, user, initial_text=initial_body, draft_path=edit_draft_path)
     if body is None:
         # Issue #149: /exit or /quit leaves this revision's draft on
         # disk instead of deleting it -- same distinguishing check as
@@ -1446,7 +1541,7 @@ async def _edit_existing_post(
         return True
 
     await _review_and_commit(
-        session, db, user, board, subject=subject, body=body, draft_path=edit_draft_path,
+        session, db, user, board, subject=subject, body=body, draft_path=edit_draft_path, layout=post.layout,
         commit_key="s", commit_label="ave", commit_brief="Save this edit",
         cancelled_notice="Edit cancelled.",
         draft_saved_notice=draft_saved_notice,
@@ -1469,6 +1564,7 @@ async def _review_and_commit(
     cancelled_notice: str,
     draft_saved_notice: str,
     commit: Callable[[str, str], Awaitable[bool]],
+    layout: str = "prose",
 ) -> None:
     """The review screen a new post and an edit both pass through
     before anything is stored: the draft is shown whole, its subject and
@@ -1502,6 +1598,7 @@ async def _review_and_commit(
             header_color=effective_header_color(session, db),
             truecolor=effective_truecolor(session, db, user),
             body_mode=body_mode,
+            body_layout=layout,
         )
         if action is ReviewAction.CANCEL:
             announce(session, cancelled_notice, tone="muted")
@@ -1510,7 +1607,8 @@ async def _review_and_commit(
             subject = await read_prefilled_field(session, "Subject", subject)
             continue
         if action is ReviewAction.EDIT_BODY:
-            revised = await _compose_body(session, db, user, initial_text=body, draft_path=draft_path)
+            editor = _draw_body if layout == "art" else _compose_body
+            revised = await editor(session, db, user, initial_text=body, draft_path=draft_path)
             if revised is not None:
                 body = revised
             elif draft_path.exists():
@@ -1599,6 +1697,147 @@ def _post_draft_path(db: Database, *, kind: str, board: Board, user: User, root_
     `kind="new"` draft the board-entry prompt didn't consume."""
     suffix = f"_{root_post_id}" if root_post_id else ""
     return drafts_directory(db) / f"{kind}_{board.id}_{user.id}{suffix}.draft"
+
+
+# The smallest canvas the art editor opens on: the project's 40x12
+# terminal floor, less the editor's status rows (Codex review on #753).
+_ART_MIN_WIDTH = 40
+_ART_MIN_HEIGHT = 9
+
+
+def _art_canvas(session: Session, drawing: str | None) -> tuple[int, int] | None:
+    """The art editor's canvas on this terminal -- as wide as it allows,
+    up to 80 columns, and as tall -- or `None`, with the reason announced,
+    when the terminal is below the editor's minimum or too small for
+    `drawing`, which the canvas would cut (Codex review on #753)."""
+    width = min(80, session.terminal_width)
+    height = session.terminal_height - 3  # the editor's status line below the canvas
+    if width < _ART_MIN_WIDTH or height < _ART_MIN_HEIGHT:
+        announce(
+            session,
+            f"The art editor needs a terminal at least {_ART_MIN_WIDTH} columns wide "
+            f"and {_ART_MIN_HEIGHT + 3} rows tall.",
+            tone="muted",
+        )
+        return None
+    if drawing:
+        try:
+            # The canvas holds CP437; anything else would save as "?".
+            strip_ansi(drawing).encode("cp437")
+        except UnicodeEncodeError:
+            announce(
+                session,
+                "This drawing has characters the art editor cannot keep, so it is not opened for editing.",
+                tone="muted",
+            )
+            return None
+        if not art_styles_editable(drawing):
+            announce(
+                session,
+                "This drawing uses underline or blink, which the art editor cannot keep, "
+                "so it is not opened for editing.",
+                tone="muted",
+            )
+            return None
+        lines = drawing.replace("\t", " ").split("\n")
+        drawn_width = max(display_width(strip_ansi(line)) for line in lines)
+        if drawn_width > width or len(lines) > height:
+            announce(
+                session,
+                f"This drawing is {drawn_width}x{len(lines)}: editing it needs a terminal at least "
+                f"{drawn_width} columns wide and {len(lines) + 3} rows tall, or part of it would be cut.",
+                tone="muted",
+            )
+            return None
+    return width, height
+
+
+async def _art_draft_choice(session: Session, db: Database, user: User, draft_path: Path) -> str:
+    """An art draft left by an earlier session, offered before anything
+    else is asked: ``"resume"``, ``"discard"`` (deleted, and said so), or
+    ``"back"``; ``"none"`` when there is no draft. A drawing is never lost
+    to an unlabeled default (Codex review on #753)."""
+    if not draft_path.exists():
+        return "none"
+    await session.write_line(colored(
+        "\r\nYou have a saved drawing from an earlier session.", fg_color=MUTED_COLOR
+    ))
+    await session.write_line(menu_row(
+        [
+            MenuEntry(label=menu_key("R", "esume"), brief="Open it in the art editor"),
+            MenuEntry(label=menu_key("D", "iscard"), brief="Delete it and start over"),
+            MenuEntry(label=menu_key("B", "ack"), brief="Leave it for later"),
+        ],
+        width=session.terminal_width, height=session.terminal_height,
+        description_level=menu_description_level(db, user),
+    ))
+    await write_prompt(session, "Choice: ")
+    while True:
+        choice = (await session.read_key()).lower()
+        if choice == "r":
+            await session.write_line("")
+            return "resume"
+        if choice == "d":
+            await session.write_line("")
+            delete_draft(draft_path)
+            announce(session, "Drawing deleted.", tone="muted")
+            return "discard"
+        if choice == "b":
+            await session.write_line("")
+            return "back"
+        await session.write(reject_unhandled_key(choice))
+
+
+def _recovered_drawing(draft_path: Path) -> str:
+    """The drawing an art draft holds, as a body."""
+    return art_body_from_editor(draft_path.read_bytes())
+
+
+async def _draw_body(
+    session: Session, db: Database, user: User, *, initial_text: str | None, draft_path: Path
+) -> str | None:
+    """An art post's body, drawn (or redrawn) in the ANSI art editor
+    (issue #711): a canvas as wide as the terminal allows, up to 80
+    columns, and as tall as it allows. `None` when the caller quits
+    without saving or saves an empty canvas -- or when the editor cannot
+    open: a terminal below the editor's minimum, or one too small for the
+    drawing being revised, which the canvas would cut (Codex review on
+    #753)."""
+    # The signature block under a drawing is not part of the canvas: it is
+    # set aside and put back as it was, so it neither takes canvas rows nor
+    # goes through the canvas's trimming (Codex review on #753).
+    signature_block = ""
+    if initial_text:
+        # The editor's canvas holds text and the styles it can keep:
+        # untrusted controls in a carried body are filtered as for a reader,
+        # tabs are one column as a reader sees them (Codex review on #753).
+        initial_text, signature_block = split_signature(initial_text)
+        initial_text = styled_post_body(initial_text, pipe_codes=False).replace("\t", " ")
+    # A saved draft is the caller's to offer (`_art_draft_choice`), so the
+    # editor never asks -- or discards one on a bare Enter (Codex review on
+    # #753). A resumed draft arrives as `initial_text`, checked like any.
+    canvas = _art_canvas(session, initial_text)
+    if canvas is None:
+        return None
+    width, height = canvas
+    initial_bytes = initial_text.replace("\n", "\r\n").encode("utf-8") if initial_text else None
+    data = await edit_ansi_art(
+        session,
+        initial_bytes=initial_bytes,
+        draft_path=draft_path,
+        width=width,
+        height=height,
+        redraw_in_place=redraw_in_place_enabled(db, user),
+        unicode_style=unicode_style_enabled(db, user),
+        collapsed=breadcrumb_collapsed_enabled(db, user),
+        offer_recovery=False,
+    )
+    if data is None:
+        return None
+    drawn = art_body_from_editor(data)
+    if not drawn:
+        return None
+    return f"{drawn}\x1b[0m{signature_block}" if signature_block else drawn
 
 
 async def _compose_body(

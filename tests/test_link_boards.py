@@ -1591,3 +1591,70 @@ def test_retaining_a_carried_board_twice_is_harmless(db, remote_node_identity):
     retain_linked_genesis(db, "boards", genesis.payload["board_id"])
 
     assert db.connection.execute("SELECT COUNT(*) FROM link_events").fetchone()[0] == 1
+
+
+# -- issue #711: an art post's layout crosses the Link as an optional field --
+
+
+def test_an_art_post_carries_its_layout_and_prose_omits_the_field(db, alice, node_identity):
+    board = create_board(db, "general", creator=alice)
+    link_board(db, board, node_identity=node_identity)
+    art = create_post(db, board, alice, "drawn", "##\n##", layout="art")
+    prose = create_post(db, board, alice, "written", "words")
+
+    assert queue_board_post_if_linked(db, art, board, node_identity=node_identity).payload["layout"] == "art"
+    assert "layout" not in queue_board_post_if_linked(db, prose, board, node_identity=node_identity).payload
+
+
+def test_a_carried_post_takes_its_layout_from_the_event(db, remote_node_identity):
+    board_id = _carried_board(db, remote_node_identity)
+
+    art = materialize_carried_post(
+        db, _remote_post(remote_node_identity, board_id=board_id, subject="art", layout="art"),
+        sender_fingerprint=remote_node_identity.fingerprint,
+    )
+    plain = materialize_carried_post(
+        db, _remote_post(remote_node_identity, board_id=board_id, subject="prose"),
+        sender_fingerprint=remote_node_identity.fingerprint,
+    )
+    unknown = materialize_carried_post(
+        db, _remote_post(remote_node_identity, board_id=board_id, subject="future", layout="hologram"),
+        sender_fingerprint=remote_node_identity.fingerprint,
+    )
+
+    assert art.layout == "art"
+    assert plain.layout == "prose"
+    assert unknown.layout == "prose"  # a layout this node does not know is prose
+
+
+def test_an_edit_of_an_art_post_stays_art(db, alice):
+    from netbbs.boards.posts import get_post, list_posts_page
+
+    board = create_board(db, "general", creator=alice)
+    post = create_post(db, board, alice, "drawn", "##", layout="art")
+    edit_post(db, post, board, subject="drawn", body="###", edited_by=alice)
+
+    shown = list_posts_page(db, board, alice).posts[0]
+    assert shown.body == "###" and shown.layout == "art"
+    assert get_post(db, post.post_id).layout == "art"
+
+
+def test_create_post_refuses_an_unknown_layout(db, alice):
+    from netbbs.boards.posts import PostError
+
+    board = create_board(db, "general", creator=alice)
+    with pytest.raises(PostError, match="layout"):
+        create_post(db, board, alice, "x", "y", layout="hologram")
+
+
+def test_a_pending_edit_of_an_art_post_is_art_in_the_queue(db, alice):
+    from netbbs.boards.posts import list_pending_posts
+
+    sysop = create_user(db, "sysop", password="hunter2", user_level=SYSOP_LEVEL)
+    board = create_board(db, "general", creator=alice, moderated=True)
+    post = approve_post(db, create_post(db, board, alice, "drawn", "##", layout="art"), approved_by=sysop)
+    edit_post(db, post, board, subject="drawn", body="###", edited_by=alice)
+
+    pending = list_pending_posts(db, board, requesting_user=sysop)
+
+    assert [p.layout for p in pending] == ["art"]

@@ -388,6 +388,7 @@ async def review_composition(
     header_color: int | tuple[int, int, int] = HEADER_COLOR,
     truecolor: bool = False,
     body_mode: str | None = None,
+    body_layout: str = "prose",
 ) -> ReviewAction:
     """Render a complete draft and return one explicit review action.
 
@@ -409,6 +410,7 @@ async def review_composition(
     `body_mode` (issue #711) previews a board post as its readers will see
     it -- `netbbs.rendering.post_body.post_body_mode`'s ``color``,
     ``plain`` or ``text``. `None`, for mail, keeps the plain preview.
+    `body_layout` is the post's layout, ``art`` keeping its lines.
 
     Dogfood feature request, issue #160's cursor-navigation follow-up
     (item 2 of the prioritized list): `[T]o`/`[U]pdate subject`/`[B]ody`
@@ -466,7 +468,9 @@ async def review_composition(
         if body_mode is None:
             await session.write_line(_preview_body(body, session.terminal_width))
         else:
-            for row in post_body_rows(body, session.terminal_width, body_mode, truecolor=truecolor):
+            for row in post_body_rows(
+                body, session.terminal_width, body_mode, truecolor=truecolor, layout=body_layout
+            ):
                 await session.write_line(row)
         await session.write_line(preview_rule)
 

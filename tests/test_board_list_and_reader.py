@@ -827,6 +827,32 @@ def test_search_indexes_the_plain_text(db, alice):
     assert search_posts(db, alice, "12") == []
 
 
+def test_art_post_is_offered_only_where_color_is_allowed(db, alice, monkeypatch):
+    colored_board = create_board(db, "colored", creator=alice, allow_color=True)
+    plain_board = create_board(db, "plain", creator=alice)
+    for board, offered in ((colored_board, True), (plain_board, False)):
+        _posts(db, board, alice, 1, monkeypatch)
+        session = FakeSession(["b"])
+        asyncio.run(board_flow._show_board(session, db, board, alice))
+        assert ("[A]rt post" in session.visible()) is offered
+
+
+def test_an_art_post_is_drawn_reviewed_and_published(db, alice):
+    from netbbs.boards.posts import list_posts_page
+
+    board = create_board(db, "general", creator=alice, allow_color=True)
+    session = FakeSession(["a", "Drawing", "H", "i", "CTRL+O", "p", "1", "b", "b"])
+
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+
+    post = list_posts_page(db, board, alice).posts[0]
+    assert post.subject == "Drawing" and post.layout == "art"
+    assert _SGR_ANY.sub("", post.body) == "Hi"
+    assert "Posted." in session.visible()
+
+
+_SGR_ANY = re.compile("\x1b\\[[0-9;]*m")
+
 def test_the_search_index_integrity_check_agrees_with_plain_indexing(db, alice):
     from netbbs.search import check_index_integrity
 
@@ -861,3 +887,263 @@ def test_the_migration_reindexes_existing_posts_as_plain_text(tmp_path, monkeypa
         assert body == "red words"
     finally:
         upgraded.close()
+
+
+def test_the_art_editor_refuses_a_terminal_below_its_minimum(db, alice):
+    board = create_board(db, "general", creator=alice, allow_color=True)
+    session = FakeSession(["a", "b"], width=40, height=7)
+
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+
+    assert "The art editor needs a terminal at least" in session.visible()
+
+
+def test_an_art_post_too_big_for_the_terminal_is_not_opened_for_editing(db, alice):
+    from netbbs.boards.posts import get_post
+
+    board = create_board(db, "general", creator=alice, allow_color=True)
+    post = create_post(db, board, alice, "Wide", "#" * 70, layout="art")
+    session = FakeSession(["1", "e", "b", "b"], width=50, height=24)
+
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+
+    assert "This drawing is 70x1" in session.visible()
+    assert get_post(db, post.post_id).body == "#" * 70
+
+
+def test_an_art_post_gets_the_authors_signature(db, alice):
+    from netbbs.boards.posts import list_posts_page
+    from netbbs.signature import set_signature
+
+    set_signature(db, alice, "-- alice")
+    board = create_board(db, "general", creator=alice, allow_color=True)
+    session = FakeSession(["a", "Drawing", "H", "i", "CTRL+O", "p", "b"])
+
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+
+    assert list_posts_page(db, board, alice).posts[0].body.endswith("-- alice")
+
+
+def test_a_recovered_art_draft_too_big_for_the_terminal_is_kept_not_opened(db, alice):
+    from netbbs.rendering import ScreenBuffer, encode_ansi_bytes, parse_ansi_into_buffer
+
+    board = create_board(db, "general", creator=alice, allow_color=True)
+    draft = board_flow._post_draft_path(db, kind="art", board=board, user=alice)
+    draft.parent.mkdir(parents=True, exist_ok=True)
+    canvas = ScreenBuffer(80, 5)
+    parse_ansi_into_buffer("#" * 70, canvas)
+    draft.write_bytes(encode_ansi_bytes(canvas))
+    session = FakeSession(["a", "r", "b"], width=50, height=24)
+
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+
+    assert "This drawing is 70x1" in session.visible()
+    assert draft.exists()
+
+
+def test_a_drawing_the_editor_cannot_hold_is_not_reopened(db, alice):
+    board = create_board(db, "general", creator=alice, allow_color=True)
+    create_post(db, board, alice, "Snow", "\u2603 snow", layout="art")
+    session = FakeSession(["1", "e", "b", "b"])
+
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+
+    assert "characters the art editor cannot keep" in session.visible()
+
+
+def test_the_signature_does_not_take_the_drawings_last_color(db, alice, monkeypatch):
+    from netbbs.boards.posts import list_posts_page
+    from netbbs.rendering.post_body import post_body_rows
+    from netbbs.signature import set_signature
+
+    set_signature(db, alice, "-- alice")
+    board = create_board(db, "general", creator=alice, allow_color=True)
+
+    async def _red_row_to_the_last_column(*args, **kwargs):
+        return "\x1b[0m\x1b[38;5;1m" + "#" * 80  # the editor ends it without a reset
+
+    monkeypatch.setattr(board_flow, "_draw_body", _red_row_to_the_last_column)
+    session = FakeSession(["a", "Drawing", "p", "b"])
+
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+
+    body = list_posts_page(db, board, alice).posts[0].body
+    rows = post_body_rows(body, 80, "color", truecolor=True, layout="art")
+    signature_row = next(row for row in rows if "alice" in row)
+    assert "38;5;1m" not in signature_row
+
+
+def test_search_indexes_an_art_posts_painted_pipe_text(db, alice):
+    board = create_board(db, "general", creator=alice, allow_color=True)
+    create_post(db, board, alice, "Drawn", "A|12B", layout="art")
+
+    assert db.connection.execute("SELECT body FROM post_search").fetchone()[0] == "A|12B"
+
+
+def test_a_signed_art_post_reopens_with_its_signature_kept_aside(db, alice, monkeypatch):
+    """The signature never enters the canvas: it takes no canvas rows and
+    keeps its "-- " delimiter through an edit (Codex review on #753)."""
+    from netbbs.boards.posts import list_posts_page
+
+    board = create_board(db, "general", creator=alice, allow_color=True)
+    tall = "\n".join(f"row {i}" for i in range(21))  # the full canvas on 80x24
+    create_post(db, board, alice, "Drawn", tall + "\x1b[0m\n-- \nalice", layout="art")
+    seen = {}
+
+    async def _editor(session, *, initial_bytes, **kwargs):
+        seen["canvas"] = initial_bytes.decode("utf-8")
+        return initial_bytes.replace(b"\n", b"\r\n").decode("utf-8").encode("cp437")
+
+    monkeypatch.setattr(board_flow, "edit_ansi_art", _editor)
+    session = FakeSession(["1", "e", "", "s", "b", "b"])
+
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+
+    assert "-- " not in seen["canvas"] and "alice" not in seen["canvas"]
+    assert list_posts_page(db, board, alice).posts[0].body.endswith("\n-- \nalice")
+
+
+def test_a_drawing_with_underline_or_blink_is_not_reopened(db, alice):
+    board = create_board(db, "general", creator=alice, allow_color=True)
+    create_post(db, board, alice, "Blinky", "\x1b[5mblink\x1b[0m", layout="art")
+    session = FakeSession(["1", "e", "b", "b"])
+
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+
+    assert "underline or blink" in session.visible()
+
+
+def test_tabs_count_when_sizing_a_drawing_for_the_editor(db, alice):
+    board = create_board(db, "general", creator=alice, allow_color=True)
+    create_post(db, board, alice, "Tabs", "A" + "\t" * 80, layout="art")
+    session = FakeSession(["1", "e", "b", "b"])
+
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+
+    assert "This drawing is 81x1" in session.visible()
+
+
+def test_the_editor_gets_a_carried_drawing_filtered(db, alice, monkeypatch):
+    board = create_board(db, "general", creator=alice, allow_color=True)
+    create_post(db, board, alice, "Drawn", "A\x08B\x1b[2J\x1b[31mC", layout="art")
+    seen = {}
+
+    async def _editor(session, *, initial_bytes, **kwargs):
+        seen["canvas"] = initial_bytes.decode("utf-8")
+        return None
+
+    monkeypatch.setattr(board_flow, "edit_ansi_art", _editor)
+    session = FakeSession(["1", "e", "", "b", "b"])
+
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+
+    assert "\x08" not in seen["canvas"] and "[2J" not in seen["canvas"]
+    assert "\x1b[31mC" in seen["canvas"]
+
+
+def test_the_migration_restores_art_posts_carried_before_the_upgrade(tmp_path, monkeypatch):
+    import json
+
+    from netbbs.storage import database as database_module
+    from netbbs.storage.migrations import MIGRATIONS
+    from tests.legacy_schema import insert_user_on_old_schema
+
+    index = next(i for i, m in enumerate(MIGRATIONS) if "`layout` on posts" in m.description)
+    monkeypatch.setattr(database_module, "MIGRATIONS", MIGRATIONS[:index])
+    path = tmp_path / "node.db"
+    old = Database(path)
+    alice = insert_user_on_old_schema(old, "alice", user_level=10)
+    board = create_board(old, "general", creator=alice)
+    post = create_post(old, board, alice, "drawn", "##")
+
+    from netbbs.boards.posts import edit_post
+
+    edit = edit_post(old, post, board, subject="drawn", body="###", edited_by=alice)
+    envelope = {"envelope": {"payload": {"layout": "art"}}, "signature": ""}
+    old.connection.execute(
+        "INSERT INTO link_events (content_id, sender_fingerprint, object_type, envelope_json, received_at, board_id) "
+        "VALUES (?, 'peer', 'board_post', ?, '2026-01-01T00:00:00Z', ?)",
+        (post.post_id, json.dumps(envelope), board.board_id),
+    )
+    old.connection.commit()
+    old.close()
+    monkeypatch.undo()
+
+    upgraded = Database(path)
+    try:
+        layouts = dict(upgraded.connection.execute("SELECT post_id, layout FROM posts").fetchall())
+        assert layouts[post.post_id] == "art"
+        assert layouts[edit.post_id] == "art"
+    finally:
+        upgraded.close()
+
+
+def _art_draft(db, board, user, text):
+    from netbbs.rendering import ScreenBuffer, encode_ansi_bytes, parse_ansi_into_buffer
+
+    draft = board_flow._post_draft_path(db, kind="art", board=board, user=user)
+    draft.parent.mkdir(parents=True, exist_ok=True)
+    canvas = ScreenBuffer(80, 5)
+    parse_ansi_into_buffer(text, canvas)
+    draft.write_bytes(encode_ansi_bytes(canvas))
+    return draft
+
+
+def test_an_art_draft_is_offered_first_and_enter_does_not_discard_it(db, alice):
+    """Resume, Discard or Back, before the subject; no unlabeled default
+    throws the drawing away (Codex review on #753)."""
+    board = create_board(db, "general", creator=alice, allow_color=True)
+    draft = _art_draft(db, board, alice, "saved")
+    session = FakeSession(["a", "\r", "b", "b"])
+
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+
+    assert "You have a saved drawing" in session.visible()
+    assert draft.exists()
+
+
+def test_a_resumed_art_draft_opens_in_the_editor(db, alice, monkeypatch):
+    board = create_board(db, "general", creator=alice, allow_color=True)
+    _art_draft(db, board, alice, "saved")
+    seen = {}
+
+    async def _editor(session, *, initial_bytes, offer_recovery, **kwargs):
+        seen["canvas"], seen["offer_recovery"] = initial_bytes.decode("utf-8"), offer_recovery
+        return None
+
+    monkeypatch.setattr(board_flow, "edit_ansi_art", _editor)
+    session = FakeSession(["a", "r", "Drawing", "b"])
+
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+
+    assert "saved" in seen["canvas"] and seen["offer_recovery"] is False
+
+
+def test_search_indexes_an_art_posts_signature_as_post_text(db, alice):
+    board = create_board(db, "general", creator=alice, allow_color=True)
+    create_post(db, board, alice, "Drawn", "A|12B\x1b[0m\n-- \n|12Alice", layout="art")
+
+    indexed = db.connection.execute("SELECT body FROM post_search").fetchone()[0]
+    assert indexed == "A|12B\n-- \nAlice"
+
+
+def test_an_art_edit_checks_the_drawing_it_resumes_before_asking_anything(db, alice):
+    """A saved edit draft too wide for this terminal is refused after the
+    Resume choice and before the subject; one that fits is offered even
+    when the published drawing does not (Codex review on #753)."""
+    from netbbs.rendering import ScreenBuffer, encode_ansi_bytes, parse_ansi_into_buffer
+
+    board = create_board(db, "general", creator=alice, allow_color=True)
+    post = create_post(db, board, alice, "Drawn", "#" * 45, layout="art")
+    draft = board_flow._post_draft_path(db, kind="art_edit", board=board, user=alice, root_post_id=post.root_post_id)
+    draft.parent.mkdir(parents=True, exist_ok=True)
+    canvas = ScreenBuffer(80, 5)
+    parse_ansi_into_buffer("#" * 70, canvas)
+    draft.write_bytes(encode_ansi_bytes(canvas))
+    session = FakeSession(["1", "e", "r", "b", "b"], width=50, height=24)
+
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+
+    assert "You have a saved drawing" in session.visible()
+    assert "This drawing is 70x1" in session.visible()
+    assert draft.exists()

@@ -693,3 +693,56 @@ def test_a_cancelled_edit_keeps_what_was_drawn_since_the_last_autosave(tmp_path)
     task = asyncio.run(scenario())
     assert task.cancelled()
     assert _buffer_from(draft.read_bytes()).get_cell(0, 0).char == "A"
+
+
+
+def test_a_recovered_draft_is_read_as_the_cp437_the_editor_wrote(tmp_path):
+    """Its bytes C3 A9 are two CP437 glyphs, and also UTF-8 for another
+    character (Codex review on #753)."""
+    draft = tmp_path / "d.draft"
+    draft.write_bytes("\u251c\u2310".encode("cp437"))
+
+    async def scenario():
+        session = FakeSession(["y", "CTRL+O"])
+        return await edit_ansi_art(session, initial_bytes=None, draft_path=draft, autosave_interval_seconds=9999)
+
+    saved = asyncio.run(scenario())
+    assert saved.decode("cp437").startswith("\x1b[0m\u251c\u2310")
+
+
+
+def test_without_recovery_the_editor_asks_nothing_and_keeps_the_draft(tmp_path):
+    draft = tmp_path / "d.draft"
+    draft.write_bytes(b"DRAFT")
+
+    async def scenario():
+        session = FakeSession(["CTRL+X"])  # nothing changed: quit without asking
+        return await edit_ansi_art(
+            session, initial_bytes=b"GIVEN", draft_path=draft, autosave_interval_seconds=9999,
+            offer_recovery=False,
+        )
+
+    assert asyncio.run(scenario()) is None
+    assert draft.exists()
+
+
+def test_a_character_the_save_cannot_hold_is_not_painted(tmp_path):
+    async def scenario():
+        session = FakeSession(["A", "\u2603", "B", "CTRL+O"])
+        return await edit_ansi_art(session, initial_bytes=None, draft_path=tmp_path / "d.draft", autosave_interval_seconds=9999)
+
+    saved = asyncio.run(scenario()).decode("cp437")
+    assert "AB" in saved and "?" not in saved
+
+
+def test_a_narrow_canvas_status_line_leads_with_save_quit_and_help(tmp_path):
+    async def scenario():
+        session = FakeSession(["CTRL+O"])
+        await edit_ansi_art(
+            session, initial_bytes=None, draft_path=tmp_path / "d.draft", width=40, height=9,
+            autosave_interval_seconds=9999,
+        )
+        return session
+
+    text = _ANSI_ESCAPE_RE.sub("", "".join(asyncio.run(scenario()).written))
+    assert "^G help ^O save ^X quit" in text

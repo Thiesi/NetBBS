@@ -138,6 +138,7 @@ async def edit_ansi_art(
     redraw_in_place: bool = False,
     unicode_style: bool = False,
     collapsed: bool = False,
+    offer_recovery: bool = True,
 ) -> bytes | None:
     """
     Run a WYSIWYG ANSI art editing session against `session`, returning
@@ -151,19 +152,32 @@ async def edit_ansi_art(
     (`SessionClosedError` propagating out of a key read) leaves it in
     place -- that's the recovery path working as intended, not a bug
     to catch.
+
+    `offer_recovery` False leaves the draft decision to a caller that has
+    already made it with its own Resume/Discard/Back choice (a board's art
+    post, issue #711): nothing is asked, `initial_bytes` is loaded, and a
+    draft on disk stays until this session's autosave or save replaces it.
     """
     buffer = ScreenBuffer(width, height)
 
     loaded_bytes: bytes | None = None
-    if draft_path.exists() and await _offer_draft_recovery(session):
+    from_draft = False
+    if offer_recovery and draft_path.exists() and await _offer_draft_recovery(session):
         loaded_bytes = draft_path.read_bytes()
+        from_draft = True
     else:
-        if draft_path.exists():
+        if offer_recovery and draft_path.exists():
             draft_path.unlink()
         loaded_bytes = initial_bytes
 
     if loaded_bytes is not None:
-        parse_ansi_into_buffer(decode_ansi_bytes(loaded_bytes), buffer)
+        # A draft is this editor's own output, always CP437
+        # (`encode_ansi_bytes`); only a caller's `initial_bytes` may be an
+        # external file for `decode_ansi_bytes` to guess about. Guessing on
+        # a draft read two glyphs whose bytes form UTF-8 as one other
+        # character (Codex review on #753).
+        text = loaded_bytes.decode("cp437") if from_draft else decode_ansi_bytes(loaded_bytes)
+        parse_ansi_into_buffer(text, buffer)
 
     state = _EditorState(buffer=buffer)
     autosave_task = asyncio.create_task(
@@ -356,9 +370,20 @@ def _dispatch(state: _EditorState, key: EditorKey) -> None:
             state.col = buffer.width - 1
         buffer.write_cell(state.row, state.col, " ", fg=None, bg=None, bold=False)
         state.dirty = True
-    elif key.kind == EditorKeyKind.CHAR and key.char is not None:
+    elif key.kind == EditorKeyKind.CHAR and key.char is not None and _savable(key.char):
         _paint(state, key.char)
     # TAB and unrecognized kinds: no-op.
+
+
+def _savable(char: str) -> bool:
+    """Whether `char` survives the CP437 save (`encode_ansi_bytes`): one
+    that does not would be painted, then saved as "?" (Codex review on
+    #753), so it is not painted at all."""
+    try:
+        char.encode("cp437")
+    except UnicodeEncodeError:
+        return False
+    return True
 
 
 def _paint(state: _EditorState, char: str) -> None:
@@ -387,6 +412,10 @@ async def _redraw(session: Session, state: _EditorState, previous: Snapshot) -> 
     return current
 
 
+# Below this canvas width the status line leads with its essential keys.
+_FULL_STATUS_WIDTH = 60
+
+
 async def _flush(session: Session, state: _EditorState) -> None:
     """Redraws the status line and repositions the terminal's real
     cursor to the logical edit position -- called after every action,
@@ -394,11 +423,17 @@ async def _flush(session: Session, state: _EditorState) -> None:
     paint with next, matching how a real terminal editor behaves."""
     fg_label = _PALETTE[state.current_fg] if state.current_fg is not None else "default"
     bg_label = _PALETTE[state.current_bg] if state.current_bg is not None else "default"
-    status = (
-        f"Row {state.row + 1}/{state.buffer.height}  Col {state.col + 1}/{state.buffer.width}  "
-        f"fg={fg_label} bg={bg_label}  "
-        f"Ctrl+G help  Ctrl+O save  Ctrl+X quit  Ctrl+T glyph  Ctrl+P fg  Ctrl+B bg"
-    )
+    if state.buffer.width < _FULL_STATUS_WIDTH:
+        # A narrow canvas (a message board's art post, issue #711) leads
+        # with the keys to save, quit and get help, which the full layout
+        # below would cut first (Codex review on #753).
+        status = f"^G help ^O save ^X quit  {state.row + 1},{state.col + 1}"
+    else:
+        status = (
+            f"Row {state.row + 1}/{state.buffer.height}  Col {state.col + 1}/{state.buffer.width}  "
+            f"fg={fg_label} bg={bg_label}  "
+            f"Ctrl+G help  Ctrl+O save  Ctrl+X quit  Ctrl+T glyph  Ctrl+P fg  Ctrl+B bg"
+        )
     # Must never exceed the canvas width: a status line long enough to
     # wrap (the palette names alone push this well past 80 columns,
     # e.g. "Bright Magenta") corrupts every subsequent redraw -- the

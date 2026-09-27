@@ -16540,7 +16540,9 @@ async def _post_action_screen(
             header_color=header_color, node_name_gradient=session.node_name_gradient,
         )
         # As the board's readers will see it, in every mode (issue #711).
-        body_rows = post_body_rows(post.body, session.terminal_width, body_mode, truecolor=truecolor)
+        body_rows = post_body_rows(
+            post.body, session.terminal_width, body_mode, truecolor=truecolor, layout=post.layout
+        )
         # What the moderator is deciding about, then the post itself under its
         # own heading, with the pin and exempt state the toggles change.
         sections = [
