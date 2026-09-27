@@ -2395,9 +2395,9 @@ A descriptor may also carry `dial_in`: up to four URLs at which a *caller*
 reaches the signing board, as opposed to the Link `addresses` a node dials
 (issue #767, §8.12). Each is `telnet://host:port`, `ssh://host:port` or an
 `https://` URL, at most 300 bytes. It is the SysOp's own statement, since no
-node can see the port-forward or proxy in front of its listeners; one that has
-never stated it publishes `[web] public_url`, the one caller-facing address a
-SysOp has already declared, or nothing. The field is display-only: a reader
+node can see the port-forward or proxy in front of its listeners. A node that has
+never stated it publishes `[web] public_url` when that is an `https://` URL,
+the one caller-facing address a SysOp has already declared, or nothing. The field is display-only: a reader
 drops a malformed entry and a malformed list reads as empty, as for
 `live_relays`, and never refuses the hello over it. An older node keeps and
 forwards the field inside the signed envelope without reading it.
@@ -3340,8 +3340,9 @@ effective trust state is quarantined or blocked: this node refuses or withholds
 their content, so leaving them off tells a caller the truth about what reaches
 them here. Probation is not a reason to leave a node off; nearly every new
 node is on probation. A node cannot ask to be left off. The list's worth is
-that a missing board means this board does not know it, and a list that
-SysOps could punch holes in would mean nothing when a board is missing. The
+that a missing board is one that callers cannot reach through this board,
+because this board either does not know it or refuses its content. A list
+that other SysOps could punch holes in would lose that meaning. The
 list is not the whole network: peers pass on only the nodes they have met
 themselves (§8.3), and there is no directory. The screen says so in its title,
 "Nodes known to <board>", and nowhere else.
@@ -3350,13 +3351,16 @@ themselves (§8.3), and there is no directory. The screen says so in its title,
 board knows it, *direct* (met) or *via <carrier>* (introduced); when it was
 last heard of, as a relative time, marked stale past 30 days; and, in its
 detail view, the `dial_in` addresses its descriptor carries (§8.2) and the
-boards and file areas this board carries from it. Link addresses, relay roles
+boards and file areas this board carries from it that this caller could open
+anyway, filtered by the same read gates as ordinary browsing. Link addresses, relay roles
 and reliability are never shown to callers: they are how nodes reach each
 other, and a caller cannot use them.
 
 **Last heard.** The later of this node's own last direct contact with it (a
 completed hello or events exchange; issue #766) and the `created_at` of its
-newest valid descriptor, clamped to the present. A node signs a fresh
+newest valid descriptor, but never later than the time this node first
+stored that descriptor, so a descriptor dated in the future cannot keep a node
+fresh. A node signs a fresh
 descriptor for every hello it builds, so that time is the node's own signed
 statement that it was running, and a carrier who passes it on can withhold a
 newer one but not forge one. A node that has never been heard from directly
@@ -11716,20 +11720,25 @@ candidate has completed no hello and names nobody who vouched for it, and
 anyone can put a name on one. Introduced nodes are listed for callers: they
 carry a verified bundle and name their carrier.
 
-**Decision 4 — no opt-out.** A board missing from the list must mean this
-board does not know it. With an opt-out it could also mean its SysOp asked,
-and a caller could no longer tell whether a missing board is unreachable or
-merely unlisted; a list that says it may be incomplete is one nobody trusts.
+**Decision 4 — no opt-out.** A board missing from the list must mean callers
+cannot reach it through this board. With an opt-out it could also mean its
+SysOp asked, and a caller could no longer tell whether a missing board is
+unreachable or merely unlisted; a list that says it may be incomplete is one
+nobody trusts.
 The one gap that remains is structural, that nodes pass on only nodes they have
 met, and the title states it. Rejected: an `unlisted` descriptor flag. Leaving
 quarantined and blocked nodes off the caller view is not an opt-out: it is
-this board's own judgement, and it matches what reaches callers here.
+this board's own judgement, and such a node is unreachable through this board,
+which is exactly what its absence tells a caller.
 
 **Decision 5 — "last heard" is first-hand or signed by the node.** Contact
 this node observed, or a descriptor time the node signed itself. Rejected: the
 peer record's update time, which a peer list refreshes secondhand and which
 made dead peers look live (issue #766); and the time a carrier's bundle
-arrived, which says when this node asked, not when the other one ran.
+arrived, which says when this node asked, not when the other one ran. The
+signed time is capped at when this node first stored it, because a skewed
+or dishonest clock could otherwise date a descriptor years ahead and never
+go stale.
 
 **Decision 6 — dial-in addresses are signed by the board they describe, and
 stated by its SysOp.** They travel in the descriptor because a descriptor
@@ -11737,8 +11746,8 @@ reaches every node that knows the board, introduced ones included, and a
 carrier cannot alter it. They are stated rather than derived because a node
 cannot see what is in front of its listeners (the issue #201 entry, Decision
 6); the SysOp's screen suggests entries from the node's DNS name and
-listener ports, and publishes nothing the SysOp has not saved, except `[web]
-public_url`, which the SysOp has already stated. Rejected: deriving them from
+listener ports, and publishes nothing the SysOp has not saved, except an
+`https://` `[web] public_url`, which the SysOp has already stated. Rejected: deriving them from
 the listener ports, which on the shipped defaults would advertise ports that
 nobody can dial from outside; and a new wire message, when an optional
 descriptor field is how #669 already extended the descriptor. Plain `http://`
