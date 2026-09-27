@@ -453,8 +453,11 @@ def voidrunner_save_directory(db_path: Path | None = None) -> tuple[Path, str]:
     than read, so a caller can report a guess as a guess instead of
     presenting it as a finding.
 
-    War Dialer needs none of this: v7.0.0 moved its world to
-    `<db path>.doors/`, derived from an argument this module already has.
+    Since issue #648 the default is `<db path>.doors/voidrunner/`, derived
+    from an argument this module already has, the way War Dialer's world has
+    been since v7.0.0. So a node that recorded nothing still has an answer
+    that is not a guess when that directory exists; only a database with
+    neither falls back to this process's home, as before.
     """
     if db_path is not None and db_path.exists():
         try:
@@ -466,6 +469,10 @@ def voidrunner_save_directory(db_path: Path | None = None) -> tuple[Path, str]:
             row = None
         if row is not None and row[0]:
             return Path(row[0]).resolve(), "node"
+    from netbbs.doors.runtime import node_voidrunner_save_dir
+
+    if db_path is not None and node_voidrunner_save_dir(db_path).is_dir():
+        return node_voidrunner_save_dir(db_path), "node"
     from netbbs.doors.bundled.voidrunner import _default_save_dir
     return _default_save_dir().resolve(), "guess"
 
@@ -2074,8 +2081,16 @@ def main(argv: list[str] | None = None) -> None:
             print_wrapped("War Dialer restored. MANUAL: configure each restored door's world path before restarting; "
                           "the source service must remain stopped. The archived node owns these user IDs.")
         if args.voidrunner_to is not None:
-            print_wrapped(f"Voidrunner restored to {args.voidrunner_to.resolve()}. MANUAL: configure the restored service's "
-                          "VOIDRUNNER_SAVE_DIR to this directory before restarting.")
+            from netbbs.doors.runtime import node_voidrunner_save_dir
+
+            # The node's own directory needs no setting (issue #648); any other
+            # place is one the restored service will not look unless told.
+            if args.voidrunner_to.resolve() == node_voidrunner_save_dir(args.db):
+                print_wrapped(f"Voidrunner restored to {args.voidrunner_to.resolve()}, the node's own save "
+                              "directory. Leave VOIDRUNNER_SAVE_DIR unset for the restored service.")
+            else:
+                print_wrapped(f"Voidrunner restored to {args.voidrunner_to.resolve()}. MANUAL: configure the restored "
+                              "service's VOIDRUNNER_SAVE_DIR to this directory before restarting.")
         if rollback_dir is not None:
             print_wrapped(
                 f"Previous generation preserved at {rollback_dir} -- not deleted automatically, "

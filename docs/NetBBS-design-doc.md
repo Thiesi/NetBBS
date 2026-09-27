@@ -4727,8 +4727,8 @@ active game sessions. The world ownership, limits and rollback contract is recor
 in the War Dialer storage decision in ?16; manual activation is in the door guide.
 
 Voidrunner coverage (issue #310): ordinary CLI and SysOp node backups include the
-effective `VOIDRUNNER_SAVE_DIR` (or legacy home-directory default), when present,
-under a checksummed `voidrunner/` component.
+node's Voidrunner save directory (`<db>.doors/voidrunner/`, or the SysOp's
+`VOIDRUNNER_SAVE_DIR`), when present, under a checksummed `voidrunner/` component.
 
 How that directory is chosen is itself part of the contract (issue #555), because
 the door and the backup CLI are different processes and need not share a `HOME`:
@@ -4738,9 +4738,10 @@ directory it would hand a door, once its listeners are bound, and the CLI reads
 that. Three provenances exist and are reported differently, because they carry
 different amounts of confidence: an **operator-supplied** `--voidrunner-save-dir`
 wins over everything; a **node-recorded** path is authoritative, so finding it
-empty is a fact about the node; and an **unrecorded** lookup falls back to the
-calling process's own home and is a guess, reported as one whether or not that
-directory happens to exist. A guess that finds files is the dangerous case -- an
+empty is a fact about the node; an unrecorded node whose `<db>.doors/voidrunner/`
+exists is the same fact, derived from the database path rather than read; and an
+**unrecorded** lookup with neither falls back to the calling process's own home
+and is a guess, reported as one whether or not that directory happens to exist. A guess that finds files is the dangerous case -- an
 operator who once ran a node from their shell has exactly that directory, holding
 exactly the wrong careers -- so it is captured but never presented as a finding.
 The chosen directory and its provenance are written into the manifest as captured,
@@ -7431,12 +7432,22 @@ pilots may play concurrently. Lock files remain in place and must not be deleted
 while the service is running. This requires a local filesystem with working OS
 locks and atomic replacement; cross-host shared directories are not supported.
 
-The resolved save directory is the installation namespace. The legacy default
-`~/.netbbs/voidrunner_saves` remains unchanged. SysOps running multiple independent
-nodes under one OS account must set a different `VOIDRUNNER_SAVE_DIR` for each
-NetBBS service; NetBBS passes this specific setting as an absolute path to doors.
-Changing a node's display name does not change career identity. See the door guide
-for the manual directory move and service configuration steps.
+The resolved save directory is the installation namespace, and it belongs to
+one node: `<db path>.doors/voidrunner/`, beside War Dialer's world, unless the
+SysOp sets `VOIDRUNNER_SAVE_DIR`. The node resolves it and passes it to every
+launch as an absolute path; the door's own `~/.netbbs/voidrunner_saves` fallback
+is for standalone play only. That home-directory path was the node default until
+issue #648, and it made every node one OS account ran share careers by user id.
+On its first start after the change, a node with no override whose own record
+names the legacy directory copies it into its own under the legacy directory's
+maintenance gate, staged and renamed into place whole. The record is the evidence
+the careers are this node's: a brand-new node under the same account has none, and
+never adopts careers another node left there, since user ids do not transfer. A
+target that already holds careers is never overwritten. It copies rather than moves, because a second node
+under the same account may still be reading it; each node then owns its copy. A
+busy or unreadable legacy directory is left alone and the node keeps using it
+until a later start copies it. Changing a node's display name does not change
+career identity. See the door guide for the upgrade and override steps.
 
 Hall of Fame records are retained independently at `scores/<user_id>.json`; only
 the displayed ranking is limited to 20. A `leaderboard.json` from before those
