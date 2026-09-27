@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """
-Dev/admin utility: set a node-wide config value.
+Dev utility: write a raw node-wide config value.
 
-No SysOp admin UI exists yet (that's later phase work) — this exists to
-unblock manually testing/using node config, starting with the display
-timestamp format.
+Every setting a SysOp is meant to change has a screen in the SysOp console
+(Settings), which validates what it writes: timestamps under Timestamp
+format, the upload cap, expiry grace, invitation expiry and chat scrollback
+under Limits & retention (issue #725). Use those. This script writes any
+`node_config` key unchecked apart from the two timestamp keys, so it can
+also write internal keys the node manages itself; it exists for
+development and testing only.
 
 Usage:
     python scripts/set_node_config.py <db_path> <key> <value>

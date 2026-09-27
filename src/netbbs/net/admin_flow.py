@@ -145,6 +145,7 @@ from netbbs.chat.categories import list_subcategories as list_channel_subcategor
 from netbbs.chat.categories import list_top_level_categories as list_top_level_channel_categories
 from netbbs.chat.channels import Channel, ChannelError, create_channel, delete_channel, list_channels, update_channel
 from netbbs.chat.hub import ChatHub
+from netbbs.chat.scrollback import SCROLLBACK_LIMIT_CONFIG_KEY, MAX_SCROLLBACK_LIMIT, get_scrollback_limit
 from netbbs.communities import (
     Community,
     CommunityError,
@@ -159,11 +160,20 @@ from netbbs.communities import (
     update_community,
 )
 from netbbs.config import (
+    EXPIRY_GRACE_PERIOD_CONFIG_KEY,
+    INVITATION_EXPIRY_DAYS_CONFIG_KEY,
     MAX_NODE_DISPLAY_NAME_LENGTH,
+    MAX_SETTING_DAYS,
+    MAX_UPLOAD_BYTES_CONFIG_KEY,
+    MAX_UPLOAD_BYTES_LIMIT,
     RegistrationMode,
+    get_expiry_grace_period_days,
+    get_invitation_expiry_days,
+    get_max_upload_bytes,
     get_node_display_name,
     get_registration_mode,
     is_node_display_name_placeholder,
+    set_config_without_commit,
     set_node_display_name,
     set_registration_mode,
 )
@@ -2194,6 +2204,11 @@ async def _system_menu(
             await _timestamp_settings_screen(session, lane, actor)
             stats = await lane.run(_load_settings_stats)
             await _draw_system_menu(session, node_controls, link_context, stats=stats)
+        elif choice == "s":
+            await session.write_line("")
+            await _limits_settings_screen(session, lane, actor)
+            stats = await lane.run(_load_settings_stats)
+            await _draw_system_menu(session, node_controls, link_context, stats=stats)
         elif choice == "v":
             def _toggle_previous_callers(db: Database) -> None:
                 enabled = not previous_callers_enabled(db)
@@ -2355,6 +2370,10 @@ async def _draw_system_menu(
         MenuEntry(label=menu_key("J", "oin NetBBS Link"), brief="Reliable-node seeds and relays"),
         MenuEntry(label=menu_key("U", "pdate"), brief="Software update settings"),
         MenuEntry(label=menu_key("T", "imestamp format"), brief="Node-wide date/time display"),
+        MenuEntry(
+            label=menu_key("S", " & retention", prefix="Limit"),
+            brief="Uploads, expiry, invites, history",
+        ),
         MenuEntry(
             label=menu_key("G", "uest access"),
             brief=(
@@ -7029,6 +7048,181 @@ async def _timestamp_settings_screen(session: Session, lane: DatabaseLane, actor
         accent_color=accent_color,
         header_color=header_color,
     )
+
+
+_MIB = 1024 * 1024
+
+
+class _LimitsError(ValueError):
+    """A limits-screen save the SysOp must correct; keeps the draft open."""
+
+
+async def _limits_settings_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
+    """Issue #725: four node-wide settings the node has always read, each
+    with a validating setter, that no screen ever called -- the upload
+    cap, the grace between expiry and deletion, the default channel
+    invitation expiry and the chat scrollback limit. Before this the
+    only way to change them was `scripts/set_node_config.py`, a
+    development helper that writes the raw string unchecked.
+
+    One draft editor rather than four immediate-mode fields: four values
+    on one screen are a draft (design doc §3.5), and none of them is so
+    urgent that it has to apply the moment it is typed.
+    """
+
+    def _load(db: Database) -> dict:
+        return {
+            "upload_bytes": get_max_upload_bytes(db),
+            "grace_days": get_expiry_grace_period_days(db),
+            "invite_days": get_invitation_expiry_days(db),
+            "scrollback": get_scrollback_limit(db),
+        }
+
+    current = await lane.run(_load)
+    # The upload cap is edited in whole MiB. A byte count that is not a
+    # whole MiB (only reachable through the dev script) is kept exactly
+    # until the SysOp edits this field -- tracked as "edited", not by
+    # comparing numbers, so re-entering the floored value still applies
+    # it (Codex review).
+    draft: dict = {**current, "upload_mib": max(1, current["upload_bytes"] // _MIB), "upload_edited": False}
+    @inline_field
+    async def _upload_field(session: Session, lane: DatabaseLane, draft: dict) -> None:
+        # `_int_field`'s shape, except that Esc and Enter differ here:
+        # Esc keeps the field untouched, Enter chooses the number shown.
+        await write_field_prompt(session, colored(f"Largest upload, in MiB ({_EDIT_HINT}):", fg_color=MUTED_COLOR))
+        try:
+            raw = (await _read_seeded_line(session, initial=str(draft["upload_mib"]))).strip()
+        except InputCancelled:
+            await session.write_line("")
+            return
+        try:
+            value = int(raw) if raw else draft["upload_mib"]
+        except ValueError:
+            await write_field_message(session, colored("Not a number -- cancelled.", fg_color=MUTED_COLOR))
+            return
+        draft["upload_mib"] = value
+        draft["upload_edited"] = True
+
+    def _upload_render(d: dict) -> str:
+        if not d["upload_edited"]:
+            return _format_bytes(current["upload_bytes"])
+        return f"{d['upload_mib']} MiB"
+
+    fields = [
+        FieldSpec(
+            key="upload_mib", hotkey="u", menu_text=menu_key("U", "pload cap (MiB)"), label="Upload cap",
+            render=_upload_render, prompt=_upload_field,
+            brief="Largest file a caller may upload", section="Files",
+            help=(
+                "The largest single upload this node accepts, over Zmodem and the browser alike, in MiB "
+                f"(1-{MAX_UPLOAD_BYTES_LIMIT // _MIB}). A reverse proxy in front of the web listener has "
+                "its own request-body limit: set that at least 1 MiB higher than this (a browser upload "
+                "also carries form framing), or uploads near the cap fail at the proxy."
+            ),
+        ),
+        FieldSpec(
+            key="grace_days", hotkey="g", menu_text=menu_key("G", "race before deletion (days)"),
+            label="Grace before deletion",
+            render=lambda d: f"{d['grace_days']} days", prompt=_int_field("grace_days", "Days"),
+            brief="Days before expired items go", section="Retention",
+            help=(
+                "When a post or file passes its board's or area's maximum age it expires, and is deleted "
+                f"this many days later (0-{MAX_SETTING_DAYS}). Until then a SysOp can still recover an "
+                "expired file from its area's E[x]pired files screen."
+            ),
+        ),
+        FieldSpec(
+            key="invite_days", hotkey="i", menu_text=menu_key("I", "nvitation expiry (days)"),
+            label="Channel invitations expire after",
+            render=lambda d: "never" if d["invite_days"] is None else f"{d['invite_days']} days",
+            prompt=_optional_int_field("invite_days", "Days (blank = never)"),
+            brief="Unused chat invitations lapse", section="Chat",
+            help=(
+                f"A channel invitation not yet accepted lapses after this many days (1-{MAX_SETTING_DAYS}). "
+                "Clear the field for invitations that never expire. Applies to invitations sent from now on."
+            ),
+        ),
+        FieldSpec(
+            key="scrollback", hotkey="c", menu_text=menu_key("C", "hat scrollback (messages)"),
+            label="Chat scrollback",
+            render=lambda d: f"{d['scrollback']} messages per channel",
+            prompt=_int_field("scrollback", "Messages kept per channel"),
+            brief="History kept in each channel", section="Chat",
+            help=(
+                f"How many messages and join/leave lines each channel keeps (1-{MAX_SCROLLBACK_LIMIT}). "
+                "Carried Link channels count too. Lowering it trims each channel the next time "
+                "something is said there."
+            ),
+        ),
+    ]
+
+    async def save(draft: dict) -> list[str]:
+        upload_bytes = draft["upload_mib"] * _MIB if draft["upload_edited"] else current["upload_bytes"]
+        values = {
+            "upload_bytes": upload_bytes,
+            "grace_days": draft["grace_days"],
+            "invite_days": draft["invite_days"],
+            "scrollback": draft["scrollback"],
+        }
+        # Checked here, before anything is written, so one bad value
+        # cannot leave the others half saved; the setters check again.
+        if not 0 < upload_bytes <= MAX_UPLOAD_BYTES_LIMIT:
+            raise _LimitsError(f"Upload cap must be 1-{MAX_UPLOAD_BYTES_LIMIT // _MIB} MiB.")
+        if not 0 <= values["grace_days"] <= MAX_SETTING_DAYS:
+            raise _LimitsError(f"Grace before deletion must be 0-{MAX_SETTING_DAYS} days.")
+        if values["invite_days"] is not None and not 0 < values["invite_days"] <= MAX_SETTING_DAYS:
+            raise _LimitsError(f"Invitation expiry must be 1-{MAX_SETTING_DAYS} days, or blank for never.")
+        if not 0 < values["scrollback"] <= MAX_SCROLLBACK_LIMIT:
+            raise _LimitsError(f"Chat scrollback must be 1-{MAX_SCROLLBACK_LIMIT} messages.")
+        changed = [key for key in values if values[key] != current[key]]
+
+        config_keys = {
+            "upload_bytes": MAX_UPLOAD_BYTES_CONFIG_KEY,
+            "grace_days": EXPIRY_GRACE_PERIOD_CONFIG_KEY,
+            "invite_days": INVITATION_EXPIRY_DAYS_CONFIG_KEY,
+            "scrollback": SCROLLBACK_LIMIT_CONFIG_KEY,
+        }
+
+        def _persist(db: Database) -> None:
+            if not changed:
+                return
+            # The values and the audit entry commit together or not at
+            # all (Codex review). The range checks above are the same
+            # ones each setter makes; `None` invitation expiry is stored
+            # as "", as `set_invitation_expiry_days` does.
+            db.connection.execute("BEGIN IMMEDIATE")
+            try:
+                for key in changed:
+                    set_config_without_commit(db, config_keys[key], "" if values[key] is None else str(values[key]))
+                record_action_without_commit(
+                    db, actor=actor, action="set_limits_and_retention",
+                    detail=" ".join(f"{key}={values[key]}" for key in changed),
+                )
+            except BaseException:
+                db.connection.rollback()
+                raise
+            else:
+                db.connection.commit()
+
+        await lane.run(_persist)
+        return changed
+
+    changed = await edit_resource_draft(
+        session, lane,
+        title="Limits & retention",
+        fields=fields, draft=draft, save=save, error_type=_LimitsError,
+        save_menu_text=menu_key("S", "ave"),
+        back_menu_text=menu_key("B", "ack"),
+        description_level=await lane.run(menu_description_level, actor),
+        redraw_in_place=await lane.run(redraw_in_place_enabled, actor),
+        unicode_style=await lane.run(unicode_style_enabled, actor),
+        collapsed=await lane.run(breadcrumb_collapsed_enabled, actor),
+        accent_color=await lane.run(effective_accent_color_256),
+        header_color=await lane.run(effective_header_color_256),
+    )
+    if changed is None:
+        return
+    _announce_line(session, "Saved. Applies from now on." if changed else "Nothing changed.")
 
 
 # -- Inter-BBS chat: MRC bridge (issue #275) ---------------------------------
