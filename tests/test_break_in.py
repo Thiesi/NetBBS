@@ -300,3 +300,185 @@ def test_a_door_player_gets_a_warning_first(db, lane, sysop):
         await asyncio.gather(viewer_task, caller_task, return_exceptions=True)
 
     asyncio.run(scenario())
+
+
+# -- review follow-ups (PR #785) ---------------------------------------------
+
+
+def test_a_password_prompt_refuses_a_break_in():
+    async def scenario():
+        caller, reader, wire = _caller()
+        typing = asyncio.create_task(caller.read_line(echo=False))
+        reader.feed_data(b"hunt")
+        await _until(lambda: caller.reading_secret)
+        assert "password" in break_in.refusal(caller)
+        reader.feed_data(b"er2\r")
+        assert await typing == "hunter2"
+        assert not caller.reading_secret
+        assert break_in.refusal(caller) is None
+
+    asyncio.run(scenario())
+
+
+def test_keys_typed_at_a_password_prompt_during_a_chat_show_as_stars():
+    async def scenario():
+        caller, _reader, _wire = _caller()
+        state = ChatState(sysop_name="sysop", caller_name="alice")
+        keys = break_in._CallerKeys(state.caller, caller)
+        for value in b"hi ":
+            keys.feed(value)
+        caller.reading_secret = True
+        for value in b"secret":
+            keys.feed(value)
+        assert state.caller.typing == "hi ******"
+
+    asyncio.run(scenario())
+
+
+def test_a_transfer_waits_for_the_chat_to_end(sysop, monkeypatch):
+    from netbbs.net import zmodem
+
+    async def scenario():
+        registry = ActiveSessionRegistry()
+        caller, reader, wire = _caller()
+        task = asyncio.create_task(_prompt_task(registry, caller, []))
+        await _until(lambda: "quest" in wire.screen().text_rows()[0])
+        began = []
+
+        async def fake_send(session, filename, data):
+            began.append(session.in_break_in)
+
+        monkeypatch.setattr(zmodem, "_send_file", fake_send)
+        sysop_session = QueueSession()
+        chat = asyncio.create_task(run_break_in(sysop_session, sysop, registry, caller, "alice"))
+        await _until(lambda: caller.in_break_in)
+        transfer = asyncio.create_task(zmodem.send_file(caller, "f.txt", b"x"))
+        await asyncio.sleep(0.05)
+        assert not transfer.done() and not began, "the transfer must not start under a chat"
+        sysop_session.inputs.put_nowait("ESCAPE")
+        await chat
+        await asyncio.wait_for(transfer, 2)
+        assert began == [False]
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_restore_releases_even_under_endless_output():
+    async def scenario():
+        caller, reader, wire = _caller()
+        await caller.write("steady")
+        caller.begin_break_in()
+        real = caller.write_through
+
+        async def busy_write_through(text):
+            await real(text)
+            caller._copy_output("more door output ")  # every repaint races new output
+
+        caller.write_through = busy_write_through
+        await asyncio.wait_for(caller.end_break_in(), 2)
+        assert not caller.in_break_in and not caller._output_held
+        await caller.write("after")
+        assert b"after" in wire.data
+
+    asyncio.run(scenario())
+
+
+def test_an_oversized_web_key_event_is_rejected_during_a_chat_too():
+    from netbbs.net.session import SessionClosedError
+    from netbbs.net import web
+
+    class _Socket:
+        closed = False
+
+        def __init__(self):
+            self.sent = []
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            await asyncio.Event().wait()
+
+        async def send_json(self, value):
+            self.sent.append(value)
+
+        async def close(self, **kwargs):
+            self.closed = True
+
+    async def scenario():
+        session = WebSession(_Socket())
+        session.begin_break_in()
+        with pytest.raises(SessionClosedError):
+            await session._handle_event({"type": "key", "data": "x" * (web._MAX_KEY_EVENT_LENGTH + 1)})
+
+    asyncio.run(scenario())
+
+
+def test_a_web_door_gets_a_fresh_decoder_when_a_chat_begins():
+    class _Socket:
+        closed = False
+
+        def __init__(self):
+            self.sent = []
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            await asyncio.Event().wait()
+
+        async def send_json(self, value):
+            self.sent.append(value)
+
+    async def scenario():
+        session = WebSession(_Socket())
+        await session.enter_door_mode(encoding="utf-8", width=80, height=25)
+        stream = session._door_stream
+        session.begin_break_in()
+        await session.break_in_began()
+        frame = session._ws.sent[-1]
+        assert frame == {"type": "door_mode", "active": True, "stream": stream, "encoding": "utf-8",
+                         "cols": 80, "rows": 25}
+        await session.end_break_in()
+        await session.leave_door_mode()
+
+    asyncio.run(scenario())
+
+
+def test_a_second_sysop_who_confirms_late_is_told_not_crashed(db, lane, sysop):
+    class _Presence:
+        def door_of(self, session):
+            return (1, "Voidrunner", "2026-09-28")
+
+    async def scenario():
+        controls = dataclasses.replace(_controls(), presence=_Presence())
+        registry = controls.session_registry
+        viewer = QueueSession()
+        viewer_task = await _connect(registry, viewer, "sysop")
+        caller, reader, wire = _caller()
+        caller_task = asyncio.create_task(_prompt_task(registry, caller, []))
+        await _until(lambda: "quest" in wire.screen().text_rows()[0])
+        monitor = asyncio.create_task(sysop_monitor.monitor_screen(
+            viewer, lane, sysop, controls, disconnect=lambda entry: asyncio.sleep(0),
+        ))
+        _select(viewer, controls, "alice")
+        viewer.inputs.put_nowait("c")
+        await _until(lambda: "Chat anyway?" in strip_ansi("".join(viewer.written)))
+        # Another SysOp breaks in while this one reads the warning.
+        other = QueueSession()
+        first = asyncio.create_task(run_break_in(other, sysop, registry, caller, "alice"))
+        await _until(lambda: caller.in_break_in)
+        viewer.inputs.put_nowait("y")
+        await _until(lambda: "already in a break-in chat" in strip_ansi("".join(viewer.written)))
+        assert not monitor.done()
+        other.inputs.put_nowait("ESCAPE")
+        await first
+        viewer.inputs.put_nowait("q")
+        await monitor
+        for task in (viewer_task, caller_task):
+            task.cancel()
+        await asyncio.gather(viewer_task, caller_task, return_exceptions=True)
+
+    asyncio.run(scenario())

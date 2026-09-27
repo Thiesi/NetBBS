@@ -611,6 +611,12 @@ async def _chat(
         if not go:
             state.say("No chat opened.")
             return
+        # The caller's state may have changed while the SysOp read the
+        # warning: another SysOp may have broken in first.
+        reason = break_in.refusal(entry.session)
+        if reason is not None:
+            state.say(f"{name} {reason}.", ERROR_COLOR)
+            return
     await break_in.run_break_in(session, actor, controls.session_registry, entry.session, name)
     state.say(f"Chat with {name} closed; they are back where they were.", SUCCESS_COLOR)
 

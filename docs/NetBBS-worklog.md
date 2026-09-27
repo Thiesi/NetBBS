@@ -2400,12 +2400,23 @@ session's I/O underneath it.
   (`_copy_generation`), and nothing is awaited between the last check and
   the release, so no write can fall in the gap. It runs in a `finally`, so a
   SysOp disconnect also restores the caller.
+- **Restore is bounded.** If output keeps landing during every repaint (a
+  busy door on a slow line), after `_RESTORE_ATTEMPTS` repaints it releases
+  and repaints once more. On a byte-stream transport the write is queued
+  before its first await, so that final repaint lands ahead of anything the
+  caller's screen writes after the release.
 - **Consequences.**
   - A half-typed line survives: it lives in the caller's own line state and
     in the copy.
   - A door keeps running unattended, so the Monitor warns first.
-  - A binary transfer is refused a break-in: diverting its byte stream would
-    corrupt it.
+  - A binary transfer and a break-in exclude each other. The Monitor refuses
+    a break-in while `binary_transfer_active` is set. `zmodem.send_file` and
+    `receive_file` wait for any break-in to end before setting it, with no
+    await between the wait and the set.
+  - Masked input is marked with `secret_input` (by `char_input.read_line`
+    and the web masked read). A break-in is refused while it is set, and a
+    key diverted to a chat while it is set shows as `*`. Any new
+    masked-input path must use it too.
 
 ---
 

@@ -261,6 +261,16 @@ class Session(ABC):
     #: caller's task keeps running untouched; see `begin_break_in`.
     _break_in_input: asyncio.Queue[int] | None = None
     _output_held: bool = False
+    _break_in_over: asyncio.Event | None = None
+
+    #: True while this session is reading masked input (a password): a
+    #: break-in is refused then, and any key diverted to a chat while it is
+    #: set is shown as `*`. Set through `secret_input`.
+    reading_secret: bool = False
+
+    #: How many times `end_break_in` repaints before it releases anyway,
+    #: when output keeps arriving during every repaint (a busy door).
+    _RESTORE_ATTEMPTS = 3
 
     def note_input(self) -> None:
         """Record that the client just sent input; see `last_input_at`."""
@@ -425,7 +435,20 @@ class Session(ABC):
             raise RuntimeError("this session is already in a break-in chat")
         self._break_in_input = asyncio.Queue(maxsize=4096)
         self._output_held = True
+        self._break_in_over = asyncio.Event()
         return self._break_in_input
+
+    async def break_in_began(self) -> None:
+        """Transport housekeeping once a break-in has taken the terminal;
+        nothing by default (see `WebSession`)."""
+
+    async def wait_for_break_in_end(self) -> None:
+        """Return once no break-in holds this session. A binary transfer
+        waits here before claiming the byte stream: the chat would divert
+        its peer's replies and interleave its own drawing with the frames
+        (`netbbs.net.zmodem`)."""
+        while self._break_in_over is not None:
+            await self._break_in_over.wait()
 
     async def write_through(self, text: str) -> None:
         """Write past a break-in's hold, and past the screen copy: the
@@ -439,14 +462,24 @@ class Session(ABC):
         output back. Nothing is awaited between the last repaint and the
         release, so no write can fall between the two."""
         try:
-            while True:
+            for _attempt in range(self._RESTORE_ATTEMPTS):
                 generation = self._copy_generation
                 await self.write_through(self.screen_copy().restore_ansi())
                 if generation == self._copy_generation:
                     break
+            else:
+                # Output kept arriving during every repaint (a busy door on a
+                # slow line). Release first, then repaint once more: the
+                # repaint is queued on the wire before anything the caller's
+                # screen writes after the release, so nothing is lost.
+                self._output_held = False
+                await self.write_through(self.screen_copy().restore_ansi())
         finally:
             self._output_held = False
             self._break_in_input = None
+            over, self._break_in_over = self._break_in_over, None
+            if over is not None:
+                over.set()
 
     @contextmanager
     def binary_transfer(self):
@@ -624,6 +657,23 @@ class Session(ABC):
         """Close the underlying connection."""
 
 
+
+
+@contextmanager
+def secret_input(session: object):
+    """Mark `session` as reading masked input for the span of the read
+    (issue #765): a SysOp's break-in must never show a password. Tolerates
+    sources that are not a `Session` (test doubles, stand-ins)."""
+    previous = getattr(session, "reading_secret", False)
+    try:
+        session.reading_secret = True  # type: ignore[attr-defined]
+    except AttributeError:
+        yield
+        return
+    try:
+        yield
+    finally:
+        session.reading_secret = previous  # type: ignore[attr-defined]
 
 
 def _normalize_newlines(text: str) -> str:

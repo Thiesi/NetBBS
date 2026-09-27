@@ -67,7 +67,7 @@ from netbbs.net.char_input import (
     move_cursor,
     redraw_tail,
 )
-from netbbs.net.session import Session, SessionClosedError, clamp_terminal_size
+from netbbs.net.session import Session, SessionClosedError, clamp_terminal_size, secret_input
 from netbbs.rendering.width import char_width, display_width
 
 _logger = logging.getLogger(__name__)
@@ -229,6 +229,8 @@ class WebSession(Session):
         self._door_stream = 0
         self._door_encoding = "utf-8"
         self._pre_door_size: tuple[int, int] | None = None
+        self._door_cols: int | None = None
+        self._door_rows: int | None = None
         self._input_closed = False
         self._input_error = "client disconnected"
         self.peer_address = peer_address
@@ -291,11 +293,14 @@ class WebSession(Session):
         event_type = event.get("type")
         if event_type in ("key", "door_key") and self._break_in_input is not None:
             # Issue #765: a SysOp's break-in chat has the keyboard; neither
-            # the menu's nor the door's queue sees these keys.
+            # the menu's nor the door's queue sees these keys. The same size
+            # limit applies as to every other key event.
             data = event.get("data")
             if isinstance(data, str) and data:
+                if len(data) > _MAX_KEY_EVENT_LENGTH:
+                    await self._reject_input("web terminal key event is too large")
                 self.note_input()
-                for value in data[:_MAX_KEY_EVENT_LENGTH].encode("utf-8", errors="replace"):
+                for value in data.encode("utf-8", errors="replace"):
                     self._divert(value)
             return
         if event_type == "door_key":
@@ -425,6 +430,7 @@ class WebSession(Session):
         self._door_stream += 1
         self._door_encoding = encoding
         self._door_active = True
+        self._door_cols, self._door_rows = width, height
         if width and height:
             # The client resizes xterm to a fixed-size door's geometry as soon
             # as it sees this frame, without a resize event of its own. The
@@ -465,6 +471,20 @@ class WebSession(Session):
         except (ConnectionResetError, RuntimeError):
             return False
         return True
+
+    async def break_in_began(self) -> None:
+        """A door stream's browser-side decoder may be holding the start of
+        a character whose remaining bytes will now be held back (issue
+        #765). Re-announcing the door stream gives the browser a fresh
+        decoder, so nothing half-decoded lands on the screen afterwards."""
+        if not self._door_active:
+            return
+        try:
+            await self._ws.send_json({"type": "door_mode", "active": True,
+                                     "stream": self._door_stream, "encoding": self._door_encoding,
+                                     "cols": self._door_cols, "rows": self._door_rows})
+        except (ConnectionResetError, RuntimeError) as exc:
+            raise SessionClosedError("client disconnected during a break-in") from exc
 
     async def leave_door_mode(self) -> None:
         was_active = self._door_active
@@ -517,7 +537,8 @@ class WebSession(Session):
         for chat's pinned input row to behave identically over web.
         """
         if not echo:
-            return await self._read_line_masked()
+            with secret_input(self):
+                return await self._read_line_masked()
         return await self._read_line_editable(
             history, completer, live_buffer=live_buffer, lock=lock,
             list_candidates=list_candidates, initial=initial, cancellable=cancellable,

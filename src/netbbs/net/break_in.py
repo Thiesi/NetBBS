@@ -138,8 +138,9 @@ class _CallerKeys:
     """Turns the caller's diverted bytes into typing: UTF-8 text, Enter,
     Backspace; escape sequences (arrows and such) are skipped whole."""
 
-    def __init__(self, pane: Pane) -> None:
+    def __init__(self, pane: Pane, session: Session) -> None:
         self.pane = pane
+        self.session = session
         self.decoder = codecs.getincrementaldecoder("utf-8")("replace")
         self.in_escape = False
         self.in_csi = False
@@ -161,7 +162,9 @@ class _CallerKeys:
             elif ch in "\x08\x7f":
                 self.pane.backspace()
             elif ch.isprintable():
-                self.pane.type(ch)
+                # The caller's own screen is reading a password: whatever
+                # they type goes to the chat, and is never shown there.
+                self.pane.type("*" if self.session.reading_secret else ch)
 
 
 def _still_connected(registry: ActiveSessionRegistry, session: Session) -> bool:
@@ -182,7 +185,7 @@ async def run_break_in(
     _logger.info("break-in: %s opened a chat with %s", actor.username, caller_name)
     registry.note_event(f"chat by {actor.username}: {caller_name}")
     caller_screen = _CallerScreen(target, state)
-    caller_keys = _CallerKeys(state.caller)
+    caller_keys = _CallerKeys(state.caller, target)
     changed = asyncio.Event()
 
     async def pump_caller() -> None:
@@ -231,6 +234,7 @@ async def run_break_in(
 
     helpers = [asyncio.create_task(pump_caller()), asyncio.create_task(draw_caller())]
     try:
+        await target.break_in_began()
         await caller_screen.render()
         await run_live_screen(
             sysop_session, paint=paint, on_key=on_key, on_notice=lambda text: None, interval=REFRESH_SECONDS,
@@ -255,4 +259,6 @@ def refusal(target: Session) -> str | None:
         return "is in the middle of a file transfer; a chat would corrupt it"
     if target.in_break_in:
         return "is already in a break-in chat"
+    if target.reading_secret:
+        return "is typing a password; try again in a moment"
     return None
