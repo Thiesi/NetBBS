@@ -112,6 +112,75 @@ def test_load_peer_last_contact_reflects_saved_peers_only(tmp_path):
     db.close()
 
 
+_LONG_AGO = "2020-01-01T00:00:00+00:00"
+
+
+def _age_peer_row(db, fingerprint: str) -> None:
+    # Explicit timestamps: consecutive utc_now_iso() calls can be equal on
+    # Windows, so "later" is proven against a fixed past instant instead.
+    db.connection.execute(
+        "UPDATE link_peers SET updated_at = ?, last_direct_contact_at = ? WHERE fingerprint = ?",
+        (_LONG_AGO, _LONG_AGO, fingerprint),
+    )
+    db.connection.commit()
+
+
+def test_secondhand_save_leaves_last_contact_alone_but_direct_save_advances_it(tmp_path):
+    """Issue #766: hearing about a peer (its descriptor in someone else's
+    peer list) is not hearing from it."""
+    db = Database(tmp_path / "node.db")
+    peer_identity = bootstrap_node_identity("bob")
+    peer = _peer_record_for(peer_identity)
+    save_peer(db, peer)
+    _age_peer_row(db, peer.fingerprint)
+
+    refreshed = _peer_record_for(peer_identity, created_at="2026-02-01T00:00:00+00:00")
+    save_peer(db, refreshed, direct_contact=False)
+
+    row = db.connection.execute(
+        "SELECT updated_at, descriptor_json FROM link_peers WHERE fingerprint = ?", (peer.fingerprint,)
+    ).fetchone()
+    assert row["updated_at"] > _LONG_AGO  # the refresh itself was stored
+    assert json.loads(row["descriptor_json"]) == refreshed.descriptor.to_dict()
+    assert load_peer_last_contact(db)[peer.fingerprint] == _LONG_AGO
+
+    save_peer(db, refreshed)
+    assert load_peer_last_contact(db)[peer.fingerprint] > _LONG_AGO
+    db.close()
+
+
+def test_peer_first_stored_secondhand_has_never_been_contacted(tmp_path):
+    db = Database(tmp_path / "node.db")
+    peer = _peer_record_for(bootstrap_node_identity("bob"))
+
+    save_peer(db, peer, direct_contact=False)
+
+    assert load_peer_last_contact(db) == {peer.fingerprint: None}
+    db.close()
+
+
+def test_last_contact_migration_starts_existing_peers_from_updated_at(tmp_path, monkeypatch):
+    from netbbs.storage import database as database_module
+    from netbbs.storage.migrations import MIGRATIONS
+
+    index = next(i for i, m in enumerate(MIGRATIONS) if "last_direct_contact_at" in m.description)
+    monkeypatch.setattr(database_module, "MIGRATIONS", MIGRATIONS[:index])
+    db = Database(tmp_path / "node.db")
+    peer = _peer_record_for(bootstrap_node_identity("bob"))
+    db.connection.execute(
+        """INSERT INTO link_peers (fingerprint, root_public_key, transitions_json, descriptor_json, updated_at)
+           VALUES (?, ?, ?, ?, ?)""",
+        (peer.fingerprint, "AA==", "[]", json.dumps(peer.descriptor.to_dict()), "2026-03-04T05:06:07+00:00"),
+    )
+    db.connection.commit()
+    db.close()
+
+    monkeypatch.setattr(database_module, "MIGRATIONS", MIGRATIONS)
+    db = Database(tmp_path / "node.db")
+    assert load_peer_last_contact(db) == {peer.fingerprint: "2026-03-04T05:06:07+00:00"}
+    db.close()
+
+
 def test_save_peer_upserts_the_latest_transitions_on_conflict(tmp_path):
     db = Database(tmp_path / "node.db")
     own_identity = bootstrap_node_identity("alice")

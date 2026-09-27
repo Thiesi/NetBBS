@@ -4974,7 +4974,10 @@ including:
   implemented, wired into `netbbs.link.mail`/`netbbs.link.sync`, and
   surfaced as an `[O]utbox` SysOp screen);
 - sync-lag and historical/trend peer-health visibility (a read-only current-
-  state view — peer count/mode, dial-reliability score, last contact, relay
+  state view — peer count/mode, dial-reliability score, last contact (the
+  last hello or events exchange with the peer itself; its descriptor
+  refreshed secondhand from another node's peer list, or its mail picked
+  up from a relay, does not count — issue #766), relay
   activity, board/event counters, and relay-mailbox size — is available in
   the SysOp menu's `[L]ink status` screen; per-seed health has nothing to
   show yet, since no per-seed success/failure tracking exists);
