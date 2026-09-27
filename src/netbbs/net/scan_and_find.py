@@ -68,6 +68,12 @@ from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 
 
+def _identity(item: _ScanItem) -> tuple[str, int]:
+    """Which resource a [N]ew scan row is, across reloads."""
+    resource = item.board or item.channel or item.file_area
+    return item.kind, resource.id if resource is not None else -1
+
+
 # Replies listed by subject above [N]ew scan's list; the rest are counted.
 # The summary is redrawn with every page, so it is kept to a few rows.
 _REPLIES_SHOWN = 3
@@ -232,6 +238,7 @@ async def _new_scan_screen(
         positions.update({id(item): index for index, item in enumerate(scan_items, start=1)})
 
     _number(items)
+    shown = {"items": items}
     accent = effective_accent_color(session, db)
 
     async def _mark_read(item: _ScanItem) -> list[_ScanItem] | None:
@@ -244,6 +251,12 @@ async def _new_scan_screen(
         await lane.run(mark_board_read, user, item.board)
         announce(session, f"{sanitize_text(item.name)}: every post marked read.", tone="muted")
         reloaded, state["replies"], state["boards"] = await lane.run(_load)
+        # In the order already on screen, so the highlight and every (#N)
+        # still name the row they did even if activity reordered the
+        # sources meanwhile (Codex review on #723). Anything new goes last.
+        place = {_identity(row): index for index, row in enumerate(shown["items"])}
+        reloaded.sort(key=lambda row: place.get(_identity(row), len(place)))
+        shown["items"] = reloaded
         _number(reloaded)
         return reloaded
 

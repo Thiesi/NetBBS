@@ -336,3 +336,45 @@ def test_migration_carries_a_legacy_cursors_non_prefix_read_state(tmp_path, monk
         assert unread_post_count(db, bob, board) == 1
     finally:
         db.close()
+
+
+def test_migration_caps_what_it_backfills(tmp_path, monkeypatch):
+    """A legacy cursor can have read hundreds of posts that arrived after
+    its first unread one; the migration keeps the newest 500 as the
+    runtime would, and the floor takes the oldest kept (Codex review)."""
+    from netbbs.storage import database as database_module
+    from netbbs.storage.migrations import MIGRATIONS
+
+    index = next(i for i, m in enumerate(MIGRATIONS) if "user_board_opened_posts" in m.description)
+    monkeypatch.setattr(database_module, "MIGRATIONS", MIGRATIONS[:index])
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
+    alice = insert_user_on_old_schema(db, "alice", user_level=10)
+    board = create_board(db, "general", creator=alice)
+
+    def _root(post_id: str, created_at: str) -> int:
+        cursor = db.connection.execute(
+            "INSERT INTO posts (post_id, board_id, parent_post_id, author_user_id, author_label, "
+            "author_fingerprint, subject, body, created_at, status, root_post_id) "
+            "VALUES (?, ?, NULL, ?, 'alice', ?, 's', 'b', ?, 'approved', ?)",
+            (post_id, board.id, alice.id, alice.fingerprint, created_at, post_id),
+        )
+        return cursor.lastrowid
+
+    _root("unread-first", "2026-02-01T00:00:00.000000Z")  # past the cursor, arrived first
+    read_ids = [_root(f"read-{i:04d}", f"2026-01-01T00:00:{i % 60:02d}.{i:06d}Z") for i in range(520)]
+    db.connection.execute(
+        "INSERT INTO user_read_cursors (user_id, object_type, object_id, last_seen_created_at, "
+        "last_seen_stable_id, last_seen_arrival_id, updated_at) VALUES (?, 'board', ?, ?, ?, NULL, ?)",
+        (alice.id, board.id, "2026-01-15T00:00:00.000000Z", "gone", "2026-01-15T00:00:00.000000Z"),
+    )
+    db.connection.commit()
+    db.close()
+    monkeypatch.undo()
+
+    db = Database(db_path)
+    try:
+        assert len(_opened_rows(db, alice, board)) == 499
+        assert _floor(db, alice, board) == sorted(read_ids)[-500]
+    finally:
+        db.close()

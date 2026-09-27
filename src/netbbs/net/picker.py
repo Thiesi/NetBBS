@@ -685,8 +685,10 @@ async def pick_item(
     # An outcome the caller's last action announced (`netbbs.net.notices`,
     # issue #680) rides along the same way: a picker is often the screen a
     # finished action returns to, and its redraw would erase a written line.
-    masthead = with_notices(session, masthead)
+    # The static text is known before the first render, as it always was:
+    # the first page is sized with it. Notices join it at each render.
     masthead_text = "" if callable(masthead) else masthead
+    masthead = with_notices(session, masthead)
 
     async def _refresh_masthead() -> None:
         nonlocal masthead_text

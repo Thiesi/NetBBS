@@ -77,3 +77,29 @@ def test_an_unknown_reference_acts_on_nothing():
     acted_on, _selected = _pick(["m", "9", "b"])
 
     assert acted_on == []
+
+
+def test_an_outcome_an_item_key_announces_shows_on_the_next_redraw():
+    """The picker reads pending outcomes at each render, not once when it
+    opens, so its own keys' outcomes show at once (Codex review on #723)."""
+    from netbbs.net.notices import announce
+
+    session = FakeSession(["m", "2", "b"])
+
+    async def _mark(item: str):
+        announce(session, f"{item}: done.")
+        return None
+
+    asyncio.run(pick_item(
+        session, ["alpha", "beta"],
+        name_of=lambda item: item,
+        stable_id_of=lambda item: ["alpha", "beta"].index(item) + 1,
+        title="Things",
+        empty_message="Nothing here.",
+        item_keys={"m": _mark},
+    ))
+
+    written = "".join(session.written)
+    assert "beta: done." in written
+    # Drawn by the picker's own redraw, above its next prompt.
+    assert written.index("beta: done.") < written.rindex("Choice")

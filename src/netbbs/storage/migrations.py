@@ -3064,6 +3064,26 @@ MIGRATIONS = [
             0
         )
         WHERE object_type = 'board' AND last_seen_arrival_id IS NULL;
+
+        -- The same cap the runtime keeps (`OPENED_POSTS_CAP`, 500): past it
+        -- the floor moves up to the oldest of the newest 500 rows.
+        UPDATE user_read_cursors
+        SET last_seen_arrival_id = (
+            SELECT o.post_row_id FROM user_board_opened_posts o
+            WHERE o.user_id = user_read_cursors.user_id AND o.board_id = user_read_cursors.object_id
+            ORDER BY o.post_row_id DESC LIMIT 1 OFFSET 499
+        )
+        WHERE object_type = 'board' AND (
+            SELECT COUNT(*) FROM user_board_opened_posts o
+            WHERE o.user_id = user_read_cursors.user_id AND o.board_id = user_read_cursors.object_id
+        ) > 500;
+
+        DELETE FROM user_board_opened_posts
+        WHERE post_row_id <= (
+            SELECT c.last_seen_arrival_id FROM user_read_cursors c
+            WHERE c.user_id = user_board_opened_posts.user_id AND c.object_type = 'board'
+              AND c.object_id = user_board_opened_posts.board_id
+        );
         """,
     ),
 ]

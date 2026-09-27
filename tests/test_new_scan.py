@@ -326,3 +326,29 @@ def test_mark_read_brings_the_replies_summary_up_to_date(db, lane, alice, monkey
     marked = text.index("general: every post marked read.")
     assert "Replies to you: 1" in text[:marked]
     assert "Replies to you: none." in text[text.rindex("Replies to you", 0, marked):]
+
+
+def test_mark_read_keeps_each_row_where_it_was(db, lane, alice, monkeypatch):
+    """Activity can reorder the boards while [M]ark read reloads them; the
+    rows stay where they were, so (#N) still names the same board."""
+    from netbbs.activity import ensure_board_baseline
+
+    first = create_board(db, "first-board", creator=alice)
+    second = create_board(db, "second-board", creator=alice)
+    for board in (first, second):
+        ensure_board_baseline(db, alice, board)
+    real = scan_and_find.list_boards
+    calls = {"n": 0}
+
+    def _reordering(database):
+        calls["n"] += 1
+        boards = real(database)
+        return boards if calls["n"] == 1 else list(reversed(boards))
+
+    monkeypatch.setattr(scan_and_find, "list_boards", _reordering)
+    session = _run_main_menu(db, lane, alice, ["n", "m", "1", "0", "1", "b", "b", "l", "y"])
+
+    text = _visible_text(session)
+    marked = re.search(r"(\S+-board): every post marked read\.", text).group(1)
+    # Row 1 is opened after the reload: the board just marked, not the other.
+    assert f"Message boards › {marked}" in text or f"Message boards > {marked}" in text
