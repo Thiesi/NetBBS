@@ -158,9 +158,13 @@ async def run_live_screen(
     key_task: asyncio.Task | None = None
     drawing = asyncio.Lock()
 
-    async def render() -> None:
+    async def render(notice: str | None = None) -> None:
         nonlocal previous, size
         async with drawing:
+            if notice is not None:
+                # Inside the lock, so no key handled between the notice's
+                # arrival and this frame can clear it unseen.
+                on_notice(notice)
             current_size = (session.terminal_width, session.terminal_height)
             buffer = ScreenBuffer(*current_size)
             paint(buffer)
@@ -174,8 +178,7 @@ async def run_live_screen(
             previous, size = snapshot, current_size
 
     async def take_notice(text: str) -> None:
-        on_notice(text)
-        await render()
+        await render(text)
 
     outer_hook = session.pinned_notice_hook
     session.pinned_notice_hook = take_notice

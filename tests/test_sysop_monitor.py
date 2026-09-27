@@ -558,6 +558,60 @@ def test_the_kick_draft_gets_a_visible_cursor(db, lane, sysop):
     asyncio.run(scenario())
 
 
+def test_a_long_outcome_wraps_instead_of_losing_its_tail():
+    async def scenario():
+        controls = _controls()
+        viewer = QueueSession(width=40)
+        task = await _connect(controls.session_registry, viewer, "sysop")
+        state = MonitorState(viewer=viewer)
+        state.say("averyveryverylongusername_of_32ch can't be sent back right now. Try again in a moment.")
+        buffer = ScreenBuffer(40, 24)
+        paint_monitor(buffer, state, controls)
+        text = " ".join(row.strip() for row in _rows(buffer))
+        assert "Try again in a moment." in text
+        assert "[Q]uit" in _rows(buffer)[-1]
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_a_wide_node_name_still_leaves_the_flags_room():
+    async def scenario():
+        controls = _controls()
+        viewer = QueueSession(width=40)
+        viewer.node_display_name = "掲示板" * 8
+        task = await _connect(controls.session_registry, viewer, "sysop")
+        controls.shutdown_scheduler.is_scheduled = lambda: True
+        controls.shutdown_scheduler.remaining_seconds = lambda: 120
+        controls.shutdown_scheduler.is_cancellable = lambda: True
+        buffer = ScreenBuffer(40, 24)
+        paint_monitor(buffer, MonitorState(viewer=viewer), controls)
+        assert "shutdown in" in _rows(buffer)[0]
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_caller_names_use_the_node_accent():
+    async def scenario():
+        controls = _controls()
+        viewer, alice = QueueSession(), QueueSession()
+        tasks = [await _connect(controls.session_registry, viewer, "sysop"),
+                 await _connect(controls.session_registry, alice, "alice")]
+        buffer = ScreenBuffer(80, 24)
+        paint_monitor(buffer, MonitorState(viewer=viewer, accent_color=141), controls)
+        row = next(i for i, text in enumerate(_rows(buffer)) if "alice" in text)
+        column = _rows(buffer)[row].index("alice")
+        assert buffer.get_cell(row, column).fg == 141
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
 def test_combining_marks_keep_their_accent():
     from netbbs.net.live_screen import paint_text
 

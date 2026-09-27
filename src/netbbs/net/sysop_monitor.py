@@ -36,7 +36,7 @@ from netbbs.net.live_screen import (
 )
 from netbbs.net.session import Session, write_prompt
 from netbbs.net.session_activity import describe, records_activity
-from netbbs.net.node_theme import effective_header_color_256
+from netbbs.net.node_theme import effective_accent_color_256, effective_header_color_256
 from netbbs.net.session_registry import SessionSummary
 from netbbs.net.shutdown import NodeControls, format_remaining_seconds
 from netbbs.net.unicode_style_preference import unicode_style_enabled
@@ -60,7 +60,7 @@ from netbbs.rendering.theme import (
     SUCCESS_COLOR,
     VALUE_COLOR,
 )
-from netbbs.rendering.width import display_width
+from netbbs.rendering.width import cut_to_width, display_width, wrap_to_width
 from netbbs.storage.execution import DatabaseLane
 from netbbs.timeutil import resolve_display_preferences
 
@@ -197,6 +197,7 @@ class MonitorState:
     # Resolved once on entry, so ticks stay database-free: the node's
     # branding for the name in the header, and the SysOp's Unicode choice.
     header_color: int = HEADER_COLOR
+    accent_color: int = ACCENT_COLOR
     name_gradient: str | None = None
     glyphs: Glyphs = UNICODE_GLYPHS
 
@@ -204,12 +205,12 @@ class MonitorState:
         self.outcome, self.outcome_color = text, color
 
 
-def _name_cell(entry: SessionSummary, viewer: Session) -> tuple[str, int]:
+def _name_cell(entry: SessionSummary, state: MonitorState) -> tuple[str, int]:
     if entry.username is None:
         return "(login)", MUTED_COLOR
-    if entry.session is viewer:
+    if entry.session is state.viewer:
         return sanitize_text(entry.username), SELF_COLOR
-    return sanitize_text(entry.username), PRIVILEGE_COLOR if entry.is_sysop else ACCENT_COLOR
+    return sanitize_text(entry.username), PRIVILEGE_COLOR if entry.is_sysop else state.accent_color
 
 
 def _cell_text(column: Column, entry: SessionSummary) -> str:
@@ -244,15 +245,17 @@ def _paint_header(buffer: ScreenBuffer, state: MonitorState, controls: NodeContr
     name is cut and the uptime dropped before any flag is."""
     glyphs = state.glyphs
     flags = _header_flags(controls)
-    flags_width = sum(len(glyphs.dot) + len(text) for text, _color in flags)
+    flags_width = sum(display_width(glyphs.dot) + display_width(text) for text, _color in flags)
     room = buffer.width - flags_width
     name = sanitize_text(state.viewer.node_display_name)
-    if len(name) > max(1, room):
-        name = name[: max(1, room - len(glyphs.ellipsis))] + glyphs.ellipsis
+    if display_width(name) > max(1, room):
+        # Display columns, not characters: a name of wide glyphs takes two
+        # columns each and would otherwise still push the flags off screen.
+        name = cut_to_width(name, max(1, room - display_width(glyphs.ellipsis))) + glyphs.ellipsis
     col = _paint_node_name(buffer, name, state)
     callers = "caller" if count == 1 else "callers"
     for part in (f"{glyphs.dot}{count} {callers}", f"{glyphs.dot}up {short_duration(uptime)}"):
-        if col + len(part) <= room:
+        if col + display_width(part) <= room:
             col = paint_text(buffer, 0, col, part, fg=METADATA_COLOR)
     for text, color in flags:
         col = paint_text(buffer, 0, col, glyphs.dot, fg=METADATA_COLOR)
@@ -326,7 +329,10 @@ def paint_monitor(buffer: ScreenBuffer, state: MonitorState, controls: NodeContr
     # Bottom up: the action bar, the outcome line, then the event tail
     # under a rule when there is room for one.
     bar_row = height - 1
-    outcome_row = height - 2
+    # A long outcome or broadcast wraps upward, up to three rows, rather
+    # than losing its tail at the screen edge.
+    outcome_lines = wrap_to_width(state.outcome, buffer.width)[:3] if state.outcome else []
+    outcome_row = height - 1 - max(1, len(outcome_lines))
     event_rows = 3 if height >= 18 else 1 if height >= 12 else 0
     events_top = outcome_row - event_rows
     table_bottom = events_top - (1 if event_rows else 0)  # the rule
@@ -365,7 +371,7 @@ def paint_monitor(buffer: ScreenBuffer, state: MonitorState, controls: NodeContr
         col = 0
         for column in columns:
             if column.key == "user":
-                name, color = _name_cell(entry, state.viewer)
+                name, color = _name_cell(entry, state)
                 text, bold = _fit(name, column, state.glyphs.ellipsis), entry.is_sysop
             else:
                 text, color, bold = _fit(_cell_text(column, entry), column), VALUE_COLOR, False
@@ -387,8 +393,8 @@ def paint_monitor(buffer: ScreenBuffer, state: MonitorState, controls: NodeContr
             col = paint_text(buffer, events_top + offset, 0, stamp + " ", fg=METADATA_COLOR)
             paint_text(buffer, events_top + offset, col, sanitize_text(event.text), fg=MUTED_COLOR)
 
-    if state.outcome:
-        paint_text(buffer, outcome_row, 0, state.outcome, fg=state.outcome_color)
+    for offset, line in enumerate(outcome_lines):
+        paint_text(buffer, outcome_row + offset, 0, line, fg=state.outcome_color)
     _paint_action_bar(buffer, bar_row, state)
 
 
@@ -496,6 +502,7 @@ async def monitor_screen(
         viewer=session,
         timezone=timezone,
         header_color=await lane.run(effective_header_color_256),
+        accent_color=await lane.run(effective_accent_color_256),
         name_gradient=session.node_name_gradient,
         glyphs=UNICODE_GLYPHS if await lane.run(unicode_style_enabled, actor) else ASCII_GLYPHS,
     )
