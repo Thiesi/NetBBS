@@ -6541,58 +6541,76 @@ async def _run_install(
     await lane.run(lambda db: record_action(db, actor=actor, action="create_backup", detail=str(backup_path)))
 
     await session.write_line(colored("Installing (this can take a few minutes)...", fg_color=MUTED_COLOR))
-    try:
-        status, log = await run_bounded(pip_command(environment, wheel_path), timeout_seconds=PIP_TIMEOUT_SECONDS)
-    except (ApplyError, OSError) as exc:
-        await _fail("install", str(exc))
-        return
-    if status != 0:
-        await _fail("install", f"pip exited with status {status}; the running version is unchanged", log)
-        return
-    try:
-        query_status, installed = await run_bounded(version_query_command(environment.python), timeout_seconds=60)
-    except (ApplyError, OSError) as exc:
-        query_status, installed = -1, f"(could not ask: {exc})"
-    installed = installed.strip().splitlines()[-1] if installed.strip() else ""
-    if query_status != 0 or installed.lstrip("vV") != release.tag_name.lstrip("vV"):
-        # pip returned 0, so the environment has changed whatever it now holds
-        # (Codex review): record that, so the Update screen keeps saying the
-        # node must be restarted or rolled back, rather than a plain failure.
-        note = (
-            f"pip installed {release.tag_name}, but the environment reports "
-            f"{installed or 'no version'} -- restart the service or roll back by hand"
-        )
-        await lane.run(
-            lambda db: record_install(
-                db, from_version=current_version, to_version=release.tag_name, restarting=False, note=note,
+
+    async def _install_and_record() -> tuple[str, str, str]:
+        """pip, the version check and the record, with no terminal I/O: this
+        runs to the end even if the SysOp's session is cancelled meanwhile
+        (Codex review) -- killing pip mid-replacement, or skipping the
+        record after it, would leave the environment changed with nothing
+        saying so. Returns `(result, detail, pip log)`, where `result` is
+        "refused" (nothing changed), "dirty" (pip changed the environment
+        but it does not report the target) or "installed"."""
+        try:
+            status, log = await run_bounded(pip_command(environment, wheel_path), timeout_seconds=PIP_TIMEOUT_SECONDS)
+        except (ApplyError, OSError) as exc:
+            return "refused", str(exc), ""
+        if status != 0:
+            return "refused", f"pip exited with status {status}; the running version is unchanged", log
+        try:
+            query_status, installed = await run_bounded(version_query_command(environment.python), timeout_seconds=60)
+        except (ApplyError, OSError) as exc:
+            query_status, installed = -1, f"(could not ask: {exc})"
+        installed = installed.strip().splitlines()[-1] if installed.strip() else ""
+        if query_status != 0 or installed.lstrip("vV") != release.tag_name.lstrip("vV"):
+            # pip returned 0, so the environment has changed whatever it now
+            # holds (Codex review): the Update screen keeps saying the node
+            # must be restarted or rolled back, not just "failed".
+            note = (
+                f"pip installed {release.tag_name}, but the environment reports "
+                f"{installed or 'no version'} -- restart the service or roll back by hand"
             )
-        )
-        await _fail("install", note, log)
+            await lane.run(
+                lambda db: record_install(
+                    db, from_version=current_version, to_version=release.tag_name, restarting=False, note=note,
+                )
+            )
+            return "dirty", note, log
+
+        def _record(db: Database) -> None:
+            record_install(db, from_version=current_version, to_version=release.tag_name, restarting=False)
+            record_check_outcome(db, f"installed {release.tag_name}; restart the service to run it")
+            record_action(
+                db, actor=actor, action="install_release",
+                detail=f"{current_version} -> {release.tag_name}, backup {backup_path}",
+            )
+
+        await lane.run(_record)
+        _logger.info("%s installed %s", actor.username, release.tag_name)
+        return "installed", "", log
+
+    result, detail, log = await _run_to_completion(_install_and_record())
+    if result != "installed":
+        await _fail("install", detail, log)
         return
 
-    def _record(db: Database) -> None:
-        record_install(db, from_version=current_version, to_version=release.tag_name, restarting=restarting)
-        record_check_outcome(
-            db,
-            f"installed {release.tag_name}; restarting" if restarting
-            else f"installed {release.tag_name}; restart the service to run it",
+    # Armed only now, and only if nothing else has claimed the node's shutdown
+    # meanwhile (Claude review): replacing a SIGTERM's non-cancellable stop
+    # with this restart would bring back a node its operator stopped.
+    if not restarting or node_controls.shutdown_scheduler.is_scheduled():
+        why = (
+            "The node is already shutting down; when the service starts it again, it runs "
+            f"{release.tag_name}." if restarting
+            else f"Restart the service to run it; until then this node runs {current_version} "
+            "with the new files on disk."
         )
-        record_action(
-            db, actor=actor, action="install_release",
-            detail=f"{current_version} -> {release.tag_name}, backup {backup_path}, restart={restarting}",
-        )
-
-    await lane.run(_record)
-    _logger.info("%s installed %s (restart=%s)", actor.username, release.tag_name, restarting)
-    if not restarting:
-        _announce(
-            session,
-            f"Installed {release.tag_name}. Restart the service to run it; until then this node runs "
-            f"{current_version} with the new files on disk.",
-            color=WARNING_COLOR,
-        )
+        _announce(session, f"Installed {release.tag_name}. {why}", color=WARNING_COLOR)
         return
 
+    def _record_restart(db: Database) -> None:
+        record_install(db, from_version=current_version, to_version=release.tag_name, restarting=True)
+        record_check_outcome(db, f"installed {release.tag_name}; restarting")
+
+    await lane.run(_record_restart)
     message = f"This node is restarting to install {release.tag_name}."
     task = asyncio.create_task(run_restart_shutdown(lambda: run_shutdown_sequence(
         graceful=True,
@@ -6611,6 +6629,26 @@ async def _run_install(
         f"Installed {release.tag_name}. The node goes down in {delay}s and the service manager starts it again.",
         color=ALERT_COLOR,
     )
+
+
+async def _run_to_completion(coroutine):
+    """Await `coroutine` as its own task that a cancellation of the caller
+    does not reach: on cancellation, keep waiting for it, then re-raise. Its
+    result or error is retrieved either way."""
+    task = asyncio.create_task(coroutine)
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+        if not task.cancelled() and task.exception() is not None:
+            _logger.error("release install failed after its SysOp session was cancelled", exc_info=task.exception())
+        raise
 
 
 # -- backup status (design doc §13.4, issue #60's first operational slice) --

@@ -650,6 +650,86 @@ def test_standalone_check_does_not_advertise_install(db, lane, sysop, monkeypatc
     assert "Install it from the live node's Settings -> Update" in text
 
 
+def test_cancelling_the_session_mid_pip_lets_the_install_finish_and_record(db, lane, sysop, monkeypatch, tmp_path):
+    """Who, or a shutdown's disconnect_all, cancelling the SysOp's session
+    must not kill pip or skip the record (Codex review)."""
+    _cache_newer_release(db)
+    set_restart_mode(db, "yes")
+    calls = _install_fakes(monkeypatch, tmp_path)
+    pip_started = None
+    pip_release = None
+
+    async def slow_run(command, *, timeout_seconds, **kwargs):
+        if command[1:4] == ["-m", "pip", "install"]:
+            calls.append(("pip", command[-1]))
+            pip_started.set()
+            await pip_release.wait()
+            return 0, "ok"
+        calls.append(("version", command[0]))
+        return 0, "99.0.0\n"
+
+    monkeypatch.setattr(admin_flow, "run_bounded", slow_run)
+
+    async def scenario():
+        nonlocal pip_started, pip_release
+        pip_started, pip_release = asyncio.Event(), asyncio.Event()
+        controls = _node_controls(backup_identity_dir=tmp_path)
+        session = FakeSession(["s", "u", "i", "i", "y", "b", "b", "b"])
+        menu = asyncio.create_task(admin_menu(session, lane, sysop, node_controls=controls))
+        await asyncio.wait_for(pip_started.wait(), timeout=10)
+        menu.cancel()
+        await asyncio.sleep(0.05)
+        assert not menu.done()  # still waiting for the install to finish
+        pip_release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(menu, timeout=10)
+        return controls
+
+    controls = asyncio.run(scenario())
+    assert [c[0] for c in calls] == ["fetch", "download", "backup", "pip", "version"]
+    recorded = get_recorded_install(db)
+    assert recorded is not None and recorded["to"] == "v99.0.0"
+    assert not controls.shutdown_scheduler.is_scheduled()
+
+
+def test_a_shutdown_scheduled_during_the_install_is_not_replaced(db, lane, sysop, monkeypatch, tmp_path):
+    """A SIGTERM's stop that arrives while pip runs must stay a stop: the
+    restart is armed only if nothing else holds the shutdown (Claude review)."""
+    _cache_newer_release(db)
+    set_restart_mode(db, "yes")
+    _install_fakes(monkeypatch, tmp_path)
+    stop_task = None
+
+    async def run_then_sigterm(command, *, timeout_seconds, **kwargs):
+        nonlocal stop_task
+        if command[1:4] == ["-m", "pip", "install"]:
+            stop_task = asyncio.create_task(asyncio.sleep(60))
+            controls.shutdown_scheduler.schedule(
+                stop_task, deadline=asyncio.get_running_loop().time() + 60, message=None,
+                source="sigterm", cancellable=False,
+            )
+            return 0, "ok"
+        return 0, "99.0.0\n"
+
+    monkeypatch.setattr(admin_flow, "run_bounded", run_then_sigterm)
+    controls = _node_controls(backup_identity_dir=tmp_path)
+
+    async def scenario():
+        session = FakeSession(["s", "u", "i", "i", "y", "b", "b", "b"])
+        try:
+            await admin_menu(session, lane, sysop, node_controls=controls)
+            assert controls.shutdown_scheduler.source() == "sigterm"
+        finally:
+            stop_task.cancel()
+            await asyncio.gather(stop_task, return_exceptions=True)
+        return session
+
+    session = asyncio.run(scenario())
+    assert not restart_exit_requested()
+    assert "The node is already shutting down" in _normalized_visible(_written_text(session))
+    assert get_recorded_install(db)["restarting"] is False
+
+
 def test_failed_download_stops_before_the_backup(db, lane, sysop, monkeypatch, tmp_path):
     _cache_newer_release(db)
     calls = _install_fakes(monkeypatch, tmp_path)

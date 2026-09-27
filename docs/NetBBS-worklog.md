@@ -4505,8 +4505,8 @@ Checks never install anything. `netbbs.update_apply` installs a release only
 when a SysOp chooses it on the Update screen; design doc §6.7 holds the steps.
 It installs the release wheel with pip into the running interpreter's
 environment. The older tarball/re-exec primitives in `netbbs.selfupdate`
-(`prepare_update`/`confirm_update`/`roll_back_update`) still have no caller.
-Delete them rather than wire them in next to the wheel path.
+(`prepare_update`/`confirm_update`/`roll_back_update`) have no caller; they
+belong to an earlier re-exec design and are not part of the wheel path.
 
 Invariants that are easy to break:
 
@@ -4522,8 +4522,13 @@ Invariants that are easy to break:
   leave a stopped node stopped. Do not set the flag anywhere else.
 - **Between install and restart, the old process runs over new files.**
   Anything imported for the first time in that window is the new code. The
-  restart shutdown follows the install immediately for that reason. Do not
-  add steps between them.
+  restart shutdown follows the install immediately for that reason.
+- **pip, the version check and the record are one uncancellable unit.**
+  `_run_to_completion` keeps them running when the SysOp's session is
+  cancelled (Who, a shutdown's `disconnect_all`), because pip killed
+  mid-replacement, or a missing record after it, leaves a changed
+  environment that nothing reports. The restart is armed after that unit
+  finishes, and only when no other shutdown is scheduled by then.
 - **Never test against the shared venv.** Tests fake the pip subprocess
   boundary (`admin_flow.run_bounded`). `run_bounded`'s own tests run only
   harmless `python -c` children. A real `pip install` from a test would
