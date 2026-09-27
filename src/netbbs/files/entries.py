@@ -122,6 +122,15 @@ def _refuse_hidden_area(db: Database, area: FileArea) -> None:
         raise FileEntryError(f"file area {area.name!r} is no longer available on this node")
 
 
+def _refuse_hidden_area_of(db: Database, entry: FileEntry) -> None:
+    """`_refuse_hidden_area` for the area `entry` is in: a pin or a keep
+    made after the SysOp hid a carried area would come back with it on
+    restore (Codex review on #783)."""
+    row = db.connection.execute("SELECT * FROM file_areas WHERE id = ?", (entry.area_id,)).fetchone()
+    if row is not None and "link_hidden_at" in row.keys() and row["link_hidden_at"] is not None:
+        raise FileEntryError(f"file area {row['name']!r} is no longer available on this node")
+
+
 def upload_file_from_temp(
     db: Database,
     area: FileArea,
@@ -649,6 +658,7 @@ def set_file_pinned(db: Database, entry: FileEntry, pinned: bool, *, changed_by:
     """
     entry = get_file(db, entry.file_id)
     _require_area_permission(db, entry, changed_by, BoardPermission.EDIT)
+    _refuse_hidden_area_of(db, entry)
 
     db.connection.execute("UPDATE files SET pinned = ? WHERE id = ?", (int(pinned), entry.id))
     db.connection.commit()
@@ -670,6 +680,7 @@ def set_file_exempt(db: Database, entry: FileEntry, exempt: bool, *, changed_by:
     `set_file_pinned` does."""
     entry = get_file(db, entry.file_id)
     _require_area_permission(db, entry, changed_by, BoardPermission.EDIT)
+    _refuse_hidden_area_of(db, entry)
 
     db.connection.execute(
         "UPDATE files SET exempt_from_expiry = ? WHERE id = ?", (int(exempt), entry.id)

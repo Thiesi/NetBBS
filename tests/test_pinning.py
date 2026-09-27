@@ -487,3 +487,80 @@ def test_a_moderator_pins_the_highlighted_file(tmp_path, monkeypatch):
     assert "pin f0.txt" in text
     assert list_files_page(db, area, mod, with_pinned=True).entries[0].filename == "f0.txt"
     db.close()
+
+
+# -- review round two (Codex on #783) ------------------------------------------------
+
+
+def test_a_removed_post_refuses_a_pin_or_keep(db, mod):
+    from netbbs.boards.posts import PostError, tombstone_post
+
+    board = _board(db, mod)
+    grant_permissions(
+        db, mod, object_type="board", object_id=board.id, permissions=BoardPermission.DELETE, granted_by=mod
+    )
+    post = create_post(db, board, mod, "Rules", "v1")
+    stale = get_post(db, post.post_id)  # a reader left open
+    tombstone_post(db, stale, board, tombstoned_by=mod)
+    with pytest.raises(PostError, match="removed"):
+        set_post_pinned(db, stale, True, changed_by=mod)
+    with pytest.raises(PostError, match="removed"):
+        set_post_exempt(db, stale, True, changed_by=mod)
+
+
+def test_unpinning_an_old_post_returns_to_the_list(db, mod, monkeypatch):
+    """Its dated place is on an older page; the reader must not go on to
+    show some other post as if it were this one."""
+    board = _board(db, mod)
+    made = _posts(db, board, mod, 12, monkeypatch)
+    set_post_pinned(db, made[0], True, changed_by=mod)
+    # Open the pinned row, unpin it, and one [B]ack leaves the board: the
+    # unpin already went back to the list.
+    session = BoardSession(["1", "i", "b"])
+    asyncio.run(board_flow._show_board(session, db, board, mod))
+    assert "Post unpinned" in session.visible()
+    assert list_pinned_posts(db, board, requesting_user=mod) == []
+
+
+def test_keep_on_an_older_file_page_stays_on_that_page(tmp_path, monkeypatch):
+    path = tmp_path / "node.db"
+    db = Database(path)
+    mod = create_user(db, "mod", password="hunter2", user_level=10)
+    area = create_file_area(db, "downloads", creator=mod, max_file_age_days=30)
+    grant_permissions(
+        db, mod, object_type="file_area", object_id=area.id, permissions=BoardPermission.EDIT, granted_by=mod
+    )
+    stamps = iter(f"2026-01-01T00:00:{i:02d}.000000Z" for i in range(8))
+    monkeypatch.setattr(entries_module, "utc_now_iso", lambda: next(stamps))
+    for i in range(8):
+        upload_file(db, area, mod, f"f{i}.txt", f"payload {i}".encode())
+    monkeypatch.undo()
+    # Keep the files fresh for the expiry sweep.
+    db.connection.execute("UPDATE files SET created_at = strftime('%Y-%m-%dT%H:%M:%f000Z', 'now', '-' || (10 - id) || ' minutes')")
+    db.connection.commit()
+    lane = DatabaseLane(path)
+    try:
+        # Older page (f0-f2), highlight its first row, keep it, leave.
+        session = FileSession(["o", "DOWN", "k", "b"])
+        asyncio.run(_show_area(session, lane, area, mod))
+    finally:
+        lane.close()
+    # The redraw after the keystroke, up to the outcome written above its
+    # prompt, is the older page again.
+    redraw = session.visible().rsplit("k\n", 1)[1].split("f0.txt kept", 1)[0]
+    assert "f0.txt" in redraw and "f7.txt" not in redraw
+    db.close()
+
+
+def test_a_hidden_area_refuses_a_file_pin(db, mod):
+    from netbbs.files.entries import FileEntryError
+
+    area = create_file_area(db, "downloads", creator=mod)
+    grant_permissions(
+        db, mod, object_type="file_area", object_id=area.id, permissions=BoardPermission.EDIT, granted_by=mod
+    )
+    entry = upload_file(db, area, mod, "a.txt", b"a")
+    db.connection.execute("UPDATE file_areas SET link_hidden_at = '2026-01-01T00:00:00.000000Z' WHERE id = ?", (area.id,))
+    db.connection.commit()
+    with pytest.raises(FileEntryError, match="no longer available"):
+        set_file_pinned(db, entry, True, changed_by=mod)

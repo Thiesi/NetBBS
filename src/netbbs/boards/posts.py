@@ -1066,6 +1066,18 @@ def tombstone_post(db: Database, post: Post, board: Board, *, tombstoned_by: Use
     return get_post(db, new_post_id)
 
 
+def _refuse_if_removed(db: Database, post: Post) -> None:
+    """A removed post is neither pinned nor kept (issue #675): removal
+    clears both, and a reader left open since must not set them again on
+    the placeholder (Codex review on #783)."""
+    removed = db.connection.execute(
+        "SELECT 1 FROM posts WHERE root_post_id = ? AND board_id = ? AND tombstoned_at IS NOT NULL LIMIT 1",
+        (post.root_post_id, post.board_id),
+    ).fetchone()
+    if removed is not None:
+        raise PostError("this post has been removed")
+
+
 def set_post_pinned(db: Database, post: Post, pinned: bool, *, changed_by: User) -> Post:
     """
     Pin or unpin a post within its own board's listing — a distinct
@@ -1082,6 +1094,7 @@ def set_post_pinned(db: Database, post: Post, pinned: bool, *, changed_by: User)
     """
     _refuse_if_board_hidden(db, post.board_id)
     _require_board_permission(db, post, changed_by, BoardPermission.EDIT)
+    _refuse_if_removed(db, post)
 
     db.connection.execute(
         "UPDATE posts SET pinned = ? WHERE root_post_id = ? AND board_id = ?",
@@ -1111,6 +1124,7 @@ def set_post_exempt(db: Database, post: Post, exempt: bool, *, changed_by: User)
     expired."""
     _refuse_if_board_hidden(db, post.board_id)
     _require_board_permission(db, post, changed_by, BoardPermission.EDIT)
+    _refuse_if_removed(db, post)
 
     db.connection.execute(
         "UPDATE posts SET exempt_from_expiry = ? WHERE root_post_id = ? AND board_id = ?",

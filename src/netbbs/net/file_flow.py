@@ -71,6 +71,7 @@ from netbbs.files import (
     FileEntryError,
     FileEntryPage,
     download_file,
+    get_file,
     list_file_areas,
     list_files_page,
     list_pending_files,
@@ -1102,10 +1103,18 @@ async def _show_area(
                 )
                 if entry is not None:
                     await _toggle_file_flag(session, lane, entry, user, pin=kind == "pin")
-                    # A pin moves the file to the top of the newest page,
-                    # an unpin back among the dated files.
-                    page = await lane.run(list_files_page, area, user, with_pinned=True)
-                    highlighted = None
+                    if kind == "pin":
+                        # A pin moves the file to the top of the opening
+                        # page, an unpin back among the dated files.
+                        page = await lane.run(list_files_page, area, user, with_pinned=True)
+                        highlighted = None
+                    else:
+                        # Keeping moves nothing: this page, the row updated
+                        # (Codex review on #783).
+                        fresh = await lane.run(get_file, entry.file_id)
+                        page = replace(
+                            page, entries=[fresh if e.file_id == fresh.file_id else e for e in page.entries]
+                        )
                 await _render_and_advance_cursor(page, highlighted=highlighted)
                 continue
         return

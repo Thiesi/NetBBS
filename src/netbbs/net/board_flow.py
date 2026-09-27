@@ -1094,10 +1094,14 @@ async def _show_board(
                     page_anchor = None
                     page = _refetch_current_page()
                     return None
-                index = next(
-                    (i for i, p in enumerate(page.posts) if p.root_post_id == root),
-                    min(index, len(page.posts) - 1),
-                )
+                found = next((i for i, p in enumerate(page.posts) if p.root_post_id == root), None)
+                if found is None and key in ("i", "k"):
+                    # Unpinned off this page: its dated place is on an
+                    # older one. Back to the list, rather than showing some
+                    # other post as if it were this one (Codex review on
+                    # #783).
+                    return None
+                index = found if found is not None else min(index, len(page.posts) - 1)
                 continue
             detail_page = 0
             if key == "n":

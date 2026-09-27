@@ -3240,6 +3240,11 @@ MIGRATIONS = [
             WHERE id = NEW.id;
         END;
 
+        -- The pinned block is looked up on every board and area opening; a
+        -- partial index keeps that from scanning a board's whole history.
+        CREATE INDEX idx_posts_pinned ON posts(board_id, created_at, post_id) WHERE pinned = 1;
+        CREATE INDEX idx_files_pinned ON files(area_id, created_at, file_id) WHERE pinned = 1;
+
         CREATE TRIGGER trg_posts_tombstone_clears_flags AFTER INSERT ON posts
         WHEN NEW.tombstoned_at IS NOT NULL
         BEGIN
