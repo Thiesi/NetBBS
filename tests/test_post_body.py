@@ -308,3 +308,13 @@ def test_a_signature_under_a_drawing_reads_as_post_text():
     visible = [_SGR.sub("", row) for row in rows]
     assert visible == ["A|12B", "-- ", "Alice"]
     assert f"{ESC}[38;5;9m" in rows[2]
+
+
+def test_a_painted_delimiter_line_is_not_a_signature():
+    from netbbs.rendering.post_body import split_signature
+
+    drawing = "title\n-- \nA|12B"
+
+    assert split_signature(drawing) == (drawing, "")
+    rows = post_body_rows(drawing, 80, "color", truecolor=True, layout="art")
+    assert _SGR.sub("", rows[-1]) == "A|12B"

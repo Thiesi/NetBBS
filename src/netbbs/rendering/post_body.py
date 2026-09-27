@@ -515,15 +515,23 @@ def art_body_from_editor(data: bytes) -> str:
 SIGNATURE_DELIMITER = "\n-- \n"
 
 
+# What an art post's appended signature follows: the reset the art path
+# writes after the drawing, then the delimiter. A painted "-- " row never
+# has this form -- every canvas row starts with its own reset, and the
+# canvas trims the delimiter's trailing space -- so a drawing that shows
+# a "-- " line is never split (Codex review on #753).
+ART_SIGNATURE_MARK = RESET + SIGNATURE_DELIMITER
+
+
 def split_signature(body: str) -> tuple[str, str]:
-    """An art post's drawing, and the signature block appended under it
-    (the delimiter included, `""` if there is none). The block was never
-    on the canvas: it is set aside when the drawing is reopened, and read
-    as ordinary post text (Codex review on #753)."""
-    if SIGNATURE_DELIMITER not in body:
+    """An art post's drawing (with the reset that ends it) and the
+    signature block appended under it (the delimiter included, `""` if
+    there is none). The block was never on the canvas: it is set aside
+    when the drawing is reopened, and read as ordinary post text."""
+    if ART_SIGNATURE_MARK not in body:
         return body, ""
-    drawing, signature = body.rsplit(SIGNATURE_DELIMITER, 1)
-    return drawing, SIGNATURE_DELIMITER + signature
+    drawing, signature = body.rsplit(ART_SIGNATURE_MARK, 1)
+    return drawing + RESET, SIGNATURE_DELIMITER + signature
 
 
 def art_styles_editable(drawing: str) -> bool:

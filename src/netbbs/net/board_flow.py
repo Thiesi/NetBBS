@@ -1483,7 +1483,8 @@ async def _edit_existing_post(
             return
         if choice == "resume":
             # The drawing from the draft, under this post's own signature.
-            initial_body = _recovered_drawing(art_draft) + split_signature(post.body)[1]
+            signature_block = split_signature(post.body)[1]
+            initial_body = _recovered_drawing(art_draft) + (f"\x1b[0m{signature_block}" if signature_block else "")
 
     subject = await read_prefilled_field(session, "Subject", post.subject)
 

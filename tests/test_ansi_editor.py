@@ -724,3 +724,12 @@ def test_without_recovery_the_editor_asks_nothing_and_keeps_the_draft(tmp_path):
 
     assert asyncio.run(scenario()) is None
     assert draft.exists()
+
+
+def test_a_character_the_save_cannot_hold_is_not_painted(tmp_path):
+    async def scenario():
+        session = FakeSession(["A", "\u2603", "B", "CTRL+O"])
+        return await edit_ansi_art(session, initial_bytes=None, draft_path=tmp_path / "d.draft", autosave_interval_seconds=9999)
+
+    saved = asyncio.run(scenario()).decode("cp437")
+    assert "AB" in saved and "?" not in saved

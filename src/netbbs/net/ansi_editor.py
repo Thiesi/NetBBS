@@ -370,9 +370,20 @@ def _dispatch(state: _EditorState, key: EditorKey) -> None:
             state.col = buffer.width - 1
         buffer.write_cell(state.row, state.col, " ", fg=None, bg=None, bold=False)
         state.dirty = True
-    elif key.kind == EditorKeyKind.CHAR and key.char is not None:
+    elif key.kind == EditorKeyKind.CHAR and key.char is not None and _savable(key.char):
         _paint(state, key.char)
     # TAB and unrecognized kinds: no-op.
+
+
+def _savable(char: str) -> bool:
+    """Whether `char` survives the CP437 save (`encode_ansi_bytes`): one
+    that does not would be painted, then saved as "?" (Codex review on
+    #753), so it is not painted at all."""
+    try:
+        char.encode("cp437")
+    except UnicodeEncodeError:
+        return False
+    return True
 
 
 def _paint(state: _EditorState, char: str) -> None:
