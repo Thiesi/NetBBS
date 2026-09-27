@@ -41,11 +41,13 @@ from dataclasses import dataclass, field
 from typing import Iterator
 
 from netbbs.rendering.ansi import CSI, RESET, colored
+from netbbs.rendering.ansi_art import decode_ansi_bytes
 from netbbs.rendering.gradient import nearest_256
 from netbbs.rendering.pipe_codes import BACKGROUND_CODES, FOREGROUND_CODES, cga_to_xterm
 from netbbs.rendering.reflow import reflow, wrap_terminal_text
 from netbbs.rendering.sanitize import sanitize_text
 from netbbs.rendering.theme import MUTED_COLOR
+from netbbs.rendering.width import char_width
 
 ESC = "\x1b"
 # Where an escape sequence can start: ESC, and the 8-bit C1 introducers
@@ -370,14 +372,75 @@ def colored_body_rows(styled: str, width: int) -> list[str]:
     ]
 
 
-def post_body_rows(body: str, width: int, mode: str, *, truecolor: bool) -> list[str]:
+def post_body_rows(body: str, width: int, mode: str, *, truecolor: bool, layout: str = "prose") -> list[str]:
     """A post body as reader rows at `width`, in `mode`
     (`netbbs.rendering.post_body.post_body_mode`): colored, or text laid
     out by `quoted_body`. The one layout the reader, the review
-    preview and the pending-post screen share (issue #711)."""
+    preview and the pending-post screen share (issue #711).
+
+    A post written in the ANSI art editor (`layout` ``art``) keeps its
+    lines in every mode: `art_body_rows`."""
+    if layout == "art":
+        return art_body_rows(render_post_body(body, mode, truecolor=truecolor), width)
     if mode == "color":
         return colored_body_rows(styled_post_body(body, truecolor=truecolor), width)
     return quoted_body(render_post_body(body, mode), width).split("\r\n")
+
+
+# -- art posts ------------------------------------------------------------------
+
+LAYOUTS = ("prose", "art")
+
+
+def art_body_from_editor(data: bytes) -> str:
+    """The body an ANSI art editor canvas (`netbbs.net.ansi_editor.
+    edit_ansi_art`'s saved bytes) becomes: its rows as lines, each
+    trimmed of trailing blank cells in the default style, and trailing
+    blank rows dropped. The canvas is a fixed width; a post is as wide
+    as what was drawn."""
+    trimmed: list[str] = []
+    for line in decode_ansi_bytes(data).replace("\r\n", "\n").split("\n"):
+        styles = _SGR_RE.findall(line)
+        # Trailing spaces are blank only in the default style; under a
+        # colored background they are part of the picture.
+        if not styles or styles[-1] in ("", "0"):
+            line = line.rstrip(" ")
+        trimmed.append(line)
+    while trimmed and not _visible(trimmed[-1]):
+        trimmed.pop()
+    return "\n".join(trimmed)
+
+
+def art_body_rows(rendered: str, width: int) -> list[str]:
+    """An art post's rendered body as rows at `width`: every line stays a
+    line; only a line wider than `width` wraps, cut at the column, not at
+    a word, with its color carried onto the next row."""
+    rows: list[str] = []
+    for line in rendered.replace("\r\n", "\n").split("\n"):
+        rows.extend(_hard_wrap(line, max(1, width)))
+    return self_contained_rows(rows)
+
+
+def _hard_wrap(line: str, width: int) -> list[str]:
+    """`line` cut into rows of at most `width` display columns, escape
+    sequences kept with the text that follows them."""
+    rows: list[str] = []
+    current: list[str] = []
+    used = 0
+    position = 0
+    for match in _SGR_RE.finditer(line + f"{CSI}m"):
+        for char in line[position:match.start()]:
+            char_columns = char_width(char)
+            if used + char_columns > width and used > 0:
+                rows.append("".join(current))
+                current, used = [], 0
+            current.append(char)
+            used += char_columns
+        if match.start() < len(line):
+            current.append(match.group(0))
+        position = match.end()
+    rows.append("".join(current))
+    return rows
 
 
 def quoted_body(body: str, width: int) -> str:

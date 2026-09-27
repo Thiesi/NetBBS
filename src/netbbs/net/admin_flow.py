@@ -16481,9 +16481,11 @@ async def _post_action_screen(
             unicode_style=unicode_style, collapsed=collapsed,
             header_color=header_color, node_name_gradient=session.node_name_gradient,
         )
-        if body_mode == "color":
+        if body_mode == "color" or post.layout == "art":
             # As the board's readers will see it (issue #711).
-            body_rows = post_body_rows(post.body, session.terminal_width, body_mode, truecolor=truecolor)
+            body_rows = post_body_rows(
+                post.body, session.terminal_width, body_mode, truecolor=truecolor, layout=post.layout
+            )
         else:
             body = reflow(render_post_body(post.body, body_mode), width=session.terminal_width)
             body_rows = [colored(line, fg_color=VALUE_COLOR) if line else "" for line in body.splitlines()]

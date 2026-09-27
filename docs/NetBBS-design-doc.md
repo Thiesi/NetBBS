@@ -1488,6 +1488,13 @@ carried exactly as written and filtered on output
   The state is kept normalized, so a flood of codes costs each row one short
   prefix. The review screen and the SysOp's pending-post screen show a body
   the same way.
+- **Art posts:** on a board that allows color, `[A]rt post` opens the ANSI art
+  editor (`netbbs.net.ansi_editor`) on a canvas as wide as the terminal, up to
+  80 columns. A drawn post keeps its lines: each line stays a line, and only a
+  line wider than the reader's terminal wraps, cut at the column, with its color
+  carried over. The layout belongs to the post, set by the editor that drew it:
+  editing an art post reopens the art editor, and a carried post brings its
+  layout along (§9.2).
 
 ### 6.2 File areas
 
@@ -3331,6 +3338,11 @@ metadata and recommended defaults for carrying nodes.
 
 Only approved local posts are originated as `board_post` events. Password-only
 users currently use the `node_vouched_user` author tier.
+
+A post drawn in the ANSI art editor carries an optional `"layout": "art"` in its
+`board_post` payload. The key is omitted for prose, and an absent or unknown
+value is prose. Edits carry no layout: a revision follows its root (§16, issue
+#711).
 
 Self-authored edits become chained `board_post_edit` events. The original post
 remains immutable. Moderator edits and tombstones require separate authorized
@@ -11626,6 +11638,32 @@ instead, which is same-origin and keeps a reverse-proxy prefix.
 **Not done, deliberately.** The probe is not a reservation: a file deleted, or a
 slot taken, between probe and `GET` still saves that `GET`'s error body. The
 window is one round trip.
+
+### Issue #711 — an art post's layout on the Link
+
+A post drawn in the ANSI art editor keeps its lines: each line stays a line, and
+only a line wider than the terminal wraps (§6.1). Which layout a post has is set
+by the editor that wrote it, not by an author-managed flag. For a carried post
+to keep its lines everywhere, and not only on its origin, the layout has to
+travel with it. Normative description: §6.1 and §9.2.
+
+**Decision 1 — an optional `layout` field on `board_post`.** `"layout": "art"`
+for an art post. The key is omitted for prose, never `null`, per §7.2's omission
+rule. No `netbbs_protocol` bump: §7.5 allows optional fields that old peers can
+safely preserve, and they do. A node that predates the field verifies the
+signature over the bytes as received, keeps the envelope and relays it
+unchanged, and shows the post as prose, which is the intended fallback. A value
+this node does not know is prose too, so a later layout degrades the same way.
+Rejected:
+- a marker inside the body, which every older node would display;
+- a new event type, which older nodes would store opaquely and never show at
+  all (§7.5).
+
+**Decision 2 — the root carries it; edits follow.** An edit is written in the
+editor that drew the post, so `board_post_edit` and the moderator edit carry no
+layout: a revision takes its root's. The local `posts.layout` column is
+meaningful on the root row. Rejected: a layout per revision, which would let one
+edit turn a drawing into reflowed prose with nothing to say why.
 
 ### SFTP over the SSH transport — declined
 

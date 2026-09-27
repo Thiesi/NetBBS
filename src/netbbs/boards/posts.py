@@ -91,6 +91,10 @@ class Post:
     # post_id` above stay intact. `edit_post`/`tombstone_post` both
     # refuse to extend a chain whose current head already has this set.
     tombstoned_at: str | None = None
+    # How the body is laid out (issue #711): "prose" reflows, "art" keeps
+    # its lines. Set by the editor that wrote the post, on the root; an
+    # edit follows its root.
+    layout: str = "prose"
     # True only on a Post resolved by list_posts_page/list_pinned_posts
     # whose displayed subject/body came from a later edit, not this row
     # itself, and False when that later revision is a tombstone -- see
@@ -108,9 +112,13 @@ def create_post(
     body: str,
     *,
     parent_post_id: str | None = None,
+    layout: str = "prose",
 ) -> Post:
     """
     Create a new post on `board`.
+
+    `layout` (issue #711) is "art" for a body written in the ANSI art
+    editor, whose lines are kept as drawn, and "prose" otherwise.
 
     Enforces `board.min_write_level` via the same level-gating plumbing
     (`netbbs.permissions.require_level`) built in Phase 1 — this is the
@@ -145,6 +153,8 @@ def create_post(
         # it still holds the `Board`; the write is refused here.
         raise PostError(f"board {board.name!r} is no longer available on this node")
 
+    if layout not in ("prose", "art"):
+        raise PostError(f"invalid layout: {layout!r}")
     status = "pending" if board.moderated else "approved"
     created_at = utc_now_iso()
     author_identifier = author.fingerprint or author.username
@@ -190,6 +200,10 @@ def create_post(
                 post_id,  # a fresh post is the root of its own edit chain
             ),
         )
+        if layout != "prose":
+            # Apart from the INSERT, which stays valid on every schema a
+            # post can be created on.
+            db.connection.execute("UPDATE posts SET layout = ? WHERE post_id = ?", (layout, post_id))
         db.connection.commit()
     except sqlite3.IntegrityError as exc:
         raise PostError(
@@ -1250,4 +1264,6 @@ def _row_to_post(row: sqlite3.Row, *, is_edited: bool = False) -> Post:
         edit_of_post_id=row["edit_of_post_id"],
         tombstoned_at=row["tombstoned_at"],
         is_edited=is_edited,
+        # Absent on a schema older than issue #711's migration.
+        layout=row["layout"] if "layout" in row.keys() else "prose",
     )

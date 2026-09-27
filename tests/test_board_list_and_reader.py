@@ -825,3 +825,30 @@ def test_search_indexes_the_plain_text(db, alice):
     assert len(hits) == 1
     assert "\x1b" not in hits[0].body and "|12" not in hits[0].body
     assert search_posts(db, alice, "12") == []
+
+
+def test_art_post_is_offered_only_where_color_is_allowed(db, alice, monkeypatch):
+    colored_board = create_board(db, "colored", creator=alice, allow_color=True)
+    plain_board = create_board(db, "plain", creator=alice)
+    for board, offered in ((colored_board, True), (plain_board, False)):
+        _posts(db, board, alice, 1, monkeypatch)
+        session = FakeSession(["b"])
+        asyncio.run(board_flow._show_board(session, db, board, alice))
+        assert ("[A]rt post" in session.visible()) is offered
+
+
+def test_an_art_post_is_drawn_reviewed_and_published(db, alice):
+    from netbbs.boards.posts import list_posts_page
+
+    board = create_board(db, "general", creator=alice, allow_color=True)
+    session = FakeSession(["a", "Drawing", "H", "i", "CTRL+O", "p", "1", "b", "b"])
+
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+
+    post = list_posts_page(db, board, alice).posts[0]
+    assert post.subject == "Drawing" and post.layout == "art"
+    assert _SGR_ANY.sub("", post.body) == "Hi"
+    assert "Posted." in session.visible()
+
+
+_SGR_ANY = re.compile("\x1b\\[[0-9;]*m")

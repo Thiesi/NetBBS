@@ -167,3 +167,50 @@ def test_uncolored_modes_lay_out_like_the_plain_reader(mode):
 
     assert ESC not in "".join(_SGR.sub("", row) for row in rows)
     assert ("|12" in rows[0]) == (mode == "text")
+
+
+# -- art posts (issue #711) ---------------------------------------------------------
+
+from netbbs.rendering import ScreenBuffer, encode_ansi_bytes, parse_ansi_into_buffer  # noqa: E402
+from netbbs.rendering.post_body import art_body_from_editor, art_body_rows  # noqa: E402
+
+
+def _canvas(text: str, width: int = 80, height: int = 10) -> bytes:
+    buffer = ScreenBuffer(width, height)
+    parse_ansi_into_buffer(text, buffer)
+    return encode_ansi_bytes(buffer)
+
+
+def test_a_canvas_becomes_a_body_as_wide_and_tall_as_the_drawing():
+    body = art_body_from_editor(_canvas(f"{ESC}[31mHI{ESC}[0m there\r\n{ESC}[44m    {ESC}[0m"))
+
+    lines = body.split("\n")
+    assert len(lines) == 2  # the eight blank rows below are dropped
+    assert _SGR.sub("", lines[0]) == "HI there"  # blank default cells trimmed
+    assert _SGR.sub("", lines[1]) == "    "  # a colored background is part of the picture
+
+
+def test_an_art_post_keeps_its_lines():
+    body = "short\nlines stay\nas drawn"
+
+    rows = art_body_rows(styled_post_body(body), 80)
+
+    assert [_SGR.sub("", row) for row in rows] == ["short", "lines stay", "as drawn"]
+    # The same body as prose is one reflowed paragraph.
+    assert len(post_body_rows(body, 80, "color", truecolor=True)) == 1
+
+
+def test_a_wide_art_line_wraps_at_the_column_with_its_color():
+    body = f"{ESC}[31m" + "#" * 80
+
+    rows = art_body_rows(styled_post_body(body), 40)
+
+    assert [len(_SGR.sub("", row)) for row in rows] == [40, 40]
+    assert rows[1].startswith(f"{ESC}[31m")
+
+
+@pytest.mark.parametrize("mode", ["plain", "text"])
+def test_an_art_post_keeps_its_lines_without_color(mode):
+    rows = post_body_rows("|12one\ntwo", 80, mode, truecolor=False, layout="art")
+
+    assert len(rows) == 2 and ESC not in rows[0] + rows[1]

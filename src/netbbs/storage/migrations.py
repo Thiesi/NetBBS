@@ -3113,4 +3113,16 @@ MIGRATIONS = [
         ALTER TABLE boards ADD COLUMN allow_color INTEGER NOT NULL DEFAULT 0;
         """,
     ),
+    Migration(
+        description=(
+            "Issue #711: `layout` on posts -- `prose` (reflowed to the reader's width) or "
+            "`art` (written in the ANSI art editor: every line stays a line). Set by the "
+            "editor that wrote the post, on its root row; its edits follow the root. A "
+            "carried post takes it from the optional `layout` field of its `board_post` "
+            "event, and is prose without one."
+        ),
+        sql="""
+        ALTER TABLE posts ADD COLUMN layout TEXT NOT NULL DEFAULT 'prose' CHECK (layout IN ('prose', 'art'));
+        """,
+    ),
 ]
