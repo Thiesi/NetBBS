@@ -544,12 +544,15 @@ def test_voidrunner_recovery_back_is_a_normal_door_exit(db, lane, player, tmp_pa
     door = create_door(db, "Voidrunner", sys.executable, args=(str(_VOIDRUNNER_PATH),), creator=player)
     session = FakeSession()
     session.type_in("B")
-    result = asyncio.run(_run(session, lane, door, player, wall_time_limit_seconds=5))
+    # A ceiling, not the subject: the door exits on the keypress, and a
+    # parallel run can take several seconds just to start it.
+    result = asyncio.run(_run(session, lane, door, player, wall_time_limit_seconds=30))
     assert result.exit_code == 0 and result.reason == "exited"
     assert b"Career recovery" in bytes(session.written)
     assert path.read_bytes() == b"damaged career"
 
 
+@pytest.mark.timing_sensitive  # the title has to be drawn inside the 3s limit
 def test_war_dialer_timeout_does_not_leave_bracketed_paste_enabled(db, lane, player, tmp_path, monkeypatch):
     monkeypatch.setenv("USERPROFILE" if os.name == "nt" else "HOME", str(tmp_path / "door-home"))
     door = create_door(
