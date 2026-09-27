@@ -17,6 +17,7 @@ called at the very top, before login even begins.
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass, field
 
 from netbbs.auth.users import SYSOP_LEVEL
@@ -45,6 +46,8 @@ class _Entry:
     username: str | None = None
     is_sysop: bool = False
     connected_at: str = field(default_factory=utc_now_iso)
+    # Issue #762: the idle clock's starting point until the first keystroke.
+    entered_monotonic: float = 0.0
     # Issue #659: the access this session's screens are currently running
     # with -- see `record_account`.
     user_level: int | None = None
@@ -80,6 +83,11 @@ class SessionSummary:
     username: str | None
     connected_at: str
     peer_address: str | None
+    # Issue #762, for the SysOp monitor: seconds since the caller last
+    # sent input (since connecting, before the first key), and where they
+    # are -- see `netbbs.net.session_activity`.
+    idle_seconds: float = 0.0
+    activity: tuple[str, ...] = ()
 
 
 class ActiveSessionRegistry:
@@ -120,7 +128,7 @@ class ActiveSessionRegistry:
         assert task is not None, "enter() must be called from within the connection's own task"
         session_id = self._next_session_id
         self._next_session_id += 1
-        self._sessions[session] = _Entry(task=task, session_id=session_id)
+        self._sessions[session] = _Entry(task=task, session_id=session_id, entered_monotonic=time.monotonic())
 
     def leave(self, session: Session) -> None:
         self._sessions.pop(session, None)
@@ -237,17 +245,23 @@ class ActiveSessionRegistry:
 
     def list_entries(self) -> list[SessionSummary]:
         """A snapshot of every currently connected session, for the
-        `[N]ode` admin menu's `[W]ho` screen."""
-        return [
-            SessionSummary(
+        `[N]ode` admin menu's `[W]ho` screen and the SysOp monitor.
+        In-memory only: the monitor calls this on every refresh tick."""
+        now = time.monotonic()
+        summaries = []
+        for session, entry in self._sessions.items():
+            last_input = getattr(session, "last_input_at", None)
+            since = entry.entered_monotonic if last_input is None else max(last_input, entry.entered_monotonic)
+            summaries.append(SessionSummary(
                 session=session,
                 session_id=entry.session_id,
                 username=entry.username,
                 connected_at=entry.connected_at,
                 peer_address=session.peer_address,
-            )
-            for session, entry in self._sessions.items()
-        ]
+                idle_seconds=max(0.0, now - since),
+                activity=tuple(getattr(session, "activity", ())),
+            ))
+        return summaries
 
     def __len__(self) -> int:
         return len(self._sessions)

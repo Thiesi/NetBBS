@@ -949,6 +949,16 @@ class _TrailingOutput:
     def __getattr__(self, name: str):
         return getattr(self._session, name)
 
+    # `__getattr__` forwards reads only. A flow's activity trail (issue #762)
+    # must land on the real session, where the monitor looks for it.
+    @property
+    def activity(self) -> tuple[str, ...]:
+        return self._session.activity
+
+    @activity.setter
+    def activity(self, value: tuple[str, ...]) -> None:
+        self._session.activity = value
+
     async def write_line(self, text: str = "") -> None:
         self._held.append(text)
 

@@ -28,6 +28,7 @@ from netbbs.net.node_theme import effective_accent_color_256, effective_header_c
 from netbbs.net.picker import pick_item
 from netbbs.net.redraw_preference import redraw_in_place_enabled
 from netbbs.net.session import Session
+from netbbs.net.session_activity import records_activity
 from netbbs.net.unicode_style_preference import unicode_style_enabled
 from netbbs.permissions import meets_level
 from netbbs.rendering import MUTED_COLOR, clear_screen, colored, sanitize_text
@@ -84,6 +85,7 @@ def chat_fanout(hub, link_context):
     return deliver
 
 
+@records_activity("Doors")
 async def browse_doors(
     session: Session,
     lane: DatabaseLane,

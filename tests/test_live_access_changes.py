@@ -461,3 +461,23 @@ def test_an_unwind_is_refused_outside_the_main_menu_and_while_one_is_pending():
         assert registry.finish_level_unwind(session) is False
 
     asyncio.run(scenario())
+
+
+def test_the_post_login_prompts_are_not_reported_as_the_main_menu(db):
+    # Issue #762: the SysOp monitor reads an empty activity trail as "Main
+    # menu". The prompts between login and the menu must not look like it.
+    sysop, _boss = _sysops(db)
+    registry = ActiveSessionRegistry()
+    session = FedSession()
+
+    async def scenario():
+        task = asyncio.create_task(_drive(db, registry, sysop, session))
+        await _until(lambda: "Unicode" in session.text())
+        assert session.activity == ("Logging in",)
+        session.feed("n")
+        await _until(lambda: "Main menu" in session.text())
+        assert session.activity == ()
+        session.feed("l", "y")
+        await asyncio.wait_for(task, timeout=2.0)
+
+    asyncio.run(scenario())

@@ -17,6 +17,7 @@ from netbbs.net.draft_storage import delete_draft, load_draft, offer_draft_recov
 from netbbs.net.help_overlay import show_help
 from netbbs.net.notices import write_notices
 from netbbs.net.session import Session, write_prompt
+from netbbs.net.session_activity import records_activity
 from netbbs.rendering.width import display_width
 from netbbs.rendering.post_body import post_body_rows
 from netbbs.rendering import (
@@ -127,6 +128,7 @@ def _parse_line_number(command: str, line_count: int, *, allow_end: bool = False
     return number if 1 <= number <= maximum else None
 
 
+@records_activity("Writing")
 async def edit_line_body(
     session: Session,
     *,

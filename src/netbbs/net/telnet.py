@@ -99,6 +99,9 @@ class TelnetSession(Session):
     ):
         self._reader = reader
         self._writer = writer
+        # Where `read_byte_with_timeout` is inside a Telnet command, so that
+        # none of its bytes count as caller input (issue #762).
+        self._peek_command: str | None = None
         self._close_timeout_seconds = close_timeout_seconds
         # Conservative defaults (also the Session base class defaults);
         # updated in place by _handle_subnegotiation if/when the client
@@ -324,6 +327,7 @@ class TelnetSession(Session):
             if next_byte == IAC:
                 # Client sent an escaped literal 0xFF as actual data
                 # (the RFC 854 escaping rule).
+                self.note_input()
                 return 0xFF
             if next_byte in (WILL, WONT, DO, DONT):
                 try:
@@ -338,6 +342,7 @@ class TelnetSession(Session):
             # bytes — nothing more to consume.
             return None
 
+        self.note_input()
         return b
 
     async def read_byte_with_timeout(self, timeout: float) -> int | None:
@@ -355,7 +360,47 @@ class TelnetSession(Session):
             peek = await asyncio.wait_for(self._reader.read(1), timeout=timeout)
         except asyncio.TimeoutError:
             return None
-        return peek[0] if peek else None
+        if not peek:
+            return None
+        self._note_peeked_input(peek[0])
+        return peek[0]
+
+    def _note_peeked_input(self, byte: int) -> None:
+        """Stamp idle time for a byte the raw peek above returned, unless
+        it belongs to a Telnet command (issue #762). The peek does not parse
+        negotiation, so this follows just enough of it: IAC and the command
+        byte after it, the option byte after WILL/WONT/DO/DONT, and
+        everything from IAC SB to IAC SE. Keepalive traffic must not make an
+        idle caller look active."""
+        state = self._peek_command
+        if state == "subnegotiation":
+            # Only IAC SE ends it: a payload byte may be 0xF0 itself (a
+            # NAWS width of 240), and IAC IAC is an escaped payload 0xFF.
+            if byte == IAC:
+                self._peek_command = "subnegotiation-iac"
+            return
+        if state == "subnegotiation-iac":
+            self._peek_command = None if byte == SE else "subnegotiation"
+            return
+        if state == "iac":
+            if byte == IAC:
+                # An escaped 0xFF is real data.
+                self._peek_command = None
+                self.note_input()
+            elif byte in (WILL, WONT, DO, DONT):
+                self._peek_command = "option"
+            elif byte == SB:
+                self._peek_command = "subnegotiation"
+            else:
+                self._peek_command = None
+            return
+        if state == "option":
+            self._peek_command = None
+            return
+        if byte == IAC:
+            self._peek_command = "iac"
+            return
+        self.note_input()
 
     async def _handle_subnegotiation(self) -> None:
         """

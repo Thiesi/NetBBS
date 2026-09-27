@@ -246,6 +246,7 @@ class SSHSession(Session):
 
         if not data:
             raise SessionClosedError("client disconnected during read")
+        self.note_input()
         return data[0]
 
     async def read_byte_with_timeout(self, timeout: float) -> int | None:
@@ -257,7 +258,10 @@ class SSHSession(Session):
             return None
         except (asyncssh.TerminalSizeChanged, asyncssh.BreakReceived, asyncssh.ConnectionLost):
             return None
-        return data[0] if data else None
+        if not data:
+            return None
+        self.note_input()
+        return data[0]
 
 
 class _NetBBSSSHServer(asyncssh.SSHServer):

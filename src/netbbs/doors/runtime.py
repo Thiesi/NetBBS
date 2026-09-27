@@ -33,6 +33,7 @@ from netbbs.net.color_depth_preference import effective_truecolor
 from netbbs.timeutil import resolve_display_preferences
 from netbbs.net.unicode_style_preference import unicode_style_enabled
 from netbbs.net.session import SessionClosedError
+from netbbs.net.session_activity import records_activity
 from netbbs.moderation.log import record_action
 
 _logger = logging.getLogger(__name__)
@@ -746,6 +747,7 @@ def effective_wall_limit(profile, call_site_limit=None):
     return min(bounds) if bounds else None
 
 
+@records_activity(lambda args: args["door"].name)
 async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
                    output_check=None, node_identity=None, rehearsal=False, chat_fanout=None):
     """Supervise and record one run; an optional synchronous probe check returns an error string.
