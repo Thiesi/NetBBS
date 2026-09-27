@@ -2237,7 +2237,9 @@ async def _pickup_relay_mail(
                     max_carried_file_areas=None, max_remote_files_per_area=None,
                     enforce_trust_policy=enforce_trust_policy,
                 )
-                await lane.run(save_peer, node.peers[claimed_sender])
+                # Mail a relay held for us, possibly for days: the sender's
+                # record grows, but this node has not heard from it (#766).
+                await lane.run(save_peer, node.peers[claimed_sender], direct_contact=False)
     return reached_a_relay
 
 async def _deposit_one(
