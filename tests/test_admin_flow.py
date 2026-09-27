@@ -9290,6 +9290,26 @@ def test_a_war_dialer_door_that_nobody_played_says_its_world_comes_later(db, lan
     assert "aintenance on" not in text, "there is no world to close"
 
 
+def test_a_legacy_war_dialer_world_is_reported_not_called_unplayed(db, lane, sysop, tmp_path, monkeypatch):
+    """The launcher refuses to create the new default while a legacy world
+    waits to be migrated; the world screen must say so, not promise play."""
+    import os
+
+    home = tmp_path / "legacy-home"
+    (home / ".netbbs").mkdir(parents=True)
+    (home / ".netbbs" / "wardialer.db").write_bytes(b"legacy")
+    monkeypatch.setenv("USERPROFILE" if os.name == "nt" else "HOME", str(home))
+    monkeypatch.delenv("WAR_DIALER_DB_PATH", raising=False)
+    _war_dialer_door(db, sysop)
+
+    session = FakeSession(_war_dialer_world_keys())
+    _run(session, lane, sysop)
+    text = _normalized_visible(_written_text(session))
+
+    assert "Legacy War Dialer world found" in text
+    assert "No world yet" not in text
+
+
 def test_the_war_dialer_world_screen_shows_status_and_switches_maintenance(db, lane, sysop):
     """Issue #726: what `war_dialer_admin status` shows, and maintenance, in-BBS.
     The world's own audit names the SysOp account, not the OS user."""
