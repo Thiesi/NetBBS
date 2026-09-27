@@ -733,6 +733,12 @@ service controls. Use **Audit log** to see administrative and moderation
 activity. Storage garbage collection and draft pruning show the proposed work
 before confirmation; review it instead of deleting files directly.
 
+**Operations → Search indexes** compares what **Find** searches with the posts,
+files and chat messages themselves, and shows how many entries are missing,
+stale or left over. **Rebuild** replaces the indexes from that content; it
+cannot lose any. It also works from `python -m netbbs.admin`, and
+`python -m netbbs.search check|rebuild --db PATH` does the same from a script.
+
 ### Custom banners and mastheads
 
 **Settings → Mastheads & banners** holds eight optional pieces of caller-facing
@@ -932,6 +938,7 @@ DNS registration, or backups is a separate, deliberate operator action.
 | Browser terminal or upload fails | Check HTTPS proxy/WebSocket forwarding, upload limits, web listener, and `public_url`. |
 | Terminal offers no file-transfer link | Enable/configure the web listener and its public URL, or use a Zmodem-capable client. |
 | Link will not start | Check the `web` extra, effective participation setting, and a non-placeholder node name. |
+| **Find** misses content callers can open, or lists removed content | **Operations → Search indexes**: check, then **Rebuild** if it reports drift. |
 | Peers connect but content is missing | Check carry/subscription decisions, trust state, Outbox, and Diagnostics. Use Repair carried posts only for local materialization repair. |
 | Game is busy, fails, or loses state | Check its session limit, Compatibility setup, Last diagnostic, service state, and actual persistent paths. |
 | Backup says `Voidrunner: NOT CAPTURED` | The node has not started since v7.4.1, so it has recorded no save directory and the CLI fell back to your shell's home. Start the node once, or rerun with explicit `--voidrunner-save-dir`. |
