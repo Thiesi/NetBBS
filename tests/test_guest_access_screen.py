@@ -78,6 +78,9 @@ def test_the_settings_menu_names_the_guest_account(db, lane, sysop):
     guest = create_user(db, "guest", password="hunter2", user_level=1)
     set_guest_user(db, guest)
     session = FakeSession(["s", "b", "b"])
+    # Tall enough for menu descriptions beside the status panel: at 24 rows
+    # Settings drops them, as Users, Content and Operations do (issue #730).
+    session.terminal_height = 40
     _run(session, lane, sysop)
     assert "Guest login as guest" in _visible(_written_text(session))
 
