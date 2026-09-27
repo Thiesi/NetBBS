@@ -28,6 +28,7 @@ from netbbs.backup_schedule import record_node_identity_dir, run_backup_schedule
 from netbbs.chat import ChatHub, DirectChatInvites, MessageMailbox, PresenceRegistry
 from netbbs.config import is_node_display_name_placeholder
 from netbbs.files.storage import purge_incoming_staging
+from netbbs.net.bootstrap_view import record_startup_bootstrap
 from netbbs.net.policy_settings import apply_stored_policy, load_stored_policy, record_startup_policy
 from netbbs.node_log import ContinuationSafeFormatter, node_log_path
 from netbbs.session_history import reconcile_interrupted_sessions
@@ -1292,6 +1293,9 @@ async def run(
         # Issue #730, and for the same reason: a second launch that fails on
         # the bound port must not overwrite what the running node resolved.
         record_startup_policy(db, config)
+        # Issue #748, likewise: the listeners, addresses and paths this node
+        # actually runs with, for the console's read-only Node configuration.
+        record_startup_bootstrap(db, config)
         record_node_identity_dir(db, config.identity_dir)
         backup_schedule_task = asyncio.create_task(run_backup_scheduler(config.db_path, config.identity_dir))
         backup_schedule_task.add_done_callback(_log_backup_schedule_failure)
