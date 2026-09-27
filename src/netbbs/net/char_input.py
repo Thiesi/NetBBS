@@ -45,6 +45,7 @@ from typing import Awaitable, Callable, Protocol, Sequence
 
 from netbbs.net.session import SessionClosedError
 from netbbs.rendering.ansi import reject_keystroke
+from netbbs.rendering.pipe_codes import PastedColor
 from netbbs.rendering.width import char_width, display_width
 
 # Control byte values relevant to character-mode line building.
@@ -164,12 +165,15 @@ _PUSHBACK_ATTR = "_netbbs_char_input_pushback"
 # deadline rather than relying on _FOLLOWUP_BYTE_TIMEOUT resetting on every
 # legitimately-arriving byte — a client that keeps a CSI sequence "alive" by
 # continuously sending parameter bytes just under that per-byte timeout would
-# otherwise never trip either individual read's own bound. 32 bytes is
-# generous headroom for any real terminal's CSI sequences (even a modified
-# key combo like Ctrl+Up, `ESC[1;5A`, is under 10 bytes); 1 second matches
-# the subnegotiation deadline, keeping both "protocol control message"
-# bounds consistent with each other.
-_MAX_ESCAPE_SEQUENCE_LENGTH = 32
+# otherwise never trip either individual read's own bound. A key sends
+# far less (even a modified combo like Ctrl+Up, `ESC[1;5A`, is under 10
+# bytes); the cap is 64 because pasted color arrives here too (issue
+# #754), and a truecolor foreground and background in one SGR,
+# `ESC[38;2;255;255;255;48;2;255;255;255m`, is 34 bytes -- over a cap of
+# 32, pasting it ended the session. 1 second matches the subnegotiation
+# deadline, keeping both "protocol control message" bounds consistent
+# with each other.
+_MAX_ESCAPE_SEQUENCE_LENGTH = 64
 _ESCAPE_SEQUENCE_TIMEOUT = 1.0
 
 # Recognized CSI final bytes with no parameter bytes -- plain arrow keys
@@ -199,6 +203,18 @@ _CSI_TILDE_TO_KEY: dict[bytes, str] = {
     b"5": "PAGE_UP",
     b"6": "PAGE_DOWN",
 }
+
+
+@dataclass(frozen=True)
+class ColorCode:
+    """A pasted SGR, ``ESC [ <digits and ;> m`` (issue #754): no key
+    sends one, so it is text someone pasted with its color. `params` is
+    what sat between ``[`` and ``m``. Readers drop it like any other
+    unrecognized sequence unless their caller passed a `PastedColor`,
+    which turns it into pipe codes typed at the cursor."""
+
+    params: str
+
 
 # SS3 forms (ESC O <letter>) -- some terminals' "application cursor key
 # mode" encoding, seen for arrows and occasionally Home/End.
@@ -888,6 +904,7 @@ async def read_line(
     cancellable: bool = False,
     viewport: int | Callable[[], int] | None = None,
     viewport_owns_row: bool = False,
+    pasted_color: PastedColor | None = None,
 ) -> str:
     """
     Read one line of input, echoing (or masking, if `echo=False`) as it
@@ -922,13 +939,18 @@ async def read_line(
     `list_candidates`, also chat-only and also `None` everywhere else,
     passes straight through to `apply_tab_completion` — see that
     function's docstring.
+
+    `pasted_color` (issue #754), given only by a post editor on a board
+    that allows color, turns pasted SGR color into pipe codes typed at
+    the cursor. Everywhere else a pasted SGR is dropped, as it always
+    was: a username or a subject has no use for ``|04``.
     """
     if not echo:
         return await _read_line_masked(source, write)
     return await _read_line_editable(
         source, write, history, completer, live_buffer=live_buffer, lock=lock,
         list_candidates=list_candidates, initial=initial, cancellable=cancellable,
-        viewport=viewport, viewport_owns_row=viewport_owns_row,
+        viewport=viewport, viewport_owns_row=viewport_owns_row, pasted_color=pasted_color,
     )
 
 
@@ -987,6 +1009,7 @@ async def _read_line_editable(
     cancellable: bool = False,
     viewport: int | Callable[[], int] | None = None,
     viewport_owns_row: bool = False,
+    pasted_color: PastedColor | None = None,
 ) -> str:
     # `initial` (issue #529) starts the buffer populated and the cursor
     # at its end, so the caller can edit an existing value instead of
@@ -1136,7 +1159,10 @@ async def _read_line_editable(
                             raise InputCancelled
                         _push_back(source, peek)
                     key = await _read_escape_sequence(source)
-                    if key == "LEFT":
+                    if isinstance(key, ColorCode):
+                        if pasted_color is not None:
+                            _type_pasted_color(source, key, pasted_color)
+                    elif key == "LEFT":
                         if cursor > 0:
                             # A whole grapheme back: landing between a
                             # character and its accent is a position
@@ -1450,7 +1476,9 @@ _SYMBOLIC_TO_EDITOR_KIND: dict[str, EditorKeyKind] = {
 }
 
 
-async def read_editor_key(source: ByteSource, *, distinguish_ctrl_h: bool = False) -> EditorKey:
+async def read_editor_key(
+    source: ByteSource, *, distinguish_ctrl_h: bool = False, pasted_color: PastedColor | None = None
+) -> EditorKey:
     """
     Read one structured key event for a full-screen editor.
 
@@ -1478,6 +1506,9 @@ async def read_editor_key(source: ByteSource, *, distinguish_ctrl_h: bool = Fals
     (`_DEL`) is unaffected either way -- it's unambiguously the "real
     Backspace key" byte on virtually every modern terminal, never
     itself repurposed as a Ctrl combo.
+
+    `pasted_color` -- see `read_line`: a pasted SGR comes back as the
+    pipe codes it translates to, one `CHAR` event each.
     """
     while True:
         b = await _read_byte(source)
@@ -1515,7 +1546,10 @@ async def read_editor_key(source: ByteSource, *, distinguish_ctrl_h: bool = Fals
                 return EditorKey(EditorKeyKind.ESCAPE)
             _push_back(source, peek)
             key = await _read_escape_sequence(source)
-            if key is not None:
+            if isinstance(key, ColorCode):
+                if pasted_color is not None:
+                    _type_pasted_color(source, key, pasted_color)
+            elif key is not None:
                 kind = _SYMBOLIC_TO_EDITOR_KIND.get(key)
                 if kind is not None:
                     return EditorKey(kind)
@@ -1626,7 +1660,9 @@ async def _consume_optional_lf_or_nul(source: ByteSource) -> None:
         _push_back(source, peek)
 
 
-def _decode_csi(params: bytes, final_byte: int) -> str | None:
+def _decode_csi(params: bytes, final_byte: int) -> str | ColorCode | None:
+    if final_byte == 0x6D and all(b == 0x3B or 0x30 <= b <= 0x39 for b in params):  # 'm'
+        return ColorCode(params.decode("ascii"))
     if not params:
         return _CSI_FINAL_TO_KEY.get(final_byte)
     if final_byte == 0x7E:
@@ -1634,12 +1670,22 @@ def _decode_csi(params: bytes, final_byte: int) -> str | None:
     return None
 
 
-async def _read_escape_sequence(source: ByteSource) -> str | None:
+def _type_pasted_color(source: ByteSource, code: ColorCode, pasted_color: PastedColor) -> None:
+    """Queue the pipe codes for `code` as if they had been typed next
+    (issue #754), so the reader echoes, bounds and inserts them through
+    the same path as every other character. The pushback is a stack, so
+    they go on last byte first."""
+    for byte in reversed(pasted_color.translate(code.params).encode("ascii")):
+        _push_back(source, byte)
+
+
+async def _read_escape_sequence(source: ByteSource) -> str | ColorCode | None:
     """
     Consume a terminal escape sequence following an ESC byte as a
     complete unit and return a symbolic key name for the small set this
     project recognizes — `"UP"`/`"DOWN"`/`"LEFT"`/`"RIGHT"`/`"HOME"`/
-    `"END"`/`"DELETE"`/`"INSERT"` — or `None` for a real Escape keypress
+    `"END"`/`"DELETE"`/`"INSERT"`, or a `ColorCode` for a pasted SGR
+    — or `None` for a real Escape keypress
     with nothing following, or any shape not in that set (still
     discarded as a complete unit either way — "recognize a few, discard
     the rest" replaces an original "discard everything"

@@ -49,6 +49,7 @@ from netbbs.rendering import (
     move_cursor,
     truncate,
 )
+from netbbs.rendering.pipe_codes import PastedColor
 from netbbs.rendering.prose_buffer import ProseBuffer, logical_position, visual_position, wrap_lines
 from netbbs.rendering.width import char_width, display_width
 
@@ -88,6 +89,7 @@ async def edit_prose(
     max_bytes: int,
     autosave_interval_seconds: float = DEFAULT_AUTOSAVE_INTERVAL_SECONDS,
     unicode_style: bool = False,
+    keep_pasted_color: bool = False,
 ) -> str | None:
     """
     Run a fullscreen prose editing session against `session`, returning
@@ -116,6 +118,10 @@ async def edit_prose(
     itself, which already happens before a save is ever attempted.
     Additional input at the ceiling is refused with a bell and a status
     line indicator, rather than silently dropped with no feedback.
+
+    `keep_pasted_color` (issue #754): pasted SGR color is typed into the
+    text as pipe codes, which the caller will show as color -- a post on
+    a board that allows it. Without it a pasted SGR is dropped.
     """
     width = max(_MIN_WIDTH, session.terminal_width)
     height = max(_MIN_HEIGHT, session.terminal_height) - _STATUS_ROW_OFFSET - 1
@@ -129,6 +135,9 @@ async def edit_prose(
         loaded_text = initial_text
 
     state = _EditorState(buffer=ProseBuffer.from_text(loaded_text or ""), max_bytes=max_bytes)
+    # Passed only when asked for, so a Session that predates the option
+    # still reads keys here.
+    read_options = {"pasted_color": PastedColor()} if keep_pasted_color else {}
     autosave_task = asyncio.create_task(_autosave_loop(state, draft_path, autosave_interval_seconds))
     async def _full_redraw() -> Snapshot:
         """Clear-and-repaint from scratch, not a diff against the
@@ -147,7 +156,7 @@ async def edit_prose(
         previous = await _full_redraw()
 
         while True:
-            key = await session.read_editor_key()
+            key = await session.read_editor_key(**read_options)
 
             if key.kind == EditorKeyKind.CTRL and key.char == "g":
                 # Ctrl+G, nano's own Help convention -- deliberately
