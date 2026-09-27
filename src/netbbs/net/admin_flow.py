@@ -10101,6 +10101,18 @@ async def _receive_sysop_upload(
     )
 
 
+_BANNER_FILE_SUFFIX_OF: dict[Callable[[Database], Path], Callable[[str], str]] = {
+    banner_path: lambda stem: f"{stem}_welcome_banner.ans",
+    main_menu_banner_path: lambda stem: f"{stem}_main_menu_banner.ans",
+    logoff_banner_path: lambda stem: f"{stem}_logoff_banner.ans",
+    new_account_banner_before_path: lambda stem: f"{stem}_new_account_banner_before.ans",
+    new_account_banner_after_path: lambda stem: f"{stem}_new_account_banner_after.ans",
+    board_list_banner_path: lambda stem: f"{stem}_board_list_banner.ans",
+    file_area_banner_path: lambda stem: f"{stem}_file_area_banner.ans",
+    chat_channel_picker_banner_path: lambda stem: f"{stem}_chat_channel_picker_banner.ans",
+}
+
+
 async def _upload_banner_piece(
     session: Session, lane: DatabaseLane, actor: User, *,
     path_of: Callable[[Database], Path], label: str, audit_action: str,
@@ -10114,7 +10126,14 @@ async def _upload_banner_piece(
     if reason is not None:
         _announce(session, reason, error=True)
         return
-    destination = await lane.run(path_of)
+    def _lexical(db: Database) -> Path:
+        # The piece helpers return a `.resolve()`d path, which has already
+        # followed a symlink at the piece's own name -- so the refusal below
+        # could never see one. Rebuild the name without following it: the
+        # database's directory, resolved, plus the piece's file name.
+        return db.path.parent.resolve() / _BANNER_FILE_SUFFIX_OF[path_of](db.path.stem)
+
+    destination = await lane.run(_lexical)
     problem = destination_problem(destination)
     if problem is not None:
         _announce(session, problem, error=True)

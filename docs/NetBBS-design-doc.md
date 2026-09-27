@@ -1516,6 +1516,34 @@ JavaScript, to reach exactly the callers already served — and it would put fil
 transfer back inside the byte stream it was moved out of. Zmodem remains the
 right answer on terminals that already implement it, which is where it stays.
 
+**SysOp uploads** (issue #728) reuse both routes to put one file at one fixed
+place on the node: a banner or masthead piece's own file (**[U]pload** on its
+screen), or a named file in the doors folder (**Content → Doors → [U]pload**).
+The contract:
+
+- The destination is chosen before any transfer is offered. The name the
+  sending side reports is recorded but never decides where bytes land. A door
+  file's name is a plain name: no folder part, no leading dot, no control
+  characters or colon.
+- Replacing an existing file is confirmed first. The consent is re-checked when
+  the bytes arrive, and a file that has appeared since is not overwritten. A
+  symlink or directory at the destination is refused, never followed. The
+  replacement keeps the old file's permission bits.
+- Caps: 256 KiB for banner art (what **[E]nable** accepts). For a door file, the
+  node's `max_upload_bytes`, read live when the link is redeemed.
+- The grant is redeemed like any other. Its account must still be an enabled,
+  unblocked SysOp when the link is used and again once the body is in.
+- The file is written beside the destination and renamed over it, so a failed
+  upload leaves the previous file in place. Every upload that lands is
+  audit-logged with its size and destination, even if the session that
+  started it is torn down mid-install.
+- An upload never enables a piece, registers a door, or sets an execute bit.
+  Those stay separate, explicit steps (**[E]nable**, **[F]rom disk**).
+
+This adds no trust boundary: a SysOp can already run any program on the host
+through a door's **Test as SysOp**. It removes the need for a separate OS-level
+account just to place a file.
+
 File bytes are node-local. NetBBS Link will distribute catalogue/descriptor
 information and fetch content on demand in bounded resumable chunks. It will
 not replicate every file to every node.

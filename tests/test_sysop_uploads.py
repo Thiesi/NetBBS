@@ -478,3 +478,30 @@ def test_door_from_disk_hides_dot_files(db, lane, sysop):
 
     text = _visible(_written_text(session))
     assert "game.py" in text and ".upload-" not in text
+
+
+def test_every_piece_uploads_to_the_same_file_its_screen_names(db):
+    """The upload builds each piece's name without resolving symlinks; it
+    must still be exactly the file `[E]nable` and Preview read."""
+    for path_of, name_of in admin_flow._BANNER_FILE_SUFFIX_OF.items():
+        assert (db.path.parent.resolve() / name_of(db.path.stem)).resolve() == path_of(db)
+
+
+def test_banner_upload_refuses_a_symlinked_piece(db, lane, sysop, tmp_path):
+    outside = tmp_path / "elsewhere.ans"
+    outside.write_bytes(b"not the node's")
+    link = db.path.parent.resolve() / f"{db.path.stem}_welcome_banner.ans"
+    try:
+        os.symlink(outside, link)
+    except (OSError, NotImplementedError):
+        pytest.skip("this platform or account cannot create symlinks")
+    session = FakeSession([])
+    grants = _browser_console(session)
+
+    asyncio.run(admin_flow._upload_banner_piece(
+        session, lane, sysop, path_of=banner_path, label="the welcome banner",
+        audit_action="upload_welcome_banner",
+    ))
+
+    assert "symbolic link" in _announced_text(session)
+    assert len(grants._grants) == 0

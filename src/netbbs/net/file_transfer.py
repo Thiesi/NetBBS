@@ -746,7 +746,12 @@ class TransferGateway:
         try:
             resolved = await self._lane.run(resolve, resolved.grant)
         except TransferError as exc:
-            temp_path.unlink(missing_ok=True)
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError as cleanup_error:
+                # The lockout is what the caller must hear, not a 500 about
+                # a staging file.
+                _logger.warning("transfer: could not remove %s: %s", temp_path, cleanup_error)
             raise web.HTTPForbidden(text=str(exc)) from exc
         try:
             size = await install_and_record(self._lane, resolved.user, target, temp_path, sent_as=filename)

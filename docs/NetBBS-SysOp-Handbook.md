@@ -751,8 +751,9 @@ already put on the node, and **Upload** sends one from your own computer. You
 can also put your own `.ans` file where the node looks for it.
 
 **Upload** needs the same route a caller's file upload does: a terminal that
-speaks Zmodem, or the web listener with its `public_url` for a single-use
-browser link. Whatever you send is saved as that piece's own file, whatever it
+speaks Zmodem, NetBBS's own browser terminal (which needs no `public_url`), or,
+from any other terminal, a single-use browser link, which needs the web listener
+and its `public_url`. Whatever you send is saved as that piece's own file, whatever it
 was called on your side, up to 256 KiB. Uploading over an existing file asks
 first; if that piece is enabled, callers see the new art at once. An upload
 never enables a piece by itself, and it is recorded in the audit log.
