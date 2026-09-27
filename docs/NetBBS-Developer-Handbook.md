@@ -739,6 +739,18 @@ Use `python -m netbbs --help` for the complete installed CLI.
 | `[shutdown]` | Caller warning delay and bounded background-task drain |
 | `[managed_dns]` | `service_url` points the node at a different managed netbbs.org service (https-only away from loopback; a node already registered elsewhere pauses rather than carrying its credential across); unset means the shipped address in `netbbs.managed_dns.state.DEFAULT_SERVICE_URL`. `admin_token` is the service's `MANAGED_DNS_ADMIN_TOKEN`, for the one node whose operator runs the service; config file only, and its presence puts the service-administration screen on that node's SysOp console |
 
+Every `[link]` policy key (seeds, sync interval, relay consent and capacity,
+peer and carried-resource caps, catalogue and transfer limits, request rate,
+diagnostic retention, live-relay bounds), all of `[throttle]` and all of
+`[shutdown]` can also be set from **Settings → Network & login limits**
+(`netbbs.net.policy_settings`, issue #730). Per key: an explicit TOML or CLI
+value wins (`NodeConfig.explicit_keys` records which keys were supplied), then
+a console value stored in `node_config` as `policy.<section>.<name>`, then the
+default. `netbbs.__main__.run` resolves this once, before anything reads the
+config, and records the result under `policy_startup_snapshot` so the console
+can show what the config file decided. Bind addresses, ports, paths and
+`[managed_dns]` stay config-only.
+
 Link configuration additionally includes seeds, sync interval, advertised
 addresses, relay consent/capacity, real-time listener settings, peer/carried-resource
 caps, request rate/burst, and trust transport limits. The field definitions,

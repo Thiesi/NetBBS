@@ -18,6 +18,7 @@ import logging
 import logging.handlers
 import signal
 import sys
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 
@@ -27,6 +28,7 @@ from netbbs.backup_schedule import record_node_identity_dir, run_backup_schedule
 from netbbs.chat import ChatHub, DirectChatInvites, MessageMailbox, PresenceRegistry
 from netbbs.config import is_node_display_name_placeholder
 from netbbs.files.storage import purge_incoming_staging
+from netbbs.net.policy_settings import apply_stored_policy, load_stored_policy, record_startup_policy
 from netbbs.node_log import ContinuationSafeFormatter, node_log_path
 from netbbs.session_history import reconcile_interrupted_sessions
 from netbbs.link.boards import LinkConfigSnapshot, LinkContext
@@ -536,6 +538,7 @@ async def run(
     maintenance: MaintenanceMode | None = None,
     drain_scheduler: SequenceScheduler | None = None,
     shutdown_scheduler: SequenceScheduler | None = None,
+    on_config_resolved: Callable[[NodeConfig], None] | None = None,
 ) -> None:
     """
     Run one node's lifetime: open the database, start every configured
@@ -589,6 +592,14 @@ async def run(
             f"{exc} -- restore from a known-good backup (see docs/NetBBS-disaster-recovery-"
             "drill.md) rather than starting against a corrupted database."
         ) from exc
+
+    # Issue #730: settings the SysOp saved from the console apply now, at
+    # startup, wherever the config file or command line did not set the same
+    # key. Everything below reads the resolved `config`. What was resolved is
+    # recorded for the console once the listeners are bound (below).
+    config = apply_stored_policy(config, load_stored_policy(db))
+    if on_config_resolved is not None:
+        on_config_resolved(config)
 
     # Design doc/issue #57: the foreground DatabaseLane -- a
     # second, independent connection to the same database file (WAL
@@ -1278,6 +1289,9 @@ async def run(
         # else. Past this line the ports are ours, so the process
         # claiming to be this node is this node.
         record_voidrunner_save_dir(db)
+        # Issue #730, and for the same reason: a second launch that fails on
+        # the bound port must not overwrite what the running node resolved.
+        record_startup_policy(db, config)
         record_node_identity_dir(db, config.identity_dir)
         backup_schedule_task = asyncio.create_task(run_backup_scheduler(config.db_path, config.identity_dir))
         backup_schedule_task.add_done_callback(_log_backup_schedule_failure)
@@ -1571,16 +1585,23 @@ def _install_signal_handlers(
     session_registry: ActiveSessionRegistry,
     maintenance: MaintenanceMode,
     shutdown_scheduler: SequenceScheduler,
-    graceful_delay_seconds: float,
+    graceful_delay_seconds: float | Callable[[], float],
 ) -> None:
+    # A callable is read when the signal arrives (issue #730): the handlers
+    # are installed before the database is open, and a delay the SysOp saved
+    # from the console is only known once it is.
+    def _delay() -> float:
+        return graceful_delay_seconds() if callable(graceful_delay_seconds) else graceful_delay_seconds
+
     def _request_shutdown(graceful: bool, source: str) -> None:
+        delay_seconds = _delay()
         _logger.info("shutdown requested (%s, %s)", "graceful" if graceful else "immediate", source)
         task = loop.create_task(
             run_shutdown_sequence(
                 graceful=graceful,
                 session_registry=session_registry,
                 maintenance=maintenance,
-                delay_seconds=graceful_delay_seconds,
+                delay_seconds=delay_seconds,
                 shutdown_event=shutdown_event,
             )
         )
@@ -1598,7 +1619,7 @@ def _install_signal_handlers(
         # for a sequence registered this way; see
         # `SequenceScheduler.is_cancellable()`'s own docstring.
         shutdown_scheduler.schedule(
-            task, deadline=loop.time() + (graceful_delay_seconds if graceful else 0.0), message=None,
+            task, deadline=loop.time() + (delay_seconds if graceful else 0.0), message=None,
             source=source, cancellable=False,
         )
 
@@ -1652,13 +1673,14 @@ async def main() -> None:
     maintenance = MaintenanceMode()
     drain_scheduler = SequenceScheduler()
     shutdown_scheduler = SequenceScheduler()
+    resolved = {"graceful_delay_seconds": config.shutdown.graceful_delay_seconds}
     _install_signal_handlers(
         asyncio.get_running_loop(),
         shutdown_event=shutdown_event,
         session_registry=session_registry,
         maintenance=maintenance,
         shutdown_scheduler=shutdown_scheduler,
-        graceful_delay_seconds=config.shutdown.graceful_delay_seconds,
+        graceful_delay_seconds=lambda: resolved["graceful_delay_seconds"],
     )
 
     try:
@@ -1669,6 +1691,9 @@ async def main() -> None:
             maintenance=maintenance,
             drain_scheduler=drain_scheduler,
             shutdown_scheduler=shutdown_scheduler,
+            on_config_resolved=lambda resolved_config: resolved.update(
+                graceful_delay_seconds=resolved_config.shutdown.graceful_delay_seconds
+            ),
         )
     except StartupError as exc:
         _logger.error("startup failed: %s", exc)
