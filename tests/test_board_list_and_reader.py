@@ -852,3 +852,38 @@ def test_an_art_post_is_drawn_reviewed_and_published(db, alice):
 
 
 _SGR_ANY = re.compile("\x1b\\[[0-9;]*m")
+
+def test_the_search_index_integrity_check_agrees_with_plain_indexing(db, alice):
+    from netbbs.search import check_index_integrity
+
+    _color_board(db, alice, allow_color=True)
+
+    report = check_index_integrity(db)
+
+    assert report.is_clean
+
+
+def test_the_migration_reindexes_existing_posts_as_plain_text(tmp_path, monkeypatch):
+    from netbbs.storage import database as database_module
+    from netbbs.storage.migrations import MIGRATIONS
+    from tests.legacy_schema import insert_user_on_old_schema
+
+    index = next(i for i, m in enumerate(MIGRATIONS) if "allow_color" in m.description)
+    monkeypatch.setattr(database_module, "MIGRATIONS", MIGRATIONS[:index])
+    path = tmp_path / "node.db"
+    old = Database(path)
+    alice = insert_user_on_old_schema(old, "alice", user_level=10)
+    board = create_board(old, "general", creator=alice)
+    create_post(old, board, alice, "old", "|12red\x1b[31m words")
+    # What the code before #711 indexed: the body as stored.
+    old.connection.execute("UPDATE post_search SET body = ?", ("|12red\x1b[31m words",))
+    old.connection.commit()
+    old.close()
+    monkeypatch.undo()
+
+    upgraded = Database(path)
+    try:
+        body = upgraded.connection.execute("SELECT body FROM post_search").fetchone()[0]
+        assert body == "red words"
+    finally:
+        upgraded.close()

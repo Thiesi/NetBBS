@@ -214,3 +214,18 @@ def test_an_art_post_keeps_its_lines_without_color(mode):
     rows = post_body_rows("|12one\ntwo", 80, mode, truecolor=False, layout="art")
 
     assert len(rows) == 2 and ESC not in rows[0] + rows[1]
+
+# -- Codex review on #750 ---------------------------------------------------------
+
+
+def test_a_color_code_between_spaces_is_not_a_word():
+    rows = colored_body_rows(styled_post_body("hello |12 world |07 again"), 80)
+
+    assert _SGR.sub("", rows[0]) == "hello world again"
+
+
+@pytest.mark.parametrize("body", [" |12> quoted", "|12 > quoted", f" {ESC}[31m > quoted"])
+def test_a_quote_marker_behind_indentation_and_color_is_drawn_once(body):
+    rows = colored_body_rows(styled_post_body(body), 80)
+
+    assert _SGR.sub("", rows[0]) == "> quoted"

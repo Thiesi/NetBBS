@@ -314,6 +314,31 @@ def self_contained_rows(rows: list[str]) -> list[str]:
     return result
 
 
+def _collapse_whitespace(styled: str) -> str:
+    """Every run of whitespace as one space, leading and trailing
+    whitespace dropped -- with color codes taking no part: a code between
+    two spaces is not a word, so ``hello |12 world`` stays one space
+    apart (Codex review on #750)."""
+    parts: list[str] = []
+    pending_space = False
+    seen_text = False
+    position = 0
+    for match in _SGR_RE.finditer(styled + f"{CSI}m"):
+        for char in styled[position:match.start()]:
+            if char.isspace():
+                pending_space = seen_text
+                continue
+            if pending_space:
+                parts.append(" ")
+                pending_space = False
+            parts.append(char)
+            seen_text = True
+        if match.start() < len(styled):
+            parts.append(match.group(0))
+        position = match.end()
+    return "".join(parts)
+
+
 def _visible(text: str) -> str:
     return _SGR_RE.sub("", text)
 
@@ -323,13 +348,17 @@ def _strip_quote_marker(line: str) -> str:
     any color set before it."""
     prefix = ""
     rest = line
+    # Indentation and color codes may come in either order before the
+    # marker (Codex review on #750).
     while True:
         match = _SGR_RE.match(rest)
-        if match is None:
+        if match is not None:
+            prefix += match.group(0)
+            rest = rest[match.end():]
+        elif rest[:1] in (" ", "\t"):
+            rest = rest[1:]
+        else:
             break
-        prefix += match.group(0)
-        rest = rest[match.end():]
-    rest = rest.lstrip(" \t")
     if rest.startswith(">"):
         rest = rest[1:].lstrip(" ")
     return prefix + rest
@@ -358,10 +387,10 @@ def colored_body_rows(styled: str, width: int) -> list[str]:
             # A blank line may still carry a color change; keep it, empty.
             rows.extend((False, "".join(m.group(0) for m in _SGR_RE.finditer(line))) for line in raw_lines)
         elif kind == "quote":
-            paragraph = " ".join(" ".join(_strip_quote_marker(line) for line in raw_lines).split())
+            paragraph = _collapse_whitespace(" ".join(_strip_quote_marker(line) for line in raw_lines))
             rows.extend((True, wrapped) for wrapped in wrap_terminal_text(paragraph, max(1, width - 2)).split("\r\n"))
         else:
-            paragraph = " ".join(" ".join(raw_lines).split())
+            paragraph = _collapse_whitespace(" ".join(raw_lines))
             rows.extend((False, wrapped) for wrapped in wrap_terminal_text(paragraph, max(1, width)).split("\r\n"))
     contents = self_contained_rows([content for _quote, content in rows])
     return [
