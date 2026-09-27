@@ -1060,7 +1060,8 @@ async def _show_board(
         discard_buffered_enter = getattr(session, "discard_buffered_enter", None)
         if discard_buffered_enter is not None:
             await discard_buffered_enter()
-        await session.write("\r\nSubject (or press Enter to cancel): ")
+        await session.write_line("")
+        await write_prompt(session, "Subject (or press Enter to cancel): ")
         subject = (await session.read_line()).strip()
         if not subject:
             announce(session, "Post cancelled.", tone="muted")
@@ -1106,7 +1107,8 @@ async def _show_board(
         discard_buffered_enter = getattr(session, "discard_buffered_enter", None)
         if discard_buffered_enter is not None:
             await discard_buffered_enter()
-        await session.write("\r\nSubject (or press Enter to cancel): ")
+        await session.write_line("")
+        await write_prompt(session, "Subject (or press Enter to cancel): ")
         subject = (await session.read_line()).strip()
         if not subject:
             announce(session, "Post cancelled.", tone="muted")
@@ -1120,7 +1122,9 @@ async def _show_board(
         # drawing (Codex review on #753).
         signature = get_signature(db, user)
         if signature:
-            body = append_signature(body, signature)
+            # Reset first: a drawing whose last row fills its last column
+            # ends without one, and the signature would take its color.
+            body = append_signature(body + "\x1b[0m", signature)
         await _review_and_commit(
             session, db, user, board, subject=subject, body=body, draft_path=draft_path,
             commit_key="p", commit_label="ost", commit_brief="Publish this post",
@@ -1688,6 +1692,16 @@ def _art_canvas(session: Session, drawing: str | None) -> tuple[int, int] | None
         )
         return None
     if drawing:
+        try:
+            # The canvas holds CP437; anything else would save as "?".
+            strip_ansi(drawing).encode("cp437")
+        except UnicodeEncodeError:
+            announce(
+                session,
+                "This drawing has characters the art editor cannot keep, so it is not opened for editing.",
+                tone="muted",
+            )
+            return None
         lines = drawing.split("\n")
         drawn_width = max(display_width(strip_ansi(line)) for line in lines)
         if drawn_width > width or len(lines) > height:
@@ -1711,8 +1725,11 @@ async def _draw_body(
     open: a terminal below the editor's minimum, or one too small for the
     drawing being revised, which the canvas would cut (Codex review on
     #753)."""
+    # The editor resumes a draft it autosaved in place of `initial_text`;
+    # that draft must fit this terminal just the same (Codex review on #753).
+    recovered = art_body_from_editor(draft_path.read_bytes()) if draft_path.exists() else None
     canvas = _art_canvas(session, initial_text)
-    if canvas is None:
+    if canvas is None or (recovered and _art_canvas(session, recovered) is None):
         return None
     width, height = canvas
     initial_bytes = initial_text.replace("\n", "\r\n").encode("utf-8") if initial_text else None

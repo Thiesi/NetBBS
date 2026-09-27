@@ -233,13 +233,16 @@ def _pipe_colors(text: str) -> str:
     return _COLOR_PIPE_RE.sub(_replace, text)
 
 
-def styled_post_body(body: str, *, truecolor: bool = True) -> str:
+def styled_post_body(body: str, *, truecolor: bool = True, pipe_codes: bool = True) -> str:
     """`body` as a reader with color sees it: sanitized text, allowed SGR,
-    and pipe codes as SGR, ending in a reset if any color was used."""
+    and pipe codes as SGR, ending in a reset if any color was used.
+    `pipe_codes` False leaves them as text: an art post's characters are
+    what was painted (Codex review on #753)."""
     parts: list[str] = []
     for kind, value in _tokens(body):
         if kind == "text":
-            parts.append(_pipe_colors(sanitize_text(value, allow_newlines=True)))
+            safe = sanitize_text(value, allow_newlines=True)
+            parts.append(_pipe_colors(safe) if pipe_codes else safe)
         else:
             parts.extend(_filtered_sgr(value, truecolor=truecolor))
     styled = "".join(parts)
@@ -463,7 +466,10 @@ def post_body_rows(body: str, width: int, mode: str, *, truecolor: bool, layout:
     A post written in the ANSI art editor (`layout` ``art``) keeps its
     lines in every mode: `art_body_rows`."""
     if layout == "art":
-        return art_body_rows(render_post_body(body, mode, truecolor=truecolor), width)
+        # Its color is the SGR the editor wrote; a pipe code in it is painted
+        # text, so it is never read as color or removed as a code.
+        drawn = styled_post_body(body, truecolor=truecolor, pipe_codes=False) if mode == "color" else post_body_text(body)
+        return art_body_rows(drawn, width)
     if mode == "color":
         return colored_body_rows(styled_post_body(body, truecolor=truecolor), width)
     return quoted_body(render_post_body(body, mode), width).split("\r\n")

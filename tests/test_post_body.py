@@ -279,3 +279,11 @@ def test_a_tab_in_an_art_post_is_one_column():
     rows = art_body_rows("A\tB", 2)
 
     assert [_SGR.sub("", row) for row in rows] == ["A ", "B"]
+
+
+
+@pytest.mark.parametrize("mode", ["color", "plain", "text"])
+def test_pipe_codes_in_an_art_post_are_painted_text(mode):
+    rows = post_body_rows("A|12B", 80, mode, truecolor=True, layout="art")
+
+    assert _SGR.sub("", rows[0]) == "A|12B"

@@ -922,3 +922,52 @@ def test_an_art_post_gets_the_authors_signature(db, alice):
     asyncio.run(board_flow._show_board(session, db, board, alice))
 
     assert list_posts_page(db, board, alice).posts[0].body.endswith("-- alice")
+
+
+def test_a_recovered_art_draft_too_big_for_the_terminal_is_kept_not_opened(db, alice):
+    from netbbs.rendering import ScreenBuffer, encode_ansi_bytes, parse_ansi_into_buffer
+
+    board = create_board(db, "general", creator=alice, allow_color=True)
+    draft = board_flow._post_draft_path(db, kind="art", board=board, user=alice)
+    draft.parent.mkdir(parents=True, exist_ok=True)
+    canvas = ScreenBuffer(80, 5)
+    parse_ansi_into_buffer("#" * 70, canvas)
+    draft.write_bytes(encode_ansi_bytes(canvas))
+    session = FakeSession(["a", "Drawing", "b"], width=50, height=24)
+
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+
+    assert "This drawing is 70x1" in session.visible()
+    assert draft.exists()
+
+
+def test_a_drawing_the_editor_cannot_hold_is_not_reopened(db, alice):
+    board = create_board(db, "general", creator=alice, allow_color=True)
+    create_post(db, board, alice, "Snow", "\u2603 snow", layout="art")
+    session = FakeSession(["1", "e", "b", "b"])
+
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+
+    assert "characters the art editor cannot keep" in session.visible()
+
+
+def test_the_signature_does_not_take_the_drawings_last_color(db, alice, monkeypatch):
+    from netbbs.boards.posts import list_posts_page
+    from netbbs.rendering.post_body import post_body_rows
+    from netbbs.signature import set_signature
+
+    set_signature(db, alice, "-- alice")
+    board = create_board(db, "general", creator=alice, allow_color=True)
+
+    async def _red_row_to_the_last_column(*args, **kwargs):
+        return "\x1b[0m\x1b[38;5;1m" + "#" * 80  # the editor ends it without a reset
+
+    monkeypatch.setattr(board_flow, "_draw_body", _red_row_to_the_last_column)
+    session = FakeSession(["a", "Drawing", "p", "b"])
+
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+
+    body = list_posts_page(db, board, alice).posts[0].body
+    rows = post_body_rows(body, 80, "color", truecolor=True, layout="art")
+    signature_row = next(row for row in rows if "alice" in row)
+    assert "38;5;1m" not in signature_row
