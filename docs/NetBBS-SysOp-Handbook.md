@@ -442,8 +442,10 @@ copying its data. Do not raise a game's session count until its concurrent
 save handling has been tested.
 
 A War Dialer door's detail screen adds **[W]orld**: the world's status and recent
-SysOp operations, and a maintenance switch that closes it to new callers. Season
-advance and reset stay on the CLI; the [door guide](NetBBS-door-guide.md) has both.
+SysOp operations, a maintenance switch that closes it to new callers, and, on a
+live node with maintenance on, **[N]ext season** and **Reset [c]ompetition**. Both
+take a verified node backup first and ask for a reason and the world's filename.
+The [door guide](NetBBS-door-guide.md) has the details and the stopped-node CLI.
 
 A door may request permission to post to message boards. **Outbound** is off
 by default and configured per door: choose an allowlist and posting limit.

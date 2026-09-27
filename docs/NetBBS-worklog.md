@@ -407,8 +407,13 @@ rollback directory; a late failure must restore both node state and world state.
 SysOp season/reset commands use normal world rollover, preserving account age and
 advancing the season identity. Keep receipt deletion and the bounded audit update
 inside that same transaction; an audit failure must roll back the competition.
-Destructive commands require persistent maintenance and a stopped node before the
-complete pre-action backup, and never reopen the world implicitly. Invalid supplied
+Destructive commands require persistent maintenance before the complete pre-action
+backup, and never reopen the world implicitly. The CLI also requires a stopped node;
+the SysOp console route (`change_competition(require_stopped_node=False)`, issue
+#726) does not, and instead serializes itself and the console's maintenance switch
+on one process-wide lock, so another console change cannot land between its backup
+and its commit. The CLI's maintenance command in another process is outside that
+lock by decision (a single-operator node; the world's audit records the sequence). Invalid supplied
 host metadata must fail before any SQLite creation; only absence selects demo mode.
 
 Shared-crew worlds use schema 2 even though the physical columns are unchanged:

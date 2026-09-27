@@ -57,6 +57,7 @@ import re
 import shlex
 import sqlite3
 import sys
+import threading
 import weakref
 from pathlib import Path
 import dataclasses
@@ -1320,6 +1321,7 @@ async def admin_menu(
                 chat_hub=node_controls.chat_hub if node_controls is not None else None,
                 door_services=node_controls.door_services if node_controls is not None else None,
                 transfers=node_controls.transfers if node_controls is not None else None,
+                backup_identity_dir=node_controls.backup_identity_dir if node_controls is not None else None,
             )
             dashboard_state = await _draw_admin_menu(
                 session, lane, user, node_controls=node_controls, link_context=link_context
@@ -14060,6 +14062,7 @@ async def _content_menu(
     chat_hub: ChatHub | None = None,
     door_services: Any = None,
     transfers: Any = None,
+    backup_identity_dir: Path | None = None,
 ) -> None:
     def _load_stats(db: Database) -> dict[str, Any]:
         all_boards = list_boards(db)
@@ -14108,7 +14111,8 @@ async def _content_menu(
             await _draw_content_menu(session, stats=stats)
         elif choice == "d":
             await session.write_line("")
-            await _door_menu(session, lane, actor, door_services=door_services)
+            await _door_menu(session, lane, actor, door_services=door_services,
+                             backup_identity_dir=backup_identity_dir)
             stats = await lane.run(_load_stats)
             await _draw_content_menu(session, stats=stats)
         elif choice == "n":
@@ -17429,7 +17433,8 @@ async def _expired_file_screen(
 # than boards'/areas' own.
 
 
-async def _door_menu(session: Session, lane: DatabaseLane, actor: User, *, door_services: Any = None) -> None:
+async def _door_menu(session: Session, lane: DatabaseLane, actor: User, *, door_services: Any = None,
+                     backup_identity_dir: Path | None = None) -> None:
     description_level = await lane.run(menu_description_level, actor)
     unicode_style = await lane.run(unicode_style_enabled, actor)
     collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
@@ -17451,13 +17456,13 @@ async def _door_menu(session: Session, lane: DatabaseLane, actor: User, *, door_
         elif choice == "g":
             await session.write_line("")
             await _door_gallery_screen(session, lane, actor, description_level, redraw_in_place, unicode_style, collapsed,
-                                       door_services=door_services)
+                                       door_services=door_services, backup_identity_dir=backup_identity_dir)
             status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
             await _draw_door_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
         elif choice == "f":
             await session.write_line("")
             await _door_filesystem_screen(session, lane, actor, description_level, redraw_in_place, unicode_style, collapsed,
-                                          door_services=door_services)
+                                          door_services=door_services, backup_identity_dir=backup_identity_dir)
             status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
             await _draw_door_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
         elif choice == "u":
@@ -17467,7 +17472,7 @@ async def _door_menu(session: Session, lane: DatabaseLane, actor: User, *, door_
             await _draw_door_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
         elif choice == "l":
             await session.write_line("")
-            await _list_doors_screen(session, lane, actor, door_services=door_services)
+            await _list_doors_screen(session, lane, actor, door_services=door_services, backup_identity_dir=backup_identity_dir)
             status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
             await _draw_door_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
         else:
@@ -17656,6 +17661,7 @@ def _find_door_by_name(db: Database, name: str) -> Door | None:
 
 async def _resolve_door_name_collision(
     session: Session, lane: DatabaseLane, actor: User, default_name: str, *, door_services: Any = None,
+    backup_identity_dir: Path | None = None,
 ) -> str | None:
     """Shared by every screen that prefills a *new* door registration
     from a default name it didn't get to choose freely (the bundled-door
@@ -17696,7 +17702,8 @@ async def _resolve_door_name_collision(
             break
         await session.write(reject_unhandled_key(choice))
     if choice == "e":
-        await _door_detail_screen(session, lane, actor, existing, door_services=door_services)
+        await _door_detail_screen(session, lane, actor, existing, door_services=door_services,
+                                  backup_identity_dir=backup_identity_dir)
         return None
     if choice != "n":
         return None
@@ -17708,6 +17715,7 @@ async def _resolve_door_name_collision(
 async def _door_gallery_screen(
     session: Session, lane: DatabaseLane, actor: User, description_level: str,
     redraw_in_place: bool, unicode_style: bool, collapsed: bool, *, door_services: Any = None,
+    backup_identity_dir: Path | None = None,
 ) -> None:
     """Browse NetBBS's own first-party doors (issue #172) and register
     one with sensible defaults pre-filled, instead of starting
@@ -17802,7 +17810,8 @@ async def _door_gallery_screen(
         await session.write_line(colored(f"  Script: {path}", fg_color=MUTED_COLOR))
 
         prefill_name = await _resolve_door_name_collision(session, lane, actor, entry.name,
-                                                         door_services=door_services)
+                                                         door_services=door_services,
+                                                         backup_identity_dir=backup_identity_dir)
         if prefill_name is None:
             continue
 
@@ -17827,6 +17836,7 @@ async def _door_gallery_screen(
 async def _door_filesystem_screen(
     session: Session, lane: DatabaseLane, actor: User, description_level: str,
     redraw_in_place: bool, unicode_style: bool, collapsed: bool, *, door_services: Any = None,
+    backup_identity_dir: Path | None = None,
 ) -> None:
     """A SysOp's *own* door scripts, not NetBBS's -- the direct
     counterpart to `[G]allery` for something a SysOp wrote or downloaded
@@ -17894,7 +17904,8 @@ async def _door_filesystem_screen(
         await session.write_line(colored(f"  Script: {path}", fg_color=MUTED_COLOR))
 
         prefill_name = await _resolve_door_name_collision(session, lane, actor, path.stem,
-                                                         door_services=door_services)
+                                                         door_services=door_services,
+                                                         backup_identity_dir=backup_identity_dir)
         if prefill_name is None:
             continue
 
@@ -17909,7 +17920,8 @@ async def _door_filesystem_screen(
         await _door_screen(session, lane, actor, prefill=prefill)
 
 
-async def _list_doors_screen(session: Session, lane: DatabaseLane, actor: User, *, door_services: Any = None) -> None:
+async def _list_doors_screen(session: Session, lane: DatabaseLane, actor: User, *, door_services: Any = None,
+                             backup_identity_dir: Path | None = None) -> None:
     doors = await lane.run(list_doors)
     selected = await pick_item(
         session, doors,
@@ -17925,11 +17937,12 @@ async def _list_doors_screen(session: Session, lane: DatabaseLane, actor: User, 
         header_color=await lane.run(effective_header_color_256),
     )
     if selected is not None:
-        await _door_detail_screen(session, lane, actor, selected, door_services=door_services)
+        await _door_detail_screen(session, lane, actor, selected, door_services=door_services,
+                                  backup_identity_dir=backup_identity_dir)
 
 
 async def _door_detail_screen(session: Session, lane: DatabaseLane, actor: User, door: Door, *,
-                              door_services: Any = None) -> None:
+                              door_services: Any = None, backup_identity_dir: Path | None = None) -> None:
     from netbbs.net.door_profile_flow import edit_door_profile, show_door_diagnostic
     description_level = await lane.run(menu_description_level, actor)
     unicode_style = await lane.run(unicode_style_enabled, actor)
@@ -17981,7 +17994,7 @@ async def _door_detail_screen(session: Session, lane: DatabaseLane, actor: User,
             await _door_outbound_screen(session, lane, actor, door)
             await _draw_door_detail(session, lane, door, description_level=description_level, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, door_services=door_services)
         elif choice == "w" and await asyncio.to_thread(_is_war_dialer_door, await lane.run(_node_db_path), door):
-            await _war_dialer_world_screen(session, lane, actor, door)
+            await _war_dialer_world_screen(session, lane, actor, door, backup_identity_dir=backup_identity_dir)
             await _draw_door_detail(session, lane, door, description_level=description_level, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, door_services=door_services)
         elif choice in {"s", "h", "r", "v"} and door_services is not None and door.profile and door.profile.service:
             await session.write_line("")
@@ -18425,10 +18438,17 @@ def _war_dialer_world_state(db_path: Path, world: Path) -> tuple[dict | None, st
 def _war_dialer_set_maintenance(db_path: Path, world: Path, enabled: bool, operator: str) -> str | None:
     from netbbs.doors.bundled import war_dialer as wd
     from netbbs.doors.war_dialer_admin import set_maintenance
+    # Shares the competition lock: switching maintenance off while a season
+    # change runs would let a caller in between its backup and its commit,
+    # making the backup older than the state it claims to precede.
+    if not _WAR_DIALER_COMPETITION_LOCK.acquire(blocking=False):
+        return "a War Dialer competition change is running; try again when it finishes"
     try:
         set_maintenance(db_path, world, enabled, operator=operator)
     except (BackupError, wd.WorldStateError, OSError, sqlite3.Error, ValueError) as exc:
         return wd._event_plain(str(exc))[:500]
+    finally:
+        _WAR_DIALER_COMPETITION_LOCK.release()
     return None
 
 
@@ -18447,15 +18467,250 @@ def _war_dialer_operation_rows(db: Database, operations: list) -> list[list[str]
     return rows
 
 
-async def _war_dialer_world_screen(session: Session, lane: DatabaseLane, actor: User, door: Door) -> None:
-    """A War Dialer door's world: what `war_dialer_admin status` shows, plus the
-    maintenance switch (issue #726).
+# One console competition change at a time on this node. Without it, two
+# SysOps could interleave: A's backup verified, B's rollover committed, then
+# A's rollover -- leaving A's recorded backup older than the state A changed.
+# The CLI needs a stopped node, so it never runs beside the console.
+_WAR_DIALER_COMPETITION_LOCK = threading.Lock()
+
+
+@dataclasses.dataclass(frozen=True)
+class _CompetitionOutcome:
+    status: dict | None
+    failure: str | None = None
+    # Whether a directory left at the destination after a failure is a
+    # complete, verified backup (a failure after it was taken) or not.
+    backup_valid: bool = False
+    # False when the change was refused before any backup was attempted, so
+    # whatever is at the destination is not this operation's.
+    backup_attempted: bool = True
+
+
+def _war_dialer_change_competition(
+    db_path: Path, world: Path, *, identity_dir: Path, destination: Path, reason: str, confirm: str,
+    reset: bool, operator: str, root: Path | None = None,
+) -> _CompetitionOutcome:
+    """`war_dialer_admin.change_competition` from the console, or the bounded
+    reason it refused. No stopped-node rule here (issue #726, the maintainer's
+    decision): maintenance keeps new callers out, the world's session guard
+    refuses anyone still inside, and the backup is the live one the Backup
+    screen takes."""
+    from netbbs.backup import _validate_backup_source
+    from netbbs.doors.bundled import war_dialer as wd
+    from netbbs.doors.war_dialer_admin import change_competition
+    if not _WAR_DIALER_COMPETITION_LOCK.acquire(blocking=False):
+        return _CompetitionOutcome(None, "another SysOp is changing a War Dialer competition right now; "
+                                         "try again when that finishes", backup_attempted=False)
+    try:
+        if root is not None:
+            # Re-checked here, immediately before the backup, like
+            # `_create_live_backup` does: a disk unmounted since the screen
+            # checked must not have its mount point recreated underneath.
+            db = Database(db_path)
+            try:
+                current = check_backup_destination(db, db_path, identity_dir)
+            except BackupScheduleError as exc:
+                return _CompetitionOutcome(None, str(exc), backup_attempted=False)
+            finally:
+                db.close()
+            if current != root:
+                return _CompetitionOutcome(None, "the backup destination changed; nothing was changed",
+                                           backup_attempted=False)
+        return _CompetitionOutcome(change_competition(
+            db_path, world, identity_dir=identity_dir, backup_to=destination, confirm=confirm,
+            reason=reason, reset=reset, operator=operator, require_stopped_node=False,
+        ))
+    except (BackupError, wd.WorldStateError, OSError, sqlite3.Error, ValueError) as exc:
+        valid = False
+        if destination.exists():
+            try:
+                _validate_backup_source(destination, allow_migrate=False)
+                valid = True
+            except (BackupError, OSError, sqlite3.Error, ValueError):
+                valid = False
+        return _CompetitionOutcome(None, wd._event_plain(str(exc))[:500], valid)
+    finally:
+        _WAR_DIALER_COMPETITION_LOCK.release()
+
+
+async def _owned_worker(func, /, *, finish=None, **kwargs):
+    """Run blocking `func` in a thread and keep it owned to the end.
+
+    Cancelling an `asyncio.to_thread` awaiter does not stop the thread, so a
+    cancellation (the SysOp's session dropping) waits for the worker, still
+    runs `finish` on its result -- an audit entry for a change that did
+    happen must not be lost with the session -- and only then propagates.
+    The same ownership `_create_live_backup_owned` gives a live backup."""
+    task = asyncio.create_task(asyncio.to_thread(func, **kwargs))
+    try:
+        result = await asyncio.shield(task)
+    except asyncio.CancelledError as cancelled:
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+        try:
+            result = task.result()
+        except Exception:
+            _logger.exception("%s failed after its SysOp session was cancelled", getattr(func, "__name__", func))
+            raise cancelled
+        if finish is not None:
+            try:
+                await _run_owned(finish(result))
+            except Exception:
+                _logger.exception("recording %s failed after its SysOp session was cancelled",
+                                  getattr(func, "__name__", func))
+        raise cancelled
+    if finish is not None:
+        await _run_owned(finish(result))
+    return result
+
+
+async def _run_owned(coro) -> None:
+    """Await `coro` to completion even if the caller is cancelled meanwhile
+    (a finalizer that records something that already happened), then let
+    the cancellation propagate."""
+    task = asyncio.create_task(coro)
+    try:
+        await asyncio.shield(task)
+    except asyncio.CancelledError as cancelled:
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+        if not task.cancelled() and task.exception() is not None:
+            _logger.error("finalizer failed after its SysOp session was cancelled", exc_info=task.exception())
+        raise cancelled
+
+
+async def _war_dialer_competition_flow(
+    session: Session, lane: DatabaseLane, actor: User, door: Door, world: Path, status: dict, *,
+    reset: bool, identity_dir: Path, db_path: Path,
+) -> None:
+    """Next season or Reset competition, behind a reason and the world's typed
+    filename. Two values, so prompts rather than a draft (design doc §3.5);
+    the filename is the type-the-name confirmation before a destructive act."""
+    what = "Reset competition" if reset else "Next season"
+    if status["maintenance"] != "on":
+        _announce(session, f"{what} needs maintenance on first, so nobody can enter the world "
+                  "while it changes. Nothing was changed.", error=True)
+        return
+    # The configured backup destination (issue #727), checked like the Backup
+    # screen checks it: one that has gone or been unmounted is refused.
+    try:
+        root = await lane.run(check_backup_destination, db_path, identity_dir)
+    except (BackupScheduleError, OSError) as exc:
+        _announce(session, f"{what} needs a usable backup destination first: {exc} Nothing was changed.",
+                  error=True)
+        return
+    destination = default_backup_destination(db_path, root=root)
+    # No season number here: the stored one can be stale until the change
+    # settles any natural cutoffs that passed while the world sat idle, so
+    # the numbers are reported from the change itself afterwards.
+    await session.write_line("")
+    await session.write_line(colored(
+        f"{what}: settles any season that has already ended, then starts the next one with the "
+        "normal competitive reset"
+        + (", and also clears every receipt." if reset else ", keeping receipts."), fg_color=VALUE_COLOR))
+    await session.write_line(colored(
+        "Player identities, handles and account age are kept; nobody gets the newcomer grace period again. "
+        "A complete node backup is taken and verified first, and maintenance stays on afterwards.",
+        fg_color=MUTED_COLOR))
+    await session.write_line(
+        colored("Backup: ", fg_color=LABEL_COLOR) + colored(sanitize_text(str(destination)), fg_color=METADATA_COLOR))
+    await write_prompt(session, "Reason, recorded in the world's audit (1-240 characters; blank cancels): ")
+    reason = (await session.read_line()).strip()
+    if not reason:
+        _announce_line(session, "Cancelled. Nothing was changed.")
+        return
+    if len(reason) > 240:
+        _announce(session, "The reason is longer than 240 characters. Nothing was changed.", error=True)
+        return
+    await write_prompt(session, f"Type the world filename {world.name!r} to confirm, or anything else to cancel: ")
+    entered = await session.read_line()
+    # Exact, or with stray surrounding spaces -- but a name that really has
+    # them can still be typed exactly.
+    if entered != world.name and entered.strip() != world.name:
+        _announce_line(session, "Cancelled. Nothing was changed.")
+        return
+    latest = await lane.run(get_door, door.id)
+    if latest is None or (await asyncio.to_thread(_war_dialer_world_of, db_path, latest))[0] != world:
+        _announce(session, "This door's world changed while you were confirming. Nothing was changed.", error=True)
+        return
+    try:
+        still = await lane.run(check_backup_destination, db_path, identity_dir)
+    except (BackupScheduleError, OSError) as exc:
+        _announce(session, f"The backup destination is no longer usable: {exc} Nothing was changed.", error=True)
+        return
+    if still != root:
+        _announce(session, "The backup destination changed while you were confirming. Nothing was changed.",
+                  error=True)
+        return
+    await session.write_line(colored("Backing up the node, then changing the competition...", fg_color=MUTED_COLOR))
+    audit_failure: str | None = None
+
+    async def _record(outcome: _CompetitionOutcome) -> None:
+        # Runs even if this session drops while the change is in flight: a
+        # change that happened must reach the node's audit log.
+        nonlocal audit_failure
+        if outcome.status is None:
+            return
+        entry = outcome.status["recent_operations"][-1] if outcome.status["recent_operations"] else {}
+        try:
+            await lane.run(
+                record_action, actor=actor, action="war_dialer_reset" if reset else "war_dialer_season",
+                object_type="door", object_id=door.id,
+                detail=f"door={door.name!r} world={str(world)!r} "
+                       f"season={entry.get('before_season')}->{entry.get('after_season')} "
+                       f"backup={str(destination)!r} reason={reason!r}",
+            )
+        except (sqlite3.Error, OSError) as exc:
+            # The change is committed; say that, and that only the node's
+            # own record of it is missing (the world's audit has it).
+            _logger.exception("War Dialer %s committed but its node audit entry failed", what)
+            audit_failure = sanitize_text(str(exc))[:300]
+
+    outcome = await _owned_worker(
+        _war_dialer_change_competition, finish=_record, db_path=db_path, world=world, identity_dir=identity_dir,
+        destination=destination, reason=reason, confirm=world.name, reset=reset, operator=actor.username,
+        root=root,
+    )
+    if outcome.failure is not None:
+        _announce(session, f"{what} failed: {outcome.failure}", error=True)
+        if outcome.backup_attempted and destination.exists():
+            if outcome.backup_valid:
+                _announce(session, f"The verified backup taken first remains at {destination}.", color=MUTED_COLOR)
+            else:
+                # Not "remove it": another backup started in the same second
+                # could own this path.
+                _announce(session, f"{destination} is not a verified backup; check what it is before relying on "
+                          "or removing it.", error=True)
+        return
+    _announce(session, f"{what} done: season {outcome.status['stored_season']} has started. Backup: {destination}. "
+              "Maintenance is still on; switch it off when you have checked the world.")
+    if audit_failure is not None:
+        _announce(session, f"The node's Audit log entry for it could not be written ({audit_failure}); "
+                  "the world's own audit records the change.", error=True)
+
+
+async def _war_dialer_world_screen(session: Session, lane: DatabaseLane, actor: User, door: Door, *,
+                                   backup_identity_dir: Path | None = None) -> None:
+    """A War Dialer door's world: what `war_dialer_admin status` shows, the
+    maintenance switch, and the season controls (issue #726).
 
     Status plus an action bar (design doc §3.5), paged through `show_detail`
     because ten retained operations do not fit a 24-row terminal. Maintenance
     is a toggle and needs no confirmation: it only closes the world to new
     callers, and it refuses while anyone is inside, the same guard the CLI
-    meets. Season and reset stay on the CLI, which requires a stopped node.
+    meets. Next season and Reset competition need a live node (for the
+    identity directory the backup takes), maintenance on, a reason and the
+    typed world filename; unlike the CLI they do not need the node stopped.
     """
     page = 0
     db_path = await lane.run(_node_db_path)
@@ -18495,6 +18750,12 @@ async def _war_dialer_world_screen(session: Session, lane: DatabaseLane, actor: 
             ]
             if maintenance:
                 rows.append(Note("Closed to new callers until you switch maintenance off."))
+            if backup_identity_dir is None:
+                rows.append(Note(
+                    "Next season and Reset competition run from a live node's console, or with "
+                    "python -m netbbs.doors.war_dialer_admin while the node is stopped."))
+            elif not maintenance:
+                rows.append(Note("Next season and Reset competition need maintenance on first."))
         sections = [Section("World", rows)]
         if status is not None:
             operations = await lane.run(_war_dialer_operation_rows, status["recent_operations"])
@@ -18505,6 +18766,8 @@ async def _war_dialer_world_screen(session: Session, lane: DatabaseLane, actor: 
         actions: list[tuple[str, str]] = []
         if status is not None:
             actions.append(("m", menu_key("M", "aintenance " + ("off" if status["maintenance"] == "on" else "on"))))
+            if backup_identity_dir is not None:
+                actions += [("n", menu_key("N", "ext season")), ("c", menu_key("c", "ompetition", prefix="Reset "))]
         actions += [("r", menu_key("R", "efresh")), _BACK_ACTION]
         choice, page = await show_detail(
             session,
@@ -18533,6 +18796,11 @@ async def _war_dialer_world_screen(session: Session, lane: DatabaseLane, actor: 
                            detail=f"door={door.name!r} world={str(world)!r} maintenance={'on' if enable else 'off'}")
             _announce(session, "Maintenance on. New callers are told the world is closed."
                       if enable else "Maintenance off. The world is open to callers again.")
+        elif choice in ("n", "c") and status is not None and backup_identity_dir is not None:
+            await _war_dialer_competition_flow(
+                session, lane, actor, door, world, status, reset=choice == "c",
+                identity_dir=backup_identity_dir, db_path=db_path,
+            )
 
 
 async def _delete_door_screen(session: Session, lane: DatabaseLane, actor: User, door: Door,
