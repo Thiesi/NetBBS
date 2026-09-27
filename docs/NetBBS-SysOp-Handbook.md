@@ -179,7 +179,14 @@ and a copy written as root is one the node cannot read; if you had to use root,
 
 Transport and path settings come from the TOML file and command-line options;
 accounts, content, and many live settings are stored in the database. Command-line
-options override TOML settings. Run `python -m netbbs --help` using the installed
+options override TOML settings.
+
+Link limits, the login throttle and the shutdown delays can be set either way.
+**Settings → Network & login limits** holds the carry caps, peering, Link limits,
+live relay bounds, login throttle and shutdown delays, grouped. A value there
+applies the next time the node starts. A key your TOML file or a command-line
+option sets still wins: the screen shows it as *set in config* and does not let
+you change it there. Remove it from the TOML file to manage it from the console. Run `python -m netbbs --help` using the installed
 interpreter for all supported switches. A TOML file is read only when supplied
 with `--config`; placing `netbbs.toml` in the working directory is not enough.
 
@@ -499,7 +506,7 @@ lists the less common transport and quota settings.
 Create a local resource before promoting it to linked scope. Linked boards,
 channels and file areas from other nodes are carried automatically up to the
 `max_carried_boards` / `max_carried_channels` / `max_carried_file_areas` caps
-(500 each). Past a cap, a new one is not lost: it waits under **Link status →
+(500 each; **Settings → Network & login limits → Carry caps**). Past a cap, a new one is not lost: it waits under **Link status →
 Offered**, with its origin and why, until you **Accept** it (not limited by the
 cap) or **Exclude** it. Set a cap to 0 to carry only what you accept. Lowering a
 cap removes nothing already carried. Deleting a carried resource that another

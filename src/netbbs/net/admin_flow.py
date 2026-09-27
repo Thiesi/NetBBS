@@ -379,6 +379,19 @@ from netbbs.moderation.log import (
     record_action_without_commit,
 )
 from netbbs.mrc.protocol import display_roster_entry, room_name_error
+from netbbs.net.nodeconfig import NodeConfig
+from netbbs.net.policy_settings import (
+    GROUPS as POLICY_GROUPS,
+    SETTINGS as POLICY_SETTINGS,
+    PolicySetting,
+    PolicyValueError,
+    PolicyView,
+    format_value as format_policy_value,
+    load_policy_views,
+    parse_text as parse_policy_text,
+    save_policy_without_commit,
+    validate_value as validate_policy_value,
+)
 from netbbs.mrc.bridge import MrcBridge, MrcState, MrcStatus
 from netbbs.mrc.settings import (
     MrcChannelMapping,
@@ -2281,6 +2294,11 @@ async def _system_menu(
             await _limits_settings_screen(session, lane, actor)
             stats = await lane.run(_load_settings_stats)
             await _draw_system_menu(session, node_controls, link_context, stats=stats)
+        elif choice == "w":
+            await session.write_line("")
+            await _policy_settings_screen(session, lane, actor)
+            stats = await lane.run(_load_settings_stats)
+            await _draw_system_menu(session, node_controls, link_context, stats=stats)
         elif choice == "v":
             def _toggle_previous_callers(db: Database) -> None:
                 enabled = not previous_callers_enabled(db)
@@ -2355,6 +2373,7 @@ async def _draw_system_menu(
     await session.write_line("\r\n" + screen_title("Settings",
             breadcrumb=(session.node_display_name,), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, header_color=header_color, node_name_gradient=session.node_name_gradient))
 
+    panel: list[str] = []
     if session.terminal_height >= 18:
         # GitHub issue #206: "current values at a glance," not counts --
         # unlike Users/Content (registered accounts, boards/files),
@@ -2447,6 +2466,10 @@ async def _draw_system_menu(
             brief="Uploads, expiry, invites, history",
         ),
         MenuEntry(
+            label=menu_key("w", "ork & login limits", prefix="Net"),
+            brief="Link, login throttle, shutdown",
+        ),
+        MenuEntry(
             label=menu_key("G", "uest access"),
             brief=(
                 # Sanitized here because `menu_grid` does not do it for
@@ -2472,8 +2495,18 @@ async def _draw_system_menu(
         MenuEntry(label=menu_key("P", "olicy trust"), brief="Federation trust policy"),
     ]
     option_list.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to the SysOp console"))
+    # The panel above takes rows from the menu, as on Users, Content and
+    # Operations: descriptions give way before anything overflows.
+    effective_desc_level, available_menu_height, desc_degraded = _degrade_description_level(
+        panel=panel, unicode_style=unicode_style, description_level=description_level,
+        entry_count=len(option_list), terminal_width=session.terminal_width,
+        terminal_height=session.terminal_height,
+    )
     await session.write_line(
-        _menu_row(option_list, description_level, width=session.terminal_width, height=session.terminal_height)
+        _menu_row(
+            option_list, effective_desc_level, width=session.terminal_width,
+            height=available_menu_height, degraded=desc_degraded,
+        )
     )
     await _choice_prompt(session)
 
@@ -7795,6 +7828,246 @@ async def _limits_settings_screen(session: Session, lane: DatabaseLane, actor: U
     if changed is None:
         return
     _announce_line(session, "Saved. Applies from now on." if changed else "Nothing changed.")
+
+
+# -- Network & login limits (issue #730) -------------------------------------
+
+# One hotkey per group on the overview; letters chosen to read as the group.
+_POLICY_GROUP_KEYS = {
+    "Carry caps": "c", "Peering": "p", "Link limits": "l",
+    "Live relay": "r", "Login throttle": "t", "Shutdown": "d",
+}
+_POLICY_CONFIG_NOTE = (
+    "Set in the config file or on the command line, which wins over this screen. Change it there, "
+    "or remove it there to manage it here."
+)
+
+
+class _PolicyError(ValueError):
+    """A limits save the SysOp must correct; keeps the draft open."""
+
+
+def _policy_source(view: PolicyView, draft_value: Any = None, *, in_draft: bool = False) -> tuple[str, str]:
+    """`(value, where it comes from)` for one setting as it will be at the
+    next start."""
+    if view.overridden:
+        return format_policy_value(view.setting, view.running), "set in config"
+    value = draft_value if in_draft else view.stored
+    if value is None:
+        return format_policy_value(view.setting, view.default), "default"
+    return format_policy_value(view.setting, value), "set here"
+
+
+def _policy_running_note(view: PolicyView, next_value: Any) -> str | None:
+    """Said when the node is running with something other than what the
+    next start will use."""
+    if view.running is None or view.overridden:
+        return None
+    if view.setting.kind is list:
+        differs = list(view.running) != list(next_value)
+    else:
+        differs = view.running != next_value
+    if not differs:
+        return None
+    return f"running with {format_policy_value(view.setting, view.running)} until the next start"
+
+
+def _policy_hotkeys(settings: Sequence[PolicySetting]) -> dict[str, tuple[str, str, str]]:
+    """A hotkey for each setting in one editor: the first letter of its label
+    that nothing else on that screen uses. `s` and `b` are Save and Back."""
+    taken = {"s", "b"}
+    keys: dict[str, tuple[str, str, str]] = {}
+    for setting in settings:
+        label = setting.label
+        for index, char in enumerate(label):
+            if char.isalpha() and char.lower() not in taken:
+                taken.add(char.lower())
+                keys[setting.key] = (char.lower(), label[:index], label[index + 1:])
+                break
+        else:  # pragma: no cover -- every group has fewer settings than letters
+            raise RuntimeError(f"no hotkey left for {setting.key}")
+    return keys
+
+
+async def _policy_settings_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
+    """Issue #730: operating policy that used to live only in `netbbs.toml`
+    -- the Link carry caps, peering and limits, the live relay's bounds, the
+    login throttle and the shutdown delays. An overview of the six groups;
+    each group opens as a draft editor.
+
+    Everything here applies at the next start (`netbbs.net.policy_settings`
+    explains why), and a key the config file or command line sets wins and
+    is shown as such rather than offered for editing."""
+    chrome = await _load_chrome(lane, actor)
+    defaults = NodeConfig()
+    page = 0
+    while True:
+        views, started = await lane.run(load_policy_views, defaults)
+        rows: list[Field | Note] = []
+        for group in POLICY_GROUPS:
+            members = [view for view in views if view.setting.group == group]
+            here = sum(1 for view in members if view.stored is not None and not view.overridden)
+            config = sum(1 for view in members if view.overridden)
+            pending = sum(
+                1 for view in members if _policy_running_note(view, view.stored if view.stored is not None
+                                                              else view.default) is not None
+            )
+            parts = [f"{len(members)} settings"]
+            if here:
+                parts.append(f"{here} set here")
+            if config:
+                parts.append(f"{config} set in config")
+            if pending:
+                parts.append(f"{pending} waiting for a restart")
+            rows.append(Field(group, ", ".join(parts)))
+        notes: list[Field | Note] = [Note("Changes apply the next time the node starts.")]
+        if not started:
+            notes.append(Note(
+                "The node has not started since this version, so which settings the config file "
+                "holds is not known yet. A value the config file sets will still win."
+            ))
+        choice, page = await show_detail(
+            session,
+            title=_detail_title(session, chrome, "Network & login limits", breadcrumb=("SysOp", "Settings")),
+            sections=[Section(None, rows), Section(None, notes)],
+            actions=[
+                *((key, menu_key(key.upper(), group[1:]) if group[0].lower() == key
+                   else menu_key(key, group[group.lower().index(key) + 1:], prefix=group[:group.lower().index(key)]))
+                  for group, key in _POLICY_GROUP_KEYS.items()),
+                _BACK_ACTION,
+            ],
+            redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style, page=page,
+        )
+        if choice == "b":
+            return
+        group = next(group for group, key in _POLICY_GROUP_KEYS.items() if key == choice)
+        await _policy_group_editor(session, lane, actor, group, [v for v in views if v.setting.group == group])
+
+
+async def _policy_group_editor(
+    session: Session, lane: DatabaseLane, actor: User, group: str, views: list[PolicyView]
+) -> None:
+    by_key = {view.setting.key: view for view in views}
+    draft: dict = {view.setting.key: view.stored for view in views}
+    hotkeys = _policy_hotkeys([view.setting for view in views])
+
+    def _render(key: str) -> Callable[[dict], str]:
+        view = by_key[key]
+
+        def render(d: dict) -> str:
+            value, source = _policy_source(view, d[key], in_draft=True)
+            next_value = view.default if d[key] is None else d[key]
+            note = _policy_running_note(view, next_value)
+            return f"{value}  ({source}{'; ' + note if note else ''})"
+
+        return render
+
+    def _prompt(key: str):
+        view = by_key[key]
+        setting = view.setting
+
+        if setting.kind is bool:
+            async def toggle(session: Session, lane: DatabaseLane, d: dict) -> None:
+                if view.overridden:
+                    await write_field_message(session, colored(_POLICY_CONFIG_NOTE, fg_color=MUTED_COLOR))
+                    return
+                current = view.default if d[key] is None else d[key]
+                # Toggling back to the default forgets the stored value rather
+                # than pinning it, so the setting reads "(default)" again.
+                d[key] = None if (not current) == view.default else not current
+
+            return toggle
+
+        @inline_field
+        async def prompt(session: Session, lane: DatabaseLane, d: dict) -> None:
+            if view.overridden:
+                await write_field_message(session, colored(_POLICY_CONFIG_NOTE, fg_color=MUTED_COLOR))
+                return
+            current = view.default if d[key] is None else d[key]
+            initial = " ".join(current) if setting.kind is list else format_policy_value(setting, current)
+            hint = "blank = default"
+            await write_field_prompt(
+                session, colored(f"{setting.label} ({_EDIT_HINT}, {hint}):", fg_color=MUTED_COLOR)
+            )
+            try:
+                raw = await _read_seeded_line(session, initial=initial)
+            except InputCancelled:
+                await session.write_line("")
+                return
+            if not raw.strip():
+                # Blank returns the setting to its default, a list included:
+                # an empty-list override would read "(set here)" forever.
+                d[key] = None
+                return
+            try:
+                d[key] = validate_policy_value(setting, parse_policy_text(setting, raw))
+            except PolicyValueError as exc:
+                await write_field_message(session, colored(str(exc), fg_color=MUTED_COLOR))
+
+        return prompt
+
+    fields = []
+    for view in views:
+        key = view.setting.key
+        letter, before, after = hotkeys[key]
+        fields.append(FieldSpec(
+            key=key, hotkey=letter,
+            menu_text=menu_key(letter.upper(), after) if not before else menu_key(letter, after, prefix=before),
+            label=view.setting.label,
+            render=_render(key), prompt=_prompt(key),
+            help=view.setting.help + (" " + _POLICY_CONFIG_NOTE if view.overridden else ""),
+        ))
+
+    async def save(d: dict) -> list[str]:
+        changed = {key: value for key, value in d.items() if value != by_key[key].stored}
+        for key, value in changed.items():
+            if value is not None:
+                try:
+                    validate_policy_value(by_key[key].setting, value)
+                except PolicyValueError as exc:
+                    raise _PolicyError(str(exc)) from exc
+        if not changed:
+            return []
+
+        def _persist(db: Database) -> None:
+            # The values and the audit entry commit together or not at all.
+            db.connection.execute("BEGIN IMMEDIATE")
+            try:
+                save_policy_without_commit(db, changed)
+                record_action_without_commit(
+                    db, actor=actor, action="set_node_policy",
+                    detail=" ".join(
+                        f"{key}={'default' if value is None else format_policy_value(by_key[key].setting, value)}"
+                        for key, value in changed.items()
+                    ),
+                )
+            except BaseException:
+                db.connection.rollback()
+                raise
+            else:
+                db.connection.commit()
+
+        await lane.run(_persist)
+        return list(changed)
+
+    changed = await edit_resource_draft(
+        session, lane,
+        title=group,
+        fields=fields, draft=draft, save=save, error_type=_PolicyError,
+        save_menu_text=menu_key("S", "ave"),
+        back_menu_text=menu_key("B", "ack"),
+        description_level=await lane.run(menu_description_level, actor),
+        redraw_in_place=await lane.run(redraw_in_place_enabled, actor),
+        unicode_style=await lane.run(unicode_style_enabled, actor),
+        collapsed=await lane.run(breadcrumb_collapsed_enabled, actor),
+        accent_color=await lane.run(effective_accent_color_256),
+        header_color=await lane.run(effective_header_color_256),
+    )
+    if changed is None:
+        return
+    _announce_line(
+        session, "Saved. Applies the next time the node starts." if changed else "Nothing changed."
+    )
 
 
 # -- Inter-BBS chat: MRC bridge (issue #275) ---------------------------------
