@@ -3334,11 +3334,15 @@ one, when it last heard of it, and how a caller dials it. It is the network's
 BBS list, as one board sees it. Callers and the SysOp see the same screen; the
 SysOp's shows more.
 
-**What is listed.** Every node this one has completed a hello with, and every
-node a carrier has introduced (§8.11), except, for callers, nodes whose
-effective trust state is quarantined or blocked: this node refuses or withholds
-their content, so leaving them off tells a caller the truth about what reaches
-them here. Probation is not a reason to leave a node off; nearly every new
+**What is listed.** Every node this one has completed a hello with, every
+node a carrier has introduced (§8.11), and every node that is the origin of a
+board or file area this node carries, even after its introduced identity was
+displaced from the bounded store; such a node is listed under whatever name
+this node still has for it. For callers the list leaves out every node
+that is quarantined or blocked in any of the identity, resource or content
+dimensions (§12.2): this node refuses or withholds something of theirs,
+so leaving them off tells a caller the truth about what reaches them here.
+Operational reachability is not a trust state and hides nothing. Probation is not a reason to leave a node off; nearly every new
 node is on probation. A node cannot ask to be left off. The list's worth is
 that a missing board is one that callers cannot reach through this board,
 because this board either does not know it or refuses its content. A list
@@ -3357,7 +3361,8 @@ and reliability are never shown to callers: they are how nodes reach each
 other, and a caller cannot use them.
 
 **Last heard.** The later of this node's own last direct contact with it (a
-completed hello or events exchange; issue #766) and the `created_at` of its
+completed hello or events exchange, or an authenticated real-time session
+being established; issue #766) and the `created_at` of its
 newest valid descriptor, but never later than the time this node first
 stored that descriptor, so a descriptor dated in the future cannot keep a node
 fresh. A node signs a fresh
@@ -3371,7 +3376,7 @@ not removed.
 **The SysOp's view.** The same list, plus the nodes callers do not see:
 peer-list candidates, marked unverified and never shown to callers, since a
 candidate has completed no hello and names nobody who vouched for it; and
-quarantined and blocked nodes, with their state. Each row adds the Link
+quarantined and blocked nodes, with the state of each dimension. Each row adds the Link
 addresses, relay roles and reliability. It replaces the peer list behind the
 Link status screen.
 
