@@ -3339,7 +3339,10 @@ SysOp's shows more.
 node a carrier has introduced (§8.11), and every node that is the origin of a
 board, file area or linked channel this node carries, even after its introduced identity was
 displaced from the bounded store; such a node is listed under whatever name
-this node still has for it. For callers the list leaves out every node
+this node still has for it, or the unknown-node label, and every field no longer
+on file (provenance, dial-in, last heard, addresses) reads *unknown*. A node is
+listed once, from its best-verified source: met before introduced, introduced
+before candidate. For callers the list leaves out every node
 that is quarantined or blocked in any of the identity, resource or content
 dimensions (§12.2): this node refuses or withholds something of theirs,
 so leaving them off tells a caller the truth about what reaches them here.
