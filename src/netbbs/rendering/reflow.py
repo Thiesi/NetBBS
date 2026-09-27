@@ -109,7 +109,16 @@ def _wrap_terminal_line(text: str, width: int) -> list[str]:
     # follows: then there is no content to leave room for, and a line of
     # blanks -- a colored stripe in an art post (issue #711) -- may fill
     # the row.
-    capped_whitespace: list[tuple[str, int]] = []
+    # (styling written before it, the blank, its width)
+    capped_whitespace: list[tuple[str, str, int]] = []
+
+    def release_capped_styling() -> None:
+        # Content follows after all: the capped blanks stay dropped, but the
+        # styling that preceded them still applies to what comes next.
+        nonlocal pending_escape
+        if capped_whitespace:
+            pending_escape = "".join(escape for escape, _, _ in capped_whitespace) + pending_escape
+            capped_whitespace.clear()
 
     def append_character(ch: str) -> None:
         nonlocal pending_escape, leading_whitespace, leading_width
@@ -124,16 +133,19 @@ def _wrap_terminal_line(text: str, width: int) -> list[str]:
             # cursor-forward sequence or a very deep indent can manufacture
             # blank physical rows before the first token.
             if leading_width + width_here > max(0, width - 1):
-                capped_whitespace.append((ch, width_here))
+                capped_whitespace.append((pending_escape, ch, width_here))
+                pending_escape = ""
                 return
             leading_width += width_here
         elif not ch.isspace():
             leading_whitespace = False
+            release_capped_styling()
         atoms.append((pending_escape + ch, ch, width_here, None))
         pending_escape = ""
 
     def append_control(raw: str, effect: tuple[str, int]) -> None:
         nonlocal pending_escape, leading_whitespace, leading_width
+        release_capped_styling()
         atoms.append((pending_escape + raw, "", 0, effect))
         pending_escape = ""
         if effect[0] in ("absolute", "restore"):
@@ -161,11 +173,16 @@ def _wrap_terminal_line(text: str, width: int) -> list[str]:
 
     if leading_whitespace and capped_whitespace:
         room = width - leading_width
-        for ch, width_here in capped_whitespace:
+        unplaced = ""
+        for escape, ch, width_here in capped_whitespace:
             if width_here > room:
-                break
-            atoms.append((ch, ch, width_here, None))
+                unplaced += escape
+                continue
+            atoms.append((escape + ch, ch, width_here, None))
             room -= width_here
+        pending_escape = unplaced + pending_escape
+    else:
+        release_capped_styling()
 
     if not atoms:
         return [pending_escape]

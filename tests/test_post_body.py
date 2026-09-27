@@ -287,3 +287,24 @@ def test_pipe_codes_in_an_art_post_are_painted_text(mode):
     rows = post_body_rows("A|12B", 80, mode, truecolor=True, layout="art")
 
     assert _SGR.sub("", rows[0]) == "A|12B"
+
+
+
+def test_a_restored_blank_keeps_the_style_written_before_it():
+    from netbbs.rendering.reflow import wrap_terminal_text
+
+    row = " " * 79 + f"{ESC}[41m {ESC}[0m"
+
+    assert wrap_terminal_text(row, 80) == row
+    # Capped indentation before content: dropped, its styling kept.
+    assert wrap_terminal_text(" " * 85 + f"{ESC}[31mX", 80) == " " * 79 + f"{ESC}[31mX"
+
+
+def test_a_signature_under_a_drawing_reads_as_post_text():
+    body = f"A|12B{ESC}[0m\n-- \n|12Alice"
+
+    rows = post_body_rows(body, 80, "color", truecolor=True, layout="art")
+
+    visible = [_SGR.sub("", row) for row in rows]
+    assert visible == ["A|12B", "-- ", "Alice"]
+    assert f"{ESC}[38;5;9m" in rows[2]

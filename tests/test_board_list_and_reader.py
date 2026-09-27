@@ -1011,3 +1011,68 @@ def test_a_drawing_with_underline_or_blink_is_not_reopened(db, alice):
     asyncio.run(board_flow._show_board(session, db, board, alice))
 
     assert "underline or blink" in session.visible()
+
+
+def test_tabs_count_when_sizing_a_drawing_for_the_editor(db, alice):
+    board = create_board(db, "general", creator=alice, allow_color=True)
+    create_post(db, board, alice, "Tabs", "A" + "\t" * 80, layout="art")
+    session = FakeSession(["1", "e", "b", "b"])
+
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+
+    assert "This drawing is 81x1" in session.visible()
+
+
+def test_the_editor_gets_a_carried_drawing_filtered(db, alice, monkeypatch):
+    board = create_board(db, "general", creator=alice, allow_color=True)
+    create_post(db, board, alice, "Drawn", "A\x08B\x1b[2J\x1b[31mC", layout="art")
+    seen = {}
+
+    async def _editor(session, *, initial_bytes, **kwargs):
+        seen["canvas"] = initial_bytes.decode("utf-8")
+        return None
+
+    monkeypatch.setattr(board_flow, "edit_ansi_art", _editor)
+    session = FakeSession(["1", "e", "", "b", "b"])
+
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+
+    assert "\x08" not in seen["canvas"] and "[2J" not in seen["canvas"]
+    assert "\x1b[31mC" in seen["canvas"]
+
+
+def test_the_migration_restores_art_posts_carried_before_the_upgrade(tmp_path, monkeypatch):
+    import json
+
+    from netbbs.storage import database as database_module
+    from netbbs.storage.migrations import MIGRATIONS
+    from tests.legacy_schema import insert_user_on_old_schema
+
+    index = next(i for i, m in enumerate(MIGRATIONS) if "`layout` on posts" in m.description)
+    monkeypatch.setattr(database_module, "MIGRATIONS", MIGRATIONS[:index])
+    path = tmp_path / "node.db"
+    old = Database(path)
+    alice = insert_user_on_old_schema(old, "alice", user_level=10)
+    board = create_board(old, "general", creator=alice)
+    post = create_post(old, board, alice, "drawn", "##")
+
+    from netbbs.boards.posts import edit_post
+
+    edit = edit_post(old, post, board, subject="drawn", body="###", edited_by=alice)
+    envelope = {"envelope": {"payload": {"layout": "art"}}, "signature": ""}
+    old.connection.execute(
+        "INSERT INTO link_events (content_id, sender_fingerprint, object_type, envelope_json, received_at, board_id) "
+        "VALUES (?, 'peer', 'board_post', ?, '2026-01-01T00:00:00Z', ?)",
+        (post.post_id, json.dumps(envelope), board.board_id),
+    )
+    old.connection.commit()
+    old.close()
+    monkeypatch.undo()
+
+    upgraded = Database(path)
+    try:
+        layouts = dict(upgraded.connection.execute("SELECT post_id, layout FROM posts").fetchall())
+        assert layouts[post.post_id] == "art"
+        assert layouts[edit.post_id] == "art"
+    finally:
+        upgraded.close()

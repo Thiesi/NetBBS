@@ -3151,6 +3151,24 @@ MIGRATIONS = [
             )
             WHERE id = NEW.id;
         END;
+
+        -- A node upgraded after it already carried art posts materialized
+        -- them as prose; their retained signed events still say "art".
+        UPDATE posts SET layout = 'art'
+         WHERE post_id = root_post_id
+           AND post_id IN (
+               SELECT content_id FROM link_events
+                WHERE object_type = 'board_post'
+                  AND json_extract(envelope_json, '$.envelope.payload.layout') = 'art'
+           );
+        UPDATE posts SET layout = (
+            SELECT r.layout FROM posts r WHERE r.post_id = posts.root_post_id AND r.board_id = posts.board_id
+        )
+         WHERE post_id != root_post_id
+           AND EXISTS (
+               SELECT 1 FROM posts r
+                WHERE r.post_id = posts.root_post_id AND r.board_id = posts.board_id AND r.layout = 'art'
+           );
         """,
     ),
 ]

@@ -112,6 +112,8 @@ from netbbs.rendering.post_body import (
     art_styles_editable,
     post_body_mode,
     post_body_rows,
+    split_signature,
+    styled_post_body,
 )
 from netbbs.rendering.reflow import wrap_terminal_text
 from netbbs.rendering.width import cut_to_width, display_width, wrap_to_width
@@ -1467,7 +1469,7 @@ async def _edit_existing_post(
     # a draft slot of its own: the prose editors' recovery must never be
     # handed a canvas. One the terminal cannot hold is refused first.
     art = post.layout == "art"
-    if art and _art_canvas(session, _split_signature(post.body)[0]) is None:
+    if art and _art_canvas(session, split_signature(post.body)[0]) is None:
         return  # said why; asked nothing
 
     subject = await read_prefilled_field(session, "Subject", post.subject)
@@ -1676,20 +1678,6 @@ def _post_draft_path(db: Database, *, kind: str, board: Board, user: User, root_
     return drafts_directory(db) / f"{kind}_{board.id}_{user.id}{suffix}.draft"
 
 
-# What `netbbs.signature.append_signature` puts between a body and its
-# signature.
-_SIGNATURE_DELIMITER = "\n-- \n"
-
-def _split_signature(body: str | None) -> tuple[str | None, str]:
-    """An art post's drawing and the signature block under it (the
-    delimiter included, `""` if there is none): only the drawing goes on
-    the canvas (Codex review on #753)."""
-    if not body or _SIGNATURE_DELIMITER not in body:
-        return body, ""
-    drawing, signature = body.rsplit(_SIGNATURE_DELIMITER, 1)
-    return drawing, _SIGNATURE_DELIMITER + signature
-
-
 # The smallest canvas the art editor opens on.
 _ART_MIN_WIDTH = 20
 _ART_MIN_HEIGHT = 5
@@ -1729,7 +1717,7 @@ def _art_canvas(session: Session, drawing: str | None) -> tuple[int, int] | None
                 tone="muted",
             )
             return None
-        lines = drawing.split("\n")
+        lines = drawing.replace("\t", " ").split("\n")
         drawn_width = max(display_width(strip_ansi(line)) for line in lines)
         if drawn_width > width or len(lines) > height:
             announce(
@@ -1755,7 +1743,13 @@ async def _draw_body(
     # The signature block under a drawing is not part of the canvas: it is
     # set aside and put back as it was, so it neither takes canvas rows nor
     # goes through the canvas's trimming (Codex review on #753).
-    initial_text, signature_block = _split_signature(initial_text)
+    signature_block = ""
+    if initial_text:
+        # The editor's canvas holds text and the styles it can keep:
+        # untrusted controls in a carried body are filtered as for a reader,
+        # tabs are one column as a reader sees them (Codex review on #753).
+        initial_text, signature_block = split_signature(initial_text)
+        initial_text = styled_post_body(initial_text, pipe_codes=False).replace("\t", " ")
     # The editor resumes a draft it autosaved in place of `initial_text`;
     # that draft must fit this terminal just the same (Codex review on #753).
     recovered = art_body_from_editor(draft_path.read_bytes()) if draft_path.exists() else None

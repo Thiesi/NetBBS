@@ -467,9 +467,16 @@ def post_body_rows(body: str, width: int, mode: str, *, truecolor: bool, layout:
     lines in every mode: `art_body_rows`."""
     if layout == "art":
         # Its color is the SGR the editor wrote; a pipe code in it is painted
-        # text, so it is never read as color or removed as a code.
-        drawn = styled_post_body(body, truecolor=truecolor, pipe_codes=False) if mode == "color" else post_body_text(body)
-        return art_body_rows(drawn, width)
+        # text, so it is never read as color or removed as a code. The
+        # signature under it was not painted: it reads as any post text
+        # does, its lines kept (Codex review on #753).
+        drawing, signature = split_signature(body)
+        drawn = (
+            styled_post_body(drawing, truecolor=truecolor, pipe_codes=False) if mode == "color"
+            else post_body_text(drawing)
+        )
+        signed = render_post_body(signature, mode, truecolor=truecolor) if signature else ""
+        return art_body_rows(drawn + signed, width)
     if mode == "color":
         return colored_body_rows(styled_post_body(body, truecolor=truecolor), width)
     return quoted_body(render_post_body(body, mode), width).split("\r\n")
@@ -501,6 +508,22 @@ def art_body_from_editor(data: bytes) -> str:
     while trimmed and not _visible(trimmed[-1]):
         trimmed.pop()
     return "\n".join(trimmed)
+
+
+# What `netbbs.signature.append_signature` puts between a body and its
+# signature.
+SIGNATURE_DELIMITER = "\n-- \n"
+
+
+def split_signature(body: str) -> tuple[str, str]:
+    """An art post's drawing, and the signature block appended under it
+    (the delimiter included, `""` if there is none). The block was never
+    on the canvas: it is set aside when the drawing is reopened, and read
+    as ordinary post text (Codex review on #753)."""
+    if SIGNATURE_DELIMITER not in body:
+        return body, ""
+    drawing, signature = body.rsplit(SIGNATURE_DELIMITER, 1)
+    return drawing, SIGNATURE_DELIMITER + signature
 
 
 def art_styles_editable(drawing: str) -> bool:
