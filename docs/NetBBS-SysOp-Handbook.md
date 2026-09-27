@@ -253,7 +253,8 @@ public_url = "https://bbs.example.org"
 
 Point the HTTPS proxy at that local port, forwarding WebSocket upgrades as
 well as ordinary requests. Set its upload body limit at least as high as
-NetBBS's configured upload cap. Use a real hostname and certificate;
+NetBBS's upload cap (**Settings → Limits & retention**, 100 MiB by default).
+Use a real hostname and certificate;
 `bbs.example.org` is a placeholder. Restart after changing listener settings.
 
 `public_url` supplies the externally reachable base address for transfer links.
@@ -281,7 +282,7 @@ NetBBS Link health when enabled. Refresh it after making changes elsewhere.
 | Users | Accounts, registration, levels, approval, identity-verifier grants |
 | Content | Message boards, file areas, chat channels, Communities, doors, moderation |
 | Operations | Sessions, maintenance, audit log, backups, Link diagnostics |
-| Settings | Branding, timestamps, node name, network participation, update checks |
+| Settings | Branding, timestamps, node name, network participation, update checks, limits and retention |
 
 Quick actions lead to the same screens. Use the displayed keys rather than
 old menu letters from release notes. **Back** leaves a screen. Draft editors
@@ -720,6 +721,16 @@ Check pending registrations/posts/files, backup recency, free disk space,
 and recent errors. Choose welcome/masthead/banner presets through Settings;
 preview before applying, or place your own files as described under
 [Custom banners and mastheads](#custom-banners-and-mastheads). Timestamp format and display timezone are node-wide.
+
+**Settings → Limits & retention** holds four node-wide values, saved together
+and applied without a restart:
+
+| Setting | Default | Effect |
+| --- | --- | --- |
+| Upload cap | 100 MiB | Largest single upload, over Zmodem and the browser. Keep a reverse proxy's body limit at least this high. |
+| Grace before deletion | 7 days | How long an expired post or file waits before it is deleted. An expired file can be recovered from its area until then. |
+| Invitation expiry | 7 days | When an unaccepted channel invitation lapses. Clear the field for invitations that never expire. |
+| Chat scrollback | 100 messages | Lines each channel keeps, carried Link channels included. Lowering it trims a channel the next time someone speaks there. |
 
 Under **Operations → Node and sessions**:
 

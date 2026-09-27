@@ -60,6 +60,9 @@ SCROLLBACK_LIMIT_CONFIG_KEY = "chat_scrollback_limit"
 # reason list_boards' sort order is node-wide only for now
 # — no per-user preference system exists yet.
 _DEFAULT_SCROLLBACK_LIMIT = 100
+# Per channel, and carried Link channels count too, so this bounds
+# storage other nodes can fill (issue #725).
+MAX_SCROLLBACK_LIMIT = 10_000
 
 
 @dataclass(frozen=True)
@@ -106,8 +109,8 @@ def set_scrollback_limit(db: Database, limit: int) -> None:
     """Set the node-wide scrollback retention limit, validating first —
     same immediate-feedback reasoning as
     `netbbs.timeutil.set_display_format`."""
-    if limit <= 0:
-        raise ValueError(f"scrollback limit must be positive, got {limit!r}")
+    if not 0 < limit <= MAX_SCROLLBACK_LIMIT:
+        raise ValueError(f"scrollback limit must be 1-{MAX_SCROLLBACK_LIMIT} messages, got {limit!r}")
     set_config(db, SCROLLBACK_LIMIT_CONFIG_KEY, str(limit))
 
 
