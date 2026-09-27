@@ -971,3 +971,43 @@ def test_the_signature_does_not_take_the_drawings_last_color(db, alice, monkeypa
     rows = post_body_rows(body, 80, "color", truecolor=True, layout="art")
     signature_row = next(row for row in rows if "alice" in row)
     assert "38;5;1m" not in signature_row
+
+
+def test_search_indexes_an_art_posts_painted_pipe_text(db, alice):
+    board = create_board(db, "general", creator=alice, allow_color=True)
+    create_post(db, board, alice, "Drawn", "A|12B", layout="art")
+
+    assert db.connection.execute("SELECT body FROM post_search").fetchone()[0] == "A|12B"
+
+
+def test_a_signed_art_post_reopens_with_its_signature_kept_aside(db, alice, monkeypatch):
+    """The signature never enters the canvas: it takes no canvas rows and
+    keeps its "-- " delimiter through an edit (Codex review on #753)."""
+    from netbbs.boards.posts import list_posts_page
+
+    board = create_board(db, "general", creator=alice, allow_color=True)
+    tall = "\n".join(f"row {i}" for i in range(21))  # the full canvas on 80x24
+    create_post(db, board, alice, "Drawn", tall + "\x1b[0m\n-- \nalice", layout="art")
+    seen = {}
+
+    async def _editor(session, *, initial_bytes, **kwargs):
+        seen["canvas"] = initial_bytes.decode("utf-8")
+        return initial_bytes.replace(b"\n", b"\r\n").decode("utf-8").encode("cp437")
+
+    monkeypatch.setattr(board_flow, "edit_ansi_art", _editor)
+    session = FakeSession(["1", "e", "", "s", "b", "b"])
+
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+
+    assert "-- " not in seen["canvas"] and "alice" not in seen["canvas"]
+    assert list_posts_page(db, board, alice).posts[0].body.endswith("\n-- \nalice")
+
+
+def test_a_drawing_with_underline_or_blink_is_not_reopened(db, alice):
+    board = create_board(db, "general", creator=alice, allow_color=True)
+    create_post(db, board, alice, "Blinky", "\x1b[5mblink\x1b[0m", layout="art")
+    session = FakeSession(["1", "e", "b", "b"])
+
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+
+    assert "underline or blink" in session.visible()

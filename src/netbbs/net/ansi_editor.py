@@ -155,15 +155,23 @@ async def edit_ansi_art(
     buffer = ScreenBuffer(width, height)
 
     loaded_bytes: bytes | None = None
+    from_draft = False
     if draft_path.exists() and await _offer_draft_recovery(session):
         loaded_bytes = draft_path.read_bytes()
+        from_draft = True
     else:
         if draft_path.exists():
             draft_path.unlink()
         loaded_bytes = initial_bytes
 
     if loaded_bytes is not None:
-        parse_ansi_into_buffer(decode_ansi_bytes(loaded_bytes), buffer)
+        # A draft is this editor's own output, always CP437
+        # (`encode_ansi_bytes`); only a caller's `initial_bytes` may be an
+        # external file for `decode_ansi_bytes` to guess about. Guessing on
+        # a draft read two glyphs whose bytes form UTF-8 as one other
+        # character (Codex review on #753).
+        text = loaded_bytes.decode("cp437") if from_draft else decode_ansi_bytes(loaded_bytes)
+        parse_ansi_into_buffer(text, buffer)
 
     state = _EditorState(buffer=buffer)
     autosave_task = asyncio.create_task(

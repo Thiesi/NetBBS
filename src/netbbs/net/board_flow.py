@@ -107,7 +107,12 @@ from netbbs.rendering import (
 )
 from netbbs.rendering.ansi import strip_ansi
 from netbbs.rendering.detail import Section, Styled
-from netbbs.rendering.post_body import art_body_from_editor, post_body_mode, post_body_rows
+from netbbs.rendering.post_body import (
+    art_body_from_editor,
+    art_styles_editable,
+    post_body_mode,
+    post_body_rows,
+)
 from netbbs.rendering.reflow import wrap_terminal_text
 from netbbs.rendering.width import cut_to_width, display_width, wrap_to_width
 from netbbs.signature import append_signature, get_signature
@@ -1462,7 +1467,7 @@ async def _edit_existing_post(
     # a draft slot of its own: the prose editors' recovery must never be
     # handed a canvas. One the terminal cannot hold is refused first.
     art = post.layout == "art"
-    if art and _art_canvas(session, post.body) is None:
+    if art and _art_canvas(session, _split_signature(post.body)[0]) is None:
         return  # said why; asked nothing
 
     subject = await read_prefilled_field(session, "Subject", post.subject)
@@ -1671,6 +1676,20 @@ def _post_draft_path(db: Database, *, kind: str, board: Board, user: User, root_
     return drafts_directory(db) / f"{kind}_{board.id}_{user.id}{suffix}.draft"
 
 
+# What `netbbs.signature.append_signature` puts between a body and its
+# signature.
+_SIGNATURE_DELIMITER = "\n-- \n"
+
+def _split_signature(body: str | None) -> tuple[str | None, str]:
+    """An art post's drawing and the signature block under it (the
+    delimiter included, `""` if there is none): only the drawing goes on
+    the canvas (Codex review on #753)."""
+    if not body or _SIGNATURE_DELIMITER not in body:
+        return body, ""
+    drawing, signature = body.rsplit(_SIGNATURE_DELIMITER, 1)
+    return drawing, _SIGNATURE_DELIMITER + signature
+
+
 # The smallest canvas the art editor opens on.
 _ART_MIN_WIDTH = 20
 _ART_MIN_HEIGHT = 5
@@ -1702,6 +1721,14 @@ def _art_canvas(session: Session, drawing: str | None) -> tuple[int, int] | None
                 tone="muted",
             )
             return None
+        if not art_styles_editable(drawing):
+            announce(
+                session,
+                "This drawing uses underline or blink, which the art editor cannot keep, "
+                "so it is not opened for editing.",
+                tone="muted",
+            )
+            return None
         lines = drawing.split("\n")
         drawn_width = max(display_width(strip_ansi(line)) for line in lines)
         if drawn_width > width or len(lines) > height:
@@ -1725,6 +1752,10 @@ async def _draw_body(
     open: a terminal below the editor's minimum, or one too small for the
     drawing being revised, which the canvas would cut (Codex review on
     #753)."""
+    # The signature block under a drawing is not part of the canvas: it is
+    # set aside and put back as it was, so it neither takes canvas rows nor
+    # goes through the canvas's trimming (Codex review on #753).
+    initial_text, signature_block = _split_signature(initial_text)
     # The editor resumes a draft it autosaved in place of `initial_text`;
     # that draft must fit this terminal just the same (Codex review on #753).
     recovered = art_body_from_editor(draft_path.read_bytes()) if draft_path.exists() else None
@@ -1745,7 +1776,10 @@ async def _draw_body(
     )
     if data is None:
         return None
-    return art_body_from_editor(data) or None
+    drawn = art_body_from_editor(data)
+    if not drawn:
+        return None
+    return f"{drawn}\x1b[0m{signature_block}" if signature_block else drawn
 
 
 async def _compose_body(

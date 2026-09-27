@@ -693,3 +693,18 @@ def test_a_cancelled_edit_keeps_what_was_drawn_since_the_last_autosave(tmp_path)
     task = asyncio.run(scenario())
     assert task.cancelled()
     assert _buffer_from(draft.read_bytes()).get_cell(0, 0).char == "A"
+
+
+
+def test_a_recovered_draft_is_read_as_the_cp437_the_editor_wrote(tmp_path):
+    """Its bytes C3 A9 are two CP437 glyphs, and also UTF-8 for another
+    character (Codex review on #753)."""
+    draft = tmp_path / "d.draft"
+    draft.write_bytes("\u251c\u2310".encode("cp437"))
+
+    async def scenario():
+        session = FakeSession(["y", "CTRL+O"])
+        return await edit_ansi_art(session, initial_bytes=None, draft_path=draft, autosave_interval_seconds=9999)
+
+    saved = asyncio.run(scenario())
+    assert saved.decode("cp437").startswith("\x1b[0m\u251c\u2310")

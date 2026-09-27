@@ -503,6 +503,35 @@ def art_body_from_editor(data: bytes) -> str:
     return "\n".join(trimmed)
 
 
+def art_styles_editable(drawing: str) -> bool:
+    """Whether the art editor can hold `drawing`'s styles. Its canvas keeps
+    foreground, background and bold per cell; underline and blink -- both
+    allowed in a post, and possible in one carried from elsewhere -- would
+    be lost by saving (Codex review on #753)."""
+    for match in _SGR_RE.finditer(drawing):
+        params = _sgr_params(match.group(1))
+        if params is None:
+            continue
+        index = 0
+        while index < len(params):
+            code = params[index]
+            if code in (38, 48):
+                mode = params[index + 1] if index + 1 < len(params) else None
+                index += 3 if mode == 5 else 5 if mode == 2 else len(params)
+                continue
+            if code in (4, 5):
+                return False
+            index += 1
+    return True
+
+
+def indexed_post_body(body: str, layout: str) -> str:
+    """What search indexes for a body: its plain text -- and for an art
+    post, whose characters are what was painted, pipe-code-shaped text
+    stays (Codex review on #753)."""
+    return post_body_text(body) if layout == "art" else plain_post_body(body)
+
+
 def art_body_rows(rendered: str, width: int) -> list[str]:
     """An art post's rendered body as rows at `width`: every line stays a
     line; only a line wider than `width` wraps, cut at the column, not at
