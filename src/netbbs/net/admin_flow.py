@@ -590,6 +590,7 @@ from netbbs.guest import (
     set_pre_login_notice,
     set_pre_login_notice_without_commit,
 )
+from netbbs.search import SearchIndexIntegrityReport, check_index_integrity, rebuild_indexes
 from netbbs.session_history import previous_callers_enabled, set_previous_callers_enabled
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
@@ -1848,6 +1849,16 @@ async def _draw_users_menu(session: Session, *, stats: dict[str, Any]) -> None:
 # -- system submenu ----------------------------------------------------------
 
 
+def _diagnostics_available(node_controls: NodeControls | None, link_context: LinkContext | None) -> bool:
+    """Whether the bounded diagnostic log is worth offering.
+
+    It is written by Link *and* by the MRC bridge (issue #275), and MRC can
+    be switched on live without Link -- so on any running node the log is
+    worth reading. Operations and Settings' hidden aliases share this one
+    gate (issue #732: Settings once required Link alone)."""
+    return link_context is not None or node_controls is not None
+
+
 async def _operations_menu(
     session: Session,
     lane: DatabaseLane,
@@ -1879,7 +1890,7 @@ async def _operations_menu(
     # part of this snapshot -- they read `node_controls` directly, in
     # memory, so recomputing them every loop iteration is free.
     state = await lane.run(_load_ops)
-    diagnostics_available = link_context is not None or node_controls is not None
+    diagnostics_available = _diagnostics_available(node_controls, link_context)
     while True:
         unicode_style = state["unicode_style"]
         collapsed = state["collapsed"]
@@ -2015,6 +2026,7 @@ async def _operations_menu(
         options = [
             MenuEntry(label=menu_key("K", "up", prefix="Bac"), brief="Create and review complete backups"),
             MenuEntry(label=menu_key("P", "rune drafts"), brief="Clean up old unsaved drafts"),
+            MenuEntry(label=menu_key("S", "earch indexes"), brief="Check and rebuild Find's indexes"),
             MenuEntry(label=menu_key("A", "udit log"), brief="Moderation action history"),
             MenuEntry(label=menu_key("g", prefix="Node lo"), brief="Warnings and errors in netbbs.log"),
         ]
@@ -2025,9 +2037,6 @@ async def _operations_menu(
                 MenuEntry(label=menu_key("L", "ink status"), brief="NetBBS Link peer/network health"),
                 MenuEntry(label=menu_key("O", "utbox"), brief="Pending outgoing Link work items"),
             ])
-        # The bounded diagnostic log is written by Link *and* by the MRC
-        # bridge (issue #275), and MRC can be switched on live without
-        # Link -- so on any running node the log is worth reading.
         if diagnostics_available:
             options.extend([
                 MenuEntry(label=menu_key("D", "iagnostics"), brief="Recent Link and MRC diagnostics"),
@@ -2089,6 +2098,9 @@ async def _operations_menu(
             state = await lane.run(_load_ops)
         elif choice == "p":
             await _prune_drafts_screen(session, lane, actor)
+            state = await lane.run(_load_ops)
+        elif choice == "s":
+            await _search_indexes_screen(session, lane, actor)
             state = await lane.run(_load_ops)
         elif choice == "a":
             await _audit_log_screen(session, lane, actor)
@@ -2221,12 +2233,12 @@ async def _system_menu(
             await _repair_carried_posts_screen(session, lane, actor)
             stats = await lane.run(_load_settings_stats)
             await _draw_system_menu(session, node_controls, link_context, stats=stats)
-        elif choice == "d" and link_context is not None:
+        elif choice == "d" and _diagnostics_available(node_controls, link_context):
             await session.write_line("")
             await _diagnostic_log_screen(session, lane, actor)
             stats = await lane.run(_load_settings_stats)
             await _draw_system_menu(session, node_controls, link_context, stats=stats)
-        elif choice == "f" and link_context is not None:
+        elif choice == "f" and _diagnostics_available(node_controls, link_context):
             await session.write_line("")
             await _diagnostic_log_tail_screen(session, lane)
             stats = await lane.run(_load_settings_stats)
@@ -8967,6 +8979,93 @@ async def _prune_drafts_screen(session: Session, lane: DatabaseLane, actor: User
         if choice == "b":
             return
         report = await lane.run(prune_stale_drafts, dry_run=False)
+
+
+_SEARCH_INDEX_LABELS = (
+    ("posts", "Message posts"),
+    ("files", "Files"),
+    ("channel_messages", "Chat messages"),
+)
+
+
+def _search_index_section(report: SearchIndexIntegrityReport) -> Section:
+    """Counts only, never the drifted ids or text -- the same rule the CLI
+    and `IndexDrift` keep, so the screen can't become a way to read
+    content the SysOp's own access wouldn't show them."""
+    rows: list[Field | Note] = []
+    for attribute, label in _SEARCH_INDEX_LABELS:
+        drift = getattr(report, attribute)
+        if drift.is_clean:
+            rows.append(Field(label, "consistent", color=SUCCESS_COLOR))
+        else:
+            rows.append(Field(
+                label,
+                f"{len(drift.missing)} missing, {len(drift.stale)} stale, {len(drift.extra)} extra",
+                color=WARNING_COLOR, bold=True,
+            ))
+    if not report.is_clean:
+        rows.append(Note(
+            "Find leaves out missing and stale entries and can list removed ones. "
+            "Rebuild replaces the indexes from the posts, files and messages themselves."
+        ))
+    return Section("Check", rows)
+
+
+def _rebuild_search_indexes(db: Database, actor: User) -> tuple[int, SearchIndexIntegrityReport]:
+    """Rebuild, audit, and re-check: how many entries were wrong, and the check after."""
+    before = rebuild_indexes(db)
+    fixed = sum(
+        len(drift.missing) + len(drift.stale) + len(drift.extra)
+        for drift in (before.posts, before.files, before.channel_messages)
+    )
+    record_action(db, actor=actor, action="rebuild_search_indexes", detail=f"entries corrected={fixed}")
+    return fixed, check_index_integrity(db)
+
+
+async def _search_indexes_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
+    """
+    `python -m netbbs.search check|rebuild` (issue #74) from the console
+    (issue #724). Checks on entry, the way Prune drafts shows its dry run:
+    the comparison is a read of the node's own content, and a SysOp who
+    opened this screen came to see it.
+
+    Rebuild is a hotkey without a yes/no, like Repair carried posts: it
+    only rewrites derived rows from authoritative data and converges to a
+    clean check, so there is nothing a SysOp could lose by pressing it.
+    Both run on the database lane's worker thread, never the event loop;
+    a rebuild is one write transaction, so other writers wait for it the
+    way they wait for any other.
+    """
+    chrome = await _load_chrome(lane, actor)
+    report = await lane.run(check_index_integrity)
+    while True:
+        actions = [("c", menu_key("C", "heck again")), _BACK_ACTION]
+        if not report.is_clean:
+            actions.insert(0, ("r", menu_key("R", "ebuild")))
+        choice, _page = await show_detail(
+            session,
+            title=_detail_title(
+                session, chrome, "Search indexes", breadcrumb=("SysOp", "Operations"),
+                subtitle="What Find searches, compared with the content it indexes.",
+            ),
+            sections=[_search_index_section(report)], actions=actions,
+            redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+        )
+        if choice == "b":
+            return
+        if choice == "r":
+            fixed, report = await lane.run(_rebuild_search_indexes, actor)
+            if not report.is_clean:
+                # Content changed between the rebuild and the re-check --
+                # a post approved in that instant. Rare, and a second
+                # rebuild settles it; say so rather than claim success.
+                _announce(session, "Rebuilt, but new content arrived meanwhile; rebuild again.", error=True)
+            elif fixed:
+                _announce(session, f"Rebuilt the search indexes: {fixed} entr{'y' if fixed == 1 else 'ies'} corrected.")
+            else:
+                _announce(session, "No drift found; rebuilt anyway.")
+        else:
+            report = await lane.run(check_index_integrity)
 
 
 async def _revoke_live_sessions(
