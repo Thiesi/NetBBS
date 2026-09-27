@@ -819,3 +819,41 @@ def test_rejecting_a_local_post_records_it_too(db, sysop, alice):
     assert db.connection.execute(
         "SELECT board_id FROM post_rejections WHERE post_id = ?", (held.post_id,)
     ).fetchone()[0] == board.id
+
+
+
+def test_the_migration_keeps_rejections_made_before_it(tmp_path, monkeypatch, remote):
+    """The moderation log already names every rejected post; a repair right
+    after upgrading must not republish them (Codex review on #780)."""
+    from netbbs.boards.posts import delete_post
+    from netbbs.storage import database as database_module
+    from netbbs.storage.migrations import MIGRATIONS
+
+    index = next(i for i, m in enumerate(MIGRATIONS) if "post_rejections" in m.description)
+    monkeypatch.setattr(database_module, "MIGRATIONS", MIGRATIONS[:index])
+    # Today's materialization asks the table this schema does not have yet.
+    import netbbs.link.boards as link_boards
+
+    monkeypatch.setattr(link_boards, "_rejected_here", lambda db, content_id: False)
+    path = tmp_path / "node.db"
+    old = Database(path)
+    sysop = create_user(old, "sysop", password="hunter2", user_level=SYSOP_LEVEL)
+    _carried_board(old, remote, moderated=True)
+    held = _carry(old, remote, subject="refused")
+    # What delete_post did before #692: log, delete, nothing else.
+    old.connection.execute("DELETE FROM posts WHERE post_id = ?", (held.post_id,))
+    old.connection.execute(
+        "INSERT INTO moderation_log (actor_user_id, action, object_type, object_id, detail, created_at) "
+        "VALUES (?, 'reject', 'board', ?, ?, ?)",
+        (sysop.id, held.board_id, held.post_id, NOW),
+    )
+    old.connection.commit()
+    old.close()
+    monkeypatch.undo()
+
+    db = Database(path)
+    try:
+        _rebuild(db)
+        assert _post_row(db, held.post_id) is None
+    finally:
+        db.close()

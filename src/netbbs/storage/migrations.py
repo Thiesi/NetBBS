@@ -3192,7 +3192,8 @@ MIGRATIONS = [
             "its event's content id), with who, when and an optional reason. Rejecting still "
             "deletes the post row; this record is what makes the decision last. A carried "
             "post's signed event is kept (§9.3), so without it `[R]epair carried posts` "
-            "re-materialized, and published, the post the moderator refused."
+            "re-materialized, and published, the post the moderator refused. Earlier "
+            "rejections are taken from the moderation log."
         ),
         sql="""
         CREATE TABLE post_rejections (
@@ -3202,6 +3203,17 @@ MIGRATIONS = [
             rejected_at          TEXT NOT NULL,
             reason               TEXT
         );
+
+        -- Rejections made before this table existed are in the moderation
+        -- log (`delete_post` logged each with the post id as its detail).
+        -- Without them the first repair after upgrading would republish
+        -- every post already refused.
+        INSERT OR IGNORE INTO post_rejections (post_id, board_id, rejected_by_user_id, rejected_at)
+        SELECT m.detail, m.object_id, m.actor_user_id, m.created_at
+          FROM moderation_log m
+         WHERE m.action = 'reject' AND m.object_type = 'board' AND m.detail IS NOT NULL
+           AND m.object_id IN (SELECT id FROM boards)
+         ORDER BY m.id;
         """,
     ),
 ]
