@@ -31,11 +31,14 @@ as it was, and a caller never sees half a banner.
 
 from __future__ import annotations
 
+import logging
 import os
 import secrets
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
+
+_logger = logging.getLogger(__name__)
 
 BANNER = "banner"
 DOOR_FILE = "door_file"
@@ -60,6 +63,10 @@ class SysOpUploadTarget:
     label: str
     #: The `moderation.log` action recorded when it lands.
     audit_action: str
+    #: Whether the SysOp agreed to replace a file already there. Checked again
+    #: when the bytes arrive: a file that appeared at the destination since
+    #: (another session's upload) is not overwritten on a consent never given.
+    replaces: bool = False
 
 
 def door_filename_error(name: str) -> str | None:
@@ -101,7 +108,12 @@ def install_upload(target: SysOpUploadTarget, source: Path) -> int:
     Copied rather than renamed into the destination directory, because the
     staging area and the doors directory need not share a filesystem; the
     copy lands under a temporary name beside the destination and is then
-    renamed over it, which is atomic on one filesystem."""
+    renamed over it, which is atomic on one filesystem. A replaced file's
+    permission bits carry over to its successor, so a door that was
+    executable stays executable.
+
+    Cleanup never replaces the outcome: a leftover temporary or staging file
+    is logged, not raised, whether the install succeeded or failed."""
     try:
         size = source.stat().st_size
         if size == 0:
@@ -113,16 +125,30 @@ def install_upload(target: SysOpUploadTarget, source: Path) -> int:
         problem = destination_problem(target.destination)
         if problem is not None:
             raise SysOpUploadError(problem)
+        if target.destination.exists() and not target.replaces:
+            raise SysOpUploadError(
+                f"{target.destination.name} appeared since you started this upload; nothing was replaced. "
+                "Upload again to replace it."
+            )
         target.destination.parent.mkdir(parents=True, exist_ok=True)
         partial = target.destination.with_name(
             f".{target.destination.name}.upload-{secrets.token_hex(4)}"
         )
         try:
             shutil.copyfile(source, partial)
+            if target.destination.exists():
+                shutil.copymode(target.destination, partial)
             os.replace(partial, target.destination)
         except BaseException:
-            partial.unlink(missing_ok=True)
+            _discard(partial)
             raise
         return size
     finally:
-        source.unlink(missing_ok=True)
+        _discard(source)
+
+
+def _discard(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as exc:
+        _logger.warning("could not remove %s: %s", path, exc)

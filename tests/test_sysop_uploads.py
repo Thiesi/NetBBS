@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from pathlib import Path
 
 import pytest
 
@@ -37,10 +38,10 @@ from tests.test_file_flow_upload_integration import _BytePipe, _ClientSession, _
 from tests.test_file_transfer_http import _Node  # noqa: E402
 
 
-def _target(tmp_path, name="art.ans", *, max_bytes=1024, kind=BANNER):
+def _target(tmp_path, name="art.ans", *, max_bytes=1024, kind=BANNER, replaces=False):
     return SysOpUploadTarget(
         kind=kind, destination=tmp_path / "dest" / name, max_bytes=max_bytes,
-        label="the test piece", audit_action="upload_test",
+        label="the test piece", audit_action="upload_test", replaces=replaces,
     )
 
 
@@ -76,7 +77,7 @@ def test_install_writes_the_destination_and_consumes_the_staged_file(tmp_path):
 
 
 def test_install_refuses_an_oversize_file_and_leaves_the_old_one(tmp_path):
-    target = _target(tmp_path, max_bytes=10)
+    target = _target(tmp_path, max_bytes=10, replaces=True)
     target.destination.parent.mkdir()
     target.destination.write_bytes(b"old")
     source = _staged(tmp_path, b"x" * 11)
@@ -86,6 +87,50 @@ def test_install_refuses_an_oversize_file_and_leaves_the_old_one(tmp_path):
 
     assert target.destination.read_bytes() == b"old"
     assert not source.exists()
+
+
+def test_install_does_not_replace_a_file_nobody_agreed_to_replace(tmp_path):
+    """Consent is given against the destination as it was; a file that
+    appeared since (another session's upload) is left alone."""
+    target = _target(tmp_path, replaces=False)
+    target.destination.parent.mkdir()
+    target.destination.write_bytes(b"someone else's")
+
+    with pytest.raises(SysOpUploadError, match="appeared since"):
+        install_upload(target, _staged(tmp_path, b"mine"))
+
+    assert target.destination.read_bytes() == b"someone else's"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="execute bits are a POSIX notion")
+def test_replacing_keeps_the_old_files_permission_bits(tmp_path):
+    target = _target(tmp_path, "door.sh", replaces=True)
+    target.destination.parent.mkdir()
+    target.destination.write_bytes(b"#!/bin/sh\necho old\n")
+    os.chmod(target.destination, 0o750)
+
+    install_upload(target, _staged(tmp_path, b"#!/bin/sh\necho new\n"))
+
+    assert target.destination.read_bytes().endswith(b"new\n")
+    assert target.destination.stat().st_mode & 0o777 == 0o750
+
+
+def test_a_failing_cleanup_does_not_turn_a_landed_upload_into_a_failure(tmp_path, monkeypatch):
+    import netbbs.sysop_uploads as module
+
+    target = _target(tmp_path)
+    source = _staged(tmp_path, b"ART")
+    real_unlink = Path.unlink
+
+    def _stubborn(self, *args, **kwargs):
+        if self == source:
+            raise PermissionError("held open")
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(module.Path, "unlink", _stubborn)
+
+    assert install_upload(target, source) == 3
+    assert target.destination.read_bytes() == b"ART"
 
 
 def test_install_refuses_an_empty_file(tmp_path):
@@ -257,9 +302,55 @@ def test_no_public_url_mints_nothing_and_promises_nothing(db, lane, sysop):
     ))
 
     text = " ".join(_announced_text(session).split())
-    assert "no public web address" in text
+    assert "public_url" in text
     assert "saved as" not in text
     assert len(grants._grants) == 0
+
+
+def test_no_public_url_is_refused_before_a_name_is_asked(db, lane, sysop):
+    """A console that cannot be handed a link says so first, rather than
+    after asking for a filename and a replacement it could never act on."""
+    session = FakeSession([])  # no scripted input: any prompt would fail the test
+    _browser_console(session, base_url=None)
+
+    asyncio.run(admin_flow._upload_door_file_screen(session, lane, sysop))
+
+    assert "public_url" in " ".join(_announced_text(session).split())
+
+
+def test_a_session_torn_down_mid_install_still_audits_what_landed(db, lane, sysop, monkeypatch, tmp_path):
+    """A running copy cannot be cancelled; the audit record of a file that
+    lands anyway must not be skipped with the session."""
+    import threading
+
+    import netbbs.net.admin_flow as module
+
+    release = threading.Event()
+    started = threading.Event()
+    real_install = module.install_upload
+
+    def _slow_install(target, source):
+        started.set()
+        release.wait(5)
+        return real_install(target, source)
+
+    monkeypatch.setattr(module, "install_upload", _slow_install)
+    target = _target(tmp_path)
+    source = _staged(tmp_path, b"ART")
+
+    async def scenario():
+        task = asyncio.create_task(module._install_and_record(lane, sysop, target, source, sent_as="a.ans"))
+        await asyncio.to_thread(started.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0.05)
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+
+    assert target.destination.read_bytes() == b"ART"
+    assert [a.action for a in list_recent_actions(db)].count("upload_test") == 1
 
 
 def test_banner_upload_over_zmodem_lands_audited_and_not_enabled(db, lane, sysop):
