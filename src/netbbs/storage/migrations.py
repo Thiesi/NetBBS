@@ -3193,7 +3193,9 @@ MIGRATIONS = [
             "pre-edit text. Every revision now carries its root's flags: a flag already "
             "set on any revision moves to the root, the root's flags are copied to its "
             "revisions, and a trigger gives every new revision -- local or carried -- its "
-            "root's flags."
+            "root's flags. A removed (tombstoned) post is neither pinned nor kept: removal "
+            "clears both, so the placeholder neither stays at the top of the board nor "
+            "outlives the board's expiry."
         ),
         sql="""
         UPDATE posts SET pinned = 1
@@ -3217,6 +3219,12 @@ MIGRATIONS = [
             )
          WHERE post_id != root_post_id
            AND EXISTS (SELECT 1 FROM posts r WHERE r.post_id = posts.root_post_id AND r.board_id = posts.board_id);
+        UPDATE posts SET pinned = 0, exempt_from_expiry = 0
+         WHERE EXISTS (
+             SELECT 1 FROM posts t
+              WHERE t.root_post_id = posts.root_post_id AND t.board_id = posts.board_id
+                AND t.tombstoned_at IS NOT NULL
+         );
 
         CREATE TRIGGER trg_posts_revision_flags AFTER INSERT ON posts
         WHEN NEW.post_id != NEW.root_post_id
@@ -3230,6 +3238,13 @@ MIGRATIONS = [
                       WHERE r.post_id = NEW.root_post_id AND r.board_id = NEW.board_id), 0
                 )
             WHERE id = NEW.id;
+        END;
+
+        CREATE TRIGGER trg_posts_tombstone_clears_flags AFTER INSERT ON posts
+        WHEN NEW.tombstoned_at IS NOT NULL
+        BEGIN
+            UPDATE posts SET pinned = 0, exempt_from_expiry = 0
+            WHERE root_post_id = NEW.root_post_id AND board_id = NEW.board_id;
         END;
         """,
     ),

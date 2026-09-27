@@ -1083,9 +1083,19 @@ async def _show_area(
                 if not can_edit_any_file or (kind == "keep" and not _keep_offered(area, page)):
                     await _reject_after_echo(session)
                     continue
+                candidates, cursor = page, highlighted
+                if kind == "keep" and area.max_file_age_days is None:
+                    # Where files no longer expire, [K]eep only undoes a
+                    # past exemption: making a new one would quietly keep
+                    # a file should expiry be turned back on (Codex review
+                    # on #783).
+                    kept = [entry for entry in page.entries if entry.exempt_from_expiry]
+                    on = page.entries[highlighted] if highlighted is not None and highlighted < len(page.entries) else None
+                    cursor = kept.index(on) if on in kept else None
+                    candidates = replace(page, entries=kept, pinned_count=0, feed_bounds=None)
                 entry = await _choose_entry(
-                    session, lane, user, page,
-                    highlighted=highlighted,
+                    session, lane, user, candidates,
+                    highlighted=cursor,
                     title=f"{'Pin or unpin' if kind == 'pin' else 'Keep or stop keeping'} a file in {area_name}",
                     empty_message="No files here.",
                     description_of=_download_choice_description,

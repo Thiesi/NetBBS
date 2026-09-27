@@ -84,7 +84,16 @@ def _age(db, table: str, row_id: int, days: int) -> None:
 # -- the board page ------------------------------------------------------------
 
 
-def test_a_pinned_post_is_listed_first_on_the_newest_page_only(db, mod, monkeypatch):
+def _older_pages(db, board, user, page, limit):
+    seen = []
+    while page.has_older:
+        page = list_posts_page(db, board, user, limit=limit, before=page.oldest_cursor, with_pinned=True)
+        assert page.pinned_count == 0
+        seen += [p.subject for p in page.posts]
+    return seen
+
+
+def test_a_pinned_post_is_listed_first_on_the_page_a_board_opens_on(db, mod, monkeypatch):
     board = _board(db, mod)
     made = _posts(db, board, mod, 12, monkeypatch)
     set_post_pinned(db, made[0], True, changed_by=mod)
@@ -94,19 +103,40 @@ def test_a_pinned_post_is_listed_first_on_the_newest_page_only(db, mod, monkeypa
     assert [p.subject for p in newest.posts] == ["Subject 0", "Subject 8", "Subject 9", "Subject 10", "Subject 11"]
     # The cursors are the feed's, not the pinned post's.
     assert newest.oldest_cursor == (made[8].created_at, made[8].post_id)
-
-    # Paging back never shows it again: it has left the dated feed.
-    seen = []
-    page = newest
-    while page.has_older:
-        page = list_posts_page(db, board, mod, limit=5, before=page.oldest_cursor, with_pinned=True)
-        assert page.pinned_count == 0
-        seen += [p.subject for p in page.posts]
-    assert "Subject 0" not in seen
-    assert sorted(seen, key=lambda s: int(s.split()[1])) == [f"Subject {i}" for i in range(1, 8)]
+    # It stays in the dated feed too, where it was posted.
+    seen = _older_pages(db, board, mod, newest, 5)
+    assert sorted(seen, key=lambda s: int(s.split()[1])) == [f"Subject {i}" for i in range(0, 8)]
 
 
-def test_pinned_posts_take_at_most_half_the_page(db, mod, monkeypatch):
+def test_the_newest_page_does_not_list_a_shown_pin_twice(db, mod, monkeypatch):
+    board = _board(db, mod)
+    made = _posts(db, board, mod, 4, monkeypatch)
+    set_post_pinned(db, made[3], True, changed_by=mod)
+    page = list_posts_page(db, board, mod, limit=5, with_pinned=True)
+    assert [p.subject for p in page.posts] == ["Subject 3", "Subject 0", "Subject 1", "Subject 2"]
+    assert not page.has_newer and not page.has_older
+
+
+def test_a_page_reached_by_a_cursor_has_no_pinned_block(db, mod, monkeypatch):
+    """A [N]ew scan or [F]ind jump opens on its target, not on old pins
+    (Codex review on #783)."""
+    board = _board(db, mod)
+    made = _posts(db, board, mod, 6, monkeypatch)
+    set_post_pinned(db, made[0], True, changed_by=mod)
+    jumped = list_posts_page(
+        db, board, mod, limit=5, after=(made[3].created_at, made[3].post_id), with_pinned=True
+    )
+    assert jumped.pinned_count == 0
+    assert [p.subject for p in jumped.posts] == ["Subject 4", "Subject 5"]
+    caught_up = list_posts_page(
+        db, board, mod, limit=5, after=(made[5].created_at, made[5].post_id), with_pinned=True
+    )
+    assert caught_up.posts == []
+
+
+def test_pins_past_the_page_share_are_still_reached_by_paging(db, mod, monkeypatch):
+    """More pins than half the page: the rest are not lost (Codex review
+    on #783) -- they are in the dated feed where they were posted."""
     board = _board(db, mod)
     made = _posts(db, board, mod, 10, monkeypatch)
     for post in made[:6]:
@@ -114,11 +144,12 @@ def test_pinned_posts_take_at_most_half_the_page(db, mod, monkeypatch):
 
     page = list_posts_page(db, board, mod, limit=6, with_pinned=True)
     assert page.pinned_count == 3
-    assert len(page.posts) == 6
-    # The feed posts they displaced are on the page before.
-    assert page.has_older
-    older = list_posts_page(db, board, mod, limit=6, before=page.oldest_cursor, with_pinned=True)
-    assert [p.subject for p in older.posts] == ["Subject 6"]
+    assert [p.subject for p in page.posts] == [
+        "Subject 0", "Subject 1", "Subject 2", "Subject 7", "Subject 8", "Subject 9",
+    ]
+    seen = _older_pages(db, board, mod, page, 6)
+    for pin in ("Subject 3", "Subject 4", "Subject 5"):
+        assert pin in seen
 
 
 def test_a_board_of_only_pinned_posts_still_lists_them(db, mod):
@@ -128,7 +159,7 @@ def test_a_board_of_only_pinned_posts_still_lists_them(db, mod):
     page = list_posts_page(db, board, mod, limit=5, with_pinned=True)
     assert [p.subject for p in page.posts] == ["Rules"]
     assert page.pinned_count == 1
-    assert page.oldest_cursor is None and not page.has_older
+    assert not page.has_older and not page.has_newer
 
 
 def test_without_with_pinned_the_feed_is_unchanged(db, mod, monkeypatch):
@@ -170,6 +201,26 @@ def test_an_exempt_post_keeps_its_edited_text_when_the_edit_would_expire(db, mod
 
     page = list_posts_page(db, board, mod, with_pinned=True)
     assert [p.body for p in page.posts] == ["new text"]
+
+
+def test_removing_a_post_clears_its_pin_and_keep(db, mod):
+    """A removed post's placeholder must neither stay at the top nor
+    outlive expiry (Codex review on #783)."""
+    from netbbs.boards.posts import tombstone_post
+
+    board = _board(db, mod)
+    grant_permissions(
+        db, mod, object_type="board", object_id=board.id, permissions=BoardPermission.DELETE, granted_by=mod
+    )
+    post = create_post(db, board, mod, "Rules", "v1")
+    set_post_pinned(db, post, True, changed_by=mod)
+    set_post_exempt(db, post, True, changed_by=mod)
+    tombstone_post(db, get_post(db, post.post_id), board, tombstoned_by=mod)
+    rows = db.connection.execute(
+        "SELECT pinned, exempt_from_expiry FROM posts WHERE root_post_id = ?", (post.post_id,)
+    ).fetchall()
+    assert all((r["pinned"], r["exempt_from_expiry"]) == (0, 0) for r in rows)
+    assert list_pinned_posts(db, board, requesting_user=mod) == []
 
 
 def test_list_pinned_posts_skips_one_with_no_approved_revision(db, mod):
@@ -232,8 +283,31 @@ def test_a_pinned_file_is_listed_first_on_the_newest_page(db, mod, monkeypatch):
     page = list_files_page(db, area, mod, limit=4, with_pinned=True)
     assert page.pinned_count == 1
     assert [e.filename for e in page.entries] == ["f0.txt", "f5.txt", "f6.txt", "f7.txt"]
-    older = list_files_page(db, area, mod, limit=4, before=page.oldest_cursor, with_pinned=True)
-    assert "f0.txt" not in [e.filename for e in older.entries]
+    seen = []
+    while page.has_older:
+        page = list_files_page(db, area, mod, limit=4, before=page.oldest_cursor, with_pinned=True)
+        assert page.pinned_count == 0
+        seen += [e.filename for e in page.entries]
+    assert sorted(seen) == [f"f{i}.txt" for i in range(5)]
+    # A jump lands on its target, with no pinned block.
+    assert list_files_page(db, area, mod, limit=4, after=(files[1].created_at, files[1].file_id), with_pinned=True).pinned_count == 0
+
+
+def test_a_file_flag_lands_on_the_file_named_not_a_reused_row(db, mod):
+    """`files.id` is a rowid a later upload may reuse; the setters act on
+    the content-addressed `file_id` (Codex review on #783)."""
+    import dataclasses
+
+    area = create_file_area(db, "downloads", creator=mod)
+    grant_permissions(
+        db, mod, object_type="file_area", object_id=area.id, permissions=BoardPermission.EDIT, granted_by=mod
+    )
+    first = upload_file(db, area, mod, "a.txt", b"a")
+    second = upload_file(db, area, mod, "b.txt", b"b")
+    stale = dataclasses.replace(first, id=second.id)
+    set_file_pinned(db, stale, True, changed_by=mod)
+    pinned = {row["filename"]: row["pinned"] for row in db.connection.execute("SELECT filename, pinned FROM files")}
+    assert pinned == {"a.txt": 1, "b.txt": 0}
 
 
 # -- the screens ------------------------------------------------------------------
@@ -357,6 +431,35 @@ class FileSession:
 
     def visible(self) -> str:
         return _SGR.sub("", "".join(self.written))
+
+
+def test_keep_only_undoes_old_exemptions_where_files_no_longer_expire(tmp_path, monkeypatch):
+    """With expiry off, [K]eep offers the kept files only, so it cannot
+    make a new exemption (Codex review on #783)."""
+    path = tmp_path / "node.db"
+    db = Database(path)
+    mod = create_user(db, "mod", password="hunter2", user_level=10)
+    area = create_file_area(db, "downloads", creator=mod)
+    grant_permissions(
+        db, mod, object_type="file_area", object_id=area.id, permissions=BoardPermission.EDIT, granted_by=mod
+    )
+    stamps = iter(f"2026-01-01T00:00:{i:02d}.000000Z" for i in range(2))
+    monkeypatch.setattr(entries_module, "utc_now_iso", lambda: next(stamps))
+    kept = upload_file(db, area, mod, "kept.txt", b"k")
+    upload_file(db, area, mod, "plain.txt", b"p")
+    monkeypatch.undo()
+    db.connection.execute("UPDATE files SET exempt_from_expiry = 1 WHERE id = ?", (kept.id,))
+    db.connection.commit()
+    lane = DatabaseLane(path)
+    try:
+        # Highlight plain.txt (the second row), then [K]eep.
+        session = FileSession(["DOWN", "DOWN", "k", "b"])
+        asyncio.run(_show_area(session, lane, area, mod))
+    finally:
+        lane.close()
+    flags = {r["filename"]: r["exempt_from_expiry"] for r in db.connection.execute("SELECT filename, exempt_from_expiry FROM files")}
+    assert flags == {"kept.txt": 0, "plain.txt": 0}
+    db.close()
 
 
 def test_a_moderator_pins_the_highlighted_file(tmp_path, monkeypatch):

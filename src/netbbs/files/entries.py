@@ -271,18 +271,24 @@ class FileEntryPage:
     has_older: bool
     has_newer: bool
     # Issue #675: how many of `entries`, from the front, are pinned files
-    # listed above the dated feed -- see `netbbs.boards.posts.PostPage`.
+    # listed first, and the feed's own cursors -- see
+    # `netbbs.boards.posts.PostPage`.
     pinned_count: int = 0
+    feed_bounds: tuple[FileEntryCursor, FileEntryCursor] | None = None
 
     @property
     def oldest_cursor(self) -> FileEntryCursor | None:
-        """The cursor for the page before this one: the oldest feed file."""
+        """The cursor for the page before this one."""
+        if self.feed_bounds is not None:
+            return self.feed_bounds[0]
         feed = self.entries[self.pinned_count:]
         return (feed[0].created_at, feed[0].file_id) if feed else None
 
     @property
     def newest_cursor(self) -> FileEntryCursor | None:
-        """The cursor for the page after this one: the newest feed file."""
+        """The cursor for the page after this one."""
+        if self.feed_bounds is not None:
+            return self.feed_bounds[1]
         feed = self.entries[self.pinned_count:]
         return (feed[-1].created_at, feed[-1].file_id) if feed else None
 
@@ -328,23 +334,22 @@ def list_files_page(
     period ends. Sweeps the area's own files for expiry/deletion first
     (`_sweep_expired_files`).
 
-    `with_pinned` (issue #675): pinned files leave the dated feed and are
-    listed first on the newest page, as `list_posts_page(with_pinned=True)`
-    does for posts.
+    `with_pinned` (issue #675): on the page an area opens on, pinned files
+    are listed first, exactly as `list_posts_page(with_pinned=True)` lists
+    pinned posts -- see there. They stay in the dated feed too.
     """
     require_level(requesting_user, area.min_read_level)
     if before is not None and after is not None:
         raise ValueError("specify at most one of before/after")
 
     _sweep_expired_files(db, area)
-    feed_sql = "AND pinned = 0" if with_pinned else ""
 
     if after is not None:
         created_at, file_id = after
         rows = db.connection.execute(
-            f"""
+            """
             SELECT * FROM files
-            WHERE area_id = ? AND status = 'approved' {feed_sql} AND (created_at, file_id) > (?, ?)
+            WHERE area_id = ? AND status = 'approved' AND (created_at, file_id) > (?, ?)
             ORDER BY created_at ASC, file_id ASC
             LIMIT ?
             """,
@@ -354,9 +359,9 @@ def list_files_page(
     elif before is not None:
         created_at, file_id = before
         rows = db.connection.execute(
-            f"""
+            """
             SELECT * FROM files
-            WHERE area_id = ? AND status = 'approved' {feed_sql} AND (created_at, file_id) < (?, ?)
+            WHERE area_id = ? AND status = 'approved' AND (created_at, file_id) < (?, ?)
             ORDER BY created_at DESC, file_id DESC
             LIMIT ?
             """,
@@ -365,9 +370,9 @@ def list_files_page(
         entries = [_row_to_file_entry(row) for row in reversed(rows)]
     else:
         rows = db.connection.execute(
-            f"""
+            """
             SELECT * FROM files
-            WHERE area_id = ? AND status = 'approved' {feed_sql}
+            WHERE area_id = ? AND status = 'approved'
             ORDER BY created_at DESC, file_id DESC
             LIMIT ?
             """,
@@ -377,50 +382,68 @@ def list_files_page(
 
     if not entries:
         return _with_pinned_files(
-            db, area, requesting_user, [], has_older=False, has_newer=False, limit=limit, with_pinned=with_pinned
+            db, area, requesting_user, [], has_older=False, has_newer=False, limit=limit,
+            landing=with_pinned and before is None and after is None,
         )
 
     oldest, newest = entries[0], entries[-1]
     has_older = db.connection.execute(
-        f"""
+        """
         SELECT EXISTS(
             SELECT 1 FROM files
-            WHERE area_id = ? AND status = 'approved' {feed_sql} AND (created_at, file_id) < (?, ?)
+            WHERE area_id = ? AND status = 'approved' AND (created_at, file_id) < (?, ?)
         )
         """,
         (area.id, oldest.created_at, oldest.file_id),
     ).fetchone()[0]
     has_newer = db.connection.execute(
-        f"""
+        """
         SELECT EXISTS(
             SELECT 1 FROM files
-            WHERE area_id = ? AND status = 'approved' {feed_sql} AND (created_at, file_id) > (?, ?)
+            WHERE area_id = ? AND status = 'approved' AND (created_at, file_id) > (?, ?)
         )
         """,
         (area.id, newest.created_at, newest.file_id),
     ).fetchone()[0]
     return _with_pinned_files(
         db, area, requesting_user, entries, has_older=bool(has_older), has_newer=bool(has_newer),
-        limit=limit, with_pinned=with_pinned,
+        limit=limit, landing=with_pinned and before is None and after is None,
     )
 
 
 def _with_pinned_files(
     db: Database, area: FileArea, requesting_user: User, entries: list[FileEntry], *,
-    has_older: bool, has_newer: bool, limit: int, with_pinned: bool,
+    has_older: bool, has_newer: bool, limit: int, landing: bool,
 ) -> FileEntryPage:
-    """The page, with the pinned files first when it is the newest page
-    and the caller asked for them. They take at most half of `limit`; the
-    feed files they displace move to the page before."""
-    pinned: list[FileEntry] = []
-    if with_pinned and not has_newer:
-        pinned = list_pinned_files(db, area, requesting_user=requesting_user, limit=max(1, limit // 2))
-        room = max(0, limit - len(pinned))
-        if len(entries) > room:
-            entries = entries[len(entries) - room:] if room else []
-            has_older = True
+    """The page, with the pinned files first on the page an area opens on
+    (`landing`). They take at most half of `limit`; the feed rows they
+    already show are left out of the rest, and the page's cursors stay
+    the feed's own."""
+    if not landing:
+        return FileEntryPage(entries=entries, has_older=has_older, has_newer=has_newer)
+    pinned = list_pinned_files(db, area, requesting_user=requesting_user, limit=max(1, limit // 2))
+    if not pinned or not entries:
+        return FileEntryPage(
+            entries=pinned + entries, has_older=has_older, has_newer=has_newer, pinned_count=len(pinned)
+        )
+    bounds = ((entries[0].created_at, entries[0].file_id), (entries[-1].created_at, entries[-1].file_id))
+    shown = {entry.file_id for entry in pinned}
+    room = limit - len(pinned)
+    kept = [entry for entry in entries if entry.file_id not in shown][-room:] if room else []
+    if kept:
+        bounds = ((kept[0].created_at, kept[0].file_id), bounds[1])
+    has_older = bool(db.connection.execute(
+        """
+        SELECT EXISTS(
+            SELECT 1 FROM files
+            WHERE area_id = ? AND status = 'approved' AND (created_at, file_id) < (?, ?)
+        )
+        """,
+        (area.id, *bounds[0]),
+    ).fetchone()[0])
     return FileEntryPage(
-        entries=pinned + entries, has_older=has_older, has_newer=has_newer, pinned_count=len(pinned)
+        entries=pinned + kept, has_older=has_older, has_newer=has_newer,
+        pinned_count=len(pinned), feed_bounds=bounds,
     )
 
 
@@ -618,9 +641,13 @@ def set_file_pinned(db: Database, entry: FileEntry, pinned: bool, *, changed_by:
     concept from `netbbs.files.areas.FileArea.pinned` (which area sorts
     first among *all* areas). Requires `BoardPermission.EDIT`.
 
-    A pinned file leaves the dated feed and is listed above it on the
-    newest page (`list_files_page(with_pinned=True)`, issue #675).
+    A pinned file is listed first on the page an area opens on
+    (`list_files_page(with_pinned=True)`, issue #675).
+
+    `entry` is re-read by `file_id` first, as `set_file_description`
+    explains: `files.id` is a rowid a later upload may reuse.
     """
+    entry = get_file(db, entry.file_id)
     _require_area_permission(db, entry, changed_by, BoardPermission.EDIT)
 
     db.connection.execute("UPDATE files SET pinned = ? WHERE id = ?", (int(pinned), entry.id))
@@ -639,7 +666,9 @@ def set_file_pinned(db: Database, entry: FileEntry, pinned: bool, *, changed_by:
 
 def set_file_exempt(db: Database, entry: FileEntry, exempt: bool, *, changed_by: User) -> FileEntry:
     """Exempt or unexempt a file from the expiry sweep. Requires
-    `BoardPermission.EDIT`."""
+    `BoardPermission.EDIT`. Re-reads `entry` by `file_id` first, as
+    `set_file_pinned` does."""
+    entry = get_file(db, entry.file_id)
     _require_area_permission(db, entry, changed_by, BoardPermission.EDIT)
 
     db.connection.execute(
