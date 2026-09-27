@@ -3374,8 +3374,9 @@ list is not the whole network: peers pass on only the nodes they have met
 themselves (§8.3), and there is no directory. The screen says so in its title,
 "Nodes known to <board>", and nowhere else.
 
-**What a caller sees.** Per node: its friendly name and DNS name; how this
-board knows it, *direct* (met) or *via <carrier>* (introduced; *via another
+**What a caller sees.** Per node: its friendly name, with its DNS name beside
+it only where two listed nodes share a friendly name (the DNS name is otherwise
+in the detail view, and search matches it); how this board knows it, *direct* (met) or *via <carrier>* (introduced; *via another
 node* when the carrier is itself left off the caller's list); when it was
 last heard of, as a relative time, marked stale past 30 days; and, in its
 detail view, the `dial_in` addresses its descriptor carries (§8.2) and the
