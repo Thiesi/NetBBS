@@ -26,8 +26,9 @@ from netbbs.storage.execution import DatabaseLane
 
 
 class FakeSession:
-    def __init__(self, keys=None):
+    def __init__(self, keys=None, lines=None):
         self._keys = iter(keys or [])
+        self._lines = iter(lines or [])
         self.written: list[str] = []
         self.terminal_width = 100
         self.node_display_name = "NetBBS"
@@ -49,7 +50,7 @@ class FakeSession:
         return key
 
     async def read_line(self, echo: bool = True, **kwargs) -> str:
-        return ""
+        return next(self._lines, "")
 
     @property
     def visible_output(self) -> str:
@@ -257,3 +258,51 @@ def test_a_long_dial_in_address_wraps_at_the_terminal_width(rig):
     text = session.visible_output
     assert all(len(line) <= 40 for line in text.replace("\r", "").split("\n"))
     assert "a" * 20 in text  # the address is wrapped, not dropped
+
+
+def test_search_matches_a_nodes_dns_name(rig):
+    db, lane, own, link_context = rig
+    harbor = bootstrap_node_identity("harbor")
+    other = bootstrap_node_identity("other")
+    save_peer(db, _record(harbor, name="Harbor BBS", dns="harbor.example.org"))
+    save_peer(db, _record(other, name="Other BBS", dns="other.example.net"))
+    viewer = create_user(db, "alice", password="hunter2", user_level=10)
+    # m: the map; s + "example.org": one match, whose detail opens; b, b, b.
+    session = FakeSession(["m", "s", "b", "b", "b"], lines=["example.org"])
+
+    _browse(session, db, lane, viewer, link_context)
+
+    assert "Nodes known to NetBBS › Harbor BBS" in session.visible_output
+
+
+def test_rows_sharing_a_friendly_name_are_told_apart(rig):
+    db, lane, own, link_context = rig
+    named = bootstrap_node_identity("named")
+    bare = bootstrap_node_identity("bare")
+    single = bootstrap_node_identity("single")
+    save_peer(db, _record(named, name="Twin BBS", dns="twin.example.org"))
+    save_peer(db, _record(bare, name="Twin BBS"))
+    save_peer(db, _record(single, name="Only BBS", dns="only.example.org"))
+    viewer = create_user(db, "alice", password="hunter2", user_level=10)
+    session = FakeSession(["m", "b", "b"])
+
+    _browse(session, db, lane, viewer, link_context)
+
+    text = session.visible_output
+    listing = text[text.index("Nodes known to NetBBS"):]
+    listing = listing[: listing.index("Choice:")]
+    assert "Twin BBS · twin.example.org" in listing
+    assert f"Twin BBS {bare.fingerprint[:6]}" in listing
+    # A name nobody else wears stays alone in its column.
+    assert "Only BBS" in listing and "only.example.org" not in listing
+
+
+def test_the_row_description_leads_with_the_dns_name():
+    from netbbs.link.node_map import MET, NodeMapEntry
+    from netbbs.net.node_map_flow import row_description, utc_now
+
+    entry = NodeMapEntry(
+        fingerprint="f" * 32, friendly_name="Harbor BBS", dns_name="harbor.example.org", number=1,
+        source=MET, relationship="direct", last_heard=None, stale=False,
+    )
+    assert row_description(entry, now=utc_now()).startswith("harbor.example.org; direct")

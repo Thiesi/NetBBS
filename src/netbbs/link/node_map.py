@@ -43,6 +43,7 @@ from netbbs.link.node_profiles import (
 )
 from netbbs.link.reliability import reliability_score
 from netbbs.link.trust import TrustDimension, TrustState, TrustSubject, get_effective_trust_state
+from netbbs.config import get_config, set_config_without_commit
 from netbbs.storage.database import Database
 from netbbs.timeutil import _parse_stored_timestamp
 
@@ -98,17 +99,27 @@ class NodeMapEntry:
     # leaves them empty so no screen can show them by accident.
     addresses: tuple[str, ...] = ()
     outgoing_only: bool | None = None
-    published_relays: int = 0
-    live_relays: int = 0
+    # `None` when no descriptor is on file to count them from: unknown, not 0.
+    published_relays: int | None = None
+    live_relays: int | None = None
     we_relay_for_it: bool = False
     it_relays_for_us: bool = False
     reliability: float | None = None
 
     @property
+    def trust_hidden(self) -> bool:
+        """Quarantined or blocked in a dimension that leaves a node off a
+        caller's map, whatever the source."""
+        return any(state in _HIDING_STATES for state in self.trust.values())
+
+    @property
     def hidden_from_callers(self) -> bool:
-        return self.source == CANDIDATE or any(
-            state in _HIDING_STATES for state in self.trust.values()
-        )
+        """Callers do not see this row at all. A candidate that is also a
+        carried origin is still listed for them, as an origin row without
+        the candidate's unverified name, unless trust hides it."""
+        if self.trust_hidden:
+            return True
+        return self.source == CANDIDATE and not self.is_origin
 
 
 @dataclass
@@ -137,28 +148,56 @@ def _display_name(db: Database, fingerprint: str) -> tuple[str, str | None]:
     return identity.friendly_name, identity.dns_name
 
 
-def node_numbers(db: Database, fingerprints: list[str]) -> dict[str, int]:
-    """Each fingerprint's permanent map number, assigning the next free one to
-    any the map has not met before, in the order given.
+# The highest map number ever given (`node_numbers`), so that a number freed
+# by `prune_node_numbers` is never handed out again.
+NODE_NUMBER_HIGH_WATER_CONFIG_KEY = "link_node_number_high_water"
 
-    Numbers are never reused or renumbered: nothing deletes a row, and a new
-    one takes one past the highest ever given, so a node that leaves the map
-    and comes back keeps its number."""
+
+def node_numbers(db: Database, fingerprints: list[str]) -> dict[str, int]:
+    """Each fingerprint's map number, assigning the next one to any the map
+    has not met before, in the order given.
+
+    A number is never renumbered while its node stays on the map, and never
+    reused: a new one is one past the highest ever given, which is kept apart
+    from the table (`NODE_NUMBER_HIGH_WATER_CONFIG_KEY`) because
+    `prune_node_numbers` deletes rows."""
     numbers = {
         row["fingerprint"]: row["number"]
         for row in db.connection.execute("SELECT fingerprint, number FROM link_node_numbers")
     }
     missing = [fp for fp in dict.fromkeys(fingerprints) if fp not in numbers]
     if missing:
-        next_number = max(numbers.values(), default=0) + 1
+        try:
+            high_water = int(get_config(db, NODE_NUMBER_HIGH_WATER_CONFIG_KEY) or 0)
+        except ValueError:
+            high_water = 0
+        next_number = max(high_water, max(numbers.values(), default=0)) + 1
         for fingerprint in missing:
             db.connection.execute(
                 "INSERT INTO link_node_numbers (fingerprint, number) VALUES (?, ?)", (fingerprint, next_number)
             )
             numbers[fingerprint] = next_number
             next_number += 1
+        set_config_without_commit(db, NODE_NUMBER_HIGH_WATER_CONFIG_KEY, str(next_number - 1))
         db.connection.commit()
     return {fp: numbers[fp] for fp in fingerprints}
+
+
+def prune_node_numbers(db: Database, present: set[str]) -> None:
+    """Forget the numbers of nodes no longer known from any source.
+
+    What the map lists is remotely influenced -- a carrier can churn
+    introduced identities through their bounded store as fast as it can mint
+    them -- so the numbers table is bounded by the same sources the map reads.
+    `present` must be the complete set (peers, introductions, candidates and
+    carried origins), never one viewer's filtered list: a caller's map leaves
+    out hidden nodes, whose numbers must survive it. A node that left and
+    returns gets a new number."""
+    stored = [row["fingerprint"] for row in db.connection.execute("SELECT fingerprint FROM link_node_numbers")]
+    gone = [fp for fp in stored if fp not in present]
+    if gone:
+        db.connection.executemany("DELETE FROM link_node_numbers WHERE fingerprint = ?", [(fp,) for fp in gone])
+        db.connection.commit()
 
 
 def _parse(value: object) -> datetime | None:
@@ -305,10 +344,22 @@ def build_node_map(
     Link addresses, relay roles and reliability a caller never sees."""
     now = now or datetime.now(timezone.utc)
     origins = carried_origins(db)
-    known = _gather(db, own_fingerprint, include_candidates=sysop)
+    # The complete set, whoever is looking: numbers are pruned against it.
+    complete = _gather(db, own_fingerprint, include_candidates=True)
     for origin in origins:
-        if origin != own_fingerprint and origin not in known:
-            known[origin] = _Known(origin, ORIGIN)
+        if origin != own_fingerprint and origin not in complete:
+            complete[origin] = _Known(origin, ORIGIN)
+    prune_node_numbers(db, set(complete))
+    if sysop:
+        known = complete
+    else:
+        # A caller never sees a candidate: where one is also a carried origin,
+        # it is listed as the origin, without the peer list's unverified word.
+        known = {
+            fp: (_Known(fp, ORIGIN) if item.source == CANDIDATE else item)
+            for fp, item in complete.items()
+            if item.source != CANDIDATE or fp in origins
+        }
 
     trust = {fingerprint: _node_trust(db, fingerprint) for fingerprint in known}
     consents: dict[str, set[str]] = {}
@@ -371,8 +422,9 @@ def build_node_map(
                     for a in (addresses if isinstance(addresses, list) else []) if isinstance(a, dict)
                 ),
                 outgoing_only=bool(payload["outgoing_only"]) if "outgoing_only" in payload else None,
-                published_relays=len(relays) if isinstance(relays, list) else 0,
-                live_relays=len(live) if isinstance(live, list) else 0,
+                # Counted only from a descriptor on file; none is unknown.
+                published_relays=(len(relays) if isinstance(relays, list) else 0) if payload else None,
+                live_relays=(len(live) if isinstance(live, list) else 0) if payload else None,
                 we_relay_for_it="i_relay_for" in roles,
                 it_relays_for_us="relay_for_me" in roles,
                 reliability=reliability_score(db, fingerprint),

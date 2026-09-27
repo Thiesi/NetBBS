@@ -281,18 +281,62 @@ def test_node_numbers_are_small_permanent_and_shared_by_every_viewer(tmp_path, o
     reopened = _by_fp(build_node_map(db, own_fingerprint=own.fingerprint, sysop=False, now=NOW))
     assert (reopened[alpha.fingerprint].number, reopened[beta.fingerprint].number) == (1, 2)
 
-    # A node that leaves the map keeps its number for when it comes back, and
-    # a newcomer never takes it.
+    # A node that truly leaves the map loses its number; one that returns
+    # gets a new one, and nobody ever gets a number handed out before.
     db.connection.execute("DELETE FROM link_peers WHERE fingerprint = ?", (alpha.fingerprint,))
     db.connection.commit()
     assert [e.number for e in build_node_map(db, own_fingerprint=own.fingerprint, sysop=False, now=NOW)] == [2]
+    assert db.connection.execute(
+        "SELECT COUNT(*) FROM link_node_numbers WHERE fingerprint = ?", (alpha.fingerprint,)
+    ).fetchone()[0] == 0
     gamma = bootstrap_node_identity("gamma")
     save_peer(db, _record(gamma, name="Gamma"))
     save_peer(db, _record(alpha, name="Alpha"))
     back = _by_fp(build_node_map(db, own_fingerprint=own.fingerprint, sysop=False, now=NOW))
-    assert back[alpha.fingerprint].number == 1
-    assert back[gamma.fingerprint].number == 3
+    assert back[beta.fingerprint].number == 2
+    assert {back[alpha.fingerprint].number, back[gamma.fingerprint].number} == {3, 4}
     db.close()
+
+
+def test_a_callers_map_never_drops_a_hidden_nodes_number(db, own):
+    hidden = bootstrap_node_identity("hidden")
+    candidate = bootstrap_node_identity("candidate")
+    save_peer(db, _record(hidden, name="Hidden"))
+    save_candidate_descriptor(db, candidate.fingerprint, _record(candidate, name="Candidate").descriptor)
+    sysop = _by_fp(build_node_map(db, own_fingerprint=own.fingerprint, sysop=True, now=NOW))
+    _block(db, hidden.fingerprint, TrustDimension.IDENTITY_INTEGRITY)
+
+    assert build_node_map(db, own_fingerprint=own.fingerprint, sysop=False, now=NOW) == []
+
+    again = _by_fp(build_node_map(db, own_fingerprint=own.fingerprint, sysop=True, now=NOW))
+    assert again[hidden.fingerprint].number == sysop[hidden.fingerprint].number
+    assert again[candidate.fingerprint].number == sysop[candidate.fingerprint].number
+
+
+def test_churned_introductions_leave_the_numbers_bounded_and_never_reused(db, own, monkeypatch):
+    """A carrier minting identities through the bounded introduction store
+    must not grow the numbers table without limit (AGENTS.md: bound remotely
+    influenced resources)."""
+    from netbbs.link import store as store_module
+
+    monkeypatch.setattr(store_module, "MAX_INTRODUCED_IDENTITIES", 5)
+    carrier = bootstrap_node_identity("carrier")
+    save_peer(db, _record(carrier, name="Carrier"))
+    given: dict[int, str] = {}
+    for index in range(25):
+        minted = bootstrap_node_identity(f"minted-{index}")
+        save_introduced_identity(
+            db, _record(minted, name=f"Minted {index}", created_at=f"2026-09-01T00:00:{index:02d}+00:00"),
+            introduced_by=carrier.fingerprint,
+        )
+        for entry in build_node_map(db, own_fingerprint=own.fingerprint, sysop=True, now=NOW):
+            assert given.setdefault(entry.number, entry.fingerprint) == entry.fingerprint  # never reused
+
+    live = db.connection.execute("SELECT COUNT(*) FROM link_introduced_identities").fetchone()[0]
+    assert live == 5
+    stored = db.connection.execute("SELECT COUNT(*) FROM link_node_numbers").fetchone()[0]
+    assert stored == live + 1  # the introductions still on file, and the carrier
+    assert len(given) == 26  # every node ever listed got its own number
 
 
 def test_node_numbers_never_renumber(db):
@@ -326,6 +370,20 @@ def test_probation_and_establishment_hide_nothing(db, own):
         _block(db, established.fingerprint, dimension, TrustState.ESTABLISHED)
 
     assert len(build_node_map(db, own_fingerprint=own.fingerprint, sysop=False, now=NOW)) == 2
+
+
+def test_relay_counts_are_unknown_without_a_descriptor(db, own):
+    origin = bootstrap_node_identity("origin")
+    peer = bootstrap_node_identity("peer")
+    _carry_board(db, origin, own, name="Carried", board_id="b-1")
+    save_peer(db, _record(peer, name="Peer"))
+
+    entries = _by_fp(build_node_map(db, own_fingerprint=own.fingerprint, sysop=True, now=NOW))
+
+    assert entries[origin.fingerprint].published_relays is None
+    assert entries[origin.fingerprint].live_relays is None
+    assert entries[peer.fingerprint].published_relays == 0
+    assert entries[peer.fingerprint].live_relays == 0
 
 
 def test_poor_reachability_hides_nothing(db, own):

@@ -343,6 +343,8 @@ from netbbs.net.node_map_flow import map_title as node_map_title
 from netbbs.net.node_map_flow import node_sections as node_map_sections
 from netbbs.net.node_map_flow import row_cells as node_map_row_cells
 from netbbs.net.node_map_flow import row_description as node_map_row_description
+from netbbs.net.node_map_flow import row_labels as node_map_row_labels
+from netbbs.net.node_map_flow import search_text as node_map_search_text
 from netbbs.net.node_map_flow import stable_id as node_map_stable_id
 from netbbs.link.trust_issuance import (
     MAX_VOUCH_EXPLANATION_CHARS,
@@ -8948,14 +8950,16 @@ async def _node_map_sysop_screen(
             cells = node_map_row_cells(entry, now=now)
             if entry.source == NODE_MAP_CANDIDATE:
                 cells[0] = ("unverified", WARNING_COLOR)
-            elif entry.hidden_from_callers:
+            elif entry.trust_hidden:
                 strongest = "blocked" if "blocked" in entry.trust.values() else "quarantined"
                 cells[0] = (strongest, ALERT_COLOR if strongest == "blocked" else WARNING_COLOR)
             return cells
 
+        labels = node_map_row_labels(state["entries"])
         selected = await pick_item(
             session, state["entries"],
-            name_of=lambda entry: entry.friendly_name,
+            name_of=lambda entry: labels[entry.fingerprint],
+            search_text_of=lambda entry: node_map_search_text(entry, labels[entry.fingerprint]),
             stable_id_of=node_map_stable_id,
             description_of=lambda entry: node_map_row_description(entry, now=now),
             columns=NODE_MAP_COLUMNS,

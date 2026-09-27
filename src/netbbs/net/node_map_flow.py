@@ -32,6 +32,7 @@ from netbbs.link.node_map import (
     carried_from,
     relative_time,
 )
+from netbbs.link.node_profiles import name_key
 from netbbs.link.trust import TrustDimension
 from netbbs.net.breadcrumb_preference import breadcrumb_collapsed_enabled
 from netbbs.net.chat_flow import _may_enter_quietly, _visible_channels_for
@@ -149,6 +150,35 @@ def last_heard_text(entry: NodeMapEntry, *, now: datetime) -> str:
     return f"stale, {text}" if entry.stale else text
 
 
+def _count(value: int | None) -> str:
+    return "unknown" if value is None else str(value)
+
+
+def row_labels(entries: list[NodeMapEntry]) -> dict[str, str]:
+    """Each row's NAME: the friendly name alone, so the column is not
+    truncated -- except where two or more rows in the same list share one,
+    which then read "<friendly> · <dns>", or "<friendly> <first 6 of the
+    fingerprint>" without a DNS name, so they can be told apart."""
+    counts: dict[str, int] = {}
+    for entry in entries:
+        key = name_key(entry.friendly_name)
+        counts[key] = counts.get(key, 0) + 1
+    labels = {}
+    for entry in entries:
+        if counts[name_key(entry.friendly_name)] < 2:
+            labels[entry.fingerprint] = entry.friendly_name
+        elif entry.dns_name:
+            labels[entry.fingerprint] = f"{entry.friendly_name} · {entry.dns_name}"
+        else:
+            labels[entry.fingerprint] = f"{entry.friendly_name} {entry.fingerprint[:6]}"
+    return labels
+
+
+def search_text(entry: NodeMapEntry, label: str) -> str:
+    """What a search matches: the row's name and its DNS name."""
+    return f"{label} {entry.dns_name}" if entry.dns_name else label
+
+
 def row_cells(entry: NodeMapEntry, *, now: datetime) -> list[str | tuple[str, int]]:
     heard = last_heard_text(entry, now=now)
     color = WARNING_COLOR if entry.stale else (MUTED_COLOR if entry.last_heard is None else VALUE_COLOR)
@@ -156,7 +186,10 @@ def row_cells(entry: NodeMapEntry, *, now: datetime) -> list[str | tuple[str, in
 
 
 def row_description(entry: NodeMapEntry, *, now: datetime) -> str:
-    return f"{entry.relationship}; last heard {last_heard_text(entry, now=now)}"
+    """The row's description, where the terminal shows one instead of the
+    table: the DNS name first, since the NAME column leaves it out."""
+    rest = f"{entry.relationship}; last heard {last_heard_text(entry, now=now)}"
+    return f"{entry.dns_name}; {rest}" if entry.dns_name else rest
 
 
 def _dial_in_lines(entry: NodeMapEntry) -> list[str]:
@@ -190,9 +223,14 @@ def node_sections(
     ))
     if entry.source == CANDIDATE:
         about.append(Field("First named by a peer list", first_named or "unknown"))
-        about.append(Note(
-            "Unverified: named in a peer list, never met, introduced by nobody. Callers do not see it."
-        ))
+        if entry.is_origin and not entry.trust_hidden:
+            seen = (
+                "Callers see it only as the origin of what this board carries, "
+                "as an unknown node without this name."
+            )
+        else:
+            seen = "Callers do not see it."
+        about.append(Note(f"Unverified: named in a peer list, never met, introduced by nobody. {seen}"))
     sections = [Section("Node", about)]
 
     if sysop:
@@ -202,7 +240,7 @@ def node_sections(
                   color=_TRUST_COLORS.get(entry.trust.get(dimension, ""), VALUE_COLOR))
             for dimension, label in _DIMENSION_LABELS.items()
         ]
-        if entry.hidden_from_callers and entry.source != CANDIDATE:
+        if entry.trust_hidden:
             trust_rows.append(Note("Quarantined or blocked here, so callers do not see it on the map."))
         sections.append(Section("Trust", trust_rows))
         if origin_only:
@@ -216,8 +254,8 @@ def node_sections(
         sections.append(Section("Reachability", reach))
         sections.append(Section("Relaying", [
             Field("Reliability", f"{entry.reliability:.2f}" if entry.reliability is not None else "unknown"),
-            Field("Published relays", str(entry.published_relays)),
-            Field("Live relays", str(entry.live_relays)),
+            Field("Published relays", _count(entry.published_relays)),
+            Field("Live relays", _count(entry.live_relays)),
             Field("We relay for it", "yes" if entry.we_relay_for_it else "no"),
             Field("It relays for us", "yes" if entry.it_relays_for_us else "no"),
         ], paired=True))
@@ -280,10 +318,11 @@ async def node_map_screen(
             return
         now = utc_now()
         title = map_title(state["board"])
+        labels = row_labels(state["entries"])
         selected = await pick_item(
             session, state["entries"],
-            # The friendly name alone; the DNS name is in the detail view.
-            name_of=lambda entry: entry.friendly_name,
+            name_of=lambda entry: labels[entry.fingerprint],
+            search_text_of=lambda entry: search_text(entry, labels[entry.fingerprint]),
             stable_id_of=stable_id,
             description_of=lambda entry: row_description(entry, now=now),
             columns=NODE_MAP_COLUMNS,

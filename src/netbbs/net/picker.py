@@ -282,6 +282,7 @@ async def pick_item(
     name_of: Callable[[T], str],
     stable_id_of: Callable[[T], int],
     description_of: Callable[[T], str | None] = lambda item: None,
+    search_text_of: Callable[[T], str] | None = None,
     name_segments_of: Callable[[T], Sequence[tuple[str, SegmentColor]]] | None = None,
     columns: Sequence[ListColumn] | None = None,
     column_values_of: Callable[[T], Sequence[str | tuple[str, SegmentColor]]] | None = None,
@@ -329,6 +330,11 @@ async def pick_item(
     name_of(item).lower()`) deliberately uses the *raw*, unsanitized
     name — matching is a text-comparison operation, not something
     written to the terminal, so there's nothing to protect there.
+
+    `search_text_of` (issue #777), if given, is what `search` matches
+    instead of `name_of` -- for a list whose rows show less than a caller
+    would search by, such as the node map, whose NAME column leaves out the
+    DNS name. `None` (every other caller) keeps matching the name alone.
 
     `name_segments_of` (dogfood report, the admin audit log's own
     timestamp/action/actor fields wanting independent colors rather
@@ -766,8 +772,10 @@ async def pick_item(
     # reapplied its query after every such change.
     active_query: str | None = None
 
+    searched = search_text_of if search_text_of is not None else name_of
+
     def _matching(candidates: Sequence[T], query: str) -> list[T]:
-        return [item for item in candidates if query.lower() in name_of(item).lower()]
+        return [item for item in candidates if query.lower() in searched(item).lower()]
 
     def _narrowed(candidates: Sequence[T]) -> Sequence[T]:
         return _matching(candidates, active_query) if active_query else candidates

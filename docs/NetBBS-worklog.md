@@ -2663,6 +2663,15 @@ signed descriptor need not match byte for byte. Any new writer of a
 `descriptor_json` column must set the first-stored time the same way, or a
 future-dated descriptor escapes its cap.
 
+The map's node numbers (`link_node_numbers`) are pruned on every map build
+against the *complete* set of known nodes (peers, introductions, candidates,
+carried origins), never against one viewer's filtered list, or a caller's
+visit would drop the numbers of nodes hidden from callers. Pruning is what
+bounds the table against a carrier churning introductions; never-reuse comes
+from the high-water mark in `node_config`
+(`link_node_number_high_water`), not from `MAX(number)`, which pruning can
+lower.
+
 ### Event acceptance
 
 Resolve the sender's current signing key from its verified transition chain

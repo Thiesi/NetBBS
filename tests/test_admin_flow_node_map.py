@@ -118,6 +118,8 @@ def test_the_sysop_sees_an_origin_only_node_with_unknown_fields(db, lane, sysop)
     assert "Last heard: unknown" in detail
     assert "DNS name: unknown" in detail
     assert "Addresses: unknown" in detail
+    assert "Published relays: unknown" in detail
+    assert "Live relays: unknown" in detail
     # The SysOp sees everything carried from it, gates or not.
     assert "Board: Left Behind" in detail
 
@@ -161,3 +163,23 @@ def test_the_sysop_detail_shows_dial_in_addresses_and_drops_bad_ones(db, lane, s
     assert "DIAL IN Address: telnet://harbor.example.org:23 Address: https://harbor.example.org/web" in detail
     assert "plain.example.org" not in detail and "evil.example.org" not in detail
     assert "pwned" not in raw and "\x1b]" not in raw
+
+
+def test_a_candidate_that_is_also_an_origin_is_described_as_callers_see_it(db, lane, sysop):
+    link_context = _link_context()
+    node = bootstrap_node_identity("both")
+    save_candidate_descriptor(db, node.fingerprint, _record(node, name="Named In A List").descriptor)
+    materialize_carried_board(db, build_board_genesis(
+        signing_identity=node.signing_key, origin_fingerprint=node.fingerprint,
+        board_id="b-both", name="Carried", created_at="2026-09-01T00:00:00+00:00",
+    ), own_fingerprint=link_context.node_identity.fingerprint)
+
+    session = FakeSession(["s", "l", "p", "0", "1", "b", "b", "b", "b", "b"])
+    session.terminal_height = 60
+    asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
+
+    detail = _detail(_visible(_written_text(session)), "Named In A List")
+    assert "Callers see it only as the origin of what this board carries" in detail
+    assert "Callers do not see it." not in detail
+    # Its descriptor, though unverified, is on file: its relay counts are known.
+    assert "Published relays: 0" in detail
