@@ -388,6 +388,7 @@ from netbbs.node_log import (
     node_log_path,
     read_node_log,
 )
+from netbbs.net.bootstrap_view import load_bootstrap_snapshot
 from netbbs.net.nodeconfig import NodeConfig
 from netbbs.net.policy_settings import (
     GROUPS as POLICY_GROUPS,
@@ -7960,14 +7961,69 @@ async def _policy_settings_screen(session: Session, lane: DatabaseLane, actor: U
                 *((key, menu_key(key.upper(), group[1:]) if group[0].lower() == key
                    else menu_key(key, group[group.lower().index(key) + 1:], prefix=group[:group.lower().index(key)]))
                   for group, key in _POLICY_GROUP_KEYS.items()),
+                ("o", menu_key("o", "nfiguration", prefix="Node c")),
                 _BACK_ACTION,
             ],
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style, page=page,
         )
         if choice == "b":
             return
+        if choice == "o":
+            await _node_configuration_screen(session, lane, actor)
+            continue
         group = next(group for group, key in _POLICY_GROUP_KEYS.items() if key == choice)
         await _policy_group_editor(session, lane, actor, group, [v for v in views if v.setting.group == group])
+
+
+_NODE_CONFIGURATION_NOTE = (
+    "Read-only. The node reads these once when it starts, from its config file and command line; "
+    "change them there and restart. They cannot be changed here: a wrong listener or address set "
+    "from inside NetBBS could lock you out of the session you would need to fix it. This is the "
+    "configuration the node resolved; a listener whose optional extra is not installed is listed "
+    "but was not started (the service output says so)."
+)
+
+
+async def _node_configuration_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
+    """Issue #748: the bootstrap settings -- listeners, Link addresses, paths
+    and the managed-DNS service -- as the node resolved them at its last
+    start, each with where its value came from. Read-only by design (#733).
+
+    The same record serves the standalone `python -m netbbs.admin`, which
+    cannot know which config file a service uses: it shows what the node
+    itself last started with, and says so."""
+    chrome = await _load_chrome(lane, actor)
+    rows = await lane.run(load_bootstrap_snapshot)
+    sections: list[Section] = []
+    if rows is None:
+        sections.append(Section(None, [Note(
+            "The node has not started since this version, so there is nothing to show yet. "
+            "Start it once; until then, see the config file and the service's command line.")]))
+    else:
+        # One table per group: the key is what to look for in the config
+        # file, so it names the row; the source says whether it is there.
+        groups: dict[str, list[list[str | tuple[str, int]]]] = {}
+        for row in rows:
+            groups.setdefault(row.group, []).append([
+                row.key,
+                (row.value, VALUE_COLOR if row.source != "default" else MUTED_COLOR),
+                (row.source, METADATA_COLOR if row.source != "default" else MUTED_COLOR),
+            ])
+        sections += [Section(group, [Table(["Setting", "Value", "From"], table_rows, flex=1)])
+                     for group, table_rows in groups.items()]
+    sections.append(Section(None, [Note(_NODE_CONFIGURATION_NOTE)]))
+    page = 0
+    while True:
+        choice, page = await show_detail(
+            session,
+            title=_detail_title(session, chrome, "Node configuration",
+                                breadcrumb=("SysOp", "Settings", "Network & login limits"),
+                                subtitle="As the node resolved it at its last start"),
+            sections=sections, actions=[_BACK_ACTION], page=page,
+            redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+        )
+        if choice == "b":
+            return
 
 
 async def _policy_group_editor(
