@@ -8760,6 +8760,31 @@ def test_operations_menu_reloads_after_diagnostic_and_follow_log_screens(db, lan
     assert len(calls) == 4
 
 
+@pytest.mark.parametrize("menu_key_", ["o", "s"])
+def test_diagnostics_open_without_link_from_operations_and_settings(db, lane, sysop, monkeypatch, menu_key_):
+    """Issue #732: a live node running MRC without Link writes the
+    diagnostic log too. Operations offered [D]iagnostics/[F]ollow log
+    there, but Settings' hidden d/f aliases still required Link and
+    silently rejected the key."""
+    import netbbs.net.admin_flow as admin_flow_module
+
+    opened = []
+
+    async def _fake_diagnostic_log_screen(session, lane, actor):
+        opened.append("diagnostics")
+
+    async def _fake_diagnostic_log_tail_screen(session, lane):
+        opened.append("follow")
+
+    monkeypatch.setattr(admin_flow_module, "_diagnostic_log_screen", _fake_diagnostic_log_screen)
+    monkeypatch.setattr(admin_flow_module, "_diagnostic_log_tail_screen", _fake_diagnostic_log_tail_screen)
+
+    session = FakeSession([menu_key_, "d", "f", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop, node_controls=_node_controls(), link_context=None))
+
+    assert opened == ["diagnostics", "follow"]
+
+
 # -- follow-up: the moderation-queue gauges had the same fake-capacity
 # bug as the active-session gauge (PR #197 review, finding #2) -- a
 # `max(10, pending_total)` denominator meant the bar was permanently

@@ -616,11 +616,18 @@ class NodeConfig:
             raise ConfigError(
                 f"link.max_relay_clients must be greater than 0, got {self.link.max_relay_clients}"
             )
-        _require_positive_link = {
-            "max_peers": self.link.max_peers,
+        # The carry caps bound automatic intake only (issue #683), and 0 is a
+        # meaningful setting: a curated node that offers everything new and
+        # carries nothing unasked. So they may be 0, never negative.
+        for name, value in {
             "max_carried_boards": self.link.max_carried_boards,
             "max_carried_channels": self.link.max_carried_channels,
             "max_carried_file_areas": self.link.max_carried_file_areas,
+        }.items():
+            if value < 0 or not math.isfinite(value):
+                raise ConfigError(f"link.{name} must be a finite number of at least 0, got {value}")
+        _require_positive_link = {
+            "max_peers": self.link.max_peers,
             "max_remote_files_per_area": self.link.max_remote_files_per_area,
             "max_concurrent_file_transfers_per_peer": self.link.max_concurrent_file_transfers_per_peer,
             "request_rate_capacity": self.link.request_rate_capacity,
