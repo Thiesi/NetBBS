@@ -733,3 +733,16 @@ def test_a_character_the_save_cannot_hold_is_not_painted(tmp_path):
 
     saved = asyncio.run(scenario()).decode("cp437")
     assert "AB" in saved and "?" not in saved
+
+
+def test_a_narrow_canvas_status_line_leads_with_save_quit_and_help(tmp_path):
+    async def scenario():
+        session = FakeSession(["CTRL+O"])
+        await edit_ansi_art(
+            session, initial_bytes=None, draft_path=tmp_path / "d.draft", width=40, height=9,
+            autosave_interval_seconds=9999,
+        )
+        return session
+
+    text = _ANSI_ESCAPE_RE.sub("", "".join(asyncio.run(scenario()).written))
+    assert "^G help ^O save ^X quit" in text

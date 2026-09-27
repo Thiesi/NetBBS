@@ -891,7 +891,7 @@ def test_the_migration_reindexes_existing_posts_as_plain_text(tmp_path, monkeypa
 
 def test_the_art_editor_refuses_a_terminal_below_its_minimum(db, alice):
     board = create_board(db, "general", creator=alice, allow_color=True)
-    session = FakeSession(["a", "Drawing", "b"], width=40, height=7)
+    session = FakeSession(["a", "b"], width=40, height=7)
 
     asyncio.run(board_flow._show_board(session, db, board, alice))
 
@@ -933,7 +933,7 @@ def test_a_recovered_art_draft_too_big_for_the_terminal_is_kept_not_opened(db, a
     canvas = ScreenBuffer(80, 5)
     parse_ansi_into_buffer("#" * 70, canvas)
     draft.write_bytes(encode_ansi_bytes(canvas))
-    session = FakeSession(["a", "r", "Drawing", "b"], width=50, height=24)
+    session = FakeSession(["a", "r", "b"], width=50, height=24)
 
     asyncio.run(board_flow._show_board(session, db, board, alice))
 

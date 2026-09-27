@@ -1119,6 +1119,11 @@ async def _show_board(
         if choice == "back":
             return False
         resumed = _recovered_drawing(draft_path) if choice == "resume" else None
+        # Before the subject: a terminal the editor cannot open on, or one
+        # too small for the resumed drawing, is said so before anything is
+        # typed for nothing (Codex review on #753). The draft stays.
+        if _art_canvas(session, resumed) is None:
+            return False
         await session.write_line("")
         await write_prompt(session, "Subject (or press Enter to cancel): ")
         subject = (await session.read_line()).strip()
@@ -1692,9 +1697,10 @@ def _post_draft_path(db: Database, *, kind: str, board: Board, user: User, root_
     return drafts_directory(db) / f"{kind}_{board.id}_{user.id}{suffix}.draft"
 
 
-# The smallest canvas the art editor opens on.
-_ART_MIN_WIDTH = 20
-_ART_MIN_HEIGHT = 5
+# The smallest canvas the art editor opens on: the project's 40x12
+# terminal floor, less the editor's status rows (Codex review on #753).
+_ART_MIN_WIDTH = 40
+_ART_MIN_HEIGHT = 9
 
 
 def _art_canvas(session: Session, drawing: str | None) -> tuple[int, int] | None:

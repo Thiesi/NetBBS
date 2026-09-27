@@ -412,6 +412,10 @@ async def _redraw(session: Session, state: _EditorState, previous: Snapshot) -> 
     return current
 
 
+# Below this canvas width the status line leads with its essential keys.
+_FULL_STATUS_WIDTH = 60
+
+
 async def _flush(session: Session, state: _EditorState) -> None:
     """Redraws the status line and repositions the terminal's real
     cursor to the logical edit position -- called after every action,
@@ -419,11 +423,17 @@ async def _flush(session: Session, state: _EditorState) -> None:
     paint with next, matching how a real terminal editor behaves."""
     fg_label = _PALETTE[state.current_fg] if state.current_fg is not None else "default"
     bg_label = _PALETTE[state.current_bg] if state.current_bg is not None else "default"
-    status = (
-        f"Row {state.row + 1}/{state.buffer.height}  Col {state.col + 1}/{state.buffer.width}  "
-        f"fg={fg_label} bg={bg_label}  "
-        f"Ctrl+G help  Ctrl+O save  Ctrl+X quit  Ctrl+T glyph  Ctrl+P fg  Ctrl+B bg"
-    )
+    if state.buffer.width < _FULL_STATUS_WIDTH:
+        # A narrow canvas (a message board's art post, issue #711) leads
+        # with the keys to save, quit and get help, which the full layout
+        # below would cut first (Codex review on #753).
+        status = f"^G help ^O save ^X quit  {state.row + 1},{state.col + 1}"
+    else:
+        status = (
+            f"Row {state.row + 1}/{state.buffer.height}  Col {state.col + 1}/{state.buffer.width}  "
+            f"fg={fg_label} bg={bg_label}  "
+            f"Ctrl+G help  Ctrl+O save  Ctrl+X quit  Ctrl+T glyph  Ctrl+P fg  Ctrl+B bg"
+        )
     # Must never exceed the canvas width: a status line long enough to
     # wrap (the palette names alone push this well past 80 columns,
     # e.g. "Bright Magenta") corrupts every subsequent redraw -- the

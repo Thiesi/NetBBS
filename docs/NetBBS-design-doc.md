@@ -1490,7 +1490,7 @@ carried exactly as written and filtered on output
   the same way.
 - **Art posts:** on a board that allows color, `[A]rt post` opens the ANSI art
   editor (`netbbs.net.ansi_editor`) on a canvas as wide as the terminal, up to
-  80 columns. A drawn post keeps its lines: each line stays a line, and only a
+  80 columns, on a terminal of at least 40x12. A drawn post keeps its lines: each line stays a line, and only a
   line wider than the reader's terminal wraps, cut at the column, with its color
   carried over. The layout belongs to the post, set by the editor that drew it:
   editing an art post reopens the art editor, and a carried post brings its
