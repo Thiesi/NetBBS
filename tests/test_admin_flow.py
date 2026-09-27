@@ -2650,7 +2650,7 @@ def test_create_board_flow(db, lane, sysop):
         "m", "m", "c",
         "n", "General",
         "d", "A general board",
-        "m", "y",
+        "m",
         "s",
         "b", "b", "b",
     ]
@@ -2760,7 +2760,7 @@ def test_edit_board_field_menu_can_be_navigated_in_any_order(db, lane, sysop):
 
     create_board(db, "General", creator=sysop)
 
-    inputs = ["m", "m", "l", "0", "1", "e", "m", "y", "n", "General2", "s", "b", "b", "b", "b"]
+    inputs = ["m", "m", "l", "0", "1", "e", "m", "n", "General2", "s", "b", "b", "b", "b"]
     session = FakeSession(inputs)
     _run(session, lane, sysop)
 
@@ -4315,7 +4315,7 @@ def test_edit_and_delete_community_flow(db, lane, sysop):
     # menu). Every other field is left untouched.
     inputs = [
         "m", "o", "l", "0", "1", "e",
-        "h", "y", "s",
+        "h", "s",
         "d", "Politics",
         "b", "b", "b",
     ]

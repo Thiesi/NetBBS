@@ -216,11 +216,9 @@ class FieldSpec:
     follow-up), if given, is a synchronous, no-I/O `(draft, direction)
     -> None` mutator that Left/Right act on when this field is the
     currently arrow-highlighted one -- `direction` is `+1`/`-1`. Only
-    meaningful for a field whose value is a cycle with a real "forward"/
-    "backward" (see `choice_step`); `None` by default, and Left/Right
-    are a silent no-op on a field that doesn't define one (deliberately
-    including `bool_field` -- see that function's own docstring for
-    why arrow-triggered instant toggling was left out on purpose).
+    meaningful for a field whose value is a cycle (see `choice_step`
+    and `bool_step`); `None` by default, and Left/Right are a silent
+    no-op on a field that doesn't define one.
 
     `section` (dogfood report -- Thiesi's own observation that the main
     menu's grouped, multi-column `menu_grid` layout and this screen's
@@ -1139,29 +1137,29 @@ def text_field(key: str, *, required: bool = False) -> FieldPrompt:
     return prompt
 
 
-def bool_field(key: str, prompt_text: str) -> FieldPrompt:
-    """A toggle field -- always offers "keep current" via a bare
-    Enter (`netbbs.net.confirm.prompt_yes_no_or_keep`'s own shape),
-    for both a freshly-defaulted create draft and an existing value on
-    edit alike.
-
-    Deliberately has no `choice_step`-style counterpart for
-    `FieldSpec.step` (issue #160's cursor-navigation follow-up): unlike
-    `choice_field`, this always opens a confirming sub-prompt rather
-    than toggling silently on one keystroke. Wiring Left/Right to flip
-    it instantly would make the same field behave inconsistently
-    depending on which key reached it -- Space/Enter/the hotkey letter
-    asking first, arrows not. Left/Right are simply a no-op on a
-    `bool_field` for now; making it an instant, confirmation-free
-    toggle under arrow navigation would be a real, separate decision
-    a boolean field's own author should make on purpose, not a side
-    effect of adding `step` support in general."""
-    from netbbs.net.confirm import prompt_yes_no_or_keep
+def bool_field(key: str) -> FieldPrompt:
+    """A yes/no field that flips on one keystroke (issue #751): the
+    hotkey, Space or Enter turns `draft[key]` from off to on or back,
+    with no sub-prompt. A draft field writes nothing before Save, so
+    the menu rule "a toggle toggles" applies -- a yes/no question is
+    kept for the last keystroke before an irreversible, destructive or
+    network-touching action. A missing or `None` value counts as off.
+    Pair it with `step=bool_step(key)` so Left/Right flip it too."""
 
     async def prompt(session: Session, lane: DatabaseLane, draft: Draft) -> None:
-        draft[key] = await prompt_yes_no_or_keep(session, prompt_text, current=bool(draft.get(key)))
+        draft[key] = not draft.get(key)
 
     return prompt
+
+
+def bool_step(key: str) -> Callable[[Draft, int], None]:
+    """`FieldSpec.step` counterpart to `bool_field`: with two states,
+    either direction flips the value."""
+
+    def step(draft: Draft, direction: int) -> None:
+        draft[key] = not draft.get(key)
+
+    return step
 
 
 def choice_field(key: str, values: list[Any]) -> FieldPrompt:
@@ -1200,9 +1198,8 @@ def live_choice_field(
 
     Deliberately has no `FieldSpec.step` counterpart, unlike
     `choice_field`/`choice_step` -- `step` stays synchronous and no-I/O
-    for every field across this module (see `bool_field`'s own docstring
-    for the same reasoning applied to instant toggling); a live field's
-    value only ever changes on Space/Enter/its hotkey, exactly like
+    for every field across this module, so it cannot persist; a live
+    field's value only ever changes on Space/Enter/its hotkey, exactly like
     `choice_field` without `choice_step`."""
 
     async def prompt(session: Session, lane: DatabaseLane, draft: Draft) -> None:

@@ -13,7 +13,7 @@ from netbbs.doors.registry import DoorError, update_door
 from netbbs.doors.runtime import run_door, war_dialer_world_path, war_dialer_path_problem
 from netbbs.net.confirm import prompt_yes_no
 from netbbs.net.picker import pick_item
-from netbbs.net.resource_editor import FieldSpec, bool_field, choice_field, edit_resource_draft, text_field
+from netbbs.net.resource_editor import FieldSpec, bool_field, bool_step, choice_field, edit_resource_draft, text_field
 from netbbs.net.session import write_prompt
 from netbbs.rendering import (
     ERROR_COLOR, LABEL_COLOR, METADATA_COLOR, MUTED_COLOR, SUCCESS_COLOR, VALUE_COLOR, WARNING_COLOR,
@@ -213,10 +213,10 @@ async def edit_door_profile(session, lane, actor, door, *, door_services=None):
         await _pause(session)
 
     fields = []
-    def add(key, hotkey, label, section, prompt=None, help=""):
+    def add(key, hotkey, label, section, prompt=None, help="", step=None):
         fields.append(FieldSpec(key=key, hotkey=hotkey, label=label, menu_text=menu_key(hotkey.upper(), " " + label),
                                  section=section, render=lambda d, k=key: sanitize_text(str(d.get(k, ""))) or "(none)",
-                                 prompt=prompt or text_field(key), help=help))
+                                 prompt=prompt or text_field(key), help=help, step=step))
     add("preset", "p", "Setup template", "Runtime", preset_prompt)
     add("import", "j", "Import JSON", "Runtime", import_prompt)
     add("original_api", "1", "Restore original API on Save", "Runtime",
@@ -246,8 +246,10 @@ async def edit_door_profile(session, lane, actor, door, *, door_services=None):
     add("stop_grace_seconds", "5", "Stop grace (seconds)", "Limits",
         help="How long this door gets to exit after SIGTERM before it is killed, on a caller disconnect, "
              "a timeout or node shutdown. A door which exits promptly never waits this long; raise it for one which writes game data on the way out.")
-    add("multinode_certified", "z", "Multi-node certified by SysOp", "Limits", bool_field("multinode_certified", "Certified"))
-    add("resize_signal", "3", "Signal door on terminal resize", "Terminal", bool_field("resize_signal", "Signal"),
+    add("multinode_certified", "z", "Multi-node certified by SysOp", "Limits", bool_field("multinode_certified"),
+        step=bool_step("multinode_certified"))
+    add("resize_signal", "3", "Signal door on terminal resize", "Terminal", bool_field("resize_signal"),
+        step=bool_step("resize_signal"),
         help="Native stdio/socket doors only, and only while columns and rows are 0. Rewrites door_info.json with "
              "the new size and sends SIGUSR1. Leave off unless the door documents that it handles SIGUSR1: the "
              "default action for that signal terminates a process. PTY doors are resized through their terminal.")

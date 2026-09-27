@@ -19,6 +19,7 @@ from netbbs.net.notices import write_notices
 from netbbs.net.session import Session, write_prompt
 from netbbs.net.session_activity import records_activity
 from netbbs.rendering.width import display_width
+from netbbs.rendering.pipe_codes import PastedColor
 from netbbs.rendering.post_body import post_body_rows
 from netbbs.rendering import (
     ACCENT_COLOR,
@@ -136,6 +137,7 @@ async def edit_line_body(
     max_bytes: int,
     max_lines: int,
     draft_path: Path | None = None,
+    keep_pasted_color: bool = False,
 ) -> str | None:
     """Edit a logical-line body without cursor-addressed terminal UI.
 
@@ -160,6 +162,11 @@ async def edit_line_body(
     parameter existed. Finishing normally (`/done`/blank line) deletes
     the draft too: the body is being handed back for real persistence,
     so the temporary autosave has nothing left to recover.
+
+    `keep_pasted_color` (issue #754) -- as for
+    `netbbs.net.prose_editor.edit_prose`: pasted SGR color is typed in
+    as pipe codes. One translator serves the whole body, so a color
+    pasted on one line still counts on the next.
     """
     if draft_path is not None and draft_path.exists():
         if await offer_draft_recovery(session):
@@ -167,6 +174,9 @@ async def edit_line_body(
         else:
             delete_draft(draft_path)
     lines = initial_text.split("\n") if initial_text is not None else []
+    # Passed only when asked for, so a Session that predates the option
+    # still reads lines here.
+    read_options = {"pasted_color": PastedColor()} if keep_pasted_color else {}
     exit_hint = " /exit or /quit saves it as a draft;" if draft_path is not None else ""
     await session.write_line(
         f"Enter message text. Blank line or /done reviews the draft;{exit_hint} "
@@ -196,7 +206,7 @@ async def edit_line_body(
 
     while True:
         await session.write(f"{len(lines) + 1}> ")
-        raw = await session.read_line()
+        raw = await session.read_line(**read_options)
         command = raw.strip()
         lowered = command.lower()
 
@@ -233,7 +243,7 @@ async def edit_line_body(
                 await session.write_line(colored(f"Usage: /insert N (1-{len(lines) + 1})", fg_color=MUTED_COLOR))
                 continue
             await session.write(f"New line {number}: ")
-            text = await session.read_line()
+            text = await session.read_line(**read_options)
             candidate = list(lines)
             candidate.insert(number - 1, text)
             await apply(candidate)
@@ -250,7 +260,7 @@ async def edit_line_body(
                 )
             )
             await session.write(f"Replacement line {number}: ")
-            text = await session.read_line()
+            text = await session.read_line(**read_options)
             candidate = list(lines)
             candidate[number - 1] = text
             await apply(candidate)

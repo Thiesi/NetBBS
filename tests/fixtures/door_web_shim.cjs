@@ -41,4 +41,18 @@ term.input('B'); assert.equal(socket.sent.at(-1).type, 'key');
 receive({type:'door_mode', active:true, stream:2});
 term.input('é'.repeat(3000));
 assert.ok(socket.sent.slice(-3).every(v => Array.from(v.data).length <= 1024 && v.stream === 2));
+// A long paste is never cut inside an escape sequence (issue #754).
+receive({type:'door_mode', active:false, stream:2});
+for (const [prefix, sequence] of [['x'.repeat(1020), '[1;31m'], ['x'.repeat(1022), '[A'], ['x'.repeat(1023), 'O']]) {
+  const before = socket.sent.length;
+  const paste = prefix + sequence + 'y'.repeat(2000);
+  term.input(paste);
+  const sent = socket.sent.slice(before).map(v => v.data);
+  assert.equal(sent.join(''), paste);
+  assert.equal(sent[0], prefix);
+  assert.ok(sent[1].startsWith(sequence));
+  assert.ok(sent.every(v => Array.from(v).length <= 1024));
+}
+term.input('z'.repeat(2048));
+assert.equal(socket.sent.at(-1).data, 'z'.repeat(1024));
 socket.bufferedAmount = 65537; term.input('overflow'); assert.equal(socket.readyState, 3);
