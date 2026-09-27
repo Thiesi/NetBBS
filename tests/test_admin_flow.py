@@ -2949,7 +2949,7 @@ def test_create_channel_screen_fits_a_real_80x24_terminal(db, lane, sysop):
     )
 
 
-def test_board_area_channel_screens_do_not_paginate_at_a_real_80x24_terminal(db, lane, sysop):
+def test_area_and_channel_screens_fit_80x24_and_the_board_screen_80x25(db, lane, sysop):
     # Pagination follow-up (issue tracked alongside Profile's own
     # overflow): Board/Area/Channel already fit exactly within 24 rows
     # unpaginated (the three tests above) after dropping the blank

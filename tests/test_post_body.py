@@ -229,3 +229,28 @@ def test_a_quote_marker_behind_indentation_and_color_is_drawn_once(body):
     rows = colored_body_rows(styled_post_body(body), 80)
 
     assert _SGR.sub("", rows[0]) == "> quoted"
+
+
+def test_an_overlong_sgr_parameter_is_dropped_not_raised():
+    body = "before" + ESC + "[" + "9" * 5000 + "mafter |12red"
+
+    for rendered in (styled_post_body(body), plain_post_body(body)):
+        assert "before" in rendered and "after" in rendered
+    assert _only_allowed_sgr(styled_post_body(body))
+    colored_body_rows(styled_post_body(body), 40)
+
+
+def test_a_quote_marker_behind_unicode_indentation_is_drawn_once():
+    rows = colored_body_rows(styled_post_body("\u00a0\u2003|12> quoted"), 80)
+
+    assert _SGR.sub("", rows[0]) == "> quoted"
+
+
+def test_quote_text_stays_muted_around_an_authors_color():
+    rows = colored_body_rows(styled_post_body("> plain |12red|07 back\x1b[0m after"), 80)
+
+    muted = ESC + "[38;5;248m"
+    row = rows[0]
+    # Muted before the author's color, and muted again after their reset.
+    assert row.index(muted) < row.index("plain")
+    assert muted in row[row.index("after") - 20:row.index("after")]
