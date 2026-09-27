@@ -878,18 +878,23 @@ class WebSession(Session):
         becomes `EditorKeyKind.CTRL, char="h"` instead of BACKSPACE
         when set, `_DEL` (0x7F) is unaffected either way.
         """
-        item = await self._read_item()
-        if isinstance(item, ColorCode) and pasted_color is not None:
-            self._typed_pipe_codes.extend(pasted_color.translate(item.params))
-        if isinstance(item, (_AltKey, ColorCode)):
-            # Not a key this editor surfaces, same as INSERT below.
-            return await self.read_editor_key(distinguish_ctrl_h=distinguish_ctrl_h, pasted_color=pasted_color)
-        if isinstance(item, _SpecialKey):
-            kind = _SPECIAL_TO_EDITOR_KIND.get(item.name)
-            if kind is not None:
-                return EditorKey(kind)
-            # e.g. INSERT -- not surfaced, keep reading
-            return await self.read_editor_key(distinguish_ctrl_h=distinguish_ctrl_h, pasted_color=pasted_color)
+        # A loop, not recursion (Codex review on #779): one permitted key
+        # event can hold over a thousand `ESC[m`, and skipping each by
+        # calling this method again ran out of call stack.
+        while True:
+            item = await self._read_item()
+            if isinstance(item, ColorCode):
+                if pasted_color is not None:
+                    self._typed_pipe_codes.extend(pasted_color.translate(item.params))
+                continue
+            if isinstance(item, _AltKey):
+                continue  # not a key this editor surfaces, same as INSERT below
+            if isinstance(item, _SpecialKey):
+                kind = _SPECIAL_TO_EDITOR_KIND.get(item.name)
+                if kind is not None:
+                    return EditorKey(kind)
+                continue  # e.g. INSERT -- not surfaced, keep reading
+            break
 
         char = item
         if char in (_CR, _LF):

@@ -340,3 +340,29 @@ def test_only_a_board_that_allows_color_keeps_pasted_color(db, allow_color):
     assert asked["Subject"] is False  # a subject has no use for pipe codes
     assert asked["new body"] is allow_color
     assert asked["edited body"] is allow_color
+
+
+@pytest.mark.parametrize("translate", [True, False])
+def test_web_read_editor_key_survives_a_flood_of_color_codes(translate):
+    # 1,300 no-op SGRs fit one permitted key event (Codex review on #779):
+    # skipping them must not cost call stack.
+    received = []
+
+    async def handler(session: Session):
+        options = {"pasted_color": PastedColor()} if translate else {}
+        received.append((await session.read_editor_key(**options)).char)
+        await session.write_line("done")
+
+    async def scenario():
+        server = WebServer(host="127.0.0.1", port=0, session_handler=handler)
+        await server.start()
+        try:
+            async with aiohttp.ClientSession() as client:
+                async with client.ws_connect(f"http://127.0.0.1:{server.port}/ws") as ws:
+                    await ws.send_json({"type": "key", "data": "\x1b[m" * 1300 + "A"})
+                    await ws.receive_json(timeout=5)
+        finally:
+            await server.stop()
+
+    asyncio.run(scenario())
+    assert received == ["A"]
