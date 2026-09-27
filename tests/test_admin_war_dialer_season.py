@@ -359,3 +359,30 @@ def test_a_destination_that_is_gone_stops_the_change(db, lane, sysop, identity_d
     assert "needs a usable backup destination first" in _normalized_visible(_written_text(session))
     assert world_status(db.path, path)["stored_season"] == "1"
     assert not elsewhere.exists()
+
+
+def test_the_worker_rechecks_the_destination_right_before_the_backup(db, lane, sysop, identity_dir, tmp_path, monkeypatch):
+    """Codex review, PR #744: a disk unmounted between the screen's check and
+    the worker must stop the change, not get its mount point recreated."""
+    from netbbs.backup_schedule import set_destination_setting
+    from netbbs.net import admin_flow
+
+    _war_dialer_door(db, sysop)
+    path = _war_dialer_world(db)
+    set_maintenance(db.path, path, True)
+    elsewhere = tmp_path / "usb"
+    elsewhere.mkdir()
+    set_destination_setting(db, elsewhere, db_path=db.path, identity_dir=identity_dir)
+    real = admin_flow._war_dialer_change_competition
+
+    def _unmount_first(**kwargs):
+        elsewhere.rmdir()
+        return real(**kwargs)
+
+    monkeypatch.setattr(admin_flow, "_war_dialer_change_competition", _unmount_first)
+    session = FakeSession(_war_dialer_world_keys("n", "rollover", path.name))
+    _live(session, lane, sysop, identity_dir)
+
+    assert "Next season failed:" in _normalized_visible(_written_text(session))
+    assert world_status(db.path, path)["stored_season"] == "1"
+    assert not elsewhere.exists(), "the mount point was not recreated"

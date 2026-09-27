@@ -18276,7 +18276,7 @@ class _CompetitionOutcome:
 
 def _war_dialer_change_competition(
     db_path: Path, world: Path, *, identity_dir: Path, destination: Path, reason: str, confirm: str,
-    reset: bool, operator: str,
+    reset: bool, operator: str, root: Path | None = None,
 ) -> _CompetitionOutcome:
     """`war_dialer_admin.change_competition` from the console, or the bounded
     reason it refused. No stopped-node rule here (issue #726, the maintainer's
@@ -18290,6 +18290,20 @@ def _war_dialer_change_competition(
         return _CompetitionOutcome(None, "another SysOp is changing a War Dialer competition right now; "
                                          "try again when that finishes", backup_attempted=False)
     try:
+        if root is not None:
+            # Re-checked here, immediately before the backup, like
+            # `_create_live_backup` does: a disk unmounted since the screen
+            # checked must not have its mount point recreated underneath.
+            db = Database(db_path)
+            try:
+                current = check_backup_destination(db, db_path, identity_dir)
+            except BackupScheduleError as exc:
+                return _CompetitionOutcome(None, str(exc), backup_attempted=False)
+            finally:
+                db.close()
+            if current != root:
+                return _CompetitionOutcome(None, "the backup destination changed; nothing was changed",
+                                           backup_attempted=False)
         return _CompetitionOutcome(change_competition(
             db_path, world, identity_dir=identity_dir, backup_to=destination, confirm=confirm,
             reason=reason, reset=reset, operator=operator, require_stopped_node=False,
@@ -18407,7 +18421,10 @@ async def _war_dialer_competition_flow(
         _announce(session, "The reason is longer than 240 characters. Nothing was changed.", error=True)
         return
     await write_prompt(session, f"Type the world filename {world.name!r} to confirm, or anything else to cancel: ")
-    if (await session.read_line()).strip() != world.name:
+    entered = await session.read_line()
+    # Exact, or with stray surrounding spaces -- but a name that really has
+    # them can still be typed exactly.
+    if entered != world.name and entered.strip() != world.name:
         _announce_line(session, "Cancelled. Nothing was changed.")
         return
     latest = await lane.run(get_door, door.id)
@@ -18441,6 +18458,7 @@ async def _war_dialer_competition_flow(
     outcome = await _owned_worker(
         _war_dialer_change_competition, finish=_record, db_path=db_path, world=world, identity_dir=identity_dir,
         destination=destination, reason=reason, confirm=world.name, reset=reset, operator=actor.username,
+        root=root,
     )
     if outcome.failure is not None:
         _announce(session, f"{what} failed: {outcome.failure}", error=True)
