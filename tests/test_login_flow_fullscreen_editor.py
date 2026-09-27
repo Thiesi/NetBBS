@@ -569,7 +569,7 @@ def test_edit_existing_post_via_plain_line_flow(db, alice):
     board = create_board(db, "general", creator=alice)
     create_post(db, board, alice, "Original subject", "Original body")
     # e -> pick post 1 -> keep subject -> replace body line 1 -> finish -> [S]ave in review -> back
-    session = FakeSession(["e", "1", "", "/edit 1", "Edited body", "", "s", "b", ""])
+    session = FakeSession(["1", "e", "", "/edit 1", "Edited body", "", "s", "b", "b"])
     asyncio.run(board_flow._show_board(session, db, board, alice))
     assert "Post updated" in _written_text(session)
     saved = list_posts_page(db, board, alice).posts[0]
@@ -583,7 +583,7 @@ def test_edit_existing_post_via_fullscreen_editor(db, alice):
     board = create_board(db, "general", creator=alice)
     create_post(db, board, alice, "Original subject", "Original body")
     session = FakeSession(
-        ["e", "1", "New subject"] + ["END"] + _type(" -- revised") + ["CTRL+O", "s", "b", ""]
+        ["1", "e", "New subject"] + ["END"] + _type(" -- revised") + ["CTRL+O", "s", "b", "b"]
     )
     asyncio.run(board_flow._show_board(session, db, board, alice))
     assert "Post updated" in _written_text(session)
@@ -596,7 +596,7 @@ def test_edit_existing_post_cancelled_leaves_it_unchanged(db, alice):
     set_fullscreen_editor_enabled(db, alice, True)
     board = create_board(db, "general", creator=alice)
     create_post(db, board, alice, "Subject", "Body")
-    session = FakeSession(["e", "1", "Subject", "CTRL+X", "d", "b", ""])
+    session = FakeSession(["1", "e", "Subject", "CTRL+X", "d", "b", "b"])
     asyncio.run(board_flow._show_board(session, db, board, alice))
     assert "cancelled" in _written_text(session).lower()
     saved = list_posts_page(db, board, alice).posts[0]
@@ -604,13 +604,16 @@ def test_edit_existing_post_cancelled_leaves_it_unchanged(db, alice):
     assert saved.is_edited is False
 
 
-def test_edit_existing_post_rejects_an_invalid_post_number(db, alice):
+def test_edit_is_an_action_of_the_reader_not_the_list(db, alice):
+    """Issue #679: editing picks its post by being on it, not by a typed
+    page-relative number -- "e" on the list is refused with the bell."""
     board = create_board(db, "general", creator=alice)
     create_post(db, board, alice, "Subject", "Body")
-    session = FakeSession(["e", "9", "b", ""])
+    session = FakeSession(["e", "b"])
     asyncio.run(board_flow._show_board(session, db, board, alice))
-    assert "Not a valid post number" in _written_text(session)
-
+    text = _written_text(session)
+    assert "Edit which post number" not in text
+    assert "\a" in text
 
 def test_editing_a_post_does_not_reset_to_the_newest_page(db, alice):
     board = create_board(db, "general", creator=alice)
@@ -618,7 +621,7 @@ def test_editing_a_post_does_not_reset_to_the_newest_page(db, alice):
     # page, edit the post shown there, and confirm the view stays on
     # that same older page rather than jumping back to page one.
     posts = [create_post(db, board, alice, f"Subject {i}", f"Body {i}") for i in range(6)]
-    session = FakeSession(["o", "e", "1", "", "/edit 1", "Edited", "", "s", "b", ""])
+    session = FakeSession(["o", "1", "e", "", "/edit 1", "Edited", "", "s", "b", "b"])
     asyncio.run(board_flow._show_board(session, db, board, alice))
     text = _written_text(session)
     assert "Post updated" in text
@@ -645,7 +648,7 @@ def test_tombstone_existing_post_via_plain_line_flow(db, alice):
     grant_permissions(db, alice, object_type="board", object_id=board.id, permissions=BoardPermission.DELETE, granted_by=alice)
     create_post(db, board, alice, "Original subject", "Original body")
     # t -> pick post 1 -> confirm -> back -> skip new post
-    session = FakeSession(["t", "1", "y", "b", ""])
+    session = FakeSession(["1", "t", "y", "b", "b"])
     asyncio.run(board_flow._show_board(session, db, board, alice))
     text = _visible(session)
     assert 'Remove "Original subject"? This cannot be undone.' in text
@@ -661,7 +664,7 @@ def test_tombstone_existing_post_cancelled_leaves_it_unchanged(db, alice):
     board = create_board(db, "general", creator=alice)
     grant_permissions(db, alice, object_type="board", object_id=board.id, permissions=BoardPermission.DELETE, granted_by=alice)
     create_post(db, board, alice, "Subject", "Body")
-    session = FakeSession(["t", "1", "n", "b", ""])
+    session = FakeSession(["1", "t", "n", "b", "b"])
     asyncio.run(board_flow._show_board(session, db, board, alice))
     assert "Cancelled" in _written_text(session)
     saved = list_posts_page(db, board, alice).posts[0]
@@ -743,7 +746,7 @@ def test_editing_on_a_moderated_board_says_the_edit_awaits_approval(db, alice):
 
     board = create_board(db, "general", creator=alice, moderated=True)
     approve_post(db, create_post(db, board, alice, "Subject", "Original body"), approved_by=_sysop(db))
-    session = FakeSession(["e", "1", "", "/edit 1", "Revised body", "", "s", "b", ""])
+    session = FakeSession(["1", "e", "", "/edit 1", "Revised body", "", "s", "b", "b"])
     asyncio.run(board_flow._show_board(session, db, board, alice))
     text = _visible(session)
     assert "Edit submitted. The post keeps its current text until a moderator approves it." in text
@@ -755,7 +758,7 @@ def test_saving_an_unchanged_edit_says_nothing_changed(db, alice):
     board = create_board(db, "general", creator=alice)
     create_post(db, board, alice, "Subject", "Body")
     # Keep the subject, finish the body untouched, save in review.
-    session = FakeSession(["e", "1", "", "", "s", "b", ""])
+    session = FakeSession(["1", "e", "", "", "s", "b", "b"])
     asyncio.run(board_flow._show_board(session, db, board, alice))
     text = _visible(session)
     assert "No changes to save." in text
@@ -766,7 +769,7 @@ def test_saving_an_unchanged_edit_says_nothing_changed(db, alice):
 def test_an_edit_is_reviewed_before_it_is_saved(db, alice):
     board = create_board(db, "general", creator=alice)
     create_post(db, board, alice, "Subject", "Body")
-    session = FakeSession(["e", "1", "", "/edit 1", "Revised", "", "c", "b", ""])
+    session = FakeSession(["1", "e", "", "/edit 1", "Revised", "", "c", "b", "b"])
     asyncio.run(board_flow._show_board(session, db, board, alice))
     text = _visible(session)
     assert "Review composition" in text
@@ -782,7 +785,7 @@ def test_a_refused_edit_stays_in_review_with_the_revision_intact(db, alice):
     create_post(db, board, alice, "Subject", "Body")
     too_long = "x" * (MAX_SUBJECT_BYTES + 1)
     session = FakeSession(
-        ["e", "1", too_long, "/edit 1", "Revised body", "", "s", "u", "Short subject", "s", "b", ""]
+        ["1", "e", too_long, "/edit 1", "Revised body", "", "s", "u", "Short subject", "s", "b", "b"]
     )
     asyncio.run(board_flow._show_board(session, db, board, alice))
     text = _visible(session)

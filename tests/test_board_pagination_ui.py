@@ -68,6 +68,12 @@ class FakeSession:
         return re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", self.output)
 
 
+def _listed(session) -> set[int]:
+    """The subject numbers the list has drawn: "Subject 12" as a whole word,
+    so "Subject 1" never matches inside "Subject 12"."""
+    return {int(n) for n in re.findall(r"Subject (\d+)\b", session.visible_output)}
+
+
 def _make_board_with_posts(db, count: int, monkeypatch):
     user = create_user(db, "alice", password="hunter2", user_level=10)
     board = create_board(db, "general", creator=user)
@@ -86,18 +92,12 @@ def test_opening_a_multi_page_board_shows_only_the_newest_page(tmp_path, monkeyp
 
     asyncio.run(_show_board(session, db, board, user))
 
-    # The core acceptance criterion: a bounded number of posts
-    # rendered, not the whole board's history. Matched against
-    # "Subject {i} --" (the exact post-header separator), not bare
-    # "Subject {i}" -- otherwise "Subject 1" would falsely match
-    # inside "Subject 10", "Subject 12", etc.
-    shown = sum(1 for i in range(total) if f"Subject {i} --" in session.output)
-    assert shown == _PAGE_SIZE
-    # Specifically the *newest* posts (highest-numbered subjects).
-    for i in range(total - _PAGE_SIZE, total):
-        assert f"Subject {i} --" in session.output
-    for i in range(0, total - _PAGE_SIZE):
-        assert f"Subject {i} --" not in session.output
+    # The core acceptance criterion: a bounded number of posts listed, not
+    # the whole board's history -- as many as the terminal holds (issue
+    # #679), and specifically the *newest* ones.
+    shown = _listed(session)
+    assert 0 < len(shown) < total
+    assert shown == set(range(total - len(shown), total))
     assert "lder" in session.output  # "[O]lder" offered -- there's more history
     assert "ewer" not in session.output  # already on the newest page
     db.close()
@@ -150,7 +150,8 @@ def test_post_shows_verified_and_displayed_real_name(tmp_path):
     create_post(db, board, alice, "Hello", "World")
     attest_name(db, alice, "Alice Smith", verifier=sysop)
 
-    session = FakeSession(keys=["b"])
+    # The reader's byline carries the attested name in full (issue #679).
+    session = FakeSession(keys=["1", "b", "b"])
     asyncio.run(_show_board(session, db, board, alice))
 
     assert "(=Alice Smith=)" in session.output
@@ -229,7 +230,7 @@ def test_board_page_has_location_post_count_and_actions(tmp_path, monkeypatch):
     asyncio.run(_show_board(session, db, board, user))
 
     assert "NetBBS › Message boards › general" in session.visible_output
-    assert "2 posts on this page" in session.output
+    assert "Newest posts" in session.visible_output
     assert "]ost" in session.output
     assert "]ack" in session.output
     db.close()
@@ -244,8 +245,9 @@ def test_back_choice_exits_without_navigating(tmp_path, monkeypatch):
     asyncio.run(_show_board(session, db, board, user))
 
     # Never paged -- only ever the newest page's subjects appear.
-    for i in range(0, _PAGE_SIZE):
-        assert f"Subject {i}" not in session.output
+    shown = _listed(session)
+    assert shown and max(shown) == total - 1
+    assert 0 not in shown
     db.close()
 
 
@@ -345,7 +347,7 @@ def test_editing_a_post_on_a_linked_board_queues_a_board_post_edit(tmp_path):
     queue_board_post_if_linked(db, post, board, node_identity=node_identity)
 
     session = FakeSession(
-        keys=["e", "1", "s", "b"], lines=["Hello (edited)", "/edit 1", "World, edited", ""]
+        keys=["1", "e", "s", "b", "b"], lines=["Hello (edited)", "/edit 1", "World, edited", ""]
     )
     asyncio.run(_show_board(session, db, board, user, link_context=link_context))
 
@@ -364,7 +366,7 @@ def test_editing_a_post_without_link_context_never_queues_one(tmp_path):
     post = create_post(db, board, user, "Hello", "World")
 
     session = FakeSession(
-        keys=["e", "1", "s", "b"], lines=["Hello (edited)", "/edit 1", "World, edited", ""]
+        keys=["1", "e", "s", "b", "b"], lines=["Hello (edited)", "/edit 1", "World, edited", ""]
     )
     asyncio.run(_show_board(session, db, board, user))
 
@@ -451,9 +453,11 @@ def test_jump_to_first_unread_opens_on_the_post_right_after_the_cursor(tmp_path,
     session = FakeSession(keys=["b"])
     asyncio.run(_show_board(session, db, board, bob, initial_cursor=cursor))
 
-    text = session.output
-    assert "Subject 0 --" not in text  # already-seen post is not on the jumped-to page
-    assert "Subject 1 --" in text  # first unread post is
+    shown = _listed(session)
+    assert 0 not in shown  # already-seen post is not on the jumped-to page
+    assert 1 in shown  # first unread post is
+    # ...and the cursor starts on it, so Enter reads what the jump was for.
+    assert re.search(r">\s+1\s+Subject 1\b", session.visible_output)
     db.close()
 
 
@@ -471,5 +475,5 @@ def test_jump_to_first_unread_falls_back_to_the_newest_page_once_caught_up(tmp_p
     asyncio.run(_show_board(session, db, board, bob, initial_cursor=cursor))
 
     assert "has no posts yet" not in session.output  # must not be mistaken for a genuinely empty board
-    assert "Subject 2 --" in session.output  # shows the ordinary newest page instead
+    assert 2 in _listed(session)  # shows the ordinary newest page instead
     db.close()

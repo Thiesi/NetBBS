@@ -571,7 +571,7 @@ from netbbs.rendering import (
     visible_width,
     wrap_to_width,
 )
-from netbbs.rendering.detail import Field, Note, Section, Table, render_sections
+from netbbs.rendering.detail import Field, Note, Section, Styled, Table, render_sections
 from netbbs.rendering.reflow import wrap_terminal_text
 from netbbs.net import notices as _notices
 from netbbs.guest import (
@@ -14834,48 +14834,6 @@ async def _pending_posts_screen(
         await _post_action_screen(session, lane, actor, selected, board, link_context=link_context)
 
 
-async def _draw_post_action(
-    session: Session, post: Post, description_level: str, redraw_in_place: bool,
-    unicode_style: bool,
-    collapsed: bool,
-    header_color: int | tuple[int, int, int] = HEADER_COLOR,
-    *,
-    status_line: str,
-    when: str,
-) -> None:
-    await session.write_line(
-        "\r\n" + screen_title(sanitize_text(post.subject),
-            breadcrumb=(session.node_display_name,), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
-            header_color=header_color, node_name_gradient=session.node_name_gradient)
-    )
-    await session.write_line(status_line)
-    # What the moderator is deciding about, then the post itself under its own
-    # heading: the body used to follow a bare "By:" line with nothing between
-    # them, and the pin/exempt toggles below had no state shown anywhere.
-    panel_rows = await _write_sections(session, [Section("Pending post", [
-        Field("By", post.author_label, color=AUTHOR_COLOR),
-        Field("Posted", when, color=DATE_COLOR),
-        Field("Pinned", _yes_no(post.pinned)),
-        Field("Exempt from auto-purge", _yes_no(post.exempt_from_expiry)),
-    ], paired=True)], unicode_style=unicode_style)
-    await session.write_line("")
-    await session.write_line(colored("MESSAGE", fg_color=METADATA_COLOR, bold=True))
-    body = reflow(sanitize_text(post.body, allow_newlines=True), width=session.terminal_width)
-    await session.write_line(colored(body, fg_color=VALUE_COLOR))
-    options = _fitted_menu(
-        [
-            MenuEntry(label=menu_key("A", "pprove"), brief="Publish this pending post"),
-            MenuEntry(label=menu_key("R", "eject"), brief="Delete this pending post"),
-            MenuEntry(label=menu_key("P", "in toggle"), brief="Toggle showing at the top"),
-            MenuEntry(label=menu_key("X", "empt toggle"), brief="Toggle exempt from auto-purge"),
-            MenuEntry(label=menu_key("B", "ack"), brief="Return to the pending list"),
-        ],
-        description_level, session=session, used_rows=panel_rows + 6 + body.count("\r\n") + 1,
-    )
-    await session.write_line(f"\r\n{options}")
-    await _choice_prompt(session)
-
-
 async def _post_action_screen(
     session: Session,
     lane: DatabaseLane,
@@ -14885,7 +14843,10 @@ async def _post_action_screen(
     *,
     link_context: LinkContext | None = None,
 ) -> None:
-    description_level = await lane.run(menu_description_level, actor)
+    """One pending post, on the same paged reader a caller reads posts with
+    (issue #679): the facts and the action bar stay on screen while a long
+    body pages under them, which matters most here -- a moderator reads the
+    whole post before approving it."""
     unicode_style = await lane.run(unicode_style_enabled, actor)
     collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
     redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
@@ -14893,20 +14854,46 @@ async def _post_action_screen(
     status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
     display_format, display_timezone = await lane.run(resolve_display_preferences)
     when = format_for_display(post.created_at, override_format=display_format, override_timezone=display_timezone)
-    await _draw_post_action(session, post, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line, when=when)
+    actions = [
+        ("a", menu_key("A", "pprove")),
+        ("r", menu_key("R", "eject")),
+        ("p", menu_key("P", "in toggle")),
+        ("x", menu_key("X", "empt toggle")),
+        ("b", menu_key("B", "ack")),
+    ]
+    page = 0
     while True:
-        choice = (await session.read_key()).lower()
-
+        title = screen_title(
+            sanitize_text(post.subject),
+            breadcrumb=(session.node_display_name,), width=session.terminal_width, clear=False,
+            unicode_style=unicode_style, collapsed=collapsed,
+            header_color=header_color, node_name_gradient=session.node_name_gradient,
+        )
+        body = reflow(sanitize_text(post.body, allow_newlines=True), width=session.terminal_width)
+        body_rows = [colored(line, fg_color=VALUE_COLOR) if line else "" for line in body.splitlines()]
+        # What the moderator is deciding about, then the post itself under its
+        # own heading, with the pin and exempt state the toggles change.
+        sections = [
+            Section("Pending post", [
+                Field("By", post.author_label, color=AUTHOR_COLOR),
+                Field("Posted", when, color=DATE_COLOR),
+                Field("Pinned", _yes_no(post.pinned)),
+                Field("Exempt from auto-purge", _yes_no(post.exempt_from_expiry)),
+            ], paired=True),
+            Section("Message", [Styled(body_rows)]),
+        ]
+        choice, page = await show_detail(
+            session, title=title, sections=sections, actions=actions,
+            redraw_in_place=redraw_in_place, unicode_style=unicode_style, page=page,
+            preamble=[status_line],
+        )
         if choice == "b":
-            await session.write_line("")
             return
-        elif choice == "a":
-            await session.write_line("")
+        if choice == "a":
             try:
                 approved = await lane.run(approve_post, post, approved_by=actor)
             except PostError as exc:
                 _announce(session, f"Error: {exc}", error=True)
-                await _draw_post_action(session, post, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line, when=when)
                 continue
             if link_context is not None:
                 await lane.run(
@@ -14914,26 +14901,18 @@ async def _post_action_screen(
                 )
             _announce_line(session, "Approved.")
             return
-        elif choice == "r":
-            await session.write_line("")
+        if choice == "r":
             try:
                 await lane.run(delete_post, post, deleted_by=actor)
             except PostError as exc:
                 _announce(session, f"Error: {exc}", error=True)
-                await _draw_post_action(session, post, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line, when=when)
                 continue
             _announce_line(session, "Rejected.")
             return
-        elif choice == "p":
-            await session.write_line("")
+        if choice == "p":
             post = await lane.run(set_post_pinned, post, not post.pinned, changed_by=actor)
-            await _draw_post_action(session, post, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line, when=when)
-        elif choice == "x":
-            await session.write_line("")
-            post = await lane.run(set_post_exempt, post, not post.exempt_from_expiry, changed_by=actor)
-            await _draw_post_action(session, post, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line, when=when)
         else:
-            await session.write(reject_unhandled_key(choice))
+            post = await lane.run(set_post_exempt, post, not post.exempt_from_expiry, changed_by=actor)
 
 
 # -- file areas ----------------------------------------------------------
@@ -17213,6 +17192,7 @@ async def _channel_detail_screen(
             deleted = await _delete_channel_screen(
                 session, lane, actor, channel,
                 own_fingerprint=link_context.node_identity.fingerprint if link_context is not None else None,
+                chat_hub=chat_hub,
             )
             if deleted:
                 if mrc_bridge is not None and mrc_mapping is not None:
@@ -17242,7 +17222,7 @@ async def _channel_detail_screen(
             await _redraw()
         elif choice == "t" and mrc_mapping is not None and mrc_mapping.is_open_room:
             await session.write_line("")
-            if await _retire_open_room_screen(session, lane, actor, channel, mrc_bridge=mrc_bridge):
+            if await _retire_open_room_screen(session, lane, actor, channel, mrc_bridge=mrc_bridge, chat_hub=chat_hub):
                 return
             await _redraw()
         elif choice == "u" and mrc_mapping is not None and not mrc_mapping.is_open_room:
@@ -17384,11 +17364,12 @@ async def _adopt_open_room_screen(
 
 async def _retire_open_room_screen(
     session: Session, lane: DatabaseLane, actor: User, channel: Channel, *, mrc_bridge: MrcBridge | None,
+    chat_hub: ChatHub | None = None,
 ) -> bool:
     """`Re[t]ire` (issue #300): remove a room a caller opened, with its
     scrollback, now. Destructive, so the yes/no is the last keystroke
     behind the hotkey. Callers inside are told and returned to the
-    picker by the same path a deleted channel already uses."""
+    picker, as for a deleted channel (issue #716)."""
     if not await prompt_yes_no(
         session, f"Retire {sanitize_text(channel.name)} and delete its scrollback now?", default=False,
     ):
@@ -17406,9 +17387,12 @@ async def _retire_open_room_screen(
     except MrcSettingsError as exc:
         _announce_line(session, colored(str(exc), fg_color=MUTED_COLOR))
         return False
+    _announce_line(session, f"Retired {channel.name!r}.")
+    # Callers first: the retirement has committed, and a bridge refresh that
+    # fails must not leave anyone inside a room that is gone.
+    _move_callers_out(session, chat_hub, channel)
     if mrc_bridge is not None:
         await mrc_bridge.refresh_channel_mappings()
-    _announce_line(session, f"Retired {channel.name!r}.")
     if mrc_bridge is None:
         _announce_line(session, colored(_MRC_STANDALONE_NOTE, fg_color=MUTED_COLOR))
     return True
@@ -17690,9 +17674,21 @@ async def _link_channel_screen(
 
 
 
+def _move_callers_out(session: Session, chat_hub: ChatHub | None, channel: Channel) -> None:
+    """Send everyone inside `channel`, which the SysOp just deleted, hid or
+    retired, back to the channel list (issue #716), and say how many."""
+    if chat_hub is None:
+        return
+    moved = chat_hub.close_channel(channel.name)
+    if moved:
+        _announce_line(
+            session, f"{moved} caller session{'s' if moved != 1 else ''} in it moved back to the channel list.",
+        )
+
+
 async def _delete_channel_screen(
     session: Session, lane: DatabaseLane, actor: User, channel: Channel, *,
-    own_fingerprint: str | None = None,
+    own_fingerprint: str | None = None, chat_hub: ChatHub | None = None,
 ) -> bool:
     # Issue #683: a carried chat channel whose origin is another node is hidden,
     # not destroyed -- see `_hide_carried_screen`.
@@ -17702,7 +17698,12 @@ async def _delete_channel_screen(
         _announce_line(session, colored(f"Cannot delete {channel.name!r}: {exc}", fg_color=ERROR_COLOR))
         return False
     if carried:
-        return await _hide_carried_screen(session, lane, actor, "channels", channel.channel_id, channel.name, own_fingerprint=own_fingerprint)
+        hidden = await _hide_carried_screen(
+            session, lane, actor, "channels", channel.channel_id, channel.name, own_fingerprint=own_fingerprint,
+        )
+        if hidden:
+            _move_callers_out(session, chat_hub, channel)
+        return hidden
     await session.write_line(
         colored(
             "\r\nThis permanently deletes the chat channel, its scrollback, mute/ban "
@@ -17721,10 +17722,13 @@ async def _delete_channel_screen(
         return False
     # Issues #669/#683: a Linked channel keeps its genesis and is recorded as
     # excluded, so it stays declared as not carried and does not come back.
-    return await _remove_resource(
+    removed = await _remove_resource(
         session, lane, actor, "channels", channel.channel_id, channel.name, own_fingerprint=own_fingerprint,
         delete=lambda db: delete_channel(db, channel, deleted_by=actor),
     )
+    if removed:
+        _move_callers_out(session, chat_hub, channel)
+    return removed
 
 
 # -- categories ----------------------------------------------------------

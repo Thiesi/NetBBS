@@ -1431,6 +1431,40 @@ A visible edit is a revision, not destructive replacement of history. Any
 threading or revision semantics which affect Link event IDs or propagation must
 be settled in Phase 3; only presentation refinements may wait until Phase 7.
 
+**A board is a list of posts; a post is read on its own screen** (issue #679).
+
+The list:
+- Shows one row per post: number, subject, a `new` marker, author and date.
+- Fits as many rows as the terminal holds and pages with
+  `[O]lder`/`[N]ewer`/`[R]ecent`.
+- Has a cursor: Up/Down, and Enter or a digit to open a post.
+- Follows §3.6: display-width columns. Below readable width, a row becomes
+  "subject -- author". Author gives way to subject first, because the reader
+  shows the author in full.
+- Has a header that says where the caller is and what they can do: the path
+  they came through (Community, "Message boards", category), newest or older
+  posts, how many were new on arrival, and "Linked" or "linked from X".
+- Shows the board's description and, for a caller who can read but not post,
+  why ("Read only: posting needs level N", or a name that needs
+  verification).
+- Marks a post `new` against the read position the caller had when they
+  arrived, so the markers survive the visit.
+- Opens a `[N]ew scan` or `[F]ind` jump with the cursor on its target.
+
+A post opens on `show_detail`:
+- The title, a byline (author, date, `edited`, `new`, the post it replies to)
+  and the action bar stay on screen while a long body pages with PgUp/PgDn.
+- The post's own actions live there, offered only when they would succeed:
+  `[E]dit`, `Remove pos[t]`, and `[N]ext post`/`[P]revious post`, which cross
+  page boundaries.
+- `[B]ack` returns to the list with the cursor on the post last read.
+- The mail message view and the SysOp's pending-post review use the same
+  reader.
+
+The board picker adds an activity column ("N new", "caught up", "not visited
+yet", in §6.6's terms) and an "about" column that leads with `[LINK]` and a
+name-gate note before the description.
+
 ### 6.2 File areas
 
 Local file metadata lives in SQLite; file bytes use content-addressed filesystem
@@ -1624,6 +1658,16 @@ that name for everything it sends, receives, and leaves with. A channel is
 therefore not renamed while callers are inside it: the SysOp screen refuses
 with the occupant count until it is empty, and the standalone admin CLI, which
 cannot see occupancy, states what a rename does to anyone inside.
+
+A channel that closes while callers are inside it — the SysOp deletes it, hides
+a carried Link channel (§16, issue #683), or retires an MRC room a caller
+opened — moves every one of them back to the channel list at once, where the
+line "#name was closed by the SysOp." is shown above the list; no keypress is
+asked for (issue #716). Their live Link subscription and MRC presence end the
+way `/leave` ends them. A closed channel gets no `leave` line: a deleted one has
+nowhere to hold it, and a hidden one keeps its scrollback exactly as it was for
+Restore. A close the running node cannot push (the standalone admin CLI) is
+caught by the session itself the next time it sends, with the same result.
 
 ### 6.4 Personal mail
 
@@ -2195,7 +2239,9 @@ A descriptor also lists `capabilities`: the optional Link behaviours the
 signing node's code understands (issue #669). A peer uses such a behaviour only
 with a node that advertises it; a descriptor without the list advertises
 nothing. It describes the software, not a setting, so every descriptor a given
-version signs carries the same list.
+version signs carries the same list. Two exist: `inventory_not_carried` (issue
+#669) and `inventory_pages` (issue #685), both for signed `InventoryRequest`
+fields (§8.8).
 
 The protocol logic remains transport-independent. The `aiohttp` adapter is the
 boundary translating protocol messages to real HTTP requests and responses.
@@ -2330,7 +2376,9 @@ InventoryRequest {
   signature: bytes,
   boards: { board_id: [known_content_id, ...], ... },
   channels: { channel_id: [known_content_id, ...], ... },
-  file_areas: { area_id: [known_content_id, ...], ... }
+  file_areas: { area_id: [known_content_id, ...], ... },
+  not_carried?: { kind: [resource_id, ...], ... },   // issue #669
+  page?: { index: int, count: int }                  // issue #685
 }
 ```
 
@@ -2343,11 +2391,48 @@ bounded replay window across restart. This prevents a captured request from
 being redirected to enumerate a different peer or replayed indefinitely.
 
 `boards` is keyed by every `board_id` the requester itself currently
-carries (bounded by its own `max_carried_boards` quota, §13.9 — the request
-size is therefore already bounded by an existing cap, not a new one) mapped
+carries (bounded by its own `max_carried_boards` quota, §13.9) mapped
 to that board's full set of content IDs the requester already has for it.
 `channels`/`file_areas` (§9.6, §11) are the identical shape for linked
 channels and linked file-area catalogues respectively.
+
+**A declaration too large for one request is sent in pages (issue #685).** The
+quotas bound the keys, not the history under them. At about 30,000 held content
+IDs the request outgrew the responder's 2 MiB `client_max_size` and was refused
+with 413 on every pass, so pull, and the `wanted` push that rides on it,
+stopped for good. When the IDs (and `not_carried`, below) would exceed 1 MiB,
+half the limit, the requester splits them into `count` pages by
+`inventory_page(id, count, nonce)` — the first eight bytes of the SHA-256 of
+the request's nonce and the ID, big endian, modulo `count` — and each request
+carries one page. The nonce is random, signed and fresh, so the split is new
+every request: unsalted, a peer that authors events could vary them until
+their IDs shared one page and push that page past the limit for good. Every key is still present; each list holds only its IDs on that
+page, and `not_carried` only the resources on it. The signed `page` field tells
+the responder which page it has, and the responder narrows its answer to match:
+for a declared resource it compares only its own events on that page, and an
+undeclared resource it answers for only when the resource ID itself is on that
+page, because only there is the requester's `not_carried` complete and "absent"
+still means "never seen". Any given item is on the page sent with chance
+1/`count`, so a node past the limit catches up in about `count` passes rather
+than never.
+`count` is at most 4,096. Rejected: a per-resource digest with a full list
+where it differs (a second round trip, and one very large resource, which a
+busy linked channel becomes since channel events are never pruned, still
+outgrows the body); a per-resource cursor or high-water mark (content IDs
+carry no order the two sides share, and a gap below the mark would never be
+asked for again); paging whole resources (the same single-resource ceiling).
+Splitting within a resource lets a reply or edit arrive before what it refers
+to, which the materializers already tolerate: gossip arrives out of order anyway.
+
+`page` is signed and omitted for a one-page request, and it is sent only to a
+responder whose descriptor advertises `inventory_pages` (§8.2), for the same
+reason as `not_carried` below. An older responder is sent the same slice
+without being told. It takes the rest as missing and answers with events the
+requester already holds, which past its 200-event page can fill every response,
+so pull from it may make no progress until it upgrades; the push half still
+works, since `wanted` is computed from what the page declares. Nothing an older
+responder understands can do better, and the whole declaration moved nothing in
+either direction.
 
 **Route: `POST {LINK_PATH_PREFIX}/inventory/{fingerprint}`**, mirroring
 `/events/{fingerprint}`'s existing convention (`fingerprint` names the
@@ -2542,7 +2627,12 @@ lives only in its own row. The list is capped at 5,000 IDs per request: the stor
 genesis set is not bounded by anything the node controls, since a peer can keep
 sending geneses to a node past its cap, and an unbounded list would grow until
 every request was refused. Over the cap each request declares a fresh random
-sample, so what goes undeclared costs a resend, never a fixed starvation. The existing maps cannot say this, since their
+sample, so what goes undeclared costs a resend, never a fixed starvation.
+Against a responder that takes pages (issue #685, above), the requester instead
+uses enough pages that each page's share stays well under the cap, so each
+request declares every declined resource on its page, the responder skips every
+undeclared resource off it, and none is ever resent; the sample remains only as
+the backstop. The existing maps cannot say this, since their
 values are known-ID sets and an offered board's posts were never received. The
 field is part of the signed payload only when it names something, so a request
 without it signs exactly as before; and it is sent only to a responder whose
@@ -11264,8 +11354,9 @@ dropped without reaching `link_events`. Mixed versions keep today's behaviour
 until the responder upgrades. The declaration costs one resource ID per offered or
 excluded resource; the carried maps beside it list every content ID of every
 carried resource and are far larger, so keeping the whole request under the
-responder's size limit is one problem for both, and #669 owns it rather than a
-separate bound on the carry-decision record.
+responder's size limit is one problem for both. Issue #685 settled it for both
+at once by paging the declaration (§8.8), rather than a separate bound on the
+carry-decision record.
 
 **Decision 7 — the bound stays a per-type count, and all three get a
 readout.** 500 stays the default, and the declared scale (§2.3) stays small.

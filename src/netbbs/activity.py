@@ -57,7 +57,7 @@ from dataclasses import dataclass
 
 from netbbs.auth.users import User
 from netbbs.boards.boards import Board
-from netbbs.boards.posts import Post, count_visible_roots
+from netbbs.boards.posts import Post, count_visible_roots, sweep_expired_posts
 from netbbs.chat.channels import Channel
 from netbbs.chat.scrollback import ChannelMessage
 from netbbs.files.areas import FileArea
@@ -119,11 +119,36 @@ def _record_seen_string_ordered(
     db: Database, user: User, object_type: str, object_id: int, *, created_at: str, stable_id: str, arrival_id: int
 ) -> None:
     existing = _get_cursor(db, user, object_type, object_id)
-    if existing is not None and _arrival_is_at_or_past(existing, arrival_id, created_at, stable_id):
-        return  # never retreat -- an older/equal page view must not un-mark newer content
+    if existing is None:
+        _upsert_cursor(
+            db, user, object_type, object_id,
+            last_seen_created_at=created_at, last_seen_stable_id=stable_id, last_seen_arrival_id=arrival_id,
+        )
+        return
+    if existing.arrival_id is None:
+        # Legacy cursor with no arrival axis: the pre-#72 rule, as before.
+        if _arrival_is_at_or_past(existing, arrival_id, created_at, stable_id):
+            return
+        _upsert_cursor(
+            db, user, object_type, object_id,
+            last_seen_created_at=created_at, last_seen_stable_id=stable_id, last_seen_arrival_id=arrival_id,
+        )
+        return
+    # The arrival watermark (what unread counts compare) and the feed
+    # position (where a jump to the first unread lands) are separate axes
+    # (§6.6), and each only ever moves forward. A late-arriving post has a
+    # newer arrival id but an older authored position: seeing it advances
+    # the watermark and must leave the feed position where it was, or a
+    # later jump would land on history already read (Codex review on #719).
+    arrival_advances = arrival_id > existing.arrival_id
+    feed_advances = (created_at, stable_id) > (existing.created_at, existing.stable_id)
+    if not arrival_advances and not feed_advances:
+        return  # never retreat -- an older/equal view must not un-mark newer content
     _upsert_cursor(
         db, user, object_type, object_id,
-        last_seen_created_at=created_at, last_seen_stable_id=stable_id, last_seen_arrival_id=arrival_id,
+        last_seen_created_at=created_at if feed_advances else existing.created_at,
+        last_seen_stable_id=stable_id if feed_advances else existing.stable_id,
+        last_seen_arrival_id=arrival_id if arrival_advances else existing.arrival_id,
     )
 
 
@@ -197,6 +222,16 @@ def board_read_cursor(db: Database, user: User, board: Board) -> tuple[str, str]
     return cursor.created_at, cursor.stable_id
 
 
+def board_seen_arrival_id(db: Database, user: User, board: Board) -> int | None:
+    """The newest post `user` has been shown on `board`, as a node-local
+    arrival id (issue #72) -- what a post list compares against to mark a
+    post `new` (issue #679). `None` for a board never visited, or a legacy
+    cursor with no arrival id: nothing is marked new on either, matching
+    §6.6's "never visited is not a count"."""
+    cursor = _get_cursor(db, user, _BOARD, board.id)
+    return cursor.arrival_id if cursor is not None else None
+
+
 def unread_post_count(db: Database, user: User, board: Board) -> int | None:
     """`None` if `user` has never visited `board` (no baseline cursor
     yet -- distinct from `0`, which means visited and fully caught up).
@@ -211,6 +246,7 @@ def unread_post_count(db: Database, user: User, board: Board) -> int | None:
     cursor = _get_cursor(db, user, _BOARD, board.id)
     if cursor is None:
         return None
+    sweep_expired_posts(db, board)
     if cursor.arrival_id is not None:
         count, _ = count_visible_roots(
             db, board.id, extra_sql="AND root.id > ?", extra_params=(cursor.arrival_id,)

@@ -40,6 +40,7 @@ from netbbs.link.protocol import LinkNode
 from netbbs.link.store import save_peer
 from netbbs.net import chat_flow
 from netbbs.net.char_input import InputHistory
+from netbbs.net.notices import pending_notices
 from netbbs.rendering import MUTED_COLOR, VERIFIED_COLOR, fg
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
@@ -320,7 +321,9 @@ def test_message_refused_once_channel_becomes_gated_mid_session(db, lane, hub, p
     session, action = asyncio.run(_run(lane, hub, presence, stale_channel, alice, ["still here", "/quit"]))
 
     assert isinstance(action, chat_flow._ToPicker)
-    assert "no longer meet" in _written(session)
+    # Carried to the channel list the caller lands on (issue #716): written
+    # here, the chat screen's exit clear would take it.
+    assert "no longer meet" in "".join(pending_notices(session))
     kinds = [m.kind for m in get_scrollback(db, open_channel)]
     assert "message" not in kinds  # the refused send was never recorded
 
@@ -332,7 +335,9 @@ def test_me_action_refused_once_channel_becomes_gated_mid_session(db, lane, hub,
     session, action = asyncio.run(_run(lane, hub, presence, stale_channel, alice, ["/me waves", "/quit"]))
 
     assert isinstance(action, chat_flow._ToPicker)
-    assert "no longer meet" in _written(session)
+    # Carried to the channel list the caller lands on (issue #716): written
+    # here, the chat screen's exit clear would take it.
+    assert "no longer meet" in "".join(pending_notices(session))
     kinds = [m.kind for m in get_scrollback(db, open_channel)]
     assert "action" not in kinds
 
