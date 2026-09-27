@@ -703,3 +703,23 @@ def test_mark_all_read_keeps_the_list_on_the_screen(db, alice, monkeypatch):
     last = session.screens()[-1]
     assert "Every post on this board is marked read." in last
     assert len(last.replace("\r\n", "\n").rstrip("\n").split("\n")) <= 24
+
+
+def test_the_new_count_follows_posts_the_cap_gave_up(db, alice, monkeypatch):
+    """Past the opened-set cap the floor jumps and unread gaps are given up
+    as read; the list's count says so at once (Codex review on #723)."""
+    from netbbs import activity
+
+    monkeypatch.setattr(activity, "OPENED_POSTS_CAP", 2)
+    board = create_board(db, "general", creator=alice)
+    ensure_board_baseline(db, alice, board)
+    posts = _posts(db, board, alice, 8, monkeypatch)
+    for index in (2, 4):
+        record_post_opened(db, alice, board, posts[index])
+    session = FakeSession(["7", "b", "b"])  # row 7 is Subject 6
+
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+
+    count = unread_post_count(db, alice, board)
+    assert count == 2
+    assert f"{count} new" in session.screens()[-1]

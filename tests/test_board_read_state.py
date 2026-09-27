@@ -400,7 +400,7 @@ def test_the_floor_never_retreats(db, alice, bob, monkeypatch):
     posts = _posts(db, board, alice, 3, monkeypatch)
     mark_board_read(db, bob, board)
     high = _floor(db, bob, board)
-    monkeypatch.setattr(activity, "_compact", lambda db, user, board, floor: 0)
+    monkeypatch.setattr(activity, "_compact", lambda db, user, board, floor: (0, False))
     monkeypatch.setattr(posts_module, "utc_now_iso", lambda: "2026-01-02T00:00:00.000000Z")
     later = create_post(db, board, alice, "later", "x")
 

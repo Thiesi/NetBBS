@@ -245,15 +245,17 @@ def _opened_ids(db: Database, user: User, board_id: int) -> set[int]:
     }
 
 
-def _compact(db: Database, user: User, board: Board, floor: int) -> int:
+def _compact(db: Database, user: User, board: Board, floor: int) -> tuple[int, bool]:
     """Fold `user`'s opened posts on `board` into the floor where they run
     unbroken from it, apply the cap, and drop every row the floor now
-    covers. Returns the new floor.
+    covers. Returns the new floor, and whether the cap moved it -- giving
+    unread posts up as read.
 
     "Unbroken" is over the posts a reader may see: a post pending
     approval, trust-hidden or deleted is not a gap a caller could have
     read, so it does not hold the floor back."""
     opened = {row_id for row_id in _opened_ids(db, user, board.id) if row_id > floor}
+    capped = False
     while opened:
         for row_id, _created_at, _post_id in iter_visible_roots(db, board.id, after_id=floor):
             if row_id not in opened:
@@ -265,12 +267,13 @@ def _compact(db: Database, user: User, board: Board, floor: int) -> int:
         # Past the cap: keep the newest rows, and the floor moves up to the
         # oldest of them -- the posts skipped below it count as read.
         floor = sorted(opened)[-OPENED_POSTS_CAP]
+        capped = True
         opened = {row_id for row_id in opened if row_id > floor}
     db.connection.execute(
         "DELETE FROM user_board_opened_posts WHERE user_id = ? AND board_id = ? AND post_row_id <= ?",
         (user.id, board.id, floor),
     )
-    return floor
+    return floor, capped
 
 
 def _raise_floor(db: Database, user: User, board: Board, floor: int) -> None:
@@ -285,19 +288,22 @@ def _raise_floor(db: Database, user: User, board: Board, floor: int) -> None:
     db.connection.commit()
 
 
-def record_post_opened(db: Database, user: User, board: Board, post: Post) -> None:
+def record_post_opened(db: Database, user: User, board: Board, post: Post) -> bool:
     """`user` opened `post` (a root) on `board`: it counts as read from now
     on (issue #710). Only opening marks a post read -- showing it in a
     list does not. The floor moves only as `_compact` allows, so opening
-    the newest post of a board does not mark the posts under it read."""
+    the newest post of a board does not mark the posts under it read.
+
+    Returns whether the opened-set cap gave other unread posts up as read,
+    so a caller keeping an unread count knows to count again."""
     if not _board_exists(db, board):
-        return
+        return False
     ensure_board_baseline(db, user, board)
     existing = _get_cursor(db, user, _BOARD, board.id)
     assert existing is not None
     floor = existing.arrival_id or 0
     if post.id <= floor:
-        return
+        return False
     # Only while that very post exists: one deleted since the reader fetched
     # it has had its rows dropped by the delete trigger already, and a row
     # written now would outlive it -- and match the next post, should that
@@ -308,7 +314,9 @@ def record_post_opened(db: Database, user: User, board: Board, post: Post) -> No
         "SELECT ?, ?, ? WHERE EXISTS (SELECT 1 FROM posts WHERE id = ? AND board_id = ? AND post_id = ?)",
         (user.id, board.id, post.id, post.id, board.id, post.post_id),
     )
-    _raise_floor(db, user, board, _compact(db, user, board, floor))
+    floor, capped = _compact(db, user, board, floor)
+    _raise_floor(db, user, board, floor)
+    return capped
 
 
 def mark_board_read(db: Database, user: User, board: Board) -> None:
@@ -324,7 +332,8 @@ def mark_board_read(db: Database, user: User, board: Board) -> None:
     newest = _newest_visible(db, board, by_feed=False)
     if newest is None:
         return
-    _raise_floor(db, user, board, _compact(db, user, board, max(existing.arrival_id or 0, newest[0])))
+    floor, _capped = _compact(db, user, board, max(existing.arrival_id or 0, newest[0]))
+    _raise_floor(db, user, board, floor)
 
 
 def unread_post_ids(db: Database, user: User, board: Board, posts: list[Post]) -> set[int]:

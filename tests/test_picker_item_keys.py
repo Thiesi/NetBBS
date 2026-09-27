@@ -103,3 +103,30 @@ def test_an_outcome_an_item_key_announces_shows_on_the_next_redraw():
     assert "beta: done." in written
     # Drawn by the picker's own redraw, above its next prompt.
     assert written.index("beta: done.") < written.rindex("Choice")
+
+
+def test_the_acted_on_row_stays_highlighted_when_its_outcome_shrinks_the_page():
+    """A full page, its last row highlighted: the outcome line takes a row,
+    and the row acted on must stay on the page and highlighted (Codex
+    review on #723)."""
+    from netbbs.net.notices import announce
+
+    names = [f"item {i:02d}" for i in range(40)]
+    session = FakeSession(["UP", "m", "ENTER"])
+    acted_on: list[str] = []
+
+    async def _mark(item: str):
+        acted_on.append(item)
+        announce(session, f"{item}: done.")
+        return None
+
+    selected = asyncio.run(pick_item(
+        session, names,
+        name_of=lambda item: item,
+        stable_id_of=lambda item: names.index(item) + 1,
+        title="Things",
+        empty_message="Nothing here.",
+        item_keys={"m": _mark},
+    ))
+
+    assert acted_on and selected == acted_on[0]

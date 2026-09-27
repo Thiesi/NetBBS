@@ -949,7 +949,9 @@ async def _show_board(
             # it is shown, so a dropped connection loses nothing already read.
             if unread_post_ids(db, user, board, [post]):
                 unread["count"] = max(0, unread["count"] - 1)
-            record_post_opened(db, user, board, post)
+            if record_post_opened(db, user, board, post):
+                # The opened-set cap gave other unread posts up as read.
+                unread["count"] = unread_post_count(db, user, board) or 0
             width = session.terminal_width
             title = screen_title(
                 sanitize_text(post.subject),

@@ -754,6 +754,10 @@ async def pick_item(
     page_end = 0
     page_history: list[int] = []
     highlighted: int | None = None
+    # A row, by its index into `working_set`, the next render must show and
+    # highlight -- set by an item key, whose outcome notice can take a row
+    # from the page it redraws (Codex review on #723).
+    keep_row: int | None = None
     # The search that narrowed `working_set`, if one did (issue #537,
     # Codex review). A re-sort or a filter replaces the backing set, and
     # without remembering this it also silently threw the search away --
@@ -805,7 +809,7 @@ async def pick_item(
             frozen = None
 
     async def _render_frozen() -> Sequence[T]:
-        nonlocal page_start, page_end, highlighted
+        nonlocal page_start, page_end, highlighted, keep_row
         # Before `_header_lines` measures it or `_masthead_prefix` draws
         # it, so a callable masthead is current for both.
         await _refresh_masthead()
@@ -878,6 +882,12 @@ async def pick_item(
         # size that changes under it moves the window without ever
         # skipping a row or repeating one.
         page_start = max(0, min(page_start, max(0, len(working_set) - 1)))
+        if keep_row is not None:
+            if keep_row < len(working_set):
+                if keep_row >= page_start + page_size:
+                    page_start = keep_row - page_size + 1
+                highlighted = keep_row - page_start
+            keep_row = None
         # The ordinal is how many pages were actually walked to get
         # here, not `page_start // page_size` (Codex review): the size
         # can differ from the one those pages were drawn with, so the
@@ -1452,10 +1462,14 @@ async def pick_item(
                     await session.write_line(colored("Out of range.", fg_color=ERROR_COLOR))
                     await session.write("Choice: ")
                     continue
+            acted_on = (
+                page_start + highlighted if highlighted is not None and highlighted < len(page_items) else None
+            )
             new_items = await item_keys[char_lower](target)
             if new_items is not None:
                 items = new_items
                 working_set = _narrowed(new_items)
+            keep_row = acted_on
             page_items = await _render()
             continue
 
