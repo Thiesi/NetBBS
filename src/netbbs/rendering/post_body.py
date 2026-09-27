@@ -134,7 +134,24 @@ def _consume_csi(text: str, position: int) -> tuple[int, list[int] | None]:
     position += 1
     if final != "m" or has_intermediates or not re.fullmatch(r"[0-9;]*", params):
         return position, None
-    return position, [int(part) if part else 0 for part in params.split(";")] if params else [0]
+    return position, _sgr_params(params)
+
+
+# No SGR parameter a post may use is longer than three digits (255 is the
+# largest). A longer one is refused before `int` sees it: a digit string of
+# a few thousand characters makes `int` raise (Codex review on #750).
+_MAX_PARAM_DIGITS = 3
+
+
+def _sgr_params(params: str) -> list[int] | None:
+    """An SGR's parameter string as integers, or `None` if any part is
+    longer than any a post may use -- then the whole SGR is dropped."""
+    if not params:
+        return [0]
+    parts = params.split(";")
+    if any(len(part) > _MAX_PARAM_DIGITS for part in parts):
+        return None
+    return [int(part) if part else 0 for part in parts]
 
 
 def _consume_string(text: str, position: int) -> int:
@@ -306,8 +323,9 @@ def self_contained_rows(rows: list[str]) -> list[str]:
         prefix = state.sequence()
         styled = bool(prefix) or bool(_SGR_RE.search(row))
         for match in _SGR_RE.finditer(row):
-            params = match.group(1)
-            state.apply([int(part) if part else 0 for part in params.split(";")] if params else [0])
+            parsed = _sgr_params(match.group(1))
+            if parsed is not None:
+                state.apply(parsed)
         result.append(prefix + row + RESET if styled else row)
     return result
 
@@ -353,7 +371,8 @@ def _strip_quote_marker(line: str) -> str:
         if match is not None:
             prefix += match.group(0)
             rest = rest[match.end():]
-        elif rest[:1] in (" ", "\t"):
+        elif rest[:1].isspace():
+            # Every kind of whitespace the quote test itself strips.
             rest = rest[1:]
         else:
             break
@@ -392,11 +411,46 @@ def colored_body_rows(styled: str, width: int) -> list[str]:
             rows.extend((False, wrapped) for wrapped in wrap_terminal_text(paragraph, max(1, width)).split("\r\n"))
     contents = self_contained_rows([content for _quote, content in rows])
     return [
-        colored("> ", fg_color=MUTED_COLOR)
-        + (content if _SGR_RE.search(content) else colored(content, fg_color=MUTED_COLOR))
-        if quote else content
+        colored("> ", fg_color=MUTED_COLOR) + _muted_quote(content) if quote else content
         for (quote, _raw), content in zip(rows, contents)
     ]
+
+
+_MUTED = f"{CSI}38;5;{MUTED_COLOR}m"
+
+
+def _muted_quote(content: str) -> str:
+    """A quote row's text in the muted quote color, an author's own color
+    kept where they set one: wherever their codes return the foreground
+    to the default -- a reset, or 39 -- it returns to muted instead
+    (Codex review on #750)."""
+    body = content[: -len(RESET)] if content.endswith(RESET) else content
+
+    def _restore(match: re.Match[str]) -> str:
+        params = _sgr_params(match.group(1))
+        return match.group(0) + _MUTED if params is not None and _ends_in_default_foreground(params) else match.group(0)
+
+    return _MUTED + _SGR_RE.sub(_restore, body) + RESET
+
+
+def _ends_in_default_foreground(params: list[int]) -> bool:
+    """Whether an SGR leaves the foreground at the terminal default."""
+    default: bool | None = None
+    index = 0
+    while index < len(params):
+        code = params[index]
+        if code in (38, 48):
+            if code == 38:
+                default = False
+            mode = params[index + 1] if index + 1 < len(params) else None
+            index += 3 if mode == 5 else 5 if mode == 2 else len(params)
+            continue
+        if code in (0, 39):
+            default = True
+        elif 30 <= code <= 37 or 90 <= code <= 97:
+            default = False
+        index += 1
+    return bool(default)
 
 
 def post_body_rows(body: str, width: int, mode: str, *, truecolor: bool) -> list[str]:
