@@ -190,8 +190,7 @@ def test_the_table_shows_who_is_doing_what():
         buffer = ScreenBuffer(80, 24)
         paint_monitor(buffer, MonitorState(viewer=viewer), controls)
         rows = _rows(buffer)
-        assert rows[0].startswith("ReLink · up ")
-        assert "3 callers" in rows[0]
+        assert rows[0].startswith("ReLink · 3 callers · up ")
         assert rows[1].split() == ["#", "USER", "VIA", "FROM", "ON", "IDLE", "TERM", "DOING"]
         alice_row = next(row for row in rows if "alice" in row)
         assert "203.0.113.9" in alice_row and "80x24" in alice_row
@@ -616,5 +615,81 @@ def test_the_more_marker_fits_a_very_narrow_terminal():
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_the_header_keeps_its_flags_on_a_narrow_terminal():
+    async def scenario():
+        controls = _controls()
+        viewer = QueueSession(width=40)
+        viewer.node_display_name = "A Very Long Bulletin Board Node Name!!"
+        task = await _connect(controls.session_registry, viewer, "sysop")
+        controls.drain_scheduler.is_scheduled = lambda: True
+        controls.drain_scheduler.remaining_seconds = lambda: 90
+        buffer = ScreenBuffer(40, 24)
+        paint_monitor(buffer, MonitorState(viewer=viewer), controls)
+        header = _rows(buffer)[0]
+        assert "drain in" in header
+        assert header.startswith("A Very")
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_ascii_glyphs_when_unicode_styling_is_off():
+    async def scenario():
+        controls = _controls()
+        registry = controls.session_registry
+        sessions = [QueueSession() for _ in range(30)]
+        sessions[1].activity = ("Communities", "Boards", "A board with a long name")
+        tasks = [await _connect(registry, s, f"user{i}") for i, s in enumerate(sessions)]
+        buffer = ScreenBuffer(80, 24)
+        paint_monitor(buffer, MonitorState(viewer=sessions[0], glyphs=sysop_monitor.ASCII_GLYPHS), controls)
+        text = "\n".join(_rows(buffer))
+        assert all(ord(ch) < 128 for ch in text), [ch for ch in text if ord(ch) >= 128]
+        assert "... > " in text and "Up/Dn select" in text and "v " in text
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_the_node_name_wears_the_node_branding():
+    async def scenario():
+        controls = _controls()
+        viewer = QueueSession()
+        task = await _connect(controls.session_registry, viewer, "sysop")
+        buffer = ScreenBuffer(80, 24)
+        paint_monitor(buffer, MonitorState(viewer=viewer, header_color=129), controls)
+        assert buffer.get_cell(0, 0).fg == 129
+        buffer = ScreenBuffer(80, 24)
+        paint_monitor(buffer, MonitorState(viewer=viewer, name_gradient="rainbow"), controls)
+        assert buffer.get_cell(0, 0).fg != buffer.get_cell(0, 5).fg
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_a_notice_is_on_screen_before_delivery_is_reported(db, lane, sysop, monkeypatch):
+    # A kick with a message disconnects right after notify_one returns;
+    # the message must already have been drawn by then.
+    monkeypatch.setattr(sysop_monitor, "REFRESH_SECONDS", 10.0)
+
+    async def scenario():
+        controls = _controls()
+        viewer = QueueSession()
+        task = await _connect(controls.session_registry, viewer, "sysop")
+        monitor = asyncio.create_task(_monitor(viewer, lane, sysop, controls))
+        await _until(lambda: "DOING" in viewer.text())
+        assert await controls.session_registry.notify_one(viewer, "*** Bye now ***")
+        assert "Bye now" in viewer.text()
+        monitor.cancel()
+        await asyncio.gather(monitor, return_exceptions=True)
+        await controls.session_registry.disconnect_one(viewer)
+        assert task.done()
 
     asyncio.run(scenario())

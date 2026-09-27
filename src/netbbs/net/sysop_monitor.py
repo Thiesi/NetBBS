@@ -36,9 +36,12 @@ from netbbs.net.live_screen import (
 )
 from netbbs.net.session import Session, write_prompt
 from netbbs.net.session_activity import describe, records_activity
+from netbbs.net.node_theme import effective_header_color_256
 from netbbs.net.session_registry import SessionSummary
 from netbbs.net.shutdown import NodeControls, format_remaining_seconds
+from netbbs.net.unicode_style_preference import unicode_style_enabled
 from netbbs.rendering import sanitize_text
+from netbbs.rendering.gradient import gradient_color
 from netbbs.rendering.ansi import clear_line, colored, move_cursor, strip_ansi
 from netbbs.rendering.screen_buffer import ScreenBuffer
 from netbbs.rendering.theme import (
@@ -102,6 +105,23 @@ _VIA = {"telnet": "tel", "ssh": "ssh", "web": "web", "local": "loc"}
 ORDERS = ("time on", "idle", "user")
 
 
+@dataclass(frozen=True)
+class Glyphs:
+    """The screen's decorative characters, in Unicode or plain ASCII for a
+    SysOp who turned Unicode styling off."""
+
+    separator: str
+    ellipsis: str
+    dot: str
+    more: str
+    rule: str
+    select_hint: str
+
+
+UNICODE_GLYPHS = Glyphs(" › ", "…", " · ", "↓", "─", "↑↓ select")
+ASCII_GLYPHS = Glyphs(" > ", "...", " - ", "v", "-", "Up/Dn select")
+
+
 def layout_columns(width: int, *, id_width: int = 3) -> tuple[list[Column], int]:
     """The columns that fit `width`, and the width left for "doing".
 
@@ -140,14 +160,16 @@ def short_duration(seconds: float) -> str:
     return f"{days}d{seconds % 86400 // 3600:02d}h"
 
 
-def fit_doing(trail: tuple[str, ...], width: int, *, authenticated: bool) -> str:
+def fit_doing(
+    trail: tuple[str, ...], width: int, *, authenticated: bool, glyphs: Glyphs = UNICODE_GLYPHS
+) -> str:
     """The activity trail in `width` columns, keeping its most specific
     end: "… › Boards › Retro" says more than "Communities › Boar"."""
-    text = describe(trail, authenticated=authenticated)
+    text = describe(trail, authenticated=authenticated, separator=glyphs.separator)
     parts = list(trail)
     while display_width(text) > width and len(parts) > 1:
         parts.pop(0)
-        text = "… › " + " › ".join(parts)
+        text = glyphs.ellipsis + glyphs.separator + glyphs.separator.join(parts)
     return text
 
 
@@ -172,6 +194,11 @@ class MonitorState:
     outcome_color: int = MUTED_COLOR
     timezone: datetime.tzinfo = datetime.timezone.utc
     visible_ids: list[int] = field(default_factory=list)
+    # Resolved once on entry, so ticks stay database-free: the node's
+    # branding for the name in the header, and the SysOp's Unicode choice.
+    header_color: int = HEADER_COLOR
+    name_gradient: str | None = None
+    glyphs: Glyphs = UNICODE_GLYPHS
 
     def say(self, text: str, color: int = MUTED_COLOR) -> None:
         self.outcome, self.outcome_color = text, color
@@ -203,17 +230,49 @@ def _cell_text(column: Column, entry: SessionSummary) -> str:
     raise KeyError(column.key)
 
 
-def _fit(text: str, column: Column) -> str:
+def _fit(text: str, column: Column, ellipsis: str = "…") -> str:
     if len(text) > column.width:
         # Marked, so two long names sharing a prefix don't look identical.
-        text = text[: column.width - 1] + "…"
+        text = text[: max(0, column.width - len(ellipsis))] + ellipsis
+        text = text[: column.width]
     return text.rjust(column.width) if column.right else text.ljust(column.width)
 
 
 def _paint_header(buffer: ScreenBuffer, state: MonitorState, controls: NodeControls, count: int, uptime: float) -> None:
-    col = paint_text(buffer, 0, 0, sanitize_text(state.viewer.node_display_name), fg=HEADER_COLOR, bold=True)
+    """Node name, uptime and caller count, then the operational flags.
+    The flags are what the header is for, so on a narrow terminal the
+    name is cut and the uptime dropped before any flag is."""
+    glyphs = state.glyphs
+    flags = _header_flags(controls)
+    flags_width = sum(len(glyphs.dot) + len(text) for text, _color in flags)
+    room = buffer.width - flags_width
+    name = sanitize_text(state.viewer.node_display_name)
+    if len(name) > max(1, room):
+        name = name[: max(1, room - len(glyphs.ellipsis))] + glyphs.ellipsis
+    col = _paint_node_name(buffer, name, state)
     callers = "caller" if count == 1 else "callers"
-    col = paint_text(buffer, 0, col, f" · up {short_duration(uptime)} · {count} {callers}", fg=METADATA_COLOR)
+    for part in (f"{glyphs.dot}{count} {callers}", f"{glyphs.dot}up {short_duration(uptime)}"):
+        if col + len(part) <= room:
+            col = paint_text(buffer, 0, col, part, fg=METADATA_COLOR)
+    for text, color in flags:
+        col = paint_text(buffer, 0, col, glyphs.dot, fg=METADATA_COLOR)
+        col = paint_text(buffer, 0, col, text, fg=color, bold=color == ALERT_COLOR)
+
+
+def _paint_node_name(buffer: ScreenBuffer, name: str, state: MonitorState) -> int:
+    """The node name with the node's own branding, as every screen's
+    title shows it: its gradient if one is set, otherwise its header
+    colour."""
+    if not state.name_gradient or len(name) < 2:
+        return paint_text(buffer, 0, 0, name, fg=state.header_color, bold=True)
+    col = 0
+    for index, ch in enumerate(name):
+        color = gradient_color(state.name_gradient, index / (len(name) - 1), truecolor=False)
+        col = paint_text(buffer, 0, col, ch, fg=color, bold=True)
+    return col
+
+
+def _header_flags(controls: NodeControls) -> list[tuple[str, int]]:
     flags: list[tuple[str, int]] = []
     if controls.maintenance.is_lockdown_active():
         flags.append(("MAINTENANCE", ALERT_COLOR))
@@ -228,9 +287,7 @@ def _paint_header(buffer: ScreenBuffer, state: MonitorState, controls: NodeContr
         mrc_state = bridge.status().state.value
         if mrc_state != "disabled":
             flags.append((f"MRC {mrc_state}", SUCCESS_COLOR if mrc_state == "connected" else ERROR_COLOR))
-    for text, color in flags:
-        col = paint_text(buffer, 0, col, " · ", fg=METADATA_COLOR)
-        col = paint_text(buffer, 0, col, text, fg=color, bold=color == ALERT_COLOR)
+    return flags
 
 
 def _paint_action_bar(buffer: ScreenBuffer, row: int, state: MonitorState) -> None:
@@ -238,7 +295,7 @@ def _paint_action_bar(buffer: ScreenBuffer, row: int, state: MonitorState) -> No
     [Q]uit is never the part a narrow terminal cuts off."""
     full = [("M", "essage"), ("K", "ick"), ("U", "nwind"), ("O", f"rder: {state.order}"), ("Q", "uit")]
     short = [("M", "sg"), ("K", "ick"), ("U", "nwind"), ("O", "rder"), ("Q", "uit")]
-    hint = "↑↓ select"
+    hint = state.glyphs.select_hint
 
     def width_of(items: list[tuple[str, str]], gap: int) -> int:
         return sum(len(key) + len(rest) + 2 + gap for key, rest in items)
@@ -309,21 +366,21 @@ def paint_monitor(buffer: ScreenBuffer, state: MonitorState, controls: NodeContr
         for column in columns:
             if column.key == "user":
                 name, color = _name_cell(entry, state.viewer)
-                text, bold = _fit(name, column), entry.is_sysop
+                text, bold = _fit(name, column, state.glyphs.ellipsis), entry.is_sysop
             else:
                 text, color, bold = _fit(_cell_text(column, entry), column), VALUE_COLOR, False
                 if column.key == "id":
                     color = METADATA_COLOR
             col = paint_text(buffer, row, col, text + " ", fg=color, bg=bg, bold=bold)
-        doing = fit_doing(entry.activity, doing_width, authenticated=entry.username is not None)
+        doing = fit_doing(entry.activity, doing_width, authenticated=entry.username is not None, glyphs=state.glyphs)
         paint_text(buffer, row, col, doing, width=doing_width, fg=EMPHASIS_COLOR if selected else VALUE_COLOR, bg=bg)
     hidden_below = len(entries) - state.top - len(visible)
     if hidden_below > 0 and capacity:
-        marker = f" ↓ {hidden_below} more "
+        marker = f" {state.glyphs.more} {hidden_below} more "
         paint_text(buffer, table_bottom - 1, max(0, buffer.width - len(marker)), marker, fg=METADATA_COLOR)
 
     if event_rows:
-        paint_text(buffer, table_bottom, 0, "─" * buffer.width, fg=RULE_COLOR)
+        paint_text(buffer, table_bottom, 0, state.glyphs.rule * buffer.width, fg=RULE_COLOR)
         paint_text(buffer, table_bottom, 2, " recent ", fg=METADATA_COLOR)
         for offset, event in enumerate(registry.recent_events()[-event_rows:]):
             stamp = event.at.astimezone(state.timezone).strftime("%H:%M")
@@ -435,7 +492,13 @@ async def monitor_screen(
         timezone: datetime.tzinfo = ZoneInfo(timezone_name)
     except (ZoneInfoNotFoundError, ValueError):
         timezone = datetime.timezone.utc
-    state = MonitorState(viewer=session, timezone=timezone)
+    state = MonitorState(
+        viewer=session,
+        timezone=timezone,
+        header_color=await lane.run(effective_header_color_256),
+        name_gradient=session.node_name_gradient,
+        glyphs=UNICODE_GLYPHS if await lane.run(unicode_style_enabled, actor) else ASCII_GLYPHS,
+    )
 
     async def on_key(key: EditorKey) -> KeyOutcome:
         state.say("")

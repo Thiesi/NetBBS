@@ -147,24 +147,20 @@ async def run_live_screen(
     otherwise be written wherever the last frame left the cursor, and a
     diff against a frame the terminal no longer shows would never repair
     it. While this screen runs, such notices go to `on_notice` instead,
-    through `Session.pinned_notice_hook`, and the screen repaints at once
-    so `paint` can show them. While `on_key` runs, the previous hook is back
-    in place: the handler may be showing a prompt or a whole other screen."""
+    through `Session.pinned_notice_hook`, and the hook repaints before it
+    returns: a notice counts as delivered only once it is on screen, which
+    matters when a disconnect follows it at once (Kick with a message).
+    One lock serialises that repaint with the loop's own. While `on_key`
+    runs, the previous hook is back in place: the handler may be showing a
+    prompt or a whole other screen."""
     previous: Snapshot | None = None
     size: tuple[int, int] | None = None
     key_task: asyncio.Task | None = None
-    notice_arrived = asyncio.Event()
-    notice_task: asyncio.Task | None = None
+    drawing = asyncio.Lock()
 
-    async def take_notice(text: str) -> None:
-        on_notice(text)
-        notice_arrived.set()
-
-    outer_hook = session.pinned_notice_hook
-    session.pinned_notice_hook = take_notice
-    try:
-        await session.write(HIDE_CURSOR)
-        while True:
+    async def render() -> None:
+        nonlocal previous, size
+        async with drawing:
             current_size = (session.terminal_width, session.terminal_height)
             buffer = ScreenBuffer(*current_size)
             paint(buffer)
@@ -177,16 +173,19 @@ async def run_live_screen(
                 await session.write(frame)
             previous, size = snapshot, current_size
 
+    async def take_notice(text: str) -> None:
+        on_notice(text)
+        await render()
+
+    outer_hook = session.pinned_notice_hook
+    session.pinned_notice_hook = take_notice
+    try:
+        await session.write(HIDE_CURSOR)
+        while True:
+            await render()
             if key_task is None:
                 key_task = asyncio.create_task(_read_key(session))
-            if notice_task is None:
-                notice_task = asyncio.create_task(notice_arrived.wait())
-            done, _pending = await asyncio.wait(
-                {key_task, notice_task}, timeout=interval, return_when=asyncio.FIRST_COMPLETED
-            )
-            if notice_task in done:
-                notice_arrived.clear()
-                notice_task = None
+            done, _pending = await asyncio.wait({key_task}, timeout=interval)
             if key_task not in done:
                 continue
             key, key_task = key_task.result(), None
@@ -209,8 +208,7 @@ async def run_live_screen(
                 previous = None
     finally:
         session.pinned_notice_hook = outer_hook
-        leftovers = [task for task in (key_task, notice_task) if task is not None]
-        for task in leftovers:
-            task.cancel()
-        await asyncio.gather(*leftovers, return_exceptions=True)
+        if key_task is not None:
+            key_task.cancel()
+            await asyncio.gather(key_task, return_exceptions=True)
         await write_quietly(session, SHOW_CURSOR + clear_screen())
