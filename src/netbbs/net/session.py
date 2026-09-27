@@ -15,6 +15,7 @@ import time
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Awaitable, Callable
 
+from netbbs.rendering.pipe_codes import PastedColor
 from netbbs.rendering.reflow import wrap_terminal_text
 
 if TYPE_CHECKING:
@@ -276,6 +277,7 @@ class Session(ABC):
         cancellable: bool = False,
         viewport: int | Callable[[], int] | None = None,
         viewport_owns_row: bool = False,
+        pasted_color: PastedColor | None = None,
     ) -> str:
         """
         Read one line of input from the client.
@@ -314,6 +316,11 @@ class Session(ABC):
         caller leaves all three at their default
         `None`, a complete no-op. See `netbbs.net.char_input.read_line`'s
         docstring for what each does.
+
+        `pasted_color` (issue #754) turns a pasted SGR color sequence
+        into the pipe codes a post editor shows, typed at the cursor.
+        Only the post editors pass one; every other read drops a pasted
+        SGR, as it always has.
         """
 
     @abstractmethod
@@ -351,7 +358,9 @@ class Session(ABC):
         return await self.read_key(echo=echo)
 
     @abstractmethod
-    async def read_editor_key(self, *, distinguish_ctrl_h: bool = False) -> EditorKey:
+    async def read_editor_key(
+        self, *, distinguish_ctrl_h: bool = False, pasted_color: PastedColor | None = None
+    ) -> EditorKey:
         """
         Read one structured key event for a full-screen editor (design
         doc -- welcome banner, `netbbs.net.ansi_editor`).
@@ -372,6 +381,9 @@ class Session(ABC):
         unaffected. See `netbbs.net.char_input.read_editor_key`'s own
         docstring for the full rationale and why it's safe only for a
         caller whose own dispatch never needs a real Backspace.
+
+        `pasted_color` -- as for `read_line`: a pasted SGR arrives as
+        its pipe codes, one `CHAR` event each.
         """
 
     async def discard_buffered_enter(self) -> None:

@@ -102,3 +102,82 @@ def render_pipe_codes(text: str) -> str:
 
     rendered = _PIPE_TOKEN_RE.sub(_replace, text)
     return rendered + RESET if emitted else rendered
+
+
+# The inverse of `CGA_TO_XTERM`: ANSI palette index -> CGA color.
+_XTERM_TO_CGA = tuple(CGA_TO_XTERM.index(index) for index in range(8))
+# SGR 38 and 48 take sub-parameters: ``5;n`` (256 colors) or ``2;r;g;b``.
+_EXTENDED_COLOR_LENGTHS = {5: 1, 2: 3}
+
+
+class PastedColor:
+    """Pasted SGR color, turned into pipe codes (issue #754).
+
+    A post editor shows color as pipe codes, and a pasted escape
+    sequence would otherwise be dropped by the key reader. One instance
+    lives for one editing session, because SGR is stateful: a bold
+    arriving after a red means light red. `translate` takes the
+    parameters of one ``ESC [ ... m`` and returns the pipe codes for
+    the colors it sets -- none when it sets nothing a pipe code can say.
+
+    A code is written whenever a sequence sets that color, even to the
+    color the last one set: the author can delete or move the codes
+    already typed, so what the text says now is not something this
+    class can know (Codex review on #779).
+
+    Only what pipe codes can say survives: the sixteen foregrounds and
+    eight backgrounds. Bold becomes the bright foreground; a bright
+    background becomes its base color; underline, blink and 256-color
+    or truecolor are dropped. Returning to the default foreground is
+    written ``|07``, since pipe codes have no "default"; the default
+    background is ``|16``, which renders as the terminal's own.
+    """
+
+    def __init__(self) -> None:
+        self._foreground: int | None = None  # a CGA color; None is the default
+        self._background: int | None = None  # a CGA base color; None is the default
+        self._bold = False
+
+    def translate(self, params: str) -> str:
+        codes = [int(part) if part else 0 for part in params.split(";")] if params else [0]
+        sets_foreground = sets_background = False
+        index = 0
+        while index < len(codes):
+            code = codes[index]
+            index += 1
+            if code == 0:
+                self._foreground = self._background = None
+                self._bold = False
+                sets_foreground = sets_background = True
+            elif code in (1, 22):
+                self._bold = code == 1
+                sets_foreground = True
+            elif 30 <= code <= 37 or 90 <= code <= 97 or code == 39:
+                self._foreground = (
+                    None if code == 39 else _XTERM_TO_CGA[code % 10] + (8 if code >= 90 else 0)
+                )
+                sets_foreground = True
+            elif 40 <= code <= 47 or 100 <= code <= 107 or code == 49:
+                # A bright background has no pipe code: its base color.
+                self._background = None if code == 49 else _XTERM_TO_CGA[code % 10]
+                sets_background = True
+            elif code in (38, 48):
+                # Skip the color it carries rather than read it as codes
+                # of its own: ``38;5;1`` is not also bold and red.
+                if index < len(codes):
+                    index += 1 + _EXTENDED_COLOR_LENGTHS.get(codes[index], len(codes))
+
+        pipes = ""
+        if sets_foreground:
+            foreground = self._effective_foreground()
+            pipes += f"|{7 if foreground is None else foreground:02d}"
+        if sets_background:
+            pipes += f"|{16 + (self._background or 0)}"
+        return pipes
+
+    def _effective_foreground(self) -> int | None:
+        if not self._bold:
+            return self._foreground
+        if self._foreground is None:
+            return 15
+        return self._foreground | 8
