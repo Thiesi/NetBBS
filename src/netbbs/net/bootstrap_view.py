@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from netbbs.config import get_config, set_config_without_commit
+from netbbs.managed_dns.state import DEFAULT_SERVICE_URL
 from netbbs.net.nodeconfig import effective_realtime_port
 from netbbs.storage.database import Database
 
@@ -48,8 +49,12 @@ def _flag(value: bool) -> str:
     return "on" if value else "off"
 
 
-def bootstrap_rows(config) -> list[BootstrapRow]:
-    """Every bootstrap setting of `config` with its effective value and source."""
+def bootstrap_rows(config, *, participation_undecided: bool = False) -> list[BootstrapRow]:
+    """Every bootstrap setting of `config` with its effective value and source.
+
+    `participation_undecided`: the SysOp has not answered Join NetBBS Link,
+    which `run()` resolves to off before this is built -- say so rather than
+    implying an answer."""
     sources = getattr(config, "setting_sources", {}) or {}
     rows: list[BootstrapRow] = []
 
@@ -81,7 +86,8 @@ def bootstrap_rows(config) -> list[BootstrapRow]:
         # (`run()` resolves it before this is recorded), not a default.
         rows.append(BootstrapRow(
             "NetBBS Link", "link.enabled", "Link",
-            "not decided yet" if link.enabled is None else _flag(link.enabled), "Join NetBBS Link"))
+            "off (not decided yet)" if link.enabled is None or participation_undecided else _flag(link.enabled),
+            "Join NetBBS Link"))
     add("NetBBS Link", "link.host", "Bind address", link.host)
     add("NetBBS Link", "link.port", "Port", str(link.port))
     realtime = effective_realtime_port(link)
@@ -102,7 +108,8 @@ def bootstrap_rows(config) -> list[BootstrapRow]:
         else f"{realtime} (= real-time port)")
 
     dns = config.managed_dns
-    add("Managed DNS", "managed_dns.service_url", "Service URL", dns.service_url or "the project's service")
+    add("Managed DNS", "managed_dns.service_url", "Service URL",
+        dns.service_url or DEFAULT_SERVICE_URL or "none shipped")
     # Never the token itself.
     add("Managed DNS", "managed_dns.admin_token", "Admin token", "set" if dns.admin_token else "not set")
     return rows
@@ -110,7 +117,10 @@ def bootstrap_rows(config) -> list[BootstrapRow]:
 
 def record_startup_bootstrap(db: Database, config) -> None:
     """Record what this start resolved, for the console to read back."""
-    rows = [row.__dict__ for row in bootstrap_rows(config)]
+    from netbbs.link.onboarding import Participation, get_participation
+
+    undecided = get_participation(db) is Participation.UNDECIDED
+    rows = [row.__dict__ for row in bootstrap_rows(config, participation_undecided=undecided)]
     set_config_without_commit(db, SNAPSHOT_KEY, json.dumps({"rows": rows}))
     db.connection.commit()
 

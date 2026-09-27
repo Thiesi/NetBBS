@@ -66,7 +66,7 @@ def test_an_unset_realtime_port_shows_the_port_it_resolves_to():
     rows = _by_key(bootstrap_rows(NodeConfig()))
     link_port = NodeConfig().link.port
     assert rows["link.realtime_port"].value == f"{link_port + 1000} (port + 1000)"
-    assert (rows["link.enabled"].value, rows["link.enabled"].source) == ("not decided yet", "Join NetBBS Link")
+    assert (rows["link.enabled"].value, rows["link.enabled"].source) == ("off (not decided yet)", "Join NetBBS Link")
 
 
 def test_link_participation_is_named_as_the_source_once_resolved():
@@ -160,3 +160,22 @@ def test_the_screen_shows_values_and_their_sources_but_no_secret(db, lane, sysop
     assert "managed_dns.admin_token set default" in text
     assert "link.advertised_host not advertised" in text
     assert _SECRET not in _written_text(session)
+
+
+def test_an_unanswered_participation_is_recorded_as_undecided(db):
+    """Codex review, PR #749: `run()` turns an unanswered Join NetBBS Link into
+    off before the snapshot; the snapshot says it was not decided."""
+    from netbbs.net.nodeconfig import LinkConfig
+
+    resolved_off = replace(NodeConfig(), link=replace(LinkConfig(), enabled=False))
+    record_startup_bootstrap(db, resolved_off)  # nothing answered on this fresh node
+
+    row = _by_key(load_bootstrap_snapshot(db))["link.enabled"]
+    assert (row.value, row.source) == ("off (not decided yet)", "Join NetBBS Link")
+
+
+def test_the_managed_dns_row_names_the_endpoint_used():
+    from netbbs.managed_dns.state import DEFAULT_SERVICE_URL
+
+    row = _by_key(bootstrap_rows(NodeConfig()))["managed_dns.service_url"]
+    assert (row.value, row.source) == (DEFAULT_SERVICE_URL, "default")
