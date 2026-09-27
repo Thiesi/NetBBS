@@ -272,3 +272,70 @@ def test_follow_prints_new_lines_at_or_above_the_floor(db, lane, sysop, monkeypa
     assert "loud line" in text
     assert "quiet line" not in text
     assert "before" not in text
+
+
+# -- review round 1 (PR #739) ----------------------------------------------
+
+
+def test_a_non_regular_log_is_refused_not_opened(tmp_path):
+    """A directory (or, on POSIX, a FIFO) where the log belongs is refused
+    with a message instead of blocking or raising."""
+    (tmp_path / "netbbs.log").mkdir()
+    result = read_node_log(tmp_path / "netbbs.log")
+    assert result.entries == [] and result.error is not None
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="no FIFOs on this platform")
+def test_a_fifo_in_place_of_the_log_does_not_block(tmp_path):
+    path = tmp_path / "netbbs.log"
+    os.mkfifo(path)
+
+    result = read_node_log(path)
+    assert "not a regular file" in (result.error or "")
+    entries, error = NodeLogFollower(path).poll()
+    assert entries == [] and "not a regular file" in (error or "")
+
+
+def test_a_failed_reload_keeps_the_last_read_and_says_why(db, lane, sysop, monkeypatch):
+    from netbbs.node_log import NodeLogRead
+
+    _write_log(db, _line("ERROR", "still shown"))
+    real = admin_flow.read_node_log
+    calls = []
+
+    def _flaky(path, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            return real(path, **kwargs)
+        return NodeLogRead(path=path, error="could not read netbbs.log: Permission denied")
+
+    monkeypatch.setattr(admin_flow, "read_node_log", _flaky)
+    # [F]ollow then any key returns through a reload.
+    session = FakeSession(["o", "g", "f", "x", "b", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop))
+
+    text = _normalized_visible(_written_text(session))
+    after = text[text.rindex("Reload failed"):]
+    assert "Permission denied" in after
+    assert "still shown" in text[text.rindex("Node log"):]
+
+
+def test_follow_shows_whole_entries_with_their_traceback(db, lane, sysop, monkeypatch):
+    path = node_log_path(db.path)
+    path.write_text("", encoding="utf-8")
+    monkeypatch.setattr(admin_flow, "_DIAGNOSTIC_TAIL_POLL_INTERVAL_SECONDS", 0.05)
+    long_message = "listener failed " + "x" * 150 + " THE-END"
+
+    class _SlowKeySession(FakeSession):
+        async def read_key(self, echo: bool = True) -> str:
+            with open(path, "a", encoding="utf-8") as handle:
+                handle.write(_line("ERROR", long_message) + "Traceback (most recent call last):\nOSError: boom\n")
+            await asyncio.sleep(0.5)
+            return "x"
+
+    session = _SlowKeySession()
+    asyncio.run(admin_flow._node_log_tail_screen(session, lane, path, floor="WARNING"))
+
+    text = "".join(_visible(_written_text(session)).split())
+    assert "THE-END" in text
+    assert "Traceback(mostrecentcalllast):" in text and "OSError:boom" in text

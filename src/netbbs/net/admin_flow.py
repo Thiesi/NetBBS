@@ -8701,14 +8701,21 @@ _NODE_LOG_FLOORS = ("WARNING", "ERROR", "INFO")
 _NODE_LOG_FLOOR_LABELS = {"WARNING": "warnings and errors", "ERROR": "errors only", "INFO": "everything"}
 
 
-def _node_log_line(entry: NodeLogEntry, width: int) -> str:
-    segments: list[tuple[str, int | None]] = [
-        (f"{entry.when}  ", MUTED_COLOR),
-        (f"[{entry.level}] ", _diagnostic_level_color(entry.level) if level_rank(entry.level) >= level_rank("WARNING") else MUTED_COLOR),
-        (f"{sanitize_text(entry.logger)}: ", MUTED_COLOR),
-        (sanitize_text(entry.message), None),
-    ]
-    return colored_truncate(segments, width)
+def _node_log_lines(entry: NodeLogEntry) -> list[str]:
+    """One followed entry, whole: its first line and every continuation line
+    (a traceback), each left to `write_line` to wrap -- the tail of an error
+    is exactly what a SysOp watching the log is waiting for, so nothing here
+    is clipped to the terminal width."""
+    level_color = (
+        _diagnostic_level_color(entry.level) if level_rank(entry.level) >= level_rank("WARNING") else MUTED_COLOR
+    )
+    first = (
+        colored(f"{entry.when}  ", fg_color=MUTED_COLOR)
+        + colored(f"[{entry.level}] ", fg_color=level_color)
+        + colored(f"{sanitize_text(entry.logger)}: ", fg_color=MUTED_COLOR)
+        + sanitize_text(entry.message)
+    )
+    return [first, *(colored("  " + sanitize_text(line), fg_color=MUTED_COLOR) for line in entry.continuation)]
 
 
 async def _node_log_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
@@ -8744,9 +8751,17 @@ async def _node_log_screen(session: Session, lane: DatabaseLane, actor: User) ->
         shown = entries_at_or_above(log.entries, state["floor"])
         return shown if state["ascending"] else list(reversed(shown))
 
+    # A reload that fails keeps the entries already on screen and says why,
+    # rather than presenting an unreadable log as one with nothing in it.
+    reload_problem: str | None = None
+
     async def _reload() -> list[NodeLogEntry]:
-        nonlocal log
-        log = await asyncio.to_thread(read_node_log, path)
+        nonlocal log, reload_problem
+        fresh = await asyncio.to_thread(read_node_log, path)
+        if fresh.error is not None or fresh.missing:
+            reload_problem = fresh.error or f"{path.name} is gone"
+        else:
+            log, reload_problem = fresh, None
         return _view()
 
     async def _flip_order() -> list[NodeLogEntry]:
@@ -8764,7 +8779,10 @@ async def _node_log_screen(session: Session, lane: DatabaseLane, actor: User) ->
 
     def _standing() -> str:
         label = f"Showing {_NODE_LOG_FLOOR_LABELS[state['floor']]}"
-        return label + ("; older lines are not shown" if log.truncated else "")
+        label += "; older lines are not shown" if log.truncated else ""
+        if reload_problem is not None:
+            label += f". Reload failed ({reload_problem}); showing the last good read"
+        return label
 
     def _row_segments(entry: NodeLogEntry) -> list[tuple[str, int | None]]:
         level_color = (
@@ -8852,7 +8870,8 @@ async def _node_log_tail_screen(session: Session, lane: DatabaseLane, path: Path
                 await session.write_line(colored(sanitize_text(error), fg_color=ERROR_COLOR))
             last_error = error
             for entry in entries_at_or_above(entries, floor):
-                await session.write_line(_node_log_line(entry, session.terminal_width))
+                for line in _node_log_lines(entry):
+                    await session.write_line(line)
     finally:
         if not key_task.done():
             key_task.cancel()

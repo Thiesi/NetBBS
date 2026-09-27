@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import os
 import re
+import stat
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -104,10 +105,41 @@ def _refuse_symlink(path: Path) -> str | None:
     return None
 
 
+class _NotRegularFile(OSError):
+    pass
+
+
+# O_NONBLOCK so that a FIFO put where the log belongs cannot block the
+# open waiting for a writer; O_NOFOLLOW so a symlink swapped in after the
+# check above is refused by the kernel. Neither exists on Windows, where
+# neither risk does either.
+_OPEN_FLAGS = (
+    os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+)
+
+
+def _open_regular(path: Path):
+    """Open `path` for binary reading only if it is a regular file."""
+    fd = os.open(path, _OPEN_FLAGS)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise _NotRegularFile(f"{path.name} is not a regular file; NetBBS does not read it.")
+    except BaseException:
+        os.close(fd)
+        raise
+    return os.fdopen(fd, "rb")
+
+
+def _describe(path: Path, exc: OSError) -> str:
+    if isinstance(exc, _NotRegularFile):
+        return str(exc)
+    return f"could not read {path.name}: {exc.strerror or exc}"
+
+
 def _read_tail(path: Path, budget: int) -> tuple[str, bool]:
     """The last `budget` bytes of `path` as text, and whether any were left
     out. A read that starts mid-file drops its first, partial line."""
-    with open(path, "rb") as handle:
+    with _open_regular(path) as handle:
         size = os.fstat(handle.fileno()).st_size
         start = max(0, size - budget)
         handle.seek(start)
@@ -161,14 +193,18 @@ def read_node_log(path: Path, *, max_bytes: int = MAX_READ_BYTES, max_entries: i
         rotated = path.with_name(path.name + ".1")
         remaining = max_bytes - len(active_text.encode("utf-8", errors="replace"))
         if not active_cut and remaining > 0 and rotated.exists() and _refuse_symlink(rotated) is None:
-            older_text, older_cut = _read_tail(rotated, remaining)
-            text = older_text + text
-            # Beyond `.1` there may be `.2` to `.5`; this read never reaches them.
-            truncated = older_cut or rotated.with_name(path.name + ".2").exists()
+            try:
+                older_text, older_cut = _read_tail(rotated, remaining)
+            except _NotRegularFile:
+                truncated = True
+            else:
+                text = older_text + text
+                # Beyond `.1` there may be `.2` to `.5`; this read never reaches them.
+                truncated = older_cut or rotated.with_name(path.name + ".2").exists()
         elif not active_cut and rotated.exists():
             truncated = True
     except OSError as exc:
-        result.error = f"could not read {path.name}: {exc.strerror or exc}"
+        result.error = _describe(path, exc)
         return result
     entries = parse_log_lines(text.split("\n"))
     if len(entries) > max_entries:
@@ -204,9 +240,9 @@ class NodeLogFollower:
         self._next_id = 0
         try:
             if _refuse_symlink(path) is None and path.exists():
-                stat = path.stat()
-                self._offset = stat.st_size
-                self._identity = (stat.st_dev, stat.st_ino)
+                info = path.stat()
+                self._offset = info.st_size
+                self._identity = (info.st_dev, info.st_ino)
         except OSError:
             pass
 
@@ -219,17 +255,17 @@ class NodeLogFollower:
         try:
             if not self.path.exists():
                 return [], None
-            with open(self.path, "rb") as handle:
-                stat = os.fstat(handle.fileno())
-                identity = (stat.st_dev, stat.st_ino)
-                if identity != self._identity or stat.st_size < self._offset:
+            with _open_regular(self.path) as handle:
+                info = os.fstat(handle.fileno())
+                identity = (info.st_dev, info.st_ino)
+                if identity != self._identity or info.st_size < self._offset:
                     self._identity = identity
                     self._offset = 0
                     self._partial = ""
                 handle.seek(self._offset)
                 data = handle.read(MAX_FOLLOW_BYTES)
         except OSError as exc:
-            return [], f"could not read {self.path.name}: {exc.strerror or exc}"
+            return [], _describe(self.path, exc)
         self._offset += len(data)
         text = self._partial + data.decode("utf-8", errors="replace")
         complete, newline, rest = text.rpartition("\n")
