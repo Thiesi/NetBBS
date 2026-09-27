@@ -6157,9 +6157,13 @@ async def _draw_update_status(
     install_rows: list[Field | Note | Table] = []
     if installable is not None:
         install_rows.append(Field("Newer release", installable.tag_name, color=WARNING_COLOR, bold=True))
-    if recorded is not None and not recorded.get("restarting"):
+    restart_scheduled = node_controls is not None and node_controls.shutdown_scheduler.is_scheduled()
+    if recorded is not None and not restart_scheduled and is_newer(current_version, recorded["to"]):
+        # Also after a SysOp cancelled the restart that followed an install
+        # (Codex review): this process still runs the old code over the new files.
         install_rows.append(Field(
-            "Installed", f"{recorded['to']} -- restart the service to run it", color=WARNING_COLOR, bold=True,
+            "Installed", recorded.get("note") or f"{recorded['to']} -- restart the service to run it",
+            color=WARNING_COLOR, bold=True,
         ))
     install_rows.append(Field("After installing", _restart_mode_text(restart_mode, detect_supervisor())))
     if node_controls is None:
@@ -6212,7 +6216,9 @@ async def _draw_update_status(
     )
 
 
-async def _run_release_check(session: Session, lane: DatabaseLane, *, unicode_style: bool) -> None:
+async def _run_release_check(
+    session: Session, lane: DatabaseLane, *, unicode_style: bool, can_install: bool = False
+) -> None:
     """One manual release check: reports whether a newer release exists
     and records the outcome (`netbbs.selfupdate.record_check_outcome`),
     but does not download/apply/restart -- see `_update_settings_screen`."""
@@ -6239,7 +6245,11 @@ async def _run_release_check(session: Session, lane: DatabaseLane, *, unicode_st
                     fg_color=WARNING_COLOR,
                 )
             )
-            _announce_line(session, colored(f"[I]nstall {release.tag_name} installs it.", fg_color=MUTED_COLOR))
+            _announce_line(session, colored(
+                f"[I]nstall {release.tag_name} installs it." if can_install
+                else "Install it from the live node's Settings -> Update, or by hand on the host.",
+                fg_color=MUTED_COLOR,
+            ))
         else:
             await lane.run(record_check_outcome, f"up to date ({current_version})")
             _announce_line(session,
@@ -6351,7 +6361,9 @@ async def _update_settings_screen(
             # error) is richer than the recorded one-line outcome the panel
             # shows, so it is announced and appears above the redrawn
             # screen's prompt.
-            await _run_release_check(session, lane, unicode_style=status.unicode_style)
+            await _run_release_check(
+                session, lane, unicode_style=status.unicode_style, can_install=node_controls is not None
+            )
             status = await _redraw()
         elif choice == "i" and status.installable is not None and node_controls is not None:
             await session.write_line("")
@@ -6457,12 +6469,42 @@ async def _install_release_screen(
     )
     if choice != "i":
         return
-    if restarting and not node_controls.shutdown_scheduler.is_cancellable():
-        _announce(session, "The node is already shutting down on a signal; nothing was installed.", color=ERROR_COLOR)
+    if node_controls.shutdown_scheduler.is_scheduled():
+        # Its countdown would end this session -- and pip with it -- part way
+        # through replacing the environment (Codex review).
+        _announce(
+            session, "A shutdown is already scheduled; cancel it first. Nothing was installed.", color=ERROR_COLOR,
+        )
+        return
+    if _INSTALL_IN_PROGRESS.locked():
+        _announce(session, "Another SysOp is installing a release right now; nothing was installed.", color=ERROR_COLOR)
         return
     if not await prompt_yes_no(session, f"Install {release.tag_name} now?", default=False):
         _announce(session, "Cancelled -- nothing was installed.", color=MUTED_COLOR)
         return
+    if _INSTALL_IN_PROGRESS.locked() or node_controls.shutdown_scheduler.is_scheduled():
+        _announce(session, "Something else started meanwhile; nothing was installed.", color=ERROR_COLOR)
+        return
+    async with _INSTALL_IN_PROGRESS:
+        await _run_install(
+            session, lane, actor, node_controls, release,
+            environment=environment, db_path=db_path, identity_dir=identity_dir,
+            restarting=restarting, current_version=current_version, breadcrumb=breadcrumb, delay=delay,
+        )
+
+
+# Issue #731: one install at a time per node (Codex review) -- two SysOps
+# confirming at once would share the download path and run two pips over one
+# environment.
+_INSTALL_IN_PROGRESS = asyncio.Lock()
+
+
+async def _run_install(
+    session: Session, lane: DatabaseLane, actor: User, node_controls: NodeControls, release: ReleaseInfo, *,
+    environment: InstallEnvironment, db_path: Path, identity_dir: Path, restarting: bool,
+    current_version: str, breadcrumb: tuple[str, ...], delay: int,
+) -> None:
+    """Steps 1-4 of `_install_release_screen`, holding `_INSTALL_IN_PROGRESS`."""
 
     async def _fail(step: str, reason: str, log: str = "") -> None:
         await lane.run(record_check_outcome, f"install of {release.tag_name} failed ({step}): {reason}")
@@ -6510,11 +6552,22 @@ async def _install_release_screen(
     try:
         query_status, installed = await run_bounded(version_query_command(environment.python), timeout_seconds=60)
     except (ApplyError, OSError) as exc:
-        await _fail("install", f"could not ask the environment which version it now holds: {exc}", log)
-        return
+        query_status, installed = -1, f"(could not ask: {exc})"
     installed = installed.strip().splitlines()[-1] if installed.strip() else ""
     if query_status != 0 or installed.lstrip("vV") != release.tag_name.lstrip("vV"):
-        await _fail("install", f"pip finished, but the environment reports version {installed or 'unknown'}", log)
+        # pip returned 0, so the environment has changed whatever it now holds
+        # (Codex review): record that, so the Update screen keeps saying the
+        # node must be restarted or rolled back, rather than a plain failure.
+        note = (
+            f"pip installed {release.tag_name}, but the environment reports "
+            f"{installed or 'no version'} -- restart the service or roll back by hand"
+        )
+        await lane.run(
+            lambda db: record_install(
+                db, from_version=current_version, to_version=release.tag_name, restarting=False, note=note,
+            )
+        )
+        await _fail("install", note, log)
         return
 
     def _record(db: Database) -> None:

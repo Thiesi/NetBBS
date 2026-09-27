@@ -196,6 +196,13 @@ def test_slow_download_times_out(tmp_path):
                        clock=lambda: next(ticks), timeout_seconds=10)
 
 
+def test_local_io_failures_are_apply_errors(tmp_path):
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("x", encoding="utf-8")
+    with pytest.raises(ApplyError, match="could not create"):
+        download_wheel(_wheel(), blocker / "updates", open_url=lambda request, timeout: _Response(WHEEL_BYTES))
+
+
 def test_network_failure_is_an_apply_error(tmp_path):
     def broken(request, timeout):
         raise OSError("connection reset")
@@ -241,6 +248,10 @@ def test_installed_extras_are_those_fully_present(monkeypatch):
     assert installed_extras(dist) == ("ssh", "web")
 
 
+def _loaded(dist):
+    return dict(loaded_from=Path(dist.locate_file("netbbs")).resolve(), loaded_version=dist.version)
+
+
 def test_install_environment_refusals():
     ok_dist = _FakeDist([])
     with pytest.raises(ApplyError, match="not running from a virtual environment"):
@@ -250,7 +261,21 @@ def test_install_environment_refusals():
         inspect_install_environment(prefix="/venv", base_prefix="/usr", distribution=lambda n: editable)
     with pytest.raises(ApplyError, match="cannot write"):
         inspect_install_environment(prefix="/venv", base_prefix="/usr", distribution=lambda n: ok_dist,
-                                    writable=lambda path: False)
+                                    writable=lambda path: False, **_loaded(ok_dist))
+
+
+def test_install_environment_refuses_metadata_for_another_copy():
+    """A checkout on PYTHONPATH beside an installed copy: installing would
+    replace the dormant copy and change nothing that runs (Codex review)."""
+    dist = _FakeDist([])
+    with pytest.raises(ApplyError, match="installing would not change what runs"):
+        inspect_install_environment(prefix="/venv", base_prefix="/usr", distribution=lambda n: dist,
+                                    writable=lambda path: True, loaded_from=Path("/src/checkout/netbbs").resolve(),
+                                    loaded_version=dist.version)
+    with pytest.raises(ApplyError, match="installing would not change what runs"):
+        inspect_install_environment(prefix="/venv", base_prefix="/usr", distribution=lambda n: dist,
+                                    writable=lambda path: True, loaded_from=_loaded(dist)["loaded_from"],
+                                    loaded_version="7.0.0")
 
     def missing(name):
         raise metadata.PackageNotFoundError(name)
@@ -263,7 +288,7 @@ def test_install_environment_accepts_a_plain_venv_install():
     dist = _FakeDist([], direct_url=json.dumps({"url": "file:///tmp/netbbs.whl", "archive_info": {}}))
     env = inspect_install_environment(
         prefix="/venv", base_prefix="/usr", executable="/venv/bin/python",
-        distribution=lambda n: dist, writable=lambda path: True,
+        distribution=lambda n: dist, writable=lambda path: True, **_loaded(dist),
     )
     assert env.python == "/venv/bin/python" and env.version == "7.11.2"
 
@@ -331,6 +356,31 @@ def test_restart_exit_is_requested_only_while_the_restart_shutdown_holds():
         assert not restart_exit_requested()
 
     asyncio.run(scenario())
+
+
+def test_a_failed_restart_shutdown_withdraws_the_request():
+    """A later ordinary SIGTERM must not exit 75 and be restarted (Codex review)."""
+    async def boom():
+        raise RuntimeError("broadcast failed")
+
+    with pytest.raises(RuntimeError):
+        asyncio.run(run_restart_shutdown(boom))
+    assert not restart_exit_requested()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="process groups are POSIX")
+def test_run_bounded_kills_the_whole_process_group(tmp_path):
+    marker = tmp_path / "child-alive"
+    child = f"import time, pathlib; time.sleep(1.5); pathlib.Path({str(marker)!r}).write_text('x')"
+    script = f"import subprocess, sys, time; subprocess.Popen([sys.executable, '-c', {child!r}]); time.sleep(60)"
+
+    async def scenario():
+        with pytest.raises(ApplyError):
+            await run_bounded([sys.executable, "-c", script], timeout_seconds=0.5)
+        await asyncio.sleep(2.5)
+
+    asyncio.run(scenario())
+    assert not marker.exists()
 
 
 def test_main_exits_with_the_restart_status_after_a_restart_shutdown(monkeypatch, tmp_path):
@@ -522,8 +572,82 @@ def test_environment_reporting_another_version_counts_as_failure(db, lane, sysop
     _install_fakes(monkeypatch, tmp_path, reported_version="7.11.2")
     session = FakeSession(["s", "u", "i", "i", "y", "b", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, node_controls=_node_controls(backup_identity_dir=tmp_path)))
-    assert "reports version 7.11.2" in _normalized_visible(_written_text(session))
-    assert get_recorded_install(db) is None
+    assert "the environment reports 7.11.2" in _normalized_visible(_written_text(session))
+    assert "Failed at: install" in _normalized_visible(_written_text(session))
+    assert get_last_check_summary(db)[1].startswith("install of v99.0.0 failed (install)")
+
+
+def test_version_mismatch_after_pip_keeps_the_restart_warning(db, lane, sysop, monkeypatch, tmp_path):
+    """pip returned 0, so the environment changed: the screen must keep
+    saying so rather than show an ordinary failure (Codex review)."""
+    _cache_newer_release(db)
+    _install_fakes(monkeypatch, tmp_path, reported_version="7.11.2")
+    session = FakeSession(["s", "u", "i", "i", "y", "b", "b", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop, node_controls=_node_controls(backup_identity_dir=tmp_path)))
+    recorded = get_recorded_install(db)
+    assert recorded is not None and "restart the service or roll back" in recorded["note"]
+
+    again = FakeSession(["s", "u", "b", "b", "b"])
+    asyncio.run(admin_menu(again, lane, sysop, node_controls=_node_controls(backup_identity_dir=tmp_path)))
+    assert "restart the service or roll back by hand" in _normalized_visible(_written_text(again))
+
+
+def test_cancelled_restart_brings_the_restart_warning_back(db, lane, sysop):
+    record_install(db, from_version="7.11.2", to_version="v99.0.0", restarting=True)
+    session = FakeSession(["s", "u", "b", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop, node_controls=_node_controls()))
+    assert "v99.0.0 -- restart the service to run it" in _normalized_visible(_written_text(session))
+
+
+def test_install_is_refused_while_a_shutdown_is_scheduled(db, lane, sysop, monkeypatch, tmp_path):
+    _cache_newer_release(db)
+    calls = _install_fakes(monkeypatch, tmp_path)
+
+    async def scenario():
+        controls = _node_controls(backup_identity_dir=tmp_path)
+        pending = asyncio.create_task(asyncio.sleep(60))
+        controls.shutdown_scheduler.schedule(pending, deadline=asyncio.get_running_loop().time() + 60, message=None)
+        session = FakeSession(["s", "u", "i", "i", "b", "b", "b"])
+        try:
+            await admin_menu(session, lane, sysop, node_controls=controls)
+        finally:
+            controls.shutdown_scheduler.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
+        return session
+
+    session = asyncio.run(scenario())
+    assert calls == []
+    assert "A shutdown is already scheduled; cancel it first." in _normalized_visible(_written_text(session))
+
+
+def test_second_concurrent_install_is_refused(db, lane, sysop, monkeypatch, tmp_path):
+    _cache_newer_release(db)
+    calls = _install_fakes(monkeypatch, tmp_path)
+
+    async def scenario():
+        await admin_flow._INSTALL_IN_PROGRESS.acquire()
+        try:
+            session = FakeSession(["s", "u", "i", "i", "b", "b", "b"])
+            await admin_menu(session, lane, sysop, node_controls=_node_controls(backup_identity_dir=tmp_path))
+            return session
+        finally:
+            admin_flow._INSTALL_IN_PROGRESS.release()
+
+    session = asyncio.run(scenario())
+    assert calls == []
+    assert "Another SysOp is installing a release right now" in _normalized_visible(_written_text(session))
+
+
+def test_standalone_check_does_not_advertise_install(db, lane, sysop, monkeypatch):
+    async def fake_check(*, known_etag=None, known_release=None, token=None, fetch=None):
+        return ReleaseInfo(tag_name="v99.0.0", tarball_url="https://x", published_at="2026-09-27T00:00:00Z"), None
+
+    monkeypatch.setattr(admin_flow, "check_latest_release", fake_check)
+    session = FakeSession(["s", "u", "c", "b", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop))
+    text = _normalized_visible(_written_text(session))
+    assert "[I]nstall v99.0.0 installs it." not in text
+    assert "Install it from the live node's Settings -> Update" in text
 
 
 def test_failed_download_stops_before_the_backup(db, lane, sysop, monkeypatch, tmp_path):

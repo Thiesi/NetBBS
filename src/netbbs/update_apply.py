@@ -25,6 +25,7 @@ import hashlib
 import json
 import os
 import re
+import signal
 import stat
 import sys
 import time
@@ -129,7 +130,9 @@ async def run_restart_shutdown(shutdown: Callable[[], Any]) -> None:
     request_restart_exit()
     try:
         await shutdown()
-    except asyncio.CancelledError:
+    except BaseException:
+        # Cancelled, replaced by SIGTERM, or failed: in none of these is the
+        # node going down *for* the restart (Codex review).
         cancel_restart_exit()
         raise
 
@@ -190,6 +193,8 @@ def inspect_install_environment(
     executable: str | None = None,
     distribution: Callable[[str], Any] = metadata.distribution,
     writable: Callable[[Path], bool] = lambda path: os.access(path, os.W_OK),
+    loaded_from: Path | None = None,
+    loaded_version: str | None = None,
 ) -> InstallEnvironment:
     """Where an install would go, or why one must not be attempted."""
     prefix = sys.prefix if prefix is None else prefix
@@ -209,6 +214,18 @@ def inspect_install_environment(
             "This NetBBS runs from a development checkout (an editable install); update the checkout instead."
         )
     site_packages = Path(dist.locate_file(""))
+    if loaded_from is None:
+        import netbbs
+
+        loaded_from = Path(netbbs.__file__).resolve().parent
+    if loaded_version is None:
+        from netbbs import __version__ as loaded_version
+    installed_copy = Path(dist.locate_file(dist_name)).resolve()
+    if loaded_from != installed_copy or loaded_version != dist.version:
+        raise ApplyError(
+            f"This process runs NetBBS {loaded_version} from {loaded_from}, not the installed "
+            f"{dist.version} in {installed_copy}; installing would not change what runs. Upgrade by hand."
+        )
     for path in (site_packages, Path(dist.locate_file(dist_name))):
         if not writable(path):
             raise ApplyError(
@@ -299,7 +316,10 @@ def download_wheel(
     Bounded by size and wall time, HTTPS end to end (redirects included), and
     written under a temporary name that becomes the real one only once its
     SHA-256 matches the release's digest."""
-    destination_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        destination_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise ApplyError(f"could not create {destination_dir}: {exc}") from exc
     final = destination_dir / wheel.name
     partial = destination_dir / (wheel.name + ".part")
     deadline = clock() + timeout_seconds
@@ -336,7 +356,11 @@ def download_wheel(
     if digest.hexdigest() != wheel.sha256:
         partial.unlink(missing_ok=True)
         raise ApplyError("the downloaded wheel does not match the release's SHA-256 digest; nothing was installed")
-    partial.replace(final)
+    try:
+        partial.replace(final)
+    except OSError as exc:
+        partial.unlink(missing_ok=True)
+        raise ApplyError(f"could not keep the downloaded wheel: {exc}") from exc
     return final
 
 
@@ -373,9 +397,13 @@ async def run_bounded(
     """Run `command`, returning its exit status and the tail of its combined
     output. The process is owned: a timeout or a cancelled caller kills it and
     waits for it before this returns or re-raises."""
+    # Its own session on POSIX, so a timeout or cancel ends pip's build
+    # children too -- a source build of a dependency keeps writing into the
+    # environment otherwise (Codex review).
+    extra = {"start_new_session": True} if os.name == "posix" else {}
     process = await spawn(
         *command, stdin=asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, **extra,
     )
     tail: deque[str] = deque()
     kept = 0
@@ -409,7 +437,10 @@ async def run_bounded(
 async def _kill(process: Any) -> None:
     if process.returncode is None:
         try:
-            process.kill()
+            if os.name == "posix":
+                os.killpg(process.pid, signal.SIGKILL)
+            else:
+                process.kill()
         except ProcessLookupError:
             pass
         await process.wait()
@@ -418,12 +449,16 @@ async def _kill(process: Any) -> None:
 # -- what happened across the restart -----------------------------------------
 
 
-def record_install(db: Database, *, from_version: str, to_version: str, restarting: bool) -> None:
+def record_install(
+    db: Database, *, from_version: str, to_version: str, restarting: bool, note: str | None = None,
+) -> None:
     """Remember an install before the node goes down, for the next start to
-    report against the version it actually runs."""
-    set_config(db, _ATTEMPT_CONFIG_KEY, json.dumps(
-        {"from": from_version, "to": to_version, "restarting": restarting}
-    ))
+    report against the version it actually runs. `note` replaces the Update
+    screen's usual "restart the service" line."""
+    data = {"from": from_version, "to": to_version, "restarting": restarting}
+    if note:
+        data["note"] = note
+    set_config(db, _ATTEMPT_CONFIG_KEY, json.dumps(data))
 
 
 def get_recorded_install(db: Database) -> dict | None:
