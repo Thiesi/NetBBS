@@ -1596,8 +1596,8 @@ def _migrate_world_v2(conn: sqlite3.Connection) -> None:
         player.crew -= budget if retained else 0
         _save_player(conn, player)
         record_event(conn, player.user_id, None,
-                     f"Shared crew upgrade: {budget if retained else 0} assigned across {counted(retained, 'holding')}; "
-                     f"{len(holdings) - retained} unstaffed {'holding' if len(holdings) - retained == 1 else 'holdings'} released. Available crew: {player.crew}. "
+                     f"Shared crew upgrade: {budget if retained else 0} assigned across {retained} holdings; "
+                     f"{len(holdings) - retained} unstaffed holdings released. Available crew: {player.crew}. "
                      "Earned income paid. Use [G] Garrison to reinforce or withdraw.", effective_now)
 
 
