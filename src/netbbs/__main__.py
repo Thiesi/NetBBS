@@ -23,7 +23,7 @@ from pathlib import Path
 
 from netbbs.auth.users import count_sysops
 from netbbs.backup import remove_pid_file, write_pid_file
-from netbbs.backup_schedule import run_backup_scheduler
+from netbbs.backup_schedule import record_node_identity_dir, run_backup_scheduler
 from netbbs.chat import ChatHub, DirectChatInvites, MessageMailbox, PresenceRegistry
 from netbbs.config import is_node_display_name_placeholder
 from netbbs.files.storage import purge_incoming_staging
@@ -1269,6 +1269,7 @@ async def run(
         # else. Past this line the ports are ours, so the process
         # claiming to be this node is this node.
         record_voidrunner_save_dir(db)
+        record_node_identity_dir(db, config.identity_dir)
         backup_schedule_task = asyncio.create_task(run_backup_scheduler(config.db_path, config.identity_dir))
         backup_schedule_task.add_done_callback(_log_backup_schedule_failure)
 

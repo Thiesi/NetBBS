@@ -686,3 +686,18 @@ def test_create_backup_now_rechecks_the_destination_after_confirmation(db, lane,
     assert len(calls) == 2
     assert list(destination.iterdir()) == []
     assert "BACKUP FAILED" in _visible(_written_text(session))
+
+
+def test_standalone_console_refuses_a_destination_inside_the_nodes_identity_dir(db, lane, sysop):
+    """Standalone admin has no identity directory; it uses the one the node
+    recorded at start, so it refuses what the node would refuse."""
+    from netbbs.backup_schedule import record_node_identity_dir
+
+    identity = db.path.parent / "identity"
+    (identity / "keys").mkdir(parents=True)
+    record_node_identity_dir(db, identity)
+    session = _tall(["o", "k", "s", "d", str(identity / "keys"), "s", "b", "y", "b", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop, node_controls=None))
+
+    assert backup_root(db, db.path) == db.path.parent / "node_backups"
+    assert "identity directory" in _normalized_visible(_written_text(session))

@@ -62,6 +62,9 @@ _DESTINATION_KEY = "backup_destination_dir"
 #: its mount point behind as an ordinary writable directory on the disk
 #: beneath; a different device is how that shows.
 _DESTINATION_DEVICE_KEY = "backup_destination_device"
+#: The running node's identity directory, recorded at start so the standalone
+#: console, which cannot know it, can still refuse a destination inside it.
+_NODE_IDENTITY_DIR_KEY = "backup_node_identity_dir"
 
 _logger = logging.getLogger(__name__)
 
@@ -219,6 +222,15 @@ def validate_destination(
             "unmounted? Mount it, or choose the destination again."
         )
     return path
+
+
+def record_node_identity_dir(db: Database, identity_dir: Path) -> None:
+    set_config(db, _NODE_IDENTITY_DIR_KEY, str(Path(identity_dir).resolve()))
+
+
+def recorded_node_identity_dir(db: Database) -> Path | None:
+    value = get_config(db, _NODE_IDENTITY_DIR_KEY)
+    return Path(value) if value else None
 
 
 def get_destination_device(db: Database) -> int | None:

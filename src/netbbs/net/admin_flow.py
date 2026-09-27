@@ -114,6 +114,7 @@ from netbbs.backup_schedule import (
     validate_destination as validate_backup_destination,
     validate_schedule as validate_backup_schedule,
     check_destination as check_backup_destination,
+    recorded_node_identity_dir,
 )
 from netbbs.managed_dns.state import (
     get_node_fingerprint as get_cached_node_fingerprint,
@@ -6661,10 +6662,15 @@ async def _backup_schedule_editor(
     """Draft editor for the backup schedule and destination (issue #727).
 
     Nothing is written before `[S]ave`. Saving a changed schedule counts from
-    that moment, so switching it on never fires for a slot already past."""
-    current, configured = await lane.run(
-        lambda db: (load_backup_schedule(db), get_backup_destination_setting(db))
+    that moment, so switching it on never fires for a slot already past.
+
+    The standalone console has no identity directory of its own; it checks a
+    destination against the one the node recorded at its last start, so a
+    destination the running node would refuse is refused here too."""
+    current, configured, recorded_identity = await lane.run(
+        lambda db: (load_backup_schedule(db), get_backup_destination_setting(db), recorded_node_identity_dir(db))
     )
+    identity_dir = identity_dir or recorded_identity
     draft: dict = {
         "frequency": current.frequency,
         "time": current.time_text,

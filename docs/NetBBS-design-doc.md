@@ -4794,15 +4794,14 @@ second instance of the same identity already running on a *different*
 machine remains an accepted, documented operator responsibility (§13.10's
 own PID-file check only ever covers *this* machine).
 
-**Explicitly deferred, not part of this slice**: encrypting backup
-contents at rest (identity material is already unencrypted-by-default on a
-live node — see §4.5 — and this tool preserves whatever it finds rather
-than changing that policy); off-site/remote transport of a completed backup
-directory; retention/rotation of old backups; and any form of automatic
-scheduling. The SysOp screen explicitly identifies its output as local; all
-of these remain operator/cron responsibilities, the same boundary
-`files.gc`'s SysOp-triggered-only design already draws for blob garbage
-collection.
+**Explicitly deferred**: encrypting backup contents at rest (identity
+material is already unencrypted-by-default on a live node — see §4.5 — and
+this tool preserves whatever it finds rather than changing that policy), and
+off-site/remote transport of a completed backup directory. The SysOp screen
+explicitly identifies its output as local; both remain operator
+responsibilities. Scheduling and retention of the schedule's own backups are
+built in (issue #727, above); retention of backups a SysOp made by hand stays
+theirs.
 
 ### 13.5 Bounded remote influence
 
