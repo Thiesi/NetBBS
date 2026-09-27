@@ -461,6 +461,12 @@ class NodeConfig:
     throttle: ThrottleConfig = field(default_factory=ThrottleConfig)
     shutdown: ShutdownConfig = field(default_factory=ShutdownConfig)
     managed_dns: ManagedDnsConfig = field(default_factory=ManagedDnsConfig)
+    # Issue #730: `section.name` for every `[link]`/`[throttle]`/`[shutdown]`
+    # setting the config file or command line supplied. Those win over a
+    # value saved from the SysOp console (`netbbs.net.policy_settings`);
+    # everything else may be tuned there. Not part of equality: two configs
+    # with the same values behave the same wherever they came from.
+    explicit_keys: frozenset[str] = field(default_factory=frozenset, compare=False)
 
     def validate(self) -> None:
         for name, transport in (("telnet", self.telnet), ("ssh", self.ssh), ("web", self.web)):
@@ -988,7 +994,14 @@ def _apply_toml(config: NodeConfig, data: dict) -> NodeConfig:
 
     identity_dir, node_name = _node_from_toml(data, config)
 
+    explicit = set(config.explicit_keys)
+    for section in ("link", "throttle", "shutdown"):
+        table = data.get(section, {})
+        if isinstance(table, dict):
+            explicit.update(f"{section}.{key}" for key in table)
+
     return NodeConfig(
+        explicit_keys=frozenset(explicit),
         db_path=db_path,
         identity_dir=identity_dir,
         node_name=node_name,
@@ -1003,6 +1016,14 @@ def _apply_toml(config: NodeConfig, data: dict) -> NodeConfig:
 
 
 def _apply_cli_overrides(config: NodeConfig, args: argparse.Namespace) -> NodeConfig:
+    # Issue #730: a `--link-*` flag is as explicit as the same key in the
+    # config file. Every such flag's `dest` is `link_<field>`.
+    cli_explicit = {
+        f"link.{name}" for name in LinkConfig.__dataclass_fields__
+        if getattr(args, f"link_{name}", None) is not None
+    }
+    if cli_explicit:
+        config = replace(config, explicit_keys=config.explicit_keys | cli_explicit)
     if args.db is not None:
         config = replace(config, db_path=args.db)
     if args.identity_dir is not None:

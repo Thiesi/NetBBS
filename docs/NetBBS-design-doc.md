@@ -5386,6 +5386,32 @@ environment.
 
 Implemented.
 
+### 13.10a Operating policy is tunable from the console (issue #730)
+
+The Link policy settings (carry caps, peering, relay capacity, catalogue and
+transfer limits, request rate, diagnostic retention, live-relay bounds), the
+login throttle and the shutdown delays are operating policy, not bootstrap
+plumbing. A SysOp tunes them over time and must not need a shell for it. Each
+resolves per key: an explicit config-file or command-line value, then a value
+saved from **Settings → Network & login limits**, then the built-in default.
+This is the precedence `[link] enabled` already has over the participation
+answer. A config file that sets nothing behaves exactly as before, and one that
+sets a key keeps it: the console shows that key as set in config and does not
+offer it.
+
+Resolution happens once, at startup. None of these values is read live -- the
+caps, rates and retention are handed by value to objects built at startup -- so
+a saved change applies at the next start, and the console says so and shows the
+running value until then. Making individual keys live is a later, per-key
+change, not a promise of this design. A stored value that no longer validates
+is skipped with a warning rather than keeping the node from starting.
+
+Bind addresses and ports, `public_url`, advertised addresses, paths and
+`[managed_dns]` stay config-only: a wrong listener set from inside the BBS can
+lock the SysOp out of the session they would need to fix it, paths are needed
+before the database opens, and the managed-DNS values are service-bound and
+secret.
+
 ### 13.11 Closing issue #60: integrity, diagnostics, protocol compatibility, graceful Link drain
 
 Four remaining, previously-open bullets from §13.6 — audited individually
