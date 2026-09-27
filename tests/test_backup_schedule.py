@@ -374,12 +374,16 @@ def test_scheduler_cancelled_mid_backup_lets_the_backup_finish(db_path, identity
         task = asyncio.create_task(run_backup_scheduler(db_path, identity_dir))
         await asyncio.to_thread(started.wait, 5)
         task.cancel()
+        await asyncio.sleep(0.05)
+        # Cancelled, but still owning the worker: shutdown waits for it
+        # (Codex review) rather than removing the PID file under a backup.
+        assert not task.done()
+        release.set()
         with pytest.raises(asyncio.CancelledError):
             await task
-        release.set()
+        assert finished == [True]
 
-    asyncio.run(main())  # asyncio.run waits for the default executor
-    assert finished == [True]
+    asyncio.run(main())
 
 
 def test_first_enable_on_a_restored_node_starts_counting_now(db_path):
@@ -515,3 +519,92 @@ def test_dashboard_names_the_next_scheduled_backup(db, lane, sysop):
     compact = FakeSession(["b"])  # 24 rows: the compact panel, one row for backups
     asyncio.run(admin_menu(compact, lane, sysop))
     assert "BACKUP never next" in _normalized_visible(_written_text(compact))
+
+
+# -- review round 1 ------------------------------------------------------------
+
+
+def test_a_slot_in_a_spring_forward_gap_comes_due_exactly_once(db_path, identity_dir):
+    """02:30 does not exist in Berlin on 2026-03-29. The slot must still be
+    one instant, so polls between 03:00 and 03:30 local do not each start a
+    backup (Codex review)."""
+    db = Database(db_path)
+    try:
+        set_display_timezone(db, "Europe/Berlin")
+        save_schedule(db, BackupSchedule(frequency="daily", hour=2, minute=30), now=_at(2026, 3, 28, 12, 0))
+    finally:
+        db.close()
+    runs = [
+        run_scheduled_backup_pass(db_path, identity_dir, now=_at(2026, 3, 29, 1, minute))  # 03:mm CEST
+        for minute in (0, 5, 29, 31, 45)
+    ]
+    assert [outcome for outcome in runs if outcome is not None] == ["succeeded (scheduled)"]
+
+
+def test_changing_only_keep_leaves_an_overdue_catch_up_in_place(db_path):
+    db = Database(db_path)
+    try:
+        save_schedule(db, BackupSchedule(frequency="daily", hour=3), now=_at(2026, 9, 20, 10, 0))
+        save_schedule(db, BackupSchedule(frequency="daily", hour=3, keep=3), now=_at(2026, 9, 27, 10, 0))
+        assert due_slot(db, _at(2026, 9, 27, 10, 1)) is not None
+        # Moving the time does reset it.
+        save_schedule(db, BackupSchedule(frequency="daily", hour=4, keep=3), now=_at(2026, 9, 27, 10, 2))
+        assert due_slot(db, _at(2026, 9, 27, 10, 3)) is None
+    finally:
+        db.close()
+
+
+def test_a_destination_on_another_device_than_when_chosen_is_refused(db_path, identity_dir, tmp_path, monkeypatch):
+    """An unmounted disk leaves its mount point behind as a writable
+    directory on the disk beneath (Codex review)."""
+    destination = tmp_path / "mnt-backups"
+    destination.mkdir()
+    _with_db(db_path, lambda db: set_destination_setting(db, destination, db_path=db_path))
+    _enable(db_path)
+    real_stat = os.stat
+
+    class _OtherDevice:
+        def __init__(self, st):
+            self._st = st
+
+        def __getattr__(self, name):
+            return getattr(self._st, name)
+
+        @property
+        def st_dev(self):
+            return self._st.st_dev + 1
+
+    def fake_stat(path, *args, **kwargs):
+        result = real_stat(path, *args, **kwargs)
+        return _OtherDevice(result) if Path(path) == destination else result
+
+    monkeypatch.setattr(bs.os, "stat", fake_stat)
+    outcome = run_scheduled_backup_pass(db_path, identity_dir, now=_at(2026, 9, 27, 10, 0))
+
+    assert outcome.startswith("scheduled run skipped:") and "unmounted" in outcome
+    assert list(destination.iterdir()) == []
+
+
+def test_one_history_row_per_scheduled_run_even_when_retention_fails(db_path, identity_dir, monkeypatch):
+    _enable(db_path, keep=1)
+    assert run_scheduled_backup_pass(db_path, identity_dir, now=_at(2026, 9, 21, 3, 5)) == "succeeded (scheduled)"
+
+    def refuse(path):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(bs.shutil, "rmtree", refuse)
+    outcome = run_scheduled_backup_pass(db_path, identity_dir, now=_at(2026, 9, 22, 3, 5))
+
+    assert outcome.startswith("succeeded (scheduled); retention: could not delete")
+    history = _with_db(db_path, lambda db: list_operational_run_history(db, "backup"))
+    assert [run.outcome for run in history] == [outcome, "succeeded (scheduled)"]
+
+
+def test_a_lone_scheduled_failure_shows_on_the_backup_screen(db, lane, sysop, tmp_path):
+    save_schedule(db, BackupSchedule(frequency="daily", hour=3), now=_at(2026, 9, 20, 10, 0))
+    run_scheduled_backup_pass(db.path, tmp_path / "no-identity", now=_at(2026, 9, 27, 10, 0))
+    session = _tall(["o", "k", "b", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop, node_controls=None))
+
+    text = _normalized_visible(_written_text(session))
+    assert "RECENT BACKUPS" in text.upper() and "scheduled run skipped" in text

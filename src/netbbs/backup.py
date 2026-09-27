@@ -1114,8 +1114,9 @@ def create_backup(*, db_path: Path, identity_dir: Path, destination: Path,
     recomputing and comparing against the filename, not against
     anything recorded here.
 
-    `trigger` is `"manual"` or `"scheduled"` (issue #727); it only labels
-    the run in the node's backup history.
+    `trigger` is `"manual"` or `"scheduled"` (issue #727). A scheduled run
+    leaves its backup-history row to the scheduler, which records one
+    outcome per run once retention has finished too.
 
     Returns `destination`.
     """
@@ -1267,8 +1268,8 @@ def _record_backup_state(db_path: Path, destination: Path, *, trigger: str = "ma
                         (_LAST_BACKUP_PATH_CONFIG_KEY, str(destination)),
                     ),
                 )
-            outcome = "succeeded" if trigger == "manual" else f"succeeded ({trigger})"
-            record_operational_run(db, "backup", outcome, detail=str(destination))
+            if trigger == "manual":
+                record_operational_run(db, "backup", "succeeded", detail=str(destination))
         finally:
             db.close()
     except Exception:

@@ -741,8 +741,12 @@ async def run(
     # default) instead of the SysOp keeping a cron job beside it. Same
     # "general node maintenance, runs regardless of Link" shape as the two
     # tasks above; a pass that is creating a backup when shutdown comes is
-    # left to finish rather than cut off (see `run_backup_scheduler`).
-    backup_schedule_task = asyncio.create_task(run_backup_scheduler(config.db_path, config.identity_dir))
+    # finished rather than cut off (see `run_backup_scheduler`). Started
+    # further down, once the listeners are bound and this process has
+    # recorded its Voidrunner save directory: a catch-up backup on the first
+    # pass would otherwise trust the path a previous start recorded (Codex
+    # review).
+    backup_schedule_task: asyncio.Task | None = None
 
     def _log_backup_schedule_failure(task: asyncio.Task) -> None:
         if task.cancelled():
@@ -755,7 +759,6 @@ async def run(
                 exc_info=exc,
             )
 
-    backup_schedule_task.add_done_callback(_log_backup_schedule_failure)
 
     # Issue #201: same "runs regardless of Link configuration, general
     # node maintenance" shape as update_check_task just above -- managed-
@@ -1266,6 +1269,8 @@ async def run(
         # else. Past this line the ports are ours, so the process
         # claiming to be this node is this node.
         record_voidrunner_save_dir(db)
+        backup_schedule_task = asyncio.create_task(run_backup_scheduler(config.db_path, config.identity_dir))
+        backup_schedule_task.add_done_callback(_log_backup_schedule_failure)
 
         # Issue #466: after the listeners are bound, not before. A second
         # NetBBS started against the same state directory fails here, on the

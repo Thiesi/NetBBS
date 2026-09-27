@@ -104,7 +104,6 @@ from netbbs.backup_schedule import (
     WEEKDAY_NAMES,
     BackupSchedule,
     BackupScheduleError,
-    backup_root,
     default_backup_root,
     get_destination_setting as get_backup_destination_setting,
     load_schedule as load_backup_schedule,
@@ -114,6 +113,7 @@ from netbbs.backup_schedule import (
     set_destination_setting as set_backup_destination_setting,
     validate_destination as validate_backup_destination,
     validate_schedule as validate_backup_schedule,
+    check_destination as check_backup_destination,
 )
 from netbbs.managed_dns.state import (
     get_node_fingerprint as get_cached_node_fingerprint,
@@ -6439,7 +6439,10 @@ async def _backup_status_screen(
             ]
         sections = [Section("Last backup", last_rows)]
 
-        if len(history) > 1:
+        # One successful run is already the "Last backup" above; a lone
+        # failed or skipped scheduled run is not, and would otherwise stay
+        # invisible until a second run (Codex review, issue #727).
+        if len(history) > 1 or (history and not history[0].outcome.startswith("succeeded")):
             sections.append(Section("Recent backups", [Table(
                 ("When", "Outcome"),
                 [
@@ -6540,20 +6543,17 @@ async def _backup_status_screen(
                 )
             )
             continue
-        root = await lane.run(backup_root, db_path)
-        if root != default_backup_root(db_path):
-            # A configured destination that has since gone (an unmounted
-            # disk) must not be recreated as an empty directory on the disk
-            # underneath it.
-            try:
-                validate_backup_destination(root, db_path=db_path, identity_dir=identity_dir)
-            except BackupScheduleError as exc:
-                _announce_styled(
-                    session,
-                    status_badge("BACKUP FAILED", tone="error", unicode_style=unicode_style)
-                    + " " + colored(sanitize_text(str(exc)), fg_color=ERROR_COLOR),
-                )
-                continue
+        # A configured destination that has since gone, or whose disk was
+        # unmounted, must not be recreated on the disk underneath it.
+        try:
+            root = await lane.run(check_backup_destination, db_path, identity_dir)
+        except (BackupScheduleError, OSError) as exc:
+            _announce_styled(
+                session,
+                status_badge("BACKUP FAILED", tone="error", unicode_style=unicode_style)
+                + " " + colored(sanitize_text(str(exc)), fg_color=ERROR_COLOR),
+            )
+            continue
         destination = default_backup_destination(db_path, root=root)
         await session.write_line(
             "\r\n"
@@ -6726,7 +6726,8 @@ async def _backup_schedule_editor(
             schedule_changed = candidate != load_backup_schedule(db)
             if schedule_changed:
                 save_backup_schedule(db, candidate)
-            set_backup_destination_setting(db, destination, db_path=db_path, identity_dir=identity_dir)
+            if destination != get_backup_destination_setting(db):
+                set_backup_destination_setting(db, destination, db_path=db_path, identity_dir=identity_dir)
             record_action(
                 db, actor=actor, action="set_backup_schedule",
                 detail=f"schedule={candidate.describe()} keep={candidate.keep} "

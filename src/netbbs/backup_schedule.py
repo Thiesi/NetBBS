@@ -58,6 +58,10 @@ _WEEKDAY_KEY = "backup_schedule_weekday"
 _KEEP_KEY = "backup_schedule_keep"
 _LAST_SLOT_KEY = "backup_schedule_last_slot"
 _DESTINATION_KEY = "backup_destination_dir"
+#: `st_dev` of the destination when the SysOp set it. An unmounted disk leaves
+#: its mount point behind as an ordinary writable directory on the disk
+#: beneath; a different device is how that shows.
+_DESTINATION_DEVICE_KEY = "backup_destination_device"
 
 _logger = logging.getLogger(__name__)
 
@@ -143,18 +147,28 @@ def load_schedule(db: Database) -> BackupSchedule:
     )
 
 
+def _timing(schedule: BackupSchedule) -> tuple:
+    return (schedule.frequency, schedule.hour, schedule.minute,
+            schedule.weekday if schedule.frequency == "weekly" else None)
+
+
 def save_schedule(db: Database, schedule: BackupSchedule, *, now: datetime.datetime | None = None) -> None:
-    """Persist `schedule` and mark `now` as handled, so a schedule switched
-    on (or moved) never fires for a slot that was already in the past."""
+    """Persist `schedule`. When *when* it runs changed, `now` counts as
+    handled, so a schedule switched on (or moved) never fires for a slot
+    already in the past; a change to Keep alone leaves an overdue slot
+    overdue, so its catch-up still runs (Codex review)."""
     validate_schedule(schedule)
+    timing_changed = _timing(schedule) != _timing(load_schedule(db))
+    values = [
+        (_FREQUENCY_KEY, schedule.frequency),
+        (_TIME_KEY, schedule.time_text),
+        (_WEEKDAY_KEY, str(schedule.weekday)),
+        (_KEEP_KEY, str(schedule.keep)),
+    ]
+    if timing_changed or get_config(db, _LAST_SLOT_KEY) is None:
+        values.append((_LAST_SLOT_KEY, _iso(now or _utc_now())))
     with db.connection:
-        for key, value in (
-            (_FREQUENCY_KEY, schedule.frequency),
-            (_TIME_KEY, schedule.time_text),
-            (_WEEKDAY_KEY, str(schedule.weekday)),
-            (_KEEP_KEY, str(schedule.keep)),
-            (_LAST_SLOT_KEY, _iso(now or _utc_now())),
-        ):
+        for key, value in values:
             db.connection.execute(
                 "INSERT INTO node_config (key, value) VALUES (?, ?) "
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -179,8 +193,11 @@ def backup_root(db: Database, db_path: Path) -> Path:
     return get_destination_setting(db) or default_backup_root(db_path)
 
 
-def validate_destination(path: Path, *, db_path: Path, identity_dir: Path | None = None) -> Path:
-    """An existing, writable directory that no backup would copy into itself."""
+def validate_destination(
+    path: Path, *, db_path: Path, identity_dir: Path | None = None, expected_device: int | None = None,
+) -> Path:
+    """An existing, writable directory that no backup would copy into itself,
+    on the device it was on when the SysOp chose it (`expected_device`)."""
     if not path.is_absolute():
         raise BackupScheduleError("Give the destination as an absolute path.")
     if not path.is_dir():
@@ -196,7 +213,31 @@ def validate_destination(path: Path, *, db_path: Path, identity_dir: Path | None
     ):
         if tree is not None and (resolved == tree.resolve() or resolved.is_relative_to(tree.resolve())):
             raise BackupScheduleError(f"The destination cannot be inside {what}.")
+    if expected_device is not None and os.stat(path).st_dev != expected_device:
+        raise BackupScheduleError(
+            f"{path} is no longer on the disk it was on when it was chosen; is that disk "
+            "unmounted? Mount it, or choose the destination again."
+        )
     return path
+
+
+def get_destination_device(db: Database) -> int | None:
+    value = get_config(db, _DESTINATION_DEVICE_KEY)
+    try:
+        return int(value) if value else None
+    except ValueError:
+        return None
+
+
+def check_destination(db: Database, db_path: Path, identity_dir: Path | None) -> Path:
+    """Where the next backup goes, refusing a configured destination that
+    has gone or moved to another disk. The default is always usable."""
+    configured = get_destination_setting(db)
+    if configured is None:
+        return default_backup_root(db_path)
+    return validate_destination(
+        configured, db_path=db_path, identity_dir=identity_dir, expected_device=get_destination_device(db),
+    )
 
 
 def set_destination_setting(db: Database, path: Path | None, *, db_path: Path,
@@ -204,9 +245,11 @@ def set_destination_setting(db: Database, path: Path | None, *, db_path: Path,
     """`None` returns to the default beside the database."""
     if path is None:
         set_config(db, _DESTINATION_KEY, "")
+        set_config(db, _DESTINATION_DEVICE_KEY, "")
         return
     validate_destination(path, db_path=db_path, identity_dir=identity_dir)
     set_config(db, _DESTINATION_KEY, str(path))
+    set_config(db, _DESTINATION_DEVICE_KEY, str(os.stat(path).st_dev))
 
 
 # -- slots -----------------------------------------------------------------
@@ -231,19 +274,28 @@ def _parse(value: str | None) -> datetime.datetime | None:
 
 
 def _slot_on(date: datetime.date, schedule: BackupSchedule, tz: datetime.tzinfo) -> datetime.datetime:
-    return datetime.datetime.combine(date, datetime.time(schedule.hour, schedule.minute), tzinfo=tz)
+    """The slot on `date`, as a UTC instant.
+
+    UTC, not the local zone: two datetimes sharing one `tzinfo` compare by
+    wall-clock time, and a wall time inside a spring-forward gap (02:30 in
+    Berlin on the last Sunday in March) names an instant later than a real
+    03:00 that compares *after* it. Converting settles every slot on one
+    instant -- a skipped time runs as the pre-transition reading (03:30
+    local), a repeated one at its first occurrence -- so a slot can come
+    due exactly once (Codex review)."""
+    local = datetime.datetime.combine(date, datetime.time(schedule.hour, schedule.minute), tzinfo=tz)
+    return local.astimezone(datetime.timezone.utc)
 
 
 def latest_slot(schedule: BackupSchedule, now: datetime.datetime, tz: datetime.tzinfo) -> datetime.datetime | None:
     """The most recent scheduled moment at or before `now`."""
     if not schedule.enabled:
         return None
-    local_now = now.astimezone(tz)
-    date = local_now.date()
+    date = now.astimezone(tz).date()
     if schedule.frequency == "weekly":
         date -= datetime.timedelta(days=(date.weekday() - schedule.weekday) % 7)
     slot = _slot_on(date, schedule, tz)
-    if slot > local_now:
+    if slot > now:
         slot = _slot_on(date - datetime.timedelta(days=7 if schedule.frequency == "weekly" else 1), schedule, tz)
     return slot
 
@@ -254,7 +306,7 @@ def next_slot(schedule: BackupSchedule, now: datetime.datetime, tz: datetime.tzi
     if latest is None:
         return None
     step = datetime.timedelta(days=7 if schedule.frequency == "weekly" else 1)
-    return _slot_on(latest.date() + step, schedule, tz)
+    return _slot_on(latest.astimezone(tz).date() + step, schedule, tz)
 
 
 def due_slot(db: Database, now: datetime.datetime) -> datetime.datetime | None:
@@ -370,8 +422,7 @@ def run_scheduled_backup_pass(
         try:
             if not identity_dir.is_dir():
                 raise BackupError(f"configured identity directory is unavailable: {identity_dir}")
-            if root != default_backup_root(db_path):
-                validate_destination(root, db_path=db_path, identity_dir=identity_dir)
+            root = check_destination(db, db_path, identity_dir)
             destination = default_backup_destination(db_path, root=root)
             created = create_backup(
                 db_path=db_path, identity_dir=identity_dir, destination=destination, trigger="scheduled",
@@ -382,11 +433,12 @@ def run_scheduled_backup_pass(
             return outcome
         record_scheduled_backup(db, created)
         report = prune_scheduled_backups(db, schedule.keep)
+        # One history row per run, success and retention together (Codex review).
+        outcome = "succeeded (scheduled)"
         if report.errors:
-            outcome = f"retention: {_short('; '.join(report.errors))}"
-            record_operational_run(db, "backup", outcome, detail=str(root))
-            return outcome
-        return "succeeded (scheduled)"
+            outcome += f"; retention: {_short('; '.join(report.errors))}"
+        record_operational_run(db, "backup", outcome, detail=str(created))
+        return outcome
     finally:
         db.close()
 
@@ -403,7 +455,9 @@ def _retrieve_abandoned(task: asyncio.Future) -> None:
         return
     exc = task.exception()
     if exc is not None:
-        _logger.error("scheduled backup failed after the scheduler stopped", exc_info=exc)
+        _logger.error("scheduled backup failed while the node was stopping", exc_info=exc)
+    elif task.result() is not None:
+        _logger.info("scheduled backup finished during shutdown: %s", task.result())
 
 
 async def run_backup_scheduler(
@@ -417,12 +471,13 @@ async def run_backup_scheduler(
     """Runs for the node's lifetime: each poll runs whatever slot is due.
 
     The pass itself is blocking work in a worker thread, which cancellation
-    cannot stop. On cancel (shutdown) the worker is left to finish -- a
-    backup cut off half-written would leave a directory that is neither
-    complete nor cleaned up -- and its outcome is still retrieved and
-    logged; the process exits once it is done. The first pass runs at once,
-    which is how a slot missed while the node was down gets its one
-    catch-up run.
+    cannot stop. On cancel (shutdown) this task keeps owning the worker and
+    waits for it before the cancellation propagates, the same way the live
+    Backup screen's `_create_live_backup_owned` does: a backup still copying
+    after the node had removed its PID file could have a restore replace
+    the state underneath it (Codex review). Shutdown therefore waits for a
+    running backup to finish. The first pass runs at once, which is how a
+    slot missed while the node was down gets its one catch-up run.
     """
     while True:
         worker = asyncio.ensure_future(
@@ -431,7 +486,14 @@ async def run_backup_scheduler(
         try:
             outcome = await asyncio.shield(worker)
         except asyncio.CancelledError:
-            worker.add_done_callback(_retrieve_abandoned)
+            while not worker.done():
+                try:
+                    await asyncio.shield(worker)
+                except asyncio.CancelledError:
+                    continue
+                except Exception:
+                    break
+            _retrieve_abandoned(worker)
             raise
         except Exception:
             _logger.exception("scheduled backup pass failed")
