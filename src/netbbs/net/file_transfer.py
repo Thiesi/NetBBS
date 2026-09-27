@@ -45,7 +45,7 @@ from typing import Callable
 from urllib.parse import quote
 
 from netbbs.attestation import meets_age, meets_name_requirement
-from netbbs.auth.users import User, get_user_by_id
+from netbbs.auth.users import SYSOP_LEVEL, User, get_user_by_id
 from netbbs.communities import (
     get_effective_min_age,
     get_effective_min_read_level,
@@ -62,7 +62,10 @@ from netbbs.files.storage import new_incoming_temp_path
 from netbbs.link.files import queue_file_descriptor_if_linked
 from netbbs.net.zmodem import safe_filename
 from netbbs.permissions import meets_level
+from netbbs.moderation.log import record_action
 from netbbs.storage.database import Database
+from netbbs.sysop_uploads import DOOR_FILE as SYSOP_UPLOAD_DOOR_FILE
+from netbbs.sysop_uploads import SysOpUploadError, SysOpUploadTarget, install_upload
 
 _logger = logging.getLogger(__name__)
 
@@ -148,10 +151,14 @@ class TransferGrant:
     username: str
     user_created_at: str
     #: The *content-addressed* area id, not the row id: see
-    #: `netbbs.files.areas.get_file_area_by_area_id`.
-    area_id: str
+    #: `netbbs.files.areas.get_file_area_by_area_id`. `None` for a SysOp
+    #: upload, which goes to `sysop_upload` rather than into an area.
+    area_id: str | None
     file_id: str | None
     expires_at: float
+    #: Issue #728: a SysOp sending one file to a fixed place on the node --
+    #: a banner piece or a door file -- instead of into a file area.
+    sysop_upload: SysOpUploadTarget | None = None
 
     def is_live(self, *, now: float | None = None) -> bool:
         return (now if now is not None else time.monotonic()) < self.expires_at
@@ -215,6 +222,32 @@ class TransferGrants:
         self._grants[grant.token] = grant
         return grant
 
+    def issue_sysop_upload(self, *, user: User, target: SysOpUploadTarget) -> TransferGrant:
+        """A single-use upload link to one SysOp destination (issue #728).
+
+        Counted against the same outstanding-grant ceiling as every other
+        link, and redeemed through the same `resolve`, which re-checks that
+        the account is still an enabled SysOp when the upload arrives."""
+        self._sweep()
+        if len(self._grants) >= self._max_outstanding:
+            raise TransferError(
+                f"this node already has {len(self._grants)} transfers waiting to start -- "
+                "try again in a few minutes"
+            )
+        grant = TransferGrant(
+            token=secrets.token_urlsafe(32),
+            direction=UPLOAD,
+            user_id=user.id,
+            username=user.username,
+            user_created_at=user.created_at,
+            area_id=None,
+            file_id=None,
+            expires_at=self._clock() + self._ttl_seconds,
+            sysop_upload=target,
+        )
+        self._grants[grant.token] = grant
+        return grant
+
     def peek(self, token: str) -> TransferGrant | None:
         """Look a grant up *without* spending it (Codex review).
 
@@ -259,7 +292,8 @@ class RedeemedTransfer:
 
     grant: TransferGrant
     user: User
-    area: FileArea
+    #: `None` only for a SysOp upload (`grant.sysop_upload`).
+    area: FileArea | None
     entry: FileEntry | None
     max_upload_bytes: int
 
@@ -288,6 +322,20 @@ def resolve(db: Database, grant: TransferGrant) -> RedeemedTransfer:
         # it was created, so the three together are an identity no
         # recreation can inherit (Codex review).
         raise TransferError("this account can no longer transfer files")
+    if grant.sysop_upload is not None:
+        # Issue #728. The link was minted by a SysOp at the console; by the
+        # time a browser sends the file that account may have been demoted
+        # or locked out, and the upload must not outlive either.
+        if is_blocked(db, user) or not meets_level(user, SYSOP_LEVEL):
+            raise TransferError("this account can no longer send files to the node")
+        max_bytes = grant.sysop_upload.max_bytes
+        if grant.sysop_upload.kind == SYSOP_UPLOAD_DOOR_FILE:
+            # The door cap is the node's upload limit, read live like a file
+            # area's: a limit lowered while the link was outstanding applies.
+            max_bytes = min(max_bytes, get_max_upload_bytes(db))
+        return RedeemedTransfer(
+            grant=grant, user=user, area=None, entry=None, max_upload_bytes=max_bytes,
+        )
     area = get_file_area_by_area_id(db, grant.area_id)
     if area is None:
         raise TransferError("that file area no longer exists")
@@ -652,6 +700,10 @@ class TransferGateway:
             temp_path.unlink(missing_ok=True)
             raise web.HTTPBadRequest(text="No file was sent.")
 
+        target = resolved.grant.sysop_upload
+        if target is not None:
+            return await self._install_sysop_upload(resolved, target, temp_path, filename)
+
         try:
             sha256, size_bytes = await asyncio.to_thread(hash_and_measure, temp_path)
             description = await read_archive_description(temp_path, filename)
@@ -682,6 +734,72 @@ class TransferGateway:
             "status": entry.status,
             "description": entry.description,
         })
+
+
+    async def _install_sysop_upload(self, resolved, target: SysOpUploadTarget, temp_path: Path, filename: str):
+        """Issue #728: put a SysOp's upload at the destination they chose
+        before the link was issued. The sent file's own name is ignored."""
+        from aiohttp import web
+
+        # Checked again now the body is in: receiving it can take minutes,
+        # and an account demoted or locked out meanwhile must not publish.
+        try:
+            resolved = await self._lane.run(resolve, resolved.grant)
+        except TransferError as exc:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError as cleanup_error:
+                # The lockout is what the caller must hear, not a 500 about
+                # a staging file.
+                _logger.warning("transfer: could not remove %s: %s", temp_path, cleanup_error)
+            raise web.HTTPForbidden(text=str(exc)) from exc
+        try:
+            size = await install_and_record(self._lane, resolved.user, target, temp_path, sent_as=filename)
+        except SysOpUploadError as exc:
+            raise web.HTTPBadRequest(text=str(exc)) from exc
+        except OSError as exc:
+            _logger.error("transfer: could not install %s: %s", target.label, exc)
+            raise web.HTTPInsufficientStorage(
+                text=f"This node could not write {target.label}: {exc.strerror or exc}"
+            ) from exc
+        _logger.info("transfer: %r uploaded %s (%d bytes)", resolved.user.username, target.label, size)
+        return web.json_response({
+            "filename": target.destination.name,
+            "size_bytes": size,
+            "status": "installed",
+            "description": None,
+        })
+
+
+async def install_and_record(lane, user: User, target: SysOpUploadTarget, temp_path: Path, *, sent_as: str) -> int:
+    """Install a SysOp upload and audit it as one owned unit (issue #728).
+
+    A running copy cannot be cancelled -- it finishes on its worker thread
+    whatever happens to the caller -- so a caller torn down meanwhile (a web
+    handler at shutdown, a console session whose SysOp was demoted) must not
+    skip the audit record of a file that did land. The work runs as its own
+    task, shielded; on cancellation it is waited for, and the cancellation
+    then continues. Shared by the browser and the Zmodem routes."""
+
+    async def _work() -> int:
+        size = await asyncio.to_thread(install_upload, target, temp_path)
+        await lane.run(record_sysop_upload, user, target, size=size, sent_as=sent_as)
+        return size
+
+    task = asyncio.ensure_future(_work())
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        await asyncio.gather(task, return_exceptions=True)
+        raise
+
+
+def record_sysop_upload(db: Database, user: User, target: SysOpUploadTarget, *, size: int, sent_as: str) -> None:
+    """The audit record every SysOp upload leaves, whichever way it came."""
+    record_action(
+        db, actor=user, action=target.audit_action,
+        detail=f"{sent_as!r} ({size} bytes) -> {target.destination}",
+    )
 
 
 async def _stream_file(response, path: Path) -> None:

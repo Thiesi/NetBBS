@@ -1518,6 +1518,34 @@ JavaScript, to reach exactly the callers already served — and it would put fil
 transfer back inside the byte stream it was moved out of. Zmodem remains the
 right answer on terminals that already implement it, which is where it stays.
 
+**SysOp uploads** (issue #728) reuse both routes to put one file at one fixed
+place on the node: a banner or masthead piece's own file (**[U]pload** on its
+screen), or a named file in the doors folder (**Content → Doors → [U]pload**).
+The contract:
+
+- The destination is chosen before any transfer is offered. The name the
+  sending side reports is recorded but never decides where bytes land. A door
+  file's name is a plain name: no folder part, no leading dot, no control
+  characters or colon.
+- Replacing an existing file is confirmed first. The consent is re-checked when
+  the bytes arrive, and a file that has appeared since is not overwritten. A
+  symlink or directory at the destination is refused, never followed. The
+  replacement keeps the old file's permission bits.
+- Caps: 256 KiB for banner art (what **[E]nable** accepts). For a door file, the
+  node's `max_upload_bytes`, read live when the link is redeemed.
+- The grant is redeemed like any other. Its account must still be an enabled,
+  unblocked SysOp when the link is used and again once the body is in.
+- The file is written beside the destination and renamed over it, so a failed
+  upload leaves the previous file in place. Every upload that lands is
+  audit-logged with its size and destination, even if the session that
+  started it is torn down mid-install.
+- An upload never enables a piece, registers a door, or sets an execute bit.
+  Those stay separate, explicit steps (**[E]nable**, **[F]rom disk**).
+
+This adds no trust boundary: a SysOp can already run any program on the host
+through a door's **Test as SysOp**. It removes the need for a separate OS-level
+account just to place a file.
+
 File bytes are node-local. NetBBS Link will distribute catalogue/descriptor
 information and fetch content on demand in bounded resumable chunks. It will
 not replicate every file to every node.
@@ -2052,34 +2080,79 @@ is visible on the SysOp dashboard and update-settings screen. The
 operator-visible switch controls the startup/daily checks only; manual checks
 remain available when it is off.
 
-The supported apply model is currently operator-driven:
+**Installing from the console (issue #731).** When the last check found a newer
+release, a SysOp on the live node can press `[I]nstall vX` on the Update screen.
+The screen shows the plan first and does nothing until `[I]nstall now` and a
+final yes. The steps run in order, and each one that fails stops the rest and
+records why:
 
-- create a complete backup from the live SysOp `[K] Backup` screen, or use
-  `python -m netbbs.backup create` when a custom destination or external
-  scheduler is required;
-- stop the service through its supervisor, allowing the normal graceful drain;
-- install the selected wheel from the official GitHub release into the same
-  virtual environment, preserving the installation's extras;
-- start the service, at which point pending database migrations apply
-  automatically and startup integrity checks run;
-- if startup fails, reinstall the previous release and restore the pre-upgrade
-  backup so application code and database schema roll back together.
+1. **Download.** The node asks the release API for that tag and takes the one
+   asset named `netbbs-<version>-py3-none-any.whl`. It refuses a draft or
+   pre-release, an asset whose address is not under the project's
+   `releases/download/<tag>/`, an implausible size, and an asset without a
+   published `sha256:` digest. The download is HTTPS end to end, redirects
+   included. It is bounded by the announced size (64 MiB at most) and 300
+   seconds. It is written under a temporary name and kept, beside the
+   database in `<db-stem>_updates/`, only when its SHA-256 matches the digest.
+2. **Back up.** A complete live backup, exactly as Backup's Create does. A
+   refused backup, for example with a War Dialer world in use, stops the
+   install.
+3. **Install.** `pip install` of the verified wheel into the interpreter the
+   node runs on, with the extras this installation has. An extra counts when
+   every requirement it names is installed; `dev` never counts. pip resolves
+   dependencies as usual, so a release that needs a newer dependency fetches
+   it from the package index. The node refuses to install:
+   - outside a virtual environment;
+   - from an editable or VCS install;
+   - where the service account cannot write the environment.
 
-`netbbs.selfupdate` also contains safe archive extraction, database snapshot,
-and pending/confirm/rollback primitives. They are tested in isolation but are
-not called by any command, menu, or node-lifecycle path. There is no automated
-apply, process re-exec, startup confirmation, or automated rollback today.
+   pip runs as an owned subprocess, bounded at 900 seconds, and only the tail
+   of its output is kept, for the failure screen. A fresh interpreter then
+   reports the installed version. Anything other than the target counts as a
+   failed install.
+4. **Restart.** The node records the install, then does one of two things:
+   - It shuts down gracefully: callers are warned and the configured delay
+     applies. It then exits with status 75, so the service manager starts the
+     new build.
+   - It stops there and tells the SysOp to restart the service.
 
-The future automated apply target, which remains unimplemented, is to drain
-live sessions, stage the new release and a database snapshot, re-exec into the
-new release, retain the previous release until startup succeeds, and restore
-both the previous release and snapshot after failed startup. Wiring this target
-requires a separate design and operational-validation pass, particularly for
-ownership under systemd/rc.d.
+   Which one is the SysOp's declaration under `[R]estart after install`. The
+   setting is `auto` by default, which trusts detection: systemd's
+   `INVOCATION_ID` counts as a supervisor that restarts NetBBS, and NetBSD
+   rc.d, which does not restart a stopped node, is not detected. The request
+   for status 75 holds only while that restart shutdown is the one in
+   charge. A SysOp who cancels it, or a SIGTERM that replaces it, withdraws
+   it, because a service manager stopping the node must leave it stopped.
+   The shipped systemd unit restarts on 75 under `Restart=on-failure`, and
+   also lists 75 under `RestartForceExitStatus=` and `SuccessExitStatus=`.
 
-HTTPS and GitHub are currently the update trust boundary. Additional release
-signing is not required by the present design, though it remains a possible
-hardening step.
+The next start compares the version it runs with the recorded target and
+records the outcome for the Update screen: "installed vX and restarted into
+it", or "installed vX, but this node started as vY".
+
+Between the install and the restart, the old process keeps running with the
+new files on disk. A module imported for the first time in that window would
+come from the new release. That is why the restart path follows the install
+immediately, and why the no-restart outcome says plainly to restart now.
+
+**Not automated:** rolling back. Going back means reinstalling the previous
+release's wheel and then restoring the pre-upgrade backup the install just
+made, so that code and schema roll back together. The operator-driven
+procedure remains fully supported: back up, stop the service, install the
+release wheel into the same environment with the same extras, start.
+
+`netbbs.selfupdate` also still contains tarball extraction, database snapshot
+and pending/confirm/rollback primitives from an earlier re-exec design. No
+command, menu or lifecycle path calls them.
+
+HTTPS and GitHub are the update trust boundary. The digest the install checks
+comes from the same release API over the same TLS. It proves the bytes are the
+ones GitHub holds for that asset, so a truncated, corrupted or swapped download
+fails. It does not prove that a maintainer signed them. An asset without a
+digest is refused rather than installed on TLS alone. Release signing remains
+a possible hardening step and is not required by the present design. GitHub
+computes asset digests on upload, so the release recipe needs no extra step;
+it must attach the wheel under its standard name.
 
 GitHub Releases and tagged source are the only official NetBBS distribution
 and update channel. `pip` is used to install an official release wheel; it is
@@ -4740,13 +4813,47 @@ operation, never a DB-only one.
 `python -m netbbs.backup {create,restore}` CLI in the same spirit as
 `python -m netbbs.admin`. `create_backup` is also exposed through the live
 SysOp `[K] Backup` screen: it uses the running node's effective database and
-identity paths, chooses a fresh timestamped directory under
-`db_path.parent / f"{db_path.stem}_backups"`, requires confirmation, and runs
+identity paths, chooses a fresh timestamped directory under the backup
+destination -- `db_path.parent / f"{db_path.stem}_backups"` unless the SysOp
+configured another directory (issue #727) -- requires confirmation, and runs
 the blocking snapshot/copy work off the asyncio event loop. The CLI remains
-the path-selectable, cron-schedulable entry point. There is no built-in
-scheduler; recurring backups are still driven by cron or another external
-operator trigger. Restore remains CLI-only and offline because it replaces
-the node's state.
+the path-selectable, scriptable entry point. Restore remains CLI-only and
+offline because it replaces the node's state.
+
+**Scheduled backups (issue #727).** The node itself can run backups on a
+schedule the SysOp sets on the Backup screen: off (the default), daily, or
+weekly on one weekday, at a wall-clock time in the node's display timezone.
+This is a deliberate exception to "maintenance runs only when a SysOp asks"
+(the repair and GC screens), for the same reason the release check is one: a
+backup nobody remembers to take is the failure it exists to prevent, and the
+alternative was a cron job every SysOp had to write and keep beside the node.
+The rules:
+
+- A *slot* is one scheduled moment, handled at most once whatever its
+  outcome. A failed or skipped slot (an active War Dialer world, a missing
+  identity directory, a destination that has gone) is recorded in the backup
+  history and not retried; the next slot is the retry.
+- A node that was down across one or more slots makes exactly one catch-up
+  backup when it next runs. Saving a changed schedule counts from that
+  moment, so switching one on never fires for a slot already in the past.
+- Retention keeps the newest N (default 7) of the schedule's *own* backups.
+  Each is recorded in `scheduled_backups` when it succeeds, and only recorded
+  directories that still hold a manifest are ever deleted; a manual backup,
+  or anything else in the destination, is never touched. A failed deletion is
+  reported and retried on the next pass.
+- The destination, when set, is an existing absolute directory the node can
+  write to, outside the file storage and identity trees a backup copies. It
+  is never created: a destination that has disappeared (an unmounted disk)
+  fails the backup rather than filling the disk beneath it.
+- Scheduled runs follow the same Door installations toggle as manual ones.
+- A pass runs in a worker thread with its own database handle. Shutdown does
+  not cut a running backup off: the task's cancellation leaves the worker to
+  finish (and logs its outcome), so the process exits once the backup is
+  complete rather than leaving a half-written directory.
+- The standalone `python -m netbbs.admin` edits the schedule but does not
+  run it.
+
+Copying backups off the machine, and encrypting them, remain the SysOp's.
 
 `create_backup(*, db_path, identity_dir, destination)`:
 
@@ -4813,15 +4920,14 @@ second instance of the same identity already running on a *different*
 machine remains an accepted, documented operator responsibility (§13.10's
 own PID-file check only ever covers *this* machine).
 
-**Explicitly deferred, not part of this slice**: encrypting backup
-contents at rest (identity material is already unencrypted-by-default on a
-live node — see §4.5 — and this tool preserves whatever it finds rather
-than changing that policy); off-site/remote transport of a completed backup
-directory; retention/rotation of old backups; and any form of automatic
-scheduling. The SysOp screen explicitly identifies its output as local; all
-of these remain operator/cron responsibilities, the same boundary
-`files.gc`'s SysOp-triggered-only design already draws for blob garbage
-collection.
+**Explicitly deferred**: encrypting backup contents at rest (identity
+material is already unencrypted-by-default on a live node — see §4.5 — and
+this tool preserves whatever it finds rather than changing that policy), and
+off-site/remote transport of a completed backup directory. The SysOp screen
+explicitly identifies its output as local; both remain operator
+responsibilities. Scheduling and retention of the schedule's own backups are
+built in (issue #727, above); retention of backups a SysOp made by hand stays
+theirs.
 
 ### 13.5 Bounded remote influence
 
@@ -5439,6 +5545,32 @@ environment.
 
 Implemented.
 
+### 13.10a Operating policy is tunable from the console (issue #730)
+
+The Link policy settings (carry caps, peering, relay capacity, catalogue and
+transfer limits, request rate, diagnostic retention, live-relay bounds), the
+login throttle and the shutdown delays are operating policy, not bootstrap
+plumbing. A SysOp tunes them over time and must not need a shell for it. Each
+resolves per key: an explicit config-file or command-line value, then a value
+saved from **Settings → Network & login limits**, then the built-in default.
+This is the precedence `[link] enabled` already has over the participation
+answer. A config file that sets nothing behaves exactly as before, and one that
+sets a key keeps it: the console shows that key as set in config and does not
+offer it.
+
+Resolution happens once, at startup. None of these values is read live -- the
+caps, rates and retention are handed by value to objects built at startup -- so
+a saved change applies at the next start, and the console says so and shows the
+running value until then. Making individual keys live is a later, per-key
+change, not a promise of this design. A stored value that no longer validates
+is skipped with a warning rather than keeping the node from starting.
+
+Bind addresses and ports, `public_url`, advertised addresses, paths and
+`[managed_dns]` stay config-only: a wrong listener set from inside the BBS can
+lock the SysOp out of the session they would need to fix it, paths are needed
+before the database opens, and the managed-DNS values are service-bound and
+secret.
+
 ### 13.11 Closing issue #60: integrity, diagnostics, protocol compatibility, graceful Link drain
 
 Four remaining, previously-open bullets from §13.6 — audited individually
@@ -5538,9 +5670,9 @@ guessing at compatibility rules for a wire change nobody has designed.
 The database and protocol halves use separate compatibility mechanisms.
 Database migrations are atomic, a newer-than-supported schema is rejected at
 startup, and the supported operator procedure requires a complete pre-upgrade
-backup so code and schema can be restored together. `netbbs.selfupdate` has
-isolated snapshot and rollback primitives, but no production path invokes
-them around startup; automated database rollback is therefore not implemented.
+backup so code and schema can be restored together. An install from the
+console (§6.7) takes that backup itself; automated database rollback is not
+implemented.
 The wire-protocol check above is independently implemented in
 `netbbs.link.protocol`, where received envelopes are version-gated without
 coupling Link compatibility to release installation.
@@ -7595,12 +7727,10 @@ runtime-linking gap documented in the worklog §10), persistent
 state paths, backup/restore (linking the existing disaster-recovery
 drill), upgrading, version/schema compatibility, and uninstalling
 without losing data. `python -m netbbs --version` (issue #82) prints
-the release version and expected schema number together. Documented,
-not implemented: `netbbs.selfupdate`'s existing download/snapshot/
-rollback plumbing has no wired apply-and-restart command yet — a
-deliberate prior deferral, not a gap this issue asked to close; manually
+the release version and expected schema number together. Installing a
+release from the console arrived later (§6.7, issue #731); manually
 installing an official GitHub-release wheel into the node's virtual
-environment is what's actually supported today.
+environment remains supported.
 
 ### Issue #74 — FTS index integrity checks and rebuild tooling — closed
 

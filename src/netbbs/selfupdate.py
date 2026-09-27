@@ -11,9 +11,10 @@ NetBBS Link protocol compatibility remains a separate concern in
 The release fetchers are injectable so version comparison, release-info
 parsing, download/extraction, database snapshot/restore, and the pending
 state primitives can be tested without reaching GitHub. No command,
-menu, or node-lifecycle path currently calls `prepare_update`,
-`confirm_update`, or `roll_back_update`; process replacement and
-automated rollback are not implemented here or elsewhere.
+menu, or node-lifecycle path calls `prepare_update`, `confirm_update`, or
+`roll_back_update`: they belong to an earlier re-exec design. Installing a
+release from the console is `netbbs.update_apply` (issue #731); automated
+rollback is not implemented anywhere.
 """
 
 from __future__ import annotations
@@ -83,7 +84,8 @@ class UpdateError(Exception):
 
 def get_auto_update_check_enabled(db: Database) -> bool:
     # Scheduled release checks default on. This setting never enables an
-    # automatic download, apply, or restart; those paths are not implemented.
+    # automatic download, install or restart: installing is a SysOp's
+    # explicit choice on the Update screen (issue #731).
     value = get_config(db, AUTO_UPDATE_CHECK_ENABLED_CONFIG_KEY)
     return value != "0"
 

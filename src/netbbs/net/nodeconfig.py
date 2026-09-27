@@ -461,6 +461,12 @@ class NodeConfig:
     throttle: ThrottleConfig = field(default_factory=ThrottleConfig)
     shutdown: ShutdownConfig = field(default_factory=ShutdownConfig)
     managed_dns: ManagedDnsConfig = field(default_factory=ManagedDnsConfig)
+    # Issue #730: `section.name` for every `[link]`/`[throttle]`/`[shutdown]`
+    # setting the config file or command line supplied. Those win over a
+    # value saved from the SysOp console (`netbbs.net.policy_settings`);
+    # everything else may be tuned there. Not part of equality: two configs
+    # with the same values behave the same wherever they came from.
+    explicit_keys: frozenset[str] = field(default_factory=frozenset, compare=False)
 
     def validate(self) -> None:
         for name, transport in (("telnet", self.telnet), ("ssh", self.ssh), ("web", self.web)):
@@ -616,11 +622,18 @@ class NodeConfig:
             raise ConfigError(
                 f"link.max_relay_clients must be greater than 0, got {self.link.max_relay_clients}"
             )
-        _require_positive_link = {
-            "max_peers": self.link.max_peers,
+        # The carry caps bound automatic intake only (issue #683), and 0 is a
+        # meaningful setting: a curated node that offers everything new and
+        # carries nothing unasked. So they may be 0, never negative.
+        for name, value in {
             "max_carried_boards": self.link.max_carried_boards,
             "max_carried_channels": self.link.max_carried_channels,
             "max_carried_file_areas": self.link.max_carried_file_areas,
+        }.items():
+            if value < 0 or not math.isfinite(value):
+                raise ConfigError(f"link.{name} must be a finite number of at least 0, got {value}")
+        _require_positive_link = {
+            "max_peers": self.link.max_peers,
             "max_remote_files_per_area": self.link.max_remote_files_per_area,
             "max_concurrent_file_transfers_per_peer": self.link.max_concurrent_file_transfers_per_peer,
             "request_rate_capacity": self.link.request_rate_capacity,
@@ -981,7 +994,14 @@ def _apply_toml(config: NodeConfig, data: dict) -> NodeConfig:
 
     identity_dir, node_name = _node_from_toml(data, config)
 
+    explicit = set(config.explicit_keys)
+    for section in ("link", "throttle", "shutdown"):
+        table = data.get(section, {})
+        if isinstance(table, dict):
+            explicit.update(f"{section}.{key}" for key in table)
+
     return NodeConfig(
+        explicit_keys=frozenset(explicit),
         db_path=db_path,
         identity_dir=identity_dir,
         node_name=node_name,
@@ -996,6 +1016,14 @@ def _apply_toml(config: NodeConfig, data: dict) -> NodeConfig:
 
 
 def _apply_cli_overrides(config: NodeConfig, args: argparse.Namespace) -> NodeConfig:
+    # Issue #730: a `--link-*` flag is as explicit as the same key in the
+    # config file. Every such flag's `dest` is `link_<field>`.
+    cli_explicit = {
+        f"link.{name}" for name in LinkConfig.__dataclass_fields__
+        if getattr(args, f"link_{name}", None) is not None
+    }
+    if cli_explicit:
+        config = replace(config, explicit_keys=config.explicit_keys | cli_explicit)
     if args.db is not None:
         config = replace(config, db_path=args.db)
     if args.identity_dir is not None:
