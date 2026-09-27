@@ -17193,6 +17193,9 @@ class _CompetitionOutcome:
     # Whether a directory left at the destination after a failure is a
     # complete, verified backup (a failure after it was taken) or not.
     backup_valid: bool = False
+    # False when the change was refused before any backup was attempted, so
+    # whatever is at the destination is not this operation's.
+    backup_attempted: bool = True
 
 
 def _war_dialer_change_competition(
@@ -17209,7 +17212,7 @@ def _war_dialer_change_competition(
     from netbbs.doors.war_dialer_admin import change_competition
     if not _WAR_DIALER_COMPETITION_LOCK.acquire(blocking=False):
         return _CompetitionOutcome(None, "another SysOp is changing a War Dialer competition right now; "
-                                         "try again when that finishes")
+                                         "try again when that finishes", backup_attempted=False)
     try:
         return _CompetitionOutcome(change_competition(
             db_path, world, identity_dir=identity_dir, backup_to=destination, confirm=confirm,
@@ -17254,14 +17257,34 @@ async def _owned_worker(func, /, *, finish=None, **kwargs):
             raise cancelled
         if finish is not None:
             try:
-                await finish(result)
+                await _run_owned(finish(result))
             except Exception:
                 _logger.exception("recording %s failed after its SysOp session was cancelled",
                                   getattr(func, "__name__", func))
         raise cancelled
     if finish is not None:
-        await finish(result)
+        await _run_owned(finish(result))
     return result
+
+
+async def _run_owned(coro) -> None:
+    """Await `coro` to completion even if the caller is cancelled meanwhile
+    (a finalizer that records something that already happened), then let
+    the cancellation propagate."""
+    task = asyncio.create_task(coro)
+    try:
+        await asyncio.shield(task)
+    except asyncio.CancelledError as cancelled:
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+        if not task.cancelled() and task.exception() is not None:
+            _logger.error("finalizer failed after its SysOp session was cancelled", exc_info=task.exception())
+        raise cancelled
 
 
 async def _war_dialer_competition_flow(
@@ -17328,12 +17351,14 @@ async def _war_dialer_competition_flow(
     )
     if outcome.failure is not None:
         _announce(session, f"{what} failed: {outcome.failure}", error=True)
-        if destination.exists():
+        if outcome.backup_attempted and destination.exists():
             if outcome.backup_valid:
                 _announce(session, f"The verified backup taken first remains at {destination}.", color=MUTED_COLOR)
             else:
-                _announce(session, f"{destination} is not a usable backup (incomplete or failed verification); "
-                          "remove it.", error=True)
+                # Not "remove it": another backup started in the same second
+                # could own this path.
+                _announce(session, f"{destination} is not a verified backup; check what it is before relying on "
+                          "or removing it.", error=True)
         return
     _announce(session, f"{what} done: season {outcome.status['stored_season']} has started. Backup: {destination}. "
               "Maintenance is still on; switch it off when you have checked the world.")

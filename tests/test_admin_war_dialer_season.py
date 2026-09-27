@@ -262,7 +262,7 @@ def test_a_backup_that_failed_verification_is_not_called_a_backup(db, lane, syso
     text = _normalized_visible(_written_text(session))
 
     assert "Next season failed: checksum mismatch" in text
-    assert "is not a usable backup" in text
+    assert "is not a verified backup" in text
     assert "verified backup taken first remains" not in text
     assert world_status(db.path, path)["stored_season"] == "1"
 
@@ -282,3 +282,41 @@ def test_maintenance_cannot_be_switched_while_a_competition_change_runs(db, lane
 
     assert "competition change is running" in _normalized_visible(_written_text(session))
     assert world_status(db.path, path)["maintenance"] == "on"
+
+
+def test_a_session_dropped_while_the_audit_is_written_still_records_it(db, lane, sysop, identity_dir, monkeypatch):
+    """Codex review, PR #744: cancellation after the change but during the
+    node-audit write must not abort that write."""
+    import threading
+    import time
+
+    from netbbs.net import admin_flow
+
+    door = _war_dialer_door(db, sysop)
+    path = _war_dialer_world(db)
+    set_maintenance(db.path, path, True)
+    real = admin_flow.record_action
+    writing = threading.Event()
+
+    def _slow_record(*args, **kwargs):
+        writing.set()
+        time.sleep(0.4)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(admin_flow, "record_action", _slow_record)
+    status = world_status(db.path, path)
+
+    async def scenario():
+        session = FakeSession(["rollover", path.name])
+        task = asyncio.create_task(admin_flow._war_dialer_competition_flow(
+            session, lane, sysop, door, path, status, reset=False, identity_dir=identity_dir, db_path=db.path))
+        while not writing.is_set():
+            await asyncio.sleep(0.01)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+
+    entry = list_recent_actions(db, limit=1)[0]
+    assert (entry.action, entry.object_id) == ("war_dialer_season", door.id)
