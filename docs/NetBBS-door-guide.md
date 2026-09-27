@@ -17,7 +17,7 @@ program. NetBBS does not download games, obtain licenses, or install emulators.
 - [Trust and filesystem layout](#trust-and-filesystem-layout)
 - [Register and test](#register-and-test-inside-netbbs)
 - [Native doors](#native-doors) and [companion services](#doors-with-a-companion-service)
-- [Allow a door to post](#letting-a-door-post-to-a-board)
+- [Allow a door to post or chat](#letting-a-door-post-to-boards-and-chat)
 - [DOS prerequisites](#dos-prerequisites), [LORD](#lord-407-dos),
   [Global War](#global-war-27-dos), [TradeWars](#tradewars-2002-309-dos)
 - [Foreign-platform doors in a VM](#foreign-platform-doors-in-a-vm)
@@ -775,13 +775,15 @@ perform deliberately, not something a node restore should do over a live
 installation. Find them under `door-installs/` inside the backup, with each
 directory's original path recorded in `manifest.json`.
 
-## Letting a door post to a board
+## Letting a door post to boards and chat
 
 A door can be allowed to post plain text to boards you choose — a season
-summary, a tournament result, a high-score roundup. It is off for every door
-until you switch it on, and switching it on grants exactly one ability:
-posting to the boards on that door's own allowlist. A door can never read the
-BBS, send mail, look up a caller, or post anywhere you did not allow.
+summary, a tournament result, a high-score roundup — and to speak one-line
+messages in chat channels you choose, as things happen in the game ("Sector 7
+has fallen"). It is off for every door until you switch it on, and switching
+it on grants exactly that: posting to the boards and speaking in the channels
+on that door's own allowlist. A door can never read the BBS, send mail, look
+up a caller, or post anywhere you did not allow.
 
 **Native and [VM](#foreign-platform-doors-in-a-vm) doors, not DOS yet.** A VM
 door finds its request directory beside `door_info.json` in `/mnt/node`, and
@@ -801,8 +803,10 @@ Be clear about what this is, because it is easy to over-read. A native door
 already runs as the NetBBS service account with the node database on the disk
 beside it, so this hook gives a door no *power* it did not already have. What
 it gives you is a supported interface instead of a door reaching into the
-database, an audit entry naming the door for every post it makes, and one
-switch you can turn off. The trust decision about the program itself is still
+database, an audit entry naming the door for every board post it makes, and
+one switch you can turn off. (Chat lines are not logged one by one: a door
+allowed thirty an hour would bury the log, and the line itself carries the
+door's name. Allowing the channel is logged, and so is any moderator's mute.) The trust decision about the program itself is still
 yours, exactly as it is for any door you register.
 
 ### Switching it on
@@ -821,7 +825,7 @@ On a door's screen in the SysOp area, press `[O]utbound`.
 3. `[C]eiling`, if you want something other than six posts an hour.
 
 `[R]evoke a board` stops it posting there. `[T]urn off` releases the posting
-name, the whole allowlist and the door's stored results; posts the door already
+name, the whole allowlist (boards and channels) and the door's stored results; posts the door already
 made keep the name they were written under, exactly as a post keeps the name of
 a deleted account.
 
@@ -844,10 +848,34 @@ post, which is usually the point of automating it. Two things follow:
   suffix is a convention a reader can recognise, not something a remote node
   verifies.
 
+### Letting it speak in a chat channel
+
+`[L]et it chat in a channel` allows one more channel, and `[D]rop a channel`
+takes one away. `[H]ourly chat lines` sets the chat ceiling, thirty lines an
+hour unless you change it; it is separate from the board ceiling, so a chatty
+door cannot use up its board posts or the reverse.
+
+- **A door's line looks like a door's.** It shows under the posting name,
+  muted and marked with `»` (or `>>` for a caller without Unicode styling), so
+  nobody mistakes it for a person or answers it expecting a reply.
+- **Channels bridged to MRC are never offered.** The bridge would present the
+  door to the MRC hub as one of your callers. If you bridge a channel after
+  allowing a door there, the door is refused in it from then on.
+- **A Linked channel asks first.** Every line reaches every node carrying the
+  channel, and chat has no way to take a line back — there is no tombstone
+  for a chat line as there is for a post. The screen asks you to confirm
+  before allowing one.
+- **A channel's moderators can mute the door there.** `/mute Blacksite.door
+  [duration] [reason]` in the channel stops the door speaking there, for a
+  time or until `/unmute Blacksite.door`, without you having to touch the
+  allowlist. The mute is announced in the channel and logged like any other,
+  and the door's outbound screen shows it next to the channel.
+
 ### Writing a door that uses it
 
 See the [developer handbook's outbound posting contract](NetBBS-Developer-Handbook.md#door-outbound-posting)
-for request/result JSON, timing, failure behavior, and limits.
+for request/result JSON (board posts and chat lines), timing, failure
+behavior, and limits.
 
 
 ## DOS prerequisites
@@ -1270,7 +1298,7 @@ number against `success_exit_codes`.
 The caller's time limit starts when the guest creates `booted`, not when qemu
 starts: booting is bounded by `boot_timeout_seconds` alone.
 
-If the SysOp has switched on the door's [outbound hook](#letting-a-door-post-to-a-board),
+If the SysOp has switched on the door's [outbound hook](#letting-a-door-post-to-boards-and-chat),
 the guest's `door_info.json` names its receipts as `/mnt/node/outbound-results`:
 a copy of the receipts NetBBS keeps for the door beside the node database,
 taken at launch and topped up whenever a request is answered during the

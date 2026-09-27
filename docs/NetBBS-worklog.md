@@ -5901,12 +5901,27 @@ carried across one session's drains by the caller (`rehearsed`), since
 rehearsal posts are never persisted. The ticker
 (`runtime._drain_while_running`) asks `has_requests` -- the same question the
 drain's scan asks, in a worker thread -- before queueing a lane job, so an idle
-door costs the shared lane nothing; it is cancelled before the final drain,
-and a lane job it already queued still runs first because the lane is one
-FIFO worker. A VM door's guest-visible receipt copy (`vm.copy_receipts`) is
+door costs the shared lane nothing. It is cancelled before the final drain,
+but a cancellation only lands between passes: a pass runs in threads (the
+lane's and `to_thread`'s) that a cancelled await does not stop, so the ticker
+waits for its pass (`_finish_owned`) before ending -- otherwise a
+`copy_receipts` still writing races the workdir's deletion, and chat lines a
+pass just recorded are never delivered. A VM door's guest-visible receipt copy (`vm.copy_receipts`) is
 reconciled with the retained receipts every tick, relative to descriptors
 opened without following links, staging each copy as `.part` and renaming it
 into place.
+A door's chat lines (#520 slice 2) are recorded on the lane but delivered
+live by the launching session: `drain(published=[...])` hands back
+`(channel, message)` pairs and `run_door(chat_fanout=...)` pushes them through
+the same `ChatHub.broadcast` and real-time Link bridge a caller's line uses
+(`door_flow.chat_fanout`). Lines are never sent to the MRC relay, which is
+explicit per call site in `chat_flow`, and a channel with an MRC mapping is
+refused both when allowed and per line. The rate debit is inserted before
+`record_message` inside one `BEGIN IMMEDIATE`, because `record_message`
+commits on its own. A door is muted per channel on its allowlist row
+(`suspended_at`/`suspended_until`), not in `channel_restrictions`, which is
+keyed by account. Rendering keys on the reserved `.door` suffix, locally only
+when the label resolves to no account.
 A VM guest can write its node directory, so the drop directory is guest-
 controlled: `outbound` or any request in it may be a symlink to a host path.
 `_DropDir` opens it once with `O_DIRECTORY|O_NOFOLLOW` and makes every scan,

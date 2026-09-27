@@ -229,7 +229,7 @@ Two kinds of registration deliberately get none of it:
 
 | Field | Meaning |
 | --- | --- |
-| `door_api` | Contract version, currently `3`. Refuse a version you do not understand rather than probing for fields. |
+| `door_api` | Contract version, currently `4`. Refuse a version you do not understand rather than probing for fields. |
 | `handle` | The caller's NetBBS handle. |
 | `user_id` | Their stable numeric id on this node. |
 | `terminal_width`, `terminal_height` | Current geometry; rewritten mid-run if the caller resizes and the door opted in (see the resize section above). |
@@ -240,7 +240,7 @@ Two kinds of registration deliberately get none of it:
 | `node_name` | The node's display name, which a SysOp may change at any time. |
 | `node_id` | A stable, opaque per-node identifier which survives a rename. Key a door's world on this, not on `node_name`. Not a credential. |
 | `session_limit_seconds` | The effective wall-clock cap for *this* launch — the tighter of the profile's limit and any lower bound the launch itself imposes — so a door can warn before it is cut off. Absent when nothing bounds the run. |
-| `outbound` | Present **only** if a SysOp switched this door's outbound hook on: `label` (the name its posts appear under), `directory` (where to drop a request, relative to the file's own directory), `results` (absolute path where outcomes are kept across launches; for a door in a VM, a copy under `/mnt/node` taken at launch), `boards` (every board it may name) and `posts_per_hour`. See [Door outbound posting](#door-outbound-posting). |
+| `outbound` | Present **only** if a SysOp switched this door's outbound hook on: `label` (the name its posts appear under), `directory` (where to drop a request, relative to the file's own directory), `results` (absolute path where outcomes are kept across launches; for a door in a VM, a copy under `/mnt/node` taken at launch), `boards` (every board it may name), `posts_per_hour`, `channels` (every chat channel it may speak in; since `door_api` 4) and `chat_lines_per_hour`. See [Door outbound posting](#door-outbound-posting). |
 
 Treat every field as optional and absence as "unknown": that is how the file
 stays compatible as it grows. Two notes on what is deliberately **not** there.
@@ -264,15 +264,17 @@ private world-ownership convention, not a general authentication facility.
 
 The hook is opt-in per registered door and publishes under a persistent,
 distinct door label. The playing caller does not lend their account or level
-to the request. The SysOp chooses permitted boards and a per-door hourly
-ceiling; the default is six posts. Normal board moderation still applies.
+to the request. The SysOp chooses permitted boards and chat channels, and two
+per-door hourly ceilings: six board posts and thirty chat lines by default.
+Normal board moderation still applies, and a channel's moderators can mute a
+door in their channel.
 
 A live node with Link identity can queue a successful linked-board post for
 federation. A standalone admin launch has no live Link context. SysOp
 compatibility tests are rehearsals: they publish nothing, and each request is
 answered with what would have happened.
-This interface currently posts to message boards; it does not send chat,
-private mail, or arbitrary administrative operations.
+This interface posts to message boards and speaks one-line messages in chat
+channels; it does not send private mail or perform administrative operations.
 
 ### Request and result contract
 
@@ -287,7 +289,9 @@ test for it:
   "directory": "outbound",
   "results": "/home/netbbs/.netbbs/door-outbound/3",
   "boards": ["Chronicle"],
-  "posts_per_hour": 6
+  "posts_per_hour": 6,
+  "channels": ["lobby"],
+  "chat_lines_per_hour": 30
 }
 ```
 
@@ -317,6 +321,33 @@ has already created it. To post, write one JSON file there:
   one, a request that names none is refused rather than guessed at.
 - `subject` must be non-empty; `body` may be empty.
 
+To speak in a chat channel instead, name a `channel` (and no `board`):
+
+```json
+{"channel": "lobby", "body": "Sector 7 has fallen to the Kessari."}
+```
+
+- `channel` is required, with or without its `#`. It must be one of
+  `outbound.channels`.
+- `body` is **one line**. Surrounding whitespace, including a trailing
+  newline, is dropped; a line break inside it is refused -- send each line as
+  its own request. Control characters (escape sequences among them) are
+  removed before anyone sees the line. At most 4000 bytes of UTF-8.
+- `kind` may be omitted or `"message"`; nothing else is accepted.
+- The line appears in the channel as the door's label, styled so callers can
+  tell it from a person, and reaches Link peers carrying the channel. It is
+  delivered to the people in the channel within about two seconds, like a
+  board post, and stays in the channel's scrollback.
+- Chat lines count against `chat_lines_per_hour`, never against
+  `posts_per_hour`, and the reverse.
+- A channel's moderators can `/mute <label>` your door there, for a time or
+  indefinitely. While muted, lines to that channel are refused; the channel
+  stays in `outbound.channels`, because the mute ends on its own.
+
+A chat line cannot be taken back once sent: chat has no retraction, and on a
+Linked channel the line has already gone to every peer. Send what you would
+be content to leave standing.
+
 Requests are picked up while the door runs -- up to 16 every two seconds, so
 a single request is answered within about two seconds and a burst of 100 takes
 about 13 seconds -- and once more when it exits. For each one, NetBBS
@@ -343,6 +374,7 @@ more than one player at a time.
  "request": "chronicle", "at": "2026-09-12T18:04:11.502133Z"}
 {"status": "rejected", "reason": "board 'Private' is not allowlisted for this door",
  "request": "chronicle", "at": "2026-09-12T18:04:11.502133Z"}
+{"status": "posted", "channel": "lobby", "request": "say", "at": "2026-09-26T20:41:07.118420Z"}
 ```
 
 If a SysOp switched the hook off while your door was running, its requests are
@@ -365,7 +397,13 @@ Reasons you can expect to see, and what they mean for the door:
 | `not allowlisted for this door` | The board name is wrong, or was revoked. |
 | `matches more than one` | Two allowlisted boards differ only by case; spell one exactly. |
 | `more than one allowlisted board` | Name a board in the request. |
-| `rate limit reached` | Try again later; the ceiling is in `posts_per_hour`. |
+| `rate limit reached` | Try again later; the ceiling is in `posts_per_hour`, or `chat_lines_per_hour` for a chat line. |
+| `no chat channel is allowlisted` | No channel is allowed yet. |
+| `board or a channel, not both` | A request named both; send two requests. |
+| `must be one line` | The chat body held a line break. |
+| `at most 4000 bytes` | The chat line was too long. |
+| `muted this door` | A moderator of that channel muted your door there. Stop sending to it until the mute ends. |
+| `bridged to MRC` | The channel was bridged to MRC after it was allowed; doors never speak there. |
 | `larger than` | The request exceeded the size limit and was not read. |
 | `requests in one session` | You wrote more in one session than a drain answers. |
 | `were not seen` | Your drop directory held more entries than one drain looks at. This receipt's `request` is empty: it answers for the directory, not one file. |

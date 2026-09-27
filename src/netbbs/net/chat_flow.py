@@ -82,6 +82,7 @@ from netbbs.attestation import (
     meets_name_requirement,
 )
 from netbbs.auth.users import (
+    DOOR_LABEL_SUFFIX,
     SYSOP_LEVEL,
     AuthError,
     User,
@@ -1457,6 +1458,25 @@ def _message_author_label(db: Database, channel: Channel, message: ChannelMessag
     return _chat_author_label(db, channel, author)
 
 
+def _is_door_line(db: Database, message: ChannelMessage) -> bool:
+    """Whether a door, not a person, said this (issue #520).
+
+    Keyed on the `.door` suffix, which the username validator reserves, so
+    it holds for a peer's door too: `x.door@Node` live, or a materialized
+    line whose authenticated author is `x.door`. Locally the label must also
+    resolve to no account, since an account that predates the reservation
+    may still carry the suffix and is a person.
+    """
+    durable_author = _durable_link_author(db, message)
+    if durable_author is not None:
+        return durable_author[0].lower().endswith(DOOR_LABEL_SUFFIX)
+    local_part, at, _node = message.author_label.rpartition("@")
+    if at:
+        return local_part.lower().endswith(DOOR_LABEL_SUFFIX)
+    return (message.author_label.lower().endswith(DOOR_LABEL_SUFFIX)
+            and _resolve_message_author(db, message.author_label) is None)
+
+
 def _colored_around(prefix: str, middle: str, suffix: str, *, fg_color: int, bold: bool = False) -> str:
     """
     Compose `prefix + middle + suffix`, all in `fg_color` — the fix for
@@ -1552,6 +1572,13 @@ def _render_channel_message(
                     + colored(">", fg_color=MUTED_COLOR)
                 )
             line = f"{label} {_mrc_body(db, viewer, message.body)}"
+        elif _is_door_line(db, message):
+            # Issue #520: a door's line reads as the game talking, not as a
+            # caller -- muted throughout, and marked, so nobody answers it
+            # expecting a reply or mistakes it for a person with an odd nick.
+            marker = "» " if unicode_style_enabled(db, viewer) else ">> "
+            line = _colored_around(f"{marker}<", author_label, f"> {sanitize_text(message.body)}",
+                                   fg_color=MUTED_COLOR)
         else:
             # Dogfood feedback: "system messages are barely readable, and
             # actual messages are just slightly better". The bodies were
@@ -2643,6 +2670,48 @@ async def _kick_live_sessions(hub: ChatHub, channel: Channel, target: User, *, r
         await hub.send_to(channel.name, participant_id, _KickNotice(reason=reason), priority=True)
 
 
+async def _door_named(ctx: ChatCommandContext, name: str):
+    """`(door, label)` when a moderation command names a door, else `None`.
+
+    Only a name in the reserved `.door` grammar is looked up, so a
+    command naming a person costs nothing extra.
+    """
+    if not name.lower().endswith(DOOR_LABEL_SUFFIX):
+        return None
+    from netbbs.doors.outbound import door_for_label
+
+    return await ctx.lane.run(door_for_label, name)
+
+
+async def _moderate_door(ctx: ChatCommandContext, named, *, kind: str,
+                         duration: datetime.timedelta | None = None, reason: str | None = None) -> None:
+    """`/mute` or `/unmute` of a door (issue #520): stops or restarts its
+    lines in this channel, and only this one. A door is not an account, so
+    it is suspended on its own allowlist entry here rather than given a
+    `channel_restrictions` row; the channel sees the same notice either way."""
+    from netbbs.doors.outbound import lift_channel_suspension, suspend_channel
+
+    door, label = named
+    try:
+        if kind == "mute":
+            changed = await ctx.lane.run(suspend_channel, door, ctx.channel, duration=duration,
+                                         reason=reason, suspended_by=ctx.user)
+        else:
+            changed = await ctx.lane.run(lift_channel_suspension, door, ctx.channel, lifted_by=ctx.user)
+    except ChatModerationError:
+        await ctx.session.write_line(
+            colored(f"You do not have permission to {kind} in this channel.", fg_color=MUTED_COLOR)
+        )
+        return
+    if not changed:
+        await ctx.session.write_line(
+            colored(f"{sanitize_text(label)} does not speak in this channel.", fg_color=MUTED_COLOR)
+        )
+        return
+    detail = _moderation_detail(ctx.user.username, duration, reason)
+    await _announce_moderation(ctx.lane, ctx.hub, ctx.channel, kind=kind, target_label=label, detail=detail)
+
+
 async def _handle_mute(ctx: ChatCommandContext, args: str) -> None:
     parts = args.split(maxsplit=1)
     if not parts:
@@ -2650,6 +2719,10 @@ async def _handle_mute(ctx: ChatCommandContext, args: str) -> None:
         return
     target_name, rest = parts[0], (parts[1] if len(parts) > 1 else "")
     duration, reason = _split_duration_and_reason(rest)
+
+    if (door := await _door_named(ctx, target_name)) is not None:
+        await _moderate_door(ctx, door, kind="mute", duration=duration, reason=reason)
+        return
 
     target = await _resolve_target(ctx.session, ctx.lane, target_name)
     if target is None:
@@ -2674,6 +2747,10 @@ async def _handle_unmute(ctx: ChatCommandContext, args: str) -> None:
     target_name = args.split(maxsplit=1)[0] if args.split() else ""
     if not target_name:
         await _show_usage(ctx.session, "unmute")
+        return
+
+    if (door := await _door_named(ctx, target_name)) is not None:
+        await _moderate_door(ctx, door, kind="unmute")
         return
 
     target = await _resolve_target(ctx.session, ctx.lane, target_name)
