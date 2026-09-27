@@ -851,7 +851,6 @@ async def _show_board(
         busiest frame this board can draw -- a page does not change size
         because [N]ewer appeared on it."""
         width = session.terminal_width
-        unread["count"] = unread_post_count(db, user, board) or 0
         unread["menu"] = bool(unread["count"])
         # Nine rows, so the read entry is in the action bar exactly as a
         # populated page draws it (Codex review on #719).
@@ -922,8 +921,12 @@ async def _show_board(
     async def _render_fresh(current_page: PostPage, highlighted: int | None = None) -> None:
         """Render after anything that can change what is unread -- a post
         read, written, removed, or the page refetched. Showing the list
-        marks nothing read (issue #710): only opening a post does."""
-        unread["count"] = unread_post_count(db, user, board) or 0
+        marks nothing read (issue #710): only opening a post does.
+
+        The unread count is counted once on arrival and kept from there --
+        one fewer for each unread post opened, none after [M]ark all read --
+        rather than recounted here: a carried board's count checks trust
+        post by post (Codex review on #723)."""
         if not unread["count"]:
             unread["menu"] = False
         await _render(current_page, highlighted)
@@ -944,6 +947,8 @@ async def _show_board(
             post = page.posts[index]
             # Opening a post is what makes it read (issue #710), recorded as
             # it is shown, so a dropped connection loses nothing already read.
+            if unread_post_ids(db, user, board, [post]):
+                unread["count"] = max(0, unread["count"] - 1)
             record_post_opened(db, user, board, post)
             width = session.terminal_width
             title = screen_title(
@@ -1339,6 +1344,7 @@ async def _show_board(
         elif char == "m" and unread["menu"]:
             await _moved_on()
             mark_board_read(db, user, board)
+            unread["count"] = 0
             announce(session, "Every post on this board is marked read.", tone="muted")
             # Refetched: the notice takes a row the page was not sized for.
             page, highlighted = _refetch_keeping(page, highlighted)

@@ -407,3 +407,21 @@ def test_the_floor_never_retreats(db, alice, bob, monkeypatch):
     record_post_opened(db, bob, board, later)
 
     assert _floor(db, bob, board) == high == posts[-1].id
+
+
+def test_a_stale_open_does_not_mark_a_post_that_reused_its_row_id(db, alice, bob, monkeypatch):
+    """The newest post is deleted and a new one takes its row id while the
+    reader still shows the old one: opening the old one must not mark the
+    new one read (Codex review on #723)."""
+    board = create_board(db, "general", creator=alice)
+    ensure_board_baseline(db, bob, board)
+    posts = _posts(db, board, alice, 2, monkeypatch)
+    db.connection.execute("DELETE FROM posts WHERE id = ?", (posts[1].id,))
+    db.connection.commit()
+    monkeypatch.setattr(posts_module, "utc_now_iso", lambda: "2026-01-02T00:00:00.000000Z")
+    replacement = create_post(db, board, alice, "replacement", "x")
+    assert replacement.id == posts[1].id  # SQLite reused the row id
+
+    record_post_opened(db, bob, board, posts[1])
+
+    assert replacement.id in unread_post_ids(db, bob, board, [replacement])

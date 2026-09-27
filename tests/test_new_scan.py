@@ -352,3 +352,11 @@ def test_mark_read_keeps_each_row_where_it_was(db, lane, alice, monkeypatch):
     marked = re.search(r"(\S+-board): every post marked read\.", text).group(1)
     # Row 1 is opened after the reload: the board just marked, not the other.
     assert f"Message boards › {marked}" in text or f"Message boards > {marked}" in text
+
+
+def test_with_nothing_to_list_the_replies_summary_still_shows(db, lane, alice):
+    session = _run_main_menu(db, lane, alice, ["n", "l", "y"])
+
+    text = _visible_text(session)
+    assert "Nothing accessible yet." in text
+    assert "Replies to you: none." in text

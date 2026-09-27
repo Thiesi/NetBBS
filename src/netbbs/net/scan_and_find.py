@@ -45,7 +45,7 @@ from netbbs.net.chat_flow import (
     list_visible_channels_for,
 )
 from netbbs.net.file_flow import enter_file_area
-from netbbs.net.notices import announce
+from netbbs.net.notices import announce, announce_styled
 from netbbs.net.node_theme import effective_accent_color, effective_header_color, effective_header_color_256
 from netbbs.net.picker import pick_item
 from netbbs.rendering import GATE_COLOR, MenuEntry, SegmentColor, menu_key
@@ -282,6 +282,12 @@ async def _new_scan_screen(
         segments.append((item.name, accent))
         return segments
 
+    if not items:
+        # The picker has nothing to draw and returns at once, announcing its
+        # empty message for the screen this returns to; the summary goes
+        # with it rather than being lost (Codex review on #723).
+        for line in (await _replies_summary()).split("\r\n"):
+            announce_styled(session, line)
     selected = await pick_item(
         session, items,
         name_of=lambda item: item.name,

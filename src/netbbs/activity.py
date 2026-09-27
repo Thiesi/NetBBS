@@ -298,14 +298,15 @@ def record_post_opened(db: Database, user: User, board: Board, post: Post) -> No
     floor = existing.arrival_id or 0
     if post.id <= floor:
         return
-    # Only while the post exists: one deleted since the reader fetched it
-    # has had its rows dropped by the delete trigger already, and a row
+    # Only while that very post exists: one deleted since the reader fetched
+    # it has had its rows dropped by the delete trigger already, and a row
     # written now would outlive it -- and match the next post, should that
-    # reuse its id (Codex review on #723).
+    # reuse its row id. Its `post_id` is the content hash, never reused
+    # (Codex review on #723).
     db.connection.execute(
         "INSERT OR IGNORE INTO user_board_opened_posts (user_id, board_id, post_row_id) "
-        "SELECT ?, ?, ? WHERE EXISTS (SELECT 1 FROM posts WHERE id = ? AND board_id = ?)",
-        (user.id, board.id, post.id, post.id, board.id),
+        "SELECT ?, ?, ? WHERE EXISTS (SELECT 1 FROM posts WHERE id = ? AND board_id = ? AND post_id = ?)",
+        (user.id, board.id, post.id, post.id, board.id, post.post_id),
     )
     _raise_floor(db, user, board, _compact(db, user, board, floor))
 
