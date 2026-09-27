@@ -1843,10 +1843,14 @@ carried Link event (the same property GitHub issue #68 already relies
 on for edit-chain tie-breaking). `user_read_cursors` gains
 `last_seen_arrival_id`, populated from that rowid; `unread_post_count`/
 `unread_file_count`/`unread_replies_to` compare against it instead of
-`created_at`, while `board_read_cursor`/`file_area_read_cursor` (feed-
-position jump-to) are unchanged and still compare `created_at` -- the
-two concerns use different orderings on purpose, per this section's own
-distinction between authored chronology and node-local availability.
+`created_at`, while `file_area_read_cursor` (feed-position jump-to)
+still compares `created_at` -- the two concerns use different orderings
+on purpose, per this section's own distinction between authored
+chronology and node-local availability. (`board_read_cursor` was the
+same until issue #710, which computes a board's jump from its unread
+posts instead; see "Boards: a post is read once it is opened" below.)
+Unread counting for boards has also moved on since: #710 makes the
+arrival id a floor with an opened set above it.
 Existing cursors are backfilled from the post/file their existing
 `last_seen_stable_id` already names, so an upgrade preserves exactly
 what a user had already read rather than resetting anyone to
