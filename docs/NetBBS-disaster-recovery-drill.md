@@ -99,7 +99,7 @@ Record the reported rollback directory and any external game rollback locations.
 
 **MANUAL — outside NetBBS:** restore the service/TOML configuration and any
 external door installations you captured. Configure the restored game paths,
-including `VOIDRUNNER_SAVE_DIR` and any War Dialer override, before launch.
+including any `VOIDRUNNER_SAVE_DIR` or War Dialer override, before launch.
 The restore command does not rewrite service environment settings.
 
 ## 4. Verify the result as a caller and SysOp

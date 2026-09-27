@@ -798,6 +798,12 @@ ROOT_EXCHANGE_COST = 50
 CAPTURE_RANK = 50
 CONTROL_RANK_HOURS = 6
 TRADE_WAREZ_RANGE = (20, 60)
+# The top of Trade's range falls by TRADE_TAPER_STEP for each Trade past the
+# first TRADE_FULL_PAYOUTS of a turn-day, down to TRADE_TAPER_FLOOR (issue #649).
+# The bottom never moves: the minimum payout is what funds bust recovery.
+TRADE_FULL_PAYOUTS = 3
+TRADE_TAPER_STEP = 5
+TRADE_TAPER_FLOOR = 40
 TRADE_WAREZ_HEAT = 2
 ROOT_EXCHANGE_HEAT = 8
 RAID_HEAT = 10
@@ -939,6 +945,7 @@ class Player:
     operation_stage: int = 0
     successful_operations: int = 0
     insignia: str = "modem"
+    turns_trading: int = 0  # Trades in the current turn-day (issue #649)
 
 
 @dataclass
@@ -1079,6 +1086,7 @@ def reset_player_for_season(player: Player, season_number: int, now: datetime) -
     player.heat = 0.0
     player.heat_updated_at = to_iso(now)
     player.turns_used = 0
+    player.turns_trading = 0
     player.turn_day_start = ""
     player.last_raided_by = None
     player.raid_shield_until = ""
@@ -1105,6 +1113,7 @@ def settle_player_clocks(player: Player, now: datetime) -> datetime:
     player.heat_updated_at = to_iso(effective_now)
     if player.turns_used == 0 or (anchor is not None and effective_now - anchor >= DAY):
         player.turns_used = 0
+        player.turns_trading = 0
         player.turn_day_start = ""
     elif anchor is None:
         # A manually inconsistent allowance must not become free extra turns.
@@ -1142,8 +1151,23 @@ def apply_heat(player: Player, amount: float, rng: random.Random, *, action: str
     return False
 
 
+def trade_payout_range(player: Player) -> tuple[int, int]:
+    """What this caller's next Trade pays, gross.
+
+    Twelve Trades in a row on a first visit took $300 to $728 with no bust risk
+    (issue #649): the same safe action paid the same every time. Past the first
+    few of a turn-day, the top of the range falls. Fifteen Trades still earn more
+    than the whole map's passive income, and the minimum stays where bust
+    recovery needs it -- both are the design document's economy targets.
+    """
+    extra = max(0, player.turns_trading - TRADE_FULL_PAYOUTS + 1)
+    low, high = TRADE_WAREZ_RANGE
+    return low, max(TRADE_TAPER_FLOOR, high - TRADE_TAPER_STEP * extra)
+
+
 def action_trade_warez(player: Player, rng: random.Random) -> tuple[int, bool]:
-    gain = rng.randint(*TRADE_WAREZ_RANGE)
+    gain = rng.randint(*trade_payout_range(player))
+    player.turns_trading += 1
     player.cash += gain
     busted = apply_heat(player, TRADE_WAREZ_HEAT, rng)
     return gain, busted
@@ -1289,7 +1313,7 @@ def _resolve_db_path() -> Path:
     return Path.home() / ".netbbs" / "wardialer.db"
 
 
-WORLD_SCHEMA_VERSION = 10
+WORLD_SCHEMA_VERSION = 11
 _OPERATION_COLUMNS = {"operation_contract", "operation_approach", "operation_stage", "successful_operations"}
 
 # Versioned schema contract: future additions need a new numbered migration.
@@ -1342,6 +1366,8 @@ def _validate_world_layout(conn: sqlite3.Connection, version: int) -> None:
             expected = expected | {"npc_key", "npc_return_at"}
         if version >= 9 and table == "players":
             expected = expected | {"insignia"}
+        if version >= 11 and table == "players":
+            expected = expected | {"turns_trading"}
         if not expected <= columns:
             raise WorldStateError(f"War Dialer {table} schema is incomplete. Preserve it for SysOp recovery; no replacement was created.")
 
@@ -1419,6 +1445,8 @@ def connect(db_path: Path) -> sqlite3.Connection:
                     fresh.execute("PRAGMA user_version=9")
                     _migrate_world_v10(fresh)
                     fresh.execute("PRAGMA user_version=10")
+                    _migrate_world_v11(fresh)
+                    fresh.execute("PRAGMA user_version=11")
             finally:
                 fresh.close()
             try:
@@ -1489,6 +1517,9 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         if version < 10:
             _migrate_world_v10(conn)
             conn.execute("PRAGMA user_version=10")
+        if version < 11:
+            _migrate_world_v11(conn)
+            conn.execute("PRAGMA user_version=11")
         _validate_world_layout(conn, WORLD_SCHEMA_VERSION)
 
 
@@ -1664,6 +1695,16 @@ def _archive_season(conn: sqlite3.Connection, old: int, current: int, now: datet
     keep = "SELECT number FROM seasons ORDER BY number DESC LIMIT ?"
     conn.execute("DELETE FROM season_results WHERE season NOT IN (" + keep + ")", (SEASON_ARCHIVE_LIMIT,))
     conn.execute("DELETE FROM seasons WHERE number NOT IN (" + keep + ")", (SEASON_ARCHIVE_LIMIT,))
+
+
+def _migrate_world_v11(conn: sqlite3.Connection) -> None:
+    """Count each caller's Trades in the turn-day, for the taper (issue #649).
+
+    Zero for everyone: a turn-day already under way when the world is upgraded
+    pays its remaining Trades as if none had happened yet, once.
+    """
+    conn.execute("ALTER TABLE players ADD COLUMN turns_trading INTEGER NOT NULL DEFAULT 0 "
+                 "CHECK (turns_trading >= 0)")
 
 
 def _migrate_world_v9(conn: sqlite3.Connection) -> None:
@@ -1929,6 +1970,7 @@ def _row_to_player(row: sqlite3.Row) -> Player:
         operation_stage=row["operation_stage"] if "operation_stage" in row.keys() else 0,
         successful_operations=row["successful_operations"] if "successful_operations" in row.keys() else 0,
         insignia=row["insignia"] if "insignia" in row.keys() else "modem",
+        turns_trading=row["turns_trading"] if "turns_trading" in row.keys() else 0,
     )
 
 
@@ -1967,6 +2009,9 @@ def _save_player(conn: sqlite3.Connection, player: Player) -> None:
                      (player.operation_contract, player.operation_approach, player.operation_stage, player.successful_operations, player.user_id))
     if _world_schema_version(conn) >= 9:
         conn.execute("UPDATE players SET insignia=? WHERE user_id=?", (player.insignia, player.user_id))
+    if _world_schema_version(conn) >= 11:
+        conn.execute("UPDATE players SET turns_trading=? WHERE user_id=?",
+                     (player.turns_trading, player.user_id))
 
 
 _INCOME_UNITS_PER_DOLLAR = 3_600_000_000  # microseconds per hour
@@ -3803,7 +3848,10 @@ HELP_SECTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
         "available crew left? Recruit or withdraw defenders before capturing again.",
     )),
     ("MONEY AND CREW", (
-        f"[T] Trade Warez: quick cash. [C] Crew Recruit: ${RECRUIT_COST} buys +1 crew.",
+        f"[T] Trade Warez: quick cash, ${TRADE_WAREZ_RANGE[0]}-${TRADE_WAREZ_RANGE[1]}; after "
+        f"{TRADE_FULL_PAYOUTS} in one turn-day the top falls ${TRADE_TAPER_STEP} a Trade, to "
+        f"${TRADE_TAPER_FLOOR}. "
+        f"[C] Crew Recruit: ${RECRUIT_COST} buys +1 crew.",
         "[S] Kit: train one crew specialty or buy one consumable support item. Each costs cash and "
         "one turn; preview before Act. Both reset each season.",
         "Capture commits one available member to its garrison. Assigned crew defend only that "
@@ -4743,7 +4791,12 @@ def action_preview_lines(action: str, player: Player, target: Player | Exchange 
     heat = {"trade": TRADE_WAREZ_HEAT, "recruit": 0, "job": job[4] if job else JOB_HEAT,
             "raid": RAID_HEAT, "root": exchange_terms(target)[2] if action == "root" else ROOT_EXCHANGE_HEAT, "service": 4}[action]
     if action == "trade":
-        lines.append(f"Gross payout: ${TRADE_WAREZ_RANGE[0]}-${TRADE_WAREZ_RANGE[1]}, before any bust loss.")
+        low, high = trade_payout_range(player)
+        lines.append(f"Gross payout: ${low}-${high}, before any bust loss.")
+        if high < TRADE_WAREZ_RANGE[1]:
+            lines.append(f"Trade {player.turns_trading + 1} of this turn-day: the top of the range "
+                         f"falls ${TRADE_TAPER_STEP} per Trade after the first {TRADE_FULL_PAYOUTS}, "
+                         f"to ${TRADE_TAPER_FLOOR}. It is back to ${TRADE_WAREZ_RANGE[1]} when your turns refill.")
     elif action == "recruit":
         lines.append("Guaranteed +1 crew and +10 Rank. No Heat or bust roll.")
     elif action == "service":
