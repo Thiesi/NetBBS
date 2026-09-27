@@ -71,7 +71,6 @@ from netbbs.files import (
     FileEntryError,
     FileEntryPage,
     download_file,
-    get_file,
     list_file_areas,
     list_files_page,
     list_pending_files,
@@ -1101,8 +1100,10 @@ async def _show_area(
                     empty_message="No files here.",
                     description_of=_download_choice_description,
                 )
-                if entry is not None:
-                    await _toggle_file_flag(session, lane, entry, user, pin=kind == "pin")
+                changed = (
+                    await _toggle_file_flag(session, lane, entry, user, pin=kind == "pin") if entry is not None else None
+                )
+                if changed is not None:
                     if kind == "pin":
                         # A pin moves the file to the top of the opening
                         # page, an unpin back among the dated files.
@@ -1111,9 +1112,8 @@ async def _show_area(
                     else:
                         # Keeping moves nothing: this page, the row updated
                         # (Codex review on #783).
-                        fresh = await lane.run(get_file, entry.file_id)
                         page = replace(
-                            page, entries=[fresh if e.file_id == fresh.file_id else e for e in page.entries]
+                            page, entries=[changed if e.file_id == changed.file_id else e for e in page.entries]
                         )
                 await _render_and_advance_cursor(page, highlighted=highlighted)
                 continue
@@ -1737,25 +1737,29 @@ def _keep_offered(area: FileArea, page: FileEntryPage) -> bool:
     return area.max_file_age_days is not None or any(entry.exempt_from_expiry for entry in page.entries)
 
 
-async def _toggle_file_flag(session: Session, lane: DatabaseLane, entry: FileEntry, user: User, *, pin: bool) -> None:
+async def _toggle_file_flag(
+    session: Session, lane: DatabaseLane, entry: FileEntry, user: User, *, pin: bool
+) -> FileEntry | None:
     """Flip `entry`'s pin (`pin=True`) or its expiry exemption (issue
-    #675), and say what changed above the next screen. A pin is this
+    #675), and say what changed above the next screen. Returns the file
+    as it now is, or `None` when the change was refused. A pin is this
     node's own presentation, never carried over the Link."""
     name = sanitize_text(entry.filename)
     try:
         if pin:
-            await lane.run(set_file_pinned, entry, not entry.pinned, changed_by=user)
+            changed = await lane.run(set_file_pinned, entry, not entry.pinned, changed_by=user)
             outcome = f"{name} unpinned." if entry.pinned else f"{name} pinned: it is listed first in this area."
         else:
-            await lane.run(set_file_exempt, entry, not entry.exempt_from_expiry, changed_by=user)
+            changed = await lane.run(set_file_exempt, entry, not entry.exempt_from_expiry, changed_by=user)
             outcome = (
                 f"{name} no longer kept: it expires with the others." if entry.exempt_from_expiry
                 else f"{name} kept: it will not expire."
             )
     except FileEntryError as exc:
         announce(session, f"Not changed: {exc}.", tone="error")
-        return
+        return None
     announce(session, outcome, tone="success")
+    return changed
 
 
 async def _choose_entry(

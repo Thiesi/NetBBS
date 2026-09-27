@@ -564,3 +564,77 @@ def test_a_hidden_area_refuses_a_file_pin(db, mod):
     db.connection.commit()
     with pytest.raises(FileEntryError, match="no longer available"):
         set_file_pinned(db, entry, True, changed_by=mod)
+
+
+# -- review round three (Codex on #783) ----------------------------------------------
+
+
+def test_the_pending_post_screen_reports_a_refused_pin(db, mod):
+    """Approved and removed by someone else while this moderator sat on
+    the pending screen: the pin is refused and the screen goes on."""
+    from netbbs.boards.posts import approve_post, tombstone_post
+    from netbbs.net.admin_flow import _post_action_screen
+
+    board = _board(db, mod, moderated=True)
+    grant_permissions(
+        db, mod, object_type="board", object_id=board.id,
+        permissions=BoardPermission.APPROVE | BoardPermission.DELETE, granted_by=mod,
+    )
+    stale = create_post(db, board, mod, "Pending", "text")
+    approve_post(db, stale, approved_by=mod)
+    tombstone_post(db, get_post(db, stale.post_id), board, tombstoned_by=mod)
+    lane = DatabaseLane(db.path)
+    try:
+        session = BoardSession(["p", "b"])
+        asyncio.run(_post_action_screen(session, lane, mod, stale, board))
+    finally:
+        lane.close()
+    assert "this post has been removed" in session.visible()
+
+
+def test_the_pending_file_screen_reports_a_refused_pin(db, mod):
+    from netbbs.net.admin_flow import _file_action_screen
+
+    area = create_file_area(db, "downloads", creator=mod, moderated=True)
+    grant_permissions(
+        db, mod, object_type="file_area", object_id=area.id,
+        permissions=BoardPermission.EDIT | BoardPermission.APPROVE, granted_by=mod,
+    )
+    entry = upload_file(db, area, mod, "a.txt", b"a")
+    db.connection.execute("UPDATE file_areas SET link_hidden_at = '2026-01-01T00:00:00.000000Z' WHERE id = ?", (area.id,))
+    db.connection.commit()
+    lane = DatabaseLane(db.path)
+    try:
+        session = FileSession(["p", "b"])
+        asyncio.run(_file_action_screen(session, lane, mod, entry, area))
+    finally:
+        lane.close()
+    assert "no longer available" in session.visible()
+
+
+def test_keep_on_a_file_deleted_meanwhile_is_refused_not_raised(tmp_path, monkeypatch):
+    path = tmp_path / "node.db"
+    db = Database(path)
+    mod = create_user(db, "mod", password="hunter2", user_level=10)
+    area = create_file_area(db, "downloads", creator=mod, max_file_age_days=30)
+    grant_permissions(
+        db, mod, object_type="file_area", object_id=area.id, permissions=BoardPermission.EDIT, granted_by=mod
+    )
+    upload_file(db, area, mod, "gone.txt", b"g")
+
+    class DeletingSession(FileSession):
+        async def read_editor_key(self, *, distinguish_ctrl_h: bool = False) -> EditorKey:
+            key = await super().read_editor_key(distinguish_ctrl_h=distinguish_ctrl_h)
+            if key.char == "k":
+                db.connection.execute("DELETE FROM files")
+                db.connection.commit()
+            return key
+
+    lane = DatabaseLane(path)
+    try:
+        session = DeletingSession(["k", "b"])
+        asyncio.run(_show_area(session, lane, area, mod))
+    finally:
+        lane.close()
+    assert "Not changed:" in session.visible()
+    db.close()

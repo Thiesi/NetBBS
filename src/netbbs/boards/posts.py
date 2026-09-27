@@ -1204,7 +1204,7 @@ def list_pinned_posts(
             f"""
             SELECT root.*, e.envelope_json AS link_envelope_json FROM posts root
             LEFT JOIN link_events e ON e.content_id = root.post_id
-            WHERE root.board_id = ? AND root.post_id = root.root_post_id AND root.pinned = 1
+            WHERE root.board_id = ? AND root.pinned = 1 AND root.post_id = root.root_post_id
               {position_sql}
               AND {_HAS_APPROVED_VERSION_SQL}
             ORDER BY root.created_at, root.post_id
