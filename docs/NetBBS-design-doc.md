@@ -9126,13 +9126,21 @@ measurable constraints, not proof of fun or fair balance. Human multi-day
 playtests remain required.
 
 The ten hourly rates are $2, $2, $2, $3, $1, $2, $3, $2, $1 and $2 in map order:
-$480/day for the entire map versus $600 expected gross from fifteen trades. A
+$480/day for the entire map versus $495 expected gross from fifteen trades. A
 capture attempt costs one turn and the role-specific cash price below, win or lose;
 success additionally commits one available member. Ordinary recruitment costs
 $75/turn; an owned Carrier Switch offers the service below. Expansion competes with
-recruitment and defense for the same cash budget. Trade remains $20-$60 without
-a cash prerequisite; after a bust resets Heat, even minimum trade payouts fund
-recovery from one to three available crew within ten turns.
+recruitment and defense for the same cash budget. Trade pays $20-$60 without
+a cash prerequisite for the first three Trades of a turn-day; each later Trade in
+the same turn-day lowers the top of the range by $5, to $20-$40, and the count
+resets with the turns (issue #649, world schema 11). Twelve Trades in a row had
+taken a first visit from $300 to $728 with no bust risk, so cash was a solved
+problem from the first session even though Trade earns no Rank. Only the top
+moves: the $20 minimum is what bust recovery is sized on, and the taper keeps
+fifteen Trades above the map's $480. A steeper cut ($5 off both ends per Trade,
+to $5-$15) was rejected because it broke both targets. After a bust resets Heat,
+even minimum trade payouts fund recovery from one to three available crew within
+ten turns.
 
 A first successful capture awards 50 Rank per player/exchange/season. Holding
 territory earns one Rank per six exchange-hours, combining fractional time across
@@ -9557,7 +9565,7 @@ before world creation; it never falls back to Guest. Caller messages remain clea
 and SysOp diagnostics are bounded. Commands do not activate or redeploy services.
 
 **World schema compatibility.** SQLite `user_version=1` identifies the original
-War Dialer schema; the current version is 10. `user_version=2` added shared-crew
+War Dialer schema; the current version is 11. `user_version=2` added shared-crew
 resource semantics without
 changing its column layout. A complete unversioned world is adopted through a
 numbered migration; its additive fields, retained history and version marker
