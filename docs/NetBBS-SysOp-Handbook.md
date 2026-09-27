@@ -427,6 +427,10 @@ on the door detail screen. Install/update the service yourself; stop it before
 copying its data. Do not raise a game's session count until its concurrent
 save handling has been tested.
 
+A War Dialer door's detail screen adds **[W]orld**: the world's status and recent
+SysOp operations, and a maintenance switch that closes it to new callers. Season
+advance and reset stay on the CLI; the [door guide](NetBBS-door-guide.md) has both.
+
 A door may request permission to post to message boards. **Outbound** is off
 by default and configured per door: choose an allowlist and posting limit.
 Posts use a distinct door label, not the caller's identity. Normal board
