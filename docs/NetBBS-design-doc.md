@@ -6891,7 +6891,11 @@ fuel, range and the number of uncharted contacts. Survey charts every new system
 within 2 + scanner tier + navigator bonus connection hops, in stable distance/ID
 order. It advances no day and consumes no encounter RNG; no contacts or insufficient
 fuel means no charge. Valid survey contracts complete through ordinary discovery
-rules in the same checkpoint as fuel spending and chart updates.
+rules in the same checkpoint as fuel spending and chart updates, but a contract a
+scan completes pays half its reward (`REMOTE_SURVEY_PAYOUT_PERCENT`); arriving
+pays it in full. At full pay a scanner made surveys close to free income -- two
+fuel, no jump, no day -- and the contract asks for the trip (issue #648). The
+contract details and the scan terms both state the half-pay figure.
 
 The report retains each discovered system's name, station, economy and danger,
 plus mission outcomes, using height-aware pages. It creates no remote price
