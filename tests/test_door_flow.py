@@ -17,6 +17,8 @@ import pytest
 from netbbs.auth.users import create_user
 from netbbs.doors import create_door
 from netbbs.net.door_flow import browse_doors, has_visible_doors
+from netbbs.net.redraw_preference import set_redraw_in_place_enabled
+from netbbs.rendering import clear_screen
 from netbbs.net.char_input import EditorKey, EditorKeyKind
 from netbbs.net.session import Session
 from netbbs.storage.database import Database
@@ -130,6 +132,21 @@ def test_picking_a_door_launches_it_and_returns_to_the_picker(db, lane, player, 
     text = _text(session)
     assert "Launching Quick" in text
     assert "Left Quick." in text
+
+
+@pytest.mark.parametrize("in_place", [True, False])
+def test_launching_a_door_clears_the_picker_for_an_in_place_caller(db, lane, player, tmp_path, in_place):
+    """The door is a new screen: for a caller who redraws in place, its title
+    card must not scroll in under the remains of the picker (issue #648). A
+    caller who scrolls keeps the picker in their scrollback, as before."""
+    script = _quick_exit_script(tmp_path)
+    create_door(db, "Quick", sys.executable, args=(str(script),), creator=player)
+    set_redraw_in_place_enabled(db, player, in_place)
+    session = FakeSession(inputs=["0", "1", "x", "b"])
+    asyncio.run(browse_doors(session, lane, player))
+    text = _text(session)
+    before_launch = text[:text.index("Launching Quick")]
+    assert before_launch.rfind(clear_screen()) > before_launch.rfind("Quick") if in_place         else before_launch.rfind(clear_screen()) < before_launch.rfind("Quick")
 
 
 def test_a_door_below_the_callers_level_is_not_offered(db, lane, player, tmp_path):
