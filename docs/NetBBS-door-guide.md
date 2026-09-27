@@ -10,6 +10,9 @@ NetBBS supplies integration and three bundled games: Retro Trivia, Voidrunner,
 and War Dialer. Third-party games and their execution environments are installed
 by the SysOp. **MANUAL — outside NetBBS** identifies work on the host or in another
 program. NetBBS does not download games, obtain licenses, or install emulators.
+A single script of your own can be sent from inside NetBBS with **Content → Doors
+→ Upload** and then registered with **From disk**; installations with runtimes,
+several files or their own directory layout still go onto the host directly.
 
 ## Find the procedure you need
 
