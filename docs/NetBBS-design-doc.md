@@ -1157,9 +1157,22 @@ visible. Local maintenance follows:
 
 `active -> expired -> deleted`
 
-with a grace period between expiration and deletion. Pin and expiry-exemption
-currently use the existing edit permission. Local pruning never becomes a
-network-wide deletion instruction.
+with a grace period between expiration and deletion. Local pruning never
+becomes a network-wide deletion instruction.
+
+**Pinning and keeping** (issue #675). A moderator with the board's or area's
+edit permission can pin a post or file, and can keep it from expiring:
+- **Where:** from the post reader (`P[i]n`, `[K]eep`) or the file area screen,
+  on any approved post or file, not only one awaiting approval.
+- **What a pin does:** a pinned post or file leaves the dated listing and is
+  listed first on the newest page, marked "pin", in at most half the page's
+  rows. Paging back never shows it again.
+- **When `[K]eep` is offered:** only where content expires (the board or area
+  has a maximum age), or where something is already kept.
+- **Both flags belong to the post, not to one revision:** an edit keeps them,
+  and a kept post's edit does not expire out from under it.
+- **Local only:** a pin is this node's own presentation and is never carried
+  over the Link. A carried board's moderator pins for this node's callers.
 
 **Expiry is a caller-facing boundary, not only a delisting** (issue #639).
 Once a post or a file is `expired`, no keystroke a caller can press reaches

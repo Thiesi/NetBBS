@@ -75,6 +75,8 @@ from netbbs.files import (
     list_files_page,
     list_pending_files,
     set_file_description,
+    set_file_exempt,
+    set_file_pinned,
     upload_file_from_temp,
 )
 from netbbs.files.categories import (
@@ -114,7 +116,7 @@ from netbbs.net.draft_storage import drafts_directory, save_draft
 from netbbs.net.editor_preference import fullscreen_editor_enabled
 from netbbs.net.file_area_banner import load_file_area_banner
 from netbbs.net.node_theme import effective_accent_color_256, effective_header_color_256
-from netbbs.net.notices import announce_styled, write_notices
+from netbbs.net.notices import announce, announce_styled, write_notices
 from netbbs.net.picker import pick_item
 from netbbs.net.prose_editor import edit_prose
 from netbbs.net.session import Session
@@ -465,6 +467,8 @@ async def _render_area_page(
     describable_pending: bool = False,
     show_transfer_hint: bool = False,
     show_remote_hint: bool = False,
+    can_pin: bool = False,
+    can_keep: bool = False,
     description_level: str = "off",
     redraw_in_place: bool = False,
     unicode_style: bool = False,
@@ -535,6 +539,10 @@ async def _render_area_page(
                 brief="Browse/fetch this file area's remote catalogue",
             )
         )
+    if can_pin and n_files > 0:
+        hints.append(MenuEntry(label=menu_key("i", "n", prefix="P"), brief="Pin or unpin a file at the top"))
+        if can_keep:
+            hints.append(MenuEntry(label=menu_key("K", "eep"), brief="Keep a file from expiring, or stop"))
     if hints:
         # An empty page with nothing this caller may do on it has no
         # hints at all, and a blank row is not a menu.
@@ -630,6 +638,10 @@ def _key_action(
         return ("weblink", None, highlighted)
     if lowered == "l":
         return ("remote", None, highlighted)
+    if lowered == "i":
+        return ("pin", None, highlighted)
+    if lowered == "k":
+        return ("keep", None, highlighted)
     return None
 
 
@@ -650,6 +662,8 @@ async def _read_file_choice(
       ('describe', None, highlighted) - edit a description (issue #463)
       ('weblink', None, highlighted) - the browser-transfer screen
       ('remote', None, highlighted) - the Link catalogue (issue #92)
+      ('pin'|'keep', None, highlighted) - a moderator's pin or expiry
+          exemption toggle (issue #675), target still to resolve
       ('refresh', None, highlighted) - re-query and redraw (Ctrl-L)
       ('highlight', None, new_index) - arrow key highlight change
       ('none', None, highlighted) - no-op / rejected key
@@ -824,11 +838,14 @@ async def _show_area(
         # name_requirement, the can_write gate, whether this area is
         # actually Linked, and the menu-description preference all come
         # from the same worker-thread pass rather than five round trips.
-        page = list_files_page(db, area, user, after=initial_cursor) if initial_cursor else list_files_page(db, area, user)
+        page = (
+            list_files_page(db, area, user, after=initial_cursor, with_pinned=True) if initial_cursor
+            else list_files_page(db, area, user, with_pinned=True)
+        )
         if initial_cursor and not page.entries:
             # Nothing newer than the cursor -- caught up, not a
             # genuinely empty area; fall back to the newest page.
-            page = list_files_page(db, area, user)
+            page = list_files_page(db, area, user, with_pinned=True)
         effective_name_requirement = get_effective_name_requirement(db, area)
         can_write = (
             meets_level(user, get_effective_min_write_level(db, area))
@@ -913,7 +930,9 @@ async def _show_area(
             can_describe=_can_describe(current_page),
             describable_pending=bool(describable_pending),
             show_transfer_hint=transfers is not None,
-            show_remote_hint=show_remote_hint, description_level=description_level, redraw_in_place=redraw_in_place,
+            show_remote_hint=show_remote_hint, can_pin=can_edit_any_file,
+            can_keep=_keep_offered(area, current_page),
+            description_level=description_level, redraw_in_place=redraw_in_place,
             unicode_style=unicode_style, collapsed=collapsed, truecolor=truecolor, highlighted=highlighted,
         )
         if current_page.entries:
@@ -976,7 +995,7 @@ async def _show_area(
                 await _render_and_advance_cursor(page, highlighted=highlighted)
                 continue
             elif kind == "refresh":
-                page = await lane.run(list_files_page, area, user)
+                page = await lane.run(list_files_page, area, user, with_pinned=True)
                 highlighted = None
                 await _render_and_advance_cursor(page, highlighted=highlighted)
                 continue
@@ -1034,27 +1053,21 @@ async def _show_area(
             elif kind == "back":
                 break
             elif kind == "older":
-                if not page.has_older:
+                if not page.has_older or page.oldest_cursor is None:
                     # Every recognized key echoes itself with a newline
                     # before dispatching, so one refused at the edge of
                     # the listing has already scrolled the prompt away.
                     await _reject_after_echo(session)
                     continue
-                oldest = page.entries[0]
-                page = await lane.run(
-                    list_files_page, area, user, before=(oldest.created_at, oldest.file_id)
-                )
+                page = await lane.run(list_files_page, area, user, before=page.oldest_cursor, with_pinned=True)
                 highlighted = None
                 await _render_and_advance_cursor(page, highlighted=highlighted)
                 continue
             elif kind == "newer":
-                if not page.has_newer:
+                if not page.has_newer or page.newest_cursor is None:
                     await _reject_after_echo(session)
                     continue
-                newest = page.entries[-1]
-                page = await lane.run(
-                    list_files_page, area, user, after=(newest.created_at, newest.file_id)
-                )
+                page = await lane.run(list_files_page, area, user, after=page.newest_cursor, with_pinned=True)
                 highlighted = None
                 await _render_and_advance_cursor(page, highlighted=highlighted)
                 continue
@@ -1062,8 +1075,27 @@ async def _show_area(
                 if not page.has_newer:
                     await _reject_after_echo(session)
                     continue
-                page = await lane.run(list_files_page, area, user)
+                page = await lane.run(list_files_page, area, user, with_pinned=True)
                 highlighted = None
+                await _render_and_advance_cursor(page, highlighted=highlighted)
+                continue
+            elif kind in ("pin", "keep"):
+                if not can_edit_any_file or (kind == "keep" and not _keep_offered(area, page)):
+                    await _reject_after_echo(session)
+                    continue
+                entry = await _choose_entry(
+                    session, lane, user, page,
+                    highlighted=highlighted,
+                    title=f"{'Pin or unpin' if kind == 'pin' else 'Keep or stop keeping'} a file in {area_name}",
+                    empty_message="No files here.",
+                    description_of=_download_choice_description,
+                )
+                if entry is not None:
+                    await _toggle_file_flag(session, lane, entry, user, pin=kind == "pin")
+                    # A pin moves the file to the top of the newest page,
+                    # an unpin back among the dated files.
+                    page = await lane.run(list_files_page, area, user, with_pinned=True)
+                    highlighted = None
                 await _render_and_advance_cursor(page, highlighted=highlighted)
                 continue
         return
@@ -1529,6 +1561,9 @@ async def _render_file_page(
         idx_label = f"{marker}[{position:2d}]"
 
         name_clean = sanitize_text(entry.filename)
+        if entry.pinned:
+            # Pinned files are listed first (issue #675); this says why.
+            name_clean = f"pin {name_clean}"
         name_cut = cut_to_width(name_clean, name_w)
         if visible_width(name_cut) < name_w:
             name_padded = name_cut + " " * (name_w - visible_width(name_cut))
@@ -1675,6 +1710,33 @@ def _download_choice_description(entry: FileEntry) -> str:
     size = _format_size(entry.size_bytes)
     first_line = (entry.description or "").splitlines()
     return f"{size} — {sanitize_text(first_line[0])}" if first_line else size
+
+
+def _keep_offered(area: FileArea, page: FileEntryPage) -> bool:
+    """`[K]eep` means something where files expire, or where one was kept
+    before the area stopped expiring them."""
+    return area.max_file_age_days is not None or any(entry.exempt_from_expiry for entry in page.entries)
+
+
+async def _toggle_file_flag(session: Session, lane: DatabaseLane, entry: FileEntry, user: User, *, pin: bool) -> None:
+    """Flip `entry`'s pin (`pin=True`) or its expiry exemption (issue
+    #675), and say what changed above the next screen. A pin is this
+    node's own presentation, never carried over the Link."""
+    name = sanitize_text(entry.filename)
+    try:
+        if pin:
+            await lane.run(set_file_pinned, entry, not entry.pinned, changed_by=user)
+            outcome = f"{name} unpinned." if entry.pinned else f"{name} pinned: it is listed first in this area."
+        else:
+            await lane.run(set_file_exempt, entry, not entry.exempt_from_expiry, changed_by=user)
+            outcome = (
+                f"{name} no longer kept: it expires with the others." if entry.exempt_from_expiry
+                else f"{name} kept: it will not expire."
+            )
+    except FileEntryError as exc:
+        announce(session, f"Not changed: {exc}.", tone="error")
+        return
+    announce(session, outcome, tone="success")
 
 
 async def _choose_entry(

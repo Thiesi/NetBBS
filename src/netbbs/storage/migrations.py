@@ -3185,4 +3185,52 @@ MIGRATIONS = [
            );
         """,
     ),
+    Migration(
+        description=(
+            "Issue #675: a post's pin and expiry exemption belong to the post, not to one "
+            "revision. Both were stored per row, and an edit started unpinned and "
+            "unexempt, so an exempt post's edit expired and the post fell back to its "
+            "pre-edit text. Every revision now carries its root's flags: a flag already "
+            "set on any revision moves to the root, the root's flags are copied to its "
+            "revisions, and a trigger gives every new revision -- local or carried -- its "
+            "root's flags."
+        ),
+        sql="""
+        UPDATE posts SET pinned = 1
+         WHERE post_id = root_post_id AND pinned = 0
+           AND EXISTS (
+               SELECT 1 FROM posts v
+                WHERE v.root_post_id = posts.post_id AND v.board_id = posts.board_id AND v.pinned = 1
+           );
+        UPDATE posts SET exempt_from_expiry = 1
+         WHERE post_id = root_post_id AND exempt_from_expiry = 0
+           AND EXISTS (
+               SELECT 1 FROM posts v
+                WHERE v.root_post_id = posts.post_id AND v.board_id = posts.board_id
+                  AND v.exempt_from_expiry = 1
+           );
+        UPDATE posts SET
+            pinned = (SELECT r.pinned FROM posts r WHERE r.post_id = posts.root_post_id AND r.board_id = posts.board_id),
+            exempt_from_expiry = (
+                SELECT r.exempt_from_expiry FROM posts r
+                 WHERE r.post_id = posts.root_post_id AND r.board_id = posts.board_id
+            )
+         WHERE post_id != root_post_id
+           AND EXISTS (SELECT 1 FROM posts r WHERE r.post_id = posts.root_post_id AND r.board_id = posts.board_id);
+
+        CREATE TRIGGER trg_posts_revision_flags AFTER INSERT ON posts
+        WHEN NEW.post_id != NEW.root_post_id
+        BEGIN
+            UPDATE posts SET
+                pinned = COALESCE(
+                    (SELECT r.pinned FROM posts r WHERE r.post_id = NEW.root_post_id AND r.board_id = NEW.board_id), 0
+                ),
+                exempt_from_expiry = COALESCE(
+                    (SELECT r.exempt_from_expiry FROM posts r
+                      WHERE r.post_id = NEW.root_post_id AND r.board_id = NEW.board_id), 0
+                )
+            WHERE id = NEW.id;
+        END;
+        """,
+    ),
 ]

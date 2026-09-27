@@ -582,6 +582,22 @@ class PostPage:
     posts: list[Post]
     has_older: bool
     has_newer: bool
+    # Issue #675: how many of `posts`, from the front, are pinned posts
+    # listed above the dated feed. They are not part of it, so the page's
+    # cursors come from the feed posts after them.
+    pinned_count: int = 0
+
+    @property
+    def oldest_cursor(self) -> PostCursor | None:
+        """The cursor for the page before this one: the oldest feed post."""
+        feed = self.posts[self.pinned_count:]
+        return (feed[0].created_at, feed[0].post_id) if feed else None
+
+    @property
+    def newest_cursor(self) -> PostCursor | None:
+        """The cursor for the page after this one: the newest feed post."""
+        feed = self.posts[self.pinned_count:]
+        return (feed[-1].created_at, feed[-1].post_id) if feed else None
 
 
 def list_posts_page(
@@ -592,6 +608,7 @@ def list_posts_page(
     before: PostCursor | None = None,
     after: PostCursor | None = None,
     limit: int = _DEFAULT_PAGE_SIZE,
+    with_pinned: bool = False,
 ) -> PostPage:
     """
     Fetch one bounded page of posts on `board` (design doc, issue #10)
@@ -658,28 +675,50 @@ def list_posts_page(
     expiry/deletion first (`_sweep_expired_posts`) so this always
     reflects an up-to-date view, given there's no background job doing
     that separately.
+
+    `with_pinned` (issue #675): pinned posts leave the dated feed and are
+    listed first on the newest page -- the page with nothing newer -- in
+    `PostPage.pinned_count` rows of its `limit`. They take at most half
+    the page; the feed posts they displace move to the page before. The
+    board screen asks for this; everything else counts posts as the feed
+    always has.
     """
     require_level(requesting_user, board.min_read_level)
     if before is not None and after is not None:
         raise ValueError("specify at most one of before/after")
 
     _sweep_expired_posts(db, board)
+    feed = {"exclude_pinned": with_pinned}
 
     if after is not None:
-        roots = _visible_roots(db, board, newer_than=after, limit=limit)
+        roots = _visible_roots(db, board, newer_than=after, limit=limit, **feed)
     elif before is not None:
-        roots = list(reversed(_visible_roots(db, board, older_than=before, limit=limit)))
+        roots = list(reversed(_visible_roots(db, board, older_than=before, limit=limit, **feed)))
     else:
-        roots = list(reversed(_visible_roots(db, board, limit=limit)))
+        roots = list(reversed(_visible_roots(db, board, limit=limit, **feed)))
 
     posts = [_resolve_current_version(db, row) for row in roots]
-    if not posts:
-        return PostPage(posts=[], has_older=False, has_newer=False)
+    has_older = has_newer = False
+    if posts:
+        oldest, newest = posts[0], posts[-1]
+        has_older = bool(
+            _visible_roots(db, board, older_than=(oldest.created_at, oldest.post_id), limit=1, **feed)
+        )
+        has_newer = bool(
+            _visible_roots(db, board, newer_than=(newest.created_at, newest.post_id), limit=1, **feed)
+        )
 
-    oldest, newest = posts[0], posts[-1]
-    has_older = bool(_visible_roots(db, board, older_than=(oldest.created_at, oldest.post_id), limit=1))
-    has_newer = bool(_visible_roots(db, board, newer_than=(newest.created_at, newest.post_id), limit=1))
-    return PostPage(posts=posts, has_older=has_older, has_newer=has_newer)
+    pinned: list[Post] = []
+    if with_pinned and not has_newer:
+        pinned = list_pinned_posts(db, board, requesting_user=requesting_user, limit=max(1, limit // 2))
+        room = max(0, limit - len(pinned))
+        if len(posts) > room:
+            # The oldest feed posts give way; [O]lder reaches them.
+            posts = posts[len(posts) - room:] if room else []
+            has_older = True
+    if not posts and not pinned:
+        return PostPage(posts=[], has_older=False, has_newer=False)
+    return PostPage(posts=pinned + posts, has_older=has_older, has_newer=has_newer, pinned_count=len(pinned))
 
 
 # How many candidate roots `_visible_roots` reads per query. Hidden roots
@@ -695,6 +734,7 @@ def _visible_roots(
     newer_than: PostCursor | None = None,
     older_than: PostCursor | None = None,
     limit: int,
+    exclude_pinned: bool = False,
 ) -> list[sqlite3.Row]:
     """Up to `limit` root rows of `board` that a reader may see, nearest
     the cursor first: ascending after `newer_than`, descending before
@@ -728,6 +768,7 @@ def _visible_roots(
             SELECT root.*, e.envelope_json AS link_envelope_json FROM posts root
             LEFT JOIN link_events e ON e.content_id = root.post_id
             WHERE root.board_id = ? AND root.post_id = root.root_post_id
+              {"AND root.pinned = 0" if exclude_pinned else ""}
               {position_sql}
               AND {_HAS_APPROVED_VERSION_SQL}
             ORDER BY root.created_at {order}, root.post_id {order}
@@ -1023,14 +1064,20 @@ def set_post_pinned(db: Database, post: Post, pinned: bool, *, changed_by: User)
     sorts first among *all* boards). Requires `BoardPermission.EDIT`,
     per the existing pin/exempt-under-`edit` sign-off note.
 
-    Does not reorder `list_posts_page`'s cursor-paginated feed itself
-    (that would break keyset pagination's stability guarantees) — see
-    `list_pinned_posts` for the dedicated pinned view.
+    A pinned post leaves the dated feed and is listed above it on the
+    newest page (`list_posts_page(with_pinned=True)`, issue #675).
+
+    The flag belongs to the post, not to one revision: every row of the
+    edit chain is set, and a later revision takes its root's flag
+    (`trg_posts_revision_flags`).
     """
     _refuse_if_board_hidden(db, post.board_id)
     _require_board_permission(db, post, changed_by, BoardPermission.EDIT)
 
-    db.connection.execute("UPDATE posts SET pinned = ? WHERE id = ?", (int(pinned), post.id))
+    db.connection.execute(
+        "UPDATE posts SET pinned = ? WHERE root_post_id = ? AND board_id = ?",
+        (int(pinned), post.root_post_id, post.board_id),
+    )
     db.connection.commit()
     record_action(
         db,
@@ -1047,12 +1094,18 @@ def set_post_pinned(db: Database, post: Post, pinned: bool, *, changed_by: User)
 def set_post_exempt(db: Database, post: Post, exempt: bool, *, changed_by: User) -> Post:
     """Exempt or unexempt a post from the expiry sweep. Requires
     `BoardPermission.EDIT`, per the existing pin/exempt-under-`edit`
-    sign-off note."""
+    sign-off note.
+
+    Set on every revision of the post, as `set_post_pinned` does (issue
+    #675): the sweep ages rows one by one, and an exempt post whose edit
+    was not exempt used to fall back to its pre-edit text when the edit
+    expired."""
     _refuse_if_board_hidden(db, post.board_id)
     _require_board_permission(db, post, changed_by, BoardPermission.EDIT)
 
     db.connection.execute(
-        "UPDATE posts SET exempt_from_expiry = ? WHERE id = ?", (int(exempt), post.id)
+        "UPDATE posts SET exempt_from_expiry = ? WHERE root_post_id = ? AND board_id = ?",
+        (int(exempt), post.root_post_id, post.board_id),
     )
     db.connection.commit()
     record_action(
@@ -1097,31 +1150,43 @@ def list_pending_posts(db: Database, board: Board, *, requesting_user: User) -> 
     return [_row_to_post(row) for row in rows]
 
 
-def list_pinned_posts(db: Database, board: Board, *, requesting_user: User) -> list[Post]:
-    """
-    Every currently-pinned, approved post on `board`, oldest first.
-    Requires only `board.min_read_level` — pinning is a display
-    convenience, not an access restriction, so anyone who can read the
-    board can see what's pinned. A dedicated view rather than
-    reordering `list_posts_page`'s feed (see `set_post_pinned`).
+# At most this many pinned posts are listed. Pins are set by this node's
+# moderators only, never carried, so this bounds a board's own misuse.
+MAX_PINNED_POSTS = 50
 
-    `pinned` is a root-level property (`set_post_pinned` operates on
-    whatever `Post` it's given, and every caller passes it an already-
-    resolved, root-identified `Post` -- see `_resolve_current_version`),
-    so filtering on it here already naturally selects root rows only;
-    each is still resolved to its current content the same as
-    `list_posts_page`, so a pinned-then-edited post shows its latest
-    body here too, not a stale snapshot from when it was pinned.
+
+def list_pinned_posts(
+    db: Database, board: Board, *, requesting_user: User, limit: int = MAX_PINNED_POSTS
+) -> list[Post]:
+    """
+    Up to `limit` pinned posts on `board` that a reader may see, oldest
+    first, each resolved to its current revision.
+
+    "May see" is the feed's rule (`_visible_roots`): some revision is
+    approved and the post is not hidden by trust. Access to the board
+    itself -- its Community cascade, `min_age`, name requirement -- is
+    the caller's to check before showing the board at all, exactly as
+    for `list_posts_page`; this checks `min_read_level` as that does.
     """
     require_level(requesting_user, board.min_read_level)
     rows = db.connection.execute(
-        """
-        SELECT * FROM posts WHERE board_id = ? AND status = 'approved' AND pinned = 1
-        ORDER BY created_at
+        f"""
+        SELECT root.*, e.envelope_json AS link_envelope_json FROM posts root
+        LEFT JOIN link_events e ON e.content_id = root.post_id
+        WHERE root.board_id = ? AND root.post_id = root.root_post_id AND root.pinned = 1
+          AND {_HAS_APPROVED_VERSION_SQL}
+        ORDER BY root.created_at, root.post_id
+        LIMIT ?
         """,
-        (board.id,),
+        (board.id, limit),
     ).fetchall()
-    return [_resolve_current_version(db, row) for row in rows]
+    author_cache: dict = {}
+    return [
+        _resolve_current_version(db, row)
+        for row in rows
+        if row["link_envelope_json"] is None
+        or envelope_content_visible(db, row["link_envelope_json"], author_cache=author_cache)
+    ]
 
 
 def _require_board_permission(db: Database, post: Post, user: User, permission: BoardPermission) -> None:

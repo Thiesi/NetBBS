@@ -41,6 +41,8 @@ from netbbs.boards import (
     edit_post,
     list_boards,
     list_posts_page,
+    set_post_exempt,
+    set_post_pinned,
     tombstone_post,
     visible_post,
 )
@@ -462,6 +464,38 @@ def _can_tombstone_post(db: Database, post: Post, user: User) -> bool:
     return has_permission(db, user, object_type="board", object_id=post.board_id, permission=BoardPermission.DELETE)
 
 
+def _can_pin_post(db: Database, post: Post, user: User) -> bool:
+    """`BoardPermission.EDIT`, no author bypass -- what `set_post_pinned`
+    and `set_post_exempt` enforce (design doc §5.3). A pin is this
+    node's own presentation and is never carried over the Link, so a
+    carried board's moderator pins for this node's callers only."""
+    if post.tombstoned_at is not None:
+        return False
+    return has_permission(db, user, object_type="board", object_id=post.board_id, permission=BoardPermission.EDIT)
+
+
+def _toggle_post_flag(session: Session, db: Database, post: Post, user: User, *, pin: bool) -> None:
+    """Flip `post`'s pin (`pin=True`) or its expiry exemption, and say
+    what changed as an outcome above the next screen."""
+    try:
+        if pin:
+            set_post_pinned(db, post, not post.pinned, changed_by=user)
+            outcome = (
+                "Post unpinned: it is back among the dated posts." if post.pinned
+                else "Post pinned: it is listed at the top of this board."
+            )
+        else:
+            set_post_exempt(db, post, not post.exempt_from_expiry, changed_by=user)
+            outcome = (
+                "Post no longer kept: it expires with the others." if post.exempt_from_expiry
+                else "Post kept: it will not expire."
+            )
+    except PostError as exc:
+        announce(session, f"Not changed: {exc}.", tone="error")
+        return
+    announce(session, outcome, tone="success")
+
+
 # -- the post list (issue #679) ------------------------------------------------
 #
 # A board page is a list: one row per post, as many rows as the terminal
@@ -477,6 +511,7 @@ _MAX_LIST_ROWS = 30
 # columns (design doc §3.6: a table that does not fit becomes prose again).
 _TABLE_MIN_WIDTH = 60
 _NEW_MARKER = "new"
+_PIN_MARKER = "pin"
 # The two-column lead ("> " or "  ") and the four two-space gaps between
 # the five columns, plus one column kept free: a row that reaches the
 # last column makes many terminals wrap the cursor onto the next row.
@@ -573,7 +608,7 @@ def _post_list_rows(
     widths = _column_widths(cells, width=width, number_width=number_width)
     if widths is None:
         for index, (post, (subject, author, when)) in enumerate(zip(posts, cells)):
-            marker = f"{_NEW_MARKER} " if post.id in new_ids else ""
+            marker = f"{_row_marker(post, new_ids)} " if _row_marker(post, new_ids) else ""
             # The date goes first when the row is this narrow: subject and
             # author say which post it is, and the reader shows the date.
             plain = cut_to_width(f"{index + 1:>{number_width}} {marker}{subject} -- {author}", width - 1)
@@ -587,7 +622,8 @@ def _post_list_rows(
     for index, (post, (subject, author, when)) in enumerate(zip(posts, cells)):
         number = f"{index + 1:>{number_width}}"
         subject_cell = _pad(cut_to_width(subject, subject_width), subject_width)
-        marker_cell = _pad(_NEW_MARKER if post.id in new_ids else "", marker_width)
+        marker = _row_marker(post, new_ids)
+        marker_cell = _pad(marker, marker_width)
         author_cell = _pad(cut_to_width(author, author_width), author_width)
         date_cell = _pad(cut_to_width(when, date_width), date_width)
         if index == highlighted:
@@ -601,13 +637,23 @@ def _post_list_rows(
             + "  "
             + colored(subject_cell, fg_color=MUTED_COLOR if post.tombstoned_at else None)
             + "  "
-            + colored(marker_cell, fg_color=SUCCESS_COLOR, bold=True)
+            + (colored(marker_cell, fg_color=SUCCESS_COLOR, bold=True) if marker == _NEW_MARKER
+               else colored(marker_cell, fg_color=accent))
             + "  "
             + colored(author_cell, fg_color=METADATA_COLOR)
             + "  "
             + colored(date_cell, fg_color=METADATA_COLOR)
         )
     return rows
+
+
+def _row_marker(post: Post, new_ids: set[int]) -> str:
+    """"new" for a post this caller has not opened, else "pin" for a pinned
+    one (issue #675) -- a pinned post is also listed first, so "new" is the
+    one worth the column when it is both."""
+    if post.id in new_ids:
+        return _NEW_MARKER
+    return _PIN_MARKER if post.pinned else ""
 
 
 def _post_list_heading(posts: list[Post], *, width: int, db: Database, name_requirement: str | None) -> str | None:
@@ -696,6 +742,9 @@ _LIST_HELP = [
     "M            count every post on this board as read",
     "Ctrl-L       redraw the list",
     "B            back to the list of boards",
+    "",
+    "Pinned posts are listed first, marked \"pin\". A moderator pins",
+    "and unpins a post, and keeps it from expiring, while reading it.",
     "",
     "Reading a post: Edit, Remove, Next and Previous post live there,",
     "and PgUp/PgDn page a long post. A post counts as read once you",
@@ -918,9 +967,9 @@ async def _show_board(
         to page one as an unrelated side effect."""
         rows = limit if limit is not None else _page_limit()
         if page_anchor is None:
-            return list_posts_page(db, board, user, limit=rows)
+            return list_posts_page(db, board, user, limit=rows, with_pinned=True)
         mode, cursor = page_anchor
-        return list_posts_page(db, board, user, limit=rows, **{mode: cursor})
+        return list_posts_page(db, board, user, limit=rows, with_pinned=True, **{mode: cursor})
 
     def _refetch_keeping(current_page: PostPage, highlighted: int | None) -> tuple[PostPage, int | None]:
         """The page on screen, refetched at the budget of the moment -- which
@@ -995,13 +1044,21 @@ async def _show_board(
                 separator=separator, width=width,
             )
             body_rows = post_body_rows(post.body, width, body_mode, truecolor=truecolor, layout=post.layout)
-            has_previous = index > 0 or page.has_older
-            has_next = index < len(page.posts) - 1 or page.has_newer
+            has_previous = index > 0 or (page.has_older and page.oldest_cursor is not None)
+            has_next = index < len(page.posts) - 1 or (page.has_newer and page.newest_cursor is not None)
             actions = []
             if _can_edit_post(db, post, user):
                 actions.append(("e", menu_key("E", "dit")))
             if _can_tombstone_post(db, post, user):
                 actions.append(("t", menu_key("t", prefix="Remove pos")))
+            can_pin = _can_pin_post(db, post, user)
+            if can_pin:
+                actions.append(("i", menu_key("i", "n", prefix="Unp" if post.pinned else "P")))
+                # Keeping a post only means something where posts expire,
+                # or where one was kept before the board stopped expiring.
+                if board.max_post_age_days is not None or post.exempt_from_expiry:
+                    actions.append(("k", menu_key("k", "eep", prefix="Un") if post.exempt_from_expiry
+                                    else menu_key("K", "eep")))
             if has_next:
                 actions.append(("n", menu_key("N", "ext post")))
             if has_previous:
@@ -1020,12 +1077,14 @@ async def _show_board(
             )
             if key == "b":
                 return index
-            if key in ("e", "t"):
+            if key in ("e", "t") or (key in ("i", "k") and can_pin):
                 root = post.root_post_id
                 if key == "e":
                     await _edit_existing_post(session, db, board, post, user, link_context=link_context)
-                else:
+                elif key == "t":
                     await _tombstone_existing_post(session, db, board, post, user, link_context=link_context)
+                else:
+                    _toggle_post_flag(session, db, post, user, pin=key == "i")
                 # The same number of rows as the page the reader is on: an
                 # outcome notice now pending takes a row from a fresh budget,
                 # and a page one post shorter could drop the post just acted
@@ -1045,16 +1104,14 @@ async def _show_board(
                 if index < len(page.posts) - 1:
                     index += 1
                     continue
-                newest = page.posts[-1]
-                page_anchor = ("after", (newest.created_at, newest.post_id))
+                page_anchor = ("after", page.newest_cursor)
                 page = _refetch_current_page()
                 index = 0
             else:
                 if index > 0:
                     index -= 1
                     continue
-                oldest = page.posts[0]
-                page_anchor = ("before", (oldest.created_at, oldest.post_id))
+                page_anchor = ("before", page.oldest_cursor)
                 page = _refetch_current_page()
                 index = len(page.posts) - 1
             if not page.posts:
@@ -1256,8 +1313,8 @@ async def _show_board(
 
     page_anchor: tuple[str, tuple[str, str]] | None = ("after", initial_cursor) if initial_cursor else None
     page = (
-        list_posts_page(db, board, user, after=initial_cursor, limit=_page_limit())
-        if initial_cursor else list_posts_page(db, board, user, limit=_page_limit())
+        list_posts_page(db, board, user, after=initial_cursor, limit=_page_limit(), with_pinned=True)
+        if initial_cursor else list_posts_page(db, board, user, limit=_page_limit(), with_pinned=True)
     )
     if initial_cursor and not page.posts:
         # Nothing newer than the cursor `[N]ew scan` jumped in with --
@@ -1266,7 +1323,7 @@ async def _show_board(
         # "has no posts yet" path below, which would falsely claim the
         # board is empty and (worse) prompt to compose the first post.
         page_anchor = None
-        page = list_posts_page(db, board, user, limit=_page_limit())
+        page = list_posts_page(db, board, user, limit=_page_limit(), with_pinned=True)
     if not page.posts:
         # Dogfood report: this used to skip straight to composing the
         # first post whenever the caller could write, with no [P]ost/
@@ -1333,7 +1390,7 @@ async def _show_board(
                     await _compose_art_post()
                 else:
                     await _saved_draft_menu(from_post=choice == "p")
-                page = list_posts_page(db, board, user, limit=_page_limit())
+                page = list_posts_page(db, board, user, limit=_page_limit(), with_pinned=True)
                 if page.posts:
                     # A post was actually created (not cancelled) --
                     # fall through to the ordinary render+navigation
@@ -1385,17 +1442,15 @@ async def _show_board(
                 header_color=effective_header_color_256(db), unicode_style=unicode_style,
             )
             await _render(page, highlighted)
-        elif char == "o" and page.has_older:
+        elif char == "o" and page.has_older and page.oldest_cursor is not None:
             await _moved_on()
-            oldest = page.posts[0]
-            page_anchor = ("before", (oldest.created_at, oldest.post_id))
+            page_anchor = ("before", page.oldest_cursor)
             page = _refetch_current_page()
             highlighted = None
             await _render_fresh(page)
-        elif char == "n" and page.has_newer:
+        elif char == "n" and page.has_newer and page.newest_cursor is not None:
             await _moved_on()
-            newest = page.posts[-1]
-            page_anchor = ("after", (newest.created_at, newest.post_id))
+            page_anchor = ("after", page.newest_cursor)
             page = _refetch_current_page()
             highlighted = None
             await _render_fresh(page)
@@ -1952,6 +2007,10 @@ def _post_byline(
     ]
     if post.is_edited:
         parts.append(badge("edited"))
+    if post.pinned:
+        parts.append(badge("pinned"))
+    if post.exempt_from_expiry:
+        parts.append(badge("kept"))
     if is_new:
         parts.append(badge("new", tone="success"))
     if post.parent_post_id is not None:
