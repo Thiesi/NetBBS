@@ -96,6 +96,10 @@ class Board:
     # never belongs to more than one Community; NULL is a real,
     # distinct, common state ("Uncategorized"), not a fallback.
     community_id: int | None
+    # Whether posts here show their author's color (issue #711,
+    # `netbbs.rendering.post_body`). This node's own choice, carried
+    # boards included.
+    allow_color: bool = False
 
 
 def create_board(
@@ -112,6 +116,7 @@ def create_board(
     min_age: int | None = None,
     name_requirement: str | None = None,
     community_id: int | None = None,
+    allow_color: bool = False,
     creator: User,
 ) -> Board:
     """
@@ -140,6 +145,9 @@ def create_board(
     `netbbs.attestation.meets_age`/`meets_name_requirement` for the
     actual check, enforced by callers alongside `min_read_level`/
     `min_write_level` rather than inside this function.
+
+    `allow_color` (issue #711) lets posts here show the color their
+    authors put in them; off by default.
 
     `min_read_level`/`min_write_level` are also nullable (design doc
     §16) -- `None` means inherit `community_id`'s
@@ -193,6 +201,10 @@ def create_board(
                 community_id,
             ),
         )
+        if allow_color:
+            # Set apart from the INSERT, which stays valid on every schema
+            # a board can be created on.
+            db.connection.execute("UPDATE boards SET allow_color = 1 WHERE board_id = ?", (board_id,))
         db.connection.commit()
     except sqlite3.IntegrityError as exc:
         if _name_held_by_hidden(db, name):
@@ -362,6 +374,7 @@ def update_board(
     min_age: int | None,
     name_requirement: str | None,
     community_id: int | None,
+    allow_color: bool,
     changed_by: User,
 ) -> Board:
     """
@@ -385,13 +398,13 @@ def update_board(
             UPDATE boards
             SET name = ?, description = ?, min_read_level = ?, min_write_level = ?,
                 category_id = ?, pinned = ?, moderated = ?, max_post_age_days = ?,
-                min_age = ?, name_requirement = ?, community_id = ?
+                min_age = ?, name_requirement = ?, community_id = ?, allow_color = ?
             WHERE id = ?
             """,
             (
                 name, description, min_read_level, min_write_level,
                 category_id, int(pinned), int(moderated), max_post_age_days,
-                min_age, name_requirement, community_id, board.id,
+                min_age, name_requirement, community_id, int(allow_color), board.id,
             ),
         )
         db.connection.commit()
@@ -461,4 +474,6 @@ def _row_to_board(row: sqlite3.Row) -> Board:
         min_age=row["min_age"],
         name_requirement=row["name_requirement"],
         community_id=row["community_id"],
+        # Absent on a schema older than issue #711's migration.
+        allow_color=bool(row["allow_color"]) if "allow_color" in row.keys() else False,
     )

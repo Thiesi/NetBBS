@@ -521,7 +521,7 @@ def test_update_board_replaces_the_full_state(db, alice):
     updated = update_board(
         db, board, name="general2", description="new desc", min_read_level=1, min_write_level=2,
         category_id=None, pinned=True, moderated=True, max_post_age_days=30,
-        min_age=18, name_requirement="verified", community_id=None, changed_by=alice,
+        min_age=18, name_requirement="verified", community_id=None, allow_color=True, changed_by=alice,
     )
     assert updated.name == "general2"
     assert updated.description == "new desc"
@@ -532,6 +532,7 @@ def test_update_board_replaces_the_full_state(db, alice):
     assert updated.max_post_age_days == 30
     assert updated.min_age == 18
     assert updated.name_requirement == "verified"
+    assert updated.allow_color is True
     entries = list_actions_for_object(db, "board", board.id)
     assert any(e.action == "update_board" for e in entries)
 
@@ -543,7 +544,7 @@ def test_update_board_rejects_a_name_collision(db, alice):
         update_board(
             db, board, name="taken", description=None, min_read_level=0, min_write_level=0,
             category_id=None, pinned=False, moderated=False, max_post_age_days=None,
-            min_age=None, name_requirement=None, community_id=None, changed_by=alice,
+            min_age=None, name_requirement=None, community_id=None, allow_color=False, changed_by=alice,
         )
 
 
@@ -553,7 +554,7 @@ def test_update_board_rejects_invalid_name_requirement(db, alice):
         update_board(
             db, board, name="general", description=None, min_read_level=0, min_write_level=0,
             category_id=None, pinned=False, moderated=False, max_post_age_days=None,
-            min_age=None, name_requirement="bogus", community_id=None, changed_by=alice,
+            min_age=None, name_requirement="bogus", community_id=None, allow_color=False, changed_by=alice,
         )
 
 
@@ -624,7 +625,7 @@ def test_update_board_refuses_a_max_post_age_below_one_day(db, alice, bad_age):
             category_id=board.category_id, pinned=board.pinned, moderated=board.moderated,
             max_post_age_days=bad_age, min_age=board.min_age,
             name_requirement=board.name_requirement, community_id=board.community_id,
-            changed_by=alice,
+            allow_color=board.allow_color, changed_by=alice,
         )
     assert get_board_by_name(db, "general").max_post_age_days == 30
 

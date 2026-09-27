@@ -39,6 +39,7 @@ from netbbs.auth.users import User
 from netbbs.communities import get_effective_min_age, get_effective_min_read_level
 from netbbs.permissions import meets_level
 from netbbs.rendering.pipe_codes import strip_pipe_codes
+from netbbs.rendering.post_body import plain_post_body
 from netbbs.rendering.reflow import print_wrapped
 from netbbs.storage.database import Database
 
@@ -352,6 +353,10 @@ def reindex_post(db: Database, board_id: int, root_post_id: str) -> None:
         (root_post_id, board_id),
     ).fetchone()
     if current is not None:
+        # Plain text only: color codes and escape sequences (issue #711)
+        # are neither searchable words nor anything a result snippet may
+        # print.
+        current = {"subject": current["subject"], "body": plain_post_body(current["body"])}
         db.connection.execute(
             "INSERT INTO post_search (subject, body, board_id, root_post_id) VALUES (?, ?, ?, ?)",
             (current["subject"], current["body"], board_id, root_post_id),
@@ -447,7 +452,9 @@ def _expected_post_index(db: Database) -> dict[str, tuple[int, str, str]]:
     resolved: dict[str, tuple[int, str, str]] = {}
     for row in rows:
         resolved[row["root_post_id"]] = (row["board_id"], row["subject"], row["body"])
-    return resolved
+    # The plain text `reindex_post` indexes (issue #711), or every colored
+    # post reads as stale (Codex review on #750).
+    return {root: (board, subject, plain_post_body(body)) for root, (board, subject, body) in resolved.items()}
 
 
 def _expected_file_index(db: Database) -> dict[str, tuple[int, str, str | None]]:

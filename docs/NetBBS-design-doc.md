@@ -1467,6 +1467,28 @@ The board picker adds an activity column ("N new", "caught up", "not visited
 yet", in §6.6's terms) and an "about" column that leads with `[LINK]` and a
 name-gate note before the description.
 
+**Color in posts** (issue #711). A board's SysOp may allow color in its
+posts ("Color in posts", off by default). A carried board follows the
+carrying node's setting. Authors color a body with Mystic pipe codes
+(`|00`-`|15` foreground, `|16`-`|23` background). A body is stored and
+carried exactly as written and filtered on output
+(`netbbs.rendering.post_body`):
+- **What survives:** text, line breaks, and SGR limited to foreground,
+  background, bold, underline and blink. Every other escape sequence is
+  removed whole: cursor movement, clears, mode changes, titles,
+  OSC/DCS/APC/PM/SOS strings and their 8-bit forms, and the bell. A post can
+  never clear the screen, move the cursor, hide text or fake a prompt.
+- **Where:** bodies only. Subjects stay plain in lists, search and
+  breadcrumbs, and search indexes a body's plain text.
+- **Who sees what:** where color is allowed, a reader with "Post colors" on
+  (Profile, on by default) sees it; with it off, plain text without the codes.
+  Where it is not allowed, a body shows as text, pipe codes as typed.
+- **Layout:** a colored body reflows like any other. Every row restates the
+  color it inherits and ends with a reset, because the reader pages by rows.
+  The state is kept normalized, so a flood of codes costs each row one short
+  prefix. The review screen and the SysOp's pending-post screen show a body
+  the same way.
+
 ### 6.2 File areas
 
 Local file metadata lives in SQLite; file bytes use content-addressed filesystem

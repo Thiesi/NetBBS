@@ -55,6 +55,9 @@ class Database:
         self.connection = sqlite3.connect(str(path))
         self.connection.row_factory = sqlite3.Row
         self._configure_pragmas()
+        # For a migration that rewrites stored text the way the application
+        # now reads it: issue #711 reindexes post bodies as plain text.
+        self.connection.create_function("netbbs_plain_post_body", 1, _plain_post_body, deterministic=True)
         self._apply_migrations()
 
     def _configure_pragmas(self) -> None:
@@ -145,3 +148,14 @@ class Database:
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         self.close()
+
+
+def _plain_post_body(body: str | None) -> str | None:
+    """`netbbs.rendering.post_body.plain_post_body`, as the SQL function
+    `netbbs_plain_post_body` migrations may call. Imported late: storage
+    sits below rendering and needs it only here."""
+    if body is None:
+        return None
+    from netbbs.rendering.post_body import plain_post_body
+
+    return plain_post_body(body)

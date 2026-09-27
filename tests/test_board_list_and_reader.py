@@ -756,3 +756,108 @@ def test_the_reader_marks_a_post_new_on_the_screen_that_opens_it(db, alice, monk
     first, second = [screen for screen in session.screens() if "Body of post 0" in screen][:2]
     assert "[new]" in first
     assert "[new]" not in second  # read now
+
+
+# -- issue #711: color in post bodies ---------------------------------------------
+
+_RED = "\x1b[38;5;9m"  # pipe code |12, bright red
+
+
+def _color_board(db, alice, *, allow_color):
+    board = create_board(db, "general", creator=alice, allow_color=allow_color)
+    create_post(db, board, alice, "Colored", "|12Red words\x1b[2J and more")
+    return board
+
+
+def test_a_board_that_allows_color_shows_it(db, alice):
+    board = _color_board(db, alice, allow_color=True)
+    session = FakeSession(["1", "b", "b"])
+
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+
+    raw = "".join(session.written)
+    assert _RED in raw
+    # The clear inside the body is gone: its text runs on as one line.
+    assert "Red words and more" in session.visible()
+    assert "|12" not in session.visible()
+
+
+def test_a_reader_with_post_colors_off_gets_plain_text(db, alice):
+    from netbbs.net.post_color_preference import set_post_colors_enabled
+
+    board = _color_board(db, alice, allow_color=True)
+    set_post_colors_enabled(db, alice, False)
+    session = FakeSession(["1", "b", "b"])
+
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+
+    assert _RED not in "".join(session.written)
+    assert "Red words and more" in session.visible()
+
+
+def test_a_board_without_color_shows_codes_as_typed(db, alice):
+    board = _color_board(db, alice, allow_color=False)
+    session = FakeSession(["1", "b", "b"])
+
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+
+    assert _RED not in "".join(session.written)
+    assert "|12Red words and more" in session.visible()
+
+
+def test_the_review_screen_previews_the_color(db, alice):
+    board = create_board(db, "general", creator=alice, allow_color=True)
+    session = FakeSession(["p", "Hello", "|12Red body", "", "p", "b"])
+
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+
+    review = "".join(session.written).split("Review composition")[1]
+    assert _RED in review
+
+
+def test_search_indexes_the_plain_text(db, alice):
+    from netbbs.search import search_posts
+
+    board = _color_board(db, alice, allow_color=True)
+
+    hits = search_posts(db, alice, "words")
+
+    assert len(hits) == 1
+    assert "\x1b" not in hits[0].body and "|12" not in hits[0].body
+    assert search_posts(db, alice, "12") == []
+
+
+def test_the_search_index_integrity_check_agrees_with_plain_indexing(db, alice):
+    from netbbs.search import check_index_integrity
+
+    _color_board(db, alice, allow_color=True)
+
+    report = check_index_integrity(db)
+
+    assert report.is_clean
+
+
+def test_the_migration_reindexes_existing_posts_as_plain_text(tmp_path, monkeypatch):
+    from netbbs.storage import database as database_module
+    from netbbs.storage.migrations import MIGRATIONS
+    from tests.legacy_schema import insert_user_on_old_schema
+
+    index = next(i for i, m in enumerate(MIGRATIONS) if "allow_color" in m.description)
+    monkeypatch.setattr(database_module, "MIGRATIONS", MIGRATIONS[:index])
+    path = tmp_path / "node.db"
+    old = Database(path)
+    alice = insert_user_on_old_schema(old, "alice", user_level=10)
+    board = create_board(old, "general", creator=alice)
+    create_post(old, board, alice, "old", "|12red\x1b[31m words")
+    # What the code before #711 indexed: the body as stored.
+    old.connection.execute("UPDATE post_search SET body = ?", ("|12red\x1b[31m words",))
+    old.connection.commit()
+    old.close()
+    monkeypatch.undo()
+
+    upgraded = Database(path)
+    try:
+        body = upgraded.connection.execute("SELECT body FROM post_search").fetchone()[0]
+        assert body == "red words"
+    finally:
+        upgraded.close()

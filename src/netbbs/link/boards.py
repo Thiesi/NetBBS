@@ -296,6 +296,7 @@ def _board_from_row(row) -> Board:
         category_id=row["category_id"], pinned=bool(row["pinned"]), created_at=row["created_at"],
         moderated=bool(row["moderated"]), max_post_age_days=row["max_post_age_days"],
         min_age=row["min_age"], name_requirement=row["name_requirement"], community_id=row["community_id"],
+        allow_color=bool(row["allow_color"]) if "allow_color" in row.keys() else False,
     )
 
 

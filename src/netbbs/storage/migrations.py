@@ -3102,4 +3102,30 @@ MIGRATIONS = [
         );
         """,
     ),
+    Migration(
+        description=(
+            "Issue #711: `allow_color` on boards -- whether this node shows the color an "
+            "author put in a post (pipe codes, SGR limited to colors, bold, underline and "
+            "blink; `netbbs.rendering.post_body`). Off by default, so no board changes on "
+            "upgrade. A carried board follows this node's own setting."
+        ),
+        sql="""
+        ALTER TABLE boards ADD COLUMN allow_color INTEGER NOT NULL DEFAULT 0;
+
+        -- Search indexes a body's plain text from now on (`netbbs.search.
+        -- reindex_post`); what is already indexed is rewritten the same way,
+        -- one current version per edit chain, as `reindex_post` picks it.
+        DELETE FROM post_search;
+        INSERT INTO post_search (subject, body, board_id, root_post_id)
+        SELECT p.subject, netbbs_plain_post_body(p.body), p.board_id, p.root_post_id
+          FROM posts p
+         WHERE p.status = 'approved'
+           AND p.id = (
+               SELECT q.id FROM posts q
+                WHERE q.root_post_id = p.root_post_id AND q.board_id = p.board_id AND q.status = 'approved'
+                ORDER BY q.created_at DESC, q.id DESC
+                LIMIT 1
+           );
+        """,
+    ),
 ]

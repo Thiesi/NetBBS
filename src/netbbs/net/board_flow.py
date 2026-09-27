@@ -82,6 +82,7 @@ from netbbs.net.node_theme import effective_accent_color, effective_header_color
 from netbbs.net.notices import announce, pending_notice_rows, take_notices, write_notices
 from netbbs.net.picker import ListColumn, pick_item
 from netbbs.net.prose_editor import edit_prose
+from netbbs.net.post_color_preference import post_colors_enabled
 from netbbs.net.redraw_preference import redraw_in_place_enabled
 from netbbs.net.session import Session, write_prompt
 from netbbs.net.sort_ui import SORT_MODE_LABELS, prompt_sort_change
@@ -105,6 +106,7 @@ from netbbs.rendering import (
 )
 from netbbs.rendering.ansi import strip_ansi
 from netbbs.rendering.detail import Section, Styled
+from netbbs.rendering.post_body import post_body_mode, post_body_rows
 from netbbs.rendering.reflow import wrap_terminal_text
 from netbbs.rendering.width import cut_to_width, display_width, wrap_to_width
 from netbbs.signature import append_signature, get_signature
@@ -760,6 +762,9 @@ async def _show_board(
     unicode_style = unicode_style_enabled(db, user)
     collapsed = breadcrumb_collapsed_enabled(db, user)
     truecolor = effective_truecolor(session, db, user)
+    body_mode = post_body_mode(
+        board_allows_color=board.allow_color, reader_wants_color=post_colors_enabled(db, user)
+    )
     name_requirement = get_effective_name_requirement(db, board)
     read_only_reason = None if can_post else _read_only_reason(db, user, board, closed=closed)
     linked_note = _linked_note(db, board, link_context)
@@ -969,7 +974,7 @@ async def _show_board(
                 db, post, name_requirement=name_requirement, is_new=was_new,
                 separator=separator, width=width,
             )
-            body_rows = _render_quoted_body(sanitize_text(post.body, allow_newlines=True), width).split("\r\n")
+            body_rows = post_body_rows(post.body, width, body_mode, truecolor=truecolor)
             has_previous = index > 0 or page.has_older
             has_next = index < len(page.posts) - 1 or page.has_newer
             actions = []
@@ -1099,7 +1104,7 @@ async def _show_board(
             return True
 
         await _review_and_commit(
-            session, db, user, subject=subject, body=body, draft_path=draft_path,
+            session, db, user, board, subject=subject, body=body, draft_path=draft_path,
             commit_key="p", commit_label="ost", commit_brief="Publish this post",
             cancelled_notice="Post cancelled.",
             draft_saved_notice="Draft saved -- you'll be offered it next time you visit this message board.",
@@ -1441,7 +1446,7 @@ async def _edit_existing_post(
         return True
 
     await _review_and_commit(
-        session, db, user, subject=subject, body=body, draft_path=edit_draft_path,
+        session, db, user, board, subject=subject, body=body, draft_path=edit_draft_path,
         commit_key="s", commit_label="ave", commit_brief="Save this edit",
         cancelled_notice="Edit cancelled.",
         draft_saved_notice=draft_saved_notice,
@@ -1453,6 +1458,7 @@ async def _review_and_commit(
     session: Session,
     db: Database,
     user: User,
+    board: Board,
     *,
     subject: str,
     body: str,
@@ -1472,7 +1478,13 @@ async def _review_and_commit(
     (the domain refused it -- a subject over the byte cap, a board
     closed meanwhile) keeps the caller in review with the text intact:
     the editor deleted its draft when it handed the body back, so this
-    loop is the only copy left."""
+    loop is the only copy left.
+
+    The draft is previewed as `board`'s readers will see it: in color
+    where the board allows it and the caller wants it (issue #711)."""
+    body_mode = post_body_mode(
+        board_allows_color=board.allow_color, reader_wants_color=post_colors_enabled(db, user)
+    )
     while True:
         action = await review_composition(
             session,
@@ -1489,6 +1501,7 @@ async def _review_and_commit(
             accent_color=effective_accent_color(session, db),
             header_color=effective_header_color(session, db),
             truecolor=effective_truecolor(session, db, user),
+            body_mode=body_mode,
         )
         if action is ReviewAction.CANCEL:
             announce(session, cancelled_notice, tone="muted")
@@ -1665,46 +1678,6 @@ def _remote_author_subject(author_label: str) -> TrustSubject | None:
     if not separator or not local_user_id or not home:
         return None
     return TrustSubject.user(home, local_user_id)
-
-
-def _render_quoted_body(body: str, width: int) -> str:
-    """Reflow `body`, coloring `>`-quoted lines in `MUTED_COLOR` (issue
-    #181). Runs `reflow()` per same-kind run of raw lines, not once over
-    the whole body: `reflow()` only paragraph-breaks on a *blank* line,
-    and otherwise collapses single line breaks and rewraps -- so a quote
-    immediately followed by a reply (no blank line between them, the
-    common case) would get merged into one rewrapped line, and a multi-
-    line quote's own wrapped continuation lines would lose their leading
-    `>` and go uncolored. Each quote run has its `>` prefix stripped,
-    gets reflowed as its own paragraph, and has `>` reapplied to every
-    wrapped line, so multi-line quotes wrap and color correctly too.
-
-    A blank line is its own third run kind, output verbatim, never
-    folded into an adjacent quote/text run's own `reflow()` call --
-    a blank separator at a quote/text boundary (`"> quoted\\n\\nreply"`)
-    would otherwise join a run's raw lines with a single `\\n`, one
-    short of the `\\n\\n` `reflow()` needs to even recognize a paragraph
-    break, silently dropping the authored blank line."""
-    runs: list[tuple[str, list[str]]] = []
-    for raw_line in body.split("\n"):
-        stripped_line = raw_line.strip()
-        kind = "blank" if not stripped_line else "quote" if stripped_line.startswith(">") else "text"
-        if runs and runs[-1][0] == kind:
-            runs[-1][1].append(raw_line)
-        else:
-            runs.append((kind, [raw_line]))
-
-    rendered: list[str] = []
-    for kind, raw_lines in runs:
-        if kind == "blank":
-            rendered.extend(raw_lines)
-        elif kind == "quote":
-            stripped = [line.split(">", 1)[1].lstrip(" ") for line in raw_lines]
-            for wrapped_line in reflow("\n".join(stripped), width=max(1, width - 2)).splitlines():
-                rendered.append(colored(f"> {wrapped_line}", fg_color=MUTED_COLOR))
-        else:
-            rendered.extend(reflow("\n".join(raw_lines), width=width).splitlines())
-    return "\r\n".join(rendered)
 
 
 def _post_byline(
