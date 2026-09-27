@@ -114,6 +114,14 @@ def test_a_stored_value_that_no_longer_validates_is_skipped(db):
         ("link.seeds", ["https://a", " "], False),
         ("link.relay_serving_enabled", False, True),
         ("link.relay_serving_enabled", 1, False),
+        # A token bucket spends whole tokens: a burst below 1 admits nothing.
+        ("throttle.global_capacity", 0.5, False),
+        ("throttle.per_source_capacity", 1, True),
+        ("link.request_rate_capacity", 0.9, False),
+        ("throttle.per_source_refill_per_minute", 0.5, True),
+        # Retention is subtracted from today's date.
+        ("link.diagnostic_log_max_age_days", 36_500, True),
+        ("link.diagnostic_log_max_age_days", 1_000_000, False),
     ],
 )
 def test_validation_matches_the_config_bounds(key, value, ok):
@@ -232,3 +240,10 @@ def test_bool_setting_toggles(db, lane, sysop):
     session = FakeSession(["s", "w", "p", "r", "s", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop))
     assert load_stored_policy(db) == {"link.relay_serving_enabled": False}
+
+
+def test_bool_toggled_back_to_its_default_forgets_the_stored_value(db, lane, sysop):
+    _save(db, {"link.relay_serving_enabled": False})
+    session = FakeSession(["s", "w", "p", "r", "s", "b", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop))
+    assert load_stored_policy(db) == {}

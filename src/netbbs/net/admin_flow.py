@@ -7178,7 +7178,9 @@ async def _policy_group_editor(
                     await write_field_message(session, colored(_POLICY_CONFIG_NOTE, fg_color=MUTED_COLOR))
                     return
                 current = view.default if d[key] is None else d[key]
-                d[key] = not current
+                # Toggling back to the default forgets the stored value rather
+                # than pinning it, so the setting reads "(default)" again.
+                d[key] = None if (not current) == view.default else not current
 
             return toggle
 

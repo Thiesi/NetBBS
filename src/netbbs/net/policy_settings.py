@@ -47,6 +47,13 @@ _MAXIMUM = 1_000_000_000
 
 SECTIONS = ("link", "throttle", "shutdown")
 
+# A token bucket spends one whole token per request or login attempt, so a
+# burst capacity below 1 admits nothing at all -- every caller locked out.
+_BURST_MINIMUM = 1.0
+# Diagnostic retention is subtracted from today's date; far beyond this the
+# subtraction leaves the calendar and every diagnostic write fails.
+_MAX_RETENTION_DAYS = 36_500
+
 
 @dataclass(frozen=True)
 class PolicySetting:
@@ -58,6 +65,9 @@ class PolicySetting:
     # Carry caps may be 0 (issue #683: a curated node carries nothing
     # unasked); every other number must be greater than 0.
     allow_zero: bool = False
+    # Tighter bounds where the code that uses the value needs them.
+    minimum: float | None = None
+    maximum: float = _MAXIMUM
 
     @property
     def section(self) -> str:
@@ -102,13 +112,13 @@ SETTINGS: tuple[PolicySetting, ...] = (
     PolicySetting("link.max_concurrent_file_transfers_per_peer", int, GROUP_LINK_LIMITS,
                   "File transfers per peer", "Concurrent file transfers served to one peer."),
     PolicySetting("link.request_rate_capacity", float, GROUP_LINK_LIMITS, "Request burst",
-                  "Link requests one address may make in a burst."),
+                  "Link requests one address may make in a burst.", minimum=_BURST_MINIMUM),
     PolicySetting("link.request_rate_refill_per_minute", float, GROUP_LINK_LIMITS, "Requests per minute",
                   "How fast that burst allowance refills."),
     PolicySetting("link.request_rate_max_tracked_sources", int, GROUP_LINK_LIMITS, "Addresses tracked",
                   "How many requesting addresses the rate limit remembers at once."),
     PolicySetting("link.diagnostic_log_max_age_days", int, GROUP_LINK_LIMITS, "Diagnostics kept (days)",
-                  "How long Link and MRC diagnostic entries are kept."),
+                  "How long Link and MRC diagnostic entries are kept.", maximum=_MAX_RETENTION_DAYS),
     PolicySetting("link.diagnostic_log_max_rows", int, GROUP_LINK_LIMITS, "Diagnostics kept (entries)",
                   "At most this many diagnostic entries are kept, whichever limit is stricter."),
     PolicySetting("link.live_relay_max_concurrent_pairs", int, GROUP_RELAY, "Live bridges",
@@ -124,15 +134,15 @@ SETTINGS: tuple[PolicySetting, ...] = (
     PolicySetting("throttle.max_attempts_per_connection", int, GROUP_THROTTLE, "Attempts per connection",
                   "Failed logins allowed before a connection is closed."),
     PolicySetting("throttle.per_source_capacity", float, GROUP_THROTTLE, "Per address: burst",
-                  "Login attempts one address may make in a burst."),
+                  "Login attempts one address may make in a burst.", minimum=_BURST_MINIMUM),
     PolicySetting("throttle.per_source_refill_per_minute", float, GROUP_THROTTLE, "Per address: per minute",
                   "How fast one address's allowance refills."),
     PolicySetting("throttle.per_username_capacity", float, GROUP_THROTTLE, "Per account: burst",
-                  "Login attempts against one account in a burst."),
+                  "Login attempts against one account in a burst.", minimum=_BURST_MINIMUM),
     PolicySetting("throttle.per_username_refill_per_minute", float, GROUP_THROTTLE, "Per account: per minute",
                   "How fast one account's allowance refills."),
     PolicySetting("throttle.global_capacity", float, GROUP_THROTTLE, "Whole node: burst",
-                  "Login attempts across the whole node in a burst."),
+                  "Login attempts across the whole node in a burst.", minimum=_BURST_MINIMUM),
     PolicySetting("throttle.global_refill_per_minute", float, GROUP_THROTTLE, "Whole node: per minute",
                   "How fast the node-wide allowance refills."),
     PolicySetting("throttle.max_tracked_keys", int, GROUP_THROTTLE, "Addresses/accounts tracked",
@@ -182,10 +192,14 @@ def validate_value(setting: PolicySetting, value: Any) -> Any:
         value = float(value)
     if not math.isfinite(value):
         raise PolicyValueError(f"{setting.label} must be a finite number.")
-    floor = 0 if setting.allow_zero else None
-    if (floor is None and value <= 0) or (floor is not None and value < floor) or value > _MAXIMUM:
-        low = "0" if setting.allow_zero else "greater than 0"
-        raise PolicyValueError(f"{setting.label} must be {low} and at most {_MAXIMUM:,}.")
+    if setting.minimum is not None:
+        too_low, low = value < setting.minimum, f"at least {format_value(setting, setting.minimum)}"
+    elif setting.allow_zero:
+        too_low, low = value < 0, "0 or more"
+    else:
+        too_low, low = value <= 0, "greater than 0"
+    if too_low or value > setting.maximum:
+        raise PolicyValueError(f"{setting.label} must be {low} and at most {setting.maximum:,}.")
     return value
 
 
