@@ -20,6 +20,7 @@ from netbbs.activity import (
     board_read_cursor,
     file_area_read_cursor,
     is_following,
+    mark_board_read,
     unread_channel_count,
     unread_file_count,
     unread_post_count,
@@ -44,9 +45,10 @@ from netbbs.net.chat_flow import (
     list_visible_channels_for,
 )
 from netbbs.net.file_flow import enter_file_area
+from netbbs.net.notices import announce
 from netbbs.net.node_theme import effective_accent_color, effective_header_color, effective_header_color_256
 from netbbs.net.picker import pick_item
-from netbbs.rendering import GATE_COLOR, SegmentColor
+from netbbs.rendering import GATE_COLOR, MenuEntry, SegmentColor, menu_key
 from netbbs.net.redraw_preference import redraw_in_place_enabled
 from netbbs.net.session import Session
 from netbbs.net.unicode_style_preference import unicode_style_enabled
@@ -213,8 +215,27 @@ async def _new_scan_screen(
         # copy would simply say it twice (Codex review).
         return f"{prefix}{item.kind.replace('_', ' ')}, {status}"
 
-    positions = {id(item): index for index, item in enumerate(items, start=1)}
+    positions: dict[int, int] = {}
+
+    def _number(scan_items: list[_ScanItem]) -> None:
+        positions.clear()
+        positions.update({id(item): index for index, item in enumerate(scan_items, start=1)})
+
+    _number(items)
     accent = effective_accent_color(session, db)
+
+    async def _mark_read(item: _ScanItem) -> list[_ScanItem] | None:
+        """[M]ark read (issue #710): every post on one board counts as
+        read, without going in. The list is reloaded in the same order, so
+        the row numbers and the highlight still point where they did."""
+        if item.kind != "board" or item.board is None:
+            announce(session, "Only a message board can be marked read here.", tone="muted")
+            return None
+        await lane.run(mark_board_read, user, item.board)
+        announce(session, f"{sanitize_text(item.name)}: every post marked read.", tone="muted")
+        reloaded, _replies, _boards = await lane.run(_load)
+        _number(reloaded)
+        return reloaded
 
     def _name_segments(item: _ScanItem) -> list[tuple[str, SegmentColor]]:
         """The gate note rides with the name here too (issue #541).
@@ -246,6 +267,8 @@ async def _new_scan_screen(
         description_of=_description,
         title="New scan",
         empty_message="Nothing accessible yet.",
+        item_keys={"m": _mark_read},
+        live_nav=[MenuEntry(label=menu_key("M", "ark read"), brief="Count a message board's posts as read")],
         redraw_in_place=redraw_in_place_enabled(db, user),
         unicode_style=unicode_style_enabled(db, user),
         collapsed=breadcrumb_collapsed_enabled(db, user),

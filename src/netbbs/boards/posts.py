@@ -796,6 +796,34 @@ def count_visible_roots(
     return count, newest
 
 
+def iter_visible_roots(
+    db: Database, board_id: int, *, after_id: int = 0, newest_first: bool = False
+):
+    """Board `board_id`'s roots a reader may see, as `(id, created_at,
+    post_id)` in arrival order (`posts.id`, issue #72), oldest first or
+    `newest_first`, above arrival id `after_id`. The same rule as
+    `count_visible_roots`, streamed, so a caller that needs only the first
+    few stops paying there: per-post read state walks up from its floor
+    and stops at the first post not opened (issue #710)."""
+    order = "DESC" if newest_first else "ASC"
+    rows = db.connection.execute(
+        f"""
+        SELECT root.id, root.created_at, root.post_id, e.envelope_json FROM posts root
+        LEFT JOIN link_events e ON e.content_id = root.post_id
+        WHERE root.board_id = ? AND root.post_id = root.root_post_id AND root.id > ?
+          AND {_HAS_APPROVED_VERSION_SQL}
+        ORDER BY root.id {order}
+        """,
+        (board_id, after_id),
+    )
+    author_cache: dict = {}
+    for row in rows:
+        if row["envelope_json"] is None or envelope_content_visible(
+            db, row["envelope_json"], author_cache=author_cache
+        ):
+            yield row["id"], row["created_at"], row["post_id"]
+
+
 def approve_post(db: Database, post: Post, *, approved_by: User) -> Post:
     """
     Approve a `'pending'` post, requiring `approved_by` to hold

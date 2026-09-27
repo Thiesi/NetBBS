@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import re
 
-from netbbs.activity import record_board_seen, unread_post_count
+from netbbs.activity import record_post_opened, unread_post_count
 from netbbs.auth.users import create_user
 from netbbs.boards import posts as posts_module
 from netbbs.boards.boards import create_board
@@ -432,7 +432,7 @@ def test_editing_an_already_seen_post_does_not_make_it_unread_again(tmp_path):
     board = create_board(db, "general", creator=alice)
     post = create_post(db, board, alice, "Hello", "World")
     bob = create_user(db, "bob", password="hunter2", user_level=10)
-    record_board_seen(db, bob, board, post)
+    record_post_opened(db, bob, board, post)
 
     edit_post(db, post, board, subject="Hello (edited)", body="World, edited", edited_by=alice)
 

@@ -1447,8 +1447,10 @@ The list:
 - Shows the board's description and, for a caller who can read but not post,
   why ("Read only: posting needs level N", or a name that needs
   verification).
-- Marks a post `new` against the read position the caller had when they
-  arrived, so the markers survive the visit.
+- Marks a post `new` until the caller opens it (§6.6, issue #710): showing
+  a post in the list does not count as reading it. `[M]ark all read` counts
+  everything on the board as read; it is offered only while something is
+  unread.
 - Opens a `[N]ew scan` or `[F]ind` jump with the cursor on its target.
 
 A post opens on `show_detail`:
@@ -1758,8 +1760,9 @@ already has full read tracking the moment it lands in a mailbox. Nothing new
 is needed for mail; issue #56's mail bullet is already satisfied.
 
 Boards, file areas, and channels need a per-user, per-container **read
-cursor**, not a per-item flag — per-item read state for a potentially
-unbounded board would itself be an unbounded table. One new table holds it:
+cursor**, not an unbounded per-item flag — per-item read state for a
+potentially unbounded board would itself be an unbounded table. Boards add a
+*bounded* per-post set on top of the cursor (issue #710, below). One new table holds it:
 `(user_id, object_type, object_id)` primary key, where `object_type` is
 `board`/`channel`/`file_area` and `object_id` is that resource's own local
 integer id (the same id `community_id`/category columns already reference —
@@ -1788,8 +1791,9 @@ or resurrect deleted content.
 
 A resource with no cursor row for a user has never been visited by them.
 First visit — not a retroactive backfill — establishes the baseline: viewing
-a board/file-area page or a channel's current scrollback advances that user's
-cursor to the newest item they were just shown. This is also the complete
+a file-area page or a channel's current scrollback advances that user's
+cursor to the newest item they were just shown, and entering a board counts
+every post already on it as read (issue #710). This is also the complete
 migration story for existing accounts (issue #56's last acceptance
 criterion): the read-cursor table starts empty for everyone, including
 existing users, at upgrade time. Nobody's history is scanned or backfilled;
@@ -1852,6 +1856,36 @@ scan`'s "has unread" detection are correct either way; only precise
 jump navigation to that specific item is not yet solved. Reconciling
 jump-to with arrival order, if ever wanted, is future work, not implied
 by this fix.
+
+**Boards: a post is read once it is opened (issue #710).** Showing a post
+in the board list does not mark it read; opening it in the reader does. A
+board cursor's `last_seen_arrival_id` is a **floor**: every post at or below
+it, in arrival order, is read. `user_board_opened_posts` holds the posts a
+user opened *above* the floor, one row per `(user, board, post row id)`.
+Unread means above the floor and not in the set, and every surface that
+reports unread uses that one rule: the list's `new` markers,
+`unread_post_count` (`[N]ew scan`, the board picker) and
+`unread_replies_to`.
+
+The set stays small by construction:
+- It only ever holds **out-of-order reads**. When the opened posts run
+  unbroken up from the floor, the floor advances past them and their rows
+  are deleted, so a caller reading in order never stores a row at all.
+  "Unbroken" is over the posts a reader may see: a post pending approval,
+  hidden by trust (§12) or deleted is not a gap anyone could read, so it does
+  not hold the floor back.
+- It is **capped** at 500 rows per user and board. Past the cap the floor
+  moves up to the oldest kept row, and the oldest gaps are given up as read.
+  Reaching the cap takes more than 500 posts opened while skipping others on
+  one board.
+
+`[M]ark all read` (on the list, and per board in `[N]ew scan`) moves the
+floor to the newest visible post and drops the set. A post still pending
+approval above it stays unread, so it is new when it appears. A caller's
+own new post is recorded as opened when it is written. The jump position
+(`board_read_cursor`) is unchanged in kind: opening a post moves it forward
+by feed position, never back. The migration makes existing cursors the
+floors, so nobody's history is reset.
 
 #### Follows and favourites
 

@@ -7,7 +7,12 @@ policy, Community assignment) they sit beside.
 
 A read cursor is the newest item a user has been shown in one container,
 not a per-item flag -- a per-item table would itself be unbounded for a
-busy board. Boards and file areas already page with a stable
+busy board. Boards refine this (issue #710): a board post counts as read
+only once it is opened, so a board's cursor is a *floor* -- everything at
+or below it is read -- plus a bounded set of the posts opened above it
+(`user_board_opened_posts`). The set holds only out-of-order reads: an
+unbroken run of opened posts from the floor is folded into the floor, and
+past `OPENED_POSTS_CAP` rows the floor moves up to the oldest kept one. Boards and file areas already page with a stable
 `(created_at, stable_id)` keyset cursor (`netbbs.boards.posts.
 list_posts_page`/`netbbs.files.entries.list_files_page`); this module
 reuses that exact tuple shape and comparison. A channel has no revision
@@ -57,7 +62,7 @@ from dataclasses import dataclass
 
 from netbbs.auth.users import User
 from netbbs.boards.boards import Board
-from netbbs.boards.posts import Post, count_visible_roots, sweep_expired_posts
+from netbbs.boards.posts import Post, count_visible_roots, iter_visible_roots, sweep_expired_posts
 from netbbs.chat.channels import Channel
 from netbbs.chat.scrollback import ChannelMessage
 from netbbs.files.areas import FileArea
@@ -192,21 +197,144 @@ def _upsert_cursor(
     db.connection.commit()
 
 
-def record_board_seen(db: Database, user: User, board: Board, post: Post) -> None:
-    """Advance `user`'s read cursor for `board` to (at least) `post` --
-    `post` should be the newest post on whatever page was just shown
-    (its root `created_at`/`post_id`, stable across later edits).
+# How many posts opened above a board's floor are remembered per user and
+# board (issue #710). Only out-of-order reads land here -- reading in
+# arrival order folds straight into the floor -- so the bound is reached
+# only by someone skipping around a very busy board, and then the oldest
+# gaps are given up as read.
+OPENED_POSTS_CAP = 500
 
-    `post.id` (issue #72) is recorded as the arrival-order watermark too
-    -- this node's own rowid for that specific root post, not a
-    board-wide maximum. A late-arriving post elsewhere in this board's
-    history, with an older `created_at` that never makes it "the newest
-    post shown" on an ordinary feed view, therefore keeps its own higher
-    `id` above this watermark and is correctly still reported unread by
-    `unread_post_count` -- exactly the case this issue is about."""
-    _record_seen_string_ordered(
-        db, user, _BOARD, board.id, created_at=post.created_at, stable_id=post.post_id, arrival_id=post.id
+
+def _board_newest(db: Database, board: Board) -> tuple[int, str, str] | None:
+    """The newest visible root of `board` by arrival id, and the newest by
+    feed position, folded into one `(arrival_id, created_at, post_id)`:
+    the arrival id is the floor's axis, the pair the jump position's."""
+    newest_id = 0
+    feed: tuple[str, str] | None = None
+    for row_id, created_at, post_id in iter_visible_roots(db, board.id):
+        newest_id = max(newest_id, row_id)
+        if feed is None or (created_at, post_id) > feed:
+            feed = (created_at, post_id)
+    if feed is None:
+        return None
+    return newest_id, feed[0], feed[1]
+
+
+def ensure_board_baseline(db: Database, user: User, board: Board) -> None:
+    """Give `user` a read floor on `board` if they have none: a first visit
+    counts everything already there as read, and only what arrives after
+    it is new -- a caller new to a busy board is not handed its whole
+    history as unread. A no-op for a board visited before."""
+    if _get_cursor(db, user, _BOARD, board.id) is not None:
+        return
+    sweep_expired_posts(db, board)
+    newest = _board_newest(db, board)
+    arrival_id, created_at, post_id = newest if newest is not None else (0, "", "")
+    _upsert_cursor(
+        db, user, _BOARD, board.id,
+        last_seen_created_at=created_at, last_seen_stable_id=post_id, last_seen_arrival_id=arrival_id,
     )
+
+
+def _opened_ids(db: Database, user: User, board_id: int) -> set[int]:
+    return {
+        row[0] for row in db.connection.execute(
+            "SELECT post_row_id FROM user_board_opened_posts WHERE user_id = ? AND board_id = ?",
+            (user.id, board_id),
+        )
+    }
+
+
+def _compact(db: Database, user: User, board: Board, floor: int) -> int:
+    """Fold `user`'s opened posts on `board` into the floor where they run
+    unbroken from it, apply the cap, and drop every row the floor now
+    covers. Returns the new floor.
+
+    "Unbroken" is over the posts a reader may see: a post pending
+    approval, trust-hidden or deleted is not a gap a caller could have
+    read, so it does not hold the floor back."""
+    opened = {row_id for row_id in _opened_ids(db, user, board.id) if row_id > floor}
+    while opened:
+        for row_id, _created_at, _post_id in iter_visible_roots(db, board.id, after_id=floor):
+            if row_id not in opened:
+                break
+            floor = row_id
+        opened = {row_id for row_id in opened if row_id > floor}
+        if len(opened) <= OPENED_POSTS_CAP:
+            break
+        # Past the cap: keep the newest rows, and the floor moves up to the
+        # oldest of them -- the posts skipped below it count as read.
+        floor = sorted(opened)[-OPENED_POSTS_CAP]
+        opened = {row_id for row_id in opened if row_id > floor}
+    db.connection.execute(
+        "DELETE FROM user_board_opened_posts WHERE user_id = ? AND board_id = ? AND post_row_id <= ?",
+        (user.id, board.id, floor),
+    )
+    return floor
+
+
+def record_post_opened(db: Database, user: User, board: Board, post: Post) -> None:
+    """`user` opened `post` (a root) on `board`: it counts as read from now
+    on (issue #710). Only opening marks a post read -- showing it in a
+    list does not.
+
+    The jump position (`board_read_cursor`) moves forward to `post` if it
+    is newer by feed position; the unread floor moves only as `_compact`
+    allows, so opening the newest post of a board does not mark the
+    posts under it read."""
+    ensure_board_baseline(db, user, board)
+    existing = _get_cursor(db, user, _BOARD, board.id)
+    assert existing is not None
+    floor = existing.arrival_id or 0
+    if post.id > floor:
+        db.connection.execute(
+            "INSERT OR IGNORE INTO user_board_opened_posts (user_id, board_id, post_row_id) VALUES (?, ?, ?)",
+            (user.id, board.id, post.id),
+        )
+        floor = _compact(db, user, board, floor)
+    feed_advances = (post.created_at, post.post_id) > (existing.created_at, existing.stable_id)
+    _upsert_cursor(
+        db, user, _BOARD, board.id,
+        last_seen_created_at=post.created_at if feed_advances else existing.created_at,
+        last_seen_stable_id=post.post_id if feed_advances else existing.stable_id,
+        last_seen_arrival_id=floor,
+    )
+
+
+def mark_board_read(db: Database, user: User, board: Board) -> None:
+    """Everything `user` may see on `board` counts as read (issue #710's
+    `[M]ark all read`): the floor moves to the newest visible post and the
+    jump position to the newest by feed position. A post still pending
+    approval above it stays unread for when it appears."""
+    ensure_board_baseline(db, user, board)
+    existing = _get_cursor(db, user, _BOARD, board.id)
+    assert existing is not None
+    sweep_expired_posts(db, board)
+    newest = _board_newest(db, board)
+    if newest is None:
+        return
+    arrival_id, created_at, post_id = newest
+    floor = max(existing.arrival_id or 0, arrival_id)
+    feed = max((existing.created_at, existing.stable_id), (created_at, post_id))
+    floor = _compact(db, user, board, floor)
+    _upsert_cursor(
+        db, user, _BOARD, board.id,
+        last_seen_created_at=feed[0], last_seen_stable_id=feed[1], last_seen_arrival_id=floor,
+    )
+
+
+def unread_post_ids(db: Database, user: User, board: Board, posts: list[Post]) -> set[int]:
+    """Which of `posts` (roots of `board`) are unread for `user`: above the
+    floor and never opened. Empty for a board never visited -- nothing is
+    new on a first visit (`ensure_board_baseline`)."""
+    cursor = _get_cursor(db, user, _BOARD, board.id)
+    if cursor is None:
+        return set()
+    floor = cursor.arrival_id or 0
+    above = [post.id for post in posts if post.id > floor]
+    if not above:
+        return set()
+    return set(above) - _opened_ids(db, user, board.id)
 
 
 def board_read_cursor(db: Database, user: User, board: Board) -> tuple[str, str] | None:
@@ -220,16 +348,6 @@ def board_read_cursor(db: Database, user: User, board: Board) -> tuple[str, str]
     if cursor is None:
         return None
     return cursor.created_at, cursor.stable_id
-
-
-def board_seen_arrival_id(db: Database, user: User, board: Board) -> int | None:
-    """The newest post `user` has been shown on `board`, as a node-local
-    arrival id (issue #72) -- what a post list compares against to mark a
-    post `new` (issue #679). `None` for a board never visited, or a legacy
-    cursor with no arrival id: nothing is marked new on either, matching
-    §6.6's "never visited is not a count"."""
-    cursor = _get_cursor(db, user, _BOARD, board.id)
-    return cursor.arrival_id if cursor is not None else None
 
 
 def unread_post_count(db: Database, user: User, board: Board) -> int | None:
@@ -247,19 +365,17 @@ def unread_post_count(db: Database, user: User, board: Board) -> int | None:
     if cursor is None:
         return None
     sweep_expired_posts(db, board)
-    if cursor.arrival_id is not None:
-        count, _ = count_visible_roots(
-            db, board.id, extra_sql="AND root.id > ?", extra_params=(cursor.arrival_id,)
-        )
-    else:
-        # Legacy fallback -- see _Cursor's own docstring for when this applies.
-        count, _ = count_visible_roots(
-            db, board.id,
-            extra_sql="AND (root.created_at, root.post_id) > (?, ?)",
-            extra_params=(cursor.created_at, cursor.stable_id),
-        )
-    # Trust-hidden carried posts are excluded (issue #677): [N]ew scan
-    # must not report posts the board page will never show.
+    # Above the floor and never opened (issue #710). Trust-hidden carried
+    # posts are excluded (issue #677): [N]ew scan must not report posts the
+    # board page will never show.
+    count, _ = count_visible_roots(
+        db, board.id,
+        extra_sql=(
+            "AND root.id > ? AND root.id NOT IN ("
+            "SELECT post_row_id FROM user_board_opened_posts WHERE user_id = ? AND board_id = ?)"
+        ),
+        extra_params=(cursor.arrival_id or 0, user.id, board.id),
+    )
     return count
 
 
@@ -294,10 +410,19 @@ def unread_replies_to(db: Database, user: User) -> list[Post]:
         or envelope_content_visible(db, row["link_envelope_json"], author_cache=author_cache)
     ]
 
+    # Unread as the board list decides it (issue #710): above the board's
+    # floor and never opened. Each board's floor and opened set are read
+    # once, however many replies sit on it.
+    floors: dict[int, int | None] = {}
+    opened: dict[int, set[int]] = {}
     unread = []
     for reply in replies:
-        cursor = _get_cursor(db, user, _BOARD, reply.board_id)
-        if cursor is None or not _arrival_is_at_or_past(cursor, reply.id, reply.created_at, reply.post_id):
+        if reply.board_id not in floors:
+            cursor = _get_cursor(db, user, _BOARD, reply.board_id)
+            floors[reply.board_id] = None if cursor is None else (cursor.arrival_id or 0)
+            opened[reply.board_id] = set() if cursor is None else _opened_ids(db, user, reply.board_id)
+        floor = floors[reply.board_id]
+        if floor is None or (reply.id > floor and reply.id not in opened[reply.board_id]):
             unread.append(reply)
     return unread
 
@@ -332,7 +457,7 @@ def _root_row_to_post(row) -> Post:
 def record_file_area_seen(db: Database, user: User, area: FileArea, entry: FileEntry) -> None:
     """Advance `user`'s read cursor for `area` to (at least) `entry` --
     `entry.id` (issue #72) is the arrival-order watermark, the same
-    reasoning `record_board_seen` documents for posts."""
+    reasoning issue #72 documents for posts."""
     _record_seen_string_ordered(
         db, user, _FILE_AREA, area.id, created_at=entry.created_at, stable_id=entry.file_id, arrival_id=entry.id
     )

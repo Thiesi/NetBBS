@@ -2977,4 +2977,34 @@ MIGRATIONS = [
         ALTER TABLE file_areas ADD COLUMN link_hidden_at TEXT;
         """,
     ),
+    Migration(
+        description=(
+            "Issue #710: a board post counts as read only once it is opened. A board "
+            "cursor's `last_seen_arrival_id` becomes a floor -- every post at or below it "
+            "is read -- and `user_board_opened_posts` holds the posts opened above it, by "
+            "their arrival id (`posts.id`). The floor advances over an unbroken run of "
+            "opened posts and their rows go; past 500 rows per user and board the floor "
+            "moves up to the oldest kept one. Existing cursors are the floors, so nobody's "
+            "history is reset. A board cursor still without an arrival id (issue #72's "
+            "backfill found its post already deleted) gets one here: the newest root at or "
+            "before its feed position, or 0."
+        ),
+        sql="""
+        CREATE TABLE user_board_opened_posts (
+            user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            board_id     INTEGER NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
+            post_row_id  INTEGER NOT NULL,
+            PRIMARY KEY (user_id, board_id, post_row_id)
+        ) WITHOUT ROWID;
+
+        UPDATE user_read_cursors
+        SET last_seen_arrival_id = COALESCE((
+            SELECT MAX(p.id) FROM posts p
+            WHERE p.board_id = user_read_cursors.object_id AND p.post_id = p.root_post_id
+              AND (p.created_at, p.post_id)
+                  <= (user_read_cursors.last_seen_created_at, user_read_cursors.last_seen_stable_id)
+        ), 0)
+        WHERE object_type = 'board' AND last_seen_arrival_id IS NULL;
+        """,
+    ),
 ]

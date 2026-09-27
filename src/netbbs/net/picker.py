@@ -293,6 +293,7 @@ async def pick_item(
     on_create: Callable[[], Awaitable[T | None]] | None = None,
     sort_label: Callable[[], str] | None = None,
     live_keys: Mapping[str, Callable[[], Awaitable[Sequence[T] | None]]] | None = None,
+    item_keys: Mapping[str, Callable[[T], Awaitable[Sequence[T] | None]]] | None = None,
     live_nav: Sequence[MenuEntry] = (),
     live_label: Callable[[], str] | None = None,
     description_level: str = "off",
@@ -1424,6 +1425,35 @@ async def pick_item(
                 page_start = 0
                 page_history.clear()
                 highlighted = None
+            page_items = await _render()
+            continue
+
+        if item_keys and char_lower in item_keys:
+            # A caller's key that acts on one row (issue #710: [N]ew scan's
+            # [M]ark read): the highlighted one, or -- with nothing
+            # highlighted -- the one whose reference the caller types, as
+            # [G]oto asks. The callback returns the new working set; the
+            # page and the highlight stay, so a caller can work down a
+            # list one row at a time. Checked after this screen's own
+            # keys, as `live_keys` is. Its label goes in `live_nav`.
+            if highlighted is not None and highlighted < len(page_items):
+                target = page_items[highlighted]
+            else:
+                if not items:
+                    await session.write(reject_keystroke())
+                    continue
+                await session.write_line("")
+                await session.write("Which #: ")
+                raw = (await session.read_line()).strip()
+                target = next((item for item in items if str(stable_id_of(item)) == raw), None)
+                if target is None:
+                    await session.write_line(colored("Out of range.", fg_color=ERROR_COLOR))
+                    await session.write("Choice: ")
+                    continue
+            new_items = await item_keys[char_lower](target)
+            if new_items is not None:
+                items = new_items
+                working_set = _narrowed(new_items)
             page_items = await _render()
             continue
 

@@ -22,7 +22,7 @@ import re
 
 import pytest
 
-from netbbs.activity import record_board_seen, unread_post_count
+from netbbs.activity import board_read_cursor, ensure_board_baseline, record_post_opened, unread_post_count
 from netbbs.auth.users import SYSOP_LEVEL, create_user
 from netbbs.boards.boards import create_board, get_board_by_name
 from netbbs.boards.posts import (
@@ -384,12 +384,49 @@ def test_hidden_posts_are_not_counted(db, remote, alice):
 def test_hidden_posts_are_not_reported_as_unread(db, remote, alice):
     board = _carried_board(db, remote)
     first = _carry(db, remote, subject="seen", minute=0)
-    record_board_seen(db, alice, board, first)
+    record_post_opened(db, alice, board, first)
     _carry(db, remote, user="troll", subject="hidden", minute=1)
     _carry(db, remote, subject="new and visible", minute=2)
     _quarantine(db, remote, "troll")
 
     assert unread_post_count(db, alice, board) == 1
+
+
+def test_a_hidden_post_is_neither_unread_nor_a_gap_in_what_was_opened(db, remote, alice):
+    """Issue #710: the floor folds over opened posts in an unbroken run of
+    what a reader may see; a trust-hidden post between them is not a gap."""
+    board = _carried_board(db, remote)
+    ensure_board_baseline(db, alice, board)
+    first = _carry(db, remote, subject="first", minute=0)
+    _carry(db, remote, user="troll", subject="hidden", minute=1)
+    third = _carry(db, remote, subject="third", minute=2)
+    _quarantine(db, remote, "troll")
+
+    record_post_opened(db, alice, board, third)
+    record_post_opened(db, alice, board, first)
+
+    assert unread_post_count(db, alice, board) == 0
+    assert db.connection.execute(
+        "SELECT COUNT(*) FROM user_board_opened_posts WHERE user_id = ?", (alice.id,)
+    ).fetchone()[0] == 0
+
+
+def test_a_late_carried_post_is_unread_until_opened_and_leaves_the_jump_alone(db, remote, alice):
+    """A carried post arriving out of order -- an old authored date, a new
+    arrival id -- is unread until opened, and opening it does not pull the
+    jump position back into history already read."""
+    board = _carried_board(db, remote)
+    ensure_board_baseline(db, alice, board)
+    on_time = _carry(db, remote, subject="on time", minute=500)
+    record_post_opened(db, alice, board, on_time)
+    late = _carry(db, remote, subject="late", minute=1)
+    assert late.id > on_time.id and late.created_at < on_time.created_at
+
+    assert unread_post_count(db, alice, board) == 1
+    record_post_opened(db, alice, board, late)
+
+    assert unread_post_count(db, alice, board) == 0
+    assert board_read_cursor(db, alice, board) == (on_time.created_at, on_time.post_id)
 
 
 def test_hidden_posts_do_not_appear_in_search(db, remote, alice):

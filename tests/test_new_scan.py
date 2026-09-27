@@ -188,16 +188,17 @@ def test_new_scan_shows_no_replies_when_there_are_none(db, lane, alice):
 
 
 def test_selecting_a_board_jumps_to_the_first_unread_post(db, lane, alice, monkeypatch):
-    from netbbs.activity import record_board_seen
+    from netbbs.activity import ensure_board_baseline, record_post_opened
 
     other = create_user(db, "bob", password="hunter2", user_level=10)
     board = create_board(db, "general", creator=other)
+    ensure_board_baseline(db, alice, board)
     timestamps = iter([f"2026-01-01T00:00:0{i}.000000Z" for i in range(2)])
     monkeypatch.setattr(posts_module, "utc_now_iso", lambda: next(timestamps))
     first = create_post(db, board, other, "first", "1")
     create_post(db, board, other, "second", "2")
 
-    record_board_seen(db, alice, board, first)
+    record_post_opened(db, alice, board, first)
 
     session = _run_main_menu(db, lane, alice, ["n", "0", "1", "b", "l", "y"])
 
@@ -276,3 +277,35 @@ def test_new_scan_numbers_its_rows_rather_than_printing_an_address(db, lane, ali
 
     assert "(#1)" in text
     assert not re.search(r"\(#\d{6,}\)", text), "a reference number nobody could type or read"
+
+
+# -- issue #710: [M]ark read -------------------------------------------------
+
+
+def test_mark_read_counts_a_boards_posts_read_without_entering_it(db, lane, alice, monkeypatch):
+    from netbbs.activity import ensure_board_baseline, unread_post_count
+
+    other = create_user(db, "bob", password="hunter2", user_level=10)
+    board = create_board(db, "general", creator=other)
+    ensure_board_baseline(db, alice, board)
+    timestamps = iter([f"2026-01-01T00:00:0{i}.000000Z" for i in range(2)])
+    monkeypatch.setattr(posts_module, "utc_now_iso", lambda: next(timestamps))
+    create_post(db, board, other, "first", "1")
+    create_post(db, board, other, "second", "2")
+
+    # Nothing highlighted on this session, so [M] asks which row.
+    session = _run_main_menu(db, lane, alice, ["n", "m", "1", "b", "l", "y"])
+
+    text = _visible_text(session)
+    assert "[M]ark read" in text
+    assert "general: every post marked read." in text
+    assert "caught up" in text
+    assert unread_post_count(db, alice, board) == 0
+
+
+def test_mark_read_says_a_channel_cannot_be_marked(db, lane, alice):
+    create_channel(db, "lobby", creator=alice)
+
+    session = _run_main_menu(db, lane, alice, ["n", "m", "1", "b", "l", "y"])
+
+    assert "Only a message board can be marked read here." in _visible_text(session)
