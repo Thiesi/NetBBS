@@ -477,6 +477,7 @@ from netbbs.net.shutdown import (
     run_drain_sequence,
     run_shutdown_sequence,
 )
+from netbbs.net.sysop_monitor import monitor_screen
 from netbbs.net.password_screen import manage_password_screen
 from netbbs.net.ssh_key_screen import manage_ssh_keys_screen
 from netbbs.net.menu_description_preference import menu_description_level
@@ -10288,6 +10289,12 @@ async def _node_menu(session: Session, lane: DatabaseLane, actor: User, node_con
             await session.write_line("")
             await _who_screen(session, lane, actor, node_controls)
             await _draw_node_menu(session, node_controls, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+        elif choice == "o":
+            await monitor_screen(
+                session, lane, actor, node_controls,
+                disconnect=lambda entry: disconnect_session_draft(session, lane, actor, node_controls, entry),
+            )
+            await _draw_node_menu(session, node_controls, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == "s":
             await session.write_line("")
             await _shutdown_screen(session, lane, actor, node_controls)
@@ -10367,6 +10374,7 @@ async def _draw_node_menu(
         "\r\n" + _fitted_menu(
             [
                 MenuEntry(label=menu_key("W", "ho"), brief="See who's currently connected"),
+                MenuEntry(label=menu_key("O", "nitor", prefix="M"), brief="Watch callers live, act on one"),
                 MenuEntry(label=menu_key("M", "aintenance mode"), brief="Toggle: block non-SysOp logins"),
                 MenuEntry(label=menu_key("D", "rain"), brief="Disconnect non-SysOps soon"),
                 MenuEntry(label=menu_key("L", "ock & drain"), brief="Maintenance mode, then drain"),
@@ -10444,7 +10452,15 @@ async def _who_screen(session: Session, lane: DatabaseLane, actor: User, node_co
             colored("That's your own session -- use Logoff instead.", fg_color=MUTED_COLOR)
         )
         return
+    await disconnect_session_draft(session, lane, actor, node_controls, selected)
 
+
+async def disconnect_session_draft(
+    session: Session, lane: DatabaseLane, actor: User, node_controls: NodeControls, selected: SessionSummary
+) -> None:
+    """The disconnect screen for one session, shared by Who and the live
+    Monitor's Kick (issue #763). Its outcome is announced, for whichever
+    screen is drawn next."""
     # Issue #282: this used to be "Disconnect X?" followed by a
     # mandatory-looking "Message ... (optional):" line prompt with no
     # way back once the question was answered. Now a one-field draft
@@ -10483,6 +10499,7 @@ async def _who_screen(session: Session, lane: DatabaseLane, actor: User, node_co
             record_action, actor=actor, action="disconnect_session",
             target_user_id=target_user_id, detail=f"{detail}, message={message!r}",
         )
+        node_controls.session_registry.note_event(f"disconnected by {actor.username}: {name}")
         _announce_line(session, colored(f"{name!r} disconnected.", fg_color=SUCCESS_COLOR))
         return True
 

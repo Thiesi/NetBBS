@@ -17,7 +17,9 @@ called at the very top, before login even begins.
 from __future__ import annotations
 
 import asyncio
+import datetime
 import time
+from collections import deque
 from dataclasses import dataclass, field
 
 from netbbs.auth.users import SYSOP_LEVEL
@@ -88,6 +90,26 @@ class SessionSummary:
     # are -- see `netbbs.net.session_activity`.
     idle_seconds: float = 0.0
     activity: tuple[str, ...] = ()
+    is_sysop: bool = False
+    # Issue #763: time online, from the monotonic clock, so a host clock
+    # step cannot freeze or inflate it the way subtracting two wall-clock
+    # `connected_at` readings would.
+    connected_seconds: float = 0.0
+
+
+#: How many recent session events the SysOp monitor can show (issue #763).
+#: Memory only, gone at restart: the durable record is the session history
+#: and the moderation log.
+RECENT_EVENT_LIMIT = 50
+
+
+@dataclass(frozen=True)
+class SessionEvent:
+    """One line of the SysOp monitor's event tail: a login, a logoff, or
+    something a SysOp did to a session."""
+
+    at: datetime.datetime
+    text: str
 
 
 class ActiveSessionRegistry:
@@ -105,6 +127,19 @@ class ActiveSessionRegistry:
         # reuse, not merely uniqueness among *currently* connected
         # sessions, is the property that actually matters here.
         self._next_session_id = 1
+        # Issue #763: the monitor's uptime and its event tail.
+        self.started_monotonic = time.monotonic()
+        self._events: deque[SessionEvent] = deque(maxlen=RECENT_EVENT_LIMIT)
+
+    def note_event(self, text: str) -> None:
+        """Add a line to the monitor's event tail. Lead with what happened
+        ("login (ssh): alice"): a narrow screen cuts the end of the line, and
+        names may be long."""
+        self._events.append(SessionEvent(at=datetime.datetime.now(datetime.timezone.utc), text=text))
+
+    def recent_events(self) -> list[SessionEvent]:
+        """The event tail, oldest first."""
+        return list(self._events)
 
     def enter(self, session: Session) -> None:
         """Register `session` as connected. Records the *current*
@@ -131,7 +166,9 @@ class ActiveSessionRegistry:
         self._sessions[session] = _Entry(task=task, session_id=session_id, entered_monotonic=time.monotonic())
 
     def leave(self, session: Session) -> None:
-        self._sessions.pop(session, None)
+        entry = self._sessions.pop(session, None)
+        if entry is not None and entry.username is not None:
+            self.note_event(f"left: {entry.username}")
 
     def mark_authenticated(self, session: Session, username: str, *, is_sysop: bool = False) -> None:
         """Records which account `session` authenticated as, once login
@@ -149,6 +186,7 @@ class ActiveSessionRegistry:
         if entry is not None:
             entry.username = username
             entry.is_sysop = is_sysop
+            self.note_event(f"login ({getattr(session, 'transport_name', 'unknown')}): {username}")
 
     # -- live access changes (issue #659) ------------------------------------
     #
@@ -260,6 +298,8 @@ class ActiveSessionRegistry:
                 peer_address=session.peer_address,
                 idle_seconds=max(0.0, now - since),
                 activity=tuple(getattr(session, "activity", ())),
+                is_sysop=entry.is_sysop,
+                connected_seconds=max(0.0, now - entry.entered_monotonic),
             ))
         return summaries
 
