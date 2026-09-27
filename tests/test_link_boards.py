@@ -1645,3 +1645,16 @@ def test_create_post_refuses_an_unknown_layout(db, alice):
     board = create_board(db, "general", creator=alice)
     with pytest.raises(PostError, match="layout"):
         create_post(db, board, alice, "x", "y", layout="hologram")
+
+
+def test_a_pending_edit_of_an_art_post_is_art_in_the_queue(db, alice):
+    from netbbs.boards.posts import list_pending_posts
+
+    sysop = create_user(db, "sysop", password="hunter2", user_level=SYSOP_LEVEL)
+    board = create_board(db, "general", creator=alice, moderated=True)
+    post = approve_post(db, create_post(db, board, alice, "drawn", "##", layout="art"), approved_by=sysop)
+    edit_post(db, post, board, subject="drawn", body="###", edited_by=alice)
+
+    pending = list_pending_posts(db, board, requesting_user=sysop)
+
+    assert [p.layout for p in pending] == ["art"]

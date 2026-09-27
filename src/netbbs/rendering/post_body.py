@@ -41,7 +41,6 @@ from dataclasses import dataclass, field
 from typing import Iterator
 
 from netbbs.rendering.ansi import CSI, RESET, colored
-from netbbs.rendering.ansi_art import decode_ansi_bytes
 from netbbs.rendering.gradient import nearest_256
 from netbbs.rendering.pipe_codes import BACKGROUND_CODES, FOREGROUND_CODES, cga_to_xterm
 from netbbs.rendering.reflow import reflow, wrap_terminal_text
@@ -482,7 +481,11 @@ def art_body_from_editor(data: bytes) -> str:
     blank rows dropped. The canvas is a fixed width; a post is as wide
     as what was drawn."""
     trimmed: list[str] = []
-    for line in decode_ansi_bytes(data).replace("\r\n", "\n").split("\n"):
+    # The editor always writes CP437 (`encode_ansi_bytes`); guessing UTF-8
+    # first, as for an uploaded file, would read two glyphs whose bytes
+    # happen to form a UTF-8 sequence as one other character (Codex
+    # review on #753).
+    for line in data.decode("cp437").replace("\r\n", "\n").split("\n"):
         styles = _SGR_RE.findall(line)
         # Trailing spaces are blank only in the default style; under a
         # colored background they are part of the picture.
@@ -500,7 +503,9 @@ def art_body_rows(rendered: str, width: int) -> list[str]:
     a word, with its color carried onto the next row."""
     rows: list[str] = []
     for line in rendered.replace("\r\n", "\n").split("\n"):
-        rows.extend(_hard_wrap(line, max(1, width)))
+        # A tab is one column, as the terminal writer draws it (Codex
+        # review on #753).
+        rows.extend(_hard_wrap(line.replace("\t", " "), max(1, width)))
     return self_contained_rows(rows)
 
 

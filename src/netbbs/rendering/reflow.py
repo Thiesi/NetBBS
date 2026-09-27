@@ -105,6 +105,11 @@ def _wrap_terminal_line(text: str, width: int) -> list[str]:
     pending_escape = ""
     leading_whitespace = True
     leading_width = 0
+    # Indentation dropped by the cap below, kept in case nothing visible
+    # follows: then there is no content to leave room for, and a line of
+    # blanks -- a colored stripe in an art post (issue #711) -- may fill
+    # the row.
+    capped_whitespace: list[tuple[str, int]] = []
 
     def append_character(ch: str) -> None:
         nonlocal pending_escape, leading_whitespace, leading_width
@@ -119,6 +124,7 @@ def _wrap_terminal_line(text: str, width: int) -> list[str]:
             # cursor-forward sequence or a very deep indent can manufacture
             # blank physical rows before the first token.
             if leading_width + width_here > max(0, width - 1):
+                capped_whitespace.append((ch, width_here))
                 return
             leading_width += width_here
         elif not ch.isspace():
@@ -152,6 +158,14 @@ def _wrap_terminal_line(text: str, width: int) -> list[str]:
             pending_escape += control
         position = match.end()
     append_text(text[position:])
+
+    if leading_whitespace and capped_whitespace:
+        room = width - leading_width
+        for ch, width_here in capped_whitespace:
+            if width_here > room:
+                break
+            atoms.append((ch, ch, width_here, None))
+            room -= width_here
 
     if not atoms:
         return [pending_escape]

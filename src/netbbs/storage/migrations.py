@@ -3138,6 +3138,19 @@ MIGRATIONS = [
         ),
         sql="""
         ALTER TABLE posts ADD COLUMN layout TEXT NOT NULL DEFAULT 'prose' CHECK (layout IN ('prose', 'art'));
+
+        -- A revision -- an edit, a moderator edit, a tombstone, local or
+        -- carried -- takes its root's layout, so a pending edit of an art
+        -- post shows as art in the moderator's preview too.
+        CREATE TRIGGER trg_posts_revision_layout AFTER INSERT ON posts
+        WHEN NEW.post_id != NEW.root_post_id
+        BEGIN
+            UPDATE posts SET layout = COALESCE(
+                (SELECT r.layout FROM posts r WHERE r.post_id = NEW.root_post_id AND r.board_id = NEW.board_id),
+                'prose'
+            )
+            WHERE id = NEW.id;
+        END;
         """,
     ),
 ]

@@ -254,3 +254,28 @@ def test_quote_text_stays_muted_around_an_authors_color():
     # Muted before the author's color, and muted again after their reset.
     assert row.index(muted) < row.index("plain")
     assert muted in row[row.index("after") - 20:row.index("after")]
+
+
+# -- Codex review on #753 ---------------------------------------------------------
+
+
+def test_a_full_width_colored_stripe_keeps_every_cell():
+    from netbbs.rendering.reflow import wrap_terminal_text
+
+    stripe = f"{ESC}[44m" + " " * 80 + f"{ESC}[0m"
+
+    assert wrap_terminal_text(stripe, 80) == stripe
+    # Indentation before content still leaves that content room.
+    assert wrap_terminal_text(" " * 85 + "X", 80) == " " * 79 + "X"
+
+
+def test_editor_output_is_read_as_cp437():
+    data = "\u251c\u2310".encode("cp437")  # bytes C3 A9: valid UTF-8 for another character
+
+    assert art_body_from_editor(data) == "\u251c\u2310"
+
+
+def test_a_tab_in_an_art_post_is_one_column():
+    rows = art_body_rows("A\tB", 2)
+
+    assert [_SGR.sub("", row) for row in rows] == ["A ", "B"]

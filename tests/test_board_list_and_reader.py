@@ -887,3 +887,38 @@ def test_the_migration_reindexes_existing_posts_as_plain_text(tmp_path, monkeypa
         assert body == "red words"
     finally:
         upgraded.close()
+
+
+def test_the_art_editor_refuses_a_terminal_below_its_minimum(db, alice):
+    board = create_board(db, "general", creator=alice, allow_color=True)
+    session = FakeSession(["a", "Drawing", "b"], width=40, height=7)
+
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+
+    assert "The art editor needs a terminal at least" in session.visible()
+
+
+def test_an_art_post_too_big_for_the_terminal_is_not_opened_for_editing(db, alice):
+    from netbbs.boards.posts import get_post
+
+    board = create_board(db, "general", creator=alice, allow_color=True)
+    post = create_post(db, board, alice, "Wide", "#" * 70, layout="art")
+    session = FakeSession(["1", "e", "b", "b"], width=50, height=24)
+
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+
+    assert "This drawing is 70x1" in session.visible()
+    assert get_post(db, post.post_id).body == "#" * 70
+
+
+def test_an_art_post_gets_the_authors_signature(db, alice):
+    from netbbs.boards.posts import list_posts_page
+    from netbbs.signature import set_signature
+
+    set_signature(db, alice, "-- alice")
+    board = create_board(db, "general", creator=alice, allow_color=True)
+    session = FakeSession(["a", "Drawing", "H", "i", "CTRL+O", "p", "b"])
+
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+
+    assert list_posts_page(db, board, alice).posts[0].body.endswith("-- alice")

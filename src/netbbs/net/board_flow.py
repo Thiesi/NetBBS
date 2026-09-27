@@ -1116,6 +1116,11 @@ async def _show_board(
         if body is None:
             announce(session, "Post cancelled.", tone="muted")
             return True
+        # The signature every composed post gets, as lines under the
+        # drawing (Codex review on #753).
+        signature = get_signature(db, user)
+        if signature:
+            body = append_signature(body, signature)
         await _review_and_commit(
             session, db, user, board, subject=subject, body=body, draft_path=draft_path,
             commit_key="p", commit_label="ost", commit_brief="Publish this post",
@@ -1449,13 +1454,15 @@ async def _edit_existing_post(
     if not _can_edit_post(db, post, user):
         announce(session, "You can't edit that post.", tone="muted")
         return
+    # An art post is revised in the editor that drew it (issue #711), with
+    # a draft slot of its own: the prose editors' recovery must never be
+    # handed a canvas. One the terminal cannot hold is refused first.
+    art = post.layout == "art"
+    if art and _art_canvas(session, post.body) is None:
+        return  # said why; asked nothing
 
     subject = await read_prefilled_field(session, "Subject", post.subject)
 
-    # An art post is revised in the editor that drew it (issue #711), with
-    # a draft slot of its own: the prose editors' recovery must never be
-    # handed a canvas.
-    art = post.layout == "art"
     edit_draft_path = _post_draft_path(
         db, kind="art_edit" if art else "edit", board=board, user=user, root_post_id=post.root_post_id
     )
@@ -1660,20 +1667,61 @@ def _post_draft_path(db: Database, *, kind: str, board: Board, user: User, root_
     return drafts_directory(db) / f"{kind}_{board.id}_{user.id}{suffix}.draft"
 
 
+# The smallest canvas the art editor opens on.
+_ART_MIN_WIDTH = 20
+_ART_MIN_HEIGHT = 5
+
+
+def _art_canvas(session: Session, drawing: str | None) -> tuple[int, int] | None:
+    """The art editor's canvas on this terminal -- as wide as it allows,
+    up to 80 columns, and as tall -- or `None`, with the reason announced,
+    when the terminal is below the editor's minimum or too small for
+    `drawing`, which the canvas would cut (Codex review on #753)."""
+    width = min(80, session.terminal_width)
+    height = session.terminal_height - 3  # the editor's status line below the canvas
+    if width < _ART_MIN_WIDTH or height < _ART_MIN_HEIGHT:
+        announce(
+            session,
+            f"The art editor needs a terminal at least {_ART_MIN_WIDTH} columns wide "
+            f"and {_ART_MIN_HEIGHT + 3} rows tall.",
+            tone="muted",
+        )
+        return None
+    if drawing:
+        lines = drawing.split("\n")
+        drawn_width = max(display_width(strip_ansi(line)) for line in lines)
+        if drawn_width > width or len(lines) > height:
+            announce(
+                session,
+                f"This drawing is {drawn_width}x{len(lines)}: editing it needs a terminal at least "
+                f"{drawn_width} columns wide and {len(lines) + 3} rows tall, or part of it would be cut.",
+                tone="muted",
+            )
+            return None
+    return width, height
+
+
 async def _draw_body(
     session: Session, db: Database, user: User, *, initial_text: str | None, draft_path: Path
 ) -> str | None:
     """An art post's body, drawn (or redrawn) in the ANSI art editor
     (issue #711): a canvas as wide as the terminal allows, up to 80
     columns, and as tall as it allows. `None` when the caller quits
-    without saving or saves an empty canvas."""
+    without saving or saves an empty canvas -- or when the editor cannot
+    open: a terminal below the editor's minimum, or one too small for the
+    drawing being revised, which the canvas would cut (Codex review on
+    #753)."""
+    canvas = _art_canvas(session, initial_text)
+    if canvas is None:
+        return None
+    width, height = canvas
     initial_bytes = initial_text.replace("\n", "\r\n").encode("utf-8") if initial_text else None
     data = await edit_ansi_art(
         session,
         initial_bytes=initial_bytes,
         draft_path=draft_path,
-        width=min(80, max(20, session.terminal_width)),
-        height=max(4, session.terminal_height - 3),
+        width=width,
+        height=height,
         redraw_in_place=redraw_in_place_enabled(db, user),
         unicode_style=unicode_style_enabled(db, user),
         collapsed=breadcrumb_collapsed_enabled(db, user),
