@@ -391,7 +391,7 @@ def test_restore_keeps_lock_inodes_and_excludes_launch_after_game_switch(
             result = subprocess.run([sys.executable, vr.__file__], input=b"Q", capture_output=True,
                                     env=dict(os.environ, NETBBS_DOOR_INFO=str(info)), timeout=60)
             assert result.returncode == 0
-            assert b"maintenance is in progress" in b" ".join(result.stdout.split())
+            assert b"saves are busy with maintenance" in b" ".join(result.stdout.split())
             checked.append(name)
 
     monkeypatch.setattr(backup_module, "_switch_one", check_switch)
@@ -505,7 +505,7 @@ def test_maintenance_prevents_a_new_real_game_launch(tmp_path):
     with vr.maintenance_session(game):
         result = subprocess.run([sys.executable, vr.__file__], input=b"Q", capture_output=True,
                                 env=dict(os.environ, NETBBS_DOOR_INFO=str(info)), timeout=60)
-    assert result.returncode == 0 and b"maintenance is in progress" in b" ".join(result.stdout.split())
+    assert result.returncode == 0 and b"saves are busy with maintenance" in b" ".join(result.stdout.split())
     assert _retained_game_bytes(game) == before
 
 
