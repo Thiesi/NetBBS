@@ -370,12 +370,17 @@ class TelnetSession(Session):
         it belongs to a Telnet command (issue #762). The peek does not parse
         negotiation, so this follows just enough of it: IAC and the command
         byte after it, the option byte after WILL/WONT/DO/DONT, and
-        everything from SB to SE. Keepalive traffic must not make an idle
-        caller look active."""
+        everything from IAC SB to IAC SE. Keepalive traffic must not make an
+        idle caller look active."""
         state = self._peek_command
         if state == "subnegotiation":
-            if byte == SE:
-                self._peek_command = None
+            # Only IAC SE ends it: a payload byte may be 0xF0 itself (a
+            # NAWS width of 240), and IAC IAC is an escaped payload 0xFF.
+            if byte == IAC:
+                self._peek_command = "subnegotiation-iac"
+            return
+        if state == "subnegotiation-iac":
+            self._peek_command = None if byte == SE else "subnegotiation"
             return
         if state == "iac":
             if byte == IAC:

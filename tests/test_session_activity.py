@@ -81,10 +81,40 @@ def test_the_trail_is_restored_on_cancellation():
 
 
 def test_a_screen_reentering_itself_does_not_grow_the_trail():
-    session = _Plain()
-    with activity(session, "Files"), activity(session, "Area"), activity(session, "Area"):
-        assert session.activity == ("Files", "Area")
-    assert session.activity == ()
+    async def scenario():
+        session = _Plain()
+        seen = []
+
+        @records_activity(lambda args: args["name"])
+        async def show_area(session, name, depth):
+            seen.append(session.activity)
+            if depth:
+                await show_area(session, name, depth - 1)
+
+        await show_area(session, "Area", 3)
+        assert seen == [("Area",)] * 4
+        assert session.activity == ()
+
+    asyncio.run(scenario())
+
+
+def test_a_place_named_like_its_parent_is_still_a_level():
+    async def scenario():
+        session = _Plain()
+        seen = []
+
+        @records_activity("Files")
+        async def browse(session):
+            await show_area(session, "Files")
+
+        @records_activity(lambda args: args["name"])
+        async def show_area(session, name):
+            seen.append(session.activity)
+
+        await browse(session)
+        assert seen == [("Files", "Files")]
+
+    asyncio.run(scenario())
 
 
 def test_an_empty_label_leaves_the_trail_alone():
@@ -279,8 +309,10 @@ def test_timed_reads_stamp_data_too():
         bytes([IAC, WILL, 31]),
         bytes([IAC, 241]),  # NOP, a common keepalive
         bytes([IAC, 250, 31, 0, 80, 0, 24, IAC, 240]),  # SB NAWS ... SE
+        bytes([IAC, 250, 31, 0, 240, 0, 24, IAC, 240]),  # a width of 240 is 00 F0
+        bytes([IAC, 250, 31, IAC, IAC, 0, 0, 24, IAC, 240]),  # an escaped 0xFF payload byte
     ],
-    ids=["will", "nop", "subnegotiation"],
+    ids=["will", "nop", "subnegotiation", "payload-f0", "payload-iac-iac"],
 )
 def test_a_telnet_peek_through_negotiation_is_not_input(stream):
     async def scenario():

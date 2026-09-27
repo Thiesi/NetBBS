@@ -21,6 +21,7 @@ reason to show one caller's private business to another screen.
 
 from __future__ import annotations
 
+import contextvars
 import functools
 import inspect
 from contextlib import contextmanager
@@ -47,15 +48,22 @@ def activity(session: Any, label: str | None) -> Iterator[None]:
     abnormally cannot leave a stale segment behind for an outer one."""
     previous = getattr(session, "activity", ())
     cleaned = _clean(label) if label else ""
-    # A screen that redraws itself by calling itself again (`file_flow.
-    # _show_area` after offering an upload link) is still one place, and
-    # must not grow the trail on every redraw.
-    if cleaned and previous[-1:] != (cleaned,):
+    if cleaned:
         session.activity = (*previous, cleaned)
     try:
         yield
     finally:
         session.activity = previous
+
+
+#: The (entry function, segment) pairs already on this task's trail. A
+#: screen that redraws itself by calling itself again (`file_flow.
+#: _show_area` after offering an upload link) is still one place and must
+#: not grow the trail on every redraw -- while a file area that happens to
+#: be named "Files" is a real second level and must show as one. Keyed by
+#: function as well as label so only the first case is collapsed. Each
+#: connection runs in its own task, so the set is per caller.
+_ENTERED: contextvars.ContextVar[frozenset] = contextvars.ContextVar("netbbs_activity_entered", default=frozenset())
 
 
 def records_activity(label: str | Callable[[Mapping[str, Any]], str | None]):
@@ -75,8 +83,16 @@ def records_activity(label: str | Callable[[Mapping[str, Any]], str | None]):
         async def wrapper(*args, **kwargs):
             bound = signature.bind(*args, **kwargs)
             segment = label if isinstance(label, str) else label(bound.arguments)
-            with activity(bound.arguments["session"], segment):
+            key = (wrapper, _clean(segment) if segment else "")
+            entered = _ENTERED.get()
+            if key in entered:
                 return await function(*args, **kwargs)
+            token = _ENTERED.set(entered | {key})
+            try:
+                with activity(bound.arguments["session"], segment):
+                    return await function(*args, **kwargs)
+            finally:
+                _ENTERED.reset(token)
 
         return wrapper
 
