@@ -24,6 +24,7 @@ from pathlib import Path
 
 from netbbs.auth.users import count_sysops
 from netbbs.backup import remove_pid_file, write_pid_file
+from netbbs.backup_schedule import record_node_identity_dir, run_backup_scheduler
 from netbbs.chat import ChatHub, DirectChatInvites, MessageMailbox, PresenceRegistry
 from netbbs.config import is_node_display_name_placeholder
 from netbbs.files.storage import purge_incoming_staging
@@ -59,6 +60,7 @@ from netbbs.net.session_registry import ActiveSessionRegistry
 from netbbs.net.shutdown import SequenceScheduler, run_shutdown_sequence
 from netbbs.net.throttle import LinkRequestThrottle, LoginThrottle
 from netbbs.selfupdate import run_scheduled_update_check
+from netbbs.update_apply import RESTART_EXIT_CODE, reconcile_install_at_startup, restart_exit_requested
 from netbbs.storage.database import Database, DatabaseIntegrityError
 from netbbs.storage.execution import DatabaseLane
 from netbbs.timeutil import utc_now_iso
@@ -731,6 +733,13 @@ async def run(
     # implying one existed. Runs regardless of Link configuration, same
     # as the daybreak announcer -- this is general node maintenance, not
     # a Link-specific concern.
+    # Issue #731: an install from Settings -> Update records itself before
+    # the node goes down; this start says whether it came back as the
+    # version that was installed. Before the scheduled check, whose own
+    # outcome would otherwise be the one the Update screen shows.
+    install_outcome = reconcile_install_at_startup(db, __version__)
+    if install_outcome is not None:
+        _logger.info("update: %s", install_outcome)
     update_check_task = asyncio.create_task(run_scheduled_update_check(db))
 
     def _log_update_check_failure(task: asyncio.Task) -> None:
@@ -746,6 +755,29 @@ async def run(
             )
 
     update_check_task.add_done_callback(_log_update_check_failure)
+
+    # Issue #727: the node runs the SysOp's backup schedule itself (off by
+    # default) instead of the SysOp keeping a cron job beside it. Same
+    # "general node maintenance, runs regardless of Link" shape as the two
+    # tasks above; a pass that is creating a backup when shutdown comes is
+    # finished rather than cut off (see `run_backup_scheduler`). Started
+    # further down, once the listeners are bound and this process has
+    # recorded its Voidrunner save directory: a catch-up backup on the first
+    # pass would otherwise trust the path a previous start recorded (Codex
+    # review).
+    backup_schedule_task: asyncio.Task | None = None
+
+    def _log_backup_schedule_failure(task: asyncio.Task) -> None:
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            _logger.error(
+                "backup scheduler task failed -- scheduled backups will not run again this node "
+                "uptime (Create backup now is unaffected)",
+                exc_info=exc,
+            )
+
 
     # Issue #201: same "runs regardless of Link configuration, general
     # node maintenance" shape as update_check_task just above -- managed-
@@ -1259,6 +1291,9 @@ async def run(
         # Issue #730, and for the same reason: a second launch that fails on
         # the bound port must not overwrite what the running node resolved.
         record_startup_policy(db, config)
+        record_node_identity_dir(db, config.identity_dir)
+        backup_schedule_task = asyncio.create_task(run_backup_scheduler(config.db_path, config.identity_dir))
+        backup_schedule_task.add_done_callback(_log_backup_schedule_failure)
 
         # Issue #466: after the listeners are bound, not before. A second
         # NetBBS started against the same state directory fails here, on the
@@ -1475,6 +1510,7 @@ async def run(
 
         await _drain_immediately(daybreak_task)
         await _drain_immediately(update_check_task)
+        await _drain_immediately(backup_schedule_task)
         # A single heartbeat call is quick, idempotent, and retry-safe
         # (worst case, cutting it off mid-flight just means "this pass's
         # heartbeat didn't complete, the next one retries") -- none of
@@ -1661,6 +1697,11 @@ async def main() -> None:
     except StartupError as exc:
         _logger.error("startup failed: %s", exc)
         raise SystemExit(1) from exc
+    # Issue #731: the node stopped to run a release installed from Settings ->
+    # Update. A distinct status the service manager restarts on.
+    if restart_exit_requested():
+        _logger.info("exiting with status %s so the service manager starts the installed release", RESTART_EXIT_CODE)
+        raise SystemExit(RESTART_EXIT_CODE)
 
 
 
