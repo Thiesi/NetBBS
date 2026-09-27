@@ -649,6 +649,20 @@ def test_captured_defenders_return_once_even_with_an_old_owner_session(db_path):
     conn.close()
 
 
+def test_one_captured_defender_is_reported_in_the_singular(db_path):
+    # "1 defenders returned" reached the feed, the log and the receipt (#649).
+    conn, now, attacker, owner = _rivals(db_path)
+    wd.resolve_root_exchange(conn, owner, 1, now, FixedRandom())
+    wd.resolve_root_exchange(conn, attacker, 1, now, FixedRandom())
+    summary = wd.history_events(conn, owner.user_id)[0].summary_text
+    assert "1 defender returned to your available crew." in summary
+    conn.close()
+
+
+def test_counted_agrees_with_its_number():
+    assert [wd.counted(n, "turn") for n in (0, 1, 2)] == ["0 turns", "1 turn", "2 turns"]
+
+
 def test_abandon_and_reclaim_cannot_farm_capture_rank_even_after_restart(db_path):
     conn, now, actor, _ = _rivals(db_path)
     wd.resolve_root_exchange(conn, actor, 1, now, FixedRandom())
