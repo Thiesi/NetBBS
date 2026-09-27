@@ -145,7 +145,7 @@ from netbbs.chat.categories import list_subcategories as list_channel_subcategor
 from netbbs.chat.categories import list_top_level_categories as list_top_level_channel_categories
 from netbbs.chat.channels import Channel, ChannelError, create_channel, delete_channel, list_channels, update_channel
 from netbbs.chat.hub import ChatHub
-from netbbs.chat.scrollback import MAX_SCROLLBACK_LIMIT, get_scrollback_limit, set_scrollback_limit
+from netbbs.chat.scrollback import SCROLLBACK_LIMIT_CONFIG_KEY, MAX_SCROLLBACK_LIMIT, get_scrollback_limit
 from netbbs.communities import (
     Community,
     CommunityError,
@@ -160,8 +160,11 @@ from netbbs.communities import (
     update_community,
 )
 from netbbs.config import (
+    EXPIRY_GRACE_PERIOD_CONFIG_KEY,
+    INVITATION_EXPIRY_DAYS_CONFIG_KEY,
     MAX_NODE_DISPLAY_NAME_LENGTH,
     MAX_SETTING_DAYS,
+    MAX_UPLOAD_BYTES_CONFIG_KEY,
     MAX_UPLOAD_BYTES_LIMIT,
     RegistrationMode,
     get_expiry_grace_period_days,
@@ -170,9 +173,7 @@ from netbbs.config import (
     get_node_display_name,
     get_registration_mode,
     is_node_display_name_placeholder,
-    set_expiry_grace_period_days,
-    set_invitation_expiry_days,
-    set_max_upload_bytes,
+    set_config_without_commit,
     set_node_display_name,
     set_registration_mode,
 )
@@ -7056,24 +7057,43 @@ async def _limits_settings_screen(session: Session, lane: DatabaseLane, actor: U
     current = await lane.run(_load)
     # The upload cap is edited in whole MiB. A byte count that is not a
     # whole MiB (only reachable through the dev script) is kept exactly
-    # unless the SysOp changes this field.
-    draft: dict = {**current, "upload_mib": max(1, current["upload_bytes"] // _MIB)}
-    start_mib = draft["upload_mib"]
+    # until the SysOp edits this field -- tracked as "edited", not by
+    # comparing numbers, so re-entering the floored value still applies
+    # it (Codex review).
+    draft: dict = {**current, "upload_mib": max(1, current["upload_bytes"] // _MIB), "upload_edited": False}
+    @inline_field
+    async def _upload_field(session: Session, lane: DatabaseLane, draft: dict) -> None:
+        # `_int_field`'s shape, except that Esc and Enter differ here:
+        # Esc keeps the field untouched, Enter chooses the number shown.
+        await write_field_prompt(session, colored(f"Largest upload, in MiB ({_EDIT_HINT}):", fg_color=MUTED_COLOR))
+        try:
+            raw = (await _read_seeded_line(session, initial=str(draft["upload_mib"]))).strip()
+        except InputCancelled:
+            await session.write_line("")
+            return
+        try:
+            value = int(raw) if raw else draft["upload_mib"]
+        except ValueError:
+            await write_field_message(session, colored("Not a number -- cancelled.", fg_color=MUTED_COLOR))
+            return
+        draft["upload_mib"] = value
+        draft["upload_edited"] = True
 
     def _upload_render(d: dict) -> str:
-        if d["upload_mib"] == start_mib:
+        if not d["upload_edited"]:
             return _format_bytes(current["upload_bytes"])
         return f"{d['upload_mib']} MiB"
 
     fields = [
         FieldSpec(
             key="upload_mib", hotkey="u", menu_text=menu_key("U", "pload cap (MiB)"), label="Upload cap",
-            render=_upload_render, prompt=_int_field("upload_mib", "Largest upload, in MiB"),
+            render=_upload_render, prompt=_upload_field,
             brief="Largest file a caller may upload", section="Files",
             help=(
                 "The largest single upload this node accepts, over Zmodem and the browser alike, in MiB "
                 f"(1-{MAX_UPLOAD_BYTES_LIMIT // _MIB}). A reverse proxy in front of the web listener has "
-                "its own request-body limit: set that at least this high, or larger uploads fail at the proxy."
+                "its own request-body limit: set that at least 1 MiB higher than this (a browser upload "
+                "also carries form framing), or uploads near the cap fail at the proxy."
             ),
         ),
         FieldSpec(
@@ -7113,9 +7133,7 @@ async def _limits_settings_screen(session: Session, lane: DatabaseLane, actor: U
     ]
 
     async def save(draft: dict) -> list[str]:
-        upload_bytes = (
-            current["upload_bytes"] if draft["upload_mib"] == start_mib else draft["upload_mib"] * _MIB
-        )
+        upload_bytes = draft["upload_mib"] * _MIB if draft["upload_edited"] else current["upload_bytes"]
         values = {
             "upload_bytes": upload_bytes,
             "grace_days": draft["grace_days"],
@@ -7134,20 +7152,33 @@ async def _limits_settings_screen(session: Session, lane: DatabaseLane, actor: U
             raise _LimitsError(f"Chat scrollback must be 1-{MAX_SCROLLBACK_LIMIT} messages.")
         changed = [key for key in values if values[key] != current[key]]
 
+        config_keys = {
+            "upload_bytes": MAX_UPLOAD_BYTES_CONFIG_KEY,
+            "grace_days": EXPIRY_GRACE_PERIOD_CONFIG_KEY,
+            "invite_days": INVITATION_EXPIRY_DAYS_CONFIG_KEY,
+            "scrollback": SCROLLBACK_LIMIT_CONFIG_KEY,
+        }
+
         def _persist(db: Database) -> None:
-            setters = {
-                "upload_bytes": set_max_upload_bytes,
-                "grace_days": set_expiry_grace_period_days,
-                "invite_days": set_invitation_expiry_days,
-                "scrollback": set_scrollback_limit,
-            }
-            for key in changed:
-                setters[key](db, values[key])
-            if changed:
-                record_action(
+            if not changed:
+                return
+            # The values and the audit entry commit together or not at
+            # all (Codex review). The range checks above are the same
+            # ones each setter makes; `None` invitation expiry is stored
+            # as "", as `set_invitation_expiry_days` does.
+            db.connection.execute("BEGIN IMMEDIATE")
+            try:
+                for key in changed:
+                    set_config_without_commit(db, config_keys[key], "" if values[key] is None else str(values[key]))
+                record_action_without_commit(
                     db, actor=actor, action="set_limits_and_retention",
                     detail=" ".join(f"{key}={values[key]}" for key in changed),
                 )
+            except BaseException:
+                db.connection.rollback()
+                raise
+            else:
+                db.connection.commit()
 
         await lane.run(_persist)
         return changed

@@ -102,7 +102,12 @@ def get_scrollback_limit(db: Database) -> int:
         limit = int(raw)
     except ValueError:
         return _DEFAULT_SCROLLBACK_LIMIT
-    return limit if limit > 0 else _DEFAULT_SCROLLBACK_LIMIT
+    if limit <= 0:
+        return _DEFAULT_SCROLLBACK_LIMIT
+    # A value stored before the setter had a ceiling (issue #725) is
+    # clamped here, so the bound on storage carried channels can fill
+    # holds on an upgraded node too (Codex review).
+    return min(limit, MAX_SCROLLBACK_LIMIT)
 
 
 def set_scrollback_limit(db: Database, limit: int) -> None:

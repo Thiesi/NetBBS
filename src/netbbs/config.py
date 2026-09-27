@@ -74,7 +74,9 @@ MAX_SETTING_DAYS = 3650
 
 def get_expiry_grace_period_days(db: Database) -> int:
     value = get_config(db, EXPIRY_GRACE_PERIOD_CONFIG_KEY)
-    return int(value) if value is not None else _DEFAULT_EXPIRY_GRACE_PERIOD_DAYS
+    # Clamped rather than trusted: a value stored before the setter had
+    # a ceiling (issue #725) would overflow the expiry timedelta.
+    return min(int(value), MAX_SETTING_DAYS) if value is not None else _DEFAULT_EXPIRY_GRACE_PERIOD_DAYS
 
 
 def set_expiry_grace_period_days(db: Database, days: int) -> None:
@@ -101,7 +103,7 @@ MAX_UPLOAD_BYTES_LIMIT = 64 * 1024 * 1024 * 1024  # 64 GiB
 
 def get_max_upload_bytes(db: Database) -> int:
     value = get_config(db, MAX_UPLOAD_BYTES_CONFIG_KEY)
-    return int(value) if value is not None else _DEFAULT_MAX_UPLOAD_BYTES
+    return min(int(value), MAX_UPLOAD_BYTES_LIMIT) if value is not None else _DEFAULT_MAX_UPLOAD_BYTES
 
 
 def set_max_upload_bytes(db: Database, max_bytes: int) -> None:
@@ -127,7 +129,7 @@ def get_invitation_expiry_days(db: Database) -> int | None:
     value = get_config(db, INVITATION_EXPIRY_DAYS_CONFIG_KEY)
     if value is None:
         return _DEFAULT_INVITATION_EXPIRY_DAYS
-    return None if value == "" else int(value)
+    return None if value == "" else min(int(value), MAX_SETTING_DAYS)
 
 
 def set_invitation_expiry_days(db: Database, days: int | None) -> None:

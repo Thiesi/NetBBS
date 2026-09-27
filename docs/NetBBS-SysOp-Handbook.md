@@ -252,8 +252,9 @@ public_url = "https://bbs.example.org"
 ```
 
 Point the HTTPS proxy at that local port, forwarding WebSocket upgrades as
-well as ordinary requests. Set its upload body limit at least as high as
-NetBBS's upload cap (**Settings → Limits & retention**, 100 MiB by default).
+well as ordinary requests. Set its upload body limit at least 1 MiB above
+NetBBS's upload cap (**Settings → Limits & retention**, 100 MiB by default):
+a browser upload carries form framing on top of the file.
 Use a real hostname and certificate;
 `bbs.example.org` is a placeholder. Restart after changing listener settings.
 
@@ -727,7 +728,7 @@ and applied without a restart:
 
 | Setting | Default | Effect |
 | --- | --- | --- |
-| Upload cap | 100 MiB | Largest single upload, over Zmodem and the browser. Keep a reverse proxy's body limit at least this high. |
+| Upload cap | 100 MiB | Largest single upload, over Zmodem and the browser. Keep a reverse proxy's body limit at least 1 MiB higher. |
 | Grace before deletion | 7 days | How long an expired post or file waits before it is deleted. An expired file can be recovered from its area until then. |
 | Invitation expiry | 7 days | When an unaccepted channel invitation lapses. Clear the field for invitations that never expire. |
 | Chat scrollback | 100 messages | Lines each channel keeps, carried Link channels included. Lowering it trims a channel the next time someone speaks there. |
