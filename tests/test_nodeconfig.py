@@ -664,13 +664,37 @@ def test_default_link_config_has_safe_quota_defaults():
 
 @pytest.mark.parametrize(
     "field_name", [
-        "max_peers", "max_carried_boards", "request_rate_capacity",
+        "max_peers", "request_rate_capacity",
         "request_rate_refill_per_minute", "request_rate_max_tracked_sources",
     ],
 )
 def test_link_nonpositive_quota_field_fails_validation(field_name):
     config = NodeConfig(
         link=LinkConfig(enabled=True, host="127.0.0.1", port=7862, **{field_name: 0})
+    )
+    with pytest.raises(ConfigError, match=f"link.{field_name}"):
+        config.validate()
+
+
+_CARRY_CAPS = ["max_carried_boards", "max_carried_channels", "max_carried_file_areas"]
+
+
+@pytest.mark.parametrize("field_name", _CARRY_CAPS)
+def test_a_carry_cap_of_zero_is_a_curated_node_and_starts(field_name):
+    """Issue #683: a cap bounds automatic intake only, so 0 means "offer
+    everything new, carry nothing unasked" -- which the SysOp Handbook tells
+    a SysOp to set. Refusing it at startup made that advice stop the node."""
+    config = NodeConfig(
+        link=LinkConfig(enabled=True, host="127.0.0.1", port=7862, **{field_name: 0})
+    )
+    config.validate()
+
+
+@pytest.mark.parametrize("value", [-1, float("inf"), float("nan")])
+@pytest.mark.parametrize("field_name", _CARRY_CAPS)
+def test_a_negative_or_unbounded_carry_cap_fails_validation(field_name, value):
+    config = NodeConfig(
+        link=LinkConfig(enabled=True, host="127.0.0.1", port=7862, **{field_name: value})
     )
     with pytest.raises(ConfigError, match=f"link.{field_name}"):
         config.validate()

@@ -163,6 +163,7 @@ from netbbs.chat.categories import list_subcategories as list_channel_subcategor
 from netbbs.chat.categories import list_top_level_categories as list_top_level_channel_categories
 from netbbs.chat.channels import Channel, ChannelError, create_channel, delete_channel, list_channels, update_channel
 from netbbs.chat.hub import ChatHub
+from netbbs.chat.scrollback import SCROLLBACK_LIMIT_CONFIG_KEY, MAX_SCROLLBACK_LIMIT, get_scrollback_limit
 from netbbs.communities import (
     Community,
     CommunityError,
@@ -177,11 +178,20 @@ from netbbs.communities import (
     update_community,
 )
 from netbbs.config import (
+    EXPIRY_GRACE_PERIOD_CONFIG_KEY,
+    INVITATION_EXPIRY_DAYS_CONFIG_KEY,
     MAX_NODE_DISPLAY_NAME_LENGTH,
+    MAX_SETTING_DAYS,
+    MAX_UPLOAD_BYTES_CONFIG_KEY,
+    MAX_UPLOAD_BYTES_LIMIT,
     RegistrationMode,
+    get_expiry_grace_period_days,
+    get_invitation_expiry_days,
+    get_max_upload_bytes,
     get_node_display_name,
     get_registration_mode,
     is_node_display_name_placeholder,
+    set_config_without_commit,
     set_node_display_name,
     set_registration_mode,
 )
@@ -191,6 +201,7 @@ from netbbs.doors import (
     create_door,
     custom_doors_dir,
     delete_door,
+    get_door,
     get_door_by_name,
     list_doors,
     update_door,
@@ -600,6 +611,7 @@ from netbbs.guest import (
     set_pre_login_notice,
     set_pre_login_notice_without_commit,
 )
+from netbbs.search import SearchIndexIntegrityReport, check_index_integrity, rebuild_indexes
 from netbbs.session_history import previous_callers_enabled, set_previous_callers_enabled
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
@@ -1882,6 +1894,16 @@ async def _draw_users_menu(session: Session, *, stats: dict[str, Any]) -> None:
 # -- system submenu ----------------------------------------------------------
 
 
+def _diagnostics_available(node_controls: NodeControls | None, link_context: LinkContext | None) -> bool:
+    """Whether the bounded diagnostic log is worth offering.
+
+    It is written by Link *and* by the MRC bridge (issue #275), and MRC can
+    be switched on live without Link -- so on any running node the log is
+    worth reading. Operations and Settings' hidden aliases share this one
+    gate (issue #732: Settings once required Link alone)."""
+    return link_context is not None or node_controls is not None
+
+
 async def _operations_menu(
     session: Session,
     lane: DatabaseLane,
@@ -1913,7 +1935,7 @@ async def _operations_menu(
     # part of this snapshot -- they read `node_controls` directly, in
     # memory, so recomputing them every loop iteration is free.
     state = await lane.run(_load_ops)
-    diagnostics_available = link_context is not None or node_controls is not None
+    diagnostics_available = _diagnostics_available(node_controls, link_context)
     while True:
         unicode_style = state["unicode_style"]
         collapsed = state["collapsed"]
@@ -2049,6 +2071,7 @@ async def _operations_menu(
         options = [
             MenuEntry(label=menu_key("K", "up", prefix="Bac"), brief="Create and review complete backups"),
             MenuEntry(label=menu_key("P", "rune drafts"), brief="Clean up old unsaved drafts"),
+            MenuEntry(label=menu_key("S", "earch indexes"), brief="Check and rebuild Find's indexes"),
             MenuEntry(label=menu_key("A", "udit log"), brief="Moderation action history"),
         ]
         if node_controls is not None:
@@ -2058,9 +2081,6 @@ async def _operations_menu(
                 MenuEntry(label=menu_key("L", "ink status"), brief="NetBBS Link peer/network health"),
                 MenuEntry(label=menu_key("O", "utbox"), brief="Pending outgoing Link work items"),
             ])
-        # The bounded diagnostic log is written by Link *and* by the MRC
-        # bridge (issue #275), and MRC can be switched on live without
-        # Link -- so on any running node the log is worth reading.
         if diagnostics_available:
             options.extend([
                 MenuEntry(label=menu_key("D", "iagnostics"), brief="Recent Link and MRC diagnostics"),
@@ -2122,6 +2142,9 @@ async def _operations_menu(
             state = await lane.run(_load_ops)
         elif choice == "p":
             await _prune_drafts_screen(session, lane, actor)
+            state = await lane.run(_load_ops)
+        elif choice == "s":
+            await _search_indexes_screen(session, lane, actor)
             state = await lane.run(_load_ops)
         elif choice == "a":
             await _audit_log_screen(session, lane, actor)
@@ -2212,6 +2235,11 @@ async def _system_menu(
             await _timestamp_settings_screen(session, lane, actor)
             stats = await lane.run(_load_settings_stats)
             await _draw_system_menu(session, node_controls, link_context, stats=stats)
+        elif choice == "s":
+            await session.write_line("")
+            await _limits_settings_screen(session, lane, actor)
+            stats = await lane.run(_load_settings_stats)
+            await _draw_system_menu(session, node_controls, link_context, stats=stats)
         elif choice == "v":
             def _toggle_previous_callers(db: Database) -> None:
                 enabled = not previous_callers_enabled(db)
@@ -2251,12 +2279,12 @@ async def _system_menu(
             await _repair_carried_posts_screen(session, lane, actor)
             stats = await lane.run(_load_settings_stats)
             await _draw_system_menu(session, node_controls, link_context, stats=stats)
-        elif choice == "d" and link_context is not None:
+        elif choice == "d" and _diagnostics_available(node_controls, link_context):
             await session.write_line("")
             await _diagnostic_log_screen(session, lane, actor)
             stats = await lane.run(_load_settings_stats)
             await _draw_system_menu(session, node_controls, link_context, stats=stats)
-        elif choice == "f" and link_context is not None:
+        elif choice == "f" and _diagnostics_available(node_controls, link_context):
             await session.write_line("")
             await _diagnostic_log_tail_screen(session, lane)
             stats = await lane.run(_load_settings_stats)
@@ -2373,6 +2401,10 @@ async def _draw_system_menu(
         MenuEntry(label=menu_key("J", "oin NetBBS Link"), brief="Reliable-node seeds and relays"),
         MenuEntry(label=menu_key("U", "pdate"), brief="Software update settings"),
         MenuEntry(label=menu_key("T", "imestamp format"), brief="Node-wide date/time display"),
+        MenuEntry(
+            label=menu_key("S", " & retention", prefix="Limit"),
+            brief="Uploads, expiry, invites, history",
+        ),
         MenuEntry(
             label=menu_key("G", "uest access"),
             brief=(
@@ -7232,6 +7264,181 @@ async def _timestamp_settings_screen(session: Session, lane: DatabaseLane, actor
     )
 
 
+_MIB = 1024 * 1024
+
+
+class _LimitsError(ValueError):
+    """A limits-screen save the SysOp must correct; keeps the draft open."""
+
+
+async def _limits_settings_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
+    """Issue #725: four node-wide settings the node has always read, each
+    with a validating setter, that no screen ever called -- the upload
+    cap, the grace between expiry and deletion, the default channel
+    invitation expiry and the chat scrollback limit. Before this the
+    only way to change them was `scripts/set_node_config.py`, a
+    development helper that writes the raw string unchecked.
+
+    One draft editor rather than four immediate-mode fields: four values
+    on one screen are a draft (design doc §3.5), and none of them is so
+    urgent that it has to apply the moment it is typed.
+    """
+
+    def _load(db: Database) -> dict:
+        return {
+            "upload_bytes": get_max_upload_bytes(db),
+            "grace_days": get_expiry_grace_period_days(db),
+            "invite_days": get_invitation_expiry_days(db),
+            "scrollback": get_scrollback_limit(db),
+        }
+
+    current = await lane.run(_load)
+    # The upload cap is edited in whole MiB. A byte count that is not a
+    # whole MiB (only reachable through the dev script) is kept exactly
+    # until the SysOp edits this field -- tracked as "edited", not by
+    # comparing numbers, so re-entering the floored value still applies
+    # it (Codex review).
+    draft: dict = {**current, "upload_mib": max(1, current["upload_bytes"] // _MIB), "upload_edited": False}
+    @inline_field
+    async def _upload_field(session: Session, lane: DatabaseLane, draft: dict) -> None:
+        # `_int_field`'s shape, except that Esc and Enter differ here:
+        # Esc keeps the field untouched, Enter chooses the number shown.
+        await write_field_prompt(session, colored(f"Largest upload, in MiB ({_EDIT_HINT}):", fg_color=MUTED_COLOR))
+        try:
+            raw = (await _read_seeded_line(session, initial=str(draft["upload_mib"]))).strip()
+        except InputCancelled:
+            await session.write_line("")
+            return
+        try:
+            value = int(raw) if raw else draft["upload_mib"]
+        except ValueError:
+            await write_field_message(session, colored("Not a number -- cancelled.", fg_color=MUTED_COLOR))
+            return
+        draft["upload_mib"] = value
+        draft["upload_edited"] = True
+
+    def _upload_render(d: dict) -> str:
+        if not d["upload_edited"]:
+            return _format_bytes(current["upload_bytes"])
+        return f"{d['upload_mib']} MiB"
+
+    fields = [
+        FieldSpec(
+            key="upload_mib", hotkey="u", menu_text=menu_key("U", "pload cap (MiB)"), label="Upload cap",
+            render=_upload_render, prompt=_upload_field,
+            brief="Largest file a caller may upload", section="Files",
+            help=(
+                "The largest single upload this node accepts, over Zmodem and the browser alike, in MiB "
+                f"(1-{MAX_UPLOAD_BYTES_LIMIT // _MIB}). A reverse proxy in front of the web listener has "
+                "its own request-body limit: set that at least 1 MiB higher than this (a browser upload "
+                "also carries form framing), or uploads near the cap fail at the proxy."
+            ),
+        ),
+        FieldSpec(
+            key="grace_days", hotkey="g", menu_text=menu_key("G", "race before deletion (days)"),
+            label="Grace before deletion",
+            render=lambda d: f"{d['grace_days']} days", prompt=_int_field("grace_days", "Days"),
+            brief="Days before expired items go", section="Retention",
+            help=(
+                "When a post or file passes its board's or area's maximum age it expires, and is deleted "
+                f"this many days later (0-{MAX_SETTING_DAYS}). Until then a SysOp can still recover an "
+                "expired file from its area's E[x]pired files screen."
+            ),
+        ),
+        FieldSpec(
+            key="invite_days", hotkey="i", menu_text=menu_key("I", "nvitation expiry (days)"),
+            label="Channel invitations expire after",
+            render=lambda d: "never" if d["invite_days"] is None else f"{d['invite_days']} days",
+            prompt=_optional_int_field("invite_days", "Days (blank = never)"),
+            brief="Unused chat invitations lapse", section="Chat",
+            help=(
+                f"A channel invitation not yet accepted lapses after this many days (1-{MAX_SETTING_DAYS}). "
+                "Clear the field for invitations that never expire. Applies to invitations sent from now on."
+            ),
+        ),
+        FieldSpec(
+            key="scrollback", hotkey="c", menu_text=menu_key("C", "hat scrollback (messages)"),
+            label="Chat scrollback",
+            render=lambda d: f"{d['scrollback']} messages per channel",
+            prompt=_int_field("scrollback", "Messages kept per channel"),
+            brief="History kept in each channel", section="Chat",
+            help=(
+                f"How many messages and join/leave lines each channel keeps (1-{MAX_SCROLLBACK_LIMIT}). "
+                "Carried Link channels count too. Lowering it trims each channel the next time "
+                "something is said there."
+            ),
+        ),
+    ]
+
+    async def save(draft: dict) -> list[str]:
+        upload_bytes = draft["upload_mib"] * _MIB if draft["upload_edited"] else current["upload_bytes"]
+        values = {
+            "upload_bytes": upload_bytes,
+            "grace_days": draft["grace_days"],
+            "invite_days": draft["invite_days"],
+            "scrollback": draft["scrollback"],
+        }
+        # Checked here, before anything is written, so one bad value
+        # cannot leave the others half saved; the setters check again.
+        if not 0 < upload_bytes <= MAX_UPLOAD_BYTES_LIMIT:
+            raise _LimitsError(f"Upload cap must be 1-{MAX_UPLOAD_BYTES_LIMIT // _MIB} MiB.")
+        if not 0 <= values["grace_days"] <= MAX_SETTING_DAYS:
+            raise _LimitsError(f"Grace before deletion must be 0-{MAX_SETTING_DAYS} days.")
+        if values["invite_days"] is not None and not 0 < values["invite_days"] <= MAX_SETTING_DAYS:
+            raise _LimitsError(f"Invitation expiry must be 1-{MAX_SETTING_DAYS} days, or blank for never.")
+        if not 0 < values["scrollback"] <= MAX_SCROLLBACK_LIMIT:
+            raise _LimitsError(f"Chat scrollback must be 1-{MAX_SCROLLBACK_LIMIT} messages.")
+        changed = [key for key in values if values[key] != current[key]]
+
+        config_keys = {
+            "upload_bytes": MAX_UPLOAD_BYTES_CONFIG_KEY,
+            "grace_days": EXPIRY_GRACE_PERIOD_CONFIG_KEY,
+            "invite_days": INVITATION_EXPIRY_DAYS_CONFIG_KEY,
+            "scrollback": SCROLLBACK_LIMIT_CONFIG_KEY,
+        }
+
+        def _persist(db: Database) -> None:
+            if not changed:
+                return
+            # The values and the audit entry commit together or not at
+            # all (Codex review). The range checks above are the same
+            # ones each setter makes; `None` invitation expiry is stored
+            # as "", as `set_invitation_expiry_days` does.
+            db.connection.execute("BEGIN IMMEDIATE")
+            try:
+                for key in changed:
+                    set_config_without_commit(db, config_keys[key], "" if values[key] is None else str(values[key]))
+                record_action_without_commit(
+                    db, actor=actor, action="set_limits_and_retention",
+                    detail=" ".join(f"{key}={values[key]}" for key in changed),
+                )
+            except BaseException:
+                db.connection.rollback()
+                raise
+            else:
+                db.connection.commit()
+
+        await lane.run(_persist)
+        return changed
+
+    changed = await edit_resource_draft(
+        session, lane,
+        title="Limits & retention",
+        fields=fields, draft=draft, save=save, error_type=_LimitsError,
+        save_menu_text=menu_key("S", "ave"),
+        back_menu_text=menu_key("B", "ack"),
+        description_level=await lane.run(menu_description_level, actor),
+        redraw_in_place=await lane.run(redraw_in_place_enabled, actor),
+        unicode_style=await lane.run(unicode_style_enabled, actor),
+        collapsed=await lane.run(breadcrumb_collapsed_enabled, actor),
+        accent_color=await lane.run(effective_accent_color_256),
+        header_color=await lane.run(effective_header_color_256),
+    )
+    if changed is None:
+        return
+    _announce_line(session, "Saved. Applies from now on." if changed else "Nothing changed.")
+
+
 # -- Inter-BBS chat: MRC bridge (issue #275) ---------------------------------
 
 # Shown by the standalone admin CLI, which edits the database but cannot
@@ -8997,6 +9204,93 @@ async def _prune_drafts_screen(session: Session, lane: DatabaseLane, actor: User
         if choice == "b":
             return
         report = await lane.run(prune_stale_drafts, dry_run=False)
+
+
+_SEARCH_INDEX_LABELS = (
+    ("posts", "Message posts"),
+    ("files", "Files"),
+    ("channel_messages", "Chat messages"),
+)
+
+
+def _search_index_section(report: SearchIndexIntegrityReport) -> Section:
+    """Counts only, never the drifted ids or text -- the same rule the CLI
+    and `IndexDrift` keep, so the screen can't become a way to read
+    content the SysOp's own access wouldn't show them."""
+    rows: list[Field | Note] = []
+    for attribute, label in _SEARCH_INDEX_LABELS:
+        drift = getattr(report, attribute)
+        if drift.is_clean:
+            rows.append(Field(label, "consistent", color=SUCCESS_COLOR))
+        else:
+            rows.append(Field(
+                label,
+                f"{len(drift.missing)} missing, {len(drift.stale)} stale, {len(drift.extra)} extra",
+                color=WARNING_COLOR, bold=True,
+            ))
+    if not report.is_clean:
+        rows.append(Note(
+            "Find leaves out missing and stale entries and can list removed ones. "
+            "Rebuild replaces the indexes from the posts, files and messages themselves."
+        ))
+    return Section("Check", rows)
+
+
+def _rebuild_search_indexes(db: Database, actor: User) -> tuple[int, SearchIndexIntegrityReport]:
+    """Rebuild, audit, and re-check: how many entries were wrong, and the check after."""
+    before = rebuild_indexes(db)
+    fixed = sum(
+        len(drift.missing) + len(drift.stale) + len(drift.extra)
+        for drift in (before.posts, before.files, before.channel_messages)
+    )
+    record_action(db, actor=actor, action="rebuild_search_indexes", detail=f"entries corrected={fixed}")
+    return fixed, check_index_integrity(db)
+
+
+async def _search_indexes_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
+    """
+    `python -m netbbs.search check|rebuild` (issue #74) from the console
+    (issue #724). Checks on entry, the way Prune drafts shows its dry run:
+    the comparison is a read of the node's own content, and a SysOp who
+    opened this screen came to see it.
+
+    Rebuild is a hotkey without a yes/no, like Repair carried posts: it
+    only rewrites derived rows from authoritative data and converges to a
+    clean check, so there is nothing a SysOp could lose by pressing it.
+    Both run on the database lane's worker thread, never the event loop;
+    a rebuild is one write transaction, so other writers wait for it the
+    way they wait for any other.
+    """
+    chrome = await _load_chrome(lane, actor)
+    report = await lane.run(check_index_integrity)
+    while True:
+        actions = [("c", menu_key("C", "heck again")), _BACK_ACTION]
+        if not report.is_clean:
+            actions.insert(0, ("r", menu_key("R", "ebuild")))
+        choice, _page = await show_detail(
+            session,
+            title=_detail_title(
+                session, chrome, "Search indexes", breadcrumb=("SysOp", "Operations"),
+                subtitle="What Find searches, compared with the content it indexes.",
+            ),
+            sections=[_search_index_section(report)], actions=actions,
+            redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+        )
+        if choice == "b":
+            return
+        if choice == "r":
+            fixed, report = await lane.run(_rebuild_search_indexes, actor)
+            if not report.is_clean:
+                # Content changed between the rebuild and the re-check --
+                # a post approved in that instant. Rare, and a second
+                # rebuild settles it; say so rather than claim success.
+                _announce(session, "Rebuilt, but new content arrived meanwhile; rebuild again.", error=True)
+            elif fixed:
+                _announce(session, f"Rebuilt the search indexes: {fixed} entr{'y' if fixed == 1 else 'ies'} corrected.")
+            else:
+                _announce(session, "No drift found; rebuilt anyway.")
+        else:
+            report = await lane.run(check_index_integrity)
 
 
 async def _revoke_live_sessions(
@@ -16623,6 +16917,9 @@ async def _door_detail_screen(session: Session, lane: DatabaseLane, actor: User,
         elif choice == "o":
             await _door_outbound_screen(session, lane, actor, door)
             await _draw_door_detail(session, lane, door, description_level=description_level, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, door_services=door_services)
+        elif choice == "w" and await asyncio.to_thread(_is_war_dialer_door, await lane.run(_node_db_path), door):
+            await _war_dialer_world_screen(session, lane, actor, door)
+            await _draw_door_detail(session, lane, door, description_level=description_level, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, door_services=door_services)
         elif choice in {"s", "h", "r", "v"} and door_services is not None and door.profile and door.profile.service:
             await session.write_line("")
             await _door_service_action(session, lane, actor, door, choice, door_services)
@@ -16666,6 +16963,8 @@ async def _draw_door_detail(
         MenuEntry(label=menu_key("D", "elete"), brief="Permanently remove this door"),
         MenuEntry(label=menu_key("B", "ack"), brief="Return to the list"),
     ]
+    if await asyncio.to_thread(_is_war_dialer_door, await lane.run(_node_db_path), door):
+        options.insert(4, MenuEntry(label=menu_key("W", "orld"), brief="Status and maintenance"))
     # Issue #466: only a door which actually declares a service says anything
     # about one, so the overwhelming majority of doors look exactly as before.
     if door.profile and door.profile.service:
@@ -17003,6 +17302,174 @@ async def _door_service_action(session: Session, lane: DatabaseLane, actor: User
     await lane.run(record_action, actor=actor, action="door_service", object_type="door",
                    object_id=door.id, detail=f"door={door.name!r} action={verb.lower()}")
     _announce_line(session, f"{verb} requested. Current state: {door_services.status(door.id).summary()}")
+
+
+def _war_dialer_world_of(db_path: Path, door: Door) -> tuple[Path | None, str | None]:
+    """The world this door plays, or why it cannot say.
+
+    `war_dialer_world_path` and `war_dialer_path_problem` are the resolution
+    and preflight the launcher and the backup use, so the world shown here is
+    the one callers are actually in, and a path the launcher would refuse (a
+    legacy world still waiting to be migrated) is reported, not called unplayed.
+    Both touch the filesystem, so callers run this in a thread, never on the
+    database lane (as the launcher does).
+    """
+    from types import SimpleNamespace
+
+    from netbbs.doors.runtime import war_dialer_path_problem, war_dialer_world_path
+    try:
+        world = war_dialer_world_path(SimpleNamespace(path=db_path), door)
+        return world, war_dialer_path_problem(door, world)
+    except (ValueError, OSError, RuntimeError) as exc:
+        return None, str(exc)
+
+
+def _is_war_dialer_door(db_path: Path, door: Door) -> bool:
+    world, problem = _war_dialer_world_of(db_path, door)
+    # A resolution failure only happens for a War Dialer launch (or an explicit
+    # world override); the world screen reports the reason.
+    return world is not None or problem is not None
+
+
+def _node_db_path(db: Database) -> Path:
+    return db.path
+
+
+def _war_dialer_world_state(db_path: Path, world: Path) -> tuple[dict | None, str | None]:
+    """`war_dialer_admin.world_status`, or the bounded reason it failed.
+
+    `(None, None)` means the world genuinely does not exist yet. Any other
+    failure to look at it, a permission error included, is a reason: an
+    unreadable directory must not read as "nobody has played".
+
+    Blocking file and SQLite work on a world that may be large, so the caller
+    runs it in a thread rather than on the node's database lane.
+    """
+    from netbbs.doors.bundled import war_dialer as wd
+    from netbbs.doors.war_dialer_admin import world_status
+    try:
+        world.stat()
+    except FileNotFoundError:
+        return None, None
+    except OSError as exc:
+        return None, wd._event_plain(str(exc))[:500]
+    try:
+        return world_status(db_path, world), None
+    except (BackupError, wd.WorldStateError, OSError, sqlite3.Error, ValueError) as exc:
+        return None, wd._event_plain(str(exc))[:500]
+
+
+def _war_dialer_set_maintenance(db_path: Path, world: Path, enabled: bool, operator: str) -> str | None:
+    from netbbs.doors.bundled import war_dialer as wd
+    from netbbs.doors.war_dialer_admin import set_maintenance
+    try:
+        set_maintenance(db_path, world, enabled, operator=operator)
+    except (BackupError, wd.WorldStateError, OSError, sqlite3.Error, ValueError) as exc:
+        return wd._event_plain(str(exc))[:500]
+    return None
+
+
+def _war_dialer_operation_rows(db: Database, operations: list) -> list[list[str]]:
+    rows = []
+    for entry in reversed(operations):
+        if not isinstance(entry, dict):
+            continue
+        at = str(entry.get("at", ""))
+        try:
+            at = format_for_display(at, db)
+        except (ValueError, TypeError):
+            pass
+        rows.append([at, str(entry.get("action", "")), str(entry.get("operator", "")),
+                     str(entry.get("reason", "")) or "—"])
+    return rows
+
+
+async def _war_dialer_world_screen(session: Session, lane: DatabaseLane, actor: User, door: Door) -> None:
+    """A War Dialer door's world: what `war_dialer_admin status` shows, plus the
+    maintenance switch (issue #726).
+
+    Status plus an action bar (design doc §3.5), paged through `show_detail`
+    because ten retained operations do not fit a 24-row terminal. Maintenance
+    is a toggle and needs no confirmation: it only closes the world to new
+    callers, and it refuses while anyone is inside, the same guard the CLI
+    meets. Season and reset stay on the CLI, which requires a stopped node.
+    """
+    page = 0
+    db_path = await lane.run(_node_db_path)
+    while True:
+        chrome = await _load_chrome(lane, actor)
+        # Re-read the registration every time: another SysOp may have pointed
+        # this door at a different world since the screen last drew.
+        current = await lane.run(get_door, door.id)
+        if current is None:
+            _announce(session, "Cannot show the world: this door was deleted.", error=True)
+            return
+        door = current
+        world, problem = await asyncio.to_thread(_war_dialer_world_of, db_path, door)
+        status = None
+        if world is not None and problem is None:
+            status, problem = await asyncio.to_thread(_war_dialer_world_state, db_path, world)
+        rows: list[Field | Note | Table] = []
+        if world is not None:
+            rows.append(Field("Path", str(world)))
+        if problem is not None:
+            rows.append(Note(f"Cannot read this world: {problem}", color=ERROR_COLOR))
+        elif status is None:
+            rows.append(Note("No world yet. It is created the first time someone plays."))
+        else:
+            maintenance = status["maintenance"] == "on"
+            rows += [
+                Field("Maintenance",
+                      status_badge("ON", tone="warning", unicode_style=chrome.unicode_style) if maintenance
+                      else status_badge("OFF", tone="neutral", unicode_style=chrome.unicode_style), styled=True),
+                Field("Season", str(status["stored_season"])),
+                Field("Schema", str(status["schema"])),
+                Field("Owner", str(status["owner"] or "(unbound)"),
+                      color=VALUE_COLOR if status["owner"] else WARNING_COLOR),
+                Field("Players", str(status["players"])),
+                Field("Exchanges", str(status["exchanges"])),
+                Field("Events", str(status["events"])),
+            ]
+            if maintenance:
+                rows.append(Note("Closed to new callers until you switch maintenance off."))
+        sections = [Section("World", rows)]
+        if status is not None:
+            operations = await lane.run(_war_dialer_operation_rows, status["recent_operations"])
+            sections.append(Section("Recent operations", [
+                Table(["When", "Action", "Operator", "Reason"], operations, flex=3) if operations
+                else Note("None recorded.")
+            ]))
+        actions: list[tuple[str, str]] = []
+        if status is not None:
+            actions.append(("m", menu_key("M", "aintenance " + ("off" if status["maintenance"] == "on" else "on"))))
+        actions += [("r", menu_key("R", "efresh")), _BACK_ACTION]
+        choice, page = await show_detail(
+            session,
+            title=_detail_title(session, chrome, f"{sanitize_text(door.name)} — world",
+                                breadcrumb=("Content", "Doors")),
+            sections=sections, actions=actions, page=page,
+            redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+        )
+
+        if choice == "b":
+            return
+        elif choice == "m" and status is not None:
+            enable = status["maintenance"] != "on"
+            latest = await lane.run(get_door, door.id)
+            if latest is None or (await asyncio.to_thread(_war_dialer_world_of, db_path, latest))[0] != world:
+                _announce(session, "This door's world changed while the screen was open; showing it now. "
+                          "Nothing was switched.", error=True)
+                continue
+            failure = await asyncio.to_thread(_war_dialer_set_maintenance, db_path, world, enable, actor.username)
+            if failure is not None:
+                _announce(session, f"Could not switch maintenance {'on' if enable else 'off'}: {failure}",
+                          error=True)
+                continue
+            await lane.run(record_action, actor=actor, action="war_dialer_maintenance", object_type="door",
+                           object_id=door.id,
+                           detail=f"door={door.name!r} world={str(world)!r} maintenance={'on' if enable else 'off'}")
+            _announce(session, "Maintenance on. New callers are told the world is closed."
+                      if enable else "Maintenance off. The world is open to callers again.")
 
 
 async def _delete_door_screen(session: Session, lane: DatabaseLane, actor: User, door: Door,

@@ -252,8 +252,10 @@ public_url = "https://bbs.example.org"
 ```
 
 Point the HTTPS proxy at that local port, forwarding WebSocket upgrades as
-well as ordinary requests. Set its upload body limit at least as high as
-NetBBS's configured upload cap. Use a real hostname and certificate;
+well as ordinary requests. Set its upload body limit at least 1 MiB above
+NetBBS's upload cap (**Settings → Limits & retention**, 100 MiB by default):
+a browser upload carries form framing on top of the file.
+Use a real hostname and certificate;
 `bbs.example.org` is a placeholder. Restart after changing listener settings.
 
 `public_url` supplies the externally reachable base address for transfer links.
@@ -281,7 +283,7 @@ NetBBS Link health when enabled. Refresh it after making changes elsewhere.
 | Users | Accounts, registration, levels, approval, identity-verifier grants |
 | Content | Message boards, file areas, chat channels, Communities, doors, moderation |
 | Operations | Sessions, maintenance, audit log, backups, Link diagnostics |
-| Settings | Branding, timestamps, node name, network participation, update checks |
+| Settings | Branding, timestamps, node name, network participation, update checks, limits and retention |
 
 Quick actions lead to the same screens. Use the displayed keys rather than
 old menu letters from release notes. **Back** leaves a screen. Draft editors
@@ -424,6 +426,10 @@ NetBBS can supervise it and exposes Start, Halt, Restart, and its recent log
 on the door detail screen. Install/update the service yourself; stop it before
 copying its data. Do not raise a game's session count until its concurrent
 save handling has been tested.
+
+A War Dialer door's detail screen adds **[W]orld**: the world's status and recent
+SysOp operations, and a maintenance switch that closes it to new callers. Season
+advance and reset stay on the CLI; the [door guide](NetBBS-door-guide.md) has both.
 
 A door may request permission to post to message boards. **Outbound** is off
 by default and configured per door: choose an allowlist and posting limit.
@@ -721,6 +727,16 @@ and recent errors. Choose welcome/masthead/banner presets through Settings;
 preview before applying, or place your own files as described under
 [Custom banners and mastheads](#custom-banners-and-mastheads). Timestamp format and display timezone are node-wide.
 
+**Settings → Limits & retention** holds four node-wide values, saved together
+and applied without a restart:
+
+| Setting | Default | Effect |
+| --- | --- | --- |
+| Upload cap | 100 MiB | Largest single upload, over Zmodem and the browser. Keep a reverse proxy's body limit at least 1 MiB higher. |
+| Grace before deletion | 7 days | How long an expired post or file waits before it is deleted. An expired file can be recovered from its area until then. |
+| Invitation expiry | 7 days | When an unaccepted channel invitation lapses. Clear the field for invitations that never expire. |
+| Chat scrollback | 100 messages | Lines each channel keeps, carried Link channels included. Lowering it trims a channel the next time someone speaks there. |
+
 Under **Operations → Node and sessions**:
 
 - **Maintenance** blocks new non-SysOp logins.
@@ -732,6 +748,12 @@ These controls require a live node session. For a stopped node, use the host's
 service controls. Use **Audit log** to see administrative and moderation
 activity. Storage garbage collection and draft pruning show the proposed work
 before confirmation; review it instead of deleting files directly.
+
+**Operations → Search indexes** compares what **Find** searches with the posts,
+files and chat messages themselves, and shows how many entries are missing,
+stale or left over. **Rebuild** replaces the indexes from that content; it
+cannot lose any. It also works from `python -m netbbs.admin`, and
+`python -m netbbs.search check|rebuild --db PATH` does the same from a script.
 
 ### Custom banners and mastheads
 
@@ -952,6 +974,7 @@ DNS registration, or backups is a separate, deliberate operator action.
 | Browser terminal or upload fails | Check HTTPS proxy/WebSocket forwarding, upload limits, web listener, and `public_url`. |
 | Terminal offers no file-transfer link | Enable/configure the web listener and its public URL, or use a Zmodem-capable client. |
 | Link will not start | Check the `web` extra, effective participation setting, and a non-placeholder node name. |
+| **Find** misses content callers can open, or lists removed content | **Operations → Search indexes**: check, then **Rebuild** if it reports drift. |
 | Peers connect but content is missing | Check carry/subscription decisions, trust state, Outbox, and Diagnostics. Use Repair carried posts only for local materialization repair. |
 | Game is busy, fails, or loses state | Check its session limit, Compatibility setup, Last diagnostic, service state, and actual persistent paths. |
 | Backup says `Voidrunner: NOT CAPTURED` | The node has not started since v7.4.1, so it has recorded no save directory and the CLI fell back to your shell's home. Start the node once, or rerun with explicit `--voidrunner-save-dir`. |

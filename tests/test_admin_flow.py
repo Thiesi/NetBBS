@@ -8760,6 +8760,31 @@ def test_operations_menu_reloads_after_diagnostic_and_follow_log_screens(db, lan
     assert len(calls) == 4
 
 
+@pytest.mark.parametrize("menu_key_", ["o", "s"])
+def test_diagnostics_open_without_link_from_operations_and_settings(db, lane, sysop, monkeypatch, menu_key_):
+    """Issue #732: a live node running MRC without Link writes the
+    diagnostic log too. Operations offered [D]iagnostics/[F]ollow log
+    there, but Settings' hidden d/f aliases still required Link and
+    silently rejected the key."""
+    import netbbs.net.admin_flow as admin_flow_module
+
+    opened = []
+
+    async def _fake_diagnostic_log_screen(session, lane, actor):
+        opened.append("diagnostics")
+
+    async def _fake_diagnostic_log_tail_screen(session, lane):
+        opened.append("follow")
+
+    monkeypatch.setattr(admin_flow_module, "_diagnostic_log_screen", _fake_diagnostic_log_screen)
+    monkeypatch.setattr(admin_flow_module, "_diagnostic_log_tail_screen", _fake_diagnostic_log_tail_screen)
+
+    session = FakeSession([menu_key_, "d", "f", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop, node_controls=_node_controls(), link_context=None))
+
+    assert opened == ["diagnostics", "follow"]
+
+
 # -- follow-up: the moderation-queue gauges had the same fake-capacity
 # bug as the active-session gauge (PR #197 review, finding #2) -- a
 # `max(10, pending_total)` denominator meant the bar was permanently
@@ -9231,6 +9256,129 @@ def test_the_chat_ceiling_is_set_on_its_own(db, lane, sysop):
     config = outbound_config(db, door.id)
     assert (config.chat_lines_per_hour, config.posts_per_hour) == (12, 6)
     assert "Chat ceiling is now 12 lines per hour." in _written_text(session)
+
+
+def _war_dialer_world_keys(*keys):
+    """Reach a single registered door's War Dialer world screen, then unwind."""
+    return ["c", "d", "l", "0", "1", "w", *keys, "b", "b", "b", "b", "b"]
+
+
+def _war_dialer_door(db, sysop):
+    import sys
+    from netbbs.doors import create_door
+
+    return create_door(db, "War Dialer", sys.executable, args=("-m", "netbbs.doors.bundled.war_dialer"),
+                       creator=sysop)
+
+
+def _war_dialer_world(db):
+    """A played world bound to this node, where the door above looks for it."""
+    from netbbs.config import set_config
+    from netbbs.doors.bundled import war_dialer as wd
+
+    owner = "b" * 32
+    set_config(db, "war_dialer_owner", owner)
+    pilot = create_user(db, "WarPilot", password="hunter2", user_level=10)
+    path = db.path.parent / (db.path.name + ".doors") / "war-dialer.db"
+    conn = wd.connect(path)
+    try:
+        wd.ensure_schema(conn)
+        wd.bind_world_owner(conn, owner)
+        now = wd.now_utc()
+        wd.get_or_create_season_anchor(conn, now)
+        wd.ensure_exchanges_seeded(conn, 1, now)
+        wd.load_or_create_player(conn, pilot.id, pilot.username, now, 1)
+    finally:
+        conn.close()
+    return path
+
+
+def test_only_a_war_dialer_door_offers_its_world(db, lane, sysop):
+    from netbbs.doors import create_door
+
+    create_door(db, "Blacksite", "/usr/bin/python3", creator=sysop)
+
+    session = FakeSession(["c", "d", "l", "0", "1", "w", "b", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+
+    assert "orld" not in _visible(_written_text(session))
+
+
+def test_a_war_dialer_door_that_nobody_played_says_its_world_comes_later(db, lane, sysop):
+    _war_dialer_door(db, sysop)
+
+    session = FakeSession(_war_dialer_world_keys())
+    _run(session, lane, sysop)
+    text = _normalized_visible(_written_text(session))
+
+    assert "No world yet. It is created the first time someone plays." in text
+    assert "aintenance on" not in text, "there is no world to close"
+
+
+def test_a_legacy_war_dialer_world_is_reported_not_called_unplayed(db, lane, sysop, tmp_path, monkeypatch):
+    """The launcher refuses to create the new default while a legacy world
+    waits to be migrated; the world screen must say so, not promise play."""
+    import os
+
+    home = tmp_path / "legacy-home"
+    (home / ".netbbs").mkdir(parents=True)
+    (home / ".netbbs" / "wardialer.db").write_bytes(b"legacy")
+    monkeypatch.setenv("USERPROFILE" if os.name == "nt" else "HOME", str(home))
+    monkeypatch.delenv("WAR_DIALER_DB_PATH", raising=False)
+    _war_dialer_door(db, sysop)
+
+    session = FakeSession(_war_dialer_world_keys())
+    _run(session, lane, sysop)
+    text = _normalized_visible(_written_text(session))
+
+    assert "Legacy War Dialer world found" in text
+    assert "No world yet" not in text
+
+
+def test_the_war_dialer_world_screen_shows_status_and_switches_maintenance(db, lane, sysop):
+    """Issue #726: what `war_dialer_admin status` shows, and maintenance, in-BBS.
+    The world's own audit names the SysOp account, not the OS user."""
+    from netbbs.doors.war_dialer_admin import world_status
+    from netbbs.moderation.log import list_recent_actions
+
+    door = _war_dialer_door(db, sysop)
+    path = _war_dialer_world(db)
+
+    session = FakeSession(_war_dialer_world_keys("m"))
+    _run(session, lane, sysop)
+    text = _normalized_visible(_written_text(session))
+
+    assert "Players: 1" in text
+    assert "Owner: " + "b" * 32 in text
+    assert "Maintenance on. New callers are told the world is closed." in text
+    status = world_status(db.path, path)
+    assert status["maintenance"] == "on"
+    assert status["recent_operations"][-1]["action"] == "maintenance on"
+    assert status["recent_operations"][-1]["operator"] == "sysop"
+    entry = list_recent_actions(db, limit=1)[0]
+    assert (entry.action, entry.object_type, entry.object_id) == ("war_dialer_maintenance", "door", door.id)
+
+    session = FakeSession(_war_dialer_world_keys("m"))
+    _run(session, lane, sysop)
+
+    assert "Maintenance off. The world is open to callers again." in _normalized_visible(_written_text(session))
+    assert world_status(db.path, path)["maintenance"] == "off"
+
+
+def test_war_dialer_maintenance_refuses_while_a_caller_is_inside(db, lane, sysop):
+    from netbbs.doors.bundled import war_dialer as wd
+    from netbbs.doors.war_dialer_admin import world_status
+
+    _war_dialer_door(db, sysop)
+    path = _war_dialer_world(db)
+
+    session = FakeSession(_war_dialer_world_keys("m"))
+    with wd.world_session(path):
+        _run(session, lane, sysop)
+    text = _normalized_visible(_written_text(session))
+
+    assert "Could not switch maintenance on:" in text
+    assert world_status(db.path, path)["maintenance"] == "off"
 
 
 def test_user_picker_keeps_an_active_search_across_a_sort(db, lane, sysop):
