@@ -1848,14 +1848,13 @@ Existing cursors are backfilled from the post/file their existing
 what a user had already read rather than resetting anyone to
 all-unread.
 
-**Accepted scope boundary:** jump-to-first-unread can still land on the
-board/area's ordinary newest page rather than navigating precisely to
-an out-of-order arrival buried elsewhere in feed history, since the
-jump cursor stays `created_at`-based. Unread *counting* and `[N]ew
-scan`'s "has unread" detection are correct either way; only precise
-jump navigation to that specific item is not yet solved. Reconciling
-jump-to with arrival order, if ever wanted, is future work, not implied
-by this fix.
+**Accepted scope boundary (file areas):** jump-to-first-unread can
+still land on a file area's ordinary newest page rather than navigating
+precisely to an out-of-order arrival buried elsewhere in feed history,
+since that jump cursor stays `created_at`-based. Unread *counting* and
+`[N]ew scan`'s "has unread" detection are correct either way. Boards no
+longer have this gap: issue #710's jump is computed from the unread
+posts themselves (below).
 
 **Boards: a post is read once it is opened (issue #710).** Showing a post
 in the board list does not mark it read; opening it in the reader does. A
@@ -1882,10 +1881,22 @@ The set stays small by construction:
 `[M]ark all read` (on the list, and per board in `[N]ew scan`) moves the
 floor to the newest visible post and drops the set. A post still pending
 approval above it stays unread, so it is new when it appears. A caller's
-own new post is recorded as opened when it is written. The jump position
-(`board_read_cursor`) is unchanged in kind: opening a post moves it forward
-by feed position, never back. The migration makes existing cursors the
-floors, so nobody's history is reset.
+own new post is recorded as opened when it is written.
+
+The jump to the first unread post (`board_read_cursor`, used by `[N]ew
+scan`) is computed rather than stored: the feed position just before the
+oldest unread post by feed order, so an unread post below others already
+opened is where the jump lands, and a late carried post is found wherever
+its authored date puts it. With nothing unread it is the newest post, and
+the jump shows the ordinary newest page. Both lookups stream newest or
+oldest first and stop at the first visible row.
+
+A trigger deletes a post's opened rows when the post is deleted, since
+`posts.id` can be reused once the newest row is gone. The migration makes
+existing cursors the floors, so nobody's history is reset. A legacy cursor
+without an arrival id (issue #72's backfill found its post deleted) read by
+feed position: its floor is set just below the first root past that
+position, and the roots above the floor it had read become opened rows.
 
 #### Follows and favourites
 

@@ -244,3 +244,95 @@ def test_migration_keeps_existing_cursors_as_floors(tmp_path, monkeypatch):
         assert first.id < second.id
     finally:
         db.close()
+
+
+# -- Codex review on #723 ---------------------------------------------------------
+
+
+def test_the_jump_anchors_before_the_first_unread_post_not_past_it(db, alice, bob, monkeypatch):
+    board = create_board(db, "general", creator=alice)
+    ensure_board_baseline(db, bob, board)
+    posts = _posts(db, board, alice, 3, monkeypatch)
+
+    record_post_opened(db, bob, board, posts[2])
+    # Post 0 is the first unread and the oldest post: jump from the start.
+    assert board_read_cursor(db, bob, board) == ("", "")
+
+    record_post_opened(db, bob, board, posts[0])
+    # Post 1 is the first unread: jump from just before it.
+    assert board_read_cursor(db, bob, board) == (posts[0].created_at, posts[0].post_id)
+
+    record_post_opened(db, bob, board, posts[1])
+    # Nothing unread: the newest post, so the jump lands on the newest page.
+    assert board_read_cursor(db, bob, board) == (posts[2].created_at, posts[2].post_id)
+
+
+def test_deleting_an_opened_post_drops_its_row(db, alice, bob, monkeypatch):
+    """`posts.id` can be reused once the newest row is gone: a stale row
+    would mark the next post read (Codex review on #723)."""
+    board = create_board(db, "general", creator=alice)
+    ensure_board_baseline(db, bob, board)
+    posts = _posts(db, board, alice, 2, monkeypatch)
+    record_post_opened(db, bob, board, posts[1])
+    assert _opened_rows(db, bob, board) == [posts[1].id]
+
+    db.connection.execute("DELETE FROM posts WHERE id = ?", (posts[1].id,))
+    db.connection.commit()
+
+    assert _opened_rows(db, bob, board) == []
+
+
+def test_read_state_writes_for_a_deleted_board_do_nothing(db, alice, bob, monkeypatch):
+    from netbbs.boards.boards import delete_board
+
+    board = create_board(db, "general", creator=alice)
+    ensure_board_baseline(db, bob, board)
+    posts = _posts(db, board, alice, 2, monkeypatch)
+    sysop = create_user(db, "sysop", password="hunter2", user_level=SYSOP_LEVEL)
+    delete_board(db, board, deleted_by=sysop)
+
+    record_post_opened(db, bob, board, posts[1])
+    mark_board_read(db, bob, board)
+    ensure_board_baseline(db, bob, board)
+
+    assert db.connection.execute(
+        "SELECT COUNT(*) FROM user_read_cursors WHERE object_type = 'board' AND object_id = ?", (board.id,)
+    ).fetchone()[0] == 0
+
+
+def test_migration_carries_a_legacy_cursors_non_prefix_read_state(tmp_path, monkeypatch):
+    """A legacy cursor with no arrival id read by feed position. A post
+    newer by feed that arrived first was unread; an older one that arrived
+    later was read. The floor must not collapse the two (Codex review)."""
+    from netbbs.storage import database as database_module
+    from netbbs.storage.migrations import MIGRATIONS
+
+    index = next(i for i, m in enumerate(MIGRATIONS) if "user_board_opened_posts" in m.description)
+    monkeypatch.setattr(database_module, "MIGRATIONS", MIGRATIONS[:index])
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
+    alice = insert_user_on_old_schema(db, "alice", user_level=10)
+    bob = insert_user_on_old_schema(db, "bob", user_level=10)
+    board = create_board(db, "general", creator=alice)
+    stamps = iter(["2026-01-01T10:00:00.000000Z", "2026-01-01T08:00:00.000000Z"])
+    monkeypatch.setattr(posts_module, "utc_now_iso", lambda: next(stamps))
+    newer_by_feed = create_post(db, board, alice, "newer by feed, arrived first", "1")
+    older_by_feed = create_post(db, board, alice, "older by feed, arrived later", "2")
+    assert older_by_feed.id > newer_by_feed.id
+    db.connection.execute(
+        "INSERT INTO user_read_cursors (user_id, object_type, object_id, last_seen_created_at, "
+        "last_seen_stable_id, last_seen_arrival_id, updated_at) VALUES (?, 'board', ?, ?, ?, NULL, ?)",
+        (bob.id, board.id, "2026-01-01T09:00:00.000000Z", "gone", "2026-01-01T09:00:00.000000Z"),
+    )
+    db.connection.commit()
+    db.close()
+    monkeypatch.undo()
+
+    db = Database(db_path)
+    try:
+        board_now = db.connection.execute("SELECT id FROM boards WHERE id = ?", (board.id,)).fetchone()
+        assert board_now is not None
+        assert unread_post_ids(db, bob, board, [newer_by_feed, older_by_feed]) == {newer_by_feed.id}
+        assert unread_post_count(db, bob, board) == 1
+    finally:
+        db.close()

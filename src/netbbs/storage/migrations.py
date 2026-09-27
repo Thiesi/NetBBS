@@ -3017,8 +3017,12 @@ MIGRATIONS = [
             "opened posts and their rows go; past 500 rows per user and board the floor "
             "moves up to the oldest kept one. Existing cursors are the floors, so nobody's "
             "history is reset. A board cursor still without an arrival id (issue #72's "
-            "backfill found its post already deleted) gets one here: the newest root at or "
-            "before its feed position, or 0."
+            "backfill found its post already deleted) read by feed position; its floor is "
+            "the arrival id just below the first root past that position, and the roots "
+            "above the floor it had read become opened rows, so its read state carries "
+            "over exactly. A trigger drops a post's opened rows when the post is deleted: "
+            "`posts.id` can be reused once the newest row is gone, and a stale row would "
+            "mark the next post read."
         ),
         sql="""
         CREATE TABLE user_board_opened_posts (
@@ -3027,14 +3031,38 @@ MIGRATIONS = [
             post_row_id  INTEGER NOT NULL,
             PRIMARY KEY (user_id, board_id, post_row_id)
         ) WITHOUT ROWID;
+        CREATE INDEX idx_user_board_opened_posts_post ON user_board_opened_posts(board_id, post_row_id);
+
+        CREATE TRIGGER trg_posts_delete_opened AFTER DELETE ON posts
+        BEGIN
+            DELETE FROM user_board_opened_posts WHERE board_id = OLD.board_id AND post_row_id = OLD.id;
+        END;
+
+        INSERT INTO user_board_opened_posts (user_id, board_id, post_row_id)
+        SELECT c.user_id, c.object_id, p.id FROM user_read_cursors c
+        JOIN posts p ON p.board_id = c.object_id AND p.post_id = p.root_post_id
+        WHERE c.object_type = 'board' AND c.last_seen_arrival_id IS NULL
+          AND (p.created_at, p.post_id) <= (c.last_seen_created_at, c.last_seen_stable_id)
+          AND p.id > (
+              SELECT MIN(q.id) FROM posts q
+              WHERE q.board_id = c.object_id AND q.post_id = q.root_post_id
+                AND (q.created_at, q.post_id) > (c.last_seen_created_at, c.last_seen_stable_id)
+          );
 
         UPDATE user_read_cursors
-        SET last_seen_arrival_id = COALESCE((
-            SELECT MAX(p.id) FROM posts p
-            WHERE p.board_id = user_read_cursors.object_id AND p.post_id = p.root_post_id
-              AND (p.created_at, p.post_id)
-                  <= (user_read_cursors.last_seen_created_at, user_read_cursors.last_seen_stable_id)
-        ), 0)
+        SET last_seen_arrival_id = COALESCE(
+            (
+                SELECT MIN(q.id) - 1 FROM posts q
+                WHERE q.board_id = user_read_cursors.object_id AND q.post_id = q.root_post_id
+                  AND (q.created_at, q.post_id)
+                      > (user_read_cursors.last_seen_created_at, user_read_cursors.last_seen_stable_id)
+            ),
+            (
+                SELECT MAX(q.id) FROM posts q
+                WHERE q.board_id = user_read_cursors.object_id AND q.post_id = q.root_post_id
+            ),
+            0
+        )
         WHERE object_type = 'board' AND last_seen_arrival_id IS NULL;
         """,
     ),

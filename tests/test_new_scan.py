@@ -180,6 +180,7 @@ def test_new_scan_shows_replies_to_you(db, lane, alice, monkeypatch):
 
 
 def test_new_scan_shows_no_replies_when_there_are_none(db, lane, alice):
+    create_board(db, "general", creator=alice)
     session = _run_main_menu(db, lane, alice, ["n", "b", "l", "y"])
     assert "Replies to you: none." in _written_text(session)
 
@@ -309,3 +310,19 @@ def test_mark_read_says_a_channel_cannot_be_marked(db, lane, alice):
     session = _run_main_menu(db, lane, alice, ["n", "m", "1", "b", "l", "y"])
 
     assert "Only a message board can be marked read here." in _visible_text(session)
+
+
+def test_mark_read_brings_the_replies_summary_up_to_date(db, lane, alice, monkeypatch):
+    board = create_board(db, "general", creator=alice)
+    timestamps = iter([f"2026-01-01T00:00:0{i}.000000Z" for i in range(2)])
+    monkeypatch.setattr(posts_module, "utc_now_iso", lambda: next(timestamps))
+    alices_post = create_post(db, board, alice, "question", "how do I do X?")
+    other = create_user(db, "bob", password="hunter2", user_level=10)
+    create_post(db, board, other, "Re: question", "like this", parent_post_id=alices_post.post_id)
+
+    session = _run_main_menu(db, lane, alice, ["n", "m", "1", "b", "l", "y"])
+
+    text = _visible_text(session)
+    marked = text.index("general: every post marked read.")
+    assert "Replies to you: 1" in text[:marked]
+    assert "Replies to you: none." in text[text.rindex("Replies to you", 0, marked):]

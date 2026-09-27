@@ -68,6 +68,11 @@ from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 
 
+# Replies listed by subject above [N]ew scan's list; the rest are counted.
+# The summary is redrawn with every page, so it is kept to a few rows.
+_REPLIES_SHOWN = 3
+
+
 @dataclass(frozen=True)
 class _ScanItem:
     """One row in issue #56's `[N]ew scan` picker -- a board, channel,
@@ -189,18 +194,23 @@ async def _new_scan_screen(
         return items, replies, boards_by_id
 
     items, replies, boards_by_id = await lane.run(_load)
+    state = {"replies": replies, "boards": boards_by_id}
 
-    await session.write_line(colored("\r\nNew scan:", fg_color=effective_header_color(session, db), bold=True))
-    if replies:
-        await session.write_line(f"Replies to you: {len(replies)}")
-        for reply in replies[:10]:
-            reply_board = boards_by_id.get(reply.board_id)
+    async def _replies_summary() -> str:
+        """Replies to the caller, above the list on every redraw: the
+        picker's masthead, so a redraw in place keeps it and [M]ark read
+        brings it up to date (Codex review on #723)."""
+        current, boards = state["replies"], state["boards"]
+        if not current:
+            return colored("Replies to you: none.", fg_color=MUTED_COLOR)
+        lines = [f"Replies to you: {len(current)}"]
+        for reply in current[:_REPLIES_SHOWN]:
+            reply_board = boards.get(reply.board_id)
             board_label = sanitize_text(reply_board.name) if reply_board is not None else "unknown message board"
-            await session.write_line(f"  {sanitize_text(reply.subject)} ({board_label})")
-        if len(replies) > 10:
-            await session.write_line(f"  ...and {len(replies) - 10} more.")
-    else:
-        await session.write_line(colored("Replies to you: none.", fg_color=MUTED_COLOR))
+            lines.append(f"  {sanitize_text(reply.subject)} ({board_label})")
+        if len(current) > _REPLIES_SHOWN:
+            lines.append(f"  ...and {len(current) - _REPLIES_SHOWN} more.")
+        return "\r\n".join(lines)
 
     def _description(item: _ScanItem) -> str:
         prefix = "* " if item.followed else ""
@@ -233,7 +243,7 @@ async def _new_scan_screen(
             return None
         await lane.run(mark_board_read, user, item.board)
         announce(session, f"{sanitize_text(item.name)}: every post marked read.", tone="muted")
-        reloaded, _replies, _boards = await lane.run(_load)
+        reloaded, state["replies"], state["boards"] = await lane.run(_load)
         _number(reloaded)
         return reloaded
 
@@ -268,6 +278,7 @@ async def _new_scan_screen(
         title="New scan",
         empty_message="Nothing accessible yet.",
         item_keys={"m": _mark_read},
+        masthead=_replies_summary,
         live_nav=[MenuEntry(label=menu_key("M", "ark read"), brief="Count a message board's posts as read")],
         redraw_in_place=redraw_in_place_enabled(db, user),
         unicode_style=unicode_style_enabled(db, user),

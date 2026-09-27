@@ -797,24 +797,30 @@ def count_visible_roots(
 
 
 def iter_visible_roots(
-    db: Database, board_id: int, *, after_id: int = 0, newest_first: bool = False
+    db: Database, board_id: int, *, after_id: int = 0, newest_first: bool = False,
+    by_feed: bool = False, extra_sql: str = "", extra_params: tuple = (),
 ):
     """Board `board_id`'s roots a reader may see, as `(id, created_at,
-    post_id)` in arrival order (`posts.id`, issue #72), oldest first or
-    `newest_first`, above arrival id `after_id`. The same rule as
-    `count_visible_roots`, streamed, so a caller that needs only the first
-    few stops paying there: per-post read state walks up from its floor
-    and stops at the first post not opened (issue #710)."""
+    post_id)` above arrival id `after_id`: in arrival order (`posts.id`,
+    issue #72), or with `by_feed` in feed order (`created_at`, `post_id`),
+    oldest first or `newest_first`. `extra_sql` narrows further, as
+    `count_visible_roots`' does. The same rule as `count_visible_roots`,
+    streamed, so a caller that needs only the first few stops paying there
+    -- per-post read state walks up from its floor and stops at the first
+    post not opened, and looks up a board's newest post without reading
+    the rest (issue #710)."""
     order = "DESC" if newest_first else "ASC"
+    order_by = f"root.created_at {order}, root.post_id {order}" if by_feed else f"root.id {order}"
     rows = db.connection.execute(
         f"""
         SELECT root.id, root.created_at, root.post_id, e.envelope_json FROM posts root
         LEFT JOIN link_events e ON e.content_id = root.post_id
         WHERE root.board_id = ? AND root.post_id = root.root_post_id AND root.id > ?
+          {extra_sql}
           AND {_HAS_APPROVED_VERSION_SQL}
-        ORDER BY root.id {order}
+        ORDER BY {order_by}
         """,
-        (board_id, after_id),
+        (board_id, after_id, *extra_params),
     )
     author_cache: dict = {}
     for row in rows:

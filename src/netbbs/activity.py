@@ -39,15 +39,13 @@ locally visible. `unread_post_count`/`unread_file_count`/
 `unread_replies_to` compare against this arrival axis, not `created_at`,
 so a late-arriving post with an old claimed timestamp is still correctly
 reported as unread rather than silently sorting behind an
-already-advanced cursor. `board_read_cursor`/`file_area_read_cursor`
-(used for feed-position jump-to) are unchanged and still return
-`(created_at, stable_id)` -- jump-to positioning stays authored-
-chronology-based; only *whether something counts as unread at all*
-changed. A known consequence: jumping to "first unread" can still land
-on the ordinary newest page rather than a specific out-of-order arrival
-buried elsewhere in feed history -- see design doc §6.6's "Read/unread
-state" subsection for why that gap is an accepted, documented scope
-boundary rather than silently unhandled.
+already-advanced cursor. `file_area_read_cursor` (feed-position
+jump-to) still returns the stored `(created_at, stable_id)`, so a jump
+to "first unread" in a file area can land on the ordinary newest page
+rather than an out-of-order arrival buried in feed history -- an
+accepted scope boundary, design doc §6.6. `board_read_cursor` computes
+its jump from the unread posts themselves (issue #710), so boards no
+longer have that gap.
 
 Plain, synchronous, `db`-first functions (CLAUDE.md), matching
 `netbbs.user_preferences`/`netbbs.chat.membership`'s own convention: every
@@ -205,19 +203,19 @@ def _upsert_cursor(
 OPENED_POSTS_CAP = 500
 
 
-def _board_newest(db: Database, board: Board) -> tuple[int, str, str] | None:
-    """The newest visible root of `board` by arrival id, and the newest by
-    feed position, folded into one `(arrival_id, created_at, post_id)`:
-    the arrival id is the floor's axis, the pair the jump position's."""
-    newest_id = 0
-    feed: tuple[str, str] | None = None
-    for row_id, created_at, post_id in iter_visible_roots(db, board.id):
-        newest_id = max(newest_id, row_id)
-        if feed is None or (created_at, post_id) > feed:
-            feed = (created_at, post_id)
-    if feed is None:
-        return None
-    return newest_id, feed[0], feed[1]
+def _board_exists(db: Database, board: Board) -> bool:
+    """Whether `board` still exists. A caller's list can outlive its board
+    -- a SysOp deletes it mid-visit -- and a read-state write must then do
+    nothing rather than recreate rows for a board that is gone (Codex
+    review on #723)."""
+    return db.connection.execute("SELECT 1 FROM boards WHERE id = ?", (board.id,)).fetchone() is not None
+
+
+def _newest_visible(db: Database, board: Board, *, by_feed: bool) -> tuple[int, str, str] | None:
+    """`board`'s newest visible root, by arrival or by feed position. The
+    query runs newest first and stops at the first visible row, so it
+    costs a page, not the board's history (Codex review on #723)."""
+    return next(iter_visible_roots(db, board.id, newest_first=True, by_feed=by_feed), None)
 
 
 def ensure_board_baseline(db: Database, user: User, board: Board) -> None:
@@ -225,14 +223,16 @@ def ensure_board_baseline(db: Database, user: User, board: Board) -> None:
     counts everything already there as read, and only what arrives after
     it is new -- a caller new to a busy board is not handed its whole
     history as unread. A no-op for a board visited before."""
-    if _get_cursor(db, user, _BOARD, board.id) is not None:
+    if _get_cursor(db, user, _BOARD, board.id) is not None or not _board_exists(db, board):
         return
     sweep_expired_posts(db, board)
-    newest = _board_newest(db, board)
-    arrival_id, created_at, post_id = newest if newest is not None else (0, "", "")
+    newest = _newest_visible(db, board, by_feed=False)
+    newest_feed = _newest_visible(db, board, by_feed=True)
     _upsert_cursor(
         db, user, _BOARD, board.id,
-        last_seen_created_at=created_at, last_seen_stable_id=post_id, last_seen_arrival_id=arrival_id,
+        last_seen_created_at=newest_feed[1] if newest_feed else "",
+        last_seen_stable_id=newest_feed[2] if newest_feed else "",
+        last_seen_arrival_id=newest[0] if newest else 0,
     )
 
 
@@ -276,50 +276,45 @@ def _compact(db: Database, user: User, board: Board, floor: int) -> int:
 def record_post_opened(db: Database, user: User, board: Board, post: Post) -> None:
     """`user` opened `post` (a root) on `board`: it counts as read from now
     on (issue #710). Only opening marks a post read -- showing it in a
-    list does not.
-
-    The jump position (`board_read_cursor`) moves forward to `post` if it
-    is newer by feed position; the unread floor moves only as `_compact`
-    allows, so opening the newest post of a board does not mark the
-    posts under it read."""
+    list does not. The floor moves only as `_compact` allows, so opening
+    the newest post of a board does not mark the posts under it read."""
+    if not _board_exists(db, board):
+        return
     ensure_board_baseline(db, user, board)
     existing = _get_cursor(db, user, _BOARD, board.id)
     assert existing is not None
     floor = existing.arrival_id or 0
-    if post.id > floor:
-        db.connection.execute(
-            "INSERT OR IGNORE INTO user_board_opened_posts (user_id, board_id, post_row_id) VALUES (?, ?, ?)",
-            (user.id, board.id, post.id),
-        )
-        floor = _compact(db, user, board, floor)
-    feed_advances = (post.created_at, post.post_id) > (existing.created_at, existing.stable_id)
+    if post.id <= floor:
+        return
+    db.connection.execute(
+        "INSERT OR IGNORE INTO user_board_opened_posts (user_id, board_id, post_row_id) VALUES (?, ?, ?)",
+        (user.id, board.id, post.id),
+    )
     _upsert_cursor(
         db, user, _BOARD, board.id,
-        last_seen_created_at=post.created_at if feed_advances else existing.created_at,
-        last_seen_stable_id=post.post_id if feed_advances else existing.stable_id,
-        last_seen_arrival_id=floor,
+        last_seen_created_at=existing.created_at, last_seen_stable_id=existing.stable_id,
+        last_seen_arrival_id=_compact(db, user, board, floor),
     )
 
 
 def mark_board_read(db: Database, user: User, board: Board) -> None:
     """Everything `user` may see on `board` counts as read (issue #710's
-    `[M]ark all read`): the floor moves to the newest visible post and the
-    jump position to the newest by feed position. A post still pending
-    approval above it stays unread for when it appears."""
+    `[M]ark all read`): the floor moves to the newest visible post. A post
+    still pending approval above it stays unread for when it appears."""
+    if not _board_exists(db, board):
+        return
     ensure_board_baseline(db, user, board)
     existing = _get_cursor(db, user, _BOARD, board.id)
     assert existing is not None
     sweep_expired_posts(db, board)
-    newest = _board_newest(db, board)
+    newest = _newest_visible(db, board, by_feed=False)
     if newest is None:
         return
-    arrival_id, created_at, post_id = newest
-    floor = max(existing.arrival_id or 0, arrival_id)
-    feed = max((existing.created_at, existing.stable_id), (created_at, post_id))
-    floor = _compact(db, user, board, floor)
+    floor = _compact(db, user, board, max(existing.arrival_id or 0, newest[0]))
     _upsert_cursor(
         db, user, _BOARD, board.id,
-        last_seen_created_at=feed[0], last_seen_stable_id=feed[1], last_seen_arrival_id=floor,
+        last_seen_created_at=existing.created_at, last_seen_stable_id=existing.stable_id,
+        last_seen_arrival_id=floor,
     )
 
 
@@ -338,16 +333,36 @@ def unread_post_ids(db: Database, user: User, board: Board, posts: list[Post]) -
 
 
 def board_read_cursor(db: Database, user: User, board: Board) -> tuple[str, str] | None:
-    """`user`'s raw `(created_at, post_id)` cursor for `board`, or
-    `None` if never visited -- for a caller (issue #56's `[N]ew scan`)
-    that needs to jump straight to the first unread post via
-    `list_posts_page`'s own `after=` parameter, not just a count.
-    Feed-position based, unchanged by issue #72 -- see this module's
-    own docstring for why that's a separate axis from unread counting."""
+    """Where a jump to `user`'s first unread post on `board` should anchor,
+    as a `(created_at, post_id)` for `list_posts_page`'s `after=`, or
+    `None` if never visited (issue #56's `[N]ew scan`).
+
+    The feed position just before the first unread post in feed order
+    (issue #710): with posts read once opened, unread ones can sit below
+    others already read, and a stored "newest seen" position would jump
+    past them (Codex review on #723). `("", "")` when the first unread
+    post is the oldest on the board; the newest post's position when
+    nothing is unread, which lands on the ordinary newest page."""
     cursor = _get_cursor(db, user, _BOARD, board.id)
     if cursor is None:
         return None
-    return cursor.created_at, cursor.stable_id
+    first_unread = next(iter_visible_roots(
+        db, board.id, after_id=cursor.arrival_id or 0, by_feed=True,
+        extra_sql=(
+            "AND root.id NOT IN (SELECT post_row_id FROM user_board_opened_posts "
+            "WHERE user_id = ? AND board_id = ?)"
+        ),
+        extra_params=(user.id, board.id),
+    ), None)
+    if first_unread is None:
+        newest = _newest_visible(db, board, by_feed=True)
+        return (newest[1], newest[2]) if newest is not None else (cursor.created_at, cursor.stable_id)
+    before = next(iter_visible_roots(
+        db, board.id, newest_first=True, by_feed=True,
+        extra_sql="AND (root.created_at, root.post_id) < (?, ?)",
+        extra_params=(first_unread[1], first_unread[2]),
+    ), None)
+    return (before[1], before[2]) if before is not None else ("", "")
 
 
 def unread_post_count(db: Database, user: User, board: Board) -> int | None:
