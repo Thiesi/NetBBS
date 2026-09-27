@@ -16495,7 +16495,10 @@ async def _door_filesystem_screen(
         directory = custom_doors_dir(db)
         if not directory.is_dir():
             return [], directory
-        return sorted(p for p in directory.iterdir() if p.is_file()), directory
+        # Hidden files are left out: nothing a SysOp registers starts with a
+        # dot, and an upload interrupted by a crash leaves its temporary copy
+        # here under one (`netbbs.sysop_uploads.install_upload`).
+        return sorted(p for p in directory.iterdir() if p.is_file() and not p.name.startswith(".")), directory
 
     files, directory = await lane.run(_list)
     if not files:

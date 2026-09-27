@@ -64,6 +64,7 @@ from netbbs.net.zmodem import safe_filename
 from netbbs.permissions import meets_level
 from netbbs.moderation.log import record_action
 from netbbs.storage.database import Database
+from netbbs.sysop_uploads import DOOR_FILE as SYSOP_UPLOAD_DOOR_FILE
 from netbbs.sysop_uploads import SysOpUploadError, SysOpUploadTarget, install_upload
 
 _logger = logging.getLogger(__name__)
@@ -327,9 +328,13 @@ def resolve(db: Database, grant: TransferGrant) -> RedeemedTransfer:
         # or locked out, and the upload must not outlive either.
         if is_blocked(db, user) or not meets_level(user, SYSOP_LEVEL):
             raise TransferError("this account can no longer send files to the node")
+        max_bytes = grant.sysop_upload.max_bytes
+        if grant.sysop_upload.kind == SYSOP_UPLOAD_DOOR_FILE:
+            # The door cap is the node's upload limit, read live like a file
+            # area's: a limit lowered while the link was outstanding applies.
+            max_bytes = min(max_bytes, get_max_upload_bytes(db))
         return RedeemedTransfer(
-            grant=grant, user=user, area=None, entry=None,
-            max_upload_bytes=grant.sysop_upload.max_bytes,
+            grant=grant, user=user, area=None, entry=None, max_upload_bytes=max_bytes,
         )
     area = get_file_area_by_area_id(db, grant.area_id)
     if area is None:
@@ -736,6 +741,13 @@ class TransferGateway:
         before the link was issued. The sent file's own name is ignored."""
         from aiohttp import web
 
+        # Checked again now the body is in: receiving it can take minutes,
+        # and an account demoted or locked out meanwhile must not publish.
+        try:
+            resolved = await self._lane.run(resolve, resolved.grant)
+        except TransferError as exc:
+            temp_path.unlink(missing_ok=True)
+            raise web.HTTPForbidden(text=str(exc)) from exc
         try:
             size = await install_and_record(self._lane, resolved.user, target, temp_path, sent_as=filename)
         except SysOpUploadError as exc:

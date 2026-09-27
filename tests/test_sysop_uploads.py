@@ -422,3 +422,59 @@ def test_menus_offer_upload(db, lane, sysop):
     asyncio.run(admin_flow._draw_welcome_banner_menu(session, lane, "off", False, False, False))
     asyncio.run(admin_flow._draw_door_menu(session, "off", False, False, False, status_line=""))
     assert _visible(_written_text(session)).count("[U]pload") == 2
+
+
+def test_demotion_while_the_body_arrives_stops_the_install(node, tmp_path, monkeypatch):
+    """The account is checked again once the body is in: sending it can
+    take minutes, and a SysOp locked out meanwhile must not publish."""
+    import netbbs.net.file_transfer as module
+
+    sysop_user = create_user(node.db, "boss", password="hunter2", user_level=SYSOP_LEVEL)
+    other = create_user(node.db, "other", password="hunter2", user_level=SYSOP_LEVEL)
+    target = _target(tmp_path)
+    real_receive = module._receive_upload
+
+    async def _receive_then_demote(request, temp_path, *, max_bytes):
+        result = await real_receive(request, temp_path, max_bytes=max_bytes)
+        set_user_level(node.db, sysop_user, 10, changed_by=other)
+        return result
+
+    monkeypatch.setattr(module, "_receive_upload", _receive_then_demote)
+
+    async def scenario():
+        async with node:
+            grant = node.grants.issue_sysop_upload(user=sysop_user, target=target)
+            url = f"{node.base}/transfer/{grant.token}"
+            async with aiohttp.ClientSession() as client:
+                async with client.post(url, data=_post_file(url, "a.ans", b"ART")) as response:
+                    return response.status
+
+    assert asyncio.run(scenario()) == 403
+    assert not target.destination.exists()
+
+
+def test_a_door_link_follows_a_lowered_upload_limit(db, sysop, tmp_path):
+    from netbbs.config import set_max_upload_bytes
+    from netbbs.net.file_transfer import resolve
+
+    grants = TransferGrants()
+    target = _target(tmp_path, "game.py", max_bytes=1_000_000, kind=DOOR_FILE)
+    grant = grants.issue_sysop_upload(user=sysop, target=target)
+    set_max_upload_bytes(db, 1000)
+
+    assert resolve(db, grant).max_upload_bytes == 1000
+
+
+def test_door_from_disk_hides_dot_files(db, lane, sysop):
+    """An upload interrupted by a crash leaves a dot-named temporary copy
+    beside its destination; it is not offered for registration."""
+    directory = custom_doors_dir(db)
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / ".game.py.upload-1a2b3c4d").write_text("half", encoding="utf-8")
+    (directory / "game.py").write_text("print('hi')", encoding="utf-8")
+    session = FakeSession(["b"])
+
+    asyncio.run(admin_flow._door_filesystem_screen(session, lane, sysop, "off", False, False, False))
+
+    text = _visible(_written_text(session))
+    assert "game.py" in text and ".upload-" not in text
