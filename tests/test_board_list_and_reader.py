@@ -11,7 +11,7 @@ import re
 
 import pytest
 
-from netbbs.activity import record_board_seen
+from netbbs.activity import ensure_board_baseline, record_post_opened, unread_post_count
 from netbbs.auth.users import create_user
 from netbbs.boards import posts as posts_module
 from netbbs.boards.boards import create_board
@@ -227,8 +227,10 @@ def test_the_byline_says_whose_post_it_answers(db, alice, monkeypatch):
 
 def test_posts_new_since_the_last_visit_are_marked_on_this_visit(db, alice, monkeypatch):
     board = create_board(db, "general", creator=alice)
+    ensure_board_baseline(db, alice, board)
     posts = _posts(db, board, alice, 4, monkeypatch)
-    record_board_seen(db, alice, board, list_posts_page(db, board, alice).posts[1])  # seen up to Subject 1
+    record_post_opened(db, alice, board, posts[0])
+    record_post_opened(db, alice, board, posts[1])  # read up to Subject 1
     session = FakeSession(["b"])
 
     asyncio.run(board_flow._show_board(session, db, board, alice))
@@ -304,11 +306,11 @@ def test_the_board_list_shows_activity_and_linked_and_gate_notes(db, alice):
     quiet = create_board(db, "Quiet", creator=alice)
     create_board(db, "Unvisited", creator=alice, name_requirement="verified")
     seen = create_post(db, busy, alice, "a", "b")
-    record_board_seen(db, alice, busy, seen)
+    record_post_opened(db, alice, busy, seen)
     create_post(db, busy, alice, "c", "d")
     create_post(db, busy, alice, "e", "f")
     last = create_post(db, quiet, alice, "x", "y")
-    record_board_seen(db, alice, quiet, last)
+    record_post_opened(db, alice, quiet, last)
     link_board(db, busy, node_identity=bootstrap_node_identity("roanoke"))
     session = FakeSession(["b"])
 
@@ -344,9 +346,9 @@ def test_stepping_into_the_next_page_marks_only_the_post_shown(db, alice, monkey
     board = create_board(db, "general", creator=alice)
     _posts(db, board, alice, 60, monkeypatch)
     recorded = []
-    real = board_flow.record_board_seen
+    real = board_flow.record_post_opened
     monkeypatch.setattr(
-        board_flow, "record_board_seen",
+        board_flow, "record_post_opened",
         lambda db_, user, board_, post: recorded.append(post.subject) or real(db_, user, board_, post),
     )
     # Older page, cursor to its last row, open it, then [N]ext post across
@@ -448,9 +450,9 @@ def test_every_post_shown_in_the_reader_is_recorded_as_it_is_shown(db, alice, mo
     board = create_board(db, "general", creator=alice)
     _posts(db, board, alice, 60, monkeypatch)
     recorded = []
-    real = board_flow.record_board_seen
+    real = board_flow.record_post_opened
     monkeypatch.setattr(
-        board_flow, "record_board_seen",
+        board_flow, "record_post_opened",
         lambda db_, user, board_, post: recorded.append(post.subject) or real(db_, user, board_, post),
     )
     # Across the page boundary with [N]ext post, then one more step inside
@@ -476,7 +478,7 @@ def test_board_activity_does_not_count_posts_past_their_age(db, alice, monkeypat
         "UPDATE posts SET created_at = ? WHERE post_id = ?", ("2020-01-01T00:00:00.000000Z", first.post_id)
     )
     db.connection.commit()
-    record_board_seen(db, alice, board, first)
+    record_post_opened(db, alice, board, first)
     db.connection.execute(
         "UPDATE posts SET created_at = ? WHERE post_id = ?", ("2020-01-02T00:00:00.000000Z", stale.post_id)
     )
@@ -568,11 +570,11 @@ def test_reading_a_late_arrival_does_not_move_the_jump_position_back(db, alice, 
     stamps = iter(["2026-01-01T10:00:00.000000Z", "2026-01-01T09:00:00.000000Z"])
     monkeypatch.setattr(posts_module, "utc_now_iso", lambda: next(stamps))
     newer = create_post(db, board, alice, "Written at ten", "x")
-    record_board_seen(db, alice, board, newer)
+    record_post_opened(db, alice, board, newer)
     late = create_post(db, board, alice, "Written at nine, arrived later", "y")
     assert late.id > newer.id and late.created_at < newer.created_at
 
-    record_board_seen(db, alice, board, late)
+    record_post_opened(db, alice, board, late)
 
     assert board_read_cursor(db, alice, board) == (newer.created_at, newer.post_id)
     assert unread_post_count(db, alice, board) == 0
@@ -619,3 +621,138 @@ def test_a_reply_to_a_long_subject_keeps_the_reader_on_the_screen(db, alice, mon
     for screen in reader:
         assert len(screen.replace("\r\n", "\n").rstrip("\n").split("\n")) <= 24
     assert 'reply to "Question' in reader[0] and "..." in reader[0]
+
+
+# -- issue #710: read once opened ------------------------------------------------
+
+
+def test_showing_the_list_marks_nothing_read(db, alice, monkeypatch):
+    board = create_board(db, "general", creator=alice)
+    ensure_board_baseline(db, alice, board)
+    _posts(db, board, alice, 3, monkeypatch)
+    session = FakeSession(["b"])
+
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+
+    assert unread_post_count(db, alice, board) == 3
+
+
+def test_an_opened_post_loses_its_new_marker(db, alice, monkeypatch):
+    board = create_board(db, "general", creator=alice)
+    ensure_board_baseline(db, alice, board)
+    _posts(db, board, alice, 3, monkeypatch)
+    session = FakeSession(["1", "b", "b"])
+
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+
+    screen = session.screens()[-1]
+    rows = {n: line for line in screen.split("\n") for n in _listed(line)}
+    assert " new " not in rows[0]
+    assert " new " in rows[1] and " new " in rows[2]
+    assert "2 new" in screen
+    assert unread_post_count(db, alice, board) == 2
+
+
+def test_mark_all_read_clears_every_marker_and_its_own_entry(db, alice, monkeypatch):
+    board = create_board(db, "general", creator=alice)
+    ensure_board_baseline(db, alice, board)
+    _posts(db, board, alice, 3, monkeypatch)
+    session = FakeSession(["m", "b"])
+
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+
+    first, last = session.screens()[0], session.screens()[-1]
+    assert "[M]ark all read" in first
+    assert "Every post on this board is marked read." in last
+    rows = [line for line in last.split("\n") if _listed(line)]
+    assert len(rows) == 3 and not any(" new " in row for row in rows)
+    assert "[M]ark all read" not in last
+    assert unread_post_count(db, alice, board) == 0
+
+
+def test_mark_all_read_is_not_offered_with_nothing_unread(db, alice, monkeypatch):
+    board = create_board(db, "general", creator=alice)
+    _posts(db, board, alice, 3, monkeypatch)  # a first visit: all of it read
+    session = FakeSession(["m", "b"])
+
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+
+    assert "[M]ark all read" not in session.visible()
+
+
+def test_a_callers_own_new_post_is_not_new_to_them(db, alice):
+    board = create_board(db, "general", creator=alice)
+    session = FakeSession(["p", "Hello", "Body", "", "p", "b"])
+
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+
+    assert "Posted." in session.visible()
+    assert unread_post_count(db, alice, board) == 0
+
+
+def test_mark_all_read_keeps_the_list_on_the_screen(db, alice, monkeypatch):
+    """The outcome line takes a row the page was not sized for; the list is
+    refetched for it (Codex review on #723)."""
+    board = create_board(db, "general", creator=alice)
+    ensure_board_baseline(db, alice, board)
+    _posts(db, board, alice, 40, monkeypatch)
+    session = FakeSession(["m", "b"])
+
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+
+    last = session.screens()[-1]
+    assert "Every post on this board is marked read." in last
+    assert len(last.replace("\r\n", "\n").rstrip("\n").split("\n")) <= 24
+
+
+def test_the_new_count_follows_posts_the_cap_gave_up(db, alice, monkeypatch):
+    """Past the opened-set cap the floor jumps and unread gaps are given up
+    as read; the list's count says so at once (Codex review on #723)."""
+    from netbbs import activity
+
+    monkeypatch.setattr(activity, "OPENED_POSTS_CAP", 2)
+    board = create_board(db, "general", creator=alice)
+    ensure_board_baseline(db, alice, board)
+    posts = _posts(db, board, alice, 8, monkeypatch)
+    for index in (2, 4):
+        record_post_opened(db, alice, board, posts[index])
+    session = FakeSession(["7", "b", "b"])  # row 7 is Subject 6
+
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+
+    count = unread_post_count(db, alice, board)
+    assert count == 2
+    assert f"{count} new" in session.screens()[-1]
+
+
+def test_publishing_recounts_when_the_cap_gives_posts_up(db, alice, monkeypatch):
+    from netbbs import activity
+
+    monkeypatch.setattr(activity, "OPENED_POSTS_CAP", 1)
+    board = create_board(db, "general", creator=alice)
+    ensure_board_baseline(db, alice, board)
+    posts = _posts(db, board, alice, 3, monkeypatch)
+    record_post_opened(db, alice, board, posts[2])  # 0 and 1 unread
+    monkeypatch.setattr(posts_module, "utc_now_iso", lambda: "2026-01-02T00:00:00.000000Z")
+    session = FakeSession(["p", "Hello", "Body", "", "p", "b"])
+
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+
+    assert unread_post_count(db, alice, board) == 0
+    last = session.screens()[-1]
+    assert "[M]ark all read" not in last and " new" not in last.split("\n")[1]
+
+
+def test_the_reader_marks_a_post_new_on_the_screen_that_opens_it(db, alice, monkeypatch):
+    """Opening is what makes it read, so whether it was new is taken before
+    the open is recorded (Codex review on #723)."""
+    board = create_board(db, "general", creator=alice)
+    ensure_board_baseline(db, alice, board)
+    _posts(db, board, alice, 1, monkeypatch)
+    session = FakeSession(["1", "b", "1", "b", "b"])
+
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+
+    first, second = [screen for screen in session.screens() if "Body of post 0" in screen][:2]
+    assert "[new]" in first
+    assert "[new]" not in second  # read now

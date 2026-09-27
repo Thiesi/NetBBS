@@ -21,7 +21,13 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
-from netbbs.activity import board_seen_arrival_id, record_board_seen, unread_post_count
+from netbbs.activity import (
+    ensure_board_baseline,
+    mark_board_read,
+    record_post_opened,
+    unread_post_count,
+    unread_post_ids,
+)
 from netbbs.attestation import format_name_for_resource, meets_age, meets_name_requirement
 from netbbs.auth.users import User, get_user_by_id
 from netbbs.boards import (
@@ -614,7 +620,7 @@ def _pad(text: str, width: int) -> str:
 
 
 def _list_options(
-    page: PostPage, *, can_post: bool, has_draft: bool, row_count: int
+    page: PostPage, *, can_post: bool, has_draft: bool, row_count: int, has_unread: bool
 ) -> list[MenuEntry]:
     options = []
     if row_count:
@@ -629,6 +635,8 @@ def _list_options(
         options.append(MenuEntry(label=menu_key("P", "ost"), brief="Write a new post"))
     if has_draft:
         options.append(_DRAFT_MENU_ENTRY)
+    if has_unread:
+        options.append(MenuEntry(label=menu_key("M", "ark all read"), brief="Count every post here as read"))
     options.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to the previous menu"))
     return options
 
@@ -668,11 +676,13 @@ _LIST_HELP = [
     "O / N / R    older posts, newer posts, the newest page",
     "P            write a new post (when you may post here)",
     "D            resume or discard a saved draft",
+    "M            count every post on this board as read",
     "Ctrl-L       redraw the list",
     "B            back to the list of boards",
     "",
     "Reading a post: Edit, Remove, Next and Previous post live there,",
-    "and PgUp/PgDn page a long post.",
+    "and PgUp/PgDn page a long post. A post counts as read once you",
+    "open it; the list marks the ones you have not opened as new.",
 ]
 
 
@@ -753,22 +763,25 @@ async def _show_board(
     name_requirement = get_effective_name_requirement(db, board)
     read_only_reason = None if can_post else _read_only_reason(db, user, board, closed=closed)
     linked_note = _linked_note(db, board, link_context)
-    # Taken before this visit moves the read cursor, so what was new when the
-    # caller arrived stays marked while they page and read (issue #679).
-    seen_floor = board_seen_arrival_id(db, user, board)
-    unread_on_entry = unread_post_count(db, user, board) or 0
+    # A first visit counts what is already here as read; from then on a
+    # post is read once it is opened, and only then (issue #710).
+    ensure_board_baseline(db, user, board)
+    unread = {"count": unread_post_count(db, user, board) or 0}
+    # Whether the action bar offers [M]ark all read. Decided when a page is
+    # fetched, with the page's row budget, and only ever withdrawn between
+    # fetches: a bar that grew after the budget was set would push the list
+    # off the screen.
+    unread["menu"] = bool(unread["count"])
     separator = " · " if unicode_style else " - "
 
     def _new_ids(current_page: PostPage) -> set[int]:
-        if seen_floor is None:
-            return set()
-        return {post.id for post in current_page.posts if post.id > seen_floor}
+        return unread_post_ids(db, user, board, current_page.posts)
 
     def _frame(current_page: PostPage, *, row_count: int | None = None) -> tuple[str, str]:
         """Everything above the list's rows and everything below them."""
         subtitle = ["Older posts" if current_page.has_newer else "Newest posts"]
-        if unread_on_entry:
-            subtitle.append(f"{unread_on_entry} new")
+        if unread["count"]:
+            subtitle.append(f"{unread['count']} new")
         if linked_note:
             subtitle.append(linked_note)
         header = screen_title(
@@ -801,6 +814,7 @@ async def _show_board(
         options = _list_options(
             current_page, can_post=can_post, has_draft=has_draft,
             row_count=len(current_page.posts) if row_count is None else row_count,
+            has_unread=unread["menu"],
         )
         # Descriptions double the action bar. Where they would leave the
         # list fewer rows than a page worth having, the bar goes compact:
@@ -810,7 +824,7 @@ async def _show_board(
         busiest = menu_row(
             _list_options(
                 PostPage(posts=[], has_older=True, has_newer=True),
-                can_post=can_post, has_draft=has_draft, row_count=9,
+                can_post=can_post, has_draft=has_draft, row_count=9, has_unread=unread["menu"],
             ),
             width=session.terminal_width, height=session.terminal_height,
             description_level=description_level,
@@ -837,6 +851,7 @@ async def _show_board(
         busiest frame this board can draw -- a page does not change size
         because [N]ewer appeared on it."""
         width = session.terminal_width
+        unread["menu"] = bool(unread["count"])
         # Nine rows, so the read entry is in the action bar exactly as a
         # populated page draws it (Codex review on #719).
         above, below = _frame(PostPage(posts=[], has_older=True, has_newer=True), row_count=9)
@@ -882,16 +897,39 @@ async def _show_board(
         mode, cursor = page_anchor
         return list_posts_page(db, board, user, limit=rows, **{mode: cursor})
 
-    async def _render_and_advance_cursor(current_page: PostPage, highlighted: int | None = None) -> None:
-        """The one place every render in this loop funnels through
-        (issue #56) -- advances `user`'s board read cursor to whatever
-        is now newest on screen. A no-op when the page is empty (the
-        empty-board early return above never reaches here at all, but
-        an Older/Newer navigation could in principle land on an empty
-        result if a page emptied out from under a live session)."""
+    def _refetch_keeping(current_page: PostPage, highlighted: int | None) -> tuple[PostPage, int | None]:
+        """The page on screen, refetched at the budget of the moment -- which
+        counts an outcome notice just queued, and a resized terminal -- with
+        the highlight on the post it was on, not on its row number (Codex
+        review on #719 and #723). Should the smaller page lose that post off
+        its end, the page keeps its size instead: a row too many is better
+        than Enter opening a different post."""
+        was_on = (
+            current_page.posts[highlighted].post_id
+            if highlighted is not None and highlighted < len(current_page.posts) else None
+        )
+        fresh = _refetch_current_page()
+        if was_on is None or not fresh.posts:
+            return fresh, None
+        for candidate in (fresh, _refetch_current_page(limit=len(current_page.posts))):
+            index = next((i for i, listed in enumerate(candidate.posts) if listed.post_id == was_on), None)
+            if index is not None:
+                return candidate, index
+        # The post itself is gone (removed, expired, hidden).
+        return fresh, min(highlighted, len(fresh.posts) - 1)
+
+    async def _render_fresh(current_page: PostPage, highlighted: int | None = None) -> None:
+        """Render after anything that can change what is unread -- a post
+        read, written, removed, or the page refetched. Showing the list
+        marks nothing read (issue #710): only opening a post does.
+
+        The unread count is counted once on arrival and kept from there --
+        one fewer for each unread post opened, none after [M]ark all read --
+        rather than recounted here: a carried board's count checks trust
+        post by post (Codex review on #723)."""
+        if not unread["count"]:
+            unread["menu"] = False
         await _render(current_page, highlighted)
-        if current_page.posts:
-            record_board_seen(db, user, board, current_page.posts[-1])
 
     async def _read_post(index: int) -> int | None:
         """Read `page.posts[index]`, one post to a screen, and step to the
@@ -907,11 +945,16 @@ async def _show_board(
         detail_page = 0
         while True:
             post = page.posts[index]
-            # Recorded as it is shown, one post at a time: stepping through a
-            # page the list never drew must not leave those posts unread if
-            # the connection drops before [B]ack (Codex review on #719).
-            # `record_board_seen` only ever moves forward.
-            record_board_seen(db, user, board, post)
+            # Opening a post is what makes it read (issue #710), recorded as
+            # it is shown, so a dropped connection loses nothing already read.
+            # Whether it was new is taken first: the byline says so on the
+            # screen that opens it (Codex review on #723).
+            was_new = bool(unread_post_ids(db, user, board, [post]))
+            if was_new:
+                unread["count"] = max(0, unread["count"] - 1)
+            if record_post_opened(db, user, board, post):
+                # The opened-set cap gave other unread posts up as read.
+                unread["count"] = unread_post_count(db, user, board) or 0
             width = session.terminal_width
             title = screen_title(
                 sanitize_text(post.subject),
@@ -923,7 +966,7 @@ async def _show_board(
                 node_name_gradient=session.node_name_gradient,
             )
             byline = _post_byline(
-                db, post, name_requirement=name_requirement, is_new=post.id in _new_ids(page),
+                db, post, name_requirement=name_requirement, is_new=was_new,
                 separator=separator, width=width,
             )
             body_rows = _render_quoted_body(sanitize_text(post.body, allow_newlines=True), width).split("\r\n")
@@ -1039,6 +1082,11 @@ async def _show_board(
             except PostError as exc:
                 announce(session, f"Could not create post: {exc}", tone="muted")
                 return False
+            # A caller's own post is not news to them (issue #710). A held
+            # one is recorded too, so it is not new when it is approved.
+            if record_post_opened(db, user, board, post):
+                # The opened-set cap gave other unread posts up as read.
+                unread["count"] = unread_post_count(db, user, board) or 0
             if link_context is not None:
                 queue_board_post_if_linked(db, post, board, node_identity=link_context.node_identity)
             if post.status == "pending":
@@ -1220,7 +1268,7 @@ async def _show_board(
     # A [N]ew scan or [F]ind jump opens the list with its target at the top;
     # the cursor starts on it, so Enter reads what the caller came for.
     highlighted: int | None = 0 if page_anchor is not None else None
-    await _render_and_advance_cursor(page, highlighted)
+    await _render_fresh(page, highlighted)
     while True:
         key, echoed = await _read_list_key(session)
         char = key.char.lower() if key.kind == EditorKeyKind.CHAR and key.char else ""
@@ -1244,29 +1292,14 @@ async def _show_board(
         ):
             await _moved_on()
             highlighted = await _read_post(highlighted)
-            await _render_and_advance_cursor(page, highlighted)
+            await _render_fresh(page, highlighted)
         elif len(char) == 1 and char in "123456789" and int(char) <= min(9, len(page.posts)):
             await _moved_on()
             highlighted = await _read_post(int(char) - 1)
-            await _render_and_advance_cursor(page, highlighted)
+            await _render_fresh(page, highlighted)
         elif (key.kind == EditorKeyKind.CTRL and key.char == "l") or char == REDRAW_KEY:
-            # The refetch runs at today's budget -- a consumed notice or a
-            # resized terminal can change it, and a newest page then gains
-            # older posts in front -- so the highlight follows the post it
-            # was on, not its row number (Codex review on #719).
-            was_on = (
-                page.posts[highlighted].post_id
-                if highlighted is not None and highlighted < len(page.posts) else None
-            )
-            page = _refetch_current_page()
-            if was_on is not None and page.posts:
-                highlighted = next(
-                    (i for i, listed in enumerate(page.posts) if listed.post_id == was_on),
-                    min(highlighted, len(page.posts) - 1),
-                )
-            else:
-                highlighted = None
-            await _render_and_advance_cursor(page, highlighted)
+            page, highlighted = _refetch_keeping(page, highlighted)
+            await _render_fresh(page, highlighted)
         elif (key.kind == EditorKeyKind.CTRL and key.char == "h") or char == HELP_KEY:
             await show_help(
                 session, "Message board keys", _LIST_HELP,
@@ -1279,20 +1312,20 @@ async def _show_board(
             page_anchor = ("before", (oldest.created_at, oldest.post_id))
             page = _refetch_current_page()
             highlighted = None
-            await _render_and_advance_cursor(page)
+            await _render_fresh(page)
         elif char == "n" and page.has_newer:
             await _moved_on()
             newest = page.posts[-1]
             page_anchor = ("after", (newest.created_at, newest.post_id))
             page = _refetch_current_page()
             highlighted = None
-            await _render_and_advance_cursor(page)
+            await _render_fresh(page)
         elif char == "r" and page.has_newer:
             await _moved_on()
             page_anchor = None
             page = _refetch_current_page()
             highlighted = None
-            await _render_and_advance_cursor(page)
+            await _render_fresh(page)
         elif char == "p" and can_post:
             await _moved_on()
             if await _saved_draft_menu(from_post=True):
@@ -1300,10 +1333,9 @@ async def _show_board(
                 highlighted = None
                 page = _refetch_current_page()
             else:
-                # Nothing was posted: the same page at the same size, so a
-                # notice now pending cannot drop the highlighted row.
-                page = _refetch_current_page(limit=len(page.posts) or None)
-            await _render_and_advance_cursor(page, highlighted)
+                # Nothing was posted: the same page, the highlight kept.
+                page, highlighted = _refetch_keeping(page, highlighted)
+            await _render_fresh(page, highlighted)
         elif char == "d" and _has_saved_draft():
             await _moved_on()
             if await _saved_draft_menu():
@@ -1311,10 +1343,19 @@ async def _show_board(
                 highlighted = None
                 page = _refetch_current_page()
             else:
-                # Discarded or left: same page, same size (Codex review on
-                # #719) -- "Draft deleted." must not cost the highlighted row.
-                page = _refetch_current_page(limit=len(page.posts) or None)
-            await _render_and_advance_cursor(page, highlighted)
+                # Discarded or left: the same page, the highlight kept --
+                # "Draft deleted." must not cost the highlighted row (Codex
+                # review on #719).
+                page, highlighted = _refetch_keeping(page, highlighted)
+            await _render_fresh(page, highlighted)
+        elif char == "m" and unread["menu"]:
+            await _moved_on()
+            mark_board_read(db, user, board)
+            unread["count"] = 0
+            announce(session, "Every post on this board is marked read.", tone="muted")
+            # Refetched: the notice takes a row the page was not sized for.
+            page, highlighted = _refetch_keeping(page, highlighted)
+            await _render_fresh(page, highlighted)
         elif char == "b":
             await _moved_on()
             return

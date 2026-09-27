@@ -180,6 +180,7 @@ def test_new_scan_shows_replies_to_you(db, lane, alice, monkeypatch):
 
 
 def test_new_scan_shows_no_replies_when_there_are_none(db, lane, alice):
+    create_board(db, "general", creator=alice)
     session = _run_main_menu(db, lane, alice, ["n", "b", "l", "y"])
     assert "Replies to you: none." in _written_text(session)
 
@@ -188,16 +189,17 @@ def test_new_scan_shows_no_replies_when_there_are_none(db, lane, alice):
 
 
 def test_selecting_a_board_jumps_to_the_first_unread_post(db, lane, alice, monkeypatch):
-    from netbbs.activity import record_board_seen
+    from netbbs.activity import ensure_board_baseline, record_post_opened
 
     other = create_user(db, "bob", password="hunter2", user_level=10)
     board = create_board(db, "general", creator=other)
+    ensure_board_baseline(db, alice, board)
     timestamps = iter([f"2026-01-01T00:00:0{i}.000000Z" for i in range(2)])
     monkeypatch.setattr(posts_module, "utc_now_iso", lambda: next(timestamps))
     first = create_post(db, board, other, "first", "1")
     create_post(db, board, other, "second", "2")
 
-    record_board_seen(db, alice, board, first)
+    record_post_opened(db, alice, board, first)
 
     session = _run_main_menu(db, lane, alice, ["n", "0", "1", "b", "l", "y"])
 
@@ -276,3 +278,85 @@ def test_new_scan_numbers_its_rows_rather_than_printing_an_address(db, lane, ali
 
     assert "(#1)" in text
     assert not re.search(r"\(#\d{6,}\)", text), "a reference number nobody could type or read"
+
+
+# -- issue #710: [M]ark read -------------------------------------------------
+
+
+def test_mark_read_counts_a_boards_posts_read_without_entering_it(db, lane, alice, monkeypatch):
+    from netbbs.activity import ensure_board_baseline, unread_post_count
+
+    other = create_user(db, "bob", password="hunter2", user_level=10)
+    board = create_board(db, "general", creator=other)
+    ensure_board_baseline(db, alice, board)
+    timestamps = iter([f"2026-01-01T00:00:0{i}.000000Z" for i in range(2)])
+    monkeypatch.setattr(posts_module, "utc_now_iso", lambda: next(timestamps))
+    create_post(db, board, other, "first", "1")
+    create_post(db, board, other, "second", "2")
+
+    # Nothing highlighted on this session, so [M] asks which row.
+    session = _run_main_menu(db, lane, alice, ["n", "m", "1", "b", "l", "y"])
+
+    text = _visible_text(session)
+    assert "[M]ark read" in text
+    assert "general: every post marked read." in text
+    assert "caught up" in text
+    assert unread_post_count(db, alice, board) == 0
+
+
+def test_mark_read_says_a_channel_cannot_be_marked(db, lane, alice):
+    create_channel(db, "lobby", creator=alice)
+
+    session = _run_main_menu(db, lane, alice, ["n", "m", "1", "b", "l", "y"])
+
+    assert "Only a message board can be marked read here." in _visible_text(session)
+
+
+def test_mark_read_brings_the_replies_summary_up_to_date(db, lane, alice, monkeypatch):
+    board = create_board(db, "general", creator=alice)
+    timestamps = iter([f"2026-01-01T00:00:0{i}.000000Z" for i in range(2)])
+    monkeypatch.setattr(posts_module, "utc_now_iso", lambda: next(timestamps))
+    alices_post = create_post(db, board, alice, "question", "how do I do X?")
+    other = create_user(db, "bob", password="hunter2", user_level=10)
+    create_post(db, board, other, "Re: question", "like this", parent_post_id=alices_post.post_id)
+
+    session = _run_main_menu(db, lane, alice, ["n", "m", "1", "b", "l", "y"])
+
+    text = _visible_text(session)
+    marked = text.index("general: every post marked read.")
+    assert "Replies to you: 1" in text[:marked]
+    assert "Replies to you: none." in text[text.rindex("Replies to you", 0, marked):]
+
+
+def test_mark_read_keeps_each_row_where_it_was(db, lane, alice, monkeypatch):
+    """Activity can reorder the boards while [M]ark read reloads them; the
+    rows stay where they were, so (#N) still names the same board."""
+    from netbbs.activity import ensure_board_baseline
+
+    first = create_board(db, "first-board", creator=alice)
+    second = create_board(db, "second-board", creator=alice)
+    for board in (first, second):
+        ensure_board_baseline(db, alice, board)
+    real = scan_and_find.list_boards
+    calls = {"n": 0}
+
+    def _reordering(database):
+        calls["n"] += 1
+        boards = real(database)
+        return boards if calls["n"] == 1 else list(reversed(boards))
+
+    monkeypatch.setattr(scan_and_find, "list_boards", _reordering)
+    session = _run_main_menu(db, lane, alice, ["n", "m", "1", "0", "1", "b", "b", "l", "y"])
+
+    text = _visible_text(session)
+    marked = re.search(r"(\S+-board): every post marked read\.", text).group(1)
+    # Row 1 is opened after the reload: the board just marked, not the other.
+    assert f"Message boards › {marked}" in text or f"Message boards > {marked}" in text
+
+
+def test_with_nothing_to_list_the_replies_summary_still_shows(db, lane, alice):
+    session = _run_main_menu(db, lane, alice, ["n", "l", "y"])
+
+    text = _visible_text(session)
+    assert "Nothing accessible yet." in text
+    assert "Replies to you: none." in text

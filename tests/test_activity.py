@@ -12,7 +12,8 @@ from netbbs.activity import (
     follow,
     is_following,
     list_followed,
-    record_board_seen,
+    record_post_opened,
+    ensure_board_baseline,
     record_channel_seen,
     record_file_area_seen,
     unfollow,
@@ -68,43 +69,61 @@ def test_unread_post_count_is_none_before_any_visit(db, alice, bob):
 
 def test_unread_post_count_is_zero_once_caught_up(db, alice, bob, monkeypatch):
     board = create_board(db, "general", creator=alice)
+    ensure_board_baseline(db, bob, board)
     _deterministic_timestamps(monkeypatch, posts_module, 1)
     post = create_post(db, board, alice, "hello", "world")
+    assert unread_post_count(db, bob, board) == 1
 
-    record_board_seen(db, bob, board, post)
+    record_post_opened(db, bob, board, post)
 
     assert unread_post_count(db, bob, board) == 0
+
+
+def test_a_first_visit_counts_what_is_already_there_as_read(db, alice, bob, monkeypatch):
+    board = create_board(db, "general", creator=alice)
+    _deterministic_timestamps(monkeypatch, posts_module, 2)
+    create_post(db, board, alice, "old", "1")
+
+    ensure_board_baseline(db, bob, board)
+    create_post(db, board, alice, "new", "2")
+
+    assert unread_post_count(db, bob, board) == 1
 
 
 def test_unread_post_count_reflects_posts_after_the_cursor(db, alice, bob, monkeypatch):
     board = create_board(db, "general", creator=alice)
     _deterministic_timestamps(monkeypatch, posts_module, 3)
     first = create_post(db, board, alice, "first", "1")
+    ensure_board_baseline(db, bob, board)
     create_post(db, board, alice, "second", "2")
     create_post(db, board, alice, "third", "3")
 
-    record_board_seen(db, bob, board, first)
+    record_post_opened(db, bob, board, first)
 
     assert unread_post_count(db, bob, board) == 2
 
 
-def test_cursor_never_retreats_on_an_older_view(db, alice, bob, monkeypatch):
+def test_opening_the_newest_post_leaves_the_older_ones_unread(db, alice, bob, monkeypatch):
+    """Issue #710: a post is read once opened, and only then."""
     board = create_board(db, "general", creator=alice)
+    ensure_board_baseline(db, bob, board)
     _deterministic_timestamps(monkeypatch, posts_module, 2)
     first = create_post(db, board, alice, "first", "1")
     second = create_post(db, board, alice, "second", "2")
 
-    record_board_seen(db, bob, board, second)  # newest first
-    record_board_seen(db, bob, board, first)  # then an older page view
+    record_post_opened(db, bob, board, second)  # newest first
+    assert unread_post_count(db, bob, board) == 1
 
-    assert unread_post_count(db, bob, board) == 0  # still caught up, not regressed
+    record_post_opened(db, bob, board, first)  # then the older one
+    assert unread_post_count(db, bob, board) == 0
 
 
 def test_editing_an_already_read_post_does_not_make_it_unread_again(db, alice, bob, monkeypatch):
     board = create_board(db, "general", creator=alice)
     _deterministic_timestamps(monkeypatch, posts_module, 2)
+    ensure_board_baseline(db, bob, board)
     post = create_post(db, board, alice, "hello", "world")
-    record_board_seen(db, bob, board, post)
+    record_post_opened(db, bob, board, post)
 
     edit_post(db, post, board, subject="hello (edited)", body="world, edited", edited_by=alice)
 
@@ -114,8 +133,9 @@ def test_editing_an_already_read_post_does_not_make_it_unread_again(db, alice, b
 def test_unread_post_count_excludes_posts_with_no_approved_version(db, alice, bob, monkeypatch):
     board = create_board(db, "general", creator=alice, moderated=True)
     _deterministic_timestamps(monkeypatch, posts_module, 2)
+    ensure_board_baseline(db, bob, board)
     first = create_post(db, board, alice, "first", "1")
-    record_board_seen(db, bob, board, first)
+    record_post_opened(db, bob, board, first)
     create_post(db, board, alice, "pending", "not yet approved")  # moderated board -> stays pending
 
     assert unread_post_count(db, bob, board) == 0
@@ -210,7 +230,7 @@ def test_unread_replies_to_respects_the_boards_own_cursor(db, alice, bob, monkey
     bobs_post = create_post(db, board, bob, "question", "how do I do X?")
     reply = create_post(db, board, alice, "Re: question", "like this", parent_post_id=bobs_post.post_id)
 
-    record_board_seen(db, bob, board, reply)  # bob already saw the reply
+    record_post_opened(db, bob, board, reply)  # bob already read the reply
 
     assert unread_replies_to(db, bob) == []
 
@@ -243,12 +263,18 @@ def test_following_twice_is_a_no_op(db, alice, bob):
 
 def test_deleting_a_board_removes_its_cursor_and_follow_rows(db, alice, bob, monkeypatch):
     board = create_board(db, "general", creator=alice)
-    _deterministic_timestamps(monkeypatch, posts_module, 1)
-    post = create_post(db, board, alice, "hello", "world")
-    record_board_seen(db, bob, board, post)
+    _deterministic_timestamps(monkeypatch, posts_module, 2)
+    ensure_board_baseline(db, bob, board)
+    create_post(db, board, alice, "hello", "world")
+    later = create_post(db, board, alice, "later", "world")
+    record_post_opened(db, bob, board, later)  # out of order: an opened-set row
     follow(db, bob, "board", board.id)
 
     delete_board(db, board, deleted_by=alice)
+
+    assert db.connection.execute(
+        "SELECT 1 FROM user_board_opened_posts WHERE board_id = ?", (board.id,)
+    ).fetchone() is None
 
     row_cursor = db.connection.execute(
         "SELECT 1 FROM user_read_cursors WHERE object_type = 'board' AND object_id = ?", (board.id,)
@@ -385,7 +411,7 @@ def test_migration_backfills_arrival_id_for_a_pre_existing_board_cursor(tmp_path
         assert unread_post_count(db, alice, board) == 0
         new_post = create_post(db, board, alice, "hello again", "world again")
         assert unread_post_count(db, alice, board) == 1
-        record_board_seen(db, alice, board, new_post)
+        record_post_opened(db, alice, board, new_post)
         assert unread_post_count(db, alice, board) == 0
     finally:
         db.close()

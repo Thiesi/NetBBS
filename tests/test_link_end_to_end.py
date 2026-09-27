@@ -85,7 +85,7 @@ from netbbs.link.work_items import (
 )
 from netbbs.mail import list_inbox, list_sent
 from netbbs.search import search_channel_messages, search_posts
-from netbbs.activity import board_read_cursor, record_board_seen, record_channel_seen, unread_channel_count, unread_post_count
+from netbbs.activity import board_read_cursor, record_post_opened, record_channel_seen, unread_channel_count, unread_post_count
 from netbbs.storage.database import Database
 from netbbs.timeutil import utc_now_iso
 from netbbs.storage.execution import DatabaseLane
@@ -520,7 +520,7 @@ def test_linked_board_post_full_vertical_materializes_and_is_visible_via_ordinar
         # 0), then becomes 0 once "seen", matching the exact model
         # test_activity.py already proves for locally-created content.
         assert unread_post_count(seed.db, bob, carried_board) is None
-        record_board_seen(seed.db, bob, carried_board, page.posts[0])
+        record_post_opened(seed.db, bob, carried_board, page.posts[0])
         assert unread_post_count(seed.db, bob, carried_board) == 0
         assert board_read_cursor(seed.db, bob, carried_board) == (
             page.posts[0].created_at, page.posts[0].post_id,
@@ -567,7 +567,7 @@ def test_linked_board_duplicate_post_delivery_over_real_transport_is_idempotent(
         page = list_posts_page(seed.db, carried_board, bob)
         assert len(page.posts) == 1
         # Not double-counted as unread either, once bob actually visits.
-        record_board_seen(seed.db, bob, carried_board, page.posts[0])
+        record_post_opened(seed.db, bob, carried_board, page.posts[0])
         assert unread_post_count(seed.db, bob, carried_board) == 0
         # Not double-indexed for search either -- the same reindex_post
         # "delete then insert" call every write path uses, exercised

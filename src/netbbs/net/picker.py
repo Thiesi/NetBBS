@@ -49,7 +49,7 @@ from netbbs.net.help_overlay import show_help
 from netbbs.rendering.ansi import strip_ansi
 from netbbs.rendering.reflow import wrap_terminal_text
 from netbbs.net.notices import announce, with_notices
-from netbbs.net.session import Session, write_preformatted_line
+from netbbs.net.session import Session, write_preformatted_line, write_prompt
 from netbbs.rendering import (
     ACCENT_COLOR,
     ERROR_COLOR,
@@ -293,6 +293,7 @@ async def pick_item(
     on_create: Callable[[], Awaitable[T | None]] | None = None,
     sort_label: Callable[[], str] | None = None,
     live_keys: Mapping[str, Callable[[], Awaitable[Sequence[T] | None]]] | None = None,
+    item_keys: Mapping[str, Callable[[T], Awaitable[Sequence[T] | None]]] | None = None,
     live_nav: Sequence[MenuEntry] = (),
     live_label: Callable[[], str] | None = None,
     description_level: str = "off",
@@ -684,8 +685,10 @@ async def pick_item(
     # An outcome the caller's last action announced (`netbbs.net.notices`,
     # issue #680) rides along the same way: a picker is often the screen a
     # finished action returns to, and its redraw would erase a written line.
-    masthead = with_notices(session, masthead)
+    # The static text is known before the first render, as it always was:
+    # the first page is sized with it. Notices join it at each render.
     masthead_text = "" if callable(masthead) else masthead
+    masthead = with_notices(session, masthead)
 
     async def _refresh_masthead() -> None:
         nonlocal masthead_text
@@ -751,6 +754,10 @@ async def pick_item(
     page_end = 0
     page_history: list[int] = []
     highlighted: int | None = None
+    # A row, by its index into `working_set`, the next render must show and
+    # highlight -- set by an item key, whose outcome notice can take a row
+    # from the page it redraws (Codex review on #723).
+    keep_row: int | None = None
     # The search that narrowed `working_set`, if one did (issue #537,
     # Codex review). A re-sort or a filter replaces the backing set, and
     # without remembering this it also silently threw the search away --
@@ -802,7 +809,7 @@ async def pick_item(
             frozen = None
 
     async def _render_frozen() -> Sequence[T]:
-        nonlocal page_start, page_end, highlighted
+        nonlocal page_start, page_end, highlighted, keep_row
         # Before `_header_lines` measures it or `_masthead_prefix` draws
         # it, so a callable masthead is current for both.
         await _refresh_masthead()
@@ -875,6 +882,16 @@ async def pick_item(
         # size that changes under it moves the window without ever
         # skipping a row or repeating one.
         page_start = max(0, min(page_start, max(0, len(working_set) - 1)))
+        if keep_row is not None:
+            if keep_row < len(working_set):
+                if keep_row >= page_start + page_size:
+                    # The rows the shift moves off the top stay reachable:
+                    # [P]rev goes back to the page as it started (Codex
+                    # review on #723).
+                    page_history.append(page_start)
+                    page_start = keep_row - page_size + 1
+                highlighted = keep_row - page_start
+            keep_row = None
         # The ordinal is how many pages were actually walked to get
         # here, not `page_start // page_size` (Codex review): the size
         # can differ from the one those pages were drawn with, so the
@@ -1424,6 +1441,39 @@ async def pick_item(
                 page_start = 0
                 page_history.clear()
                 highlighted = None
+            page_items = await _render()
+            continue
+
+        if item_keys and char_lower in item_keys:
+            # A caller's key that acts on one row (issue #710: [N]ew scan's
+            # [M]ark read): the highlighted one, or -- with nothing
+            # highlighted -- the one whose reference the caller types, as
+            # [G]oto asks. The callback returns the new working set; the
+            # page and the highlight stay, so a caller can work down a
+            # list one row at a time. Checked after this screen's own
+            # keys, as `live_keys` is. Its label goes in `live_nav`.
+            if highlighted is not None and highlighted < len(page_items):
+                target = page_items[highlighted]
+            else:
+                if not items:
+                    await session.write(reject_keystroke())
+                    continue
+                await session.write_line("")
+                await write_prompt(session, "Which #: ")
+                raw = (await session.read_line()).strip()
+                target = next((item for item in items if str(stable_id_of(item)) == raw), None)
+                if target is None:
+                    await session.write_line(colored("Out of range.", fg_color=ERROR_COLOR))
+                    await write_prompt(session, "Choice: ")
+                    continue
+            acted_on = (
+                page_start + highlighted if highlighted is not None and highlighted < len(page_items) else None
+            )
+            new_items = await item_keys[char_lower](target)
+            if new_items is not None:
+                items = new_items
+                working_set = _narrowed(new_items)
+            keep_row = acted_on
             page_items = await _render()
             continue
 
