@@ -35,9 +35,10 @@ from netbbs.link.node_map import (
     ORIGIN,
     build_node_map,
     last_heard,
+    node_numbers,
     relative_time,
+    unknown_node_label,
 )
-from netbbs.link.node_profiles import UNKNOWN_NODE_NAME
 from netbbs.link.protocol import PeerRecord
 from netbbs.link.store import (
     record_direct_contact,
@@ -184,7 +185,7 @@ def test_a_candidate_that_is_also_an_origin_is_an_origin_row_for_callers(db, own
     [entry] = build_node_map(db, own_fingerprint=own.fingerprint, sysop=False, now=NOW)
 
     assert entry.source == ORIGIN
-    assert entry.friendly_name == UNKNOWN_NODE_NAME
+    assert entry.friendly_name == unknown_node_label(node.fingerprint)
     [sysop_entry] = build_node_map(db, own_fingerprint=own.fingerprint, sysop=True, now=NOW)
     assert sysop_entry.source == CANDIDATE and sysop_entry.is_origin
 
@@ -208,7 +209,7 @@ def test_origin_only_nodes_of_every_carried_kind_read_unknown(db, own):
     assert set(entries) == {board_origin.fingerprint, area_origin.fingerprint, channel_origin.fingerprint}
     for entry in entries.values():
         assert entry.source == ORIGIN
-        assert entry.friendly_name == UNKNOWN_NODE_NAME
+        assert entry.friendly_name == unknown_node_label(entry.fingerprint)
         assert entry.dns_name is None
         assert entry.relationship == "unknown"
         assert entry.last_heard is None and not entry.stale
@@ -236,6 +237,67 @@ def test_a_transferred_board_counts_for_its_current_origin(db, own):
     assert [e.fingerprint for e in build_node_map(db, own_fingerprint=own.fingerprint, sysop=False, now=NOW)] == [
         second.fingerprint
     ]
+
+
+def test_unknown_nodes_are_told_apart(db, own):
+    first = bootstrap_node_identity("first-unknown")
+    second = bootstrap_node_identity("second-unknown")
+    _carry_board(db, first, own, name="One", board_id="b-one")
+    _carry_board(db, second, own, name="Two", board_id="b-two")
+
+    names = {e.friendly_name for e in build_node_map(db, own_fingerprint=own.fingerprint, sysop=False, now=NOW)}
+
+    assert names == {f"Unknown node {first.fingerprint[:6]}", f"Unknown node {second.fingerprint[:6]}"}
+
+
+def test_an_introduction_names_its_carrier_without_the_dns_name(db, own):
+    carrier = bootstrap_node_identity("carrier")
+    far = bootstrap_node_identity("far")
+    save_peer(db, _record(carrier, name="Carrier Board", dns="carrier.example.org"))
+    save_introduced_identity(db, _record(far, name="Far Board"), introduced_by=carrier.fingerprint)
+
+    for sysop in (False, True):
+        entry = _by_fp(build_node_map(db, own_fingerprint=own.fingerprint, sysop=sysop, now=NOW))[far.fingerprint]
+        assert entry.relationship == "via Carrier Board"
+
+
+# -- permanent node numbers --------------------------------------------------
+
+
+def test_node_numbers_are_small_permanent_and_shared_by_every_viewer(tmp_path, own):
+    db = Database(tmp_path / "node.db")
+    alpha = bootstrap_node_identity("alpha")
+    beta = bootstrap_node_identity("beta")
+    save_peer(db, _record(alpha, name="Alpha"))
+    save_peer(db, _record(beta, name="Beta"))
+    caller = _by_fp(build_node_map(db, own_fingerprint=own.fingerprint, sysop=False, now=NOW))
+    assert (caller[alpha.fingerprint].number, caller[beta.fingerprint].number) == (1, 2)
+    sysop = _by_fp(build_node_map(db, own_fingerprint=own.fingerprint, sysop=True, now=NOW))
+    assert (sysop[alpha.fingerprint].number, sysop[beta.fingerprint].number) == (1, 2)
+    db.close()
+
+    # Across a restart.
+    db = Database(tmp_path / "node.db")
+    reopened = _by_fp(build_node_map(db, own_fingerprint=own.fingerprint, sysop=False, now=NOW))
+    assert (reopened[alpha.fingerprint].number, reopened[beta.fingerprint].number) == (1, 2)
+
+    # A node that leaves the map keeps its number for when it comes back, and
+    # a newcomer never takes it.
+    db.connection.execute("DELETE FROM link_peers WHERE fingerprint = ?", (alpha.fingerprint,))
+    db.connection.commit()
+    assert [e.number for e in build_node_map(db, own_fingerprint=own.fingerprint, sysop=False, now=NOW)] == [2]
+    gamma = bootstrap_node_identity("gamma")
+    save_peer(db, _record(gamma, name="Gamma"))
+    save_peer(db, _record(alpha, name="Alpha"))
+    back = _by_fp(build_node_map(db, own_fingerprint=own.fingerprint, sysop=False, now=NOW))
+    assert back[alpha.fingerprint].number == 1
+    assert back[gamma.fingerprint].number == 3
+    db.close()
+
+
+def test_node_numbers_never_renumber(db):
+    assert node_numbers(db, ["fp-b", "fp-a"]) == {"fp-b": 1, "fp-a": 2}
+    assert node_numbers(db, ["fp-a", "fp-c", "fp-b"]) == {"fp-a": 2, "fp-c": 3, "fp-b": 1}
 
 
 # -- who callers do not see ------------------------------------------------
@@ -610,10 +672,15 @@ def test_an_open_realtime_session_records_contact_at_start_while_open_and_at_clo
         )
         session = _Session()
         assert await registry.admit(session)
-        await asyncio.sleep(0.01)
-        assert len(calls) == 1  # at the start
-        await asyncio.sleep(0.12)
-        assert len(calls) >= 3  # and while it stays open
+        await asyncio.sleep(0)
+        assert len(calls) == 1  # at the start, before any interval has passed
+        # And while it stays open: waited for, not slept for, since a loaded
+        # machine may run the interval late.
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 5.0
+        while len(calls) < 3 and loop.time() < deadline:
+            await asyncio.sleep(0.01)
+        assert len(calls) >= 3
         open_calls = len(calls)
         await registry.close_all(reason="test")
         assert len(calls) == open_calls + 1  # and once at close

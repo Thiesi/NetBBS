@@ -3194,7 +3194,9 @@ MIGRATIONS = [
             "the future cannot keep a node fresh. `first_named_at` on link_peer_candidates is "
             "when a peer list first named the candidate, which the SysOp's node map shows. "
             "Existing rows start from `updated_at`, the best information there is: it is no "
-            "earlier than the descriptor was first stored."
+            "earlier than the descriptor was first stored. `link_node_numbers` gives each node "
+            "the map lists a small permanent number, assigned the first time the map meets it "
+            "and never reused, so that #3 means the same node to every caller and the SysOp."
         ),
         sql="""
         ALTER TABLE link_peers ADD COLUMN descriptor_first_stored_at TEXT;
@@ -3204,6 +3206,11 @@ MIGRATIONS = [
         ALTER TABLE link_peer_candidates ADD COLUMN descriptor_first_stored_at TEXT;
         ALTER TABLE link_peer_candidates ADD COLUMN first_named_at TEXT;
         UPDATE link_peer_candidates SET descriptor_first_stored_at = updated_at, first_named_at = updated_at;
+
+        CREATE TABLE link_node_numbers (
+            fingerprint  TEXT PRIMARY KEY,
+            number       INTEGER NOT NULL UNIQUE
+        );
         """,
     ),
 ]

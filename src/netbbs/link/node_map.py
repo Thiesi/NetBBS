@@ -31,10 +31,11 @@ it through a `DatabaseLane`.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 
 from netbbs.link.node_profiles import (
+    UNKNOWN_NODE_NAME,
     UNNAMED_NODE_NAME,
     identity_for_fingerprint,
     normalize_dns_name,
@@ -79,6 +80,8 @@ class NodeMapEntry:
     fingerprint: str
     friendly_name: str
     dns_name: str | None
+    # The node's permanent number on this board's map (`node_numbers`).
+    number: int
     source: str
     relationship: str
     last_heard: datetime | None
@@ -102,10 +105,6 @@ class NodeMapEntry:
     reliability: float | None = None
 
     @property
-    def name(self) -> str:
-        return f"{self.friendly_name} · {self.dns_name}" if self.dns_name else self.friendly_name
-
-    @property
     def hidden_from_callers(self) -> bool:
         return self.source == CANDIDATE or any(
             state in _HIDING_STATES for state in self.trust.values()
@@ -121,6 +120,45 @@ class _Known:
     last_direct_contact_at: str | None = None
     introduced_by: str | None = None
     first_named_at: str | None = None
+
+
+def unknown_node_label(fingerprint: str) -> str:
+    """What a node with no name on file is called on the map: two such nodes
+    must not read the same. A fingerprint is public, so its start is fine."""
+    return f"Unknown node {fingerprint[:6]}"
+
+
+def _display_name(db: Database, fingerprint: str) -> tuple[str, str | None]:
+    """Whatever name this node still has for `fingerprint`, or the unknown
+    label -- with its DNS name, if any."""
+    identity = identity_for_fingerprint(db, fingerprint)
+    if identity.friendly_name == UNKNOWN_NODE_NAME:
+        return unknown_node_label(fingerprint), None
+    return identity.friendly_name, identity.dns_name
+
+
+def node_numbers(db: Database, fingerprints: list[str]) -> dict[str, int]:
+    """Each fingerprint's permanent map number, assigning the next free one to
+    any the map has not met before, in the order given.
+
+    Numbers are never reused or renumbered: nothing deletes a row, and a new
+    one takes one past the highest ever given, so a node that leaves the map
+    and comes back keeps its number."""
+    numbers = {
+        row["fingerprint"]: row["number"]
+        for row in db.connection.execute("SELECT fingerprint, number FROM link_node_numbers")
+    }
+    missing = [fp for fp in dict.fromkeys(fingerprints) if fp not in numbers]
+    if missing:
+        next_number = max(numbers.values(), default=0) + 1
+        for fingerprint in missing:
+            db.connection.execute(
+                "INSERT INTO link_node_numbers (fingerprint, number) VALUES (?, ?)", (fingerprint, next_number)
+            )
+            numbers[fingerprint] = next_number
+            next_number += 1
+        db.connection.commit()
+    return {fp: numbers[fp] for fp in fingerprints}
 
 
 def _parse(value: object) -> datetime | None:
@@ -289,8 +327,7 @@ def build_node_map(
         payload = _payload(item.descriptor_json)
         if item.source == ORIGIN:
             # Whatever name this node still has for it, or the unknown label.
-            identity = identity_for_fingerprint(db, fingerprint)
-            friendly, dns_name = identity.friendly_name, identity.dns_name
+            friendly, dns_name = _display_name(db, fingerprint)
         else:
             friendly = normalize_friendly_name(payload.get("friendly_name")) or UNNAMED_NODE_NAME
             dns_name = normalize_dns_name(payload.get("canonical_dns_name"))
@@ -303,10 +340,9 @@ def build_node_map(
                 # The carrier is itself left off this caller's list.
                 relationship = f"via {ANOTHER_NODE}"
             else:
-                carrier_identity = identity_for_fingerprint(db, carrier)
-                # The SysOp gets the technical identity of a carrier with no
-                # name on file; a caller gets the unknown-node label.
-                relationship = f"via {carrier_identity.label if sysop else carrier_identity.friendly_name}"
+                # The carrier's friendly name alone: its DNS name is on its
+                # own row, and would only crowd this column.
+                relationship = f"via {_display_name(db, carrier)[0]}"
         elif item.source == CANDIDATE:
             relationship = "unverified"
         else:
@@ -346,6 +382,7 @@ def build_node_map(
             fingerprint=fingerprint,
             friendly_name=friendly,
             dns_name=dns_name,
+            number=0,
             source=item.source,
             relationship=relationship,
             last_heard=heard,
@@ -358,7 +395,10 @@ def build_node_map(
             **extra,
         ))
     entries.sort(key=lambda e: (e.friendly_name.casefold(), e.dns_name or "", e.fingerprint))
-    return entries
+    # Numbered after sorting, so nodes met for the first time together are
+    # numbered in the order the list shows them.
+    numbers = node_numbers(db, [e.fingerprint for e in entries])
+    return [replace(e, number=numbers[e.fingerprint]) for e in entries]
 
 
 def has_known_nodes(db: Database, *, own_fingerprint: str) -> bool:

@@ -111,7 +111,7 @@ def test_the_sysop_sees_an_origin_only_node_with_unknown_fields(db, lane, sysop)
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
 
     visible = _visible(_written_text(session))
-    detail = _detail(visible, "Unknown linked node")
+    detail = _detail(visible, f"Unknown node {origin.fingerprint[:6]}")
     assert f"Technical identity: {origin.fingerprint}" in detail
     assert "Known: unknown" in detail
     assert "Last heard: unknown" in detail

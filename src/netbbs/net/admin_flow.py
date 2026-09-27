@@ -332,7 +332,6 @@ from netbbs.link.onboarding import (
 from netbbs.link.reliable_nodes import effective_reliable_nodes, reliable_nodes_source
 from netbbs.link.store import load_peer_last_contact
 from netbbs.link.node_map import CANDIDATE as NODE_MAP_CANDIDATE
-from netbbs.link.node_map import ORIGIN as NODE_MAP_ORIGIN
 from netbbs.link.node_map import NodeMapEntry, build_node_map, has_known_nodes
 from netbbs.net.node_map_flow import NODE_MAP_COLUMNS, all_carried_names
 from netbbs.net.node_map_flow import utc_now as node_map_now
@@ -8941,8 +8940,7 @@ async def _node_map_sysop_screen(
 
         selected = await pick_item(
             session, state["entries"],
-            name_of=lambda entry: entry.name if entry.source != NODE_MAP_ORIGIN or entry.dns_name
-            else f"{entry.friendly_name} ({entry.fingerprint[:12]})",
+            name_of=lambda entry: entry.friendly_name,
             stable_id_of=node_map_stable_id,
             description_of=lambda entry: node_map_row_description(entry, now=now),
             columns=NODE_MAP_COLUMNS,

@@ -13,7 +13,6 @@ caller's map does not even carry them.
 
 from __future__ import annotations
 
-import hashlib
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -137,7 +136,9 @@ def utc_now() -> datetime:
 
 
 def stable_id(entry: NodeMapEntry) -> int:
-    return int(hashlib.sha256(entry.fingerprint.encode("utf-8")).hexdigest()[:8], 16)
+    """The node's permanent number on this board's map: #3 is the same node to
+    every caller and to the SysOp, from one visit to the next."""
+    return entry.number
 
 
 def last_heard_text(entry: NodeMapEntry, *, now: datetime) -> str:
@@ -282,7 +283,8 @@ async def node_map_screen(
         title = map_title(state["board"])
         selected = await pick_item(
             session, state["entries"],
-            name_of=lambda entry: entry.name,
+            # The friendly name alone; the DNS name is in the detail view.
+            name_of=lambda entry: entry.friendly_name,
             stable_id_of=stable_id,
             description_of=lambda entry: row_description(entry, now=now),
             columns=NODE_MAP_COLUMNS,
