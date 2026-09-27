@@ -246,6 +246,66 @@ def test_a_rotated_file_ending_mid_line_does_not_swallow_the_newest_entry(tmp_pa
     assert result.entries[-1].level == "CRITICAL" and result.entries[-1].message == "startup failed"
 
 
+def test_follower_drains_the_rotated_file_before_switching(tmp_path):
+    """Review round 3 on PR #739: lines written between the last poll and a
+    rotation were never read."""
+    path = tmp_path / "netbbs.log"
+    path.write_text(_line("INFO", "before following"), encoding="utf-8")
+    follower = NodeLogFollower(path)
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(_line("ERROR", "written just before rotation"))
+    path.replace(tmp_path / "netbbs.log.1")
+    path.write_text(_line("ERROR", "first in the new file"), encoding="utf-8")
+
+    entries = []
+    for _ in range(3):
+        entries += follower.poll()[0]
+
+    assert [e.message for e in entries] == ["written just before rotation", "first in the new file"]
+
+
+def test_follower_bounds_an_overlong_line(tmp_path, monkeypatch):
+    """Review round 3 on PR #739: one record longer than a poll grew the
+    pending buffer without limit."""
+    import netbbs.node_log as node_log
+
+    monkeypatch.setattr(node_log, "MAX_HELD_CHARS", 200)
+    monkeypatch.setattr(node_log, "MAX_FOLLOW_BYTES", 64)
+    path = tmp_path / "netbbs.log"
+    path.write_text("", encoding="utf-8")
+    follower = NodeLogFollower(path)
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(_line("ERROR", "huge " + "y" * 5000) + _line("ERROR", "after the huge one"))
+
+    entries = []
+    for _ in range(200):
+        entries += follower.poll()[0]
+        assert len(follower._partial) <= 200 + len(" [line cut: longer than NetBBS shows]")
+
+    assert entries[0].message.startswith("huge yyy") and entries[0].message.endswith("[line cut: longer than NetBBS shows]")
+    assert entries[-1].message == "after the huge one"
+
+
+@pytest.mark.parametrize("screen", ["node", "diagnostic"])
+def test_follow_screens_raise_a_failed_key_read(db, lane, sysop, screen):
+    """Review round 3 on PR #739: a caller hanging up during Follow left the
+    read's exception unretrieved and the screen carried on."""
+
+    class _HangUp(FakeSession):
+        async def read_key(self, echo: bool = True) -> str:
+            raise ConnectionResetError("caller went away")
+
+    session = _HangUp()
+    if screen == "node":
+        path = node_log_path(db.path)
+        path.write_text("", encoding="utf-8")
+        run = admin_flow._node_log_tail_screen(session, lane, path, floor="WARNING")
+    else:
+        run = admin_flow._diagnostic_log_tail_screen(session, lane)
+    with pytest.raises(ConnectionResetError):
+        asyncio.run(run)
+
+
 def test_follower_poll_is_bounded(tmp_path):
     path = tmp_path / "netbbs.log"
     path.write_text("", encoding="utf-8")

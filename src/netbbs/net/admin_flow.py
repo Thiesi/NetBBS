@@ -8696,6 +8696,9 @@ async def _diagnostic_log_tail_screen(session: Session, lane: DatabaseLane) -> N
                 {key_task}, timeout=_DIAGNOSTIC_TAIL_POLL_INTERVAL_SECONDS
             )
             if key_task in done:
+                # A read that failed (the caller hung up) raises here rather
+                # than being left unretrieved in a finished task.
+                key_task.result()
                 break
             new_entries = await lane.run(list_diagnostic_log_entries_since, last_id)
             for entry in new_entries:
@@ -8876,6 +8879,9 @@ async def _node_log_tail_screen(session: Session, lane: DatabaseLane, path: Path
         while True:
             done, _pending = await asyncio.wait({key_task}, timeout=_DIAGNOSTIC_TAIL_POLL_INTERVAL_SECONDS)
             if key_task in done:
+                # A read that failed (the caller hung up) raises here rather
+                # than being left unretrieved in a finished task.
+                key_task.result()
                 break
             entries, error = await asyncio.to_thread(follower.poll)
             if error is not None and error != last_error:

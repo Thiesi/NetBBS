@@ -255,6 +255,7 @@ class NodeLogFollower:
         self._identity: tuple[int, int] | None = None
         self._partial = ""
         self._held: list[str] = []
+        self._discarding = False
         self._decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         self._next_id = 0
         try:
@@ -271,26 +272,41 @@ class NodeLogFollower:
         refusal = _refuse_symlink(self.path)
         if refusal is not None:
             return [], refusal
-        finished: list[str] = []
+        ready: list[str] = []
         try:
             if not self.path.exists():
-                return self._emit(self._take_held()), None
+                return self._emit(self._finish_generation()), None
             with _open_regular(self.path) as handle:
                 info = os.fstat(handle.fileno())
                 identity = (info.st_dev, info.st_ino)
                 if identity != self._identity or info.st_size < self._offset:
-                    # Rotated: whatever was held belongs to a file that is done.
-                    finished = self._take_held()
+                    # Rotated. What the old generation gained since the last
+                    # poll is read from where it went (`.1`) before the new
+                    # file is started, then everything held from it is done.
+                    ready = self._drain_rotated() + self._finish_generation()
                     self._identity = identity
                     self._offset = 0
-                    self._partial = ""
-                    self._decoder.reset()
                 handle.seek(self._offset)
                 data = handle.read(MAX_FOLLOW_BYTES)
         except OSError as exc:
-            return [], _describe(self.path, exc)
+            return self._emit(ready), _describe(self.path, exc)
         self._offset += len(data)
-        text = self._partial + self._decoder.decode(data)
+        ready += self._consume(data, hold=True)
+        return self._emit(ready), None
+
+    def _consume(self, data: bytes, *, hold: bool) -> list[str]:
+        """Decode `data` onto what was pending and return the lines ready to
+        parse, keeping the newest entry back when `hold` (see the class)."""
+        text = self._decoder.decode(data)
+        if self._discarding:
+            # The rest of a line already cut at `MAX_HELD_CHARS`.
+            _, newline, tail = text.partition("\n")
+            if not newline:
+                text = ""
+            else:
+                self._discarding = False
+                text = "\n" + tail
+        text = self._partial + text
         complete, newline, rest = text.rpartition("\n")
         if newline:
             self._partial = rest
@@ -299,7 +315,10 @@ class NodeLogFollower:
             self._partial = text
             lines = list(self._held)
         self._held = []
-        if data:
+        if len(self._partial) > MAX_HELD_CHARS:
+            self._partial = self._partial[:MAX_HELD_CHARS] + " [line cut: longer than NetBBS shows]"
+            self._discarding = True
+        if hold and data:
             last_header = max(
                 (index for index, line in enumerate(lines) if _ENTRY_START.match(redact(line.rstrip("\r")))),
                 default=None,
@@ -307,11 +326,32 @@ class NodeLogFollower:
             if last_header is not None and sum(len(line) for line in lines[last_header:]) <= MAX_HELD_CHARS:
                 self._held = lines[last_header:]
                 lines = lines[:last_header]
-        return self._emit(finished) + self._emit(lines), None
+        return lines
 
-    def _take_held(self) -> list[str]:
-        held, self._held = self._held, []
-        return held
+    def _drain_rotated(self) -> list[str]:
+        """The unread end of the generation this follower was reading, if
+        it is now `netbbs.log.1` -- bounded like any other poll."""
+        rotated = self.path.with_name(self.path.name + ".1")
+        if self._identity is None or _refuse_symlink(rotated) is not None or not rotated.exists():
+            return []
+        try:
+            with _open_regular(rotated) as handle:
+                info = os.fstat(handle.fileno())
+                if (info.st_dev, info.st_ino) != self._identity:
+                    return []
+                handle.seek(self._offset)
+                data = handle.read(MAX_FOLLOW_BYTES)
+        except OSError:
+            return []
+        return self._consume(data, hold=False)
+
+    def _finish_generation(self) -> list[str]:
+        """Everything still pending from a file that will not grow again."""
+        tail = self._partial + self._decoder.decode(b"", final=True)
+        lines = self._held + ([tail] if tail else [])
+        self._held, self._partial, self._discarding = [], "", False
+        self._decoder.reset()
+        return lines
 
     def _emit(self, lines: list[str]) -> list[NodeLogEntry]:
         entries = parse_log_lines(lines, first_id=self._next_id)
