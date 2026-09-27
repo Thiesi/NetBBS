@@ -707,7 +707,7 @@ async def _main_menu_loop(
                 redraw = True
             elif choice == "d":
                 await session.write_line("")
-                await _browse_directory(session, db, user)
+                await _browse_directory(session, db, user, lane=lane, link_context=link_context)
                 redraw = True
             elif choice == "p":
                 await session.write_line("")

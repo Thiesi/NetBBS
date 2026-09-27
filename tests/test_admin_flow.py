@@ -7839,7 +7839,7 @@ def test_link_status_screen_shows_summary_counts(db, lane, sysop):
     assert "Relay-serving: on (0/20 slots in use)" in text
     assert "Linked boards: 1" in text
     assert "Known events: 1" in text
-    assert "[P]eers" not in text  # nothing to pick from with no verified peers
+    assert "[P]eers" not in text  # no node on the map to pick from
 
 
 def test_link_status_screen_reads_the_current_node_name(db, lane, sysop):
@@ -8130,9 +8130,12 @@ def test_diagnostic_log_tail_screen_appends_entries_written_while_watching(db, l
 
 
 def test_link_status_screen_lists_and_shows_peer_detail(db, lane, sysop):
+    """Issue #777: `[P]eers` opens the node map, which replaced the
+    verified-peer list and keeps everything that list showed a SysOp."""
     from netbbs.link.events import build_endpoint_descriptor
     from netbbs.link.node_identity import bootstrap_node_identity
     from netbbs.link.protocol import PeerRecord
+    from netbbs.link.store import save_peer
 
     link_context = _link_context()
     peer_identity = bootstrap_node_identity("elsewhere")
@@ -8149,21 +8152,29 @@ def test_link_status_screen_lists_and_shows_peer_detail(db, lane, sysop):
         transitions=peer_identity.transitions,
         descriptor=descriptor,
     )
+    save_peer(db, peer)
     link_context.link_node.peers[peer.fingerprint] = peer
 
-    # [P]eers -> picker -> the peer's own detail screen, left with [B]ack
-    # (the stray "x" is refused, not taken as "any key") -> Link status.
-    session = FakeSession(["s", "l", "p", "0", "1", "x", "b", "b", "b", "b"])
+    # [P]eers -> the node map -> the peer's own detail screen, left with
+    # [B]ack (the stray "x" is refused, not taken as "any key") -> the map
+    # -> Link status.
+    session = FakeSession(["s", "l", "p", "0", "1", "x", "b", "b", "b", "b", "b"])
+    session.terminal_height = 60  # the whole detail on one page
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
 
     visible = _visible(_written_text(session))
-    detail = visible[visible.index("Link status › Verified peers ›"):]
-    detail = _normalized_visible(detail[: detail.index("Choice: ")])
-    assert f"Technical identity: {peer.fingerprint} Kind: full peer" in detail
+    assert "Link status › Nodes known to NetBBS" in visible
+    text = _normalized_visible(visible)
+    detail = text[text.index("Name: Unnamed linked node"):]
+    detail = detail[: detail.index("Choice: ")]
+    assert f"Technical identity: {peer.fingerprint}" in detail
+    assert "Known: direct" in detail
+    assert "Kind: full peer" in detail
     assert "Reliability: 0.50" in detail
-    assert "Last contact: never" in detail
+    assert "Last heard:" in detail
     assert "Address: tcp://203.0.113.5:7862" in detail
     assert "We relay for it: no" in detail and "It relays for us: no" in detail
+    assert "Identity trust: probationary" in detail
     assert "Press any key" not in visible
 
 

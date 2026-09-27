@@ -588,7 +588,17 @@ use a second address, or a protocol demultiplexer in front of both.
 ### Trust and recovery
 
 Use **Link status** for peers and relay state, **Outbox** for pending or failed
-work, and **Diagnostics / Follow log** for explanations. Policy trust settings
+work, and **Diagnostics / Follow log** for explanations.
+
+**Link status → Peers** is the node map: every node this one knows, as callers
+see it under **Directory → Node map** ("Nodes known to" your board), plus what
+callers do not see. Peer-list candidates are marked unverified and "never heard
+from"; nodes you quarantine or block in any trust dimension are marked, with
+each dimension's state, because callers do not see them at all. Each node's
+screen adds its Link addresses, relay roles and reliability. Last heard is your
+own last contact with the node, or the time its newest descriptor says it was
+signed, never later than when you first stored it; a node not heard of for 30
+days is marked stale, not removed. Policy trust settings
 separate identity integrity, resource behavior, and content conduct: a complaint
 about content should not be treated as proof of a forged identity.
 
@@ -751,7 +761,7 @@ and recent errors. Choose welcome/masthead/banner presets through Settings;
 preview before applying, or place your own files as described under
 [Custom banners and mastheads](#custom-banners-and-mastheads). Timestamp format and display timezone are node-wide.
 
-**Settings → Limits & retention** holds four node-wide values, saved together
+**Settings → Limits & retention** holds five node-wide values, saved together
 and applied without a restart:
 
 | Setting | Default | Effect |
@@ -760,6 +770,7 @@ and applied without a restart:
 | Grace before deletion | 7 days | How long an expired post or file waits before it is deleted. An expired file can be recovered from its area until then. |
 | Invitation expiry | 7 days | When an unaccepted channel invitation lapses. Clear the field for invitations that never expire. |
 | Chat scrollback | 100 messages | Lines each channel keeps, carried Link channels included. Lowering it trims a channel the next time someone speaks there. |
+| Node map level | 0 | The lowest level that may open **Directory → Node map**. A guest is an ordinary account: set this above the guest account's level to keep the map from guests. |
 
 Under **Operations → Node and sessions**:
 

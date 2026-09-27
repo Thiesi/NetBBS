@@ -2646,6 +2646,23 @@ A full peer must advertise a usable address. Outgoing-only nodes may have no
 inbound address. Link-only startup does not count as an interactive BBS
 listener: at least one user-facing transport must start.
 
+Last heard (the node map, issue #777) rests on two stored times, and both are
+easy to break from an unrelated save path. `last_direct_contact_at` moves only
+on contact with the node itself: a hello, an events exchange, or an open
+authenticated real-time session, which `LinkRealtimeSessionRegistry` records
+through its `on_contact` hook at admission, every
+`REALTIME_CONTACT_RECORD_INTERVAL_SECONDS` while open, and at close (the
+peer's last frame time, not the teardown time). A save of secondhand
+knowledge passes `direct_contact=False`. `descriptor_first_stored_at` moves
+only when the stored descriptor's *content id* changes, and
+`store.descriptor_first_stored_at` looks for the same descriptor in all three
+tables that hold one (`link_peers`, `link_introduced_identities`,
+`link_peer_candidates`), so a descriptor moving between them keeps its time.
+Compare by content id, never by stored JSON: a re-serialized copy of the same
+signed descriptor need not match byte for byte. Any new writer of a
+`descriptor_json` column must set the first-stored time the same way, or a
+future-dated descriptor escapes its cap.
+
 ### Event acceptance
 
 Resolve the sender's current signing key from its verified transition chain

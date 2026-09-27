@@ -279,3 +279,28 @@ def get_registration_mode(db: Database) -> RegistrationMode:
 
 def set_registration_mode(db: Database, mode: RegistrationMode) -> None:
     set_config(db, REGISTRATION_MODE_CONFIG_KEY, mode.value)
+
+
+# Issue #777 (design doc §8.12): the lowest level that may open the node map
+# from the Directory. A node-wide level like every other gate a SysOp sets,
+# not a guest switch -- a guest is an ordinary account (§4.6), so a SysOp who
+# wants the map kept from guests sets this above the guest account's level.
+NODE_MAP_MIN_LEVEL_CONFIG_KEY = "node_map_min_level"
+_DEFAULT_NODE_MAP_MIN_LEVEL = 0
+# The SysOp level (`netbbs.auth.users.SYSOP_LEVEL`), the highest there is.
+MAX_NODE_MAP_MIN_LEVEL = 255
+
+
+def get_node_map_min_level(db: Database) -> int:
+    value = get_config(db, NODE_MAP_MIN_LEVEL_CONFIG_KEY)
+    try:
+        level = int(value) if value is not None else _DEFAULT_NODE_MAP_MIN_LEVEL
+    except ValueError:
+        return _DEFAULT_NODE_MAP_MIN_LEVEL
+    return min(max(level, 0), MAX_NODE_MAP_MIN_LEVEL)
+
+
+def set_node_map_min_level(db: Database, level: int) -> None:
+    if not 0 <= level <= MAX_NODE_MAP_MIN_LEVEL:
+        raise ValueError(f"node map level must be 0-{MAX_NODE_MAP_MIN_LEVEL}, got {level!r}")
+    set_config(db, NODE_MAP_MIN_LEVEL_CONFIG_KEY, str(level))
