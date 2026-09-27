@@ -600,3 +600,49 @@ def test_follow_retrieves_a_failed_read_even_when_the_body_fails_first(db, lane,
     asyncio.run(scenario())
     gc.collect()
     assert not [c for c in unretrieved if "never retrieved" in str(c.get("message", ""))]
+
+
+# -- Claude review (PR #739) -------------------------------------------------
+
+
+def test_an_unreadable_rotated_file_keeps_the_active_entries(tmp_path, monkeypatch):
+    import netbbs.node_log as node_log
+
+    path = tmp_path / "netbbs.log"
+    path.write_text(_line("ERROR", "active and fine"), encoding="utf-8")
+    (tmp_path / "netbbs.log.1").write_text(_line("ERROR", "older"), encoding="utf-8")
+    real = node_log._read_tail
+
+    def _deny_rotated(target, budget):
+        if target.name.endswith(".1"):
+            raise PermissionError(13, "Permission denied")
+        return real(target, budget)
+
+    monkeypatch.setattr(node_log, "_read_tail", _deny_rotated)
+    result = read_node_log(path)
+
+    assert result.error is None
+    assert [e.message for e in result.entries] == ["active and fine"]
+    assert result.truncated
+
+
+def test_the_empty_message_does_not_name_a_stale_level(db, lane, sysop):
+    _write_log(db, _line("WARNING", "only a warning"))
+
+    # Cycle to "errors only", which is empty.
+    session = FakeSession(["o", "g", "l", "b", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop))
+    text = _normalized_visible(_written_text(session))
+
+    after = text[text.rindex("Showing errors only") - 400:]
+    assert "Nothing at this level" in after
+    assert "No warnings and errors" not in text
+
+
+def test_info_entries_are_muted_not_coloured_as_warnings():
+    from netbbs.rendering import MUTED_COLOR
+
+    assert admin_flow._node_log_level_color("INFO") == MUTED_COLOR
+    assert admin_flow._node_log_level_color("DEBUG") == MUTED_COLOR
+    assert admin_flow._node_log_level_color("WARNING") != MUTED_COLOR
+    assert admin_flow._node_log_level_color("ERROR") != MUTED_COLOR

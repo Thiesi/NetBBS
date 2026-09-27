@@ -8913,14 +8913,17 @@ _NODE_LOG_FLOORS = ("WARNING", "ERROR", "INFO")
 _NODE_LOG_FLOOR_LABELS = {"WARNING": "warnings and errors", "ERROR": "errors only", "INFO": "everything"}
 
 
+def _node_log_level_color(level: str) -> int:
+    """Warnings and worse in their severity colour; INFO and DEBUG muted."""
+    return _diagnostic_level_color(level) if level_rank(level) >= level_rank("WARNING") else MUTED_COLOR
+
+
 def _node_log_lines(entry: NodeLogEntry) -> list[str]:
     """One followed entry, whole: its first line and every continuation line
     (a traceback), each left to `write_line` to wrap -- the tail of an error
     is exactly what a SysOp watching the log is waiting for, so nothing here
     is clipped to the terminal width."""
-    level_color = (
-        _diagnostic_level_color(entry.level) if level_rank(entry.level) >= level_rank("WARNING") else MUTED_COLOR
-    )
+    level_color = _node_log_level_color(entry.level)
     first = (
         colored(f"{entry.when}  ", fg_color=MUTED_COLOR)
         + colored(f"[{entry.level}] ", fg_color=level_color)
@@ -8997,10 +9000,7 @@ async def _node_log_screen(session: Session, lane: DatabaseLane, actor: User) ->
         return label
 
     def _row_segments(entry: NodeLogEntry) -> list[tuple[str, int | None]]:
-        level_color = (
-            _diagnostic_level_color(entry.level) if level_rank(entry.level) >= level_rank("WARNING")
-            else MUTED_COLOR
-        )
+        level_color = _node_log_level_color(entry.level)
         return [
             (entry.when, METADATA_COLOR),
             ("  ", None),
@@ -9019,7 +9019,9 @@ async def _node_log_screen(session: Session, lane: DatabaseLane, actor: User) ->
             name_segments_of=_row_segments,
             title="Node log",
             breadcrumb=("SysOp", "Operations"),
-            empty_message=f"No {_NODE_LOG_FLOOR_LABELS[state['floor']]} in the newest part of {path.name}.",
+            # One call serves every [L]evel, so this names no level; the
+            # standing line below says which one is showing.
+            empty_message=f"Nothing at this level in the newest part of {path.name}.",
             start_stable_id=reopen_at,
             refresh=_reload,
             on_sort=_flip_order,
@@ -9041,7 +9043,7 @@ async def _node_log_screen(session: Session, lane: DatabaseLane, actor: User) ->
         reopen_at = selected.id
         rows: list[Field | Note] = [
             Field("When", selected.when, color=DATE_COLOR),
-            Field("Level", selected.level, color=_diagnostic_level_color(selected.level), bold=True),
+            Field("Level", selected.level, color=_node_log_level_color(selected.level), bold=True),
             Field("Logger", selected.logger, color=METADATA_COLOR),
             Field("Message", selected.message),
         ]

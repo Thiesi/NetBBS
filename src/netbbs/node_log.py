@@ -228,7 +228,10 @@ def read_node_log(path: Path, *, max_bytes: int = MAX_READ_BYTES, max_entries: i
         if not active_cut and remaining > 0 and rotated.exists() and _refuse_symlink(rotated) is None:
             try:
                 older_text, older_cut, _, older_identity = _read_tail(rotated, remaining)
-            except _NotRegularFile:
+            except OSError:
+                # `.1` is a top-up: unreadable (or renamed to `.2` by a
+                # rollover since the check) costs its lines, not the active
+                # file's that were read fine.
                 truncated = True
             else:
                 if older_identity == active_identity:
