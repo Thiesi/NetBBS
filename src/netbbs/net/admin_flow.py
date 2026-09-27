@@ -16398,6 +16398,9 @@ async def _door_detail_screen(session: Session, lane: DatabaseLane, actor: User,
         elif choice == "o":
             await _door_outbound_screen(session, lane, actor, door)
             await _draw_door_detail(session, lane, door, description_level=description_level, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, door_services=door_services)
+        elif choice == "w" and await lane.run(_is_war_dialer_door, door):
+            await _war_dialer_world_screen(session, lane, actor, door)
+            await _draw_door_detail(session, lane, door, description_level=description_level, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, door_services=door_services)
         elif choice in {"s", "h", "r", "v"} and door_services is not None and door.profile and door.profile.service:
             await session.write_line("")
             await _door_service_action(session, lane, actor, door, choice, door_services)
@@ -16441,6 +16444,8 @@ async def _draw_door_detail(
         MenuEntry(label=menu_key("D", "elete"), brief="Permanently remove this door"),
         MenuEntry(label=menu_key("B", "ack"), brief="Return to the list"),
     ]
+    if await lane.run(_is_war_dialer_door, door):
+        options.insert(4, MenuEntry(label=menu_key("W", "orld"), brief="Status and maintenance"))
     # Issue #466: only a door which actually declares a service says anything
     # about one, so the overwhelming majority of doors look exactly as before.
     if door.profile and door.profile.service:
@@ -16778,6 +16783,158 @@ async def _door_service_action(session: Session, lane: DatabaseLane, actor: User
     await lane.run(record_action, actor=actor, action="door_service", object_type="door",
                    object_id=door.id, detail=f"door={door.name!r} action={verb.lower()}")
     _announce_line(session, f"{verb} requested. Current state: {door_services.status(door.id).summary()}")
+
+
+def _war_dialer_world_of(db: Database, door: Door) -> tuple[Path, Path | None, str | None]:
+    """The node database, and the world this door plays, or why it cannot say.
+
+    `war_dialer_world_path` is the same resolution the launcher and the backup
+    use, so the world shown here is the one callers are actually in.
+    """
+    from netbbs.doors.runtime import war_dialer_world_path
+    try:
+        return db.path, war_dialer_world_path(db, door), None
+    except (ValueError, OSError) as exc:
+        return db.path, None, str(exc)
+
+
+def _is_war_dialer_door(db: Database, door: Door) -> bool:
+    _, world, problem = _war_dialer_world_of(db, door)
+    return world is not None or problem is not None
+
+
+def _war_dialer_world_state(db_path: Path, world: Path) -> tuple[dict | None, str | None]:
+    """`war_dialer_admin.world_status`, or the bounded reason it failed.
+
+    Blocking file and SQLite work on a world that may be large, so the caller
+    runs it in a thread rather than on the node's database lane.
+    """
+    from netbbs.doors.bundled import war_dialer as wd
+    from netbbs.doors.war_dialer_admin import world_status
+    if not world.exists():
+        return None, None
+    try:
+        return world_status(db_path, world), None
+    except (BackupError, wd.WorldStateError, OSError, sqlite3.Error, ValueError) as exc:
+        return None, wd._event_plain(str(exc))[:500]
+
+
+def _war_dialer_set_maintenance(db_path: Path, world: Path, enabled: bool, operator: str) -> str | None:
+    from netbbs.doors.bundled import war_dialer as wd
+    from netbbs.doors.war_dialer_admin import set_maintenance
+    try:
+        set_maintenance(db_path, world, enabled, operator=operator)
+    except (BackupError, wd.WorldStateError, OSError, sqlite3.Error, ValueError) as exc:
+        return wd._event_plain(str(exc))[:500]
+    return None
+
+
+def _war_dialer_operation_rows(db: Database, operations: list) -> list[list[str]]:
+    rows = []
+    for entry in reversed(operations):
+        if not isinstance(entry, dict):
+            continue
+        at = str(entry.get("at", ""))
+        try:
+            at = format_for_display(at, db)
+        except (ValueError, TypeError):
+            pass
+        rows.append([at, str(entry.get("action", "")), str(entry.get("operator", "")),
+                     str(entry.get("reason", "")) or "—"])
+    return rows
+
+
+async def _war_dialer_world_screen(session: Session, lane: DatabaseLane, actor: User, door: Door) -> None:
+    """A War Dialer door's world: what `war_dialer_admin status` shows, plus the
+    maintenance switch (issue #726).
+
+    Status plus an action bar (design doc §3.5). Maintenance is a toggle and
+    needs no confirmation: it only closes the world to new callers, and it
+    refuses while anyone is inside, the same guard the CLI meets. Season and
+    reset stay on the CLI, which requires a stopped node.
+    """
+    description_level = await lane.run(menu_description_level, actor)
+    unicode_style = await lane.run(unicode_style_enabled, actor)
+    collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
+    redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
+    header_color = await lane.run(effective_header_color_256)
+    while True:
+        db_path, world, problem = await lane.run(_war_dialer_world_of, door)
+        status = None
+        if world is not None and problem is None:
+            status, problem = await asyncio.to_thread(_war_dialer_world_state, db_path, world)
+        await session.write_line(
+            "\r\n" + screen_title(f"{sanitize_text(door.name)} — world",
+                breadcrumb=(session.node_display_name,), width=session.terminal_width,
+                clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
+                header_color=header_color, node_name_gradient=session.node_name_gradient)
+        )
+        rows: list[Field | Note | Table] = []
+        if world is not None:
+            rows.append(Field("Path", str(world)))
+        if problem is not None:
+            rows.append(Note(f"Cannot read this world: {problem}", color=ERROR_COLOR))
+        elif status is None:
+            rows.append(Note("No world yet. It is created the first time someone plays."))
+        else:
+            maintenance = status["maintenance"] == "on"
+            rows += [
+                Field("Maintenance",
+                      status_badge("ON", tone="warning", unicode_style=unicode_style) if maintenance
+                      else status_badge("OFF", tone="neutral", unicode_style=unicode_style), styled=True),
+                Field("Season", str(status["stored_season"])),
+                Field("Schema", str(status["schema"])),
+                Field("Owner", str(status["owner"] or "(unbound)"),
+                      color=VALUE_COLOR if status["owner"] else WARNING_COLOR),
+                Field("Players", str(status["players"])),
+                Field("Exchanges", str(status["exchanges"])),
+                Field("Events", str(status["events"])),
+            ]
+            if maintenance:
+                rows.append(Note("Closed to new callers until you switch maintenance off."))
+        sections = [Section("World", rows)]
+        if status is not None:
+            operations = await lane.run(_war_dialer_operation_rows, status["recent_operations"])
+            sections.append(Section("Recent operations", [
+                Table(["When", "Action", "Operator", "Reason"], operations, flex=3) if operations
+                else Note("None recorded.")
+            ]))
+        await _write_sections(session, sections, unicode_style=unicode_style)
+        options = []
+        if status is not None:
+            options.append(MenuEntry(
+                label=menu_key("M", "aintenance " + ("off" if status["maintenance"] == "on" else "on")),
+                brief="Close or reopen the world to new callers"))
+        options += [
+            MenuEntry(label=menu_key("R", "efresh"), brief="Read the world again"),
+            MenuEntry(label=menu_key("B", "ack"), brief="Return to the door"),
+        ]
+        await session.write_line(
+            "\r\n" + _menu_row(options, description_level, width=session.terminal_width,
+                               height=session.terminal_height)
+        )
+        await _choice_prompt(session)
+        choice = (await session.read_key()).lower()
+        await session.write_line("")
+
+        if choice == "b":
+            return
+        elif choice == "r":
+            continue
+        elif choice == "m" and status is not None:
+            enable = status["maintenance"] != "on"
+            failure = await asyncio.to_thread(_war_dialer_set_maintenance, db_path, world, enable, actor.username)
+            if failure is not None:
+                _announce(session, f"Could not switch maintenance {'on' if enable else 'off'}: {failure}",
+                          error=True)
+                continue
+            await lane.run(record_action, actor=actor, action="war_dialer_maintenance", object_type="door",
+                           object_id=door.id,
+                           detail=f"door={door.name!r} world={str(world)!r} maintenance={'on' if enable else 'off'}")
+            _announce(session, "Maintenance on. New callers are told the world is closed."
+                      if enable else "Maintenance off. The world is open to callers again.")
+        else:
+            await session.write(reject_unhandled_key(choice))
 
 
 async def _delete_door_screen(session: Session, lane: DatabaseLane, actor: User, door: Door,
