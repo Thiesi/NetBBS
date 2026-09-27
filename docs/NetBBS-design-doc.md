@@ -9310,11 +9310,17 @@ process exit releases it without deleting its inode. Restore retains the prior
 generation and journals unresolved failures. Service/profile path activation and
 old-binary exclusion are manual SysOp actions, as documented in the door guide.
 
-**SysOp competition controls.** Local commands provide read-only status, persistent
+**SysOp competition controls.** The SysOp console (a War Dialer door's
+**[W]orld** screen) and the local CLI provide read-only status, persistent
 maintenance and confirmed season/reset operations. Maintenance excludes new
 callers and cannot be changed over an active game session. Destructive controls
-require a stopped node, maintenance on, an exact-filename confirmation, a reason,
-and a freshly created and verified complete node backup. They use the normal
+require maintenance on, an exact-filename confirmation, a reason, and a freshly
+created and verified complete node backup. The CLI additionally requires a
+stopped node; the console does not (issue #726, the maintainer's decision), since
+maintenance already keeps callers out, the world's session guard refuses anyone
+still inside, and the backup is the same live backup the console's Backup screen
+takes. The console needs a live node for the identity directory that backup
+captures, and records the SysOp account in the world's audit. They use the normal
 atomic rollover and advance the season number. A reset additionally clears
 receipts; the maintainer selected preservation of player identities and account
 age, so reset never renews newcomer protection. Ownership and the latest 100 SysOp

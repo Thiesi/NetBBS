@@ -126,14 +126,24 @@ and the console shows that refusal instead of switching. The flag persists acros
 restart. Switch it off (`maintenance off`) to reopen the world after checking it.
 The world's audit names the SysOp account for a console change and the local OS
 account for a CLI one; the console change is also in the node's **Audit log**. A caller arriving during maintenance, or in the moment a live backup
-holds the world, is told it is closed and to try again later. (A season change
-needs the node stopped, so nobody arrives during one; they arrive while the flag
-is still on around it.) The game then ends
+holds the world, is told it is closed and to try again later, including while a
+season change runs. The game then ends
 normally: door-session history records an ordinary exit, not a crash, so the
 crashes listed there are real ones.
 No operator command starts, stops or redeploys the BBS service for you.
 
-**MANUAL — outside NetBBS, season advance or reset** (CLI only for now):
+**Season advance or reset in the console.** On the **[W]orld** screen of a live
+node, **[N]ext season** starts the next numbered season and **Reset [c]ompetition**
+also clears receipts. Both need maintenance on first, then ask for a reason
+(1-240 characters, recorded in the world's audit) and the exact world filename.
+A complete node backup is taken under `netbbs_backups/` beside the database and
+verified before anything changes; the result line names it. The node keeps
+running: maintenance keeps callers out, and a caller still inside the world
+stops the change with nothing altered. Maintenance stays on afterwards, so check
+the world and then switch it off. The standalone `python -m netbbs.admin`
+console cannot take that backup and points to the CLI instead.
+
+**MANUAL — outside NetBBS, season advance or reset with the node stopped:**
 
 1. Close game sessions, enable maintenance and stop the node service. Use `status`
    to review the selected path and competition before proceeding.

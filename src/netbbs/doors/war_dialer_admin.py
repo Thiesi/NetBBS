@@ -79,16 +79,25 @@ def set_maintenance(db_path: Path, world: Path, enabled: bool, *, operator: str 
 
 
 def change_competition(db_path: Path, world: Path, *, identity_dir: Path, backup_to: Path,
-                       confirm: str, reason: str, reset: bool = False) -> dict:
+                       confirm: str, reason: str, reset: bool = False, operator: str | None = None,
+                       require_stopped_node: bool = True) -> dict:
+    """Start the next season, or also clear receipts, behind a verified backup.
+
+    The CLI keeps its stopped-node rule. The SysOp console passes
+    `require_stopped_node=False` (issue #726): maintenance already keeps
+    callers out, the world session guard refuses anyone still inside, and the
+    backup below is the same live backup the console's Backup screen takes.
+    """
     world = _target(db_path, world)
     if confirm != world.name or not reason.strip() or len(reason) > 240:
         raise backup.BackupError("Confirm the exact world filename and supply a reason of 1-240 characters.")
-    backup._require_node_not_running(db_path)
+    if require_stopped_node:
+        backup._require_node_not_running(db_path)
     # Maintenance is an explicit preceding operation, and remains on afterward.
     if world_status(db_path, world)["maintenance"] != "on":
         raise backup.BackupError("Enable maintenance first and close game sessions; no season was changed.")
     if not identity_dir.is_dir():
-        raise backup.BackupError("Node identity directory is unavailable. Check --identity-dir; no season was changed.")
+        raise backup.BackupError(f"Node identity directory {identity_dir} is unavailable; no season was changed.")
     backup.create_backup(db_path=db_path, identity_dir=identity_dir, destination=backup_to)
     backup._validate_backup_source(backup_to, allow_migrate=False)
     with backup._war_dialer_maintenance(world), contextlib.closing(wd.connect(world)) as conn:
@@ -109,7 +118,7 @@ def change_competition(db_path: Path, world: Path, *, identity_dir: Path, backup
                 conn.execute("DELETE FROM events")
                 if wd._world_schema_version(conn) >= 9:
                     conn.execute("DELETE FROM scene")
-            _audit(conn, "reset competition" if reset else "advance season", reason=reason,
+            _audit(conn, "reset competition" if reset else "advance season", operator=operator, reason=reason,
                    backup_path=backup_to, before=before, after=season)
     return world_status(db_path, world)
 
