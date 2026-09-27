@@ -7202,6 +7202,10 @@ and not the rest is how the color was lost one slice at a time. It is
 unconditional rather than following the host's `redraw_in_place` preference,
 which is opt-in because clearing a *menu* costs scrollback a caller may still
 want; a door's own screens are not that, and War Dialer has always cleared.
+The hand-off into a door does follow the preference: the host clears before
+launching for a caller who redraws in place, because the door is a new screen
+and its title card otherwise arrived under the remains of the door picker
+(issue #648). A caller who scrolls keeps the picker in their scrollback.
 
 What that replaces has to survive it. The launch banner is wiped by the first
 deck the caller lands on, and everything it said is on that deck already -- the
