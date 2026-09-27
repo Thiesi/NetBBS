@@ -65,15 +65,23 @@ EXPIRY_GRACE_PERIOD_CONFIG_KEY = "post_expiry_grace_period_days"
 
 _DEFAULT_EXPIRY_GRACE_PERIOD_DAYS = 7
 
+# Upper bound for the day counts in this module (issue #725). Each
+# becomes a `timedelta(days=...)` added to a timestamp, which overflows
+# past year 9999, so an unbounded value would make every expiry sweep
+# raise. Ten years is far beyond any retention a SysOp means.
+MAX_SETTING_DAYS = 3650
+
 
 def get_expiry_grace_period_days(db: Database) -> int:
     value = get_config(db, EXPIRY_GRACE_PERIOD_CONFIG_KEY)
-    return int(value) if value is not None else _DEFAULT_EXPIRY_GRACE_PERIOD_DAYS
+    # Clamped rather than trusted: a value stored before the setter had
+    # a ceiling (issue #725) would overflow the expiry timedelta.
+    return min(int(value), MAX_SETTING_DAYS) if value is not None else _DEFAULT_EXPIRY_GRACE_PERIOD_DAYS
 
 
 def set_expiry_grace_period_days(db: Database, days: int) -> None:
-    if days < 0:
-        raise ValueError(f"grace period must be non-negative, got {days!r}")
+    if not 0 <= days <= MAX_SETTING_DAYS:
+        raise ValueError(f"grace period must be 0-{MAX_SETTING_DAYS} days, got {days!r}")
     set_config(db, EXPIRY_GRACE_PERIOD_CONFIG_KEY, str(days))
 
 
@@ -87,16 +95,20 @@ def set_expiry_grace_period_days(db: Database, days: int) -> None:
 MAX_UPLOAD_BYTES_CONFIG_KEY = "max_upload_bytes"
 
 _DEFAULT_MAX_UPLOAD_BYTES = 100 * 1024 * 1024  # 100 MiB
+# A ceiling on the ceiling (issue #725): far above anything a hobbyist
+# node transfers, so a slip of the keyboard cannot quietly remove the
+# bound this setting exists for.
+MAX_UPLOAD_BYTES_LIMIT = 64 * 1024 * 1024 * 1024  # 64 GiB
 
 
 def get_max_upload_bytes(db: Database) -> int:
     value = get_config(db, MAX_UPLOAD_BYTES_CONFIG_KEY)
-    return int(value) if value is not None else _DEFAULT_MAX_UPLOAD_BYTES
+    return min(int(value), MAX_UPLOAD_BYTES_LIMIT) if value is not None else _DEFAULT_MAX_UPLOAD_BYTES
 
 
 def set_max_upload_bytes(db: Database, max_bytes: int) -> None:
-    if max_bytes <= 0:
-        raise ValueError(f"max upload size must be positive, got {max_bytes!r}")
+    if not 0 < max_bytes <= MAX_UPLOAD_BYTES_LIMIT:
+        raise ValueError(f"max upload size must be between 1 byte and 64 GiB, got {max_bytes!r}")
     set_config(db, MAX_UPLOAD_BYTES_CONFIG_KEY, str(max_bytes))
 
 
@@ -117,12 +129,14 @@ def get_invitation_expiry_days(db: Database) -> int | None:
     value = get_config(db, INVITATION_EXPIRY_DAYS_CONFIG_KEY)
     if value is None:
         return _DEFAULT_INVITATION_EXPIRY_DAYS
-    return None if value == "" else int(value)
+    return None if value == "" else min(int(value), MAX_SETTING_DAYS)
 
 
 def set_invitation_expiry_days(db: Database, days: int | None) -> None:
-    if days is not None and days <= 0:
-        raise ValueError(f"invitation expiry must be positive or None (indefinite), got {days!r}")
+    if days is not None and not 0 < days <= MAX_SETTING_DAYS:
+        raise ValueError(
+            f"invitation expiry must be 1-{MAX_SETTING_DAYS} days or None (indefinite), got {days!r}"
+        )
     set_config(db, INVITATION_EXPIRY_DAYS_CONFIG_KEY, "" if days is None else str(days))
 
 
