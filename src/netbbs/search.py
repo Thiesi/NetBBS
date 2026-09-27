@@ -452,7 +452,9 @@ def _expected_post_index(db: Database) -> dict[str, tuple[int, str, str]]:
     resolved: dict[str, tuple[int, str, str]] = {}
     for row in rows:
         resolved[row["root_post_id"]] = (row["board_id"], row["subject"], row["body"])
-    return resolved
+    # The plain text `reindex_post` indexes (issue #711), or every colored
+    # post reads as stale (Codex review on #750).
+    return {root: (board, subject, plain_post_body(body)) for root, (board, subject, body) in resolved.items()}
 
 
 def _expected_file_index(db: Database) -> dict[str, tuple[int, str, str | None]]:

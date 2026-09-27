@@ -10477,3 +10477,32 @@ def test_a_pending_post_is_shown_in_color_where_its_board_allows_it(db, lane, sy
 
     assert "\x1b[38;5;9m" in _written_text(session)
     assert "Red body" in _visible(_written_text(session))
+
+
+def test_color_in_posts_toggles_without_a_prompt(db, lane, sysop):
+    """A toggle toggles (AGENTS.md; Codex review on #750)."""
+    from netbbs.boards.boards import get_board_by_name
+    from netbbs.net.admin_flow import _board_screen
+
+    session = FakeSession(["n", "Colorful", "o", "s"])
+    asyncio.run(_board_screen(session, lane, sysop, existing=None))
+
+    assert get_board_by_name(db, "Colorful").allow_color is True
+    assert "Allow color in posts?" not in _written_text(session)
+
+
+def test_a_pending_post_keeps_the_readers_layout_with_colors_off(db, lane, sysop):
+    from netbbs.boards.boards import create_board
+    from netbbs.boards.posts import create_post
+    from netbbs.net.post_color_preference import set_post_colors_enabled
+
+    alice = create_user(db, "alice", password="hunter2", user_level=10)
+    board = create_board(db, "General", creator=sysop, moderated=True, allow_color=True)
+    create_post(db, board, alice, "Hello", "> |12quoted\nthe reply")
+    set_post_colors_enabled(db, sysop, False)
+
+    session = FakeSession(["m", "m", "l", "0", "1", "p", "0", "1", "b"] + ["b"] * 8)
+    _run(session, lane, sysop)
+
+    lines = [line.strip() for line in _visible(_written_text(session)).splitlines()]
+    assert "> quoted" in lines and "the reply" in lines

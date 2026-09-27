@@ -658,7 +658,7 @@ from netbbs.rendering import (
     wrap_to_width,
 )
 from netbbs.rendering.detail import Field, Note, Section, Styled, Table, render_sections
-from netbbs.rendering.post_body import post_body_mode, post_body_rows, render_post_body
+from netbbs.rendering.post_body import post_body_mode, post_body_rows
 from netbbs.rendering.reflow import wrap_terminal_text
 from netbbs.net import notices as _notices
 from netbbs.guest import (
@@ -15358,7 +15358,8 @@ def _board_field_specs(
             key="allow_color", hotkey="o", menu_text=menu_key("o", "lor in posts", prefix="C"),
             label="Color in posts",
             render=lambda d: "allowed" if d.get("allow_color") else "not allowed",
-            prompt=bool_field("allow_color", "Allow color in posts?"),
+            prompt=choice_field("allow_color", [False, True]),
+            step=choice_step("allow_color", [False, True]),
             brief="Show authors' colors in posts",
             help=(
                 "Allowed: pipe codes (|00-|23) and color escape codes in a post body show as "
@@ -16481,12 +16482,8 @@ async def _post_action_screen(
             unicode_style=unicode_style, collapsed=collapsed,
             header_color=header_color, node_name_gradient=session.node_name_gradient,
         )
-        if body_mode == "color":
-            # As the board's readers will see it (issue #711).
-            body_rows = post_body_rows(post.body, session.terminal_width, body_mode, truecolor=truecolor)
-        else:
-            body = reflow(render_post_body(post.body, body_mode), width=session.terminal_width)
-            body_rows = [colored(line, fg_color=VALUE_COLOR) if line else "" for line in body.splitlines()]
+        # As the board's readers will see it, in every mode (issue #711).
+        body_rows = post_body_rows(post.body, session.terminal_width, body_mode, truecolor=truecolor)
         # What the moderator is deciding about, then the post itself under its
         # own heading, with the pin and exempt state the toggles change.
         sections = [

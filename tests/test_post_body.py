@@ -167,3 +167,19 @@ def test_uncolored_modes_lay_out_like_the_plain_reader(mode):
 
     assert ESC not in "".join(_SGR.sub("", row) for row in rows)
     assert ("|12" in rows[0]) == (mode == "text")
+
+
+# -- Codex review on #750 ---------------------------------------------------------
+
+
+def test_a_color_code_between_spaces_is_not_a_word():
+    rows = colored_body_rows(styled_post_body("hello |12 world |07 again"), 80)
+
+    assert _SGR.sub("", rows[0]) == "hello world again"
+
+
+@pytest.mark.parametrize("body", [" |12> quoted", "|12 > quoted", f" {ESC}[31m > quoted"])
+def test_a_quote_marker_behind_indentation_and_color_is_drawn_once(body):
+    rows = colored_body_rows(styled_post_body(body), 80)
+
+    assert _SGR.sub("", rows[0]) == "> quoted"
