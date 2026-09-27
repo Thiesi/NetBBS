@@ -34,6 +34,7 @@ import logging
 import os
 import re
 import stat
+import dataclasses
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -263,6 +264,35 @@ def read_node_log(path: Path, *, max_bytes: int = MAX_READ_BYTES, max_entries: i
     result.entries = entries
     result.truncated = truncated
     return result
+
+
+class StableEntryIds:
+    """Keeps an entry's number the same across re-reads of one screen.
+
+    `read_node_log` numbers entries by position, which shifts whenever the
+    retained window moves (new lines, a rotation). The picker shows the
+    number as a permanent reference (`#N`, reachable with Goto), so an
+    entry seen before keeps its number -- matched by its text and by how
+    many identical entries precede it -- and only entries new to this
+    screen get new ones."""
+
+    def __init__(self) -> None:
+        self._known: dict[tuple, int] = {}
+        self._next = 1
+
+    def apply(self, entries: list[NodeLogEntry]) -> list[NodeLogEntry]:
+        seen: dict[tuple, int] = {}
+        numbered = []
+        for entry in entries:
+            text = (entry.when, entry.level, entry.logger, entry.message, entry.continuation)
+            occurrence = seen.get(text, 0)
+            seen[text] = occurrence + 1
+            key = (*text, occurrence)
+            if key not in self._known:
+                self._known[key] = self._next
+                self._next += 1
+            numbered.append(dataclasses.replace(entry, id=self._known[key]))
+        return numbered
 
 
 def entries_at_or_above(entries: list[NodeLogEntry], minimum: str) -> list[NodeLogEntry]:

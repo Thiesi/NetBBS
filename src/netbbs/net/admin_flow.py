@@ -361,6 +361,7 @@ from netbbs.mrc.protocol import display_roster_entry, room_name_error
 from netbbs.node_log import (
     NodeLogEntry,
     NodeLogFollower,
+    StableEntryIds,
     entries_at_or_above,
     level_rank,
     node_log_path,
@@ -8960,6 +8961,10 @@ async def _node_log_screen(session: Session, lane: DatabaseLane, actor: User) ->
         )
         return
 
+    # The picker shows an entry's number as a permanent reference; keep it
+    # the same across refreshes on this screen (Codex review, PR #739).
+    ids = StableEntryIds()
+    log.entries = ids.apply(log.entries)
     state = {"floor": _NODE_LOG_FLOORS[0], "ascending": False}
 
     def _view() -> list[NodeLogEntry]:
@@ -8976,6 +8981,7 @@ async def _node_log_screen(session: Session, lane: DatabaseLane, actor: User) ->
         if fresh.error is not None or fresh.missing:
             reload_problem = fresh.error or f"{path.name} is gone"
         else:
+            fresh.entries = ids.apply(fresh.entries)
             log, reload_problem = fresh, None
         return _view()
 

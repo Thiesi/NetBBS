@@ -646,3 +646,19 @@ def test_info_entries_are_muted_not_coloured_as_warnings():
     assert admin_flow._node_log_level_color("DEBUG") == MUTED_COLOR
     assert admin_flow._node_log_level_color("WARNING") != MUTED_COLOR
     assert admin_flow._node_log_level_color("ERROR") != MUTED_COLOR
+
+
+def test_entry_numbers_survive_a_refresh_that_moves_the_window():
+    """Codex review, PR #739: the picker shows an entry's number as a
+    permanent reference, so a refresh that drops old lines must not
+    renumber the ones still shown."""
+    from netbbs.node_log import StableEntryIds
+
+    ids = StableEntryIds()
+    first = ids.apply(parse_log_lines([_line("ERROR", m).rstrip("\n") for m in ("a", "b", "b", "c")]))
+    second = ids.apply(parse_log_lines([_line("ERROR", m).rstrip("\n") for m in ("b", "b", "c", "d")]))
+
+    by_first = {(e.message, e.id) for e in first}
+    assert [e.id for e in first] == [1, 2, 3, 4]
+    assert [(e.message, e.id) for e in second[:3]] == [("b", 2), ("b", 3), ("c", 4)]
+    assert second[3].id == 5 and ("d", 5) not in by_first
