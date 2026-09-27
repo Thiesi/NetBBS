@@ -3102,4 +3102,15 @@ MIGRATIONS = [
         );
         """,
     ),
+    Migration(
+        description=(
+            "Issue #711: `allow_color` on boards -- whether this node shows the color an "
+            "author put in a post (pipe codes, SGR limited to colors, bold, underline and "
+            "blink; `netbbs.rendering.post_body`). Off by default, so no board changes on "
+            "upgrade. A carried board follows this node's own setting."
+        ),
+        sql="""
+        ALTER TABLE boards ADD COLUMN allow_color INTEGER NOT NULL DEFAULT 0;
+        """,
+    ),
 ]

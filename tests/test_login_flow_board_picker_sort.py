@@ -145,7 +145,7 @@ def test_community_scoped_order_offers_a_whole_community_save_option(db, alice):
     update_board(
         db, board, name="lobby", description=None, min_read_level=0, min_write_level=0,
         category_id=None, pinned=False, moderated=False, max_post_age_days=None,
-        min_age=None, name_requirement=None, community_id=community.id, changed_by=alice,
+        min_age=None, name_requirement=None, community_id=community.id, allow_color=False, changed_by=alice,
     )
 
     session = FakeSession(["o", "l", "w", "b"])

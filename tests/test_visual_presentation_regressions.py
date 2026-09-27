@@ -21,7 +21,8 @@ from netbbs.mail import send_mail
 from netbbs.net.char_input import EditorKey, EditorKeyKind
 from netbbs.net.composition import ReviewAction, review_composition
 from netbbs.net.help_overlay import show_help
-from netbbs.net.board_flow import _post_list_rows, _render_quoted_body
+from netbbs.net.board_flow import _post_list_rows
+from netbbs.rendering.post_body import quoted_body as _render_quoted_body
 from netbbs.net.mail_flow import _show_message
 from netbbs.rendering.width import display_width
 from netbbs.net.picker import pick_item

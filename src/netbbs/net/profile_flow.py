@@ -83,6 +83,7 @@ from netbbs.net.sort_ui import SORT_MODE_LABELS
 from netbbs.net.password_screen import manage_password_screen
 from netbbs.net.ssh_key_screen import manage_ssh_keys_screen
 from netbbs.net.mrc_color_preference import mrc_colors_enabled, set_mrc_colors_enabled
+from netbbs.net.post_color_preference import post_colors_enabled, set_post_colors_enabled
 from netbbs.net.mrc_nick_color_preference import mrc_nick_color, set_mrc_nick_color
 from netbbs.net.mrc_lastseen_preference import mrc_lastseen_recorded, set_mrc_lastseen_recorded
 from netbbs.net.mrc_private_preference import mrc_private_messages_enabled, set_mrc_private_messages_enabled
@@ -916,6 +917,7 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
         "redraw_in_place": redraw_in_place,
         "unicode_style": unicode_style,
         "mrc_colors": await lane.run(mrc_colors_enabled, user),
+        "post_colors": await lane.run(post_colors_enabled, user),
         "mrc_nick_color": await lane.run(mrc_nick_color, user),
         "breadcrumb_collapsed": collapsed,
         "sort_preference_count": len(await lane.run(list_sort_preferences, user)),
@@ -1242,6 +1244,23 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
                 "Whether menus/breadcrumbs use Unicode characters (›, ●, etc.) for a "
                 "cleaner look, or fall back to plain ASCII ('/', '[X]', etc.) for a terminal "
                 "that renders Unicode incorrectly."
+            ),
+            section="Display",
+        ),
+        FieldSpec(
+            key="post_colors", hotkey="t", menu_text=menu_key("t", " colors", prefix="Pos"),
+            label="Colors in board posts",
+            render=lambda d: "on" if d["post_colors"] else "off",
+            prompt=live_choice_field(
+                "post_colors", [False, True],
+                persist=lambda lane, v: lane.run(set_post_colors_enabled, user, v),
+            ),
+            brief="Show authors' colors in posts",
+            help=(
+                "On a message board whose SysOp allows color, authors can color their posts "
+                "with pipe codes (|00-|23). On: those colors are shown. Off: the same posts "
+                "appear as plain text. Either way nothing in a post can move the cursor or "
+                "clear the screen."
             ),
             section="Display",
         ),

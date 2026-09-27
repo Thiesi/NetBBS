@@ -2959,8 +2959,12 @@ def test_board_area_channel_screens_do_not_paginate_at_a_real_80x24_terminal(db,
     # ever show the "Section N of M" hint.
     from netbbs.net.admin_flow import _area_screen, _board_screen, _channel_screen
 
-    for screen in (_board_screen, _area_screen, _channel_screen):
+    # The board screen gained "Color in posts" (issue #711), one row past
+    # 24: at 80x24 it pages by section, which is that screen's designed
+    # overflow, and one row more fits it whole.
+    for screen, height in ((_board_screen, 25), (_area_screen, 24), (_channel_screen, 24)):
         session = FakeSession(["b"])
+        session.terminal_height = height
         asyncio.run(screen(session, lane, sysop, existing=None))
         text = _visible(_written_text(session))
         assert "PgUp/PgDn" not in text, f"{screen.__name__} unexpectedly paginated"
@@ -10456,3 +10460,20 @@ def test_a_closed_boards_detail_shows_the_closure_reason(db, lane, sysop):
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
 
     assert "Closure reason: archived" in _normalized_visible(_written_text(session))
+
+
+def test_a_pending_post_is_shown_in_color_where_its_board_allows_it(db, lane, sysop):
+    """The moderator sees the post as its readers will (issue #711)."""
+    from netbbs.boards.boards import create_board
+    from netbbs.boards.posts import create_post
+
+    alice = create_user(db, "alice", password="hunter2", user_level=10)
+    board = create_board(db, "General", creator=sysop, moderated=True, allow_color=True)
+    create_post(db, board, alice, "Hello", "|12Red body\x1b[2J")
+
+    inputs = ["m", "m", "l", "0", "1", "p", "0", "1", "b"] + ["b"] * 8
+    session = FakeSession(inputs)
+    _run(session, lane, sysop)
+
+    assert "\x1b[38;5;9m" in _written_text(session)
+    assert "Red body" in _visible(_written_text(session))

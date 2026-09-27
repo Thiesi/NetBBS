@@ -486,6 +486,7 @@ from netbbs.net.redraw_preference import (
 )
 from netbbs.net.breadcrumb_preference import breadcrumb_collapsed_enabled
 from netbbs.net.color_depth_preference import effective_truecolor
+from netbbs.net.post_color_preference import post_colors_enabled
 from netbbs.net.node_theme import (
     accent_color_override,
     clock_color_override,
@@ -657,6 +658,7 @@ from netbbs.rendering import (
     wrap_to_width,
 )
 from netbbs.rendering.detail import Field, Note, Section, Styled, Table, render_sections
+from netbbs.rendering.post_body import post_body_mode, post_body_rows, render_post_body
 from netbbs.rendering.reflow import wrap_terminal_text
 from netbbs.net import notices as _notices
 from netbbs.guest import (
@@ -15353,6 +15355,21 @@ def _board_field_specs(
             section="Moderation",
         ),
         FieldSpec(
+            key="allow_color", hotkey="o", menu_text=menu_key("o", "lor in posts", prefix="C"),
+            label="Color in posts",
+            render=lambda d: "allowed" if d.get("allow_color") else "not allowed",
+            prompt=bool_field("allow_color", "Allow color in posts?"),
+            brief="Show authors' colors in posts",
+            help=(
+                "Allowed: pipe codes (|00-|23) and color escape codes in a post body show as "
+                "color, bold, underline and blink -- never anything that moves the cursor or "
+                "clears the screen, and never in subjects. Callers can still turn color off "
+                "for themselves. Not allowed: posts show as text, codes as typed. Posts "
+                "carried from other nodes follow this node's setting."
+            ),
+            section="Moderation",
+        ),
+        FieldSpec(
             key="max_post_age_days", hotkey="x", menu_text=menu_key("X", " post age", prefix="Ma"),
             label="Max post age (days)",
             render=lambda d: _optional_int_label(d.get("max_post_age_days"), none_word="unlimited"),
@@ -15383,7 +15400,7 @@ async def _board_screen(
             "community_id": existing.community_id, "category_id": existing.category_id,
             "pinned": existing.pinned, "moderated": existing.moderated,
             "max_post_age_days": existing.max_post_age_days, "min_age": existing.min_age,
-            "name_requirement": existing.name_requirement,
+            "name_requirement": existing.name_requirement, "allow_color": existing.allow_color,
         }
         draft["community_id_label"] = (
             (await lane.run(get_community, existing.community_id)).name
@@ -15398,7 +15415,7 @@ async def _board_screen(
             "name": "", "description": None, "min_read_level": 0, "min_write_level": 0,
             "community_id": None, "category_id": None, "pinned": False, "moderated": False,
             "max_post_age_days": None, "min_age": None, "name_requirement": None,
-            "community_id_label": None, "category_id_label": None,
+            "community_id_label": None, "category_id_label": None, "allow_color": False,
         }
 
     async def save(draft: dict) -> Board:
@@ -15411,7 +15428,8 @@ async def _board_screen(
                 min_write_level=draft["min_write_level"], category_id=draft["category_id"],
                 pinned=draft["pinned"], moderated=draft["moderated"],
                 max_post_age_days=draft["max_post_age_days"], min_age=draft["min_age"],
-                name_requirement=draft["name_requirement"], community_id=draft["community_id"], creator=actor,
+                name_requirement=draft["name_requirement"], community_id=draft["community_id"],
+                allow_color=draft["allow_color"], creator=actor,
             )
         return await lane.run(
             update_board,
@@ -15419,7 +15437,8 @@ async def _board_screen(
             min_read_level=draft["min_read_level"], min_write_level=draft["min_write_level"],
             category_id=draft["category_id"], pinned=draft["pinned"], moderated=draft["moderated"],
             max_post_age_days=draft["max_post_age_days"], min_age=draft["min_age"],
-            name_requirement=draft["name_requirement"], community_id=draft["community_id"], changed_by=actor,
+            name_requirement=draft["name_requirement"], community_id=draft["community_id"],
+            allow_color=draft["allow_color"], changed_by=actor,
         )
 
     redraw_in_place, redraw_hint = await lane.run(_resolve_redraw_preference, actor)
@@ -16233,6 +16252,7 @@ async def _draw_board_detail(
                 "Max post age",
                 f"{board.max_post_age_days} days" if board.max_post_age_days is not None else "unlimited",
             ),
+            Field("Color in posts", "allowed" if board.allow_color else "not allowed"),
         ], paired=True),
     ]
     is_origin = False
@@ -16442,6 +16462,10 @@ async def _post_action_screen(
     status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
     display_format, display_timezone = await lane.run(resolve_display_preferences)
     when = format_for_display(post.created_at, override_format=display_format, override_timezone=display_timezone)
+    body_mode = post_body_mode(
+        board_allows_color=board.allow_color, reader_wants_color=await lane.run(post_colors_enabled, actor)
+    )
+    truecolor = await lane.run(lambda db: effective_truecolor(session, db, actor))
     actions = [
         ("a", menu_key("A", "pprove")),
         ("r", menu_key("R", "eject")),
@@ -16457,8 +16481,12 @@ async def _post_action_screen(
             unicode_style=unicode_style, collapsed=collapsed,
             header_color=header_color, node_name_gradient=session.node_name_gradient,
         )
-        body = reflow(sanitize_text(post.body, allow_newlines=True), width=session.terminal_width)
-        body_rows = [colored(line, fg_color=VALUE_COLOR) if line else "" for line in body.splitlines()]
+        if body_mode == "color":
+            # As the board's readers will see it (issue #711).
+            body_rows = post_body_rows(post.body, session.terminal_width, body_mode, truecolor=truecolor)
+        else:
+            body = reflow(render_post_body(post.body, body_mode), width=session.terminal_width)
+            body_rows = [colored(line, fg_color=VALUE_COLOR) if line else "" for line in body.splitlines()]
         # What the moderator is deciding about, then the post itself under its
         # own heading, with the pin and exempt state the toggles change.
         sections = [

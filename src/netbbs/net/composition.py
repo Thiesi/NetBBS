@@ -18,6 +18,7 @@ from netbbs.net.help_overlay import show_help
 from netbbs.net.notices import write_notices
 from netbbs.net.session import Session, write_prompt
 from netbbs.rendering.width import display_width
+from netbbs.rendering.post_body import post_body_rows
 from netbbs.rendering import (
     ACCENT_COLOR,
     HEADER_COLOR,
@@ -386,6 +387,7 @@ async def review_composition(
     accent_color: int = ACCENT_COLOR,
     header_color: int | tuple[int, int, int] = HEADER_COLOR,
     truecolor: bool = False,
+    body_mode: str | None = None,
 ) -> ReviewAction:
     """Render a complete draft and return one explicit review action.
 
@@ -403,6 +405,10 @@ async def review_composition(
     effective_truecolor(session, db, user)`, which honors that user's own
     `[C]olor depth` override rather than this module reading `session.
     supports_truecolor` directly and silently ignoring it.
+
+    `body_mode` (issue #711) previews a board post as its readers will see
+    it -- `netbbs.rendering.post_body.post_body_mode`'s ``color``,
+    ``plain`` or ``text``. `None`, for mail, keeps the plain preview.
 
     Dogfood feature request, issue #160's cursor-navigation follow-up
     (item 2 of the prioritized list): `[T]o`/`[U]pdate subject`/`[B]ody`
@@ -457,7 +463,11 @@ async def review_composition(
         divider_color = 238 if truecolor else RULE_COLOR
         preview_rule = colored(rule_char * min(session.terminal_width, 78), fg_color=divider_color)
         await session.write_line(preview_rule)
-        await session.write_line(_preview_body(body, session.terminal_width))
+        if body_mode is None:
+            await session.write_line(_preview_body(body, session.terminal_width))
+        else:
+            for row in post_body_rows(body, session.terminal_width, body_mode, truecolor=truecolor):
+                await session.write_line(row)
         await session.write_line(preview_rule)
 
         options = [MenuEntry(label=menu_key(commit_key.upper(), commit_label), brief=commit_brief)]
