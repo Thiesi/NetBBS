@@ -53,9 +53,8 @@ def test_sgr_becomes_the_equivalent_pipe_codes(params, pipes):
 
 
 def test_translation_keeps_the_color_state_between_sequences():
-    # A bold after a red is light red; switching bold off is red again;
-    # the same color twice says nothing the second time.
-    assert _translate("31", "1", "22", "31") == ["|04", "|12", "|04", ""]
+    # A bold after a red is light red; switching bold off is red again.
+    assert _translate("31", "1", "22") == ["|04", "|12", "|04"]
     # Bold set first carries into the next color.
     assert _translate("1", "34") == ["|15", "|09"]
 
@@ -65,8 +64,18 @@ def test_reset_returns_to_the_default_colors():
     assert _translate("31;44", "") == ["|04|17", "|07|16"]  # ESC[m is a reset
     assert _translate("31", "39") == ["|04", "|07"]
     assert _translate("44", "49") == ["|17", "|16"]
-    # A reset with nothing set changes nothing.
-    assert _translate("0") == [""]
+    # A reset is written even with nothing set: the translator cannot
+    # know what the text around the cursor says.
+    assert _translate("0") == ["|07|16"]
+
+
+def test_a_color_set_again_is_written_again():
+    # The author may have deleted the first `|04` (Codex review on #779):
+    # a second pasted red must still arrive red.
+    assert _translate("31", "31") == ["|04", "|04"]
+    assert _translate("44", "44") == ["|17", "|17"]
+    # A sequence that sets no color writes nothing.
+    assert _translate("31", "4") == ["|04", ""]
 
 
 def test_codes_without_a_pipe_equivalent_are_dropped():
@@ -109,7 +118,7 @@ _PASTE = b"plain \x1b[1;31mred\x1b[0m and \x1b[44mblue\x1b[m\r"
 
 def test_read_line_types_pasted_color_as_pipe_codes():
     line = asyncio.run(read_line(FakeByteSource(_PASTE), _ignore, pasted_color=PastedColor()))
-    assert line == "plain |12red|07 and |17blue|16"
+    assert line == "plain |12red|07|16 and |17blue|07|16"
 
 
 def test_read_line_still_drops_pasted_color_by_default():
@@ -202,7 +211,7 @@ def test_line_editor_keeps_pasted_color_only_when_asked(keep, body):
     assert result == body
 
 
-@pytest.mark.parametrize(("keep", "body"), [(True, "|02green|07 text"), (False, "green text")])
+@pytest.mark.parametrize(("keep", "body"), [(True, "|02green|07|16 text"), (False, "green text")])
 def test_prose_editor_keeps_pasted_color_only_when_asked(tmp_path, keep, body):
     session = ByteSession(b"\x1b[32mgreen\x1b[0m text" + _CTRL_O)
     result = asyncio.run(
@@ -245,7 +254,7 @@ def _web_read_line(data: str, **read_options) -> str:
 
 def test_web_read_line_types_pasted_color_as_pipe_codes():
     paste = "plain \x1b[1;31mred\x1b[0m and \x1b[44mblue\x1b[m\r"
-    assert _web_read_line(paste, pasted_color=PastedColor()) == "plain |12red|07 and |17blue|16"
+    assert _web_read_line(paste, pasted_color=PastedColor()) == "plain |12red|07|16 and |17blue|07|16"
     assert _web_read_line(paste) == "plain red and blue"
 
 
@@ -365,4 +374,6 @@ def test_web_read_editor_key_survives_a_flood_of_color_codes(translate):
             await server.stop()
 
     asyncio.run(scenario())
-    assert received == ["A"]
+    # With a translator each reset is typed as `|07|16`, so the first key
+    # is the first of those; without one they are skipped to reach `A`.
+    assert received == (["|"] if translate else ["A"])

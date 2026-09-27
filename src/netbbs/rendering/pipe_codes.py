@@ -117,9 +117,13 @@ class PastedColor:
     sequence would otherwise be dropped by the key reader. One instance
     lives for one editing session, because SGR is stateful: a bold
     arriving after a red means light red. `translate` takes the
-    parameters of one ``ESC [ ... m`` and returns the pipe codes that
-    bring the text to the same colors -- often none, when the sequence
-    changes nothing a pipe code can say.
+    parameters of one ``ESC [ ... m`` and returns the pipe codes for
+    the colors it sets -- none when it sets nothing a pipe code can say.
+
+    A code is written whenever a sequence sets that color, even to the
+    color the last one set: the author can delete or move the codes
+    already typed, so what the text says now is not something this
+    class can know (Codex review on #779).
 
     Only what pipe codes can say survives: the sixteen foregrounds and
     eight backgrounds. Bold becomes the bright foreground; a bright
@@ -133,11 +137,10 @@ class PastedColor:
         self._foreground: int | None = None  # a CGA color; None is the default
         self._background: int | None = None  # a CGA base color; None is the default
         self._bold = False
-        self._shown_foreground: int | None = None
-        self._shown_background: int | None = None
 
     def translate(self, params: str) -> str:
         codes = [int(part) if part else 0 for part in params.split(";")] if params else [0]
+        sets_foreground = sets_background = False
         index = 0
         while index < len(codes):
             code = codes[index]
@@ -145,22 +148,19 @@ class PastedColor:
             if code == 0:
                 self._foreground = self._background = None
                 self._bold = False
-            elif code == 1:
-                self._bold = True
-            elif code == 22:
-                self._bold = False
-            elif 30 <= code <= 37:
-                self._foreground = _XTERM_TO_CGA[code - 30]
-            elif 90 <= code <= 97:
-                self._foreground = _XTERM_TO_CGA[code - 90] + 8
-            elif code == 39:
-                self._foreground = None
-            elif 40 <= code <= 47:
-                self._background = _XTERM_TO_CGA[code - 40]
-            elif 100 <= code <= 107:
-                self._background = _XTERM_TO_CGA[code - 100]
-            elif code == 49:
-                self._background = None
+                sets_foreground = sets_background = True
+            elif code in (1, 22):
+                self._bold = code == 1
+                sets_foreground = True
+            elif 30 <= code <= 37 or 90 <= code <= 97 or code == 39:
+                self._foreground = (
+                    None if code == 39 else _XTERM_TO_CGA[code % 10] + (8 if code >= 90 else 0)
+                )
+                sets_foreground = True
+            elif 40 <= code <= 47 or 100 <= code <= 107 or code == 49:
+                # A bright background has no pipe code: its base color.
+                self._background = None if code == 49 else _XTERM_TO_CGA[code % 10]
+                sets_background = True
             elif code in (38, 48):
                 # Skip the color it carries rather than read it as codes
                 # of its own: ``38;5;1`` is not also bold and red.
@@ -168,13 +168,11 @@ class PastedColor:
                     index += 1 + _EXTENDED_COLOR_LENGTHS.get(codes[index], len(codes))
 
         pipes = ""
-        foreground = self._effective_foreground()
-        if foreground != self._shown_foreground:
+        if sets_foreground:
+            foreground = self._effective_foreground()
             pipes += f"|{7 if foreground is None else foreground:02d}"
-            self._shown_foreground = foreground
-        if self._background != self._shown_background:
+        if sets_background:
             pipes += f"|{16 + (self._background or 0)}"
-            self._shown_background = self._background
         return pipes
 
     def _effective_foreground(self) -> int | None:

@@ -90,14 +90,36 @@
     term.write("\r\n\x1b[90m[Connection error]\x1b[0m\r\n");
   };
 
+  // Where a chunk of `chars` from `start` may end at or before `end`
+  // without cutting an escape sequence in two (issue #754): the server
+  // parses each message on its own, so a pasted color split across two
+  // would lose its `ESC[` and leave `31m` in the text. Only the last 64
+  // characters are searched -- the server's own cap on one sequence.
+  function chunkEnd(chars, start, end) {
+    if (end >= chars.length) return chars.length;
+    for (var j = end - 1; j > start && j >= end - 64; j--) {
+      if (chars[j] !== "\x1b") continue;
+      if (chars[j + 1] === "[") {
+        for (var k = j + 2; k < end; k++) {
+          if (chars[k] >= "@" && chars[k] <= "~") return end;
+        }
+        return j;
+      }
+      return j + 2 < end ? end : j;
+    }
+    return end;
+  }
+
   term.onData(function (data) {
     if (ws.readyState === WebSocket.OPEN) {
       // Bound pasted chunks and browser-side queued writes as well as server queues.
       var chars = Array.from(data);
-      for (var i = 0; i < chars.length; i += 1024) {
+      for (var i = 0; i < chars.length;) {
+        var end = chunkEnd(chars, i, i + 1024);
         if (ws.bufferedAmount > 65536) { ws.close(); return; }
         ws.send(JSON.stringify({ type: doorStream === null ? "key" : "door_key",
-                                stream: doorStream, data: chars.slice(i, i + 1024).join("") }));
+                                stream: doorStream, data: chars.slice(i, end).join("") }));
+        i = end;
       }
     }
   });
