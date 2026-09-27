@@ -275,6 +275,10 @@ from netbbs.link.files import (
     link_file_area,
     queue_file_descriptor_if_linked,
 )
+from netbbs.link.dial_in import (
+    MAX_DIAL_IN_ADDRESSES, MAX_DIAL_IN_URL_BYTES, DialInError, get_stated_dial_in, published_dial_in,
+    set_stated_dial_in, suggested_dial_in,
+)
 from netbbs.link.key_rotation import KeyRotationError
 from netbbs.link.node_identity import operational_key_history
 from netbbs.link.protocol import PeerRecord
@@ -8768,6 +8772,12 @@ async def _link_status_sections(
                 identity.append(Field("Advertised address", f"{config.advertised_host}:{config.advertised_port}"))
             else:
                 identity.append(Field("Advertised address", "(not configured)", color=WARNING_COLOR))
+    # Issue #777: where callers reach this board, as its descriptor says.
+    dial_in, dial_in_source = await lane.run(_published_dial_in_summary)
+    identity.append(Field(
+        "Dial-in", _describe_published_dial_in(dial_in, dial_in_source),
+        color=VALUE_COLOR if dial_in else MUTED_COLOR,
+    ))
     sections = [Section("Identity", identity)]
 
     identity_notices = await lane.run(list_identity_observations)
@@ -9152,6 +9162,127 @@ async def _carry_decisions_screen(
                     return
 
 
+def _published_dial_in_summary(db: Database) -> tuple[tuple[str, ...], str]:
+    """What this node's next descriptor carries as `dial_in`, and where it
+    comes from: `"stated"` (the SysOp saved a list, possibly empty),
+    `"public_url"` (never saved; `[web] public_url` stands in) or
+    `"none"`."""
+    if get_stated_dial_in(db) is not None:
+        return published_dial_in(db), "stated"
+    published = published_dial_in(db)
+    return published, "public_url" if published else "none"
+
+
+def _describe_published_dial_in(published: tuple[str, ...], source: str) -> str:
+    """One plain-text line for the Link status panel and the editor. The
+    URLs are this node's own validated entries; the caller sanitizes the
+    line before styling it, as for any text."""
+    if not published:
+        return "none (you saved an empty list)" if source == "stated" else "none"
+    listed = ", ".join(published)
+    return f"{listed} (from [web] public_url until you save a list)" if source == "public_url" else listed
+
+
+async def _dial_in_editor(
+    session: Session, lane: DatabaseLane, actor: User, *, link_context: LinkContext,
+) -> None:
+    """The SysOp's statement of where callers reach this board (issue #777,
+    design doc §8.2 and §8.12, §16 issue #767 Decision 6).
+
+    A draft editor (§3.5): four address slots, seeded from the saved list,
+    and `[U]se suggestions`, which copies the suggested entries -- this
+    node's DNS name with its enabled telnet and SSH listener ports, and an
+    `https://` `[web] public_url` -- into the draft. Nothing is published
+    until `[S]ave`; the node cannot see what is in front of its listeners,
+    so a suggestion is only ever a starting point. `[S]ave` validates every
+    slot with the same `parse_dial_in_url` a reader applies and raises
+    `DialInError` on the first bad one, keeping the draft. Saving with
+    every slot empty is a statement too: the node then publishes nothing,
+    and `[web] public_url` no longer stands in."""
+    config = link_context.link_config
+    advertised_host = config.advertised_host if config is not None else None
+    stated = await lane.run(get_stated_dial_in)
+    published, source = await lane.run(_published_dial_in_summary)
+    suggestions = await lane.run(suggested_dial_in, advertised_host)
+    seed = list(stated if stated is not None else published)
+    slots = [f"address_{index}" for index in range(1, MAX_DIAL_IN_ADDRESSES + 1)]
+    draft = {key: (seed[position] if position < len(seed) else "") for position, key in enumerate(slots)}
+
+    async def use_suggestions_prompt(session: Session, lane: DatabaseLane, draft: dict) -> None:
+        # Fills the draft only; `[S]ave` is still what publishes.
+        for position, key in enumerate(slots):
+            draft[key] = suggestions[position] if position < len(suggestions) else ""
+
+    fields = [
+        FieldSpec(
+            key=key, hotkey=str(position), menu_text=menu_key(str(position), f" Address {position}"),
+            label=f"Address {position}", render=lambda d, key=key: d[key] or "(empty)",
+            prompt=text_field(key),
+            brief="telnet://, ssh:// or https://",
+            help=(
+                "Where a caller reaches this board: telnet://host:port, ssh://host:port or an "
+                f"https:// URL, at most {MAX_DIAL_IN_URL_BYTES} bytes. Plain http:// is not accepted. "
+                "Empty the line to drop the entry."
+            ),
+        )
+        for position, key in enumerate(slots, start=1)
+    ]
+    fields.append(FieldSpec(
+        key="suggestions", hotkey="u", menu_text=menu_key("U", "se suggestions"), label="Suggested",
+        render=lambda d: ", ".join(suggestions) if suggestions else "(none -- no DNS name or listeners on record)",
+        prompt=use_suggestions_prompt,
+        brief="Fill the slots; not saved yet",
+        help=(
+            "Suggestions come from this node's DNS name and its enabled telnet and SSH listener "
+            "ports, plus an https:// [web] public_url. They are not published by themselves: check "
+            "them against your port forwards and proxies, then save."
+        ),
+    ))
+
+    def preamble(_draft: dict) -> str:
+        now = sanitize_text(_describe_published_dial_in(published, source))
+        return "\r\n".join([
+            colored("Published now: ", fg_color=LABEL_COLOR) + colored(now, fg_color=VALUE_COLOR),
+            colored(
+                "Callers dial these; other boards show them on their node map. Suggested entries "
+                "are not published until you save.", fg_color=MUTED_COLOR,
+            ),
+        ])
+
+    async def save(draft: dict) -> list[str]:
+        values = [draft[key] for key in slots]
+
+        def _persist(db: Database) -> list[str]:
+            accepted = set_stated_dial_in(db, values)
+            record_action(
+                db, actor=actor, action="set_dial_in",
+                detail=", ".join(accepted) if accepted else "(none)",
+            )
+            return accepted
+
+        accepted = await lane.run(_persist)
+        if accepted:
+            _announce_line(session, f"Dial-in addresses saved ({len(accepted)}); the next hello publishes them.")
+        else:
+            _announce_line(session, "Dial-in addresses saved empty; this node publishes none.")
+        return accepted
+
+    await edit_resource_draft(
+        session, lane,
+        title="Dial-in addresses",
+        subtitle="Where callers reach this board, as other boards will show it.",
+        fields=fields, draft=draft, save=save, error_type=DialInError,
+        save_menu_text=menu_key("S", "ave"), back_menu_text=menu_key("B", "ack"),
+        preamble=preamble,
+        description_level=await lane.run(menu_description_level, actor),
+        redraw_in_place=await lane.run(redraw_in_place_enabled, actor),
+        unicode_style=await lane.run(unicode_style_enabled, actor),
+        collapsed=await lane.run(breadcrumb_collapsed_enabled, actor),
+        accent_color=await lane.run(effective_accent_color_256),
+        header_color=await lane.run(effective_header_color_256),
+    )
+
+
 async def _link_status_screen(
     session: Session, lane: DatabaseLane, actor: User, *, link_context: LinkContext,
     node_controls: NodeControls | None = None,
@@ -9199,6 +9330,8 @@ async def _link_status_screen(
             actions.append(("a", menu_key("A", "cknowledge identity changes")))
         # Issue #624: the node's own keys and their rotation.
         actions.append(("k", menu_key("K", "eys")))
+        # Issue #777: where callers reach this board.
+        actions.append(("d", menu_key("D", "ial-in")))
         # Issue #683: what this node holds and does not carry.
         offered, excluded = await _carry_decision_totals(lane)
         if offered:
@@ -9228,6 +9361,8 @@ async def _link_status_screen(
                 session, lane, actor, link_context=link_context,
                 key_rotation=node_controls.key_rotation if node_controls is not None else None,
             )
+        elif choice == "d":
+            await _dial_in_editor(session, lane, actor, link_context=link_context)
         elif choice == "a":
             for notice in identity_notices[:5]:
                 await lane.run(dismiss_identity_observation, notice.id)
