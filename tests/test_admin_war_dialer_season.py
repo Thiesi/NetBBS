@@ -170,3 +170,98 @@ def test_an_overlong_reason_is_refused(db, lane, sysop, identity_dir):
 
     assert "longer than 240 characters" in _normalized_visible(_written_text(session))
     assert world_status(db.path, path)["stored_season"] == "1"
+
+
+# -- review round 1 (PR #744) ----------------------------------------------
+
+
+def test_the_node_audit_records_the_effective_seasons_of_an_idle_world(db, lane, sysop, identity_dir, monkeypatch):
+    """A world idle past natural cutoffs settles them first; the node audit
+    must record what the change did (3->4), not the stale stored season."""
+    from datetime import timedelta
+
+    from netbbs.doors.bundled import war_dialer as wd
+
+    _war_dialer_door(db, sysop)
+    path = _war_dialer_world(db)
+    set_maintenance(db.path, path, True)
+    later = wd.now_utc() + timedelta(days=70)
+    monkeypatch.setattr(wd, "now_utc", lambda: later)
+
+    session = FakeSession(_war_dialer_world_keys("n", "catch up", path.name))
+    _live(session, lane, sysop, identity_dir)
+
+    assert world_status(db.path, path)["stored_season"] == "4"
+    entry = list_recent_actions(db, limit=1)[0]
+    assert "season=3->4" in entry.detail
+    assert "season 4 has started" in _normalized_visible(_written_text(session))
+
+
+def test_a_second_concurrent_change_is_refused(db, lane, sysop, identity_dir):
+    from netbbs.net import admin_flow
+
+    _war_dialer_door(db, sysop)
+    path = _war_dialer_world(db)
+    set_maintenance(db.path, path, True)
+
+    session = FakeSession(_war_dialer_world_keys("n", "rollover", path.name))
+    with admin_flow._WAR_DIALER_COMPETITION_LOCK:
+        _live(session, lane, sysop, identity_dir)
+
+    assert "another SysOp is changing a War Dialer competition" in _normalized_visible(_written_text(session))
+    assert world_status(db.path, path)["stored_season"] == "1"
+    assert _backups(db) == []
+
+
+def test_a_dropped_session_still_records_the_change_it_made(db, lane, sysop, identity_dir, monkeypatch):
+    import time
+
+    from netbbs.net import admin_flow
+
+    door = _war_dialer_door(db, sysop)
+    path = _war_dialer_world(db)
+    set_maintenance(db.path, path, True)
+    real = admin_flow._war_dialer_change_competition
+
+    def _slow(**kwargs):
+        time.sleep(0.4)
+        return real(**kwargs)
+
+    monkeypatch.setattr(admin_flow, "_war_dialer_change_competition", _slow)
+    status = world_status(db.path, path)
+
+    async def scenario():
+        session = FakeSession(["rollover", path.name])
+        task = asyncio.create_task(admin_flow._war_dialer_competition_flow(
+            session, lane, sysop, door, path, status, reset=False, identity_dir=identity_dir, db_path=db.path))
+        await asyncio.sleep(0.15)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+
+    assert world_status(db.path, path)["stored_season"] == "2"
+    entry = list_recent_actions(db, limit=1)[0]
+    assert (entry.action, entry.object_id) == ("war_dialer_season", door.id)
+
+
+def test_a_backup_that_failed_verification_is_not_called_a_backup(db, lane, sysop, identity_dir, monkeypatch):
+    import netbbs.backup as backup_module
+
+    _war_dialer_door(db, sysop)
+    path = _war_dialer_world(db)
+    set_maintenance(db.path, path, True)
+
+    def _reject(source, *, allow_migrate):
+        raise BackupError("checksum mismatch")
+
+    monkeypatch.setattr(backup_module, "_validate_backup_source", _reject)
+    session = FakeSession(_war_dialer_world_keys("n", "rollover", path.name))
+    _live(session, lane, sysop, identity_dir)
+    text = _normalized_visible(_written_text(session))
+
+    assert "Next season failed: checksum mismatch" in text
+    assert "is not a usable backup" in text
+    assert "verified backup taken first remains" not in text
+    assert world_status(db.path, path)["stored_season"] == "1"

@@ -57,6 +57,7 @@ import re
 import shlex
 import sqlite3
 import sys
+import threading
 from pathlib import Path
 import dataclasses
 from dataclasses import dataclass
@@ -17171,36 +17172,66 @@ def _war_dialer_operation_rows(db: Database, operations: list) -> list[list[str]
     return rows
 
 
+# One console competition change at a time on this node. Without it, two
+# SysOps could interleave: A's backup verified, B's rollover committed, then
+# A's rollover -- leaving A's recorded backup older than the state A changed.
+# The CLI needs a stopped node, so it never runs beside the console.
+_WAR_DIALER_COMPETITION_LOCK = threading.Lock()
+
+
+@dataclasses.dataclass(frozen=True)
+class _CompetitionOutcome:
+    status: dict | None
+    failure: str | None = None
+    # Whether a directory left at the destination after a failure is a
+    # complete, verified backup (a failure after it was taken) or not.
+    backup_valid: bool = False
+
+
 def _war_dialer_change_competition(
     db_path: Path, world: Path, *, identity_dir: Path, destination: Path, reason: str, confirm: str,
     reset: bool, operator: str,
-) -> tuple[dict | None, str | None]:
+) -> _CompetitionOutcome:
     """`war_dialer_admin.change_competition` from the console, or the bounded
     reason it refused. No stopped-node rule here (issue #726, the maintainer's
     decision): maintenance keeps new callers out, the world's session guard
     refuses anyone still inside, and the backup is the live one the Backup
     screen takes."""
+    from netbbs.backup import _validate_backup_source
     from netbbs.doors.bundled import war_dialer as wd
     from netbbs.doors.war_dialer_admin import change_competition
+    if not _WAR_DIALER_COMPETITION_LOCK.acquire(blocking=False):
+        return _CompetitionOutcome(None, "another SysOp is changing a War Dialer competition right now; "
+                                         "try again when that finishes")
     try:
-        return change_competition(
+        return _CompetitionOutcome(change_competition(
             db_path, world, identity_dir=identity_dir, backup_to=destination, confirm=confirm,
             reason=reason, reset=reset, operator=operator, require_stopped_node=False,
-        ), None
+        ))
     except (BackupError, wd.WorldStateError, OSError, sqlite3.Error, ValueError) as exc:
-        return None, wd._event_plain(str(exc))[:500]
+        valid = False
+        if destination.exists():
+            try:
+                _validate_backup_source(destination, allow_migrate=False)
+                valid = True
+            except (BackupError, OSError, sqlite3.Error, ValueError):
+                valid = False
+        return _CompetitionOutcome(None, wd._event_plain(str(exc))[:500], valid)
+    finally:
+        _WAR_DIALER_COMPETITION_LOCK.release()
 
 
-async def _owned_worker(func, /, **kwargs):
+async def _owned_worker(func, /, *, finish=None, **kwargs):
     """Run blocking `func` in a thread and keep it owned to the end.
 
     Cancelling an `asyncio.to_thread` awaiter does not stop the thread, so a
-    cancellation (the SysOp's session dropping) waits for the worker, logs
-    its outcome, and only then propagates -- the same ownership
-    `_create_live_backup_owned` gives a live backup."""
+    cancellation (the SysOp's session dropping) waits for the worker, still
+    runs `finish` on its result -- an audit entry for a change that did
+    happen must not be lost with the session -- and only then propagates.
+    The same ownership `_create_live_backup_owned` gives a live backup."""
     task = asyncio.create_task(asyncio.to_thread(func, **kwargs))
     try:
-        return await asyncio.shield(task)
+        result = await asyncio.shield(task)
     except asyncio.CancelledError as cancelled:
         while not task.done():
             try:
@@ -17210,10 +17241,20 @@ async def _owned_worker(func, /, **kwargs):
             except Exception:
                 break
         try:
-            task.result()
+            result = task.result()
         except Exception:
             _logger.exception("%s failed after its SysOp session was cancelled", getattr(func, "__name__", func))
+            raise cancelled
+        if finish is not None:
+            try:
+                await finish(result)
+            except Exception:
+                _logger.exception("recording %s failed after its SysOp session was cancelled",
+                                  getattr(func, "__name__", func))
         raise cancelled
+    if finish is not None:
+        await finish(result)
+    return result
 
 
 async def _war_dialer_competition_flow(
@@ -17229,11 +17270,13 @@ async def _war_dialer_competition_flow(
                   "while it changes. Nothing was changed.", error=True)
         return
     destination = default_backup_destination(db_path)
-    season = status["stored_season"]  # a string, or "not started"
-    next_label = f"season {int(season) + 1}" if str(season).isdigit() else "the next season"
+    # No season number here: the stored one can be stale until the change
+    # settles any natural cutoffs that passed while the world sat idle, so
+    # the numbers are reported from the change itself afterwards.
     await session.write_line("")
     await session.write_line(colored(
-        f"{what}: starts {next_label} with the normal competitive reset"
+        f"{what}: settles any season that has already ended, then starts the next one with the "
+        "normal competitive reset"
         + (", and also clears every receipt." if reset else ", keeping receipts."), fg_color=VALUE_COLOR))
     await session.write_line(colored(
         "Player identities, handles and account age are kept; nobody gets the newcomer grace period again. "
@@ -17258,20 +17301,34 @@ async def _war_dialer_competition_flow(
         _announce(session, "This door's world changed while you were confirming. Nothing was changed.", error=True)
         return
     await session.write_line(colored("Backing up the node, then changing the competition...", fg_color=MUTED_COLOR))
-    result, failure = await _owned_worker(
-        _war_dialer_change_competition, db_path=db_path, world=world, identity_dir=identity_dir,
+    async def _record(outcome: _CompetitionOutcome) -> None:
+        # Runs even if this session drops while the change is in flight: a
+        # change that happened must reach the node's audit log.
+        if outcome.status is None:
+            return
+        entry = outcome.status["recent_operations"][-1] if outcome.status["recent_operations"] else {}
+        await lane.run(
+            record_action, actor=actor, action="war_dialer_reset" if reset else "war_dialer_season",
+            object_type="door", object_id=door.id,
+            detail=f"door={door.name!r} world={str(world)!r} "
+                   f"season={entry.get('before_season')}->{entry.get('after_season')} "
+                   f"backup={str(destination)!r} reason={reason!r}",
+        )
+
+    outcome = await _owned_worker(
+        _war_dialer_change_competition, finish=_record, db_path=db_path, world=world, identity_dir=identity_dir,
         destination=destination, reason=reason, confirm=world.name, reset=reset, operator=actor.username,
     )
-    if failure is not None:
-        _announce(session, f"{what} failed: {failure}", error=True)
+    if outcome.failure is not None:
+        _announce(session, f"{what} failed: {outcome.failure}", error=True)
         if destination.exists():
-            _announce(session, f"The backup taken first remains at {destination}.", color=MUTED_COLOR)
+            if outcome.backup_valid:
+                _announce(session, f"The verified backup taken first remains at {destination}.", color=MUTED_COLOR)
+            else:
+                _announce(session, f"{destination} is not a usable backup (incomplete or failed verification); "
+                          "remove it.", error=True)
         return
-    await lane.run(record_action, actor=actor, action="war_dialer_reset" if reset else "war_dialer_season",
-                   object_type="door", object_id=door.id,
-                   detail=f"door={door.name!r} world={str(world)!r} season={season}->{result['stored_season']} "
-                          f"backup={str(destination)!r} reason={reason!r}")
-    _announce(session, f"{what} done: season {result['stored_season']} has started. Backup: {destination}. "
+    _announce(session, f"{what} done: season {outcome.status['stored_season']} has started. Backup: {destination}. "
               "Maintenance is still on; switch it off when you have checked the world.")
 
 
