@@ -592,10 +592,9 @@ async def run(
 
     # Issue #730: settings the SysOp saved from the console apply now, at
     # startup, wherever the config file or command line did not set the same
-    # key. Everything below reads the resolved `config`. The resolution is
-    # recorded so the console can say what the config file decided.
+    # key. Everything below reads the resolved `config`. What was resolved is
+    # recorded for the console once the listeners are bound (below).
     config = apply_stored_policy(config, load_stored_policy(db))
-    record_startup_policy(db, config)
     if on_config_resolved is not None:
         on_config_resolved(config)
 
@@ -1257,6 +1256,9 @@ async def run(
         # else. Past this line the ports are ours, so the process
         # claiming to be this node is this node.
         record_voidrunner_save_dir(db)
+        # Issue #730, and for the same reason: a second launch that fails on
+        # the bound port must not overwrite what the running node resolved.
+        record_startup_policy(db, config)
 
         # Issue #466: after the listeners are bound, not before. A second
         # NetBBS started against the same state directory fails here, on the

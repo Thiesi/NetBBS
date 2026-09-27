@@ -119,6 +119,9 @@ def test_a_stored_value_that_no_longer_validates_is_skipped(db):
         ("throttle.per_source_capacity", 1, True),
         ("link.request_rate_capacity", 0.9, False),
         ("throttle.per_source_refill_per_minute", 0.5, True),
+        # A refill rate is divided down to tokens per second.
+        ("throttle.global_refill_per_minute", 5e-324, False),
+        ("link.request_rate_refill_per_minute", 0.001, False),
         # Retention is subtracted from today's date.
         ("link.diagnostic_log_max_age_days", 36_500, True),
         ("link.diagnostic_log_max_age_days", 1_000_000, False),
@@ -245,5 +248,33 @@ def test_bool_setting_toggles(db, lane, sysop):
 def test_bool_toggled_back_to_its_default_forgets_the_stored_value(db, lane, sysop):
     _save(db, {"link.relay_serving_enabled": False})
     session = FakeSession(["s", "w", "p", "r", "s", "b", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop))
+    assert load_stored_policy(db) == {}
+
+
+def test_a_failed_start_does_not_record_a_snapshot(tmp_path):
+    """Codex review of PR #741: a launch that fails -- a second node against
+    a running one's state, a node with no SysOp -- must not claim its
+    config is the one running."""
+    from netbbs.__main__ import StartupError
+
+    config = _config(tmp_path, seed_sysop=False, explicit_keys=frozenset({"link.max_peers"}))
+
+    async def scenario():
+        with pytest.raises(StartupError):
+            await run(config)
+
+    asyncio.run(scenario())
+    db = Database(config.db_path)
+    try:
+        assert get_config(db, STARTUP_SNAPSHOT_KEY) is None
+    finally:
+        db.close()
+
+
+def test_blank_seeds_return_to_the_default(db, lane, sysop):
+    _save(db, {"link.seeds": ["https://seed.example"]})
+    # Peering, then Manual seeds (m), clear the line, Save.
+    session = FakeSession(["s", "w", "p", "m", "", "s", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop))
     assert load_stored_policy(db) == {}

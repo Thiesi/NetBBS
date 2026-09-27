@@ -50,6 +50,9 @@ SECTIONS = ("link", "throttle", "shutdown")
 # A token bucket spends one whole token per request or login attempt, so a
 # burst capacity below 1 admits nothing at all -- every caller locked out.
 _BURST_MINIMUM = 1.0
+# A refill rate is divided down to tokens per second; one so small that the
+# division reaches zero never refills, and the bucket stays empty for good.
+_REFILL_MINIMUM = 0.01
 # Diagnostic retention is subtracted from today's date; far beyond this the
 # subtraction leaves the calendar and every diagnostic write fails.
 _MAX_RETENTION_DAYS = 36_500
@@ -114,7 +117,7 @@ SETTINGS: tuple[PolicySetting, ...] = (
     PolicySetting("link.request_rate_capacity", float, GROUP_LINK_LIMITS, "Request burst",
                   "Link requests one address may make in a burst.", minimum=_BURST_MINIMUM),
     PolicySetting("link.request_rate_refill_per_minute", float, GROUP_LINK_LIMITS, "Requests per minute",
-                  "How fast that burst allowance refills."),
+                  "How fast that burst allowance refills.", minimum=_REFILL_MINIMUM),
     PolicySetting("link.request_rate_max_tracked_sources", int, GROUP_LINK_LIMITS, "Addresses tracked",
                   "How many requesting addresses the rate limit remembers at once."),
     PolicySetting("link.diagnostic_log_max_age_days", int, GROUP_LINK_LIMITS, "Diagnostics kept (days)",
@@ -136,15 +139,15 @@ SETTINGS: tuple[PolicySetting, ...] = (
     PolicySetting("throttle.per_source_capacity", float, GROUP_THROTTLE, "Per address: burst",
                   "Login attempts one address may make in a burst.", minimum=_BURST_MINIMUM),
     PolicySetting("throttle.per_source_refill_per_minute", float, GROUP_THROTTLE, "Per address: per minute",
-                  "How fast one address's allowance refills."),
+                  "How fast one address's allowance refills.", minimum=_REFILL_MINIMUM),
     PolicySetting("throttle.per_username_capacity", float, GROUP_THROTTLE, "Per account: burst",
                   "Login attempts against one account in a burst.", minimum=_BURST_MINIMUM),
     PolicySetting("throttle.per_username_refill_per_minute", float, GROUP_THROTTLE, "Per account: per minute",
-                  "How fast one account's allowance refills."),
+                  "How fast one account's allowance refills.", minimum=_REFILL_MINIMUM),
     PolicySetting("throttle.global_capacity", float, GROUP_THROTTLE, "Whole node: burst",
                   "Login attempts across the whole node in a burst.", minimum=_BURST_MINIMUM),
     PolicySetting("throttle.global_refill_per_minute", float, GROUP_THROTTLE, "Whole node: per minute",
-                  "How fast the node-wide allowance refills."),
+                  "How fast the node-wide allowance refills.", minimum=_REFILL_MINIMUM),
     PolicySetting("throttle.max_tracked_keys", int, GROUP_THROTTLE, "Addresses/accounts tracked",
                   "How many addresses and accounts the throttle remembers at once."),
     PolicySetting("throttle.max_concurrent_unauthenticated_sessions", int, GROUP_THROTTLE,

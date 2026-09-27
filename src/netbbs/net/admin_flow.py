@@ -7191,7 +7191,7 @@ async def _policy_group_editor(
                 return
             current = view.default if d[key] is None else d[key]
             initial = " ".join(current) if setting.kind is list else format_policy_value(setting, current)
-            hint = "blank = none" if setting.kind is list else "blank = default"
+            hint = "blank = default"
             await write_field_prompt(
                 session, colored(f"{setting.label} ({_EDIT_HINT}, {hint}):", fg_color=MUTED_COLOR)
             )
@@ -7201,7 +7201,9 @@ async def _policy_group_editor(
                 await session.write_line("")
                 return
             if not raw.strip():
-                d[key] = [] if setting.kind is list else None
+                # Blank returns the setting to its default, a list included:
+                # an empty-list override would read "(set here)" forever.
+                d[key] = None
                 return
             try:
                 d[key] = validate_policy_value(setting, parse_policy_text(setting, raw))
