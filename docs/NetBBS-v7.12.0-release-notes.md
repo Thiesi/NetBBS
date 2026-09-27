@@ -54,10 +54,13 @@ a place on **Link status**.
   - `[R]estore` brings it back exactly as it was, including your own callers'
     posts and your local moderation, and the next sync fetches what arrived
     meanwhile.
-  - `[P]urge` asks you to type its name and then deletes it for real. It
-    stays excluded, so it is not carried again unasked.
-  - `[R]estore` also takes back a resource you declined or purged. It is taken
-    on again from its origin, without what was kept before.
+  - `[P]urge` asks you to type its name and then deletes this node's copy:
+    your own callers' posts and your local moderation are gone for good. It
+    stays excluded, so it is not carried again unasked. The signed Link
+    content this node received for it is kept.
+  - `[R]estore` also takes back a resource you declined or purged. It is
+    taken on again from its origin, and content this node still holds from
+    peers comes back with it.
   - A hidden resource's name stays reserved until you restore or purge it.
   - Deleting a resource this node originates still deletes it. If it was
     Linked, it is also listed as excluded, so peers do not send it back.
@@ -354,8 +357,10 @@ Two changes from earlier in this release:
   `<launch>.<sequence>.<request>.result.json`. A door that followed the
   handbook and matched on each receipt's `request` field is unaffected. A door
   that built the name itself will no longer find its receipts.
-- **A request is claimed before it is read,** so each is answered exactly
-  once.
+- **A request is claimed before it is read,** so each is processed at most
+  once. If NetBBS cannot write a receipt, the request may have been carried
+  out with no receipt for it, so do not treat a missing receipt as a failure
+  to retry blindly.
 - **A SysOp's test launch now answers requests** with `"status": "rehearsal"`
   and a `"would"` field saying what a real session would have got. Do not
   report such a post as made. Before, a test launch wrote no receipts.
