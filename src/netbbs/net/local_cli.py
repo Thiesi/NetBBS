@@ -163,4 +163,7 @@ class LocalCLISession(Session):
 
     async def read_byte_with_timeout(self, timeout: float) -> int | None:
         data = await asyncio.to_thread(self._read_byte_with_timeout_fn, timeout)
-        return data[0] if data else None
+        if not data:
+            return None
+        self.note_input()
+        return data[0]

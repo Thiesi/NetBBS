@@ -251,6 +251,37 @@ class _Socket:
         self.done.set()
 
 
+def test_timed_reads_stamp_data_too():
+    async def scenario():
+        reader = asyncio.StreamReader()
+        telnet = TelnetSession(reader, _UnusedWriter())
+        reader.feed_data(bytes([IAC]))
+        assert await telnet.read_byte_with_timeout(0.1) == IAC
+        assert telnet.last_input_at is None
+        reader.feed_data(b"x")
+        assert await telnet.read_byte_with_timeout(0.1) == ord("x")
+        assert telnet.last_input_at is not None
+
+        local = LocalCLISession(read_byte_fn=lambda: b"", read_byte_with_timeout_fn=lambda timeout: b"x")
+        assert await local.read_byte_with_timeout(0.1) == ord("x")
+        assert local.last_input_at is not None
+
+    asyncio.run(scenario())
+
+
+def test_empty_web_key_events_are_not_input():
+    async def scenario():
+        session = WebSession(_Socket())
+        await session._handle_event({"type": "key", "data": ""})
+        assert session.last_input_at is None
+        await session.enter_door_mode(encoding="cp437", width=80, height=25)
+        await session._handle_event({"type": "door_key", "stream": session._door_stream, "data": ""})
+        assert session.last_input_at is None
+        await session.leave_door_mode()
+
+    asyncio.run(scenario())
+
+
 def test_web_stamps_keys_and_door_keys_but_not_resizes():
     async def scenario():
         session = WebSession(_Socket())

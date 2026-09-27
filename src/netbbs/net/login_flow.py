@@ -57,6 +57,7 @@ from netbbs.net.node_theme import effective_accent_color, effective_header_color
 from netbbs.net.nodeconfig import ThrottleConfig
 from netbbs.net.redraw_preference import set_redraw_in_place_enabled
 from netbbs.net.session import Session, SessionClosedError, write_preformatted_line, write_prompt
+from netbbs.net.session_activity import set_root_activity
 from netbbs.net.session_registry import ActiveSessionRegistry
 from netbbs.net.shutdown import NodeControls, SequenceScheduler, format_remaining_seconds
 from netbbs.net.throttle import LoginThrottle
@@ -749,6 +750,9 @@ async def run_authenticated_session(
     completed_history_entry = None
     intentional_logoff = False
     watcher_task: asyncio.Task | None = None
+    # Issue #762: onboarding, the Unicode question and the previous-callers
+    # screen come before the main menu, which is what empties the trail.
+    set_root_activity(session, "Logging in")
     if node_controls is not None:
         node_controls.session_registry.mark_authenticated(
             session, user.username, is_sysop=meets_level(user, SYSOP_LEVEL)

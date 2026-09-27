@@ -258,7 +258,10 @@ class SSHSession(Session):
             return None
         except (asyncssh.TerminalSizeChanged, asyncssh.BreakReceived, asyncssh.ConnectionLost):
             return None
-        return data[0] if data else None
+        if not data:
+            return None
+        self.note_input()
+        return data[0]
 
 
 class _NetBBSSSHServer(asyncssh.SSHServer):

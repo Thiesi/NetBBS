@@ -357,7 +357,12 @@ class TelnetSession(Session):
             peek = await asyncio.wait_for(self._reader.read(1), timeout=timeout)
         except asyncio.TimeoutError:
             return None
-        return peek[0] if peek else None
+        if not peek:
+            return None
+        # A raw peek can land on negotiation, which is not input.
+        if peek[0] != IAC:
+            self.note_input()
+        return peek[0]
 
     async def _handle_subnegotiation(self) -> None:
         """
