@@ -84,12 +84,11 @@ def with_notices(
     session: Session, masthead: str | Callable[[], Awaitable[str]]
 ) -> str | Callable[[], Awaitable[str]]:
     """`masthead` extended with whatever is pending on `session`, for a
-    picker: re-read on each render, so the outcome is there for the first
-    draw and gone once a key has redrawn the list. Returned unchanged when
-    nothing is pending, so a picker with no outcome to show draws exactly
-    as it always has."""
-    if not has_notices(session):
-        return masthead
+    picker: re-read on each render, so an outcome is there for the draw
+    after it was announced and gone once a key has redrawn the list. That
+    includes an outcome the picker's own keys announce while it is open
+    ([N]ew scan's [M]ark read, issue #710), so the check is made at each
+    render, not once when the picker opens (Codex review on #723)."""
 
     async def _masthead() -> str:
         own = (await masthead()) if callable(masthead) else masthead

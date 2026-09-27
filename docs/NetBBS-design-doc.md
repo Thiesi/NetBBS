@@ -1447,8 +1447,10 @@ The list:
 - Shows the board's description and, for a caller who can read but not post,
   why ("Read only: posting needs level N", or a name that needs
   verification).
-- Marks a post `new` against the read position the caller had when they
-  arrived, so the markers survive the visit.
+- Marks a post `new` until the caller opens it (§6.6, issue #710): showing
+  a post in the list does not count as reading it. `[M]ark all read` counts
+  everything on the board as read; it is offered only while something is
+  unread.
 - Opens a `[N]ew scan` or `[F]ind` jump with the cursor on its target.
 
 A post opens on `show_detail`:
@@ -1786,8 +1788,9 @@ already has full read tracking the moment it lands in a mailbox. Nothing new
 is needed for mail; issue #56's mail bullet is already satisfied.
 
 Boards, file areas, and channels need a per-user, per-container **read
-cursor**, not a per-item flag — per-item read state for a potentially
-unbounded board would itself be an unbounded table. One new table holds it:
+cursor**, not an unbounded per-item flag — per-item read state for a
+potentially unbounded board would itself be an unbounded table. One table,
+`user_read_cursors`, holds the cursors, with an
 `(user_id, object_type, object_id)` primary key, where `object_type` is
 `board`/`channel`/`file_area` and `object_id` is that resource's own local
 integer id (the same id `community_id`/category columns already reference —
@@ -1795,18 +1798,22 @@ never the content-addressed `post_id`/`file_id`, which only identifies one
 item, not a container). Its payload is the newest item's ordering key the
 user has already seen:
 
-- boards and file areas already page with a stable `(created_at, post_id)` /
-  `(created_at, file_id)` keyset cursor (the existing `list_posts_page`/
-  file-listing implementation) — the read cursor stores exactly that same
-  tuple shape, so "what's unread" is the identical tuple comparison keyset
-  pagination already performs for `after=`, just anchored at the user's own
-  cursor instead of a page boundary;
+- **boards** work differently since issue #710: a post is read once opened,
+  so a board cursor's arrival id is a *floor* and a second, bounded table
+  (`user_board_opened_posts`) holds the posts opened above it. The model is
+  "Boards: a post is read once it is opened" below; the rest of this list
+  describes file areas and channels;
+- file areas already page with a stable `(created_at, file_id)` keyset
+  cursor (the existing file-listing implementation) — the read cursor
+  stores exactly that same tuple shape, so "what's unread" is the identical
+  tuple comparison keyset pagination already performs for `after=`, just
+  anchored at the user's own cursor instead of a page boundary;
 - channel scrollback has no revision concept and is already ordered by a
   plain monotonic message id, so a channel's cursor is just that id.
 
 An **edit never resets read state**: an edit's root post keeps the original
-`created_at`/`post_id` (§6.1), which is exactly what the cursor comparison
-keys on — a post a user has already scrolled past stays "read" after a later
+`created_at`/`post_id` and row id (§6.1), which is exactly what the read
+state keys on — a post a user has already read stays "read" after a later
 typo fix, matching normal reader expectance. **Expiry and deletion cannot
 corrupt a cursor**: an expired post keeps its `post_id` reachable until
 nothing references it, and even final hard-deletion only ever removes an
@@ -1816,8 +1823,9 @@ or resurrect deleted content.
 
 A resource with no cursor row for a user has never been visited by them.
 First visit — not a retroactive backfill — establishes the baseline: viewing
-a board/file-area page or a channel's current scrollback advances that user's
-cursor to the newest item they were just shown. This is also the complete
+a file-area page or a channel's current scrollback advances that user's
+cursor to the newest item they were just shown, and entering a board counts
+every post already on it as read (issue #710). This is also the complete
 migration story for existing accounts (issue #56's last acceptance
 criterion): the read-cursor table starts empty for everyone, including
 existing users, at upgrade time. Nobody's history is scanned or backfilled;
@@ -1863,23 +1871,68 @@ carried Link event (the same property GitHub issue #68 already relies
 on for edit-chain tie-breaking). `user_read_cursors` gains
 `last_seen_arrival_id`, populated from that rowid; `unread_post_count`/
 `unread_file_count`/`unread_replies_to` compare against it instead of
-`created_at`, while `board_read_cursor`/`file_area_read_cursor` (feed-
-position jump-to) are unchanged and still compare `created_at` -- the
-two concerns use different orderings on purpose, per this section's own
-distinction between authored chronology and node-local availability.
+`created_at`, while `file_area_read_cursor` (feed-position jump-to)
+still compares `created_at` -- the two concerns use different orderings
+on purpose, per this section's own distinction between authored
+chronology and node-local availability. (`board_read_cursor` was the
+same until issue #710, which computes a board's jump from its unread
+posts instead; see "Boards: a post is read once it is opened" below.)
+Unread counting for boards has also moved on since: #710 makes the
+arrival id a floor with an opened set above it.
 Existing cursors are backfilled from the post/file their existing
 `last_seen_stable_id` already names, so an upgrade preserves exactly
 what a user had already read rather than resetting anyone to
 all-unread.
 
-**Accepted scope boundary:** jump-to-first-unread can still land on the
-board/area's ordinary newest page rather than navigating precisely to
-an out-of-order arrival buried elsewhere in feed history, since the
-jump cursor stays `created_at`-based. Unread *counting* and `[N]ew
-scan`'s "has unread" detection are correct either way; only precise
-jump navigation to that specific item is not yet solved. Reconciling
-jump-to with arrival order, if ever wanted, is future work, not implied
-by this fix.
+**Accepted scope boundary (file areas):** jump-to-first-unread can
+still land on a file area's ordinary newest page rather than navigating
+precisely to an out-of-order arrival buried elsewhere in feed history,
+since that jump cursor stays `created_at`-based. Unread *counting* and
+`[N]ew scan`'s "has unread" detection are correct either way. Boards no
+longer have this gap: issue #710's jump is computed from the unread
+posts themselves (below).
+
+**Boards: a post is read once it is opened (issue #710).** Showing a post
+in the board list does not mark it read; opening it in the reader does. A
+board cursor's `last_seen_arrival_id` is a **floor**: every post at or below
+it, in arrival order, is read. `user_board_opened_posts` holds the posts a
+user opened *above* the floor, one row per `(user, board, post row id)`.
+Unread means above the floor and not in the set, and every surface that
+reports unread uses that one rule: the list's `new` markers,
+`unread_post_count` (`[N]ew scan`, the board picker) and
+`unread_replies_to`.
+
+The set stays small by construction:
+- It only ever holds **out-of-order reads**. When the opened posts run
+  unbroken up from the floor, the floor advances past them and their rows
+  are deleted, so a caller reading in order never stores a row at all.
+  "Unbroken" is over the posts a reader may see: a post pending approval,
+  hidden by trust (§12) or deleted is not a gap anyone could read, so it does
+  not hold the floor back.
+- It is **capped** at 500 rows per user and board. Past the cap the floor
+  moves up to the oldest kept row, and the oldest gaps are given up as read.
+  Reaching the cap takes more than 500 posts opened while skipping others on
+  one board.
+
+`[M]ark all read` (on the list, and per board in `[N]ew scan`) moves the
+floor to the newest visible post and drops the set. A post still pending
+approval above it stays unread, so it is new when it appears. A caller's
+own new post is recorded as opened when it is written.
+
+The jump to the first unread post (`board_read_cursor`, used by `[N]ew
+scan`) is computed rather than stored: the feed position just before the
+oldest unread post by feed order, so an unread post below others already
+opened is where the jump lands, and a late carried post is found wherever
+its authored date puts it. With nothing unread it is the newest post, and
+the jump shows the ordinary newest page. Both lookups stream newest or
+oldest first and stop at the first visible row.
+
+A trigger deletes a post's opened rows when the post is deleted, since
+`posts.id` can be reused once the newest row is gone. The migration makes
+existing cursors the floors, so nobody's history is reset. A legacy cursor
+without an arrival id (issue #72's backfill found its post deleted) read by
+feed position: its floor is set just below the first root past that
+position, and the roots above the floor it had read become opened rows.
 
 #### Follows and favourites
 

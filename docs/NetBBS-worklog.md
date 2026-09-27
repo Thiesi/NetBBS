@@ -1632,26 +1632,42 @@ a plain `INSERT`, same as `netbbs.boards.posts.create_post` — no new
 column needed on `posts`/`files` themselves, this is the same rowid
 property GitHub issue #68 already relies on). `unread_post_count`/
 `unread_file_count`/`unread_replies_to` (`netbbs.activity`) compare
-against `last_seen_arrival_id`, not `created_at`; `board_read_cursor`/
-`file_area_read_cursor` (feed-position jump-to) are deliberately
-unchanged, still `created_at`-based — jump-to precision to a specific
-out-of-order arrival is an accepted, documented scope boundary (design
-doc §6.6), not silently unhandled. `record_board_seen`/
-`record_file_area_seen` record the *specific* post/file's own arrival
-id passed to them, never a container-wide maximum — this is what lets
-a late-arriving historical post keep its own high arrival id above the
-cursor even after a user visits the board's ordinary newest page,
-since that specific old post is never "the newest post shown" on a
-normal feed view. A pre-#72 cursor row has no `last_seen_arrival_id` of
-its own; the migration backfills it from the post/file its existing
-`last_seen_stable_id` already names (`tests/test_activity.py`'s
-migration-backfill tests exercise this directly, by monkeypatching
-`netbbs.storage.database.MIGRATIONS` to a shorter list, writing a
-cursor row in the pre-migration shape, then reopening with the real
-list). `_get_cursor`'s returned `_Cursor.arrival_id` can only be `None`
-for a backfilled row whose named post/file was already hard-deleted at
-migration time — the one case every `unread_*_count` function falls
+against `last_seen_arrival_id`, not `created_at`; `file_area_read_cursor`
+(feed-position jump-to) is deliberately still `created_at`-based —
+jump-to precision to a specific out-of-order arrival is an accepted,
+documented scope boundary for file areas (design doc §6.6).
+`record_file_area_seen` records the *specific* file's own arrival id
+passed to it, never a container-wide maximum. A pre-#72 cursor row has
+no `last_seen_arrival_id` of its own; the migration backfills it from
+the post/file its existing `last_seen_stable_id` already names
+(`tests/test_activity.py`'s migration-backfill tests exercise this
+directly, by monkeypatching `netbbs.storage.database.MIGRATIONS` to a
+shorter list, writing a cursor row in the pre-migration shape, then
+reopening with the real list). For a file area, `_Cursor.arrival_id`
+can only be `None` for a backfilled row whose named file was already
+hard-deleted at migration time — the one case `unread_file_count` falls
 back to the legacy tuple comparison for.
+
+**Boards since issue #710.** A board post is read once it is opened
+(`record_post_opened`); showing it in a list marks nothing. A board
+cursor's `last_seen_arrival_id` is a floor, and `user_board_opened_posts`
+holds the posts opened above it, folded into the floor as they run
+unbroken over *visible* roots (`iter_visible_roots`) and capped at
+`OPENED_POSTS_CAP`. Invariants a change must keep:
+- every surface that reports board unread uses "above the floor and not
+  opened" (`unread_post_ids`, `unread_post_count`, `unread_replies_to`);
+- floor writes only ever raise it (`_raise_floor`), and the first-visit
+  baseline is insert-if-absent, since the same account can compact in
+  two sessions;
+- an opened row names a post that exists by row id *and* `post_id`, and a
+  trigger deletes a post's rows with it: `posts.id` and `boards.id` are
+  reused once the newest row is deleted, so a read-state write also
+  checks the board by `board_id`;
+- `board_read_cursor` is computed (the feed position before the oldest
+  unread post), not stored.
+The #710 migration gave every board cursor an arrival id, so a board
+cursor's is never `None` now; a legacy one read by feed position became
+a safe floor plus opened rows, capped the same way.
 
 ### Local search (issue #56)
 

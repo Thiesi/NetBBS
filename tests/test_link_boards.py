@@ -905,7 +905,7 @@ def test_load_own_board_events_empty_when_nothing_linked(db, alice, node_identit
 
 
 def test_late_arriving_carried_post_with_an_old_timestamp_is_still_unread(db, alice, remote_node_identity):
-    from netbbs.activity import record_board_seen, unread_post_count
+    from netbbs.activity import record_post_opened, unread_post_count
 
     board_id = _carried_board(db, remote_node_identity)
     board = get_board_by_name(db, "Remote Discussion")
@@ -917,7 +917,7 @@ def test_late_arriving_carried_post_with_an_old_timestamp_is_still_unread(db, al
         created_at="2026-06-01T00:00:00Z",
     )
     materialized_normal = materialize_carried_post(db, normal_post, sender_fingerprint=remote_node_identity.fingerprint)
-    record_board_seen(db, alice, board, materialized_normal)
+    record_post_opened(db, alice, board, materialized_normal)
 
     assert unread_post_count(db, alice, board) == 0
 
@@ -934,7 +934,7 @@ def test_late_arriving_carried_post_with_an_old_timestamp_is_still_unread(db, al
 
 
 def test_peer_clock_skew_cannot_hide_newly_materialized_activity(db, alice, remote_node_identity):
-    from netbbs.activity import record_board_seen, unread_post_count
+    from netbbs.activity import record_post_opened, unread_post_count
 
     board_id = _carried_board(db, remote_node_identity)
     board = get_board_by_name(db, "Remote Discussion")
@@ -944,7 +944,7 @@ def test_peer_clock_skew_cannot_hide_newly_materialized_activity(db, alice, remo
         created_at="2026-06-01T00:00:00Z",
     )
     materialized_normal = materialize_carried_post(db, normal_post, sender_fingerprint=remote_node_identity.fingerprint)
-    record_board_seen(db, alice, board, materialized_normal)
+    record_post_opened(db, alice, board, materialized_normal)
 
     # A wildly clock-skewed peer claims a timestamp far in the future --
     # arrival order must not be fooled the other direction either.
@@ -958,14 +958,14 @@ def test_peer_clock_skew_cannot_hide_newly_materialized_activity(db, alice, remo
 
 
 def test_duplicate_materialization_does_not_double_count_or_advance_arrival_twice(db, alice, remote_node_identity):
-    from netbbs.activity import board_read_cursor, record_board_seen, unread_post_count
+    from netbbs.activity import board_read_cursor, record_post_opened, unread_post_count
 
     board_id = _carried_board(db, remote_node_identity)
     board = get_board_by_name(db, "Remote Discussion")
 
     post = _remote_post(remote_node_identity, board_id=board_id, created_at="2026-01-01T00:00:00Z")
     first = materialize_carried_post(db, post, sender_fingerprint=remote_node_identity.fingerprint)
-    record_board_seen(db, alice, board, first)
+    record_post_opened(db, alice, board, first)
     cursor_after_first = board_read_cursor(db, alice, board)
 
     # A retried/duplicate delivery of the identical event -- materialize_
@@ -978,14 +978,14 @@ def test_duplicate_materialization_does_not_double_count_or_advance_arrival_twic
 
 
 def test_typo_edit_does_not_reopen_an_already_read_root_post_as_unread(db, alice, remote_node_identity):
-    from netbbs.activity import record_board_seen, unread_post_count
+    from netbbs.activity import record_post_opened, unread_post_count
 
     board_id = _carried_board(db, remote_node_identity)
     board = get_board_by_name(db, "Remote Discussion")
 
     post = _remote_post(remote_node_identity, board_id=board_id, created_at="2026-01-01T00:00:00Z")
     materialized = materialize_carried_post(db, post, sender_fingerprint=remote_node_identity.fingerprint)
-    record_board_seen(db, alice, board, materialized)
+    record_post_opened(db, alice, board, materialized)
     assert unread_post_count(db, alice, board) == 0
 
     edit = build_board_post_edit(
@@ -1002,7 +1002,7 @@ def test_typo_edit_does_not_reopen_an_already_read_root_post_as_unread(db, alice
 
     # The existing #56 rule: an edit to an already-read root must not
     # make it unread again -- unread_post_count only ever looks at root
-    # rows, and record_board_seen's cursor already covers this root's
+    # rows, and record_post_opened's cursor already covers this root's
     # own arrival id.
     assert unread_post_count(db, alice, board) == 0
 

@@ -20,6 +20,7 @@ from netbbs.activity import (
     board_read_cursor,
     file_area_read_cursor,
     is_following,
+    mark_board_read,
     unread_channel_count,
     unread_file_count,
     unread_post_count,
@@ -44,9 +45,10 @@ from netbbs.net.chat_flow import (
     list_visible_channels_for,
 )
 from netbbs.net.file_flow import enter_file_area
+from netbbs.net.notices import announce, announce_styled
 from netbbs.net.node_theme import effective_accent_color, effective_header_color, effective_header_color_256
 from netbbs.net.picker import pick_item
-from netbbs.rendering import GATE_COLOR, SegmentColor
+from netbbs.rendering import GATE_COLOR, MenuEntry, SegmentColor, menu_key
 from netbbs.net.redraw_preference import redraw_in_place_enabled
 from netbbs.net.session import Session
 from netbbs.net.unicode_style_preference import unicode_style_enabled
@@ -64,6 +66,17 @@ from netbbs.search import (
 )
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
+
+
+def _identity(item: _ScanItem) -> tuple[str, int]:
+    """Which resource a [N]ew scan row is, across reloads."""
+    resource = item.board or item.channel or item.file_area
+    return item.kind, resource.id if resource is not None else -1
+
+
+# Replies listed by subject above [N]ew scan's list; the rest are counted.
+# The summary is redrawn with every page, so it is kept to a few rows.
+_REPLIES_SHOWN = 3
 
 
 @dataclass(frozen=True)
@@ -187,18 +200,23 @@ async def _new_scan_screen(
         return items, replies, boards_by_id
 
     items, replies, boards_by_id = await lane.run(_load)
+    state = {"replies": replies, "boards": boards_by_id}
 
-    await session.write_line(colored("\r\nNew scan:", fg_color=effective_header_color(session, db), bold=True))
-    if replies:
-        await session.write_line(f"Replies to you: {len(replies)}")
-        for reply in replies[:10]:
-            reply_board = boards_by_id.get(reply.board_id)
+    async def _replies_summary() -> str:
+        """Replies to the caller, above the list on every redraw: the
+        picker's masthead, so a redraw in place keeps it and [M]ark read
+        brings it up to date (Codex review on #723)."""
+        current, boards = state["replies"], state["boards"]
+        if not current:
+            return colored("Replies to you: none.", fg_color=MUTED_COLOR)
+        lines = [f"Replies to you: {len(current)}"]
+        for reply in current[:_REPLIES_SHOWN]:
+            reply_board = boards.get(reply.board_id)
             board_label = sanitize_text(reply_board.name) if reply_board is not None else "unknown message board"
-            await session.write_line(f"  {sanitize_text(reply.subject)} ({board_label})")
-        if len(replies) > 10:
-            await session.write_line(f"  ...and {len(replies) - 10} more.")
-    else:
-        await session.write_line(colored("Replies to you: none.", fg_color=MUTED_COLOR))
+            lines.append(f"  {sanitize_text(reply.subject)} ({board_label})")
+        if len(current) > _REPLIES_SHOWN:
+            lines.append(f"  ...and {len(current) - _REPLIES_SHOWN} more.")
+        return "\r\n".join(lines)
 
     def _description(item: _ScanItem) -> str:
         prefix = "* " if item.followed else ""
@@ -213,8 +231,34 @@ async def _new_scan_screen(
         # copy would simply say it twice (Codex review).
         return f"{prefix}{item.kind.replace('_', ' ')}, {status}"
 
-    positions = {id(item): index for index, item in enumerate(items, start=1)}
+    positions: dict[int, int] = {}
+
+    def _number(scan_items: list[_ScanItem]) -> None:
+        positions.clear()
+        positions.update({id(item): index for index, item in enumerate(scan_items, start=1)})
+
+    _number(items)
+    shown = {"items": items}
     accent = effective_accent_color(session, db)
+
+    async def _mark_read(item: _ScanItem) -> list[_ScanItem] | None:
+        """[M]ark read (issue #710): every post on one board counts as
+        read, without going in. The list is reloaded in the same order, so
+        the row numbers and the highlight still point where they did."""
+        if item.kind != "board" or item.board is None:
+            announce(session, "Only a message board can be marked read here.", tone="muted")
+            return None
+        await lane.run(mark_board_read, user, item.board)
+        announce(session, f"{sanitize_text(item.name)}: every post marked read.", tone="muted")
+        reloaded, state["replies"], state["boards"] = await lane.run(_load)
+        # In the order already on screen, so the highlight and every (#N)
+        # still name the row they did even if activity reordered the
+        # sources meanwhile (Codex review on #723). Anything new goes last.
+        place = {_identity(row): index for index, row in enumerate(shown["items"])}
+        reloaded.sort(key=lambda row: place.get(_identity(row), len(place)))
+        shown["items"] = reloaded
+        _number(reloaded)
+        return reloaded
 
     def _name_segments(item: _ScanItem) -> list[tuple[str, SegmentColor]]:
         """The gate note rides with the name here too (issue #541).
@@ -238,6 +282,12 @@ async def _new_scan_screen(
         segments.append((item.name, accent))
         return segments
 
+    if not items:
+        # The picker has nothing to draw and returns at once, announcing its
+        # empty message for the screen this returns to; the summary goes
+        # with it rather than being lost (Codex review on #723).
+        for line in (await _replies_summary()).split("\r\n"):
+            announce_styled(session, line)
     selected = await pick_item(
         session, items,
         name_of=lambda item: item.name,
@@ -246,6 +296,9 @@ async def _new_scan_screen(
         description_of=_description,
         title="New scan",
         empty_message="Nothing accessible yet.",
+        item_keys={"m": _mark_read},
+        masthead=_replies_summary,
+        live_nav=[MenuEntry(label=menu_key("M", "ark read"), brief="Count a message board's posts as read")],
         redraw_in_place=redraw_in_place_enabled(db, user),
         unicode_style=unicode_style_enabled(db, user),
         collapsed=breadcrumb_collapsed_enabled(db, user),

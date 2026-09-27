@@ -29,6 +29,7 @@ from netbbs.chat import ChatHub, DirectChatInvites, MessageMailbox, PresenceRegi
 from netbbs.config import is_node_display_name_placeholder
 from netbbs.files.storage import purge_incoming_staging
 from netbbs.net.policy_settings import apply_stored_policy, load_stored_policy, record_startup_policy
+from netbbs.node_log import ContinuationSafeFormatter, node_log_path
 from netbbs.session_history import reconcile_interrupted_sessions
 from netbbs.link.boards import LinkConfigSnapshot, LinkContext
 from netbbs import __version__
@@ -113,7 +114,7 @@ def _create_log_file_handler(log_path: Path) -> logging.Handler:
         backupCount=_LOG_FILE_BACKUP_COUNT,
         encoding="utf-8",
     )
-    handler.setFormatter(logging.Formatter(_LOG_FORMAT, datefmt=_LOG_DATE_FORMAT))
+    handler.setFormatter(ContinuationSafeFormatter(_LOG_FORMAT, datefmt=_LOG_DATE_FORMAT))
     return handler
 
 
@@ -1664,7 +1665,7 @@ async def main() -> None:
     # rather than an operator-chosen path -- consistent with db_path's
     # own CWD-relative default, and one less thing to configure for a
     # deployment that hasn't asked for anything fancier.
-    log_path = config.db_path.parent / "netbbs.log"
+    log_path = node_log_path(config.db_path)
     logging.getLogger().addHandler(_create_log_file_handler(log_path))
 
     shutdown_event = asyncio.Event()
