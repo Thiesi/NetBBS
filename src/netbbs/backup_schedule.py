@@ -248,6 +248,12 @@ def set_destination_setting(db: Database, path: Path | None, *, db_path: Path,
         set_config(db, _DESTINATION_DEVICE_KEY, "")
         return
     validate_destination(path, db_path=db_path, identity_dir=identity_dir)
+    # Retention deletes a scheduled backup's whole tree; a destination inside
+    # one would have the next backup deleted along with its parent (Codex review).
+    resolved = path.resolve()
+    for _, recorded in list_scheduled_backups(db):
+        if resolved == recorded.resolve() or resolved.is_relative_to(recorded.resolve()):
+            raise BackupScheduleError(f"The destination cannot be inside an earlier backup ({recorded}).")
     set_config(db, _DESTINATION_KEY, str(path))
     set_config(db, _DESTINATION_DEVICE_KEY, str(os.stat(path).st_dev))
 
@@ -369,7 +375,17 @@ def prune_scheduled_backups(db: Database, keep: int) -> PruneReport:
     """Delete scheduled backups beyond the newest `keep`. Only recorded
     directories that still hold a backup manifest are deleted."""
     report = PruneReport(deleted=[], errors=[])
-    for record_id, path in list_scheduled_backups(db)[keep:]:
+    # A backup the SysOp moved off the machine no longer counts toward Keep:
+    # forgotten first, or it would hold a place among the newest while an
+    # older one that is still here got deleted (Codex review).
+    surviving = []
+    for record_id, path in list_scheduled_backups(db):
+        if path.exists() or path.is_symlink():
+            surviving.append((record_id, path))
+        else:
+            with db.connection:
+                db.connection.execute("DELETE FROM scheduled_backups WHERE id = ?", (record_id,))
+    for record_id, path in surviving[keep:]:
         forget = True
         if path.is_symlink():
             report.errors.append(f"{path} is a link now; not deleted")
@@ -384,8 +400,6 @@ def prune_scheduled_backups(db: Database, keep: int) -> PruneReport:
                     forget = False
                 else:
                     report.deleted.append(path)
-        # A path that is gone already (moved off-node by the SysOp) just
-        # stops counting.
         if forget:
             with db.connection:
                 db.connection.execute("DELETE FROM scheduled_backups WHERE id = ?", (record_id,))
@@ -424,12 +438,25 @@ def run_scheduled_backup_pass(
                 raise BackupError(f"configured identity directory is unavailable: {identity_dir}")
             root = check_destination(db, db_path, identity_dir)
             destination = default_backup_destination(db_path, root=root)
-            created = create_backup(
-                db_path=db_path, identity_dir=identity_dir, destination=destination, trigger="scheduled",
-            )
         except (BackupError, BackupScheduleError, OSError, sqlite3.Error) as exc:
             outcome = f"scheduled run skipped: {_short(exc)}"
             record_operational_run(db, "backup", outcome, detail=str(root))
+            return outcome
+        try:
+            created = create_backup(
+                db_path=db_path, identity_dir=identity_dir, destination=destination, trigger="scheduled",
+            )
+        except (BackupError, OSError, sqlite3.Error) as exc:
+            outcome = f"scheduled run failed: {_short(exc)}"
+            # `create_backup` refuses an existing destination, so whatever is
+            # there now is this run's partial archive. Left behind it would
+            # count toward nothing and pile up slot after slot (Codex review).
+            if destination.exists() and not (destination / _MANIFEST_FILENAME).is_file():
+                try:
+                    shutil.rmtree(destination)
+                except OSError as cleanup:
+                    outcome += f"; partial backup left at {destination}: {cleanup.strerror or cleanup}"
+            record_operational_run(db, "backup", _short(outcome), detail=str(root))
             return outcome
         record_scheduled_backup(db, created)
         report = prune_scheduled_backups(db, schedule.keep)

@@ -6353,11 +6353,23 @@ async def _update_settings_screen(session: Session, lane: DatabaseLane, actor: U
 def _create_live_backup(
     *, db_path: Path, identity_dir: Path, destination: Path
 ) -> Path:
-    """Create a live-node backup only while its configured identity exists."""
+    """Create a live-node backup only while its configured identity exists,
+    and while its destination is still on the disk the SysOp chose: the
+    confirmation prompt before this can stay open while a disk is unmounted
+    (issue #727, Codex review)."""
     if not identity_dir.is_dir():
         raise BackupError(
             f"configured identity directory is unavailable: {identity_dir}"
         )
+    db = Database(db_path)
+    try:
+        root = check_backup_destination(db, db_path, identity_dir)
+    except BackupScheduleError as exc:
+        raise BackupError(str(exc)) from exc
+    finally:
+        db.close()
+    if destination.parent != root:
+        raise BackupError("The backup destination changed while this screen was open; try again.")
     return create_backup(
         db_path=db_path,
         identity_dir=identity_dir,

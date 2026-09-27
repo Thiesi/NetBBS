@@ -223,6 +223,7 @@ def test_retention_never_deletes_a_recorded_path_that_is_not_a_backup(db_path, t
     db = Database(db_path)
     try:
         record_scheduled_backup(db, not_a_backup)
+        (tmp_path / "newer").mkdir(exist_ok=True)
         record_scheduled_backup(db, tmp_path / "newer")
         report = prune_scheduled_backups(db, keep=1)
     finally:
@@ -238,6 +239,7 @@ def test_a_retention_failure_is_reported_and_retried(db_path, tmp_path, monkeypa
     db = Database(db_path)
     try:
         record_scheduled_backup(db, old)
+        (tmp_path / "newer").mkdir(exist_ok=True)
         record_scheduled_backup(db, tmp_path / "newer")
 
         def refuse(path):
@@ -608,3 +610,79 @@ def test_a_lone_scheduled_failure_shows_on_the_backup_screen(db, lane, sysop, tm
 
     text = _normalized_visible(_written_text(session))
     assert "RECENT BACKUPS" in text.upper() and "scheduled run skipped" in text
+
+
+# -- review round 2 ------------------------------------------------------------
+
+
+def test_a_backup_moved_off_node_no_longer_holds_a_keep_slot(db_path, identity_dir):
+    _enable(db_path, keep=2)
+    created = []
+    for day in (21, 22, 23):
+        run_scheduled_backup_pass(db_path, identity_dir, now=_at(2026, 9, day, 3, 5))
+        created.append(_with_db(db_path, list_scheduled_backups)[0][1])
+    import shutil as _shutil
+
+    _shutil.rmtree(created[2])  # the SysOp moved the newest one away
+    run_scheduled_backup_pass(db_path, identity_dir, now=_at(2026, 9, 24, 3, 5))
+
+    kept = [path for _, path in _with_db(db_path, list_scheduled_backups)]
+    assert len(kept) == 2 and kept[1] == created[1] and created[1].exists()
+
+
+def test_a_destination_inside_an_earlier_backup_is_refused(db_path, identity_dir):
+    _enable(db_path)
+    run_scheduled_backup_pass(db_path, identity_dir, now=_at(2026, 9, 27, 10, 0))
+    earlier = _with_db(db_path, list_scheduled_backups)[0][1]
+    inside = earlier / "files"
+    inside.mkdir(exist_ok=True)
+
+    with pytest.raises(BackupScheduleError, match="inside an earlier backup"):
+        _with_db(db_path, lambda db: set_destination_setting(db, inside, db_path=db_path))
+
+
+def test_a_failed_scheduled_backup_leaves_no_partial_directory(db_path, identity_dir, monkeypatch):
+    from netbbs import backup as backup_module
+
+    real_copytree = backup_module.shutil.copytree
+
+    def failing_copytree(src, dst, *args, **kwargs):
+        if Path(dst).name == "identity":
+            raise OSError(28, "No space left on device")
+        return real_copytree(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(backup_module.shutil, "copytree", failing_copytree)
+    _enable(db_path)
+
+    outcome = run_scheduled_backup_pass(db_path, identity_dir, now=_at(2026, 9, 27, 10, 0))
+
+    assert outcome.startswith("scheduled run failed:") and "No space left" in outcome
+    root = db_path.parent / "node_backups"
+    assert not root.exists() or list(root.iterdir()) == []
+
+
+def test_create_backup_now_rechecks_the_destination_after_confirmation(db, lane, sysop, tmp_path, monkeypatch):
+    """The disk can be unmounted while the confirmation prompt is open."""
+    from netbbs.net import admin_flow
+
+    identity = db.path.parent / "identity"
+    identity.mkdir()
+    destination = tmp_path / "usb"
+    destination.mkdir()
+    set_destination_setting(db, destination, db_path=db.path)
+    calls = []
+    real_check = admin_flow.check_backup_destination
+
+    def check_then_unmount(*args, **kwargs):
+        calls.append(1)
+        if len(calls) > 1:
+            raise BackupScheduleError("is that disk unmounted?")
+        return real_check(*args, **kwargs)
+
+    monkeypatch.setattr(admin_flow, "check_backup_destination", check_then_unmount)
+    session = _tall(["k", "c", "y", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop, node_controls=_node_controls(backup_identity_dir=identity)))
+
+    assert len(calls) == 2
+    assert list(destination.iterdir()) == []
+    assert "BACKUP FAILED" in _visible(_written_text(session))
