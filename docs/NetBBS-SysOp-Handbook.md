@@ -763,6 +763,19 @@ and applied without a restart:
 
 Under **Operations → Node and sessions**:
 
+- **Monitor** is a live table of everyone connected, refreshed every two
+  seconds:
+  - It shows each caller's transport, address, time on, idle time, terminal
+    size and where they are, for example "Boards › Retro" or
+    "Doors › Voidrunner".
+  - Up/Down selects a caller. **Message** sends them a line. **Kick**
+    disconnects them after an optional message and records it in the audit
+    log, like **Who**. **Unwind** sends them back to the main menu.
+  - **Order** sorts by time on, idle time or name. Below the table are the
+    most recent logins and logoffs.
+  - On a terminal narrower than 80 columns, the address, terminal size and
+    transport columns are left out, in that order.
+- **Who** lists sessions and disconnects one.
 - **Maintenance** blocks new non-SysOp logins.
 - **Drain** warns and disconnects non-SysOp sessions after a delay.
 - **Lock & drain** combines both for planned work.

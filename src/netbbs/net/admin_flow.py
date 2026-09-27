@@ -477,6 +477,7 @@ from netbbs.net.shutdown import (
     run_drain_sequence,
     run_shutdown_sequence,
 )
+from netbbs.net.sysop_monitor import monitor_screen
 from netbbs.net.password_screen import manage_password_screen
 from netbbs.net.ssh_key_screen import manage_ssh_keys_screen
 from netbbs.net.menu_description_preference import menu_description_level
@@ -10287,6 +10288,9 @@ async def _node_menu(session: Session, lane: DatabaseLane, actor: User, node_con
             await session.write_line("")
             await _who_screen(session, lane, actor, node_controls)
             await _draw_node_menu(session, node_controls, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+        elif choice == "o":
+            await monitor_screen(session, lane, actor, node_controls)
+            await _draw_node_menu(session, node_controls, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == "s":
             await session.write_line("")
             await _shutdown_screen(session, lane, actor, node_controls)
@@ -10366,6 +10370,7 @@ async def _draw_node_menu(
         "\r\n" + _fitted_menu(
             [
                 MenuEntry(label=menu_key("W", "ho"), brief="See who's currently connected"),
+                MenuEntry(label=menu_key("O", "nitor", prefix="M"), brief="Watch callers live, act on one"),
                 MenuEntry(label=menu_key("M", "aintenance mode"), brief="Toggle: block non-SysOp logins"),
                 MenuEntry(label=menu_key("D", "rain"), brief="Disconnect non-SysOps soon"),
                 MenuEntry(label=menu_key("L", "ock & drain"), brief="Maintenance mode, then drain"),
