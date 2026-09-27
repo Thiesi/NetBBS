@@ -119,6 +119,15 @@ def test_a_stored_value_that_no_longer_validates_is_skipped(db):
         ("throttle.per_source_capacity", 1, True),
         ("link.request_rate_capacity", 0.9, False),
         ("throttle.per_source_refill_per_minute", 0.5, True),
+        # Timeouts and intervals below a second are never meant.
+        ("link.sync_interval_seconds", 1e-300, False),
+        ("link.sync_interval_seconds", 9.0, False),
+        ("link.sync_interval_seconds", 10, True),
+        ("throttle.login_deadline_seconds", 0.2, False),
+        ("shutdown.background_task_drain_seconds", 1, True),
+        # Hundreds of digits: rejected, not an OverflowError.
+        ("link.max_peers", 10**400, False),
+        ("link.sync_interval_seconds", 10**400, False),
         # A refill rate is divided down to tokens per second.
         ("throttle.global_refill_per_minute", 5e-324, False),
         ("link.request_rate_refill_per_minute", 0.001, False),
@@ -277,4 +286,9 @@ def test_blank_seeds_return_to_the_default(db, lane, sysop):
     # Peering, then Manual seeds (m), clear the line, Save.
     session = FakeSession(["s", "w", "p", "m", "", "s", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop))
+    assert load_stored_policy(db) == {}
+
+
+def test_a_stored_integer_too_large_for_a_float_is_skipped(db):
+    set_config(db, "policy.link.max_peers", "1" + "0" * 400)
     assert load_stored_policy(db) == {}

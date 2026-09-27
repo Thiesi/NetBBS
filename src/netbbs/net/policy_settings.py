@@ -50,6 +50,11 @@ SECTIONS = ("link", "throttle", "shutdown")
 # A token bucket spends one whole token per request or login attempt, so a
 # burst capacity below 1 admits nothing at all -- every caller locked out.
 _BURST_MINIMUM = 1.0
+# A timeout or interval below a second is not a setting anyone means: a
+# timeout that small fails every connection, and a sync interval that small
+# (below the event loop's clock resolution) never sleeps at all.
+_SECONDS_MINIMUM = 1.0
+_SYNC_INTERVAL_MINIMUM = 10.0
 # A refill rate is divided down to tokens per second; one so small that the
 # division reaches zero never refills, and the bucket stays empty for good.
 _REFILL_MINIMUM = 0.01
@@ -104,7 +109,7 @@ SETTINGS: tuple[PolicySetting, ...] = (
                   "Link addresses this node syncs with besides the reliable nodes, separated by "
                   "spaces or commas. Empty means none."),
     PolicySetting("link.sync_interval_seconds", float, GROUP_PEERING, "Sync interval (seconds)",
-                  "How often this node syncs with its seeds and peers."),
+                  "How often this node syncs with its seeds and peers.", minimum=_SYNC_INTERVAL_MINIMUM),
     PolicySetting("link.relay_serving_enabled", bool, GROUP_PEERING, "Relay for others",
                   "Whether a full peer relays for nodes that cannot be dialled. An outgoing-only "
                   "node never relays, whatever this says."),
@@ -129,9 +134,9 @@ SETTINGS: tuple[PolicySetting, ...] = (
     PolicySetting("link.live_relay_max_pending_rendezvous", int, GROUP_RELAY, "Pending rendezvous",
                   "Live relay requests waiting for their other side."),
     PolicySetting("link.live_relay_rendezvous_timeout_seconds", float, GROUP_RELAY,
-                  "Rendezvous timeout (seconds)", "How long a relay request waits for its other side."),
+                  "Rendezvous timeout (seconds)", "How long a relay request waits for its other side.", minimum=_SECONDS_MINIMUM),
     PolicySetting("link.live_relay_idle_timeout_seconds", float, GROUP_RELAY, "Idle timeout (seconds)",
-                  "A relayed conversation with no traffic for this long is closed."),
+                  "A relayed conversation with no traffic for this long is closed.", minimum=_SECONDS_MINIMUM),
     PolicySetting("link.live_relay_max_bytes_per_second", int, GROUP_RELAY, "Bytes per second",
                   "Bandwidth one relayed conversation may use."),
     PolicySetting("throttle.max_attempts_per_connection", int, GROUP_THROTTLE, "Attempts per connection",
@@ -153,14 +158,14 @@ SETTINGS: tuple[PolicySetting, ...] = (
     PolicySetting("throttle.max_concurrent_unauthenticated_sessions", int, GROUP_THROTTLE,
                   "Connections not logged in", "Connections allowed at once before anyone logs in."),
     PolicySetting("throttle.login_deadline_seconds", float, GROUP_THROTTLE, "Login deadline (seconds)",
-                  "Time a connection has to finish logging in."),
+                  "Time a connection has to finish logging in.", minimum=_SECONDS_MINIMUM),
     PolicySetting("throttle.unauthenticated_idle_timeout_seconds", float, GROUP_THROTTLE,
-                  "Idle at login (seconds)", "A connection idle this long at the login prompt is closed."),
+                  "Idle at login (seconds)", "A connection idle this long at the login prompt is closed.", minimum=_SECONDS_MINIMUM),
     PolicySetting("shutdown.graceful_delay_seconds", float, GROUP_SHUTDOWN, "Warning before shutdown (s)",
                   "How long callers are warned before a graceful shutdown (the service manager's stop) "
-                  "disconnects them. Raise the service's stop timeout to match if you raise this."),
+                  "disconnects them. Raise the service's stop timeout to match if you raise this.", minimum=_SECONDS_MINIMUM),
     PolicySetting("shutdown.background_task_drain_seconds", float, GROUP_SHUTDOWN, "Background drain (s)",
-                  "How long shutdown waits for each background task and listener to stop."),
+                  "How long shutdown waits for each background task and listener to stop.", minimum=_SECONDS_MINIMUM),
 )
 
 BY_KEY = {setting.key: setting for setting in SETTINGS}
@@ -186,13 +191,21 @@ def validate_value(setting: PolicySetting, value: Any) -> Any:
         return items
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise PolicyValueError(f"{setting.label} must be a number.")
+    too_big = f"{setting.label} must be at most {setting.maximum:,}."
     if setting.kind is int:
         if isinstance(value, float):
-            if not value.is_integer():
+            if not math.isfinite(value) or not value.is_integer():
                 raise PolicyValueError(f"{setting.label} must be a whole number.")
             value = int(value)
+        # Compared as an integer, before anything turns it into a float:
+        # a few hundred digits overflow a float instead of failing politely.
+        if value > setting.maximum:
+            raise PolicyValueError(too_big)
     else:
-        value = float(value)
+        try:
+            value = float(value)
+        except OverflowError as exc:
+            raise PolicyValueError(too_big) from exc
     if not math.isfinite(value):
         raise PolicyValueError(f"{setting.label} must be a finite number.")
     if setting.minimum is not None:
@@ -251,7 +264,7 @@ def load_stored_policy(db: Database) -> dict[str, Any]:
             continue
         try:
             values[setting.key] = validate_value(setting, json.loads(row["value"]))
-        except (ValueError, TypeError) as exc:
+        except (ValueError, TypeError, OverflowError) as exc:
             _logger.warning("ignoring stored console setting %s: %s", setting.key, exc)
     return values
 
