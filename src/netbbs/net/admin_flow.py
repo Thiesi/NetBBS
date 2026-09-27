@@ -9374,7 +9374,7 @@ async def _node_log_screen(session: Session, lane: DatabaseLane, actor: User) ->
             live_keys={"l": _cycle_floor, "f": _follow},
             live_nav=[
                 MenuEntry(label=menu_key("L", "evel"), brief="Warnings / errors / everything"),
-                MenuEntry(label=menu_key("F", "ollow"), brief="Watch new lines as they are written"),
+                MenuEntry(label=menu_key("F", "ollow"), brief="Watch new lines as they arrive"),
             ],
             live_label=_standing,
             redraw_in_place=chrome.redraw_in_place,
