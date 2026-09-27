@@ -309,6 +309,8 @@ class TerminalEmulator:
         if width == 0:
             # A combining mark joins the character before it.
             col = self.col if self._wrap_pending else self.col - 1
+            if col > 0 and not self._rows[self.row][col].char:
+                col -= 1  # past a wide glyph's continuation cell
             if 0 <= col < self.width:
                 cell = self._rows[self.row][col]
                 if cell.char:

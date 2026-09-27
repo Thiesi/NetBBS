@@ -170,7 +170,9 @@ async def run_live_screen(
             paint(buffer)
             snapshot = buffer.snapshot()
             if previous is None or current_size != size:
-                frame = full_render_ansi(snapshot)
+                # A nested screen (snoop, a draft) shows the cursor on its way
+                # out; every full repaint hides it again.
+                frame = HIDE_CURSOR + full_render_ansi(snapshot)
             else:
                 frame = diff_ansi(previous, snapshot)
             if frame:

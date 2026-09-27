@@ -215,3 +215,31 @@ def test_a_test_double_overriding_write_still_works():
         assert double.out
 
     asyncio.run(scenario())
+
+
+def test_a_fixed_size_web_door_sets_the_session_size_and_gives_it_back():
+    async def scenario():
+        session = _web()
+        session.terminal_width, session.terminal_height = 120, 40
+        await session.enter_door_mode(encoding="cp437", width=80, height=25)
+        assert (session.terminal_width, session.terminal_height) == (80, 25)
+        # The browser resizing meanwhile doesn't move a fixed door...
+        await session._handle_event({"type": "resize", "cols": 100, "rows": 30})
+        assert (session.terminal_width, session.terminal_height) == (80, 25)
+        await session.leave_door_mode()
+        # ...but is what the session has once the door ends.
+        assert (session.terminal_width, session.terminal_height) == (100, 30)
+
+    asyncio.run(scenario())
+
+
+def test_a_door_without_a_fixed_size_leaves_the_session_size_alone():
+    async def scenario():
+        session = _web()
+        session.terminal_width, session.terminal_height = 120, 40
+        await session.enter_door_mode(encoding="utf-8")
+        await session._handle_event({"type": "resize", "cols": 100, "rows": 30})
+        assert (session.terminal_width, session.terminal_height) == (100, 30)
+        await session.leave_door_mode()
+
+    asyncio.run(scenario())

@@ -886,3 +886,53 @@ def test_a_caller_who_leaves_while_watched_is_reported():
         await asyncio.gather(tasks[0], return_exceptions=True)
 
     asyncio.run(scenario())
+
+
+def test_a_notice_during_snoop_is_shown_not_swallowed(db, lane, sysop, monkeypatch):
+    monkeypatch.setattr(sysop_monitor, "SNOOP_REFRESH_SECONDS", 10.0)
+
+    async def scenario():
+        controls = _controls()
+        viewer, alice = QueueSession(), CopyingSession()
+        tasks = [await _connect(controls.session_registry, viewer, "sysop"),
+                 await _connect(controls.session_registry, alice, "alice")]
+        monitor = asyncio.create_task(_monitor(viewer, lane, sysop, controls))
+        _select(viewer, controls, "alice")
+        viewer.inputs.put_nowait("s")
+        await _until(lambda: "Watching alice" in viewer.text())
+        assert await controls.session_registry.notify_one(viewer, "*** Node going down ***")
+        assert "Node going down" in viewer.text()
+        viewer.inputs.put_nowait("x")
+        viewer.inputs.put_nowait("q")
+        await monitor
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_the_cursor_is_hidden_again_after_snoop(db, lane, sysop, monkeypatch):
+    monkeypatch.setattr(sysop_monitor, "SNOOP_REFRESH_SECONDS", 0.01)
+
+    async def scenario():
+        controls = _controls()
+        viewer, alice = QueueSession(), CopyingSession()
+        tasks = [await _connect(controls.session_registry, viewer, "sysop"),
+                 await _connect(controls.session_registry, alice, "alice")]
+        monitor = asyncio.create_task(_monitor(viewer, lane, sysop, controls))
+        _select(viewer, controls, "alice")
+        viewer.inputs.put_nowait("s")
+        await _until(lambda: "Watching alice" in viewer.text())
+        mark = len(viewer.written)
+        viewer.inputs.put_nowait("x")
+        await _until(lambda: "DOING" in strip_ansi("".join(viewer.written[mark:])))
+        after = "".join(viewer.written[mark:])
+        assert after.rfind("\x1b[?25l") > after.rfind(SHOW_CURSOR)
+        viewer.inputs.put_nowait("q")
+        await monitor
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    asyncio.run(scenario())

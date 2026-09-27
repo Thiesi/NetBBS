@@ -169,3 +169,15 @@ def test_pen_sgr_round_trips():
 def test_huge_sizes_are_clamped():
     emulator = TerminalEmulator(100_000, 100_000)
     assert (emulator.width, emulator.height) == (500, 200)
+
+
+# -- review follow-ups (PR #784) ---------------------------------------------
+
+
+def test_a_combining_mark_after_a_wide_glyph_joins_the_glyph():
+    emulator = TerminalEmulator(10, 2)
+    emulator.feed("漢́x")
+    row = emulator.snapshot()[0]
+    assert row[0].char == "漢́"
+    assert row[1].char == ""
+    assert row[2].char == "x"

@@ -487,7 +487,12 @@ def _unwind(state: MonitorState, controls: NodeControls, entry: SessionSummary) 
 
 
 def paint_snoop(
-    buffer: ScreenBuffer, entry: SessionSummary, controls: NodeControls, *, glyphs: Glyphs = UNICODE_GLYPHS
+    buffer: ScreenBuffer,
+    entry: SessionSummary,
+    controls: NodeControls,
+    *,
+    glyphs: Glyphs = UNICODE_GLYPHS,
+    notice: str = "",
 ) -> None:
     """One frame of the snoop view: a header row naming the caller, and
     under it their screen as the copy has it, cropped to this terminal,
@@ -505,7 +510,12 @@ def paint_snoop(
         header += " (cropped)"
     header += f"{glyphs.dot}any key stops"
     fill_row(buffer, 0, bg=_SELECTED_BG)
-    paint_text(buffer, 0, 0, header, fg=EMPHASIS_COLOR, bg=_SELECTED_BG, bold=True)
+    if notice:
+        # A message or broadcast for the SysOp takes the header row: it
+        # matters more than the caption.
+        paint_text(buffer, 0, 0, notice, fg=ALERT_COLOR, bg=_SELECTED_BG, bold=True)
+    else:
+        paint_text(buffer, 0, 0, header, fg=EMPHASIS_COLOR, bg=_SELECTED_BG, bold=True)
     snapshot = copy.snapshot()
     rows = min(copy.height, buffer.height - 1)
     cols = min(copy.width, buffer.width)
@@ -532,12 +542,19 @@ async def snoop_screen(
     async def on_key(key: EditorKey) -> KeyOutcome:
         return KeyOutcome.EXIT
 
+    notices: list[str] = []
+
+    def on_notice(text: str) -> None:
+        notices.append(" ".join(strip_ansi(text).split()))
+
     try:
         await run_live_screen(
             session,
-            paint=lambda buffer: paint_snoop(buffer, entry, controls, glyphs=glyphs),
+            paint=lambda buffer: paint_snoop(
+                buffer, entry, controls, glyphs=glyphs, notice=notices[-1] if notices else "",
+            ),
             on_key=on_key,
-            on_notice=lambda text: None,
+            on_notice=on_notice,
             interval=SNOOP_REFRESH_SECONDS,
         )
     finally:
