@@ -476,7 +476,12 @@ async def monitor_screen(
         if choice == "m":
             await _message(session, state, controls, entry)
         else:
-            await disconnect(entry)
+            # The draft is an ordinary screen: it needs the cursor back.
+            await session.write(SHOW_CURSOR)
+            try:
+                await disconnect(entry)
+            finally:
+                await write_quietly(session, HIDE_CURSOR)
             _take_outcome(session, state)
         return KeyOutcome.REPAINT
 

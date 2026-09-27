@@ -148,7 +148,8 @@ async def run_live_screen(
     diff against a frame the terminal no longer shows would never repair
     it. While this screen runs, such notices go to `on_notice` instead,
     through `Session.pinned_notice_hook`, and the screen repaints at once
-    so `paint` can show them."""
+    so `paint` can show them. While `on_key` runs, the previous hook is back
+    in place: the handler may be showing a prompt or a whole other screen."""
     previous: Snapshot | None = None
     size: tuple[int, int] | None = None
     key_task: asyncio.Task | None = None
@@ -192,7 +193,16 @@ async def run_live_screen(
             if _is_redraw(key):
                 previous = None
                 continue
-            outcome = await on_key(key)
+            # A key handler may hand the terminal to a prompt or another
+            # screen. While it does, notices take the ordinary route, so
+            # that screen shows them as it would anywhere else, instead of
+            # this screen swallowing them into state the handler is about
+            # to overwrite with its own outcome.
+            session.pinned_notice_hook = outer_hook
+            try:
+                outcome = await on_key(key)
+            finally:
+                session.pinned_notice_hook = take_notice
             if outcome is KeyOutcome.EXIT:
                 return
             if outcome is KeyOutcome.REPAINT:

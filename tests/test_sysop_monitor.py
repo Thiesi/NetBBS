@@ -510,6 +510,55 @@ def test_a_notice_for_the_sysop_lands_on_the_outcome_line_not_over_the_table(db,
     asyncio.run(scenario())
 
 
+def test_a_notice_during_an_action_takes_the_ordinary_route(db, lane, sysop):
+    async def scenario():
+        controls = _controls()
+        viewer, alice = QueueSession(), QueueSession()
+        tasks = [await _connect(controls.session_registry, viewer, "sysop"),
+                 await _connect(controls.session_registry, alice, "alice")]
+        monitor = asyncio.create_task(_monitor(viewer, lane, sysop, controls))
+        _select(viewer, controls, "alice")
+        viewer.inputs.put_nowait("m")
+        await _until(lambda: "Message to alice" in viewer.text())
+        # The prompt owns the terminal: no live-screen hook is installed.
+        assert viewer.pinned_notice_hook is None
+        assert await controls.session_registry.notify_one(viewer, "*** Node going down ***")
+        assert "*** Node going down ***" in viewer.text()
+        viewer.inputs.put_nowait("hi")
+        await _until(lambda: "Message sent to alice." in viewer.text())
+        assert viewer.pinned_notice_hook is not None
+        viewer.inputs.put_nowait("q")
+        await monitor
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_the_kick_draft_gets_a_visible_cursor(db, lane, sysop):
+    async def scenario():
+        controls = _controls()
+        viewer, alice = QueueSession(), QueueSession()
+        tasks = [await _connect(controls.session_registry, viewer, "sysop"),
+                 await _connect(controls.session_registry, alice, "alice")]
+        monitor = asyncio.create_task(_monitor(viewer, lane, sysop, controls))
+        _select(viewer, controls, "alice")
+        mark = len(viewer.written)
+        viewer.inputs.put_nowait("k")
+        await _until(lambda: "Disconnect alice" in strip_ansi("".join(viewer.written[mark:])))
+        shown = "".join(viewer.written[mark:])
+        assert shown.rfind(SHOW_CURSOR) > shown.rfind("\x1b[?25l")
+        viewer.inputs.put_nowait("b")
+        viewer.inputs.put_nowait("q")
+        await monitor
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
 def test_combining_marks_keep_their_accent():
     from netbbs.net.live_screen import paint_text
 
