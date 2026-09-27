@@ -152,16 +152,19 @@ at `/mnt/node`.
   - A slot runs once and is never retried. After downtime the node makes
     one catch-up backup. A backup in progress at shutdown finishes first.
   - Retention deletes only backups the schedule made, never manual ones.
-  - The **destination** applies to every backup, manual ones included. It
-    must be an existing, writable, absolute directory, outside file storage
-    and the identity directory. NetBBS never creates it, and it notices when
+  - The **destination** applies to every backup, manual ones and the one before
+    an install included. It must be an existing, writable, absolute
+    directory, outside file storage, the identity directory, the Voidrunner
+    saves and the door receipts. NetBBS never creates it, and it notices when
     the disk behind it is not mounted. Empty means beside the database, as
     before.
   - The dashboard shows when the next backup is due. Copying backups off the
     host and encrypting them stay your job.
 - **Install a release: Settings → Update → `[I]nstall`** (#731).
-  - It appears on a live node once a check has found a newer release. It
-    shows a plan, takes a backup first, and aborts if the backup fails.
+  - It appears on a live node once a check has found a newer release, and
+    one install runs at a time. It shows a plan first. It then downloads and
+    verifies the wheel, and backs the node up to your backup destination
+    before running pip. It aborts if the backup fails.
   - It downloads the release's wheel from GitHub over HTTPS and checks it
     against the SHA-256 digest GitHub publishes for it. That proves the bytes
     are what GitHub holds, not that a maintainer signed them. Dependencies
@@ -171,8 +174,11 @@ at `/mnt/node`.
     write to, and not as an editable or VCS install.
   - `[R]estart after install`: auto, yes or no. Under systemd (auto) or
     with yes, the node shuts down gracefully and exits with status 75 so the
-    supervisor starts the new version. NetBSD's rc.d is not detected as a
-    supervisor, so choose yes or restart it yourself.
+    supervisor starts the new version. NetBSD's rc.d does not restart
+    NetBBS, so under rc.d the node keeps running the old version until you
+    restart the service yourself; do that promptly, because the new files are
+    already on disk. Choose yes only if something restarts NetBBS when it
+    exits.
   - **MANUAL — existing systemd units:** add `RestartForceExitStatus=75` and
     `SuccessExitStatus=75`, as in `examples/netbbs.service`. Without them a
     restart for an update is logged as a failure.
@@ -223,7 +229,8 @@ at `/mnt/node`.
     for a reason and the world's exact filename, takes and verifies a full
     node backup, and then makes the change. The node no longer has to be
     stopped for this, as the command-line tool still requires. A caller
-    still inside stops the change with nothing altered.
+    still inside stops the change with nothing altered, and maintenance stays
+    on afterwards. This needs the live node's console.
 - The hidden Settings shortcuts to Diagnostics and the log follower now work
   on a node without Link, as the Operations screen already did (#732).
 
@@ -244,6 +251,7 @@ at `/mnt/node`.
   it. The list has `[M]ark all read` when something is unread, and
   `[N]ew scan` has `[M]ark read` per board. On a first visit, a board's
   existing posts count as read. Your own posts always count as read.
+  Up to 500 posts opened out of order are remembered per board.
 - **A post opens in a reader,** with PgUp and PgDn for long bodies and a byline
   showing author, date, *edited*, *new* and what it replies to.
   - It offers `[E]dit`, `Remove pos[t]`, `[N]ext post` and `[P]revious post`,
@@ -383,15 +391,14 @@ declined resources are still resent between them. A large inventory request
 is split into pages, so it is no longer refused, but pulling from an older
 peer may make little progress until that peer upgrades.
 
-**Rolling back needs a restore.** A 7.11.x wheel refuses to open a schema-75
+**Rolling back needs a restore.** A 7.11.x wheel refuses to open a schema-77
 database. **MANUAL — to roll back:** stop NetBBS, install the 7.11.2 wheel,
 then restore the backup taken before the upgrade. Anything since the upgrade is lost with
 it: accept, exclude, hide and purge decisions, door chat allowlists and
 mutes, and all new content. A door profile using the `vm` adapter does not
-load on an older build. Settings made in the new console screens are ignored
-by an older build: backups go back beside the database and are no longer
-scheduled, and console policy values revert to `netbbs.toml` or the
-defaults.
+load on an older build. Settings made in the new console screens are lost
+with the restore: backups go back beside the database and are no longer
+scheduled, and policy values revert to `netbbs.toml` or the defaults.
 
 ## Verification boundaries
 
@@ -411,7 +418,8 @@ defaults.
   VM tests, and the outbound tests that need symlinks or directory handles,
   are skipped on Windows, where the full suite runs.
 - **Installing a release from the console has been tested up to the
-  download.** A live node downloaded and verified v7.11.2. No end-to-end pip
+  download.** A smoke test downloaded and verified the real v7.11.2 wheel.
+  No end-to-end pip
   install into a running service has been done, and the tests never install
   into a real environment. Downloaded wheels are kept in `<database>_updates/`
   and are not cleaned up.
