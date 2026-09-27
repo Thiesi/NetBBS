@@ -741,3 +741,18 @@ def test_publishing_recounts_when_the_cap_gives_posts_up(db, alice, monkeypatch)
     assert unread_post_count(db, alice, board) == 0
     last = session.screens()[-1]
     assert "[M]ark all read" not in last and " new" not in last.split("\n")[1]
+
+
+def test_the_reader_marks_a_post_new_on_the_screen_that_opens_it(db, alice, monkeypatch):
+    """Opening is what makes it read, so whether it was new is taken before
+    the open is recorded (Codex review on #723)."""
+    board = create_board(db, "general", creator=alice)
+    ensure_board_baseline(db, alice, board)
+    _posts(db, board, alice, 1, monkeypatch)
+    session = FakeSession(["1", "b", "1", "b", "b"])
+
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+
+    first, second = [screen for screen in session.screens() if "Body of post 0" in screen][:2]
+    assert "[new]" in first
+    assert "[new]" not in second  # read now

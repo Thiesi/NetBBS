@@ -947,7 +947,10 @@ async def _show_board(
             post = page.posts[index]
             # Opening a post is what makes it read (issue #710), recorded as
             # it is shown, so a dropped connection loses nothing already read.
-            if unread_post_ids(db, user, board, [post]):
+            # Whether it was new is taken first: the byline says so on the
+            # screen that opens it (Codex review on #723).
+            was_new = bool(unread_post_ids(db, user, board, [post]))
+            if was_new:
                 unread["count"] = max(0, unread["count"] - 1)
             if record_post_opened(db, user, board, post):
                 # The opened-set cap gave other unread posts up as read.
@@ -963,7 +966,7 @@ async def _show_board(
                 node_name_gradient=session.node_name_gradient,
             )
             byline = _post_byline(
-                db, post, name_requirement=name_requirement, is_new=post.id in _new_ids(page),
+                db, post, name_requirement=name_requirement, is_new=was_new,
                 separator=separator, width=width,
             )
             body_rows = _render_quoted_body(sanitize_text(post.body, allow_newlines=True), width).split("\r\n")
