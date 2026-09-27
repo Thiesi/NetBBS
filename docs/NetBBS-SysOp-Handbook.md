@@ -408,6 +408,13 @@ SysOp**. Testing launches real programs and may change game data, even if you
 later discard the configuration draft. Test normal quit, disconnect, timeout,
 and each offered caller transport before opening it to users.
 
+Your own door scripts can be sent from inside NetBBS: **Content → Doors →
+Upload** asks for the file's name, then takes one file over Zmodem or a
+browser link into the node's doors folder, the one **From disk** lists.
+Replacing a file of the same name asks first. The upload registers nothing and
+changes no permissions; register it with **From disk**. It is capped at the
+node's upload limit and recorded in the audit log.
+
 **MANUAL — outside NetBBS:** obtain games and licenses, install their runtimes,
 prepare writable installation directories, and configure any remote-service
 tunnel and credentials. NetBBS does not install these components. Use the
@@ -739,9 +746,16 @@ before confirmation; review it instead of deleting files directly.
 art. **Banners** are the welcome greeting, the log-off screen, and the screens
 shown before and after self-service signup. **Mastheads** sit above the main
 menu, the message-board list, the file-area list, and the chat channel picker.
-Each has a gallery of bundled samples, and **From disk** loads a file you have
-already put on the node. You can also put your own `.ans` file where the node
-looks for it.
+Each has a gallery of bundled samples, **From disk** loads a file you have
+already put on the node, and **Upload** sends one from your own computer. You
+can also put your own `.ans` file where the node looks for it.
+
+**Upload** needs the same route a caller's file upload does: a terminal that
+speaks Zmodem, or the web listener with its `public_url` for a single-use
+browser link. Whatever you send is saved as that piece's own file, whatever it
+was called on your side, up to 256 KiB. Uploading over an existing file asks
+first; if that piece is enabled, callers see the new art at once. An upload
+never enables a piece by itself, and it is recorded in the audit log.
 
 The file goes beside the database and is named after the database file, minus
 `.db`, plus a suffix for the piece. A node whose `[database] path` is
