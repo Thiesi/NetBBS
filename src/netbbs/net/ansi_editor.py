@@ -48,6 +48,7 @@ from netbbs.net.confirm import prompt_yes_no
 from netbbs.net.help_overlay import show_help
 from netbbs.net.picker import pick_item
 from netbbs.net.session import Session, SessionClosedError, write_prompt
+from netbbs.net.session_activity import records_activity
 from netbbs.rendering import (
     MUTED_COLOR,
     ScreenBuffer,
@@ -127,6 +128,7 @@ class _EditorState:
     dirty: bool = False
 
 
+@records_activity("Drawing")
 async def edit_ansi_art(
     session: Session,
     *,

@@ -246,6 +246,7 @@ class SSHSession(Session):
 
         if not data:
             raise SessionClosedError("client disconnected during read")
+        self.note_input()
         return data[0]
 
     async def read_byte_with_timeout(self, timeout: float) -> int | None:

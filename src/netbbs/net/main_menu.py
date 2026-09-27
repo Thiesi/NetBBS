@@ -60,6 +60,7 @@ from netbbs.net.profile_flow import (
 from netbbs.net.redraw_preference import redraw_in_place_enabled
 from netbbs.net.scan_and_find import _find_screen, _new_scan_screen
 from netbbs.net.session import Session, write_preformatted_line, write_prompt
+from netbbs.net.session_activity import set_root_activity
 from netbbs.net.session_registry import ActiveSessionRegistry
 from netbbs.net.shutdown import NodeControls, format_remaining_seconds
 from netbbs.net.unicode_style_preference import unicode_style_enabled
@@ -83,6 +84,27 @@ from netbbs.rendering import (
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 from netbbs.timeutil import format_for_display, utc_now_iso
+
+#: What the SysOp monitor shows for a caller who took each main-menu branch
+#: (issue #762), named as the menu names it. Every key `_main_menu_loop`
+#: dispatches on needs an entry; a test holds the two in step.
+_MENU_ACTIVITY = {
+    "c": "Communities",
+    "u": "Uncategorized",
+    "j": "Jump to",
+    "n": "New scan",
+    "f": "Find",
+    "d": "Directory",
+    "p": "Profile",
+    "e": "Mail",
+    "h": "History",
+    "r": "Previous callers",
+    "w": "Who's online",
+    "i": "Invitations",
+    "v": "Verify",
+    "s": "SysOp",
+    "l": "Logging off",
+}
 
 
 async def _draw_main_menu(
@@ -523,6 +545,7 @@ async def _main_menu_loop(
                 await _draw_main_menu(session, db, mailbox, user, node_controls=node_controls, notice=notice)
                 notice = None
                 redraw = False
+            set_root_activity(session, None)
             key_task = asyncio.create_task(session.read_key())
             side_tasks: dict[str, asyncio.Task] = {}
             if direct_invites is not None:
@@ -609,6 +632,8 @@ async def _main_menu_loop(
                 # the old access -- redraw rather than act on it.
                 redraw = True
                 continue
+
+            set_root_activity(session, _MENU_ACTIVITY.get(choice))
 
             if choice == REDRAW_KEY:
                 # Issue #102: redraws in place, no state change -- the same

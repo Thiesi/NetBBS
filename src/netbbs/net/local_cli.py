@@ -158,6 +158,7 @@ class LocalCLISession(Session):
         data = await asyncio.to_thread(self._read_byte_fn)
         if not data:
             raise SessionClosedError("stdin closed")
+        self.note_input()
         return data[0]
 
     async def read_byte_with_timeout(self, timeout: float) -> int | None:

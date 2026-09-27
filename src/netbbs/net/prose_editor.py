@@ -36,6 +36,7 @@ from netbbs.net.char_input import EditorKey, EditorKeyKind
 from netbbs.net.draft_storage import delete_draft, offer_draft_recovery, save_draft
 from netbbs.net.help_overlay import show_help
 from netbbs.net.session import Session, SessionClosedError, write_prompt
+from netbbs.net.session_activity import records_activity
 from netbbs.rendering import (
     MUTED_COLOR,
     ScreenBuffer,
@@ -78,6 +79,7 @@ def _byte_length(text: str) -> int:
     return len(text.encode("utf-8"))
 
 
+@records_activity("Writing")
 async def edit_prose(
     session: Session,
     *,

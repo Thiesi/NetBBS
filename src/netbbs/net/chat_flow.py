@@ -177,6 +177,7 @@ from netbbs.net.redraw_preference import redraw_in_place_enabled
 from netbbs.net.breadcrumb_preference import breadcrumb_collapsed_enabled
 from netbbs.net.unicode_style_preference import unicode_style_enabled
 from netbbs.net.session import Session, SessionClosedError, write_prompt
+from netbbs.net.session_activity import records_activity
 from netbbs.net.session_registry import ActiveSessionRegistry
 from netbbs.net.sort_ui import SORT_MODE_LABELS, prompt_sort_change
 from netbbs.permissions import meets_level
@@ -238,6 +239,7 @@ if TYPE_CHECKING:
     from netbbs.link.realtime_channels import LiveChannelBridge
 
 
+@records_activity("Chat")
 async def browse_channels(
     session: Session,
     lane: DatabaseLane,
@@ -4619,6 +4621,7 @@ async def _clock_loop(
             )
 
 
+@records_activity(lambda args: args["channel"].name)
 async def _chat_loop(
     session: Session,
     lane: DatabaseLane,
@@ -5862,6 +5865,7 @@ class _DirectChatPinnedUIState:
         return height if self.active else None
 
 
+@records_activity("Direct chat")
 async def run_direct_chat_loop(
     session: Session,
     hub: ChatHub,

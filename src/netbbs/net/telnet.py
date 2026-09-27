@@ -324,6 +324,7 @@ class TelnetSession(Session):
             if next_byte == IAC:
                 # Client sent an escaped literal 0xFF as actual data
                 # (the RFC 854 escaping rule).
+                self.note_input()
                 return 0xFF
             if next_byte in (WILL, WONT, DO, DONT):
                 try:
@@ -338,6 +339,7 @@ class TelnetSession(Session):
             # bytes — nothing more to consume.
             return None
 
+        self.note_input()
         return b
 
     async def read_byte_with_timeout(self, timeout: float) -> int | None:

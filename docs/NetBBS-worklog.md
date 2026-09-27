@@ -2311,6 +2311,37 @@ permissions. The home menu uses the same option set and hotkeys at every width;
 groups stacked vertically. Layout tests strip SGR before asserting visible
 width, because raw escape-byte length is not terminal column width.
 
+### Idle time and the activity trail (issue #762)
+
+The SysOp monitor's idle and "doing" columns come from two fields on
+`Session`, snapshotted by `ActiveSessionRegistry.list_entries` without touching
+the database.
+
+- **`last_input_at`** is stamped by `note_input()` at each transport's lowest
+  input point: `read_byte` for Telnet, SSH and the local CLI, and the websocket
+  event handler for web keys and door keys. It sits below every read method, so
+  a keystroke counts wherever it is consumed, doors included. Transport-level
+  traffic is not input. Telnet negotiation, SSH resize and break, and web resize
+  events must not stamp it, or a client's keepalive would make an idle caller
+  look active. A new transport stamps at its own equivalent point.
+- **`activity`** is a trail of place names, set only through
+  `netbbs.net.session_activity`:
+  - `records_activity` goes on an area's entry function, not at its call sites,
+    so every caller is covered, including later ones.
+  - The main menu, the root, resets the trail before each key read and names
+    the branch it dispatches to. A test ties `_MENU_ACTIVITY` to that dispatch
+    chain.
+  - Every setter restores the previous trail in a `finally`, so a screen that
+    ends by disconnect, cancellation or level unwind cannot leave a stale
+    segment behind.
+
+  Segments name places, never content. No message subject, mail or direct-chat
+  partner, file name or search string goes into the trail.
+
+A stand-in session that forwards attributes with `__getattr__`
+(`admin_flow._TrailingOutput`) forwards reads only. It must forward `activity`
+writes explicitly, or the trail lands on the stand-in, where nothing looks.
+
 ---
 
 ## 8. Async ownership, shutdown, and background tasks

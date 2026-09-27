@@ -293,6 +293,7 @@ class WebSession(Session):
                 return
             data = event.get("data")
             if isinstance(data, str):
+                self.note_input()
                 if len(data) > _MAX_KEY_EVENT_LENGTH:
                     await self._reject_input("web terminal key event is too large")
                 encoded = data.encode("utf-8", errors="replace")
@@ -304,6 +305,7 @@ class WebSession(Session):
         elif event_type == "key" and not self._door_active:
             data = event.get("data")
             if isinstance(data, str):
+                self.note_input()
                 if len(data) > _MAX_KEY_EVENT_LENGTH:
                     await self._reject_input("web terminal key event is too large")
                 for item in _parse_input_events(data):

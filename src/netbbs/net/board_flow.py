@@ -85,6 +85,7 @@ from netbbs.net.prose_editor import edit_prose
 from netbbs.net.post_color_preference import post_colors_enabled
 from netbbs.net.redraw_preference import redraw_in_place_enabled
 from netbbs.net.session import Session, write_prompt
+from netbbs.net.session_activity import records_activity
 from netbbs.net.sort_ui import SORT_MODE_LABELS, prompt_sort_change
 from netbbs.net.unicode_style_preference import unicode_style_enabled
 from netbbs.permissions import meets_level
@@ -125,6 +126,7 @@ _BOARD_LIST_COLUMNS = [
 ]
 
 
+@records_activity("Boards")
 async def _browse_boards(
     session: Session,
     db: Database,
@@ -705,6 +707,7 @@ def _moderation_stays_local(db: Database, board: Board, link_context: LinkContex
 _DRAFT_MENU_ENTRY = MenuEntry(label=menu_key("D", "raft"), brief="Resume or discard your saved draft")
 
 
+@records_activity(lambda args: args["board"].name)
 async def _show_board(
     session: Session,
     db: Database,

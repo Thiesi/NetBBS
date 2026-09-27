@@ -11,6 +11,7 @@ a given user connected through.
 from __future__ import annotations
 
 import asyncio
+import time
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Awaitable, Callable
 
@@ -202,6 +203,20 @@ class Session(ABC):
     #: place to try passwords.
     login_throttle: LoginThrottle | None = None
 
+    #: `time.monotonic()` of the last data byte or key the client sent,
+    #: or `None` before the first one -- the SysOp monitor's idle time
+    #: (issue #762). Stamped by `note_input` at each transport's lowest
+    #: input point, below every read method, so a keystroke counts
+    #: whichever screen, editor or door consumes it. Transport-level
+    #: traffic (Telnet negotiation, SSH resize) is not input: a client's
+    #: keepalive must not make an idle caller look active.
+    last_input_at: float | None = None
+
+    #: Where this caller is, as a trail of place names (issue #762). Set
+    #: only through `netbbs.net.session_activity`, which restores it when
+    #: a screen ends; see that module for what may and may not go in it.
+    activity: tuple[str, ...] = ()
+
     #: Hook a screen can install so an out-of-band system notice (a
     #: node-shutdown broadcast, `netbbs.net.session_registry.
     #: ActiveSessionRegistry.broadcast_to_all`) reaches this session
@@ -219,6 +234,10 @@ class Session(ABC):
     #: and clears it again on exit so a stale closure never lingers past
     #: the chat session that captured it.
     pinned_notice_hook: Callable[[str], Awaitable[None]] | None = None
+
+    def note_input(self) -> None:
+        """Record that the client just sent input; see `last_input_at`."""
+        self.last_input_at = time.monotonic()
 
     @abstractmethod
     async def write(self, text: str) -> None:

@@ -118,6 +118,7 @@ from netbbs.net.notices import announce_styled, write_notices
 from netbbs.net.picker import pick_item
 from netbbs.net.prose_editor import edit_prose
 from netbbs.net.session import Session
+from netbbs.net.session_activity import records_activity
 from netbbs.net.sort_ui import SORT_MODE_LABELS, prompt_sort_change
 from netbbs.moderation import BoardPermission, has_permission
 from netbbs.permissions import meets_level
@@ -197,6 +198,7 @@ async def enter_file_area(
     await _show_area(session, lane, area, user, initial_cursor=initial_cursor, link_context=link_context, transfers=transfers)
 
 
+@records_activity("Files")
 async def browse_file_areas(
     session: Session,
     lane: DatabaseLane,
@@ -750,6 +752,7 @@ async def _read_file_choice(
     return action
 
 
+@records_activity(lambda args: args["area"].name)
 async def _show_area(
     session: Session,
     lane: DatabaseLane,
@@ -1303,6 +1306,7 @@ def _remote_file_origin_label(link_context: LinkContext, remote_file: RemoteFile
     return identity_for_peer(peer).label if peer is not None else remote_file.origin_fingerprint
 
 
+@records_activity("Downloading")
 async def _fetch_remote_file(
     session: Session,
     lane: DatabaseLane,
@@ -2173,6 +2177,7 @@ async def _transfer_link_screen(
         await session.write(reject_unhandled_key(choice))
 
 
+@records_activity("Uploading")
 async def _handle_upload(
     session: Session, lane: DatabaseLane, area: FileArea, user: User, *,
     link_context: LinkContext | None = None,
@@ -2369,6 +2374,7 @@ async def _handle_upload(
     return True
 
 
+@records_activity("Downloading")
 async def send_file_to_caller(
     session: Session, lane: DatabaseLane, area: FileArea, entry: FileEntry, user: User, *,
     transfers: TransferGrants | None = None,
