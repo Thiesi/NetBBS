@@ -57,6 +57,7 @@ import re
 import shlex
 import sqlite3
 import sys
+import weakref
 from pathlib import Path
 import dataclasses
 from dataclasses import dataclass
@@ -97,6 +98,24 @@ from netbbs.backup import (
     set_door_installs_included,
     voidrunner_save_directory,
     get_last_backup_summary,
+)
+from netbbs.backup_schedule import (
+    FREQUENCIES as BACKUP_FREQUENCIES,
+    MAX_KEEP as BACKUP_MAX_KEEP,
+    WEEKDAY_NAMES,
+    BackupSchedule,
+    BackupScheduleError,
+    default_backup_root,
+    get_destination_setting as get_backup_destination_setting,
+    load_schedule as load_backup_schedule,
+    parse_time as parse_backup_time,
+    save_schedule as save_backup_schedule,
+    schedule_status,
+    set_destination_setting as set_backup_destination_setting,
+    validate_destination as validate_backup_destination,
+    validate_schedule as validate_backup_schedule,
+    check_destination as check_backup_destination,
+    recorded_node_identity_dir,
 )
 from netbbs.managed_dns.state import (
     get_node_fingerprint as get_cached_node_fingerprint,
@@ -409,6 +428,17 @@ from netbbs.net.char_input import (
     reject_unhandled_key,
 )
 from netbbs.net.confirm import prompt_yes_no, prompt_yes_no_or_keep
+from netbbs.config import get_max_upload_bytes
+from netbbs.files.storage import new_incoming_temp_path
+from netbbs.net.file_transfer import UPLOAD, install_and_record
+from netbbs.sysop_uploads import (
+    BANNER as SYSOP_UPLOAD_BANNER,
+    DOOR_FILE as SYSOP_UPLOAD_DOOR_FILE,
+    SysOpUploadError,
+    SysOpUploadTarget,
+    destination_problem,
+    door_filename_error,
+)
 from netbbs.net.draft_storage import DraftPruneReport, prune_stale_drafts
 from netbbs.net.help_overlay import show_help
 from netbbs.net.picker import ListColumn, pick_item as _pick_item
@@ -772,6 +802,17 @@ def _get_display_backup_summary(db: Database) -> tuple[str | None, str | None]:
         format_for_display(backup_at, db) if backup_at else None,
         backup_path,
     )
+
+
+def _get_display_next_backup(db: Database) -> str | None:
+    """When the backup schedule runs next, for display; `None` while it is off
+    (issue #727)."""
+    status = schedule_status(db)
+    if not status.schedule.enabled:
+        return None
+    if status.overdue:
+        return "due now"
+    return format_for_display(status.next_run.isoformat(), db) if status.next_run else None
 
 
 async def _load_condensed_status_line(lane: DatabaseLane, *, unicode_style: bool, terminal_width: int) -> str:
@@ -1227,6 +1268,12 @@ async def admin_menu(
     and `[S]ystem` operation keys remain accepted as compatibility aliases but
     are no longer advertised in the reorganized console.
     """
+    transfers = node_controls.transfers if node_controls is not None else None
+    owner = getattr(session, "notice_session", session)
+    if transfers is not None:
+        _console_transfers[owner] = transfers
+    else:
+        _console_transfers.pop(owner, None)
     dashboard_state = await _draw_admin_menu(
         session, lane, user, node_controls=node_controls, link_context=link_context
     )
@@ -1370,6 +1417,7 @@ async def _draw_admin_menu(
             "total_files": sum(count_visible_files(db, area)[0] for area in all_areas),
             **_link_health_snapshot(db, link_context),
             "backup": _get_display_backup_summary(db),
+            "next_backup": _get_display_next_backup(db),
             "update": get_display_check_summary(db),
             "description_level": menu_description_level(db, actor),
             "redraw_in_place": redraw_in_place_enabled(db, actor),
@@ -1494,6 +1542,8 @@ async def _draw_admin_menu(
         "  Backup: "
         + (sanitize_text(_fit(backup_at, 10)) if backup_at else colored("never", fg_color=WARNING_COLOR))
     )
+    if state.get("next_backup") is not None:
+        health.append("  Next backup: " + sanitize_text(_fit(state["next_backup"], 15)))
     health.append(
         "  Update check: "
         + (
@@ -1654,11 +1704,21 @@ def _compact_dashboard_panel(
     def _fit(text: str, used: int) -> str:
         return cut_to_width(text, max(1, width - used)) if unicode_style else text
 
-    panel.append(
-        _label("BACKUP")
-        + (colored(sanitize_text(_fit(backup_at, label_width)), fg_color=VALUE_COLOR) if backup_at
-           else colored("never", fg_color=WARNING_COLOR))
-    )
+    # Issue #727: with a schedule on, the same row says when the next one
+    # runs, rather than a row of its own on the screen with least room.
+    next_backup = state.get("next_backup")
+    if next_backup is not None:
+        backup_value = f"{backup_at or 'never'}  next {next_backup}"
+        panel.append(
+            _label("BACKUP")
+            + colored(sanitize_text(_fit(backup_value, label_width)), fg_color=VALUE_COLOR if backup_at else WARNING_COLOR)
+        )
+    else:
+        panel.append(
+            _label("BACKUP")
+            + (colored(sanitize_text(_fit(backup_at, label_width)), fg_color=VALUE_COLOR) if backup_at
+               else colored("never", fg_color=WARNING_COLOR))
+        )
     panel.append(
         _label("UPDATES")
         + (colored(sanitize_text(_fit(update_outcome or update_at or "completed", label_width)), fg_color=VALUE_COLOR)
@@ -6695,11 +6755,23 @@ async def _run_to_completion(coroutine):
 def _create_live_backup(
     *, db_path: Path, identity_dir: Path, destination: Path
 ) -> Path:
-    """Create a live-node backup only while its configured identity exists."""
+    """Create a live-node backup only while its configured identity exists,
+    and while its destination is still on the disk the SysOp chose: the
+    confirmation prompt before this can stay open while a disk is unmounted
+    (issue #727, Codex review)."""
     if not identity_dir.is_dir():
         raise BackupError(
             f"configured identity directory is unavailable: {identity_dir}"
         )
+    db = Database(db_path)
+    try:
+        root = check_backup_destination(db, db_path, identity_dir)
+    except BackupScheduleError as exc:
+        raise BackupError(str(exc)) from exc
+    finally:
+        db.close()
+    if destination.parent != root:
+        raise BackupError("The backup destination changed while this screen was open; try again.")
     return create_backup(
         db_path=db_path,
         identity_dir=identity_dir,
@@ -6781,7 +6853,10 @@ async def _backup_status_screen(
             ]
         sections = [Section("Last backup", last_rows)]
 
-        if len(history) > 1:
+        # One successful run is already the "Last backup" above; a lone
+        # failed or skipped scheduled run is not, and would otherwise stay
+        # invisible until a second run (Codex review, issue #727).
+        if len(history) > 1 or (history and not history[0].outcome.startswith("succeeded")):
             sections.append(Section("Recent backups", [Table(
                 ("When", "Outcome"),
                 [
@@ -6838,10 +6913,13 @@ async def _backup_status_screen(
             ),
         ]))
 
+        sections.append(await _backup_schedule_section(lane, db_path, standalone=not can_create))
+
         if can_create:
             actions = [
                 ("c", menu_key("C", "reate backup now")),
                 ("d", menu_key("D", "oor installations: " + ("on" if installs_on else "off"))),
+                ("s", menu_key("S", "chedule & destination")),
                 _BACK_ACTION,
             ]
         else:
@@ -6849,7 +6927,7 @@ async def _backup_status_screen(
                 "Live backup creation is unavailable in standalone admin. "
                 "Run 'python -m netbbs.backup create --to <path>' instead."
             )]))
-            actions = [_BACK_ACTION]
+            actions = [("s", menu_key("S", "chedule & destination")), _BACK_ACTION]
 
         choice, page = await show_detail(
             session,
@@ -6862,6 +6940,9 @@ async def _backup_status_screen(
         )
         if choice == "b":
             return
+        if choice == "s":
+            await _backup_schedule_editor(session, lane, actor, db_path=db_path, identity_dir=identity_dir)
+            continue
         if choice == "d":
             # A toggle toggles (AGENTS.md, design doc §3.5). The setting is
             # reversible and changes nothing until the next backup runs, so it
@@ -6876,7 +6957,18 @@ async def _backup_status_screen(
                 )
             )
             continue
-        destination = default_backup_destination(db_path)
+        # A configured destination that has since gone, or whose disk was
+        # unmounted, must not be recreated on the disk underneath it.
+        try:
+            root = await lane.run(check_backup_destination, db_path, identity_dir)
+        except (BackupScheduleError, OSError) as exc:
+            _announce_styled(
+                session,
+                status_badge("BACKUP FAILED", tone="error", unicode_style=unicode_style)
+                + " " + colored(sanitize_text(str(exc)), fg_color=ERROR_COLOR),
+            )
+            continue
+        destination = default_backup_destination(db_path, root=root)
         await session.write_line(
             "\r\n"
             + colored("Destination: ", fg_color=LABEL_COLOR)
@@ -6928,6 +7020,157 @@ async def _backup_status_screen(
                     session, "The backup completed, but its SysOp audit entry could not be recorded.",
                     color=WARNING_COLOR,
                 )
+
+
+async def _backup_schedule_section(lane: DatabaseLane, db_path: Path, *, standalone: bool) -> Section:
+    """The schedule, when it runs next, what it keeps, and where backups go
+    (issue #727)."""
+
+    def _load(db: Database):
+        return schedule_status(db), get_backup_destination_setting(db)
+
+    status, configured = await lane.run(_load)
+    schedule = status.schedule
+    rows: list[Field | Note | Table] = [Field("Schedule", schedule.describe(), bold=schedule.enabled)]
+    if schedule.enabled:
+        if status.overdue:
+            next_text = "due now -- runs within a minute of the node running"
+        elif status.next_run is not None:
+            next_text = await lane.run(lambda db: format_for_display(status.next_run.isoformat(), db))
+        else:
+            next_text = "--"
+        rows.append(Field("Next run", next_text, color=DATE_COLOR))
+        rows.append(Field("Keeps", f"the newest {schedule.keep} scheduled backups"))
+    rows.append(Field(
+        "Destination", str(configured or default_backup_root(db_path)), color=METADATA_COLOR,
+        note=None if configured else "the default, beside the database",
+    ))
+    if schedule.enabled:
+        rows.append(Note(
+            "Only backups the schedule made are ever deleted, and only past the newest "
+            + str(schedule.keep) + ". Backups you create yourself are kept until you remove them."
+        ))
+    if standalone:
+        rows.append(Note(
+            "The running node makes scheduled backups; this console only changes the settings."
+        ))
+    return Section("Schedule", rows)
+
+
+async def _backup_schedule_editor(
+    session: Session, lane: DatabaseLane, actor: User, *, db_path: Path, identity_dir: Path | None,
+) -> None:
+    """Draft editor for the backup schedule and destination (issue #727).
+
+    Nothing is written before `[S]ave`. Saving a changed schedule counts from
+    that moment, so switching it on never fires for a slot already past.
+
+    The standalone console has no identity directory of its own; it checks a
+    destination against the one the node recorded at its last start, so a
+    destination the running node would refuse is refused here too."""
+    current, configured, recorded_identity = await lane.run(
+        lambda db: (load_backup_schedule(db), get_backup_destination_setting(db), recorded_node_identity_dir(db))
+    )
+    identity_dir = identity_dir or recorded_identity
+    draft: dict = {
+        "frequency": current.frequency,
+        "time": current.time_text,
+        "weekday": current.weekday,
+        "keep": current.keep,
+        "destination": str(configured) if configured else "",
+    }
+
+    fields = [
+        FieldSpec(
+            key="frequency", hotkey="f", menu_text=menu_key("F", "requency"), label="Frequency",
+            render=lambda d: d["frequency"],
+            prompt=choice_field("frequency", list(BACKUP_FREQUENCIES)),
+            step=choice_step("frequency", list(BACKUP_FREQUENCIES)),
+            brief="Off, daily or weekly",
+            help="Off makes no scheduled backups. Daily and weekly run at the time below, in the node's display timezone.",
+        ),
+        FieldSpec(
+            key="time", hotkey="t", menu_text=menu_key("T", "ime"), label="Time",
+            render=lambda d: d["time"], prompt=text_field("time"),
+            brief="24-hour, node's timezone",
+            help=(
+                "The wall-clock time the backup starts, as HH:MM on a 24-hour clock, in the node's "
+                "display timezone (Settings, Timestamp format). A node that was not running then "
+                "makes one backup when it next starts."
+            ),
+        ),
+        FieldSpec(
+            key="weekday", hotkey="w", menu_text=menu_key("W", "eekday"), label="Weekday (weekly)",
+            render=lambda d: WEEKDAY_NAMES[d["weekday"]],
+            prompt=choice_field("weekday", list(range(7))), step=choice_step("weekday", list(range(7))),
+            brief="Which day a weekly one runs",
+        ),
+        FieldSpec(
+            key="keep", hotkey="k", menu_text=menu_key("K", "eep"), label="Keep",
+            render=lambda d: f"newest {d['keep']} scheduled backups",
+            prompt=_int_field("keep", f"Scheduled backups to keep (1-{BACKUP_MAX_KEEP})"),
+            brief="Older scheduled ones are deleted",
+            help=(
+                "After each scheduled backup, older scheduled backups beyond this many are deleted. "
+                "Only backups the schedule itself made are ever deleted; backups made with Create "
+                "backup now, or anything else in the destination, are never touched."
+            ),
+        ),
+        FieldSpec(
+            key="destination", hotkey="d", menu_text=menu_key("D", "estination"), label="Destination",
+            render=lambda d: d["destination"] or f"(default) {default_backup_root(db_path)}",
+            prompt=_optional_text_field("destination"),
+            brief="Folder for every backup",
+            help=(
+                "An existing directory the node's account can write to, as an absolute path. Both "
+                "Create backup now and scheduled backups go there. Empty returns to the default "
+                "beside the database. This is still on this machine: copy backups off it yourself."
+            ),
+        ),
+    ]
+
+    async def save(draft: dict) -> bool:
+        hour, minute = parse_backup_time(draft["time"])
+        candidate = BackupSchedule(
+            frequency=draft["frequency"], hour=hour, minute=minute,
+            weekday=int(draft["weekday"]), keep=int(draft["keep"]),
+        )
+        validate_backup_schedule(candidate)
+        raw_destination = (draft["destination"] or "").strip()
+        destination = Path(raw_destination) if raw_destination else None
+
+        def _persist(db: Database) -> bool:
+            if destination is not None:
+                validate_backup_destination(destination, db_path=db_path, identity_dir=identity_dir)
+            schedule_changed = candidate != load_backup_schedule(db)
+            if schedule_changed:
+                save_backup_schedule(db, candidate)
+            if destination != get_backup_destination_setting(db):
+                set_backup_destination_setting(db, destination, db_path=db_path, identity_dir=identity_dir)
+            record_action(
+                db, actor=actor, action="set_backup_schedule",
+                detail=f"schedule={candidate.describe()} keep={candidate.keep} "
+                       f"destination={destination or 'default'}",
+            )
+            return schedule_changed
+
+        await lane.run(_persist)
+        _announce_line(session, f"Backup schedule: {candidate.describe()}.")
+        return True
+
+    await edit_resource_draft(
+        session, lane,
+        title="Backup schedule",
+        subtitle="Scheduled backups, how many to keep, and where backups go.",
+        fields=fields, draft=draft, save=save, error_type=BackupScheduleError,
+        save_menu_text=menu_key("S", "ave"), back_menu_text=menu_key("B", "ack"),
+        description_level=await lane.run(menu_description_level, actor),
+        redraw_in_place=await lane.run(redraw_in_place_enabled, actor),
+        unicode_style=await lane.run(unicode_style_enabled, actor),
+        collapsed=await lane.run(breadcrumb_collapsed_enabled, actor),
+        accent_color=await lane.run(effective_accent_color_256),
+        header_color=await lane.run(effective_header_color_256),
+    )
 
 
 _MANAGED_DNS_ACTIVE_STATUSES = (ManagedDnsRegistrationStatus.PENDING, ManagedDnsRegistrationStatus.MATURED)
@@ -10599,6 +10842,10 @@ async def _welcome_banner_menu(session: Session, lane: DatabaseLane, actor: User
             await session.write_line("")
             await _welcome_banner_filesystem_screen(session, lane, actor, description_level, redraw_in_place, unicode_style, collapsed)
             await _draw_welcome_banner_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed)
+        elif choice == "u":
+            await session.write_line("")
+            await _upload_banner_piece(session, lane, actor, path_of=banner_path, label="the welcome banner", audit_action="upload_welcome_banner")
+            await _draw_welcome_banner_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed)
         elif choice == HELP_KEY:
             await session.write_line("")
             header_color = await lane.run(effective_header_color_256)
@@ -10631,6 +10878,7 @@ async def _draw_welcome_banner_menu(
                 MenuEntry(label=menu_key("i", "t", prefix="Ed"), brief="Edit the banner text"),
                 MenuEntry(label=menu_key("G", "allery"), brief="Apply a bundled sample banner"),
                 MenuEntry(label=menu_key("F", "rom disk"), brief="Load your own .ans from this node"),
+                MenuEntry(label=menu_key("U", "pload"), brief="Send an .ans from your computer"),
                 MenuEntry(label=menu_key("B", "ack"), brief="Return to Banners"),
             ],
             description_level,
@@ -10840,6 +11088,179 @@ async def _welcome_banner_gallery_screen(
         return
 
 
+# Issue #728: the file-transfer grants of the node a console session runs on,
+# for the screens deep inside it that offer an upload link. Registered by
+# `admin_menu` rather than threaded through every banner menu's signature;
+# weakly keyed, so a finished session takes its entry with it. Absent in the
+# standalone `python -m netbbs.admin` console, which has no web listener.
+_console_transfers: "weakref.WeakKeyDictionary[Session, Any]" = weakref.WeakKeyDictionary()
+
+
+def _session_transfers(session: Session) -> Any:
+    return _console_transfers.get(getattr(session, "notice_session", session))
+
+
+def _upload_unavailable_reason(session: Session) -> str | None:
+    """Why this console cannot receive a file at all, before anything is
+    asked -- the same two routes a file area offers (issue #475)."""
+    from netbbs.net.file_flow import supports_zmodem
+
+    if supports_zmodem(session):
+        return None
+    transfers = _session_transfers(session)
+    # A link needs somewhere to go: an absolute URL, or this session's own
+    # browser page. Checked here, before a filename or a replacement is
+    # asked for, rather than only when the link is minted.
+    if transfers is not None and (
+        transfers.base_url is not None or getattr(session, "offer_transfer", None) is not None
+    ):
+        return None
+    return (
+        "This connection cannot carry a Zmodem transfer, and this node has no browser "
+        "transfer configured. Enable the web listener and its public_url, or connect with "
+        "a Zmodem-capable terminal, to upload from here."
+    )
+
+
+async def _receive_sysop_upload(
+    session: Session, lane: DatabaseLane, actor: User, target: SysOpUploadTarget, *, then: str,
+) -> None:
+    """Receive one file for `target` over Zmodem where the terminal can, or
+    hand out a single-use browser link where it cannot -- the file area's
+    own choice between the two (`netbbs.net.file_flow._handle_upload`)."""
+    from netbbs.net import zmodem
+    from netbbs.net.file_flow import offer_grant, supports_zmodem
+
+    if supports_zmodem(session):
+        await session.write_line(
+            f"Start your terminal's Zmodem send (sz) now. The file is saved as "
+            f"{target.destination.name}, whatever it is called on your side. Waiting for the transfer..."
+        )
+        temp_path = await lane.run(new_incoming_temp_path)
+        try:
+            received = await zmodem.receive_file(session, max_bytes=target.max_bytes, dest_path=temp_path)
+        except (zmodem.ZmodemError, NotImplementedError) as exc:
+            _announce(session, f"Upload failed: {exc}", error=True)
+            return
+        try:
+            size = await install_and_record(lane, actor, target, temp_path, sent_as=received.filename)
+        except SysOpUploadError as exc:
+            _announce(session, f"Upload failed: {exc}", error=True)
+            return
+        except OSError as exc:
+            _announce(session, f"Could not write {target.destination}: {exc.strerror or exc}", error=True)
+            return
+        _announce(session, f"Uploaded {size} bytes to {target.destination}. {then}")
+        return
+
+    transfers = _session_transfers(session)
+    if transfers is None:  # `_upload_unavailable_reason` is checked first; kept for safety
+        _announce(session, _upload_unavailable_reason(session) or "No transfer route.", error=True)
+        return
+    if not await offer_grant(
+        session, transfers,
+        mint=lambda: transfers.issue_sysop_upload(user=actor, target=target),
+        direction=UPLOAD, what=f"upload {target.label}",
+    ):
+        return
+    _announce(
+        session,
+        f"Whatever you send is saved as {target.destination}, up to {target.max_bytes} bytes. {then}",
+        color=MUTED_COLOR,
+    )
+
+
+_BANNER_FILE_SUFFIX_OF: dict[Callable[[Database], Path], Callable[[str], str]] = {
+    banner_path: lambda stem: f"{stem}_welcome_banner.ans",
+    main_menu_banner_path: lambda stem: f"{stem}_main_menu_banner.ans",
+    logoff_banner_path: lambda stem: f"{stem}_logoff_banner.ans",
+    new_account_banner_before_path: lambda stem: f"{stem}_new_account_banner_before.ans",
+    new_account_banner_after_path: lambda stem: f"{stem}_new_account_banner_after.ans",
+    board_list_banner_path: lambda stem: f"{stem}_board_list_banner.ans",
+    file_area_banner_path: lambda stem: f"{stem}_file_area_banner.ans",
+    chat_channel_picker_banner_path: lambda stem: f"{stem}_chat_channel_picker_banner.ans",
+}
+
+
+async def _upload_banner_piece(
+    session: Session, lane: DatabaseLane, actor: User, *,
+    path_of: Callable[[Database], Path], label: str, audit_action: str,
+) -> None:
+    """[U]pload on a banner or masthead screen (issue #728): one `.ans` file
+    from the SysOp's own computer, written to exactly this piece's file.
+
+    Never enables the piece. Replacing an existing file is confirmed first,
+    because an enabled piece shows the new file to callers at once."""
+    reason = _upload_unavailable_reason(session)
+    if reason is not None:
+        _announce(session, reason, error=True)
+        return
+    def _lexical(db: Database) -> Path:
+        # The piece helpers return a `.resolve()`d path, which has already
+        # followed a symlink at the piece's own name -- so the refusal below
+        # could never see one. Rebuild the name without following it: the
+        # database's directory, resolved, plus the piece's file name.
+        return db.path.parent.resolve() / _BANNER_FILE_SUFFIX_OF[path_of](db.path.stem)
+
+    destination = await lane.run(_lexical)
+    problem = destination_problem(destination)
+    if problem is not None:
+        _announce(session, problem, error=True)
+        return
+    if destination.exists() and not await prompt_yes_no(
+        session,
+        f"Replace the current {destination.name}? If {label} is enabled, callers see the new one at once",
+        default=False,
+    ):
+        _announce(session, "Nothing uploaded.")
+        return
+    target = SysOpUploadTarget(
+        kind=SYSOP_UPLOAD_BANNER, destination=destination, max_bytes=MAX_BANNER_SIZE_BYTES,
+        label=label, audit_action=audit_action, replaces=destination.exists(),
+    )
+    await _receive_sysop_upload(
+        session, lane, actor, target, then="Use [P]review, then [E]nable if it is not on yet.",
+    )
+
+
+async def _upload_door_file_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
+    """Doors -> [U]pload (issue #728): one file into the node's own doors
+    directory, the one [F]rom disk lists. The SysOp names it first; the
+    name the sending side reports is not used. Nothing is registered and
+    no mode bits change: [F]rom disk runs a script through an interpreter,
+    so it needs no execute bit."""
+    reason = _upload_unavailable_reason(session)
+    if reason is not None:
+        _announce(session, reason, error=True)
+        return
+    directory = await lane.run(custom_doors_dir)
+    await write_prompt(session, f"\r\nName for the file in {directory} (blank cancels): ")
+    name = (await session.read_line()).strip()
+    if not name:
+        _announce(session, "Nothing uploaded.")
+        return
+    error = door_filename_error(name)
+    if error is not None:
+        _announce(session, error, error=True)
+        return
+    destination = directory / name
+    problem = destination_problem(destination)
+    if problem is not None:
+        _announce(session, problem, error=True)
+        return
+    if destination.exists() and not await prompt_yes_no(
+        session, f"Replace the existing {name}? A door that runs it uses the new file from its next launch",
+        default=False,
+    ):
+        _announce(session, "Nothing uploaded.")
+        return
+    target = SysOpUploadTarget(
+        kind=SYSOP_UPLOAD_DOOR_FILE, destination=destination, max_bytes=await lane.run(get_max_upload_bytes),
+        label=f"door file {name}", audit_action="upload_door_file", replaces=destination.exists(),
+    )
+    await _receive_sysop_upload(session, lane, actor, target, then="Use [F]rom disk to register it as a door.")
+
+
 def _browsable_ans_files(directory: Path, *, exclude: Path) -> list[Path]:
     """Every `.ans` file in `directory` except `exclude` (the picker's
     own current target -- loading it onto itself is a pointless option,
@@ -10869,7 +11290,7 @@ async def _banner_help_screen(
     realizing the file just isn't in the right place yet."""
     lines = [
         colored("Placing your own .ans file", fg_color=header_color, bold=True),
-        "  Upload or save it (e.g. via SFTP/SCP) as exactly this path, then [E]nable:",
+        "  Send it with [U]pload, or place it (e.g. via SFTP/SCP) at exactly this path, then [E]nable:",
         f"  {path}",
         "  Or save it under any other name in that same directory and pick it up "
         "with [F]rom disk instead of overwriting this one directly.",
@@ -10943,7 +11364,7 @@ async def _welcome_banner_filesystem_screen(
         _announce(
             session,
             f"No other .ans files found in {directory}. Place one there "
-            f"(e.g. via SFTP/SCP), then browse again.",
+            f"(e.g. via SFTP/SCP), or send one with [U]pload, then browse again.",
             color=MUTED_COLOR,
         )
         return
@@ -11041,6 +11462,10 @@ async def _main_menu_banner_menu(session: Session, lane: DatabaseLane, actor: Us
             await session.write_line("")
             await _main_menu_banner_filesystem_screen(session, lane, actor, description_level, redraw_in_place, unicode_style, collapsed)
             await _draw_main_menu_banner_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed)
+        elif choice == "u":
+            await session.write_line("")
+            await _upload_banner_piece(session, lane, actor, path_of=main_menu_banner_path, label="the main-menu masthead", audit_action="upload_main_menu_banner")
+            await _draw_main_menu_banner_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed)
         elif choice == HELP_KEY:
             await session.write_line("")
             header_color = await lane.run(effective_header_color_256)
@@ -11079,6 +11504,7 @@ async def _draw_main_menu_banner_menu(
                 MenuEntry(label=menu_key("i", "t", prefix="Ed"), brief="Edit the masthead art"),
                 MenuEntry(label=menu_key("G", "allery"), brief="Apply a bundled sample masthead"),
                 MenuEntry(label=menu_key("F", "rom disk"), brief="Load your own .ans from this node"),
+                MenuEntry(label=menu_key("U", "pload"), brief="Send an .ans from your computer"),
                 MenuEntry(label=menu_key("B", "ack"), brief="Return to Mastheads"),
             ],
             description_level,
@@ -11251,7 +11677,7 @@ async def _main_menu_banner_filesystem_screen(
         _announce(
             session,
             f"No other .ans files found in {directory}. Place one there "
-            f"(e.g. via SFTP/SCP), then browse again.",
+            f"(e.g. via SFTP/SCP), or send one with [U]pload, then browse again.",
             color=MUTED_COLOR,
         )
         return
@@ -11428,6 +11854,10 @@ async def _logoff_banner_menu(session: Session, lane: DatabaseLane, actor: User)
             await session.write_line("")
             await _logoff_banner_filesystem_screen(session, lane, actor, description_level, redraw_in_place, unicode_style, collapsed)
             await _draw_logoff_banner_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+        elif choice == "u":
+            await session.write_line("")
+            await _upload_banner_piece(session, lane, actor, path_of=logoff_banner_path, label="the log-off banner", audit_action="upload_logoff_banner")
+            await _draw_logoff_banner_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == HELP_KEY:
             await session.write_line("")
             await _banner_help_screen(
@@ -11464,6 +11894,7 @@ async def _draw_logoff_banner_menu(
                 MenuEntry(label=menu_key("i", "t", prefix="Ed"), brief="Edit the banner text"),
                 MenuEntry(label=menu_key("G", "allery"), brief="Apply a bundled sample banner"),
                 MenuEntry(label=menu_key("F", "rom disk"), brief="Load your own .ans from this node"),
+                MenuEntry(label=menu_key("U", "pload"), brief="Send an .ans from your computer"),
                 MenuEntry(label=menu_key("B", "ack"), brief="Return to Banners"),
             ],
             description_level,
@@ -11605,7 +12036,7 @@ async def _logoff_banner_filesystem_screen(
         _announce(
             session,
             f"No other .ans files found in {directory}. Place one there "
-            f"(e.g. via SFTP/SCP), then browse again.",
+            f"(e.g. via SFTP/SCP), or send one with [U]pload, then browse again.",
             color=MUTED_COLOR,
         )
         return
@@ -11699,6 +12130,10 @@ async def _new_account_banner_before_menu(session: Session, lane: DatabaseLane, 
             await session.write_line("")
             await _new_account_banner_before_filesystem_screen(session, lane, actor, description_level, redraw_in_place, unicode_style, collapsed)
             await _draw_new_account_banner_before_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+        elif choice == "u":
+            await session.write_line("")
+            await _upload_banner_piece(session, lane, actor, path_of=new_account_banner_before_path, label="the before-signup banner", audit_action="upload_new_account_banner_before")
+            await _draw_new_account_banner_before_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == HELP_KEY:
             await session.write_line("")
             await _banner_help_screen(
@@ -11735,6 +12170,7 @@ async def _draw_new_account_banner_before_menu(
                 MenuEntry(label=menu_key("i", "t", prefix="Ed"), brief="Edit the banner text"),
                 MenuEntry(label=menu_key("G", "allery"), brief="Apply a bundled sample banner"),
                 MenuEntry(label=menu_key("F", "rom disk"), brief="Load your own .ans from this node"),
+                MenuEntry(label=menu_key("U", "pload"), brief="Send an .ans from your computer"),
                 MenuEntry(label=menu_key("B", "ack"), brief="Return to Banners"),
             ],
             description_level,
@@ -11882,7 +12318,7 @@ async def _new_account_banner_before_filesystem_screen(
         _announce(
             session,
             f"No other .ans files found in {directory}. Place one there "
-            f"(e.g. via SFTP/SCP), then browse again.",
+            f"(e.g. via SFTP/SCP), or send one with [U]pload, then browse again.",
             color=MUTED_COLOR,
         )
         return
@@ -11978,6 +12414,10 @@ async def _new_account_banner_after_menu(session: Session, lane: DatabaseLane, a
             await session.write_line("")
             await _new_account_banner_after_filesystem_screen(session, lane, actor, description_level, redraw_in_place, unicode_style, collapsed)
             await _draw_new_account_banner_after_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+        elif choice == "u":
+            await session.write_line("")
+            await _upload_banner_piece(session, lane, actor, path_of=new_account_banner_after_path, label="the after-signup banner", audit_action="upload_new_account_banner_after")
+            await _draw_new_account_banner_after_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == HELP_KEY:
             await session.write_line("")
             await _banner_help_screen(
@@ -12014,6 +12454,7 @@ async def _draw_new_account_banner_after_menu(
                 MenuEntry(label=menu_key("i", "t", prefix="Ed"), brief="Edit the banner text"),
                 MenuEntry(label=menu_key("G", "allery"), brief="Apply a bundled sample banner"),
                 MenuEntry(label=menu_key("F", "rom disk"), brief="Load your own .ans from this node"),
+                MenuEntry(label=menu_key("U", "pload"), brief="Send an .ans from your computer"),
                 MenuEntry(label=menu_key("B", "ack"), brief="Return to Banners"),
             ],
             description_level,
@@ -12161,7 +12602,7 @@ async def _new_account_banner_after_filesystem_screen(
         _announce(
             session,
             f"No other .ans files found in {directory}. Place one there "
-            f"(e.g. via SFTP/SCP), then browse again.",
+            f"(e.g. via SFTP/SCP), or send one with [U]pload, then browse again.",
             color=MUTED_COLOR,
         )
         return
@@ -12335,6 +12776,10 @@ async def _board_list_masthead_menu(session: Session, lane: DatabaseLane, actor:
             await session.write_line("")
             await _board_list_masthead_filesystem_screen(session, lane, actor, description_level, redraw_in_place, unicode_style, collapsed)
             await _draw_board_list_masthead_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+        elif choice == "u":
+            await session.write_line("")
+            await _upload_banner_piece(session, lane, actor, path_of=board_list_banner_path, label="the message-board masthead", audit_action="upload_board_list_banner")
+            await _draw_board_list_masthead_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == HELP_KEY:
             await session.write_line("")
             await _banner_help_screen(
@@ -12371,6 +12816,7 @@ async def _draw_board_list_masthead_menu(
                 MenuEntry(label=menu_key("i", "t", prefix="Ed"), brief="Edit the masthead art"),
                 MenuEntry(label=menu_key("G", "allery"), brief="Apply a bundled sample masthead"),
                 MenuEntry(label=menu_key("F", "rom disk"), brief="Load your own .ans from this node"),
+                MenuEntry(label=menu_key("U", "pload"), brief="Send an .ans from your computer"),
                 MenuEntry(label=menu_key("B", "ack"), brief="Return to Mastheads"),
             ],
             description_level,
@@ -12512,7 +12958,7 @@ async def _board_list_masthead_filesystem_screen(
         _announce(
             session,
             f"No other .ans files found in {directory}. Place one there "
-            f"(e.g. via SFTP/SCP), then browse again.",
+            f"(e.g. via SFTP/SCP), or send one with [U]pload, then browse again.",
             color=MUTED_COLOR,
         )
         return
@@ -12606,6 +13052,10 @@ async def _file_area_masthead_menu(session: Session, lane: DatabaseLane, actor: 
             await session.write_line("")
             await _file_area_masthead_filesystem_screen(session, lane, actor, description_level, redraw_in_place, unicode_style, collapsed)
             await _draw_file_area_masthead_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+        elif choice == "u":
+            await session.write_line("")
+            await _upload_banner_piece(session, lane, actor, path_of=file_area_banner_path, label="the file-area masthead", audit_action="upload_file_area_banner")
+            await _draw_file_area_masthead_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == HELP_KEY:
             await session.write_line("")
             await _banner_help_screen(
@@ -12642,6 +13092,7 @@ async def _draw_file_area_masthead_menu(
                 MenuEntry(label=menu_key("i", "t", prefix="Ed"), brief="Edit the masthead art"),
                 MenuEntry(label=menu_key("G", "allery"), brief="Apply a bundled sample masthead"),
                 MenuEntry(label=menu_key("F", "rom disk"), brief="Load your own .ans from this node"),
+                MenuEntry(label=menu_key("U", "pload"), brief="Send an .ans from your computer"),
                 MenuEntry(label=menu_key("B", "ack"), brief="Return to Mastheads"),
             ],
             description_level,
@@ -12781,7 +13232,7 @@ async def _file_area_masthead_filesystem_screen(
         _announce(
             session,
             f"No other .ans files found in {directory}. Place one there "
-            f"(e.g. via SFTP/SCP), then browse again.",
+            f"(e.g. via SFTP/SCP), or send one with [U]pload, then browse again.",
             color=MUTED_COLOR,
         )
         return
@@ -12875,6 +13326,10 @@ async def _chat_channel_picker_masthead_menu(session: Session, lane: DatabaseLan
             await session.write_line("")
             await _chat_channel_picker_masthead_filesystem_screen(session, lane, actor, description_level, redraw_in_place, unicode_style, collapsed)
             await _draw_chat_channel_picker_masthead_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+        elif choice == "u":
+            await session.write_line("")
+            await _upload_banner_piece(session, lane, actor, path_of=chat_channel_picker_banner_path, label="the chat-channel masthead", audit_action="upload_chat_channel_picker_banner")
+            await _draw_chat_channel_picker_masthead_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == HELP_KEY:
             await session.write_line("")
             await _banner_help_screen(
@@ -12911,6 +13366,7 @@ async def _draw_chat_channel_picker_masthead_menu(
                 MenuEntry(label=menu_key("i", "t", prefix="Ed"), brief="Edit the masthead art"),
                 MenuEntry(label=menu_key("G", "allery"), brief="Apply a bundled sample masthead"),
                 MenuEntry(label=menu_key("F", "rom disk"), brief="Load your own .ans from this node"),
+                MenuEntry(label=menu_key("U", "pload"), brief="Send an .ans from your computer"),
                 MenuEntry(label=menu_key("B", "ack"), brief="Return to Mastheads"),
             ],
             description_level,
@@ -13056,7 +13512,7 @@ async def _chat_channel_picker_masthead_filesystem_screen(
         _announce(
             session,
             f"No other .ans files found in {directory}. Place one there "
-            f"(e.g. via SFTP/SCP), then browse again.",
+            f"(e.g. via SFTP/SCP), or send one with [U]pload, then browse again.",
             color=MUTED_COLOR,
         )
         return
@@ -16731,6 +17187,11 @@ async def _door_menu(session: Session, lane: DatabaseLane, actor: User, *, door_
                                           door_services=door_services)
             status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
             await _draw_door_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
+        elif choice == "u":
+            await session.write_line("")
+            await _upload_door_file_screen(session, lane, actor)
+            status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
+            await _draw_door_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
         elif choice == "l":
             await session.write_line("")
             await _list_doors_screen(session, lane, actor, door_services=door_services)
@@ -16755,6 +17216,7 @@ async def _draw_door_menu(
                     MenuEntry(label=menu_key("C", "reate"), brief="Register a new door"),
                     MenuEntry(label=menu_key("G", "allery"), brief="Register one of NetBBS's own doors"),
                     MenuEntry(label=menu_key("F", "rom disk"), brief="Register a script from this node"),
+                    MenuEntry(label=menu_key("U", "pload"), brief="Send a door file to this node"),
                     MenuEntry(label=menu_key("L", "ist"), brief="Browse and edit doors"),
                     MenuEntry(label=menu_key("B", "ack"), brief="Return to the Content menu"),
                 ],
@@ -17121,13 +17583,16 @@ async def _door_filesystem_screen(
         directory = custom_doors_dir(db)
         if not directory.is_dir():
             return [], directory
-        return sorted(p for p in directory.iterdir() if p.is_file()), directory
+        # Hidden files are left out: nothing a SysOp registers starts with a
+        # dot, and an upload interrupted by a crash leaves its temporary copy
+        # here under one (`netbbs.sysop_uploads.install_upload`).
+        return sorted(p for p in directory.iterdir() if p.is_file() and not p.name.startswith(".")), directory
 
     files, directory = await lane.run(_list)
     if not files:
         _announce_line(session, colored(
             f"\r\nNo files found in {directory}. Place your own door script there "
-            f"(e.g. via SFTP/SCP), then browse again.", fg_color=MUTED_COLOR,
+            f"(e.g. via SFTP/SCP), or send one with [U]pload, then browse again.", fg_color=MUTED_COLOR,
         ))
         return
 

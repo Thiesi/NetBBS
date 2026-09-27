@@ -4084,8 +4084,21 @@ primitive via a worker thread, using the database lane's path and the running
 node's effective configured identity directory. Never guess the default
 identity path in this flow: a custom identity directory omitted from a
 nominally successful backup would make it non-recoverable. Standalone admin
-therefore remains status-only; custom destinations and scheduling use the
-CLI, and restore remains offline/CLI-only.
+therefore never creates a backup. It may edit the backup schedule and
+destination (issue #727), which only the running node acts on, and whose
+identity directory the node checks at run time. Restore remains
+offline/CLI-only.
+
+Scheduled backups (issue #727): slots are UTC instants derived from local wall
+times, because same-`tzinfo` datetimes compare by wall clock and a
+spring-forward gap would otherwise make one slot due twice. The last-handled
+marker is written before the work, so a crashing pass cannot repeat per poll.
+Retention deletes only rows of `scheduled_backups` whose directory still holds
+a manifest. The destination's `st_dev` is recorded when set and checked before
+every backup: an unmounted disk leaves a writable mount point on the root
+filesystem, and existence alone does not tell the two apart. The scheduler
+task keeps owning its worker across cancellation, so shutdown waits for a
+running backup rather than removing the PID file under it.
 
 Revalidate that configured identity directory in the backup worker immediately
 before creating the destination. Because cancellation cannot stop an
