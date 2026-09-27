@@ -4304,13 +4304,14 @@ def test_no_world_is_migrated_for_a_tone(tmp_path):
     happened -- and it would cost a schema version that older game binaries refuse
     outright.
     """
-    assert wd.WORLD_SCHEMA_VERSION == 10
-    assert not hasattr(wd, "_migrate_world_v11")
+    # 11 counts Trades for the taper (issue #649); it touches no receipt.
+    assert wd.WORLD_SCHEMA_VERSION == 11
+    assert not hasattr(wd, "_migrate_world_v12")
     source = _WAR_DIALER_PATH.read_text(encoding="utf-8")
     assert "UPDATE events SET actor_handle=NULL" not in source
     # A world at the shipped version is opened, not upgraded.
     conn, _ = _painted_world(tmp_path, "noupgrade.db")
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 10
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 11
     conn.close()
 
 
@@ -4563,3 +4564,16 @@ def test_a_door_waiting_for_input_still_publishes_its_first_screen(tmp_path):
     state.mkdir()
     pages = gallery.capture(door, state, b"^", 80, 24, {}, expect=False)
     assert "W A R   D I A L E R" in "".join(pages)
+
+
+def test_trade_preview_quotes_the_tapered_range_and_says_why(tmp_path):
+    # Issue #649: the preview is where a caller sees the taper before paying.
+    conn, now = _painted_world(tmp_path)
+    player = wd.refresh_player(conn, 1, now)
+    fresh = "\n".join(wd.action_preview_lines("trade", player))
+    assert "Gross payout: $20-$60" in fresh and "turn-day" not in fresh
+    player.turns_trading = 5
+    tapered = "\n".join(wd.action_preview_lines("trade", player))
+    assert "Gross payout: $20-$45" in tapered
+    assert "Trade 6 of this turn-day" in tapered and "back to $60 when your turns refill" in tapered
+    conn.close()
