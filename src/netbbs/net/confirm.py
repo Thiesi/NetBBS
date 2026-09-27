@@ -101,19 +101,3 @@ async def prompt_yes_no(session: Session, prompt: str, *, default: bool) -> bool
     await write_prompt(session, f"{prompt} {_BRACKET_OPEN}{hint}{_BRACKET_CLOSE}: ")
     answer = await read_confirmation_choice(session)
     return default if answer is None else answer
-
-
-async def prompt_yes_no_or_keep(session: Session, prompt: str, *, current: bool) -> bool:
-    """
-    The *edit*-screen counterpart to `prompt_yes_no`: the hint shows
-    only the current value (`[y]` or `[N]`, never both), and a bare
-    Enter keeps it unchanged rather than selecting a fixed default --
-    the same "blank = keep" convention `_prompt_optional_int`/
-    `_prompt_min_age`/`_prompt_name_requirement` already use for
-    non-boolean fields on the very same edit screens. Y/N returns on one
-    keypress; Enter keeps the current value.
-    """
-    hint = _highlighted("y" if current else "N")
-    await write_prompt(session, f"{prompt} {_BRACKET_OPEN}{hint}{_BRACKET_CLOSE}: ")
-    answer = await read_confirmation_choice(session)
-    return current if answer is None else answer

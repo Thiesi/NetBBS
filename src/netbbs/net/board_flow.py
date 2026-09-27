@@ -19,6 +19,7 @@ also split out, hold only session-entry/auth logic).
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from functools import partial
 from pathlib import Path
 
 from netbbs.activity import (
@@ -1077,7 +1078,10 @@ async def _show_board(
             announce(session, "Post cancelled.", tone="muted")
             return
         draft_path = _post_draft_path(db, kind="new", board=board, user=user)
-        body = await _compose_body(session, db, user, initial_text=initial_body, draft_path=draft_path)
+        body = await _compose_body(
+            session, db, user, initial_text=initial_body, draft_path=draft_path,
+            keep_pasted_color=board.allow_color,
+        )
         if body is not None:
             # `append_signature` is idempotent (its own docstring): a
             # resumed draft (`initial_body`) may or may not already
@@ -1502,7 +1506,7 @@ async def _edit_existing_post(
         db, kind="art_edit" if art else "edit", board=board, user=user, root_post_id=post.root_post_id
     )
     draft_saved_notice = "Draft saved -- you'll be offered it next time you edit this post."
-    editor = _draw_body if art else _compose_body
+    editor = _draw_body if art else partial(_compose_body, keep_pasted_color=board.allow_color)
     body = await editor(session, db, user, initial_text=initial_body, draft_path=edit_draft_path)
     if body is None:
         # Issue #149: /exit or /quit leaves this revision's draft on
@@ -1610,7 +1614,7 @@ async def _review_and_commit(
             subject = await read_prefilled_field(session, "Subject", subject)
             continue
         if action is ReviewAction.EDIT_BODY:
-            editor = _draw_body if layout == "art" else _compose_body
+            editor = _draw_body if layout == "art" else partial(_compose_body, keep_pasted_color=board.allow_color)
             revised = await editor(session, db, user, initial_text=body, draft_path=draft_path)
             if revised is not None:
                 body = revised
@@ -1844,7 +1848,13 @@ async def _draw_body(
 
 
 async def _compose_body(
-    session: Session, db: Database, user: User, *, initial_text: str | None = None, draft_path: Path
+    session: Session,
+    db: Database,
+    user: User,
+    *,
+    initial_text: str | None = None,
+    draft_path: Path,
+    keep_pasted_color: bool = False,
 ) -> str | None:
     """The single place a post body (or an edit of one) is actually
     entered: the fullscreen prose editor if `user` has opted in,
@@ -1854,11 +1864,15 @@ async def _compose_body(
     leave (draft kept -- issue #149, see `edit_line_body`'s/
     `edit_prose`'s own docstrings) -- `draft_path.exists()` after a
     `None` return tells the two apart. Neither path persists a real
-    post itself."""
+    post itself.
+
+    `keep_pasted_color` is the board's "Color in posts" setting (issue
+    #754): where pipe codes are color, pasted color is typed in as them;
+    where they are text, it is dropped rather than left as ``|04``."""
     if fullscreen_editor_enabled(db, user):
         return await edit_prose(
             session, initial_text=initial_text, draft_path=draft_path, max_bytes=MAX_BODY_BYTES,
-            unicode_style=unicode_style_enabled(db, user),
+            unicode_style=unicode_style_enabled(db, user), keep_pasted_color=keep_pasted_color,
         )
     return await edit_line_body(
         session,
@@ -1866,6 +1880,7 @@ async def _compose_body(
         max_bytes=MAX_BODY_BYTES,
         max_lines=_MAX_PLAIN_POST_LINES,
         draft_path=draft_path,
+        keep_pasted_color=keep_pasted_color,
     )
 
 

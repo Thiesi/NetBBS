@@ -275,6 +275,10 @@ from netbbs.link.files import (
     link_file_area,
     queue_file_descriptor_if_linked,
 )
+from netbbs.link.dial_in import (
+    MAX_DIAL_IN_ADDRESSES, MAX_DIAL_IN_URL_BYTES, DialInError, get_stated_dial_in, published_dial_in,
+    set_stated_dial_in_without_commit, suggested_dial_in,
+)
 from netbbs.link.key_rotation import KeyRotationError
 from netbbs.link.node_identity import operational_key_history
 from netbbs.link.protocol import PeerRecord
@@ -442,7 +446,7 @@ from netbbs.net.char_input import (
     EditorKeyKind,
     reject_unhandled_key,
 )
-from netbbs.net.confirm import prompt_yes_no, prompt_yes_no_or_keep
+from netbbs.net.confirm import prompt_yes_no
 from netbbs.config import get_max_upload_bytes
 from netbbs.files.storage import new_incoming_temp_path
 from netbbs.net.file_transfer import UPLOAD, install_and_record
@@ -464,6 +468,7 @@ from netbbs.net.resource_editor import (
     write_field_message,
     FieldSpec,
     bool_field,
+    bool_step,
     choice_field,
     choice_step,
     edit_resource_draft as _edit_resource_draft,
@@ -477,6 +482,7 @@ from netbbs.net.shutdown import (
     run_drain_sequence,
     run_shutdown_sequence,
 )
+from netbbs.net.sysop_monitor import monitor_screen
 from netbbs.net.password_screen import manage_password_screen
 from netbbs.net.ssh_key_screen import manage_ssh_keys_screen
 from netbbs.net.menu_description_preference import menu_description_level
@@ -8249,13 +8255,16 @@ async def _mrc_settings_screen(
     mrc_bridge = node_controls.mrc_bridge if node_controls is not None else None
     unicode_style = await lane.run(unicode_style_enabled, actor)
 
-    async def _tls_field(session: Session, lane: DatabaseLane, draft: dict) -> None:
+    def _toggle_tls(draft: dict, direction: int = 1) -> None:
         was = bool(draft.get("tls"))
-        draft["tls"] = await prompt_yes_no_or_keep(session, "Use TLS to reach the hub?", current=was)
+        draft["tls"] = not was
         # The two well-known hub ports differ only by transport; follow
         # the toggle unless the SysOp chose a custom port.
-        if draft["tls"] != was and draft.get("port") == default_port_for(was):
+        if draft.get("port") == default_port_for(was):
             draft["port"] = default_port_for(draft["tls"])
+
+    async def _tls_field(session: Session, lane: DatabaseLane, draft: dict) -> None:
+        _toggle_tls(draft)
 
     def _preamble(draft: dict) -> str:
         lines = [
@@ -8275,7 +8284,7 @@ async def _mrc_settings_screen(
         FieldSpec(
             key="enabled", hotkey="e", menu_text=menu_key("E", "nable/Disable"), label="Enabled",
             render=lambda d: "yes" if d["enabled"] else "no",
-            prompt=bool_field("enabled", "Connect this node to the MRC hub?"),
+            prompt=bool_field("enabled"), step=bool_step("enabled"),
             brief="Switch the hub link on or off", section="Hub",
             help="Off by default. Even when on, only channels you bridge individually reach the network.",
         ),
@@ -8292,7 +8301,7 @@ async def _mrc_settings_screen(
         ),
         FieldSpec(
             key="tls", hotkey="t", menu_text=menu_key("T", "LS"), label="TLS",
-            render=lambda d: "yes" if d["tls"] else "no", prompt=_tls_field,
+            render=lambda d: "yes" if d["tls"] else "no", prompt=_tls_field, step=_toggle_tls,
             brief="Encrypt the hub connection", section="Hub",
             help="Recommended. The hub's certificate is verified against the system CA store.",
         ),
@@ -8768,6 +8777,12 @@ async def _link_status_sections(
                 identity.append(Field("Advertised address", f"{config.advertised_host}:{config.advertised_port}"))
             else:
                 identity.append(Field("Advertised address", "(not configured)", color=WARNING_COLOR))
+    # Issue #777: where callers reach this board, as its descriptor says.
+    dial_in, dial_in_source = await lane.run(_published_dial_in_summary)
+    identity.append(Field(
+        "Dial-in", _describe_published_dial_in(dial_in, dial_in_source),
+        color=VALUE_COLOR if dial_in else MUTED_COLOR,
+    ))
     sections = [Section("Identity", identity)]
 
     identity_notices = await lane.run(list_identity_observations)
@@ -9152,6 +9167,136 @@ async def _carry_decisions_screen(
                     return
 
 
+def _published_dial_in_summary(db: Database) -> tuple[tuple[str, ...], str]:
+    """What this node's next descriptor carries as `dial_in`, and where it
+    comes from: `"stated"` (the SysOp saved a list, possibly empty),
+    `"public_url"` (never saved; `[web] public_url` stands in) or
+    `"none"`."""
+    if get_stated_dial_in(db) is not None:
+        return published_dial_in(db), "stated"
+    published = published_dial_in(db)
+    return published, "public_url" if published else "none"
+
+
+def _describe_published_dial_in(published: tuple[str, ...], source: str) -> str:
+    """One plain-text line for the Link status panel and the editor. The
+    URLs are this node's own validated entries; the caller sanitizes the
+    line before styling it, as for any text."""
+    if not published:
+        return "none (you saved an empty list)" if source == "stated" else "none"
+    listed = ", ".join(published)
+    return f"{listed} (from [web] public_url until you save a list)" if source == "public_url" else listed
+
+
+async def _dial_in_editor(
+    session: Session, lane: DatabaseLane, actor: User, *, link_context: LinkContext,
+) -> None:
+    """The SysOp's statement of where callers reach this board (issue #777,
+    design doc §8.2 and §8.12, §16 issue #767 Decision 6).
+
+    A draft editor (§3.5): four address slots, seeded from the saved list,
+    and `[U]se suggestions`, which copies the suggested entries -- this
+    node's DNS name with its enabled telnet and SSH listener ports, and an
+    `https://` `[web] public_url` -- into the draft. Nothing is published
+    until `[S]ave`; the node cannot see what is in front of its listeners,
+    so a suggestion is only ever a starting point. `[S]ave` validates every
+    slot with the same `parse_dial_in_url` a reader applies and raises
+    `DialInError` on the first bad one, keeping the draft. Saving with
+    every slot empty is a statement too: the node then publishes nothing,
+    and `[web] public_url` no longer stands in."""
+    config = link_context.link_config
+    advertised_host = config.advertised_host if config is not None else None
+    stated = await lane.run(get_stated_dial_in)
+    published, source = await lane.run(_published_dial_in_summary)
+    suggestions = await lane.run(suggested_dial_in, advertised_host)
+    seed = list(stated if stated is not None else published)
+    slots = [f"address_{index}" for index in range(1, MAX_DIAL_IN_ADDRESSES + 1)]
+    draft = {key: (seed[position] if position < len(seed) else "") for position, key in enumerate(slots)}
+
+    async def use_suggestions_prompt(session: Session, lane: DatabaseLane, draft: dict) -> None:
+        # Fills the draft only; `[S]ave` is still what publishes.
+        for position, key in enumerate(slots):
+            draft[key] = suggestions[position] if position < len(suggestions) else ""
+
+    fields = [
+        FieldSpec(
+            key=key, hotkey=str(position), menu_text=menu_key(str(position), f" Address {position}"),
+            label=f"Address {position}", render=lambda d, key=key: d[key] or "(empty)",
+            prompt=text_field(key),
+            brief="telnet://, ssh:// or https://",
+            help=(
+                "Where a caller reaches this board: telnet://host:port, ssh://host:port or an "
+                f"https:// URL, at most {MAX_DIAL_IN_URL_BYTES} bytes. Plain http:// is not accepted. "
+                "Empty the line to drop the entry."
+            ),
+        )
+        for position, key in enumerate(slots, start=1)
+    ]
+    fields.append(FieldSpec(
+        key="suggestions", hotkey="u", menu_text=menu_key("U", "se suggestions"), label="Suggested",
+        render=lambda d: ", ".join(suggestions) if suggestions else "(none -- no DNS name or listeners on record)",
+        prompt=use_suggestions_prompt,
+        brief="Fill the slots; not saved yet",
+        help=(
+            "Suggestions come from this node's DNS name and its enabled telnet and SSH listener "
+            "ports, plus an https:// [web] public_url. They are not published by themselves: check "
+            "them against your port forwards and proxies, then save."
+        ),
+    ))
+
+    def preamble(_draft: dict) -> str:
+        now = sanitize_text(_describe_published_dial_in(published, source))
+        return "\r\n".join([
+            colored("Published now: ", fg_color=LABEL_COLOR) + colored(now, fg_color=VALUE_COLOR),
+            colored(
+                "Callers dial these; other boards show them on their node map. Suggested entries "
+                "are not published until you save.", fg_color=MUTED_COLOR,
+            ),
+        ])
+
+    async def save(draft: dict) -> list[str]:
+        values = [draft[key] for key in slots]
+
+        def _persist(db: Database) -> list[str]:
+            # The list and its audit entry commit together or not at all,
+            # as the limits-and-retention save does.
+            db.connection.execute("BEGIN IMMEDIATE")
+            try:
+                accepted = set_stated_dial_in_without_commit(db, values)
+                record_action_without_commit(
+                    db, actor=actor, action="set_dial_in",
+                    detail=", ".join(accepted) if accepted else "(none)",
+                )
+            except BaseException:
+                db.connection.rollback()
+                raise
+            else:
+                db.connection.commit()
+            return accepted
+
+        accepted = await lane.run(_persist)
+        if accepted:
+            _announce_line(session, f"Dial-in addresses saved ({len(accepted)}); the next hello publishes them.")
+        else:
+            _announce_line(session, "Dial-in addresses saved empty; this node publishes none.")
+        return accepted
+
+    await edit_resource_draft(
+        session, lane,
+        title="Dial-in addresses",
+        subtitle="Where callers reach this board, as other boards will show it.",
+        fields=fields, draft=draft, save=save, error_type=DialInError,
+        save_menu_text=menu_key("S", "ave"), back_menu_text=menu_key("B", "ack"),
+        preamble=preamble,
+        description_level=await lane.run(menu_description_level, actor),
+        redraw_in_place=await lane.run(redraw_in_place_enabled, actor),
+        unicode_style=await lane.run(unicode_style_enabled, actor),
+        collapsed=await lane.run(breadcrumb_collapsed_enabled, actor),
+        accent_color=await lane.run(effective_accent_color_256),
+        header_color=await lane.run(effective_header_color_256),
+    )
+
+
 async def _link_status_screen(
     session: Session, lane: DatabaseLane, actor: User, *, link_context: LinkContext,
     node_controls: NodeControls | None = None,
@@ -9199,6 +9344,8 @@ async def _link_status_screen(
             actions.append(("a", menu_key("A", "cknowledge identity changes")))
         # Issue #624: the node's own keys and their rotation.
         actions.append(("k", menu_key("K", "eys")))
+        # Issue #777: where callers reach this board.
+        actions.append(("d", menu_key("D", "ial-in")))
         # Issue #683: what this node holds and does not carry.
         offered, excluded = await _carry_decision_totals(lane)
         if offered:
@@ -9228,6 +9375,8 @@ async def _link_status_screen(
                 session, lane, actor, link_context=link_context,
                 key_rotation=node_controls.key_rotation if node_controls is not None else None,
             )
+        elif choice == "d":
+            await _dial_in_editor(session, lane, actor, link_context=link_context)
         elif choice == "a":
             for notice in identity_notices[:5]:
                 await lane.run(dismiss_identity_observation, notice.id)
@@ -10288,6 +10437,12 @@ async def _node_menu(session: Session, lane: DatabaseLane, actor: User, node_con
             await session.write_line("")
             await _who_screen(session, lane, actor, node_controls)
             await _draw_node_menu(session, node_controls, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+        elif choice == "o":
+            await monitor_screen(
+                session, lane, actor, node_controls,
+                disconnect=lambda entry: disconnect_session_draft(session, lane, actor, node_controls, entry),
+            )
+            await _draw_node_menu(session, node_controls, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == "s":
             await session.write_line("")
             await _shutdown_screen(session, lane, actor, node_controls)
@@ -10367,6 +10522,7 @@ async def _draw_node_menu(
         "\r\n" + _fitted_menu(
             [
                 MenuEntry(label=menu_key("W", "ho"), brief="See who's currently connected"),
+                MenuEntry(label=menu_key("O", "nitor", prefix="M"), brief="Watch callers live, act on one"),
                 MenuEntry(label=menu_key("M", "aintenance mode"), brief="Toggle: block non-SysOp logins"),
                 MenuEntry(label=menu_key("D", "rain"), brief="Disconnect non-SysOps soon"),
                 MenuEntry(label=menu_key("L", "ock & drain"), brief="Maintenance mode, then drain"),
@@ -10444,7 +10600,15 @@ async def _who_screen(session: Session, lane: DatabaseLane, actor: User, node_co
             colored("That's your own session -- use Logoff instead.", fg_color=MUTED_COLOR)
         )
         return
+    await disconnect_session_draft(session, lane, actor, node_controls, selected)
 
+
+async def disconnect_session_draft(
+    session: Session, lane: DatabaseLane, actor: User, node_controls: NodeControls, selected: SessionSummary
+) -> None:
+    """The disconnect screen for one session, shared by Who and the live
+    Monitor's Kick (issue #763). Its outcome is announced, for whichever
+    screen is drawn next."""
     # Issue #282: this used to be "Disconnect X?" followed by a
     # mandatory-looking "Message ... (optional):" line prompt with no
     # way back once the question was answered. Now a one-field draft
@@ -10483,6 +10647,7 @@ async def _who_screen(session: Session, lane: DatabaseLane, actor: User, node_co
             record_action, actor=actor, action="disconnect_session",
             target_user_id=target_user_id, detail=f"{detail}, message={message!r}",
         )
+        node_controls.session_registry.note_event(f"disconnected by {actor.username}: {name}")
         _announce_line(session, colored(f"{name!r} disconnected.", fg_color=SUCCESS_COLOR))
         return True
 
@@ -14975,7 +15140,7 @@ def _community_field_specs() -> list[FieldSpec]:
         FieldSpec(
             key="hidden", hotkey="h", menu_text=menu_key("H", "idden"), label="Hidden",
             render=lambda d: "yes" if d.get("hidden") else "no",
-            prompt=bool_field("hidden", "Hidden?"),
+            prompt=bool_field("hidden"), step=bool_step("hidden"),
             brief="Hide from the communities list",
             help=(
                 "Delists this Community from ordinary browsing without deleting it. A SysOp "
@@ -15408,7 +15573,7 @@ def _board_field_specs(
         FieldSpec(
             key="pinned", hotkey="p", menu_text=menu_key("P", "inned"), label="Pinned",
             render=lambda d: "yes" if d.get("pinned") else "no",
-            prompt=bool_field("pinned", "Pinned?"),
+            prompt=bool_field("pinned"), step=bool_step("pinned"),
             brief="Shown at the top of listings",
             help="Shown at the top of board listings, above unpinned boards, regardless of sort order.",
             section="Organization",
@@ -15416,7 +15581,7 @@ def _board_field_specs(
         FieldSpec(
             key="moderated", hotkey="m", menu_text=menu_key("M", "oderated"), label="Moderated",
             render=lambda d: "yes" if d.get("moderated") else "no",
-            prompt=bool_field("moderated", "Moderated (posts need approval)?"),
+            prompt=bool_field("moderated"), step=bool_step("moderated"),
             brief="New posts need approval first",
             help="New posts need a moderator or SysOp to approve them before anyone else can see them.",
             section="Moderation",
@@ -16839,7 +17004,7 @@ def _area_field_specs(
         FieldSpec(
             key="pinned", hotkey="p", menu_text=menu_key("P", "inned"), label="Pinned",
             render=lambda d: "yes" if d.get("pinned") else "no",
-            prompt=bool_field("pinned", "Pinned?"),
+            prompt=bool_field("pinned"), step=bool_step("pinned"),
             brief="Shown at the top of listings",
             help="Shown at the top of file-area listings, above unpinned areas, regardless of sort order.",
             section="Organization",
@@ -16847,7 +17012,7 @@ def _area_field_specs(
         FieldSpec(
             key="moderated", hotkey="m", menu_text=menu_key("M", "oderated"), label="Moderated",
             render=lambda d: "yes" if d.get("moderated") else "no",
-            prompt=bool_field("moderated", "Moderated (uploads need approval)?"),
+            prompt=bool_field("moderated"), step=bool_step("moderated"),
             brief="New uploads need approval first",
             help="New uploads need a moderator or SysOp to approve them before anyone else can download them.",
             section="Moderation",
@@ -17671,7 +17836,7 @@ def _door_field_specs(*, actor: User) -> list[FieldSpec]:
         FieldSpec(
             key="pinned", hotkey="i", menu_text=menu_key("i", "nned", prefix="P"), label="Pinned",
             render=lambda d: "yes" if d.get("pinned") else "no",
-            prompt=bool_field("pinned", "Pinned?"),
+            prompt=bool_field("pinned"), step=bool_step("pinned"),
             brief="Shown at the top of listings",
             help="Shown at the top of door listings, above unpinned doors, regardless of sort order.",
         ),
@@ -19091,7 +19256,7 @@ def _channel_field_specs(
         FieldSpec(
             key="pinned", hotkey="p", menu_text=menu_key("P", "inned"), label="Pinned",
             render=lambda d: "yes" if d.get("pinned") else "no",
-            prompt=bool_field("pinned", "Pinned?"),
+            prompt=bool_field("pinned"), step=bool_step("pinned"),
             brief="Shown at the top of listings",
             help="Shown at the top of channel listings, above unpinned channels, regardless of sort order.",
             section="Organization",
@@ -19099,7 +19264,7 @@ def _channel_field_specs(
         FieldSpec(
             key="hidden", hotkey="h", menu_text=menu_key("H", "idden"), label="Hidden",
             render=lambda d: "yes" if d.get("hidden") else "no",
-            prompt=bool_field("hidden", "Hidden (omitted from listings)?"),
+            prompt=bool_field("hidden"), step=bool_step("hidden"),
             brief="Omitted from channel listings",
             help=(
                 "Delists this channel from ordinary browsing without deleting it. Members "
@@ -19111,7 +19276,7 @@ def _channel_field_specs(
         FieldSpec(
             key="members_only", hotkey="m", menu_text=menu_key("M", "embers-only"), label="Members-only",
             render=lambda d: "yes" if d.get("members_only") else "no",
-            prompt=bool_field("members_only", "Members-only (invite-only access)?"),
+            prompt=bool_field("members_only"), step=bool_step("members_only"),
             brief="Only invited members may join",
             help="When on, a caller can only join via an invite from an existing member -- browsing to it isn't enough.",
             section="Membership",
@@ -19120,7 +19285,7 @@ def _channel_field_specs(
             key="allow_member_invites", hotkey="i", menu_text=menu_key("I", "nvites"),
             label="Allow member invites",
             render=lambda d: "yes" if d.get("allow_member_invites") else "no",
-            prompt=bool_field("allow_member_invites", "Allow members to invite others?"),
+            prompt=bool_field("allow_member_invites"), step=bool_step("allow_member_invites"),
             brief="Members can invite others too",
             help=(
                 "When on, any regular member can invite someone else, not just a moderator/"

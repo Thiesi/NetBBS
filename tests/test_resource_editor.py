@@ -7,6 +7,7 @@ create/edit screen driver (design doc, dogfood feature request) behind
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import re
 
 import pytest
@@ -17,6 +18,7 @@ from netbbs.net.char_input import read_editor_key as _raw_read_editor_key
 from netbbs.net.resource_editor import (
     FieldSpec,
     bool_field,
+    bool_step,
     choice_field,
     choice_step,
     edit_resource_draft,
@@ -220,7 +222,7 @@ def _pinned_field() -> FieldSpec:
         menu_text=menu_key("P", "inned"),
         label="Pinned",
         render=lambda draft: "yes" if draft.get("pinned") else "no",
-        prompt=bool_field("pinned", "Pinned?"),
+        prompt=bool_field("pinned"),
     )
 
 
@@ -460,13 +462,13 @@ def test_an_unrecognized_key_is_rejected_and_the_menu_stays_active():
     assert "\a" in _written_text(session)
 
 
-def test_bool_field_toggles_via_prompt_yes_no_or_keep():
+def test_bool_field_flips_on_one_keystroke_without_a_prompt():
     async def save(draft):
         return draft["pinned"]
 
-    # "p" selects Pinned, "y" sets it true (read_line fallback since
-    # read_editor_key raises NotImplementedError), "s" saves.
-    session = FakeSession(["p", "y", "s"])
+    # Issue #751: "p" alone turns Pinned on -- no "Pinned?" question,
+    # so the next key is already the menu's own "s".
+    session = FakeSession(["p", "s"])
     result = asyncio.run(
         edit_resource_draft(
             session, None,
@@ -476,22 +478,41 @@ def test_bool_field_toggles_via_prompt_yes_no_or_keep():
         )
     )
     assert result is True
+    assert "Pinned?" not in _written_text(session)
 
 
-def test_bool_field_bare_enter_keeps_the_current_value():
+@pytest.mark.parametrize("start, presses, expected", [
+    (True, 1, False), (True, 2, True), (None, 1, True),
+])
+def test_bool_field_toggles_back_and_treats_missing_as_off(start, presses, expected):
     async def save(draft):
         return draft["pinned"]
 
-    session = FakeSession(["p", "", "s"])  # bare Enter keeps current (True)
+    session = FakeSession(["p"] * presses + ["s"])
     result = asyncio.run(
         edit_resource_draft(
             session, None,
-            title="Edit thing", fields=[_pinned_field()], draft={"pinned": True},
+            title="Edit thing", fields=[_pinned_field()], draft={"pinned": start},
             save=save, error_type=FieldError,
             save_menu_text=menu_key("S", "ave"), back_menu_text=menu_key("B", "ack"),
         )
     )
-    assert result is True
+    assert result is expected
+
+
+@pytest.mark.parametrize("arrows, expected", [(["RIGHT"], True), (["LEFT"], True), (["RIGHT", "LEFT"], False)])
+def test_bool_step_flips_on_either_arrow(arrows, expected):
+    field = dataclasses.replace(_pinned_field(), step=bool_step("pinned"))
+    session = NavigableFakeSession(["DOWN", *arrows, "s"])
+    result = asyncio.run(
+        edit_resource_draft(
+            session, None,
+            title="Create thing", fields=[field], draft={"pinned": False},
+            save=_save_dict, error_type=FieldError,
+            save_menu_text=menu_key("S", "ave"), back_menu_text=menu_key("B", "ack"),
+        )
+    )
+    assert result["pinned"] is expected
 
 
 def test_choice_field_cycles_one_step_per_hotkey_press_without_typing():
@@ -536,7 +557,7 @@ def test_multiple_fields_render_together_and_can_be_edited_in_any_order():
 
     # Edits Pinned first, then Name, then saves -- proves fields are
     # addressable independently, not in a fixed sequential order.
-    session = FakeSession(["p", "y", "n", "general", "s"])
+    session = FakeSession(["p", "n", "general", "s"])
     result = asyncio.run(
         edit_resource_draft(
             session, None,
@@ -560,7 +581,7 @@ def _pinned_field_with_help() -> FieldSpec:
         menu_text=menu_key("P", "inned"),
         label="Pinned",
         render=lambda draft: "yes" if draft.get("pinned") else "no",
-        prompt=bool_field("pinned", "Pinned?"),
+        prompt=bool_field("pinned"),
         help="Keeps this item at the top of every listing.",
     )
 
@@ -710,7 +731,7 @@ def test_navigation_wraps_at_both_ends():
 
 
 def test_space_activates_the_highlighted_field():
-    session = NavigableFakeSession(["DOWN", "DOWN", " ", "y", "s"])  # Name, Pinned, toggle it on, confirm
+    session = NavigableFakeSession(["DOWN", "DOWN", " ", "s"])  # Name, Pinned, toggle it on
     result = asyncio.run(
         edit_resource_draft(
             session, None,
@@ -725,7 +746,7 @@ def test_space_activates_the_highlighted_field():
 
 
 def test_enter_activates_the_highlighted_field():
-    session = NavigableFakeSession(["DOWN", "DOWN", "ENTER", "y", "s"])
+    session = NavigableFakeSession(["DOWN", "DOWN", "ENTER", "s"])
     result = asyncio.run(
         edit_resource_draft(
             session, None,
@@ -760,7 +781,7 @@ def test_selection_persists_after_activating_a_field():
     # After Space/Enter edits the highlighted field, the marker stays
     # on that same field rather than resetting -- so a caller can
     # immediately arrow to the next one.
-    session = NavigableFakeSession(["DOWN", "DOWN", " ", "y", "UP", "s"])
+    session = NavigableFakeSession(["DOWN", "DOWN", " ", "UP", "s"])
     asyncio.run(
         edit_resource_draft(
             session, None,
@@ -778,7 +799,7 @@ def test_selection_persists_after_activating_a_field():
 
 
 def test_hotkey_still_works_and_syncs_the_selection_marker():
-    session = NavigableFakeSession(["p", "y", "s"])
+    session = NavigableFakeSession(["p", "s"])
     result = asyncio.run(
         edit_resource_draft(
             session, None,
@@ -1019,7 +1040,7 @@ def _pinned_field_with_brief() -> FieldSpec:
         menu_text=menu_key("P", "inned"),
         label="Pinned",
         render=lambda draft: "yes" if draft.get("pinned") else "no",
-        prompt=bool_field("pinned", "Pinned?"),
+        prompt=bool_field("pinned"),
         brief="Shown at the top of listings",
     )
 
@@ -1069,7 +1090,7 @@ def test_description_level_detailed_prefers_help_over_brief():
         menu_text=menu_key("P", "inned"),
         label="Pinned",
         render=lambda draft: "yes" if draft.get("pinned") else "no",
-        prompt=bool_field("pinned", "Pinned?"),
+        prompt=bool_field("pinned"),
         brief="Shown at the top of listings",
         # Short enough to survive this screen's flat-section column-
         # splitting (issue #160): 4 entries at the default 80-column
@@ -1369,7 +1390,7 @@ def _sectioned_fields() -> list[FieldSpec]:
         FieldSpec(
             key="pinned", hotkey="p", menu_text=menu_key("P", "inned"), label="Pinned",
             render=lambda draft: "yes" if draft.get("pinned") else "no",
-            prompt=bool_field("pinned", "Pinned?"),
+            prompt=bool_field("pinned"),
             section="Display",
         ),
     ]

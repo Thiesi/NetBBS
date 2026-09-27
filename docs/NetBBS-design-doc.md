@@ -1495,6 +1495,18 @@ carried exactly as written and filtered on output
   carried over. The layout belongs to the post, set by the editor that drew it:
   editing an art post reopens the art editor, and a carried post brings its
   layout along (§9.2).
+- **Pasted color** (issue #754): the post editors show color as pipe codes, so
+  that is how pasted color arrives. On a board that allows color, the line and
+  fullscreen prose editors type a pasted SGR (`ESC [ <digits;> m`) in at the
+  cursor as the equivalent pipe codes. Bold becomes the bright foreground, a
+  bright background its base color, and a return to the default foreground
+  `|07`. Underline, blink, 256-color and truecolor have no pipe code and are
+  dropped. The editors have no notation of their own for bold, underline or
+  blink. The author sees and edits the codes as text, and the stored body stays
+  in the one notation the editors show. On a board without color, and at every
+  other prompt, a pasted SGR is dropped as before. A post with SGR of its own
+  (carried over the Link, or written by another client) still shows it through
+  the filter above.
 
 ### 6.2 File areas
 

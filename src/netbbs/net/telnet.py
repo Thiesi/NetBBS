@@ -48,6 +48,7 @@ from typing import Awaitable, Callable
 
 from netbbs.net import char_input
 from netbbs.net.session import Session, SessionClosedError, clamp_terminal_size, wait_until_drained
+from netbbs.rendering.pipe_codes import PastedColor
 
 # Telnet protocol constants (RFC 854, plus NAWS from RFC 1073 and
 # NEW-ENVIRON from RFC 1572).
@@ -241,6 +242,7 @@ class TelnetSession(Session):
         cancellable: bool = False,
         viewport: int | Callable[[], int] | None = None,
         viewport_owns_row: bool = False,
+        pasted_color: PastedColor | None = None,
     ) -> str:
         """
         Read one line of input, character by character, echoing (or
@@ -258,6 +260,7 @@ class TelnetSession(Session):
             self, self.write, echo, history, completer,
             live_buffer=live_buffer, lock=lock, list_candidates=list_candidates,
             initial=initial, cancellable=cancellable, viewport=viewport, viewport_owns_row=viewport_owns_row,
+            pasted_color=pasted_color,
         )
 
     async def read_key(self, echo: bool = True) -> str:
@@ -274,10 +277,14 @@ class TelnetSession(Session):
         lives in `netbbs.net.char_input.read_any_key`."""
         return await char_input.read_any_key(self, self.write, echo)
 
-    async def read_editor_key(self, *, distinguish_ctrl_h: bool = False) -> char_input.EditorKey:
+    async def read_editor_key(
+        self, *, distinguish_ctrl_h: bool = False, pasted_color: PastedColor | None = None
+    ) -> char_input.EditorKey:
         """See the `Session.read_editor_key` docstring — the actual
         logic lives in `netbbs.net.char_input.read_editor_key`."""
-        return await char_input.read_editor_key(self, distinguish_ctrl_h=distinguish_ctrl_h)
+        return await char_input.read_editor_key(
+            self, distinguish_ctrl_h=distinguish_ctrl_h, pasted_color=pasted_color
+        )
 
     async def discard_buffered_enter(self) -> None:
         await char_input.discard_buffered_enter(self)

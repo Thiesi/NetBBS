@@ -2650,7 +2650,7 @@ def test_create_board_flow(db, lane, sysop):
         "m", "m", "c",
         "n", "General",
         "d", "A general board",
-        "m", "y",
+        "m",
         "s",
         "b", "b", "b",
     ]
@@ -2760,7 +2760,7 @@ def test_edit_board_field_menu_can_be_navigated_in_any_order(db, lane, sysop):
 
     create_board(db, "General", creator=sysop)
 
-    inputs = ["m", "m", "l", "0", "1", "e", "m", "y", "n", "General2", "s", "b", "b", "b", "b"]
+    inputs = ["m", "m", "l", "0", "1", "e", "m", "n", "General2", "s", "b", "b", "b", "b"]
     session = FakeSession(inputs)
     _run(session, lane, sysop)
 
@@ -4315,7 +4315,7 @@ def test_edit_and_delete_community_flow(db, lane, sysop):
     # menu). Every other field is left untouched.
     inputs = [
         "m", "o", "l", "0", "1", "e",
-        "h", "y", "s",
+        "h", "s",
         "d", "Politics",
         "b", "b", "b",
     ]
@@ -8194,10 +8194,11 @@ def test_link_status_screen_draws_the_whole_panel_before_offering_to_acknowledge
     before = len(list_identity_observations(db))
     assert before >= 1
 
-    # The panel is paged now, so "the whole panel" is both pages of it:
+    # The panel is paged now, so "the whole panel" is every page of it:
     # the script turns the page ([>] rather than [N], since [P]eers owns
-    # "p" here) and then leaves, and never answers anything.
-    session = FakeSession(["s", "l", ">", "b", "b", "b"])
+    # "p" here) through all three and then leaves, and never answers
+    # anything. (Issue #777's dial-in row made it three pages.)
+    session = FakeSession(["s", "l", ">", ">", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
 
     text = _visible(_written_text(session))
