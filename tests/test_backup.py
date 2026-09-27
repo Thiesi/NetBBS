@@ -426,6 +426,7 @@ def test_voidrunner_restore_into_the_nodes_own_directory_needs_no_setting(tmp_pa
     main(["restore", "--db", str(db_path), "--identity-dir", str(identity_dir), "--from", str(source),
           "--voidrunner-to", str(target)])
     output = capsys.readouterr().out
+    output = " ".join(output.split())  # the CLI wraps to the terminal width
     assert "the node's own save directory" in output and "MANUAL: configure" not in output
     assert (target / "77.json").exists()
 

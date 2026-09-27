@@ -457,7 +457,7 @@ def voidrunner_save_directory(db_path: Path | None = None) -> tuple[Path, str]:
     from an argument this module already has, the way War Dialer's world has
     been since v7.0.0. So a node that recorded nothing still has an answer
     that is not a guess when that directory exists; only a database with
-    neither falls back to this process's home.
+    neither falls back to this process's home, as before.
     """
     if db_path is not None and db_path.exists():
         try:
@@ -469,13 +469,10 @@ def voidrunner_save_directory(db_path: Path | None = None) -> tuple[Path, str]:
             row = None
         if row is not None and row[0]:
             return Path(row[0]).resolve(), "node"
-    from netbbs.doors.runtime import node_voidrunner_save_dir, voidrunner_save_dir
+    from netbbs.doors.runtime import node_voidrunner_save_dir
 
-    if db_path is not None:
-        own = node_voidrunner_save_dir(db_path)
-        if own.is_dir():
-            return own, "node"
-        return voidrunner_save_dir(db_path), "guess"
+    if db_path is not None and node_voidrunner_save_dir(db_path).is_dir():
+        return node_voidrunner_save_dir(db_path), "node"
     from netbbs.doors.bundled.voidrunner import _default_save_dir
     return _default_save_dir().resolve(), "guess"
 

@@ -11,6 +11,7 @@ import codecs
 import json
 import logging
 import os
+import re
 import secrets
 import shutil
 import signal
@@ -227,53 +228,98 @@ def legacy_voidrunner_save_dir() -> Path | None:
 
 
 def _holds_careers(directory: Path | None) -> bool:
-    """Whether a directory has anything Voidrunner would miss: a career,
-    a score, or the pre-scores leaderboard. Lock files alone do not count."""
-    if directory is None or not directory.is_dir():
+    """Whether a directory has anything Voidrunner would miss: a career, a
+    retained copy of one, a score, the pre-scores leaderboard. Lock and
+    temporary files alone do not count, and an unreadable directory counts
+    as holding nothing -- the door could not play from it either -- with a
+    warning, rather than stopping the node at startup."""
+    if directory is None:
         return False
-    return any(directory.glob("*.json")) or any((directory / "scores").glob("*.json"))
+    try:
+        if not directory.is_dir():
+            return False
+        for entry in directory.iterdir():
+            if entry.name == "scores" and entry.is_dir():
+                if any(entry.iterdir()):
+                    return True
+            elif not re.fullmatch(r"\.(?:[0-9]+|maintenance)\.lock|\..+\.tmp", entry.name):
+                return True
+    except OSError as exc:
+        _logger.warning("Voidrunner save directory %s could not be read: %s", directory, exc)
+    return False
 
 
-def voidrunner_save_dir(db_path: Path) -> Path:
+def _recorded_voidrunner_save_dir(db) -> str | None:
+    row = db.connection.execute(
+        "SELECT value FROM node_config WHERE key = ?", (VOIDRUNNER_SAVE_DIR_CONFIG_KEY,)
+    ).fetchone()
+    return row[0] if row is not None and row[0] else None
+
+
+def _legacy_owned_by(db) -> Path | None:
+    """The legacy directory, if *this node* used it -- and `None` otherwise.
+
+    The evidence is the node's own record: every node since #555 wrote down
+    the directory it handed its doors, and one that played from the home
+    default wrote down exactly that path. A brand-new node has no such
+    record, so it never adopts, or copies, careers another node left in the
+    account's home directory: they are keyed by user id, and its user 5 is
+    not theirs (#648 review). A node too old to have recorded anything and
+    not started since is treated the same way; its careers stay on disk.
+    """
+    recorded, legacy = _recorded_voidrunner_save_dir(db), legacy_voidrunner_save_dir()
+    if recorded is None or legacy is None:
+        return None
+    return legacy if Path(recorded).resolve() == legacy else None
+
+
+def voidrunner_save_dir(db) -> Path:
     """Where this node's Voidrunner careers live.
 
     `VOIDRUNNER_SAVE_DIR` wins when the SysOp set it. Otherwise the node's
-    own `<db path>.doors/voidrunner/`, except while careers remain only in
-    the legacy home directory -- a node whose first-start copy
-    (`migrate_voidrunner_saves`) could not run yet keeps playing the
+    own `<db path>.doors/voidrunner/`, except while this node's careers
+    remain only in the legacy home directory -- a node whose first-start
+    copy (`migrate_voidrunner_saves`) could not run yet keeps playing the
     careers it has rather than opening an empty directory beside them.
     """
     if override := os.environ.get("VOIDRUNNER_SAVE_DIR"):
         return Path(override).expanduser().resolve()
-    own = node_voidrunner_save_dir(db_path)
-    if own.exists():
+    own = node_voidrunner_save_dir(db.path)
+    if _holds_careers(own):
         return own
-    legacy = legacy_voidrunner_save_dir()
+    legacy = _legacy_owned_by(db)
     return legacy if _holds_careers(legacy) else own
 
 
-def migrate_voidrunner_saves(db_path: Path) -> Path | None:
-    """Copy legacy careers into the node's own directory once; return the
-    directory copied from, or `None` when there was nothing to do.
+def migrate_voidrunner_saves(db) -> Path | None:
+    """Copy this node's legacy careers into its own directory once; return
+    the directory copied from, or `None` when there was nothing to do.
 
-    Runs at startup before the node records its save directory. A copy,
-    not a move: the legacy directory belongs to the OS account, and a
-    second node under the same account may be reading it -- moving it
-    would hand that node's callers an empty career list. Each node takes
-    its own copy and the two stop sharing from then on.
+    Runs at startup before the node records its save directory, and only for
+    a node whose record says it played from the legacy directory
+    (`_legacy_owned_by`). A copy, not a move: the legacy directory belongs
+    to the OS account, and a second node -- or standalone Voidrunner -- may
+    be reading it; moving it would hand those callers an empty career list.
+    Each node takes its own copy and they stop sharing from then on.
 
     The copy is made under the legacy directory's maintenance gate, so no
     pilot is mid-checkpoint, into a staging directory renamed into place
     whole: a node killed half-way leaves no partial directory that
-    `voidrunner_save_dir` would mistake for the real one. A busy or
-    unreadable legacy directory is left alone and tried again at the next
-    start; until then the node keeps using it.
+    `voidrunner_save_dir` would mistake for the real one. A target that
+    exists but holds only lock files -- pre-created for ownership, say --
+    is replaced; one that holds careers of its own is never overwritten,
+    and wins. A busy or unreadable legacy directory is left alone and tried
+    again at the next start; until then the node keeps using it.
     """
     if os.environ.get("VOIDRUNNER_SAVE_DIR"):
         return None
-    own = node_voidrunner_save_dir(db_path)
-    legacy = legacy_voidrunner_save_dir()
-    if own.exists() or not _holds_careers(legacy):
+    own = node_voidrunner_save_dir(db.path)
+    legacy = _legacy_owned_by(db)
+    if not _holds_careers(legacy):
+        return None
+    if _holds_careers(own):
+        _logger.warning("Voidrunner careers exist both in %s and in %s; this node uses %s and copies nothing.",
+                        own, legacy, own)
         return None
     from netbbs.backup import BackupError, _voidrunner_files
     from netbbs.doors.bundled.voidrunner import PilotBusy, maintenance_session
@@ -281,19 +327,25 @@ def migrate_voidrunner_saves(db_path: Path) -> Path | None:
     staging = own.with_name(own.name + ".migrating")
     try:
         shutil.rmtree(staging, ignore_errors=True)
+        if own.exists() and _voidrunner_files(own):
+            raise BackupError(f"{own} is not empty")
         with maintenance_session(legacy):
             for relative in _voidrunner_files(legacy):
                 target = staging / relative
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(legacy / relative, target)
+            staging.mkdir(parents=True, exist_ok=True)
+            if own.exists():
+                shutil.rmtree(own)  # lock files only, checked above
             os.replace(staging, own)
     except (PilotBusy, BackupError, OSError) as exc:
         shutil.rmtree(staging, ignore_errors=True)
         _logger.warning("Voidrunner careers were not copied from %s to %s (%s); this node keeps using %s "
                         "and will try again at its next start.", legacy, own, exc, legacy)
         return None
-    _logger.warning("Voidrunner careers copied from %s to %s. This node no longer reads %s; remove it "
-                    "once no other NetBBS node run by this account uses it.", legacy, own, legacy)
+    _logger.warning("Voidrunner careers copied from %s to %s. This node no longer reads %s; remove it once "
+                    "no other NetBBS node and no standalone Voidrunner run by this account uses it.",
+                    legacy, own, legacy)
     return legacy
 
 
@@ -310,18 +362,16 @@ def record_voidrunner_save_dir(db) -> Path:
     so the documented backup command quietly captured no careers at all.
     The default is now derived from the database path (issue #648), which
     the CLI has too; the record still decides a `VOIDRUNNER_SAVE_DIR`
-    override and a legacy directory not yet copied.
+    override and a legacy directory not yet copied, and it is the evidence
+    `migrate_voidrunner_saves` needs that the legacy careers are this node's.
 
     Read before write, and written only when it has actually changed --
     an unconditional write would take SQLite's write lock on a path that
     runs at every startup, for a value that changes approximately never.
     See `_minted_once` for the same reasoning at greater length.
     """
-    resolved = voidrunner_save_dir(db.path)
-    row = db.connection.execute(
-        "SELECT value FROM node_config WHERE key = ?", (VOIDRUNNER_SAVE_DIR_CONFIG_KEY,)
-    ).fetchone()
-    if row is None or row[0] != str(resolved):
+    resolved = voidrunner_save_dir(db)
+    if _recorded_voidrunner_save_dir(db) != str(resolved):
         db.connection.execute(
             "INSERT INTO node_config (key, value) VALUES (?, ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -750,7 +800,7 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
         width = profile.width if profile and profile.width else session.terminal_width
         height = profile.height if profile and profile.height else session.terminal_height
         env = _door_environment(info_path, world_path,
-                                await lane.run(lambda db: voidrunner_save_dir(db.path)))
+                                await lane.run(voidrunner_save_dir))
         # Decided before the spawn, because the guard has to be in place before
         # there is a child to inherit it.
         vouched = (os.name == "posix" and bundled_follows_resize(door)

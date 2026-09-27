@@ -60,6 +60,13 @@ def _as_home(monkeypatch, home: Path) -> None:
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
 
 
+def _upgraded(db, home: Path) -> None:
+    """What a node that played from the home default recorded (#555)."""
+    db.connection.execute("INSERT INTO node_config (key, value) VALUES (?, ?)",
+                          (VOIDRUNNER_SAVE_DIR_CONFIG_KEY, str(home / ".netbbs" / "voidrunner_saves")))
+    db.connection.commit()
+
+
 def _legacy_careers(home: Path) -> Path:
     """A legacy directory the way a running node leaves it: careers, a
     score, the retained leaderboard, and lock files."""
@@ -80,23 +87,35 @@ def _legacy_careers(home: Path) -> Path:
 def test_a_node_keeps_its_careers_beside_its_database(db, node_home, monkeypatch):
     _as_home(monkeypatch, node_home)
 
-    assert voidrunner_save_dir(db.path) == db.path.resolve().parent / "node.db.doors" / "voidrunner"
+    assert voidrunner_save_dir(db) == db.path.resolve().parent / "node.db.doors" / "voidrunner"
 
 
-def test_two_nodes_under_one_account_no_longer_share_careers(tmp_path, node_home, monkeypatch):
+def test_two_nodes_under_one_account_no_longer_share_careers(tmp_path):
+    assert node_voidrunner_save_dir(tmp_path / "one" / "netbbs.db") != node_voidrunner_save_dir(tmp_path / "two" / "netbbs.db")
+
+
+def test_a_brand_new_node_never_adopts_another_nodes_legacy_careers(db, node_home, monkeypatch):
+    """Codex review: careers are keyed by user id, so a second node set up
+    under an account whose home holds the first node's careers would hand
+    its own user 5 somebody else's pilot. Without a record saying the
+    legacy directory was this node's, it starts empty."""
     _as_home(monkeypatch, node_home)
+    _legacy_careers(node_home)
 
-    assert voidrunner_save_dir(tmp_path / "one" / "netbbs.db") != voidrunner_save_dir(tmp_path / "two" / "netbbs.db")
+    assert migrate_voidrunner_saves(db) is None
+    assert voidrunner_save_dir(db) == node_voidrunner_save_dir(db.path)
+    assert not node_voidrunner_save_dir(db.path).exists()
 
 
 def test_legacy_careers_are_copied_once_and_left_in_place(db, node_home, monkeypatch):
     _as_home(monkeypatch, node_home)
+    _upgraded(db, node_home)
     legacy = _legacy_careers(node_home)
     before = {path.relative_to(legacy): path.read_bytes() for path in legacy.rglob("*") if path.is_file()}
     # Until the copy has run, the node plays the careers it has.
-    assert voidrunner_save_dir(db.path) == legacy.resolve()
+    assert voidrunner_save_dir(db) == legacy.resolve()
 
-    assert migrate_voidrunner_saves(db.path) == legacy.resolve()
+    assert migrate_voidrunner_saves(db) == legacy.resolve()
 
     own = node_voidrunner_save_dir(db.path)
     copied = {path.relative_to(own) for path in own.rglob("*") if path.is_file()}
@@ -104,19 +123,76 @@ def test_legacy_careers_are_copied_once_and_left_in_place(db, node_home, monkeyp
     assert (own / "5.json").read_bytes() == before[Path("5.json")]
     # A copy, not a move: a second node under this account still has them.
     assert {path.relative_to(legacy): path.read_bytes() for path in legacy.rglob("*") if path.is_file()} == before
-    assert voidrunner_save_dir(db.path) == own
+    assert voidrunner_save_dir(db) == own
     assert record_voidrunner_save_dir(db) == own
-    assert migrate_voidrunner_saves(db.path) is None, "once is enough"
+    assert migrate_voidrunner_saves(db) is None, "once is enough"
+
+
+def test_corrupt_only_legacy_data_is_still_copied(db, node_home, monkeypatch):
+    """Codex review: a retained `.corrupt-*` career is supported data the
+    backup keeps, and has no `.json` suffix."""
+    _as_home(monkeypatch, node_home)
+    _upgraded(db, node_home)
+    legacy = node_home / ".netbbs" / "voidrunner_saves"
+    (legacy / "5.corrupt-1726000000").write_bytes(b"damaged")
+
+    assert migrate_voidrunner_saves(db) == legacy.resolve()
+    assert (node_voidrunner_save_dir(db.path) / "5.corrupt-1726000000").read_bytes() == b"damaged"
+
+
+def test_an_empty_precreated_target_is_not_mistaken_for_a_finished_copy(db, node_home, monkeypatch):
+    """Codex review: a SysOp may create the directory ahead of time for its
+    ownership. Holding only a lock file, it is filled rather than trusted."""
+    _as_home(monkeypatch, node_home)
+    _upgraded(db, node_home)
+    _legacy_careers(node_home)
+    own = node_voidrunner_save_dir(db.path)
+    own.mkdir(parents=True)
+    (own / ".maintenance.lock").write_bytes(b"")
+
+    assert migrate_voidrunner_saves(db) is not None
+    assert (own / "5.json").exists()
+
+
+def test_a_target_with_careers_of_its_own_is_never_overwritten(db, node_home, monkeypatch):
+    _as_home(monkeypatch, node_home)
+    _upgraded(db, node_home)
+    _legacy_careers(node_home)
+    own = node_voidrunner_save_dir(db.path)
+    own.mkdir(parents=True)
+    (own / "7.json").write_text('{"career": 7}', encoding="utf-8")
+
+    assert migrate_voidrunner_saves(db) is None
+    assert not (own / "5.json").exists() and voidrunner_save_dir(db) == own
+
+
+def test_an_unreadable_legacy_directory_does_not_stop_the_node(db, node_home, monkeypatch):
+    """Codex review: the probe ran outside the guarded copy, so a
+    permissions change on the old directory aborted startup."""
+    _as_home(monkeypatch, node_home)
+    _upgraded(db, node_home)
+    legacy = _legacy_careers(node_home).resolve()
+    real_iterdir = Path.iterdir
+
+    def iterdir(self):
+        if self.resolve() == legacy:
+            raise PermissionError("denied")
+        return real_iterdir(self)
+
+    monkeypatch.setattr(Path, "iterdir", iterdir)
+    assert migrate_voidrunner_saves(db) is None
+    assert voidrunner_save_dir(db) == node_voidrunner_save_dir(db.path)
 
 
 def test_nothing_is_copied_when_the_sysop_chose_a_directory(db, node_home, tmp_path, monkeypatch):
     _as_home(monkeypatch, node_home)
+    _upgraded(db, node_home)
     _legacy_careers(node_home)
     monkeypatch.setenv("VOIDRUNNER_SAVE_DIR", str(tmp_path / "chosen"))
 
-    assert migrate_voidrunner_saves(db.path) is None
+    assert migrate_voidrunner_saves(db) is None
     assert not node_voidrunner_save_dir(db.path).exists()
-    assert voidrunner_save_dir(db.path) == (tmp_path / "chosen").resolve()
+    assert voidrunner_save_dir(db) == (tmp_path / "chosen").resolve()
 
 
 def test_a_pilot_in_flight_postpones_the_copy(db, node_home, monkeypatch):
@@ -126,32 +202,35 @@ def test_a_pilot_in_flight_postpones_the_copy(db, node_home, monkeypatch):
     from netbbs.doors.bundled.voidrunner import pilot_session
 
     _as_home(monkeypatch, node_home)
+    _upgraded(db, node_home)
     legacy = _legacy_careers(node_home)
 
     with pilot_session(legacy, 5):
-        assert migrate_voidrunner_saves(db.path) is None
+        assert migrate_voidrunner_saves(db) is None
 
     own = node_voidrunner_save_dir(db.path)
     assert not own.exists() and not own.with_name(own.name + ".migrating").exists()
-    assert voidrunner_save_dir(db.path) == legacy.resolve()
-    assert migrate_voidrunner_saves(db.path) == legacy.resolve()
+    assert voidrunner_save_dir(db) == legacy.resolve()
+    assert migrate_voidrunner_saves(db) == legacy.resolve()
 
 
 def test_a_legacy_directory_holding_foreign_files_is_left_alone(db, node_home, monkeypatch):
     _as_home(monkeypatch, node_home)
+    _upgraded(db, node_home)
     legacy = _legacy_careers(node_home)
     (legacy / "notes.txt").write_text("not a career", encoding="utf-8")
 
-    assert migrate_voidrunner_saves(db.path) is None
-    assert voidrunner_save_dir(db.path) == legacy.resolve()
+    assert migrate_voidrunner_saves(db) is None
+    assert voidrunner_save_dir(db) == legacy.resolve()
 
 
 def test_lock_files_alone_are_not_careers(db, node_home, monkeypatch):
     _as_home(monkeypatch, node_home)
+    _upgraded(db, node_home)
     (node_home / ".netbbs" / "voidrunner_saves" / ".maintenance.lock").write_bytes(b"")
 
-    assert migrate_voidrunner_saves(db.path) is None
-    assert voidrunner_save_dir(db.path) == node_voidrunner_save_dir(db.path)
+    assert migrate_voidrunner_saves(db) is None
+    assert voidrunner_save_dir(db) == node_voidrunner_save_dir(db.path)
 
 
 # -- what the node records ---------------------------------------------
@@ -233,7 +312,8 @@ def test_an_unrecorded_node_directory_is_found_from_the_database_path(operator_h
 
 def test_without_a_recorded_location_the_answer_is_marked_as_a_guess(operator_home, tmp_path, monkeypatch):
     """A database written before this version says nothing and has no
-    directory beside it yet, so the CLI has to report that it guessed.
+    directory beside it yet, so the CLI falls back to its own home -- and
+    has to report that it guessed.
 
     This is the exact state every upgraded node is in until it next
     starts, so the fallback matters as much as the fix.
@@ -246,7 +326,7 @@ def test_without_a_recorded_location_the_answer_is_marked_as_a_guess(operator_ho
         database.close()
 
     assert provenance == "guess"
-    assert resolved == node_voidrunner_save_dir(tmp_path / "unrecorded.db")
+    assert resolved == (operator_home / ".netbbs" / "voidrunner_saves").resolve()
 
 
 def test_no_database_at_all_still_resolves(operator_home, tmp_path, monkeypatch):
@@ -260,7 +340,7 @@ def test_no_database_at_all_still_resolves(operator_home, tmp_path, monkeypatch)
     assert resolved == (operator_home / ".netbbs" / "voidrunner_saves").resolve()
 
     missing, guessed = backup_module.voidrunner_save_directory(tmp_path / "not-a-database.db")
-    assert (missing, guessed) == (node_voidrunner_save_dir(tmp_path / "not-a-database.db"), "guess")
+    assert (missing, guessed) == (resolved, "guess")
 
 
 # -- a guess is never reported as a finding (Codex review) -------------
@@ -353,7 +433,7 @@ def test_the_manifest_records_where_the_run_looked_even_when_it_found_nothing(
     assert manifest["voidrunner"] is None, "nothing was captured"
     looked_in = manifest["voidrunner_source"]
     assert looked_in["provenance"] == "guess"
-    assert looked_in["directory"] == str(node_voidrunner_save_dir(tmp_path / "unrecorded.db"))
+    assert looked_in["directory"] == str((operator_home / ".netbbs" / "voidrunner_saves").resolve())
 
 
 def test_an_operator_supplied_path_is_not_claimed_as_the_nodes_answer(

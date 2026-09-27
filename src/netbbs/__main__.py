@@ -1290,7 +1290,7 @@ async def run(
         # else. Past this line the ports are ours, so the process
         # claiming to be this node is this node. The one-time copy of legacy
         # careers belongs here for the same reason (issue #648).
-        migrate_voidrunner_saves(db.path)
+        migrate_voidrunner_saves(db)
         record_voidrunner_save_dir(db)
         # Issue #730, and for the same reason: a second launch that fails on
         # the bound port must not overwrite what the running node resolved.

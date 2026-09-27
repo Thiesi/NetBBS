@@ -524,6 +524,7 @@ def test_voidrunner_directory_override_reaches_real_door_without_parent_secrets(
 def test_every_door_is_told_the_nodes_own_voidrunner_directory(db, lane, player, tmp_path, monkeypatch):
     """Without an override the door is still handed a directory, so it
     never falls back to its standalone home-directory default (#648)."""
+    monkeypatch.setenv("USERPROFILE" if os.name == "nt" else "HOME", str(tmp_path / "door-home"))
     monkeypatch.delenv("VOIDRUNNER_SAVE_DIR", raising=False)
     script = _write_script(tmp_path, "check_env.py", "import os, json; print(json.dumps(dict(os.environ)))")
     door = create_door(db, "Environment check", sys.executable, args=(str(script),), creator=player)

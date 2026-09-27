@@ -251,14 +251,17 @@ two nodes run by one OS account no longer share careers.
 
 **Upgrading from the home-directory default:** before this, careers lived in
 `~/.netbbs/voidrunner_saves`, one directory for every node the OS account ran. On
-its first start after the upgrade a node copies that directory into its own,
+its first start after the upgrade a node that was using that directory -- its
+own record says so -- copies it into its own,
 taking the careers, the `scores` subdirectory and the legacy `leaderboard.json`,
 and logs where it copied from. It copies rather than moves, so a second node run
 by the same account still finds the careers it had; each node then plays its own
 copy. The copy waits for a quiet moment: if a pilot is playing from the old
 directory at startup, the node keeps using the old directory and tries again at
-its next start. Once every node has started on the new version, the old directory
-is no longer read and can be removed. If two nodes shared it, both copies hold
+its next start. A node set up after the upgrade starts with an empty directory
+rather than adopting another node's careers. Once every node has started on the
+new version, and no standalone Voidrunner run by the account uses it, the old
+directory is no longer read and can be removed. If two nodes shared it, both copies hold
 both nodes' careers under overlapping user IDs, exactly as the shared directory
 did; inspect ownership before removing a career from either.
 
