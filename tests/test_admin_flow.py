@@ -6474,7 +6474,9 @@ def test_update_screen_reports_newer_release_without_auto_applying(db, lane, sys
     text = _visible(_written_text(session))
     assert "● UPDATE AVAILABLE" in text
     assert "v999.0.0" in text
-    assert "Automatic download/apply is not yet available" in text
+    # A check never installs anything by itself (issue #731). Without a live
+    # node there is no [I]nstall key, so it points at where installing is.
+    assert "Install it from the live node's Settings -> Update" in text
     _, outcome = get_last_check_summary(db)
     assert outcome == "newer release available: v999.0.0"
 

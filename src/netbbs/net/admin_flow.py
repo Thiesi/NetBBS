@@ -466,6 +466,7 @@ from netbbs.net.node_theme import (
 from netbbs.net.unicode_style_preference import unicode_style_enabled
 from netbbs.operational_history import list_operational_run_history
 from netbbs.selfupdate import (
+    ReleaseInfo,
     UpdateError,
     check_latest_release,
     clear_github_pat,
@@ -479,6 +480,26 @@ from netbbs.selfupdate import (
     save_release_cache,
     set_auto_update_check_enabled,
     set_github_pat,
+)
+from netbbs.update_apply import (
+    RESTART_MODES,
+    ApplyError,
+    InstallEnvironment,
+    detect_supervisor,
+    download_wheel,
+    fetch_release_wheel,
+    get_recorded_install,
+    get_restart_mode,
+    inspect_install_environment,
+    pip_command,
+    record_install,
+    restarts_after_install,
+    run_bounded,
+    run_restart_shutdown,
+    set_restart_mode,
+    updates_directory,
+    version_query_command,
+    PIP_TIMEOUT_SECONDS,
 )
 from netbbs.net.ansi_editor import edit_ansi_art
 from netbbs.net.welcome_banner import (
@@ -2212,7 +2233,7 @@ async def _system_menu(
             await _draw_system_menu(session, node_controls, link_context, stats=stats)
         elif choice == "u":
             await session.write_line("")
-            await _update_settings_screen(session, lane, actor)
+            await _update_settings_screen(session, lane, actor, node_controls=node_controls)
             stats = await lane.run(_load_settings_stats)
             await _draw_system_menu(session, node_controls, link_context, stats=stats)
         elif choice == "n":
@@ -6122,23 +6143,48 @@ async def _registration_settings_screen(session: Session, lane: DatabaseLane, ac
 # -- self-update (design doc §17) --
 
 
+@dataclass(frozen=True)
+class _UpdateStatus:
+    """What `_update_settings_screen`'s dispatch loop acts on, as last drawn."""
+
+    auto_enabled: bool
+    masked_token: str | None
+    unicode_style: bool
+    #: The newer release `[I]nstall` would install, or `None`.
+    installable: ReleaseInfo | None
+    restart_mode: str
+
+
+def _restart_mode_text(mode: str, supervisor: str | None) -> str:
+    if mode == "yes":
+        return "shut down; the service manager restarts NetBBS (declared)"
+    if mode == "no":
+        return "stop after installing; you restart the service"
+    if supervisor is not None:
+        return f"shut down; {supervisor} restarts NetBBS (detected)"
+    return "stop after installing; no service manager that restarts NetBBS was detected"
+
+
 async def _draw_update_status(
-    session: Session, lane: DatabaseLane, actor: User
-) -> tuple[bool, str | None, bool]:
+    session: Session, lane: DatabaseLane, actor: User, *, node_controls: NodeControls | None = None
+) -> _UpdateStatus:
     """Renders the self-update status panel (running version, daily
-    automatic-check switch, GitHub token, last check plus recent
-    history) and the action bar under it. Returns what the dispatch
-    loop in `_update_settings_screen` needs to label and act on its
-    hotkeys without re-reading: the daily-check switch, the masked
-    token, and the caller's unicode-style preference."""
+    automatic-check switch, GitHub token, installing, last check plus
+    recent history) and the action bar under it, and returns what the
+    dispatch loop in `_update_settings_screen` acts on."""
     from netbbs import __version__ as current_version
 
-    def _load(db: Database) -> tuple[bool, str | None, str | None, str | None]:
+    def _load(db: Database) -> tuple:
         auto_enabled = get_auto_update_check_enabled(db)
         checked_at, outcome = get_display_check_summary(db, current_version=current_version)
-        return auto_enabled, checked_at, outcome, masked_github_pat(db)
+        _etag, release = load_release_cache(db)
+        return (
+            auto_enabled, checked_at, outcome, masked_github_pat(db), release,
+            get_restart_mode(db), get_recorded_install(db),
+        )
 
-    auto_enabled, checked_at, outcome, masked_token = await lane.run(_load)
+    auto_enabled, checked_at, outcome, masked_token, release, restart_mode, recorded = await lane.run(_load)
+    installable = release if release is not None and is_newer(current_version, release.tag_name) else None
     redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
     unicode_style = await lane.run(unicode_style_enabled, actor)
     collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
@@ -6149,7 +6195,7 @@ async def _draw_update_status(
         + screen_title(
             "Self-update",
             breadcrumb=(session.node_display_name, "Settings"),
-            subtitle="Release checks only; applying an update remains an operator action.",
+            subtitle="Check for releases and install a newer one.",
             width=session.terminal_width,
             clear=redraw_in_place,
             unicode_style=unicode_style, collapsed=collapsed,
@@ -6175,6 +6221,24 @@ async def _draw_update_status(
         Field("Daily automatic check", auto_badge, styled=True),
         Field("GitHub token", token_badge, styled=True),
     ])]
+    install_rows: list[Field | Note | Table] = []
+    if installable is not None:
+        install_rows.append(Field("Newer release", installable.tag_name, color=WARNING_COLOR, bold=True))
+    restart_scheduled = node_controls is not None and node_controls.shutdown_scheduler.is_scheduled()
+    if recorded is not None and not restart_scheduled and is_newer(current_version, recorded["to"]):
+        # Also after a SysOp cancelled the restart that followed an install
+        # (Codex review): this process still runs the old code over the new files.
+        install_rows.append(Field(
+            "Installed", recorded.get("note") or f"{recorded['to']} -- restart the service to run it",
+            color=WARNING_COLOR, bold=True,
+        ))
+    install_rows.append(Field("After installing", _restart_mode_text(restart_mode, detect_supervisor())))
+    if node_controls is None:
+        install_rows.append(Note(
+            "Installing runs from the live node: log in as a SysOp and open Settings -> Update, "
+            "or upgrade by hand on the host."
+        ))
+    sections.append(Section("Installing", install_rows))
     if checked_at is not None:
         display_format, display_timezone = await lane.run(resolve_display_preferences)
         when = format_for_display(checked_at, override_format=display_format, override_timezone=display_timezone)
@@ -6202,23 +6266,26 @@ async def _draw_update_status(
     else:
         sections.append(Section("Release checks", [Note("No check has been run on this node yet.")]))
     await _write_sections(session, sections, unicode_style=unicode_style)
-    await session.write_line(
-        "\r\n"
-        + action_bar(
-            [
-                menu_key("C", "heck now"),
-                menu_key("T", "oken"),
-                menu_key("A", "uto-check off" if auto_enabled else "uto-check on"),
-                menu_key("B", "ack"),
-            ],
-            width=session.terminal_width,
-        )
-    )
+    actions = [menu_key("C", "heck now")]
+    if installable is not None and node_controls is not None:
+        actions.append(menu_key("I", f"nstall {installable.tag_name}"))
+    actions.extend([
+        menu_key("R", "estart after install"),
+        menu_key("T", "oken"),
+        menu_key("A", "uto-check off" if auto_enabled else "uto-check on"),
+        menu_key("B", "ack"),
+    ])
+    await session.write_line("\r\n" + action_bar(actions, width=session.terminal_width))
     await _choice_prompt(session)
-    return auto_enabled, masked_token, unicode_style
+    return _UpdateStatus(
+        auto_enabled=auto_enabled, masked_token=masked_token, unicode_style=unicode_style,
+        installable=installable if node_controls is not None else None, restart_mode=restart_mode,
+    )
 
 
-async def _run_release_check(session: Session, lane: DatabaseLane, *, unicode_style: bool) -> None:
+async def _run_release_check(
+    session: Session, lane: DatabaseLane, *, unicode_style: bool, can_install: bool = False
+) -> None:
     """One manual release check: reports whether a newer release exists
     and records the outcome (`netbbs.selfupdate.record_check_outcome`),
     but does not download/apply/restart -- see `_update_settings_screen`."""
@@ -6245,13 +6312,11 @@ async def _run_release_check(session: Session, lane: DatabaseLane, *, unicode_st
                     fg_color=WARNING_COLOR,
                 )
             )
-            _announce_line(session,
-                colored(
-                    "Automatic download/apply is not yet available from this "
-                    "screen -- update manually for now.",
-                    fg_color=MUTED_COLOR,
-                )
-            )
+            _announce_line(session, colored(
+                f"[I]nstall {release.tag_name} installs it." if can_install
+                else "Install it from the live node's Settings -> Update, or by hand on the host.",
+                fg_color=MUTED_COLOR,
+            ))
         else:
             await lane.run(record_check_outcome, f"up to date ({current_version})")
             _announce_line(session,
@@ -6296,7 +6361,9 @@ async def _github_token_prompt(
 
 
 
-async def _update_settings_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
+async def _update_settings_screen(
+    session: Session, lane: DatabaseLane, actor: User, *, node_controls: NodeControls | None = None
+) -> None:
     """
     Check-for-updates, the GitHub token, and the daily-automatic-check
     off switch (§17's "off switch: ... disables the daily automatic
@@ -6313,14 +6380,12 @@ async def _update_settings_screen(session: Session, lane: DatabaseLane, actor: U
     result is visible in the same place it was read from -- the same
     status + action-bar shape `_managed_dns_status_screen` uses.
 
-    Deliberately **check-only**: it reports whether a newer release
-    exists and records the outcome (`netbbs.selfupdate.
-    record_check_outcome`), but does not download/apply/restart. The
-    graceful-drain-then-restart apply flow (§17) needs to coordinate
-    with the live node process's own shutdown/re-exec sequence, which
-    isn't wired up yet -- a deliberate scope cut for this
-    implementation pass, not an oversight, so this screen doesn't
-    promise automation that isn't safely built and tested yet.
+    Issue #731: `[I]nstall vX` installs a newer release the last check
+    found (`_install_release_screen`), on a live node only, and
+    `[R]estart after install` cycles whether that install ends in a
+    graceful shutdown for the service manager to restart (auto/yes/no).
+    Checks, scheduled or manual, still never install anything by
+    themselves.
 
     A failed check (network/API error) records `"check failed: ..."`
     too, not just the two success outcomes -- a real gap traced from a
@@ -6347,7 +6412,10 @@ async def _update_settings_screen(session: Session, lane: DatabaseLane, actor: U
     needed ("Public Repositories, read-only") since this screen has no
     way to enforce what scope a pasted token actually carries.
     """
-    auto_enabled, masked_token, unicode_style = await _draw_update_status(session, lane, actor)
+    async def _redraw() -> _UpdateStatus:
+        return await _draw_update_status(session, lane, actor, node_controls=node_controls)
+
+    status = await _redraw()
     while True:
         choice = (await session.read_key()).lower()
 
@@ -6360,14 +6428,32 @@ async def _update_settings_screen(session: Session, lane: DatabaseLane, actor: U
             # error) is richer than the recorded one-line outcome the panel
             # shows, so it is announced and appears above the redrawn
             # screen's prompt.
-            await _run_release_check(session, lane, unicode_style=unicode_style)
-            auto_enabled, masked_token, unicode_style = await _draw_update_status(session, lane, actor)
+            await _run_release_check(
+                session, lane, unicode_style=status.unicode_style, can_install=node_controls is not None
+            )
+            status = await _redraw()
+        elif choice == "i" and status.installable is not None and node_controls is not None:
+            await session.write_line("")
+            await _install_release_screen(session, lane, actor, node_controls, status.installable)
+            status = await _redraw()
+        elif choice == "r":
+            await session.write_line("")
+            mode = RESTART_MODES[(RESTART_MODES.index(status.restart_mode) + 1) % len(RESTART_MODES)]
+
+            def _apply_mode(db: Database) -> None:
+                set_restart_mode(db, mode)
+                record_action(db, actor=actor, action="set_update_restart_mode", detail=f"mode={mode}")
+
+            await lane.run(_apply_mode)
+            _announce_line(session, f"After installing: {_restart_mode_text(mode, detect_supervisor())}.")
+            status = await _redraw()
         elif choice == "t":
             await session.write_line("")
-            await _github_token_prompt(session, lane, actor, masked_token=masked_token)
-            auto_enabled, masked_token, unicode_style = await _draw_update_status(session, lane, actor)
+            await _github_token_prompt(session, lane, actor, masked_token=status.masked_token)
+            status = await _redraw()
         elif choice == "a":
             await session.write_line("")
+            auto_enabled = status.auto_enabled
 
             def _apply(db: Database) -> None:
                 set_auto_update_check_enabled(db, not auto_enabled)
@@ -6375,9 +6461,261 @@ async def _update_settings_screen(session: Session, lane: DatabaseLane, actor: U
 
             await lane.run(_apply)
             _announce_line(session, f"Daily automatic check is now {'ON' if not auto_enabled else 'off'}.")
-            auto_enabled, masked_token, unicode_style = await _draw_update_status(session, lane, actor)
+            status = await _redraw()
         else:
             await session.write(reject_unhandled_key(choice))
+
+
+async def _install_release_screen(
+    session: Session, lane: DatabaseLane, actor: User, node_controls: NodeControls, release: ReleaseInfo,
+) -> None:
+    """Issue #731: install `release` into the environment this node runs from.
+
+    Shows the plan first, and does nothing until `[I]nstall now` and a final
+    yes. Then, in order, each step refusing the rest when it fails:
+
+    1. fetch the release's wheel and check it against the SHA-256 digest the
+       release publishes (`netbbs.update_apply.download_wheel`);
+    2. back up the node, exactly as Backup's Create does;
+    3. `pip install` the wheel with this installation's extras, and ask a
+       fresh interpreter which version is now installed;
+    4. record the install, then either shut down gracefully for the service
+       manager to restart into it, or say that the SysOp restarts it.
+
+    Between the install and the restart the old process keeps running with
+    the new files on disk, so the restart is not something to put off.
+    """
+    from netbbs import __version__ as current_version
+
+    chrome = await _load_chrome(lane, actor)
+    db_path = await lane.run(lambda db: db.path)
+    identity_dir = node_controls.backup_identity_dir
+    restarting = await lane.run(restarts_after_install)
+    delay = int(node_controls.graceful_delay_seconds)
+    try:
+        environment: InstallEnvironment | None = await asyncio.to_thread(inspect_install_environment)
+        refusal = None
+    except ApplyError as exc:
+        environment, refusal = None, str(exc)
+    if refusal is None and identity_dir is None:
+        refusal = "This session cannot create the pre-upgrade backup (no identity directory is configured for it)."
+
+    breadcrumb = ("SysOp", "Settings", "Update")
+    title = _detail_title(session, chrome, f"Install {release.tag_name}", breadcrumb=breadcrumb)
+    if refusal is not None:
+        await show_detail(
+            session, title=title,
+            sections=[Section(None, [
+                Field("Installing", "not possible here", color=ERROR_COLOR, bold=True),
+                Note(refusal),
+            ])],
+            actions=[_BACK_ACTION], redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+        )
+        return
+
+    extras = ", ".join(environment.extras) if environment.extras else "none"
+    plan = [
+        Field("1. Download", f"netbbs-{release.tag_name.lstrip('vV')} wheel from GitHub, checked against its SHA-256"),
+        Field("2. Back up", f"this node, to {default_backup_destination(db_path).parent}"),
+        Field("3. Install", f"into {environment.python} with extras: {extras}"),
+        Field(
+            "4. Restart",
+            f"callers warned, node goes down in {delay}s, the service manager starts {release.tag_name}"
+            if restarting else "none -- restart the service yourself afterwards",
+        ),
+        Note(
+            "pip also fetches any dependency the new release needs. Going back to "
+            f"{current_version} stays a manual job: install its wheel, then restore the backup from step 2."
+        ),
+    ]
+    choice, _page = await show_detail(
+        session, title=title,
+        sections=[Section(f"{current_version} -> {release.tag_name}", plan)],
+        actions=[("i", menu_key("I", "nstall now")), _BACK_ACTION],
+        redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+    )
+    if choice != "i":
+        return
+    if node_controls.shutdown_scheduler.is_scheduled():
+        # Its countdown would end this session -- and pip with it -- part way
+        # through replacing the environment (Codex review).
+        _announce(
+            session, "A shutdown is already scheduled; cancel it first. Nothing was installed.", color=ERROR_COLOR,
+        )
+        return
+    if _INSTALL_IN_PROGRESS.locked():
+        _announce(session, "Another SysOp is installing a release right now; nothing was installed.", color=ERROR_COLOR)
+        return
+    if not await prompt_yes_no(session, f"Install {release.tag_name} now?", default=False):
+        _announce(session, "Cancelled -- nothing was installed.", color=MUTED_COLOR)
+        return
+    if _INSTALL_IN_PROGRESS.locked() or node_controls.shutdown_scheduler.is_scheduled():
+        _announce(session, "Something else started meanwhile; nothing was installed.", color=ERROR_COLOR)
+        return
+    async with _INSTALL_IN_PROGRESS:
+        await _run_install(
+            session, lane, actor, node_controls, release,
+            environment=environment, db_path=db_path, identity_dir=identity_dir,
+            restarting=restarting, current_version=current_version, breadcrumb=breadcrumb, delay=delay,
+        )
+
+
+# Issue #731: one install at a time per node (Codex review) -- two SysOps
+# confirming at once would share the download path and run two pips over one
+# environment.
+_INSTALL_IN_PROGRESS = asyncio.Lock()
+
+
+async def _run_install(
+    session: Session, lane: DatabaseLane, actor: User, node_controls: NodeControls, release: ReleaseInfo, *,
+    environment: InstallEnvironment, db_path: Path, identity_dir: Path, restarting: bool,
+    current_version: str, breadcrumb: tuple[str, ...], delay: int,
+) -> None:
+    """Steps 1-4 of `_install_release_screen`, holding `_INSTALL_IN_PROGRESS`."""
+
+    async def _fail(step: str, reason: str, log: str = "") -> None:
+        await lane.run(record_check_outcome, f"install of {release.tag_name} failed ({step}): {reason}")
+        await lane.run(
+            lambda db: record_action(
+                db, actor=actor, action="install_release_failed", detail=f"{release.tag_name} {step}: {reason}"[:500]
+            )
+        )
+        rows: list[Field | Note] = [Field("Failed at", step, color=ERROR_COLOR, bold=True), Note(reason)]
+        sections = [Section(None, rows)]
+        if log:
+            sections.append(Section("pip output (last lines)", [Note(line, color=VALUE_COLOR) for line in log.splitlines()[-40:]]))
+        await _show_report(
+            session, lane, actor, f"Install {release.tag_name}", breadcrumb=breadcrumb, sections=sections,
+        )
+
+    token = await lane.run(get_github_pat)
+    await session.write_line(colored(f"Downloading {release.tag_name}...", fg_color=MUTED_COLOR))
+    try:
+        wheel = await asyncio.to_thread(fetch_release_wheel, release.tag_name, token=token)
+        wheel_path = await asyncio.to_thread(download_wheel, wheel, updates_directory(db_path))
+    except ApplyError as exc:
+        await _fail("download", str(exc))
+        return
+
+    await session.write_line(colored("Backing up this node...", fg_color=MUTED_COLOR))
+    try:
+        backup_path = await _create_live_backup_owned(
+            db_path=db_path, identity_dir=identity_dir, destination=default_backup_destination(db_path),
+        )
+    except (BackupError, OSError, sqlite3.Error) as exc:
+        await _fail("backup", str(exc))
+        return
+    await lane.run(lambda db: record_action(db, actor=actor, action="create_backup", detail=str(backup_path)))
+
+    await session.write_line(colored("Installing (this can take a few minutes)...", fg_color=MUTED_COLOR))
+
+    async def _install_and_record() -> tuple[str, str, str]:
+        """pip, the version check and the record, with no terminal I/O: this
+        runs to the end even if the SysOp's session is cancelled meanwhile
+        (Codex review) -- killing pip mid-replacement, or skipping the
+        record after it, would leave the environment changed with nothing
+        saying so. Returns `(result, detail, pip log)`, where `result` is
+        "refused" (nothing changed), "dirty" (pip changed the environment
+        but it does not report the target) or "installed"."""
+        try:
+            status, log = await run_bounded(pip_command(environment, wheel_path), timeout_seconds=PIP_TIMEOUT_SECONDS)
+        except (ApplyError, OSError) as exc:
+            return "refused", str(exc), ""
+        if status != 0:
+            return "refused", f"pip exited with status {status}; the running version is unchanged", log
+        try:
+            query_status, installed = await run_bounded(version_query_command(environment.python), timeout_seconds=60)
+        except (ApplyError, OSError) as exc:
+            query_status, installed = -1, f"(could not ask: {exc})"
+        installed = installed.strip().splitlines()[-1] if installed.strip() else ""
+        if query_status != 0 or installed.lstrip("vV") != release.tag_name.lstrip("vV"):
+            # pip returned 0, so the environment has changed whatever it now
+            # holds (Codex review): the Update screen keeps saying the node
+            # must be restarted or rolled back, not just "failed".
+            note = (
+                f"pip installed {release.tag_name}, but the environment reports "
+                f"{installed or 'no version'} -- restart the service or roll back by hand"
+            )
+            await lane.run(
+                lambda db: record_install(
+                    db, from_version=current_version, to_version=release.tag_name, restarting=False, note=note,
+                )
+            )
+            return "dirty", note, log
+
+        def _record(db: Database) -> None:
+            record_install(db, from_version=current_version, to_version=release.tag_name, restarting=False)
+            record_check_outcome(db, f"installed {release.tag_name}; restart the service to run it")
+            record_action(
+                db, actor=actor, action="install_release",
+                detail=f"{current_version} -> {release.tag_name}, backup {backup_path}",
+            )
+
+        await lane.run(_record)
+        _logger.info("%s installed %s", actor.username, release.tag_name)
+        return "installed", "", log
+
+    result, detail, log = await _run_to_completion(_install_and_record())
+    if result != "installed":
+        await _fail("install", detail, log)
+        return
+
+    # Armed only now, and only if nothing else has claimed the node's shutdown
+    # meanwhile (Claude review): replacing a SIGTERM's non-cancellable stop
+    # with this restart would bring back a node its operator stopped.
+    if not restarting or node_controls.shutdown_scheduler.is_scheduled():
+        why = (
+            "The node is already shutting down; when the service starts it again, it runs "
+            f"{release.tag_name}." if restarting
+            else f"Restart the service to run it; until then this node runs {current_version} "
+            "with the new files on disk."
+        )
+        _announce(session, f"Installed {release.tag_name}. {why}", color=WARNING_COLOR)
+        return
+
+    def _record_restart(db: Database) -> None:
+        record_install(db, from_version=current_version, to_version=release.tag_name, restarting=True)
+        record_check_outcome(db, f"installed {release.tag_name}; restarting")
+
+    await lane.run(_record_restart)
+    message = f"This node is restarting to install {release.tag_name}."
+    task = asyncio.create_task(run_restart_shutdown(lambda: run_shutdown_sequence(
+        graceful=True,
+        session_registry=node_controls.session_registry,
+        maintenance=node_controls.maintenance,
+        delay_seconds=node_controls.graceful_delay_seconds,
+        shutdown_event=node_controls.shutdown_event,
+        message=message,
+    )))
+    loop = asyncio.get_running_loop()
+    node_controls.shutdown_scheduler.schedule(
+        task, deadline=loop.time() + node_controls.graceful_delay_seconds, message=message,
+    )
+    _announce(
+        session,
+        f"Installed {release.tag_name}. The node goes down in {delay}s and the service manager starts it again.",
+        color=ALERT_COLOR,
+    )
+
+
+async def _run_to_completion(coroutine):
+    """Await `coroutine` as its own task that a cancellation of the caller
+    does not reach: on cancellation, keep waiting for it, then re-raise. Its
+    result or error is retrieved either way."""
+    task = asyncio.create_task(coroutine)
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+        if not task.cancelled() and task.exception() is not None:
+            _logger.error("release install failed after its SysOp session was cancelled", exc_info=task.exception())
+        raise
 
 
 # -- backup status (design doc §13.4, issue #60's first operational slice) --

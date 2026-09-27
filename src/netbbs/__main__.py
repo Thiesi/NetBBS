@@ -58,6 +58,7 @@ from netbbs.net.session_registry import ActiveSessionRegistry
 from netbbs.net.shutdown import SequenceScheduler, run_shutdown_sequence
 from netbbs.net.throttle import LinkRequestThrottle, LoginThrottle
 from netbbs.selfupdate import run_scheduled_update_check
+from netbbs.update_apply import RESTART_EXIT_CODE, reconcile_install_at_startup, restart_exit_requested
 from netbbs.storage.database import Database, DatabaseIntegrityError
 from netbbs.storage.execution import DatabaseLane
 from netbbs.timeutil import utc_now_iso
@@ -721,6 +722,13 @@ async def run(
     # implying one existed. Runs regardless of Link configuration, same
     # as the daybreak announcer -- this is general node maintenance, not
     # a Link-specific concern.
+    # Issue #731: an install from Settings -> Update records itself before
+    # the node goes down; this start says whether it came back as the
+    # version that was installed. Before the scheduled check, whose own
+    # outcome would otherwise be the one the Update screen shows.
+    install_outcome = reconcile_install_at_startup(db, __version__)
+    if install_outcome is not None:
+        _logger.info("update: %s", install_outcome)
     update_check_task = asyncio.create_task(run_scheduled_update_check(db))
 
     def _log_update_check_failure(task: asyncio.Task) -> None:
@@ -1664,6 +1672,11 @@ async def main() -> None:
     except StartupError as exc:
         _logger.error("startup failed: %s", exc)
         raise SystemExit(1) from exc
+    # Issue #731: the node stopped to run a release installed from Settings ->
+    # Update. A distinct status the service manager restarts on.
+    if restart_exit_requested():
+        _logger.info("exiting with status %s so the service manager starts the installed release", RESTART_EXIT_CODE)
+        raise SystemExit(RESTART_EXIT_CODE)
 
 
 

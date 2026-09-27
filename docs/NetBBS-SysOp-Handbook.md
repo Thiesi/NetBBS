@@ -941,7 +941,47 @@ appear on the SysOp dashboard and **Settings → Update**. You can check manuall
 toggle the schedule, and set an optional GitHub token for a higher API limit.
 These checks do not download, install, restart, or interrupt callers.
 
-**MANUAL — on the host:**
+### Installing from Settings → Update
+
+When a check has found a newer release, **[I]nstall vX** appears on
+**Settings → Update** on the live node. It first shows the plan, and does
+nothing until you choose **[I]nstall now** and answer yes. Read the release
+notes first, and stop games and companion services, as for any upgrade. The
+steps run in order, and a failure stops the rest and says why:
+
+1. Download the release's wheel from GitHub and check it against the SHA-256
+   digest the release publishes. A wheel without a published digest is not
+   installed.
+2. Back up this node to `netbbs_backups/` beside the database, the same as
+   **Backup → Create backup now**.
+3. `pip install` the wheel into the environment NetBBS runs from, with the same
+   extras. pip also fetches any newer dependency the release needs. The install
+   is refused for a system Python (not a virtual environment), a development
+   checkout, or an environment the service account cannot write. A failed pip
+   run shows its last lines of output.
+4. Restart, or not, as **[R]estart after install** says:
+   - **auto** restarts under systemd, detected, and not under NetBSD rc.d.
+   - **yes** declares that your service manager restarts NetBBS when it exits.
+   - **no** always stops after installing.
+
+   A restart warns callers and waits the configured shutdown delay. The node
+   then exits with status 75, and the service manager starts the new version.
+   Without a restart, the screen tells you to restart the service yourself. Do
+   it promptly: until then, the old version runs with the new files on disk.
+
+After the restart, the Update screen says whether the node came back as the
+version that was installed.
+
+**MANUAL — on the host, units installed from an earlier release:** the shipped
+`netbbs.service` now carries `RestartForceExitStatus=75` and
+`SuccessExitStatus=75`. An older unit with `Restart=on-failure` already restarts
+on 75, but logs it as a failure. Add both lines, then run
+`systemctl daemon-reload`.
+
+Rolling back stays a host procedure: stop the service, install the previous
+release's wheel, restore the backup from step 2, and start the service.
+
+**MANUAL — on the host (the by-hand route, always available):**
 
 1. Read the selected release's notes. Record the current version and paths.
 2. Stop games/services and create a backup; verify its game coverage and keep
