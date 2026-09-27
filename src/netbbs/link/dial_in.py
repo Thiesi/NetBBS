@@ -29,7 +29,7 @@ from ipaddress import ip_address
 import json
 from urllib.parse import urlsplit
 
-from netbbs.config import get_config, set_config
+from netbbs.config import get_config, set_config_without_commit
 from netbbs.link.node_profiles import normalize_dns_name, own_canonical_dns_name
 from netbbs.managed_dns.state import get_local_listeners
 from netbbs.storage.database import Database
@@ -88,10 +88,13 @@ def parse_dial_in_url(value: object) -> DialInAddress:
     but printable ASCII, and more than `MAX_DIAL_IN_URL_BYTES` bytes."""
     if not isinstance(value, str) or not value:
         raise DialInError("An address must be a non-empty URL.")
-    if len(value.encode("utf-8")) > MAX_DIAL_IN_URL_BYTES:
-        raise DialInError(f"An address may be at most {MAX_DIAL_IN_URL_BYTES} bytes.")
+    # Characters first: a lone surrogate in a signed payload would make the
+    # byte measurement below raise, and the reader must never raise. After
+    # this check one character is one byte.
     if any(not ("\x21" <= char <= "\x7e") for char in value):
         raise DialInError("An address may hold only printable ASCII characters and no spaces.")
+    if len(value) > MAX_DIAL_IN_URL_BYTES:
+        raise DialInError(f"An address may be at most {MAX_DIAL_IN_URL_BYTES} bytes.")
     try:
         parts = urlsplit(value)
         stated_port = parts.port
@@ -187,20 +190,25 @@ def get_stated_dial_in(db: Database) -> list[str] | None:
     return [address.url for address in advertised_dial_in({"dial_in": data})]
 
 
-def set_stated_dial_in(db: Database, values: list[str]) -> list[str]:
-    """Save the SysOp's list (possibly empty) and return what was stored.
-    Raises `DialInError` without writing anything if an entry is refused."""
+def set_stated_dial_in_without_commit(db: Database, values: list[str]) -> list[str]:
+    """Store the SysOp's list (possibly empty) inside the caller's own
+    transaction, so the list and its audit entry commit together (the SysOp
+    console's save), and return what was stored. Raises `DialInError`
+    before writing anything if an entry is refused."""
     accepted = validate_dial_in_list(values)
-    set_config(db, DIAL_IN_CONFIG_KEY, json.dumps(accepted))
+    set_config_without_commit(db, DIAL_IN_CONFIG_KEY, json.dumps(accepted))
     return accepted
 
 
 def public_url_fallback(db: Database) -> str | None:
     """`[web] public_url` as recorded at the last startup, when it is an
-    acceptable `https://` dial-in address (which includes the byte limit);
-    otherwise `None`."""
+    acceptable `https://` dial-in address (which includes the byte limit)
+    and the web listener was enabled; otherwise `None`. A public_url in
+    front of a disabled listener leads callers nowhere."""
     listeners = get_local_listeners(db)
-    url = listeners.web_public_url if listeners is not None else None
+    if listeners is None or listeners.web_port is None:
+        return None
+    url = listeners.web_public_url
     if not url:
         return None
     try:

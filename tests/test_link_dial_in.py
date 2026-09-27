@@ -26,7 +26,7 @@ from netbbs.link.dial_in import (
     get_stated_dial_in,
     parse_dial_in_url,
     published_dial_in,
-    set_stated_dial_in,
+    set_stated_dial_in_without_commit,
     suggested_dial_in,
 )
 from netbbs.link.events import (
@@ -70,10 +70,21 @@ def sysop(db):
     return create_user(db, "sysop", password="hunter2", user_level=SYSOP_LEVEL)
 
 
-def _listeners(db, *, public_url=None, telnet=2323, ssh=2222):
+def _listeners(db, *, public_url=None, telnet=2323, ssh=2222, web=8080):
     set_local_listeners(db, ListenerFacts(
-        telnet_port=telnet, ssh_port=ssh, web_port=8080, web_public_url=public_url,
+        telnet_port=telnet, ssh_port=ssh, web_port=web, web_public_url=public_url,
     ))
+
+
+def set_stated_dial_in(db, values):
+    """Store and commit, as the console's save does around its audit entry."""
+    try:
+        accepted = set_stated_dial_in_without_commit(db, values)
+    except BaseException:
+        db.connection.rollback()
+        raise
+    db.connection.commit()
+    return accepted
 
 
 # -- the validator -------------------------------------------------------------
@@ -155,6 +166,15 @@ def test_reader_drops_malformed_entries_and_repeats_and_caps_at_four():
         "https://three.example.org/", "telnet://four.example.org:23",
     ]
     assert len(addresses) == MAX_DIAL_IN_ADDRESSES
+
+
+def test_a_lone_surrogate_is_refused_not_raised():
+    """JSON can carry "\\ud800", which cannot be encoded as UTF-8; measuring
+    its bytes used to raise UnicodeEncodeError out of the reader."""
+    with pytest.raises(DialInError):
+        parse_dial_in_url("https://bbs.example.org/\ud800")
+    payload = json.loads('{"dial_in": ["https://bbs.example.org/\\ud800", "telnet://ok.example.org:23"]}')
+    assert [address.url for address in advertised_dial_in(payload)] == ["telnet://ok.example.org:23"]
 
 
 def test_reader_never_raises_on_a_hostile_list():
@@ -315,6 +335,14 @@ def test_a_damaged_stored_value_publishes_nothing(db):
     assert published_dial_in(db) == ()
     set_config(db, DIAL_IN_CONFIG_KEY, json.dumps(["telnet://ok.example.org:23", "http://no.example.org/"]))
     assert published_dial_in(db) == ("telnet://ok.example.org:23",)
+
+
+def test_a_public_url_is_neither_published_nor_suggested_with_web_disabled(db):
+    _listeners(db, public_url="https://bbs.example.org/", web=None)
+    assert published_dial_in(db) == ()
+    assert suggested_dial_in(db, "bbs.example.org") == [
+        "telnet://bbs.example.org:2323", "ssh://bbs.example.org:2222",
+    ]
 
 
 def test_suggestions_use_the_dns_name_listener_ports_and_https_public_url(db):

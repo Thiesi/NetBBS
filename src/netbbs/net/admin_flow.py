@@ -277,7 +277,7 @@ from netbbs.link.files import (
 )
 from netbbs.link.dial_in import (
     MAX_DIAL_IN_ADDRESSES, MAX_DIAL_IN_URL_BYTES, DialInError, get_stated_dial_in, published_dial_in,
-    set_stated_dial_in, suggested_dial_in,
+    set_stated_dial_in_without_commit, suggested_dial_in,
 )
 from netbbs.link.key_rotation import KeyRotationError
 from netbbs.link.node_identity import operational_key_history
@@ -9253,11 +9253,20 @@ async def _dial_in_editor(
         values = [draft[key] for key in slots]
 
         def _persist(db: Database) -> list[str]:
-            accepted = set_stated_dial_in(db, values)
-            record_action(
-                db, actor=actor, action="set_dial_in",
-                detail=", ".join(accepted) if accepted else "(none)",
-            )
+            # The list and its audit entry commit together or not at all,
+            # as the limits-and-retention save does.
+            db.connection.execute("BEGIN IMMEDIATE")
+            try:
+                accepted = set_stated_dial_in_without_commit(db, values)
+                record_action_without_commit(
+                    db, actor=actor, action="set_dial_in",
+                    detail=", ".join(accepted) if accepted else "(none)",
+                )
+            except BaseException:
+                db.connection.rollback()
+                raise
+            else:
+                db.connection.commit()
             return accepted
 
         accepted = await lane.run(_persist)
