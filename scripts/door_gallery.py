@@ -236,9 +236,12 @@ WALKS: dict[str, list[tuple[str, bytes]]] = {
         ("Raid preview", b"R#N%"),
         ("Log", b"H"),
         # A caller nothing has happened to yet: the feed and the log both say so
-        # (issue #649). Fresh worlds, so `\r*` dismisses the first-visit guide.
-        ("Switchboard, nothing yet", b"\r*N%"),
-        ("Log, nothing yet", b"\r*H"),
+        # (issue #649), on fresh worlds. The guide takes any key, and `N*` is the
+        # one way past it that ends: the switchboard redraws its last page on
+        # Next, where it ignores Enter without drawing anything, so `\r*`
+        # waited for a screen that never came. `P*` then returns to page one.
+        ("Switchboard, nothing yet", b"N*P*N%"),
+        ("Log, nothing yet", b"N*H"),
         ("Contract board", b"J"),
         # An action's preview is two pickers deep: the board, the approach, and
         # only then the terms the player is actually asked to accept. Each of the
