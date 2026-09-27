@@ -2977,4 +2977,35 @@ MIGRATIONS = [
         ALTER TABLE file_areas ADD COLUMN link_hidden_at TEXT;
         """,
     ),
+    Migration(
+        description=(
+            "Issue #520 slice 2: a door's outbound hook may also speak one-line messages in "
+            "chat channels a SysOp allows. `door_outbound_channel_targets` is the channel "
+            "allowlist, beside the board one; `suspended_at` is set when a channel moderator "
+            "mutes the door there (`/mute <label>`), with `suspended_until` NULL for an "
+            "indefinite mute, the same shape `channel_restrictions` gives a caller -- a door "
+            "is not an account, so it cannot have a row there. Chat lines get their own "
+            "ceiling (`chat_lines_per_hour`, default 30) and `door_outbound_history.kind` "
+            "keeps the two debits apart, so a chatty door cannot spend its board budget "
+            "or the reverse."
+        ),
+        sql="""
+        ALTER TABLE door_outbound ADD COLUMN chat_lines_per_hour INTEGER NOT NULL DEFAULT 30;
+
+        ALTER TABLE door_outbound_history ADD COLUMN kind TEXT NOT NULL DEFAULT 'board'
+            CHECK (kind IN ('board', 'chat'));
+
+        CREATE TABLE door_outbound_channel_targets (
+            id                    INTEGER PRIMARY KEY,
+            door_id               INTEGER NOT NULL REFERENCES doors(id) ON DELETE CASCADE,
+            channel_id            INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+            suspended_at          TEXT,
+            suspended_until       TEXT,
+            suspended_by_user_id  INTEGER REFERENCES users(id) ON DELETE SET NULL,
+            suspension_reason     TEXT,
+            created_at            TEXT NOT NULL,
+            UNIQUE (door_id, channel_id)
+        );
+        """,
+    ),
 ]

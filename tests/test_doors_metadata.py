@@ -30,7 +30,7 @@ def _only_user(db):
 
 
 def test_the_contract_version_is_published(db, tmp_path, player):
-    assert _info(db, tmp_path)["door_api"] == DOOR_API_VERSION == 3
+    assert _info(db, tmp_path)["door_api"] == DOOR_API_VERSION == 4
 
 
 def test_only_a_door_with_the_hook_hears_about_outbound(db, tmp_path, player):
@@ -141,7 +141,7 @@ def test_a_real_door_reads_the_effective_limit_not_the_profile_value(db, lane, p
     result = asyncio.run(_run(session, lane, door, player, wall_time_limit_seconds=30))
 
     assert result.reason == "exited"
-    assert b"API 3 LIMIT 30" in session.written, bytes(session.written)
+    assert b"API 4 LIMIT 30" in session.written, bytes(session.written)
 
 
 def test_a_second_launch_does_not_take_a_write_lock(db, tmp_path, player):

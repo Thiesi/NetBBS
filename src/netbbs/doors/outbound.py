@@ -1,7 +1,8 @@
 """
 A door's outbound hook: a per-door, SysOp-enabled allowlist of boards the
-door may post to, and a file-drop protocol it uses to do so (issue #520,
-from Blacksite upstream request #470).
+door may post to and chat channels it may speak in, and a file-drop
+protocol it uses to do so (issue #520, from Blacksite upstream request
+#470).
 
 **This is not containment, and nothing here should be read as if it were.**
 A native door already runs as the BBS user with the node database on disk
@@ -52,6 +53,7 @@ from netbbs.auth.users import DOOR_LABEL_SUFFIX, User, get_user_by_id
 from netbbs.boards.boards import Board, _row_to_board
 from netbbs.boards.limits import MAX_BODY_BYTES, MAX_SUBJECT_BYTES
 from netbbs.boards.posts import PostError, create_labelled_post
+from netbbs.chat.channels import Channel, _row_to_channel
 from netbbs.moderation.log import record_action, record_action_without_commit
 from netbbs.search import reindex_post
 from netbbs.storage.database import Database
@@ -97,18 +99,21 @@ _RESULTS_DIRNAME = "door-outbound"
 #: the bound a backup captures per door, which is why it is public.
 #: Defined below `_MAX_REQUESTS_PER_DRAIN`, which it depends on.
 
-#: Default ceiling, per door, per rolling hour. One number rather than one
-#: per target kind: two knobs would be two knobs nobody tunes, and the SysOp
-#: who owns the trust decision can raise this one where it matters.
+#: Default board ceiling, per door, per rolling hour.
 DEFAULT_POSTS_PER_HOUR = 6
-#: Highest ceiling a SysOp may set. Everything below is sized against it.
+#: Default chat ceiling. Its own number, not the board one: a line in a
+#: channel scrolls away and a board post stays, so "a few an hour" is right
+#: for one and far too few for a door narrating a game into a channel.
+DEFAULT_CHAT_LINES_PER_HOUR = 30
+#: Highest ceiling a SysOp may set, for either. Everything below is sized
+#: against it.
 MAX_POSTS_PER_HOUR = 240
 _RATE_WINDOW = datetime.timedelta(hours=1)
 
-#: How many requests one drain answers. Above `MAX_POSTS_PER_HOUR` on purpose:
-#: a cap *below* the highest ceiling a SysOp can set would silently discard
-#: posts from a configuration NetBBS itself permits.
-_MAX_REQUESTS_PER_DRAIN = MAX_POSTS_PER_HOUR + 16
+#: How many requests one drain answers. Above both ceilings together on
+#: purpose: a cap *below* what a SysOp can permit would silently discard
+#: posts from a configuration NetBBS itself allows.
+_MAX_REQUESTS_PER_DRAIN = 2 * MAX_POSTS_PER_HOUR + 16
 
 #: How many directory entries one drain will even enumerate. `iterdir()` plus
 #: `sorted()` materializes the whole directory before any cap applies, and a
@@ -131,6 +136,18 @@ RESULTS_KEPT = _MAX_REQUESTS_PER_DRAIN
 _JSON_ESCAPE_FACTOR = 6
 _MAX_REQUEST_BYTES = (MAX_SUBJECT_BYTES + MAX_BODY_BYTES) * _JSON_ESCAPE_FACTOR + 16 * 1024
 
+#: Longest chat line a door may send, in UTF-8 bytes. The real-time Link
+#: frame refuses a longer body outright, and a line a live peer cannot be
+#: sent is one this node would show and its peers would not; a caller
+#: typing at the prompt is held to the same frame.
+CHAT_LINE_MAX_BYTES = 4000
+#: Everything a chat line may not carry: C0 and C1 controls (ESC among
+#: them), which would let a door move the reader's cursor or recolor the
+#: screen. Stripped rather than refused, the same way a caller's pasted
+#: tab is harmless; a line break is refused instead, since that is the
+#: door trying to send two lines.
+_CHAT_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
 #: Longest label we will mint, matching `_MAX_USERNAME_LENGTH`, because the
 #: label federates as `local_user_id` and a peer validates it as a handle.
 _MAX_LABEL_LENGTH = 32
@@ -146,6 +163,7 @@ class OutboundConfig:
     door_id: int
     label: str
     posts_per_hour: int
+    chat_lines_per_hour: int
     #: Nullable via `ON DELETE SET NULL`. A door posts on the authority of
     #: the SysOp who switched its hook on, so if that account is gone the
     #: authority has lapsed with it and `drain` refuses until a SysOp
@@ -162,6 +180,7 @@ def _row_to_config(row: sqlite3.Row) -> OutboundConfig:
         door_id=row["door_id"],
         label=row["label"],
         posts_per_hour=row["posts_per_hour"],
+        chat_lines_per_hour=row["chat_lines_per_hour"],
         enabled_by_user_id=row["enabled_by_user_id"],
         last_refusal_logged_at=row["last_refusal_logged_at"],
         created_at=row["created_at"],
@@ -278,6 +297,7 @@ def disable_outbound(db: Database, door, *, disabled_by: User) -> None:
     if config is None:
         return
     db.connection.execute("DELETE FROM door_outbound_targets WHERE door_id = ?", (door.id,))
+    db.connection.execute("DELETE FROM door_outbound_channel_targets WHERE door_id = ?", (door.id,))
     db.connection.execute("DELETE FROM door_outbound_history WHERE door_id = ?", (door.id,))
     db.connection.execute("DELETE FROM door_outbound WHERE door_id = ?", (door.id,))
     db.connection.commit()
@@ -342,6 +362,184 @@ def revoke_target(db: Database, door, board: Board, *, revoked_by: User) -> None
                   object_id=door.id, detail=f"door={door.name!r} action=revoke board={board.name!r}")
 
 
+def set_chat_ceiling(db: Database, door, ceiling: int, *, changed_by: User) -> OutboundConfig:
+    """Change how many chat lines an hour this door may send."""
+    if not 1 <= ceiling <= MAX_POSTS_PER_HOUR:
+        raise OutboundError(f"the hourly chat ceiling must be between 1 and {MAX_POSTS_PER_HOUR}")
+    if outbound_config(db, door.id) is None:
+        raise OutboundError("this door's outbound hook is not switched on")
+    db.connection.execute(
+        "UPDATE door_outbound SET chat_lines_per_hour = ? WHERE door_id = ?", (ceiling, door.id)
+    )
+    db.connection.commit()
+    record_action(db, actor=changed_by, action="door_outbound", object_type="door",
+                  object_id=door.id, detail=f"door={door.name!r} action=chat_rate ceiling={ceiling}")
+    return outbound_config(db, door.id)
+
+
+@dataclass(frozen=True)
+class ChannelTarget:
+    """One channel a door may speak in, and whether a moderator muted it there."""
+
+    channel: Channel
+    #: Set while a channel moderator has the door muted here (`/mute`).
+    suspended_at: str | None
+    #: When that mute ends; `None` with `suspended_at` set is indefinite.
+    suspended_until: str | None
+    suspended_by: str | None
+    suspension_reason: str | None
+
+    @property
+    def suspended(self) -> bool:
+        return self.suspended_at is not None and (
+            self.suspended_until is None or self.suspended_until > utc_now_iso())
+
+
+def channel_not_allowable(db: Database, channel: Channel) -> str | None:
+    """Why a door may never speak in `channel`, or `None` if it may.
+
+    An MRC-bridged channel is refused because the bridge treats every
+    author as a local caller and would announce the door to the hub as one,
+    under a nick nobody there can resolve. Checked when a SysOp allows the
+    channel and again for every line, since a SysOp can bridge a channel
+    after allowing it.
+    """
+    from netbbs.link.channels import is_open_mrc_room
+    from netbbs.mrc.settings import get_mrc_mapping
+
+    if is_open_mrc_room(db, channel) or get_mrc_mapping(db, channel) is not None:
+        return "is bridged to MRC, and door lines are never sent there"
+    return None
+
+
+def channel_targets(db: Database, door_id: int) -> list[ChannelTarget]:
+    """Every channel this door may speak in, in the order they were allowed."""
+    rows = db.connection.execute(
+        """
+        SELECT c.*, t.suspended_at, t.suspended_until, t.suspension_reason,
+               u.username AS suspended_by
+        FROM door_outbound_channel_targets t
+        JOIN channels c ON c.id = t.channel_id AND c.link_hidden_at IS NULL
+        LEFT JOIN users u ON u.id = t.suspended_by_user_id
+        WHERE t.door_id = ?
+        ORDER BY t.id
+        """,
+        (door_id,),
+    ).fetchall()
+    return [ChannelTarget(channel=_row_to_channel(row), suspended_at=row["suspended_at"],
+                          suspended_until=row["suspended_until"], suspended_by=row["suspended_by"],
+                          suspension_reason=row["suspension_reason"])
+            for row in rows]
+
+
+def allow_channel(db: Database, door, channel: Channel, *, allowed_by: User) -> None:
+    """Add one chat channel to this door's allowlist.
+
+    Whether the SysOp was told that a Linked channel's lines reach every
+    peer and cannot be taken back is the screen's job; this refuses only
+    what can never be allowed.
+    """
+    if outbound_config(db, door.id) is None:
+        raise OutboundError("this door's outbound hook is not switched on")
+    if problem := channel_not_allowable(db, channel):
+        raise OutboundError(f"#{channel.name} {problem}")
+    db.connection.execute(
+        "INSERT OR IGNORE INTO door_outbound_channel_targets (door_id, channel_id, created_at) "
+        "VALUES (?, ?, ?)",
+        (door.id, channel.id, utc_now_iso()),
+    )
+    db.connection.commit()
+    record_action(db, actor=allowed_by, action="door_outbound", object_type="door",
+                  object_id=door.id, detail=f"door={door.name!r} action=allow channel={channel.name!r}")
+
+
+def revoke_channel(db: Database, door, channel: Channel, *, revoked_by: User) -> None:
+    """Remove one chat channel from this door's allowlist."""
+    db.connection.execute(
+        "DELETE FROM door_outbound_channel_targets WHERE door_id = ? AND channel_id = ?",
+        (door.id, channel.id),
+    )
+    db.connection.commit()
+    record_action(db, actor=revoked_by, action="door_outbound", object_type="door",
+                  object_id=door.id, detail=f"door={door.name!r} action=revoke channel={channel.name!r}")
+
+
+def door_for_label(db: Database, label: str):
+    """`(door, label)` for the door that speaks as `label`, or `None`.
+
+    The label comes back as stored, since a moderator may type it in any
+    case and the channel should be told the name the door actually uses.
+    """
+    from netbbs.doors.registry import get_door
+
+    row = db.connection.execute(
+        "SELECT door_id, label FROM door_outbound WHERE label = ? COLLATE NOCASE", (label,)
+    ).fetchone()
+    if row is None:
+        return None
+    door = get_door(db, row["door_id"])
+    return (door, row["label"]) if door is not None else None
+
+
+def _require_channel_moderator(db: Database, channel: Channel, actor: User) -> None:
+    from netbbs.chat.moderation import ChatModerationError
+    from netbbs.moderation import ChannelPermission, has_permission
+
+    if not has_permission(db, actor, object_type="channel", object_id=channel.id,
+                          permission=ChannelPermission.MODERATE):
+        raise ChatModerationError(f"{actor.username!r} does not hold moderate permission on this channel")
+
+
+def suspend_channel(db: Database, door, channel: Channel, *, duration: datetime.timedelta | None,
+                    reason: str | None, suspended_by: User) -> bool:
+    """A channel moderator's `/mute` of a door: it stops speaking there.
+
+    The SysOp owns whether a door may speak at all; the people who keep a
+    channel civil own whether it speaks *there*, without needing a SysOp to
+    edit an allowlist for them. Timed like a caller's mute and logged the
+    same way. Returns False when the door has no standing in this channel,
+    which is not an error: there is nothing to mute.
+    """
+    _require_channel_moderator(db, channel, suspended_by)
+    until = None
+    if duration is not None:
+        until = (datetime.datetime.now(datetime.timezone.utc) + duration).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    cursor = db.connection.execute(
+        """
+        UPDATE door_outbound_channel_targets
+        SET suspended_at = ?, suspended_until = ?, suspended_by_user_id = ?, suspension_reason = ?
+        WHERE door_id = ? AND channel_id = ?
+        """,
+        (utc_now_iso(), until, suspended_by.id, reason, door.id, channel.id),
+    )
+    db.connection.commit()
+    if cursor.rowcount == 0:
+        return False
+    record_action(db, actor=suspended_by, action="mute", object_type="channel", object_id=channel.id,
+                  detail=f"door={door.name!r}" + (f" reason: {reason}" if reason else ""))
+    return True
+
+
+def lift_channel_suspension(db: Database, door, channel: Channel, *, lifted_by: User) -> bool:
+    """`/unmute` for a door. Returns False when it has no standing here."""
+    _require_channel_moderator(db, channel, lifted_by)
+    cursor = db.connection.execute(
+        """
+        UPDATE door_outbound_channel_targets
+        SET suspended_at = NULL, suspended_until = NULL, suspended_by_user_id = NULL,
+            suspension_reason = NULL
+        WHERE door_id = ? AND channel_id = ?
+        """,
+        (door.id, channel.id),
+    )
+    db.connection.commit()
+    if cursor.rowcount == 0:
+        return False
+    record_action(db, actor=lifted_by, action="unmute", object_type="channel", object_id=channel.id,
+                  detail=f"door={door.name!r}")
+    return True
+
+
 def _window_start() -> str:
     """Start of the rate window, in the same fixed format `utc_now_iso`
     produces -- so it compares directly against stored `created_at`
@@ -350,14 +548,14 @@ def _window_start() -> str:
     return cutoff.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
-def _recent_post_count(db: Database, door_id: int) -> int:
-    """Posts inside the rate window, pruning everything older first.
+def _recent_post_count(db: Database, door_id: int, kind: str = "board") -> int:
+    """Posts (or chat lines) inside the rate window, pruning everything older first.
 
     Counted from its own table rather than from `posts` so that deleting a
     door's output cannot silently raise its own ceiling -- which is exactly
     what a SysOp clearing up after a misbehaving door would otherwise do.
-    Pruning on every check is what keeps the table bounded by
-    `posts_per_hour` per door rather than growing for the node's lifetime.
+    Pruning on every check is what keeps the table bounded by the two
+    ceilings per door rather than growing for the node's lifetime.
     """
     cutoff = _window_start()
     db.connection.execute(
@@ -366,8 +564,8 @@ def _recent_post_count(db: Database, door_id: int) -> int:
     )
     db.connection.commit()
     row = db.connection.execute(
-        "SELECT COUNT(*) FROM door_outbound_history WHERE door_id = ? AND created_at >= ?",
-        (door_id, cutoff),
+        "SELECT COUNT(*) FROM door_outbound_history WHERE door_id = ? AND kind = ? AND created_at >= ?",
+        (door_id, kind, cutoff),
     ).fetchone()
     return row[0]
 
@@ -439,6 +637,50 @@ def _resolve_board(db: Database, door_id: int, requested: object) -> tuple[Board
         return None, (f"board {_quoted(requested)} matches more than one allowlisted board; "
                       "spell it exactly")
     return None, f"board {_quoted(requested)} is not allowlisted for this door"
+
+
+def _resolve_channel(db: Database, door_id: int, requested: object) -> tuple[ChannelTarget | None, str]:
+    """Pick the allowlisted channel a request names, or say why we cannot.
+
+    Always named: unlike a board, there is no "the one target" default, since
+    the absence of `channel` is what makes a request a board post.
+    """
+    if not isinstance(requested, str):
+        return None, "'channel' must be a string"
+    # Callers write channels with their `#`; a door copying one should not be
+    # refused for it.
+    name = requested[1:] if requested.startswith("#") else requested
+    allowed = channel_targets(db, door_id)
+    if not allowed:
+        return None, "no chat channel is allowlisted for this door"
+    for target in allowed:
+        if target.channel.name == name:
+            return target, ""
+    # Same exact-then-folded rule as boards, for the same reason.
+    folded = [target for target in allowed if target.channel.name.casefold() == name.casefold()]
+    if len(folded) == 1:
+        return folded[0], ""
+    if folded:
+        return None, (f"channel {_quoted(requested)} matches more than one allowlisted channel; "
+                      "spell it exactly")
+    return None, f"channel {_quoted(requested)} is not allowlisted for this door"
+
+
+def _chat_line(body: str) -> tuple[str | None, str]:
+    """A door's chat body as the one line it will be shown as, or why not.
+
+    Surrounding whitespace goes first, so a door writing `line\\n` the way
+    most languages print is not refused for its own trailing newline.
+    """
+    line = body.strip()
+    if "\n" in line or "\r" in line:
+        return None, "a chat line must be one line; send each line as its own request"
+    line = _CHAT_CONTROL.sub("", line).strip()
+    if not line:
+        return None, "request needs a non-empty 'body' string"
+    if len(line.encode("utf-8")) > CHAT_LINE_MAX_BYTES:
+        return None, f"a chat line may be at most {CHAT_LINE_MAX_BYTES} bytes"
+    return line, ""
 
 
 def _is_storable(text: str) -> bool:
@@ -799,7 +1041,7 @@ def _write_result(db: Database, door_id: int, launch: str, stem: str, payload: d
 
 def drain(db: Database, door, workdir: Path, *, node_identity=None, rehearsal: bool = False,
           limit: int = _MAX_REQUESTS_PER_DRAIN, final: bool = True,
-          rehearsed: dict | None = None) -> tuple[int, int]:
+          rehearsed: dict | None = None, published: list | None = None) -> tuple[int, int]:
     """Process the requests a door has written, returning (posted, refused).
 
     Safe to call repeatedly, including while the door is still writing: each
@@ -824,6 +1066,13 @@ def drain(db: Database, door, workdir: Path, *, node_identity=None, rehearsal: b
     times passes to every call, so the rate verdicts span the whole session
     the way a real one's persisted debits do.
 
+    Every chat line this call records is appended to `published` as
+    `(channel, message)`, for the caller to deliver to the people in that
+    channel right now. That delivery is asynchronous and needs the node's
+    chat hub, neither of which a lane job has; the line is already in the
+    channel's scrollback and queued for Link by the time it is appended, so
+    a caller that cannot deliver it live loses nothing but the moment.
+
     Failures here never propagate into the caller's shutdown path. A door
     that has already exited cleanly must not be reported as having crashed
     because its drop directory was unreadable.
@@ -833,11 +1082,11 @@ def drain(db: Database, door, workdir: Path, *, node_identity=None, rehearsal: b
         return 0, 0
     with drop:
         return _drain(db, door, workdir, drop, node_identity=node_identity, rehearsal=rehearsal,
-                      limit=limit, final=final, rehearsed=rehearsed)
+                      limit=limit, final=final, rehearsed=rehearsed, published=published)
 
 
 def _drain(db: Database, door, workdir: Path, drop: _DropDir, *, node_identity, rehearsal: bool,
-           limit: int, final: bool, rehearsed: dict | None) -> tuple[int, int]:
+           limit: int, final: bool, rehearsed: dict | None, published: list | None) -> tuple[int, int]:
     requests, truncated = _scan_requests(drop)
     # The working directory is freshly made per launch, so its name
     # distinguishes concurrent sessions of the same door from each other.
@@ -877,7 +1126,7 @@ def _drain(db: Database, door, workdir: Path, drop: _DropDir, *, node_identity, 
         # persisted, but counted, so the fifth rehearsed request under a
         # ceiling of one is told what a real session would tell it.
         if rehearsed is None:
-            rehearsed = {"posts": 0}
+            rehearsed = {"posts": 0, "chat": 0}
         for name in requests[:limit]:
             claimed = _claim(drop, name)
             if claimed is None:
@@ -892,7 +1141,7 @@ def _drain(db: Database, door, workdir: Path, drop: _DropDir, *, node_identity, 
             try:
                 reason = _handle_one(db, door, config, actor, launch, _stem(name), drop, claimed,
                                      node_identity=node_identity, rehearsal=rehearsal,
-                                     rehearsed=rehearsed)
+                                     rehearsed=rehearsed, published=published)
             finally:
                 _release(drop, claimed)
             receipts.note()
@@ -920,7 +1169,8 @@ def _drain(db: Database, door, workdir: Path, drop: _DropDir, *, node_identity, 
 
 def _handle_one(db: Database, door, config: OutboundConfig, actor: User, launch: str,
                 stem: str, drop: _DropDir, claimed: str, *, node_identity=None,
-                rehearsal: bool = False, rehearsed: dict | None = None) -> str | None:
+                rehearsal: bool = False, rehearsed: dict | None = None,
+                published: list | None = None) -> str | None:
     """Post one claimed request, or return the reason it was refused.
 
     `claimed` is the request's name inside `drop` once claimed; `stem` is the
@@ -956,6 +1206,12 @@ def _handle_one(db: Database, door, config: OutboundConfig, actor: User, launch:
     if not isinstance(payload, dict):
         answer({"status": "rejected", "reason": "request must be a JSON object"})
         return "malformed request"
+    if "channel" in payload:
+        if "board" in payload:
+            answer({"status": "rejected", "reason": "a request names a board or a channel, not both"})
+            return "malformed request"
+        return _handle_chat(db, door, config, payload, answer, node_identity=node_identity,
+                            rehearsal=rehearsal, rehearsed=rehearsed, published=published)
 
     subject, body = payload.get("subject"), payload.get("body")
     if not isinstance(subject, str) or not isinstance(body, str) or not subject.strip():
@@ -1044,6 +1300,91 @@ def _handle_one(db: Database, door, config: OutboundConfig, actor: User, launch:
     return None
 
 
+def _handle_chat(db: Database, door, config: OutboundConfig, payload: dict, answer, *,
+                 node_identity, rehearsal: bool, rehearsed: dict | None,
+                 published: list | None) -> str | None:
+    """Speak one line in an allowlisted channel, or return why not.
+
+    Recorded exactly as a caller's line is -- scrollback, search, the Link
+    queue -- under the door's label, so every reader and every peer sees one
+    kind of chat line rather than a second one with its own rules. Not
+    audit-logged line by line, unlike a board post: a line scrolls out of a
+    channel within the hour, a door allowed thirty an hour would bury the
+    moderation log, and the label already says who spoke. Allowing the
+    channel is what is logged, and a moderator's `/mute` of the door.
+    """
+    if payload.get("kind", "message") != "message":
+        answer({"status": "rejected", "reason": "a door may only send 'message' lines"})
+        return "malformed request"
+    body = payload.get("body")
+    if not isinstance(body, str) or not _is_storable(body):
+        answer({"status": "rejected", "reason": "request needs a non-empty 'body' string"})
+        return "malformed request"
+    line, problem = _chat_line(body)
+    if line is None:
+        answer({"status": "rejected", "reason": problem})
+        return "malformed request"
+
+    target, problem = _resolve_channel(db, door.id, payload.get("channel"))
+    if target is None:
+        answer({"status": "rejected", "reason": problem})
+        return problem
+    channel = target.channel
+    if unallowable := channel_not_allowable(db, channel):
+        reason = f"#{channel.name} {unallowable}"
+        answer({"status": "rejected", "reason": reason})
+        return reason
+    if target.suspended:
+        until = f" until {target.suspended_until}" if target.suspended_until else ""
+        reason = f"a moderator of #{channel.name} has muted this door there{until}"
+        answer({"status": "rejected", "reason": reason, "channel": channel.name})
+        return reason
+
+    spent = _recent_post_count(db, door.id, "chat") + (rehearsed or {}).get("chat", 0)
+    if spent >= config.chat_lines_per_hour:
+        reason = f"rate limit reached ({config.chat_lines_per_hour} chat lines per hour)"
+        answer({"status": "rejected", "reason": reason})
+        return reason
+
+    if rehearsal:
+        # Nothing to roll back to judge it by: a chat line has no content
+        # check beyond the ones above, so a rehearsal records nothing at all.
+        if rehearsed is not None:
+            rehearsed["chat"] = rehearsed.get("chat", 0) + 1
+        answer({"status": "posted", "channel": channel.name})
+        return None
+
+    from netbbs.chat.scrollback import record_message
+
+    # The rate debit rides in the same transaction as the line:
+    # `record_message` commits once, at its end, and a line that exists
+    # without its debit hands the door back budget it has already spent.
+    db.connection.execute("BEGIN IMMEDIATE")
+    try:
+        db.connection.execute(
+            "INSERT INTO door_outbound_history (door_id, kind, created_at) VALUES (?, 'chat', ?)",
+            (door.id, utc_now_iso()),
+        )
+        message = record_message(db, channel, kind="message", author_label=config.label, body=line)
+    except BaseException:
+        db.connection.rollback()
+        raise
+
+    if node_identity is not None:
+        from netbbs.link.channels import queue_channel_message_if_linked
+
+        try:
+            queue_channel_message_if_linked(db, message, channel, node_identity=node_identity)
+        except (OSError, ValueError, sqlite3.Error) as exc:
+            # As for a board post: the line is real here, and a refusal would
+            # only invite the door to say it again.
+            _logger.warning("could not queue door chat line %s for Link: %s", message.id, exc)
+    if published is not None:
+        published.append((channel, message))
+    answer({"status": "posted", "channel": channel.name})
+    return None
+
+
 def door_info_block(db: Database, door_id: int, *, rehearsal: bool = False) -> dict | None:
     """What a door is told about its own hook, or `None` when it has none.
 
@@ -1063,6 +1404,11 @@ def door_info_block(db: Database, door_id: int, *, rehearsal: bool = False) -> d
         "results": str(results_dir(db, door_id)),
         "boards": [board.name for board in targets(db, door_id)],
         "posts_per_hour": config.posts_per_hour,
+        # Every allowlisted channel, muted ones included: a door told a
+        # channel had vanished would stop trying, and a mute ends on its own.
+        # A line sent while muted is refused with a reason, like any other.
+        "channels": [target.channel.name for target in channel_targets(db, door_id)],
+        "chat_lines_per_hour": config.chat_lines_per_hour,
     }
     if rehearsal:
         # A SysOp testing a door still gets a working drop directory, so the

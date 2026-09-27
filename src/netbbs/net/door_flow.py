@@ -17,6 +17,8 @@ forward the way file_flow.py/chat_flow.py had to.
 
 from __future__ import annotations
 
+import logging
+
 from netbbs.auth.users import User
 from netbbs.doors import Door, get_door, list_doors
 from netbbs.doors.runtime import DoorRunResult, run_door
@@ -31,6 +33,8 @@ from netbbs.permissions import meets_level
 from netbbs.rendering import MUTED_COLOR, colored, sanitize_text
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
+
+_logger = logging.getLogger(__name__)
 
 
 def has_visible_doors(
@@ -53,6 +57,33 @@ def _visible_doors(db: Database, user: User, *, community_id: int | None, commun
     return doors
 
 
+def chat_fanout(hub, link_context):
+    """What a door's chat lines are delivered live through (issue #520).
+
+    The same two pushes a caller's own line gets in `chat_flow`: everyone in
+    the channel on this node, then any Link peer live-subscribed to it --
+    a no-op for a channel that is not Linked. Never the MRC relay: a door's
+    channel is never a bridged one (`outbound.channel_not_allowable`). The
+    bridge is read at delivery, not here, for the same outlives-the-launch
+    reason `node_identity` is.
+    """
+    if hub is None:
+        return None
+
+    async def deliver(published) -> None:
+        for channel, message in published:
+            try:
+                await hub.broadcast(channel.name, message)
+                bridge = link_context.realtime_bridge if link_context is not None else None
+                if bridge is not None:
+                    await bridge.broadcast_local_message_live(channel, message)
+            except Exception as exc:
+                # One line's failure must not cost the lines after it.
+                _logger.warning("door chat line %s was not delivered live: %s", message.id, exc)
+
+    return deliver
+
+
 async def browse_doors(
     session: Session,
     lane: DatabaseLane,
@@ -64,6 +95,7 @@ async def browse_doors(
     door_services=None,
     presence=None,
     link_context=None,
+    chat_hub=None,
 ) -> None:
     """Pick a door and play it, looping back to the picker afterward so a
     caller can play another without re-entering the menu -- same
@@ -145,6 +177,7 @@ async def browse_doors(
                 # Read at each drain, not at launch: a door session can
                 # outlast a signing-key rotation by hours (issue #624).
                 node_identity=(lambda: link_context.node_identity) if link_context is not None else None,
+                chat_fanout=chat_fanout(chat_hub, link_context),
             )
         finally:
             if presence is not None:

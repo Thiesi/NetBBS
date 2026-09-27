@@ -7269,8 +7269,8 @@ Compatibility extension (issues #296/#297):
   is checked, not just the number. A SysOp screen names everything, being
   SysOp-only already. Remote presence carries no door: a linked node reports
   who is online, not what they are doing.
-- A door may post to boards a SysOp allowlists for it (issue #520, the
-  outbound half of #470), and to nothing else. It posts under a **label**, not
+- A door may post to boards and speak in chat channels a SysOp allowlists for
+  it (issue #520, the outbound half of #470), and to nothing else. It posts under a **label**, not
   an account: `author_user_id` and `author_fingerprint` are NULL and
   `author_label` alone carries the identity, which is the shape a Link-carried
   post has always had. An account was rejected as the answer -- `users`
@@ -7305,7 +7305,22 @@ Compatibility extension (issues #296/#297):
   requests are picked up every two seconds, a few at a time, and once more at
   exit; only the drain at exit refuses what is left over. A SysOp's test
   launch is drained too, but answered with a `rehearsal` verdict: nothing is
-  posted, debited or audit-logged. Reads of any
+  posted, debited or audit-logged. A chat line (slice 2) is one line,
+  control characters stripped, `kind="message"` only, recorded exactly as a
+  caller's line is -- scrollback, search, Link queue -- and delivered live by
+  the session that launched the door, since only it holds the chat hub. It
+  has its own hourly ceiling (30 by default) so neither budget spends the
+  other, and is not audit-logged per line: lines scroll away and a busy door
+  would bury the moderation log, while the label names the speaker. Three
+  rules keep it civil. An MRC-bridged channel is never a target, because the
+  bridge would present the door to the hub as a local caller. A Linked
+  channel needs the SysOp's explicit confirmation, because chat has no
+  retraction and the line reaches every peer. And a channel's moderators can
+  `/mute` a door there, timed like a caller's mute, by suspending its
+  allowlist entry -- a door has no account for `channel_restrictions` to name.
+  A door's line renders muted and marked; peers key on the reserved `.door`
+  suffix, so a newer peer styles a door's line too and an older one shows it
+  plain. Reads of any
   kind remain out of scope, and the hook is available to locally-launched
   doors only -- a remote registration shares no filesystem, and a DOS guest
   cannot read the launch metadata that names the drop directory.
