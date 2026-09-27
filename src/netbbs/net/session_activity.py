@@ -47,7 +47,10 @@ def activity(session: Any, label: str | None) -> Iterator[None]:
     abnormally cannot leave a stale segment behind for an outer one."""
     previous = getattr(session, "activity", ())
     cleaned = _clean(label) if label else ""
-    if cleaned:
+    # A screen that redraws itself by calling itself again (`file_flow.
+    # _show_area` after offering an upload link) is still one place, and
+    # must not grow the trail on every redraw.
+    if cleaned and previous[-1:] != (cleaned,):
         session.activity = (*previous, cleaned)
     try:
         yield

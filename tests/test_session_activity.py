@@ -80,6 +80,13 @@ def test_the_trail_is_restored_on_cancellation():
     asyncio.run(scenario())
 
 
+def test_a_screen_reentering_itself_does_not_grow_the_trail():
+    session = _Plain()
+    with activity(session, "Files"), activity(session, "Area"), activity(session, "Area"):
+        assert session.activity == ("Files", "Area")
+    assert session.activity == ()
+
+
 def test_an_empty_label_leaves_the_trail_alone():
     session = _Plain()
     with activity(session, "Mail"):
@@ -255,9 +262,6 @@ def test_timed_reads_stamp_data_too():
     async def scenario():
         reader = asyncio.StreamReader()
         telnet = TelnetSession(reader, _UnusedWriter())
-        reader.feed_data(bytes([IAC]))
-        assert await telnet.read_byte_with_timeout(0.1) == IAC
-        assert telnet.last_input_at is None
         reader.feed_data(b"x")
         assert await telnet.read_byte_with_timeout(0.1) == ord("x")
         assert telnet.last_input_at is not None
@@ -265,6 +269,31 @@ def test_timed_reads_stamp_data_too():
         local = LocalCLISession(read_byte_fn=lambda: b"", read_byte_with_timeout_fn=lambda timeout: b"x")
         assert await local.read_byte_with_timeout(0.1) == ord("x")
         assert local.last_input_at is not None
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "stream",
+    [
+        bytes([IAC, WILL, 31]),
+        bytes([IAC, 241]),  # NOP, a common keepalive
+        bytes([IAC, 250, 31, 0, 80, 0, 24, IAC, 240]),  # SB NAWS ... SE
+    ],
+    ids=["will", "nop", "subnegotiation"],
+)
+def test_a_telnet_peek_through_negotiation_is_not_input(stream):
+    async def scenario():
+        reader = asyncio.StreamReader()
+        telnet = TelnetSession(reader, _UnusedWriter())
+        reader.feed_data(stream)
+        for _ in stream:
+            assert await telnet.read_byte_with_timeout(0.1) is not None
+        assert telnet.last_input_at is None
+        reader.feed_data(bytes([IAC, IAC]))  # an escaped 0xFF is data
+        await telnet.read_byte_with_timeout(0.1)
+        await telnet.read_byte_with_timeout(0.1)
+        assert telnet.last_input_at is not None
 
     asyncio.run(scenario())
 

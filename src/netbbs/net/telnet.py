@@ -99,6 +99,9 @@ class TelnetSession(Session):
     ):
         self._reader = reader
         self._writer = writer
+        # Where `read_byte_with_timeout` is inside a Telnet command, so that
+        # none of its bytes count as caller input (issue #762).
+        self._peek_command: str | None = None
         self._close_timeout_seconds = close_timeout_seconds
         # Conservative defaults (also the Session base class defaults);
         # updated in place by _handle_subnegotiation if/when the client
@@ -359,10 +362,40 @@ class TelnetSession(Session):
             return None
         if not peek:
             return None
-        # A raw peek can land on negotiation, which is not input.
-        if peek[0] != IAC:
-            self.note_input()
+        self._note_peeked_input(peek[0])
         return peek[0]
+
+    def _note_peeked_input(self, byte: int) -> None:
+        """Stamp idle time for a byte the raw peek above returned, unless
+        it belongs to a Telnet command (issue #762). The peek does not parse
+        negotiation, so this follows just enough of it: IAC and the command
+        byte after it, the option byte after WILL/WONT/DO/DONT, and
+        everything from SB to SE. Keepalive traffic must not make an idle
+        caller look active."""
+        state = self._peek_command
+        if state == "subnegotiation":
+            if byte == SE:
+                self._peek_command = None
+            return
+        if state == "iac":
+            if byte == IAC:
+                # An escaped 0xFF is real data.
+                self._peek_command = None
+                self.note_input()
+            elif byte in (WILL, WONT, DO, DONT):
+                self._peek_command = "option"
+            elif byte == SB:
+                self._peek_command = "subnegotiation"
+            else:
+                self._peek_command = None
+            return
+        if state == "option":
+            self._peek_command = None
+            return
+        if byte == IAC:
+            self._peek_command = "iac"
+            return
+        self.note_input()
 
     async def _handle_subnegotiation(self) -> None:
         """

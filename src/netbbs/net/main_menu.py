@@ -60,7 +60,7 @@ from netbbs.net.profile_flow import (
 from netbbs.net.redraw_preference import redraw_in_place_enabled
 from netbbs.net.scan_and_find import _find_screen, _new_scan_screen
 from netbbs.net.session import Session, write_preformatted_line, write_prompt
-from netbbs.net.session_activity import set_root_activity
+from netbbs.net.session_activity import activity, set_root_activity
 from netbbs.net.session_registry import ActiveSessionRegistry
 from netbbs.net.shutdown import NodeControls, format_remaining_seconds
 from netbbs.net.unicode_style_preference import unicode_style_enabled
@@ -594,7 +594,9 @@ async def _main_menu_loop(
                         task.cancel()
                     await asyncio.gather(*stragglers, return_exceptions=True)
                     direct_invites.clear_arrival(session)
-                    await _handle_incoming_invite(session, db, direct_invites, hub, presence, user)
+                    # Issue #762: "Invitation", never whose.
+                    with activity(session, "Invitation"):
+                        await _handle_incoming_invite(session, db, direct_invites, hub, presence, user)
                     continue
                 if access_task is not None and access_task in done and key_task not in done:
                     for task in (key_task, *side_tasks.values()):
