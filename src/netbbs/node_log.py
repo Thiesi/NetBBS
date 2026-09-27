@@ -30,6 +30,7 @@ reaches a terminal is masked.
 from __future__ import annotations
 
 import codecs
+import logging
 import os
 import re
 import stat
@@ -62,6 +63,27 @@ _TRANSFER_TOKEN = re.compile(r"(/transfer/)[^\s\"'?#]+")
 def redact(text: str) -> str:
     """Mask bearer transfer tokens (see the module docstring)."""
     return _TRANSFER_TOKEN.sub(r"\1<token>", text)
+
+
+#: Appended to a followed entry released at `MAX_HELD_CHARS`.
+ENTRY_CUT_MARKER = "  [entry cut: longer than NetBBS shows]"
+
+#: What the file log writes before every line of an entry after its first.
+CONTINUATION_INDENT = "  "
+
+
+class ContinuationSafeFormatter(logging.Formatter):
+    """The node's file-log formatter: every line after an entry's first is
+    indented, so only a real entry starts with a timestamp at column 0.
+
+    Logged messages can carry text from outside -- a Link peer's error body,
+    a caller's input -- and a newline in it followed by something shaped
+    like `2026-09-27 10:00:00 CRITICAL:...` would otherwise read, in the
+    file and in Operations -> Node log, as an entry the node never wrote."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        first, *rest = super().format(record).split("\n")
+        return "\n".join([first, *(CONTINUATION_INDENT + line for line in rest)])
 
 
 def node_log_path(db_path: Path) -> Path:
@@ -139,12 +161,15 @@ def _describe(path: Path, exc: OSError) -> str:
     return f"could not read {path.name}: {exc.strerror or exc}"
 
 
-def _read_tail(path: Path, budget: int) -> tuple[str, bool, int]:
+def _read_tail(path: Path, budget: int) -> tuple[str, bool, int, tuple[int, int]]:
     """The last `budget` bytes of `path` as text, whether any were left out,
-    and how many bytes were read. A read that starts mid-line drops that
-    partial first line; one that starts exactly at a line keeps it."""
+    how many bytes were read, and the file's identity. A read that starts
+    mid-line drops that partial first line; one that starts exactly at a
+    line keeps it."""
     with _open_regular(path) as handle:
-        size = os.fstat(handle.fileno()).st_size
+        info = os.fstat(handle.fileno())
+        identity = (info.st_dev, info.st_ino)
+        size = info.st_size
         start = max(0, size - budget)
         # One byte more, to see whether `start` begins a line.
         handle.seek(max(0, start - 1))
@@ -155,7 +180,7 @@ def _read_tail(path: Path, budget: int) -> tuple[str, bool, int]:
     text = data.decode("utf-8", errors="replace")
     if start > 0 and not starts_a_line:
         _, _, text = text.partition("\n")
-    return text, start > 0, len(data)
+    return text, start > 0, len(data), identity
 
 
 def parse_log_lines(lines: list[str], *, first_id: int = 0) -> list[NodeLogEntry]:
@@ -195,17 +220,21 @@ def read_node_log(path: Path, *, max_bytes: int = MAX_READ_BYTES, max_entries: i
         result.missing = True
         return result
     try:
-        active_text, active_cut, active_bytes = _read_tail(path, max_bytes)
+        active_text, active_cut, active_bytes, active_identity = _read_tail(path, max_bytes)
         text = active_text
         truncated = active_cut
         rotated = path.with_name(path.name + ".1")
         remaining = max_bytes - active_bytes
         if not active_cut and remaining > 0 and rotated.exists() and _refuse_symlink(rotated) is None:
             try:
-                older_text, older_cut, _ = _read_tail(rotated, remaining)
+                older_text, older_cut, _, older_identity = _read_tail(rotated, remaining)
             except _NotRegularFile:
                 truncated = True
             else:
+                if older_identity == active_identity:
+                    # The log rolled over between the two reads: `.1` is the
+                    # generation already read above. Show it once.
+                    older_text, older_cut = "", True
                 # A generation that ended mid-line (a crash before rotation)
                 # must not glue its last fragment onto the active file's
                 # first entry.
@@ -273,9 +302,11 @@ class NodeLogFollower:
         if refusal is not None:
             return [], refusal
         ready: list[str] = []
+        notice: str | None = None
         try:
             if not self.path.exists():
-                return self._emit(self._finish_generation()), None
+                return self._emit(self._finish_generation()), (
+                    f"{self.path.name} is gone; nothing is being followed until it is back.")
             with _open_regular(self.path) as handle:
                 info = os.fstat(handle.fileno())
                 identity = (info.st_dev, info.st_ino)
@@ -283,7 +314,8 @@ class NodeLogFollower:
                     # Rotated. What the old generation gained since the last
                     # poll is read from where it went (`.1`) before the new
                     # file is started, then everything held from it is done.
-                    ready = self._drain_rotated() + self._finish_generation()
+                    drained, notice = self._drain_rotated()
+                    ready = drained + self._finish_generation()
                     self._identity = identity
                     self._offset = 0
                 handle.seek(self._offset)
@@ -292,7 +324,7 @@ class NodeLogFollower:
             return self._emit(ready), _describe(self.path, exc)
         self._offset += len(data)
         ready += self._consume(data, hold=True)
-        return self._emit(ready), None
+        return self._emit(ready), notice
 
     def _consume(self, data: bytes, *, hold: bool) -> list[str]:
         """Decode `data` onto what was pending and return the lines ready to
@@ -323,27 +355,38 @@ class NodeLogFollower:
                 (index for index, line in enumerate(lines) if _ENTRY_START.match(redact(line.rstrip("\r")))),
                 default=None,
             )
-            if last_header is not None and sum(len(line) for line in lines[last_header:]) <= MAX_HELD_CHARS:
-                self._held = lines[last_header:]
-                lines = lines[:last_header]
+            if last_header is not None:
+                if sum(len(line) for line in lines[last_header:]) <= MAX_HELD_CHARS:
+                    self._held = lines[last_header:]
+                    lines = lines[:last_header]
+                else:
+                    # Released at its size limit: say so, because the rest of
+                    # its traceback arrives without a header and is dropped.
+                    lines.append(ENTRY_CUT_MARKER)
         return lines
 
-    def _drain_rotated(self) -> list[str]:
+    def _drain_rotated(self) -> tuple[list[str], str | None]:
         """The unread end of the generation this follower was reading, if
-        it is now `netbbs.log.1` -- bounded like any other poll."""
+        it is now `netbbs.log.1` -- bounded like any other poll, with a
+        notice naming what that bound left unread."""
         rotated = self.path.with_name(self.path.name + ".1")
         if self._identity is None or _refuse_symlink(rotated) is not None or not rotated.exists():
-            return []
+            return [], None
         try:
             with _open_regular(rotated) as handle:
                 info = os.fstat(handle.fileno())
                 if (info.st_dev, info.st_ino) != self._identity:
-                    return []
+                    return [], None
                 handle.seek(self._offset)
                 data = handle.read(MAX_FOLLOW_BYTES)
         except OSError:
-            return []
-        return self._consume(data, hold=False)
+            return [], None
+        skipped = info.st_size - self._offset - len(data)
+        notice = (
+            f"The log rotated after a burst; {skipped} bytes written just before it are not shown here "
+            f"(they are in {rotated.name})." if skipped > 0 else None
+        )
+        return self._consume(data, hold=False), notice
 
     def _finish_generation(self) -> list[str]:
         """Everything still pending from a file that will not grow again."""

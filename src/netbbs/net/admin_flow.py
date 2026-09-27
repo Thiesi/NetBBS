@@ -8899,9 +8899,12 @@ async def _diagnostic_log_tail_screen(session: Session, lane: DatabaseLane) -> N
                 await session.write_line(_diagnostic_entry_line(entry, session.terminal_width))
                 last_id = entry.id
     finally:
+        # Always retrieve the read, even one that already finished with an
+        # error while the body was failing for its own reason (gathered with
+        # return_exceptions, so it cannot mask that original error).
         if not key_task.done():
             key_task.cancel()
-            await asyncio.gather(key_task, return_exceptions=True)
+        await asyncio.gather(key_task, return_exceptions=True)
     await session.write_line("")
 
 
@@ -9087,7 +9090,7 @@ async def _node_log_tail_screen(session: Session, lane: DatabaseLane, path: Path
     finally:
         if not key_task.done():
             key_task.cancel()
-            await asyncio.gather(key_task, return_exceptions=True)
+        await asyncio.gather(key_task, return_exceptions=True)
     await session.write_line("")
 
 

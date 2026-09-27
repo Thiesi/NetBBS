@@ -468,3 +468,135 @@ def test_follow_shows_whole_entries_with_their_traceback(db, lane, sysop, monkey
     text = "".join(_visible(_written_text(session)).split())
     assert "THE-END" in text
     assert "Traceback(mostrecentcalllast):" in text and "OSError:boom" in text
+
+
+# -- review round 4 (PR #739) ----------------------------------------------
+
+
+def test_a_forged_entry_inside_a_logged_message_stays_part_of_it(tmp_path):
+    """A Link peer's error body can carry a newline and a line shaped like an
+    entry; the file formatter indents continuation lines, so only the node's
+    own entries start at column 0."""
+    import logging
+
+    from netbbs.__main__ import _create_log_file_handler
+
+    path = tmp_path / "netbbs.log"
+    handler = _create_log_file_handler(path)
+    logger = logging.getLogger("netbbs.test_forgery")
+    logger.addHandler(handler)
+    logger.propagate = False
+    try:
+        logger.warning("peer said: %s", "oops\n2026-09-27 10:00:00 CRITICAL:netbbs:forged by a peer")
+        try:
+            raise ValueError("bad\n2026-09-27 10:00:01 CRITICAL:netbbs:forged in a traceback")
+        except ValueError:
+            logger.exception("request failed")
+    finally:
+        logger.removeHandler(handler)
+        handler.close()
+
+    entries = read_node_log(path).entries
+    assert [(e.level, e.message) for e in entries] == [("WARNING", "peer said: oops"), ("ERROR", "request failed")]
+    assert any("forged by a peer" in line for line in entries[0].continuation)
+    assert any("forged in a traceback" in line for line in entries[1].continuation)
+
+
+def test_a_rollover_between_the_two_reads_is_not_shown_twice(tmp_path):
+    """If `.1` is the very file just read as the active log (the handler
+    rolled over in between), its text appears once."""
+    path = tmp_path / "netbbs.log"
+    path.write_text(_line("ERROR", "only once"), encoding="utf-8")
+    try:
+        os.link(path, tmp_path / "netbbs.log.1")
+    except (OSError, NotImplementedError):
+        pytest.skip("hard links are unavailable here")
+
+    result = read_node_log(path)
+
+    assert [e.message for e in result.entries] == ["only once"]
+
+
+def test_a_burst_before_rotation_says_what_follow_did_not_show(tmp_path, monkeypatch):
+    import netbbs.node_log as node_log
+
+    monkeypatch.setattr(node_log, "MAX_FOLLOW_BYTES", 256)
+    path = tmp_path / "netbbs.log"
+    path.write_text("", encoding="utf-8")
+    follower = NodeLogFollower(path)
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write("".join(_line("ERROR", f"burst {i:03d}") for i in range(50)))
+    path.replace(tmp_path / "netbbs.log.1")
+    path.write_text(_line("ERROR", "after"), encoding="utf-8")
+
+    entries, notice = follower.poll()
+
+    assert notice is not None and "rotated after a burst" in notice and "netbbs.log.1" in notice
+    assert entries and entries[0].message == "burst 000"
+
+
+def test_an_entry_released_at_its_size_limit_says_it_was_cut(tmp_path, monkeypatch):
+    import netbbs.node_log as node_log
+
+    monkeypatch.setattr(node_log, "MAX_HELD_CHARS", 300)
+    monkeypatch.setattr(node_log, "MAX_FOLLOW_BYTES", 128)
+    path = tmp_path / "netbbs.log"
+    path.write_text("", encoding="utf-8")
+    follower = NodeLogFollower(path)
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(_line("ERROR", "long traceback") + "".join(f"  frame {i:03d}\n" for i in range(100)))
+        handle.write(_line("INFO", "next"))
+
+    entries = []
+    for _ in range(100):
+        entries += follower.poll()[0]
+
+    cut = next(e for e in entries if e.message == "long traceback")
+    assert cut.continuation[-1].strip() == node_log.ENTRY_CUT_MARKER.strip()
+    assert entries[-1].message == "next"
+
+
+def test_follow_says_when_the_log_is_gone(tmp_path):
+    path = tmp_path / "netbbs.log"
+    path.write_text(_line("ERROR", "x"), encoding="utf-8")
+    follower = NodeLogFollower(path)
+    path.unlink()
+
+    entries, error = follower.poll()
+
+    assert entries == [] and "is gone" in error
+
+
+def test_follow_retrieves_a_failed_read_even_when_the_body_fails_first(db, lane, monkeypatch):
+    """The read finished with an error while a poll was failing for its own
+    reason; the finally block must still retrieve it."""
+    import gc
+
+    path = node_log_path(db.path)
+    path.write_text("", encoding="utf-8")
+    monkeypatch.setattr(admin_flow, "_DIAGNOSTIC_TAIL_POLL_INTERVAL_SECONDS", 0.02)
+
+    def _slow_failing_poll(self):
+        import time
+
+        time.sleep(0.3)
+        raise RuntimeError("poll broke")
+
+    monkeypatch.setattr(admin_flow.NodeLogFollower, "poll", _slow_failing_poll)
+
+    class _DropsDuringPoll(FakeSession):
+        async def read_key(self, echo: bool = True) -> str:
+            await asyncio.sleep(0.1)
+            raise ConnectionResetError("caller went away")
+
+    unretrieved = []
+
+    async def scenario():
+        asyncio.get_running_loop().set_exception_handler(lambda loop, context: unretrieved.append(context))
+        with pytest.raises(RuntimeError, match="poll broke"):
+            await admin_flow._node_log_tail_screen(_DropsDuringPoll(), lane, path, floor="WARNING")
+        gc.collect()
+
+    asyncio.run(scenario())
+    gc.collect()
+    assert not [c for c in unretrieved if "never retrieved" in str(c.get("message", ""))]

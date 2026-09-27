@@ -26,7 +26,7 @@ from netbbs.backup import remove_pid_file, write_pid_file
 from netbbs.chat import ChatHub, DirectChatInvites, MessageMailbox, PresenceRegistry
 from netbbs.config import is_node_display_name_placeholder
 from netbbs.files.storage import purge_incoming_staging
-from netbbs.node_log import node_log_path
+from netbbs.node_log import ContinuationSafeFormatter, node_log_path
 from netbbs.session_history import reconcile_interrupted_sessions
 from netbbs.link.boards import LinkConfigSnapshot, LinkContext
 from netbbs import __version__
@@ -110,7 +110,7 @@ def _create_log_file_handler(log_path: Path) -> logging.Handler:
         backupCount=_LOG_FILE_BACKUP_COUNT,
         encoding="utf-8",
     )
-    handler.setFormatter(logging.Formatter(_LOG_FORMAT, datefmt=_LOG_DATE_FORMAT))
+    handler.setFormatter(ContinuationSafeFormatter(_LOG_FORMAT, datefmt=_LOG_DATE_FORMAT))
     return handler
 
 
