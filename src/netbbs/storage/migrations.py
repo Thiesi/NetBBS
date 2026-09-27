@@ -3219,14 +3219,28 @@ MIGRATIONS = [
         -- taken down again, where nothing depends on it: a root with no
         -- replies and no revisions (anything else keeps its row, for a
         -- moderator to remove). Its search entry goes with it.
+        -- An edit with no later edit built on it is taken down the same way,
+        -- and its post's search entry falls back to the version before it.
         CREATE TEMP TABLE resurrected_rejections AS
-        SELECT p.post_id FROM posts p JOIN post_rejections r ON r.post_id = p.post_id
-         WHERE p.post_id = p.root_post_id
-           AND EXISTS (SELECT 1 FROM link_events e WHERE e.content_id = p.post_id)
+        SELECT p.post_id, p.root_post_id, p.board_id FROM posts p JOIN post_rejections r ON r.post_id = p.post_id
+         WHERE EXISTS (SELECT 1 FROM link_events e WHERE e.content_id = p.post_id)
            AND NOT EXISTS (SELECT 1 FROM posts c WHERE c.parent_post_id = p.post_id)
-           AND NOT EXISTS (SELECT 1 FROM posts c WHERE c.root_post_id = p.post_id AND c.post_id != p.post_id);
-        DELETE FROM post_search WHERE root_post_id IN (SELECT post_id FROM resurrected_rejections);
+           AND NOT EXISTS (SELECT 1 FROM posts c WHERE c.edit_of_post_id = p.post_id)
+           AND (p.post_id != p.root_post_id
+                OR NOT EXISTS (SELECT 1 FROM posts c WHERE c.root_post_id = p.post_id AND c.post_id != p.post_id));
+        DELETE FROM post_search WHERE root_post_id IN (SELECT root_post_id FROM resurrected_rejections);
         DELETE FROM posts WHERE post_id IN (SELECT post_id FROM resurrected_rejections);
+        INSERT INTO post_search (subject, body, board_id, root_post_id)
+        SELECT p.subject, netbbs_plain_post_body(p.body), p.board_id, p.root_post_id
+          FROM posts p
+         WHERE p.root_post_id IN (SELECT root_post_id FROM resurrected_rejections)
+           AND p.status = 'approved'
+           AND p.id = (
+               SELECT q.id FROM posts q
+                WHERE q.root_post_id = p.root_post_id AND q.board_id = p.board_id AND q.status = 'approved'
+                ORDER BY q.created_at DESC, q.id DESC
+                LIMIT 1
+           );
         DROP TABLE resurrected_rejections;
         """,
     ),

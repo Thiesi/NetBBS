@@ -893,3 +893,67 @@ def test_the_migration_takes_down_a_refused_post_an_earlier_repair_restored(tmp_
         ).fetchone() is None
     finally:
         db.close()
+
+
+
+def _retained(db, content_id):
+    return db.connection.execute("SELECT 1 FROM link_events WHERE content_id = ?", (content_id,)).fetchone() is not None
+
+
+def test_later_edits_past_a_rejected_edit_are_kept_for_relay_not_shown(db, sysop, remote):
+    """Codex review on #780: each later edit names the rejected one (then
+    the one before it) as its predecessor; they are retained, not dropped."""
+    from netbbs.boards.posts import delete_post
+
+    _carried_board(db, remote, moderated=True)
+    root = approve_post(db, _carry(db, remote), approved_by=sysop)
+    rejected_event = _remote_edit(remote, root, previous=root.post_id, body="refused text")
+    rejected = materialize_carried_post_edit(db, rejected_event, sender_fingerprint=remote.fingerprint)
+    delete_post(db, rejected, deleted_by=sysop)
+
+    later = _remote_edit(remote, root, previous=rejected_event.content_id, body="built on it")
+    after_that = _remote_edit(remote, root, previous=later.content_id, body="and on that")
+    assert materialize_carried_post_edit(db, later, sender_fingerprint=remote.fingerprint) is None
+    assert materialize_carried_post_edit(db, after_that, sender_fingerprint=remote.fingerprint) is None
+
+    assert _retained(db, later.content_id) and _retained(db, after_that.content_id)
+    assert _post_row(db, later.content_id) is None and _post_row(db, after_that.content_id) is None
+    assert get_post(db, root.post_id).body == "first post"
+
+
+def test_the_migration_takes_down_a_refused_edit_an_earlier_repair_restored(tmp_path, monkeypatch, remote):
+    from netbbs.storage import database as database_module
+    from netbbs.storage.migrations import MIGRATIONS
+    import netbbs.link.boards as link_boards
+
+    index = next(i for i, m in enumerate(MIGRATIONS) if "post_rejections" in m.description)
+    monkeypatch.setattr(database_module, "MIGRATIONS", MIGRATIONS[:index])
+    monkeypatch.setattr(link_boards, "_rejected_here", lambda db, content_id: False)
+    path = tmp_path / "node.db"
+    old = Database(path)
+    sysop = create_user(old, "sysop", password="hunter2", user_level=SYSOP_LEVEL)
+    _carried_board(old, remote)
+    root = _carry(old, remote)
+    edit = materialize_carried_post_edit(
+        old, _remote_edit(remote, root, previous=root.post_id, body="refused, then repaired back"),
+        sender_fingerprint=remote.fingerprint,
+    )
+    old.connection.execute(
+        "INSERT INTO moderation_log (actor_user_id, action, object_type, object_id, detail, created_at) "
+        "VALUES (?, 'reject', 'board', ?, ?, ?)",
+        (sysop.id, edit.board_id, edit.post_id, NOW),
+    )
+    old.connection.commit()
+    old.close()
+    monkeypatch.undo()
+
+    db = Database(path)
+    try:
+        assert _post_row(db, edit.post_id) is None
+        assert get_post(db, root.post_id).body == "first post"
+        indexed = db.connection.execute(
+            "SELECT body FROM post_search WHERE root_post_id = ?", (root.post_id,)
+        ).fetchall()
+        assert [row[0] for row in indexed] == ["first post"]
+    finally:
+        db.close()

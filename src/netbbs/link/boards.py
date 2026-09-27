@@ -658,7 +658,14 @@ def materialize_carried_post_edit(
     # itself retained but never projected must not keep this event from
     # being retained too: a chain of edits after a tombstone would otherwise
     # lose every edit after the first from durable storage.
-    if status is not None and not _predecessor_projected(db, payload["previous_event_id"]):
+    #
+    # The same holds past a rejected edit (issue #692): its signed event is
+    # kept, its text never shown. A later edit building on it is kept for
+    # relay but not shown either -- nor any edit after that, since each one's
+    # predecessor is then retained and unprojected in turn (Codex review on
+    # #780). A predecessor this node has not received at all still refuses.
+    predecessor_projected = _predecessor_projected(db, payload["previous_event_id"])
+    if status is not None and not predecessor_projected and not _event_retained(db, payload["previous_event_id"]):
         return None
 
     board_local_id = root_row["board_id"]
@@ -676,7 +683,7 @@ def materialize_carried_post_edit(
             payload["board_id"],
         ),
     )
-    if status is None or _rejected_here(db, edit.content_id):
+    if status is None or not predecessor_projected or _rejected_here(db, edit.content_id):
         db.connection.commit()
         return None
     db.connection.execute(
@@ -699,6 +706,13 @@ def materialize_carried_post_edit(
     return _post_from_row(
         db.connection.execute("SELECT * FROM posts WHERE post_id = ?", (edit.content_id,)).fetchone()
     )
+
+
+def _event_retained(db: Database, content_id: str) -> bool:
+    """Whether this node keeps the signed event `content_id`."""
+    return db.connection.execute(
+        "SELECT 1 FROM link_events WHERE content_id = ?", (content_id,)
+    ).fetchone() is not None
 
 
 def _rejected_here(db: Database, content_id: str) -> bool:
