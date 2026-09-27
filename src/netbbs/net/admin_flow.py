@@ -2348,7 +2348,7 @@ async def _draw_system_menu(
         MenuEntry(label=menu_key("T", "imestamp format"), brief="Node-wide date/time display"),
         MenuEntry(
             label=menu_key("S", " & retention", prefix="Limit"),
-            brief="Upload cap, expiry grace, invitations, scrollback",
+            brief="Uploads, expiry, invites, history",
         ),
         MenuEntry(
             label=menu_key("G", "uest access"),
@@ -7100,7 +7100,7 @@ async def _limits_settings_screen(session: Session, lane: DatabaseLane, actor: U
             key="grace_days", hotkey="g", menu_text=menu_key("G", "race before deletion (days)"),
             label="Grace before deletion",
             render=lambda d: f"{d['grace_days']} days", prompt=_int_field("grace_days", "Days"),
-            brief="Expired posts and files wait this long", section="Retention",
+            brief="Days before expired items go", section="Retention",
             help=(
                 "When a post or file passes its board's or area's maximum age it expires, and is deleted "
                 f"this many days later (0-{MAX_SETTING_DAYS}). Until then a SysOp can still recover an "
