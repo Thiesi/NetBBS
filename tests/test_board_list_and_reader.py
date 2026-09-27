@@ -688,3 +688,18 @@ def test_a_callers_own_new_post_is_not_new_to_them(db, alice):
 
     assert "Posted." in session.visible()
     assert unread_post_count(db, alice, board) == 0
+
+
+def test_mark_all_read_keeps_the_list_on_the_screen(db, alice, monkeypatch):
+    """The outcome line takes a row the page was not sized for; the list is
+    refetched for it (Codex review on #723)."""
+    board = create_board(db, "general", creator=alice)
+    ensure_board_baseline(db, alice, board)
+    _posts(db, board, alice, 40, monkeypatch)
+    session = FakeSession(["m", "b"])
+
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+
+    last = session.screens()[-1]
+    assert "Every post on this board is marked read." in last
+    assert len(last.replace("\r\n", "\n").rstrip("\n").split("\n")) <= 24

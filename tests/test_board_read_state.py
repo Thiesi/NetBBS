@@ -378,3 +378,32 @@ def test_migration_caps_what_it_backfills(tmp_path, monkeypatch):
         assert _floor(db, alice, board) == sorted(read_ids)[-500]
     finally:
         db.close()
+
+
+def test_opening_a_post_deleted_meanwhile_writes_no_row(db, alice, bob, monkeypatch):
+    board = create_board(db, "general", creator=alice)
+    ensure_board_baseline(db, bob, board)
+    posts = _posts(db, board, alice, 2, monkeypatch)
+    db.connection.execute("DELETE FROM posts WHERE id = ?", (posts[1].id,))
+    db.connection.commit()
+
+    record_post_opened(db, bob, board, posts[1])  # the reader still had it
+
+    assert _opened_rows(db, bob, board) == []
+
+
+def test_the_floor_never_retreats(db, alice, bob, monkeypatch):
+    """Another session of the same account can raise the floor while this
+    one compacts from the old value; the lower result must not win."""
+    board = create_board(db, "general", creator=alice)
+    ensure_board_baseline(db, bob, board)
+    posts = _posts(db, board, alice, 3, monkeypatch)
+    mark_board_read(db, bob, board)
+    high = _floor(db, bob, board)
+    monkeypatch.setattr(activity, "_compact", lambda db, user, board, floor: 0)
+    monkeypatch.setattr(posts_module, "utc_now_iso", lambda: "2026-01-02T00:00:00.000000Z")
+    later = create_post(db, board, alice, "later", "x")
+
+    record_post_opened(db, bob, board, later)
+
+    assert _floor(db, bob, board) == high == posts[-1].id

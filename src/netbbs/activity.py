@@ -273,6 +273,18 @@ def _compact(db: Database, user: User, board: Board, floor: int) -> int:
     return floor
 
 
+def _raise_floor(db: Database, user: User, board: Board, floor: int) -> None:
+    """Move `user`'s floor on `board` up to `floor`, never down. The same
+    account in two sessions can compact from the same old floor, and the
+    one that saw less must not undo the other (Codex review on #723)."""
+    db.connection.execute(
+        "UPDATE user_read_cursors SET last_seen_arrival_id = MAX(COALESCE(last_seen_arrival_id, 0), ?), "
+        "updated_at = ? WHERE user_id = ? AND object_type = ? AND object_id = ?",
+        (floor, utc_now_iso(), user.id, _BOARD, board.id),
+    )
+    db.connection.commit()
+
+
 def record_post_opened(db: Database, user: User, board: Board, post: Post) -> None:
     """`user` opened `post` (a root) on `board`: it counts as read from now
     on (issue #710). Only opening marks a post read -- showing it in a
@@ -286,15 +298,16 @@ def record_post_opened(db: Database, user: User, board: Board, post: Post) -> No
     floor = existing.arrival_id or 0
     if post.id <= floor:
         return
+    # Only while the post exists: one deleted since the reader fetched it
+    # has had its rows dropped by the delete trigger already, and a row
+    # written now would outlive it -- and match the next post, should that
+    # reuse its id (Codex review on #723).
     db.connection.execute(
-        "INSERT OR IGNORE INTO user_board_opened_posts (user_id, board_id, post_row_id) VALUES (?, ?, ?)",
-        (user.id, board.id, post.id),
+        "INSERT OR IGNORE INTO user_board_opened_posts (user_id, board_id, post_row_id) "
+        "SELECT ?, ?, ? WHERE EXISTS (SELECT 1 FROM posts WHERE id = ? AND board_id = ?)",
+        (user.id, board.id, post.id, post.id, board.id),
     )
-    _upsert_cursor(
-        db, user, _BOARD, board.id,
-        last_seen_created_at=existing.created_at, last_seen_stable_id=existing.stable_id,
-        last_seen_arrival_id=_compact(db, user, board, floor),
-    )
+    _raise_floor(db, user, board, _compact(db, user, board, floor))
 
 
 def mark_board_read(db: Database, user: User, board: Board) -> None:
@@ -310,12 +323,7 @@ def mark_board_read(db: Database, user: User, board: Board) -> None:
     newest = _newest_visible(db, board, by_feed=False)
     if newest is None:
         return
-    floor = _compact(db, user, board, max(existing.arrival_id or 0, newest[0]))
-    _upsert_cursor(
-        db, user, _BOARD, board.id,
-        last_seen_created_at=existing.created_at, last_seen_stable_id=existing.stable_id,
-        last_seen_arrival_id=floor,
-    )
+    _raise_floor(db, user, board, _compact(db, user, board, max(existing.arrival_id or 0, newest[0])))
 
 
 def unread_post_ids(db: Database, user: User, board: Board, posts: list[Post]) -> set[int]:

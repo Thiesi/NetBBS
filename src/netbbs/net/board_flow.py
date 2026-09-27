@@ -898,6 +898,27 @@ async def _show_board(
         mode, cursor = page_anchor
         return list_posts_page(db, board, user, limit=rows, **{mode: cursor})
 
+    def _refetch_keeping(current_page: PostPage, highlighted: int | None) -> tuple[PostPage, int | None]:
+        """The page on screen, refetched at the budget of the moment -- which
+        counts an outcome notice just queued, and a resized terminal -- with
+        the highlight on the post it was on, not on its row number (Codex
+        review on #719 and #723). Should the smaller page lose that post off
+        its end, the page keeps its size instead: a row too many is better
+        than Enter opening a different post."""
+        was_on = (
+            current_page.posts[highlighted].post_id
+            if highlighted is not None and highlighted < len(current_page.posts) else None
+        )
+        fresh = _refetch_current_page()
+        if was_on is None or not fresh.posts:
+            return fresh, None
+        for candidate in (fresh, _refetch_current_page(limit=len(current_page.posts))):
+            index = next((i for i, listed in enumerate(candidate.posts) if listed.post_id == was_on), None)
+            if index is not None:
+                return candidate, index
+        # The post itself is gone (removed, expired, hidden).
+        return fresh, min(highlighted, len(fresh.posts) - 1)
+
     async def _render_fresh(current_page: PostPage, highlighted: int | None = None) -> None:
         """Render after anything that can change what is unread -- a post
         read, written, removed, or the page refetched. Showing the list
@@ -1265,22 +1286,7 @@ async def _show_board(
             highlighted = await _read_post(int(char) - 1)
             await _render_fresh(page, highlighted)
         elif (key.kind == EditorKeyKind.CTRL and key.char == "l") or char == REDRAW_KEY:
-            # The refetch runs at today's budget -- a consumed notice or a
-            # resized terminal can change it, and a newest page then gains
-            # older posts in front -- so the highlight follows the post it
-            # was on, not its row number (Codex review on #719).
-            was_on = (
-                page.posts[highlighted].post_id
-                if highlighted is not None and highlighted < len(page.posts) else None
-            )
-            page = _refetch_current_page()
-            if was_on is not None and page.posts:
-                highlighted = next(
-                    (i for i, listed in enumerate(page.posts) if listed.post_id == was_on),
-                    min(highlighted, len(page.posts) - 1),
-                )
-            else:
-                highlighted = None
+            page, highlighted = _refetch_keeping(page, highlighted)
             await _render_fresh(page, highlighted)
         elif (key.kind == EditorKeyKind.CTRL and key.char == "h") or char == HELP_KEY:
             await show_help(
@@ -1315,9 +1321,8 @@ async def _show_board(
                 highlighted = None
                 page = _refetch_current_page()
             else:
-                # Nothing was posted: the same page at the same size, so a
-                # notice now pending cannot drop the highlighted row.
-                page = _refetch_current_page(limit=len(page.posts) or None)
+                # Nothing was posted: the same page, the highlight kept.
+                page, highlighted = _refetch_keeping(page, highlighted)
             await _render_fresh(page, highlighted)
         elif char == "d" and _has_saved_draft():
             await _moved_on()
@@ -1326,14 +1331,17 @@ async def _show_board(
                 highlighted = None
                 page = _refetch_current_page()
             else:
-                # Discarded or left: same page, same size (Codex review on
-                # #719) -- "Draft deleted." must not cost the highlighted row.
-                page = _refetch_current_page(limit=len(page.posts) or None)
+                # Discarded or left: the same page, the highlight kept --
+                # "Draft deleted." must not cost the highlighted row (Codex
+                # review on #719).
+                page, highlighted = _refetch_keeping(page, highlighted)
             await _render_fresh(page, highlighted)
         elif char == "m" and unread["menu"]:
             await _moved_on()
             mark_board_read(db, user, board)
             announce(session, "Every post on this board is marked read.", tone="muted")
+            # Refetched: the notice takes a row the page was not sized for.
+            page, highlighted = _refetch_keeping(page, highlighted)
             await _render_fresh(page, highlighted)
         elif char == "b":
             await _moved_on()
