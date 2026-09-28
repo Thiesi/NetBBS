@@ -153,6 +153,7 @@ from netbbs.boards.posts import (
     approve_post,
     count_visible_posts,
     delete_post,
+    list_node_pending_posts,
     list_pending_posts,
     set_post_exempt,
     set_post_pinned,
@@ -247,6 +248,7 @@ from netbbs.files.entries import (
     delete_file,
     expired_file_purge_at,
     list_expired_files,
+    list_node_pending_files,
     list_pending_files,
     set_file_exempt,
     set_file_pinned,
@@ -16766,26 +16768,41 @@ def _load_pending_items(
     queue refers to each item by its own id; the node-wide one, where a
     post and a file may share an id, by its place in the queue."""
     node_wide = boards is None and areas is None
+    cap = MAX_QUEUE_ITEMS + 1
+    posts: list[tuple[Post, Board]] = []
+    entries: list[tuple[FileEntry, FileArea]] = []
     if node_wide:
-        boards, areas = list_boards(db), list_file_areas(db)
+        # One bounded query each, however many boards and areas there are
+        # (Codex review on #795).
+        boards_by_id = {board.id: board for board in list_boards(db)}
+        areas_by_id = {area.id: area for area in list_file_areas(db)}
+        posts = [
+            (post, boards_by_id[post.board_id])
+            for post in list_node_pending_posts(db, requesting_user=actor, limit=cap)
+            if post.board_id in boards_by_id
+        ]
+        entries = [
+            (entry, areas_by_id[entry.area_id])
+            for entry in list_node_pending_files(db, requesting_user=actor, limit=cap)
+            if entry.area_id in areas_by_id
+        ]
+    else:
+        for board in boards or []:
+            posts += [(post, board) for post in list_pending_posts(db, board, requesting_user=actor, limit=cap)]
+        for area in areas or []:
+            entries += [(entry, area) for entry in list_pending_files(db, area, requesting_user=actor, limit=cap)]
+    more = len(posts) > MAX_QUEUE_ITEMS or len(entries) > MAX_QUEUE_ITEMS
     items: list[_PendingItem] = []
-    more = False
-    for board in boards or []:
-        posts = list_pending_posts(db, board, requesting_user=actor, limit=MAX_QUEUE_ITEMS + 1)
-        more = more or len(posts) > MAX_QUEUE_ITEMS
-        for post in posts[:MAX_QUEUE_ITEMS]:
-            items.append(_PendingItem(
-                stable_id=post.id, title=post.subject, kind=_pending_post_kind(post), where=board.name,
-                author=post.author_label, when=_when_or_raw(post.created_at, db), post=post, board=board,
-            ))
-    for area in areas or []:
-        entries = list_pending_files(db, area, requesting_user=actor, limit=MAX_QUEUE_ITEMS + 1)
-        more = more or len(entries) > MAX_QUEUE_ITEMS
-        for entry in entries[:MAX_QUEUE_ITEMS]:
-            items.append(_PendingItem(
-                stable_id=entry.id, title=entry.filename, kind="file", where=area.name,
-                author=entry.uploader_label, when=_when_or_raw(entry.created_at, db), entry=entry, area=area,
-            ))
+    for post, board in posts:
+        items.append(_PendingItem(
+            stable_id=post.id, title=post.subject, kind=_pending_post_kind(post), where=board.name,
+            author=post.author_label, when=_when_or_raw(post.created_at, db), post=post, board=board,
+        ))
+    for entry, area in entries:
+        items.append(_PendingItem(
+            stable_id=entry.id, title=entry.filename, kind="file", where=area.name,
+            author=entry.uploader_label, when=_when_or_raw(entry.created_at, db), entry=entry, area=area,
+        ))
     items.sort(key=lambda item: (
         _submitted_instant((item.post or item.entry).created_at), item.entry is not None, item.stable_id,
     ))

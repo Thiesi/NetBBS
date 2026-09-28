@@ -185,3 +185,43 @@ def test_the_edit_readers_would_get_is_not_called_superseded(db, lane, sysop, al
     asyncio.run(_post_action_screen(session, lane, sysop, edit, board))
 
     assert "Superseded" not in _visible(_written_text(session))
+
+
+def test_the_node_wide_cap_is_one_cap_across_every_board(db, sysop, alice, monkeypatch):
+    """Codex review on #795: one bounded query for the node, not one per board."""
+    monkeypatch.setattr(admin_flow, "MAX_QUEUE_ITEMS", 2)
+    first = create_board(db, "first", creator=sysop, moderated=True)
+    second = create_board(db, "second", creator=sysop, moderated=True)
+    create_post(db, first, alice, "A", "x")
+    create_post(db, second, alice, "B", "x")
+    create_post(db, first, alice, "C", "x")
+    create_post(db, second, alice, "D", "x")
+
+    items, more = _load_pending_items(db, sysop)
+
+    assert more and [(item.where, item.title) for item in items] == [("first", "A"), ("second", "B")]
+
+
+def test_a_capped_board_queue_keeps_the_earliest_instant(db, sysop, alice):
+    """Codex review on #795: the cap picks by instant, before the screen sorts."""
+    from netbbs.boards.posts import list_pending_posts
+
+    board = create_board(db, "general", creator=sysop, moderated=True)
+    later = create_post(db, board, alice, "Later", "x")
+    earlier = create_post(db, board, alice, "Earlier", "x")
+    db.connection.execute("UPDATE posts SET created_at = ? WHERE id = ?", ("2026-01-01T00:00:00.000000Z", later.id))
+    db.connection.execute("UPDATE posts SET created_at = ? WHERE id = ?", ("2026-01-01T03:00:00+05:00", earlier.id))
+    db.connection.commit()
+
+    assert [post.subject for post in list_pending_posts(db, board, requesting_user=sysop, limit=1)] == ["Earlier"]
+
+
+def test_only_a_sysop_reads_the_node_wide_queue(db, alice):
+    from netbbs.boards.posts import list_node_pending_posts
+    from netbbs.files.entries import list_node_pending_files
+    from netbbs.permissions.levels import InsufficientLevelError
+
+    with pytest.raises(InsufficientLevelError):
+        list_node_pending_posts(db, requesting_user=alice, limit=10)
+    with pytest.raises(InsufficientLevelError):
+        list_node_pending_files(db, requesting_user=alice, limit=10)
