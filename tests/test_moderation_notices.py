@@ -155,3 +155,27 @@ class _FakeSession:
         if not self._inputs:
             raise AssertionError("ran out of scripted input (read_key)")
         return self._inputs.pop(0)
+
+
+def test_a_notice_is_kept_until_the_menu_showing_it_is_drawn(db, sysop, alice, board):
+    """Codex review on #792: a caller who drops before the menu is drawn is
+    told next time."""
+    from netbbs.boards.moderation_notices import pending_moderation_notices
+
+    approve_post(db, create_post(db, board, alice, "Hello", "x"), approved_by=sysop)
+
+    first, _ids = pending_moderation_notices(db, alice)  # read, never shown
+    again, _ids = pending_moderation_notices(db, alice)
+
+    assert first == again and len(first) == 1
+
+
+def test_a_backlog_is_shown_ten_at_a_time_with_the_rest_counted(db, sysop, alice, board):
+    for i in range(13):
+        approve_post(db, create_post(db, board, alice, f"Post {i}", "x"), approved_by=sysop)
+
+    lines = take_moderation_notices(db, alice)
+
+    assert len(lines) == 11
+    assert lines[-1][1] == "...and 3 more moderation decisions on your posts."
+    assert db.connection.execute("SELECT COUNT(*) FROM moderation_notices").fetchone()[0] == 0

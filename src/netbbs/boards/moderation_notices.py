@@ -5,8 +5,8 @@ What an author is told when a moderator decides on their held post
 A post on a moderated board waits for approval. When a moderator approves
 or rejects it -- or an edit of it -- its local author is told:
 
-- **a notice** the next time they reach the main menu, shown once
-  (`moderation_notices`, taken by `take_moderation_notices`);
+- **a notice** the next time they reach the main menu, shown once and
+  then deleted (`moderation_notices`);
 - **a mail** for a rejection, from the moderator who made it, with the
   reason and the rejected text: a rejection deletes the post, and the
   author would otherwise have lost what they wrote.
@@ -28,6 +28,9 @@ OUTCOMES = ("approved", "rejected")
 # How much of a subject a notice quotes: a subject may run to 300 bytes,
 # and a notice is one line.
 _NOTICE_SUBJECT_COLUMNS = 40
+# How many notices the main menu shows at once; the rest are counted in one
+# line (Codex review on #792).
+MAX_NOTICES_SHOWN = 10
 
 
 def record_moderation_outcome(
@@ -57,26 +60,46 @@ def record_moderation_outcome(
         _mail_rejection(db, post, author_row, moderator=moderator, reason=reason)
 
 
-def take_moderation_notices(db: Database, user: User) -> list[tuple[str, str]]:
-    """`user`'s notices not yet shown, as `(outcome, text)` oldest first,
-    and marked shown: each is told once."""
+def pending_moderation_notices(db: Database, user: User) -> tuple[list[tuple[str, str]], list[int]]:
+    """`user`'s notices not yet told, as `(outcome, text)` oldest first, and
+    the ids to acknowledge once they are on screen. At most
+    `MAX_NOTICES_SHOWN` are listed; the rest are counted in one closing
+    line and acknowledged with them. Nothing is marked here: a caller who
+    drops before the menu is drawn is told next time (Codex review on
+    #792)."""
     rows = db.connection.execute(
         """
         SELECT n.*, b.name AS board_name FROM moderation_notices n
         JOIN boards b ON b.id = n.board_id
-        WHERE n.user_id = ? AND n.shown_at IS NULL
+        WHERE n.user_id = ?
         ORDER BY n.id
         """,
         (user.id,),
     ).fetchall()
-    if not rows:
-        return []
+    lines = [(row["outcome"], _notice_text(row)) for row in rows[:MAX_NOTICES_SHOWN]]
+    if len(rows) > MAX_NOTICES_SHOWN:
+        more = len(rows) - MAX_NOTICES_SHOWN
+        lines.append(("approved", f"...and {more} more moderation decision{'s' if more != 1 else ''} on your posts."))
+    return lines, [row["id"] for row in rows]
+
+
+def acknowledge_moderation_notices(db: Database, notice_ids: list[int]) -> None:
+    """Forget notices that have been shown: they are told once, and kept
+    no longer than that."""
+    if not notice_ids:
+        return
     db.connection.execute(
-        f"UPDATE moderation_notices SET shown_at = ? WHERE id IN ({','.join('?' * len(rows))})",
-        (utc_now_iso(), *(row["id"] for row in rows)),
+        f"DELETE FROM moderation_notices WHERE id IN ({','.join('?' * len(notice_ids))})", tuple(notice_ids)
     )
     db.connection.commit()
-    return [(row["outcome"], _notice_text(row)) for row in rows]
+
+
+def take_moderation_notices(db: Database, user: User) -> list[tuple[str, str]]:
+    """`pending_moderation_notices`, acknowledged at once -- for a caller
+    that shows them there and then."""
+    lines, ids = pending_moderation_notices(db, user)
+    acknowledge_moderation_notices(db, ids)
+    return lines
 
 
 def _notice_text(row) -> str:

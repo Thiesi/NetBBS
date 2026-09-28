@@ -3351,7 +3351,7 @@ MIGRATIONS = [
         description=(
             "Issue #678: `moderation_notices` -- what an author is told once, at the main "
             "menu, when a moderator approves or rejects their held post or edit, with the "
-            "rejection's reason. `shown_at` marks it told. Gone with the author or the board."
+            "rejection's reason. A notice is deleted once shown. Gone with the author or the board."
         ),
         sql="""
         CREATE TABLE moderation_notices (
@@ -3363,10 +3363,9 @@ MIGRATIONS = [
             is_edit     INTEGER NOT NULL DEFAULT 0,
             outcome     TEXT NOT NULL CHECK (outcome IN ('approved', 'rejected')),
             reason      TEXT,
-            created_at  TEXT NOT NULL,
-            shown_at    TEXT
+            created_at  TEXT NOT NULL
         );
-        CREATE INDEX idx_moderation_notices_unshown ON moderation_notices(user_id, shown_at);
+        CREATE INDEX idx_moderation_notices_user ON moderation_notices(user_id);
         """,
     ),
 ]
