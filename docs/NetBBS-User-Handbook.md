@@ -76,7 +76,9 @@ contact fails, send mail explicitly—chat does not silently turn it into mail.
 On a linked node, addresses can use a known, unambiguous name such as
 `alice@OtherNode`. Use the address offered by the directory or Who screen.
 If a name is ambiguous, NetBBS asks for a more specific identity. Check an
-unexpected node-identity warning with your SysOp.
+unexpected node-identity warning with your SysOp. A node that has only just
+linked with this one cannot be written to yet: the To prompt says so, and mail
+opens once your SysOp establishes that node.
 
 Channels marked **MRC** connect to a separate public chat network. Your handle
 and messages are visible there. MRC private messages are optional in your

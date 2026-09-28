@@ -43,6 +43,8 @@ from pathlib import Path
 
 from netbbs.auth.users import AuthError, User, get_user_by_id, get_user_by_username
 from netbbs.link.boards import LinkContext
+from netbbs.link.enforcement import LinkPolicyAction, decide_node_action
+from netbbs.link.trust import TrustState
 from netbbs.link.mail import LinkMailError, compose_link_message
 from netbbs.link.node_profiles import (
     identity_for_fingerprint, latest_identity_observation, resolve_stored_peer_reference,
@@ -470,6 +472,10 @@ async def _compose_mail(
                 announce(session, "Cancelled.", tone="muted")
                 return
             if link_context is not None and "@" in recipient_text:
+                refusal = await _link_mail_refusal_for_address(lane, recipient_text)
+                if refusal is not None:
+                    await session.write_line(colored(refusal, fg_color=ERROR_COLOR))
+                    continue
                 break
             try:
                 await lane.run(get_user_by_username, recipient_text)
@@ -581,8 +587,14 @@ async def _compose_mail(
                         ),
                     )
                 continue
+            # The To prompt checks this too; the address may have been
+            # edited from the review screen since.
+            refusal = await lane.run(_link_mail_refusal, resolved)
+            if refusal is not None:
+                announce_styled(session, colored(refusal, fg_color=ERROR_COLOR))
+                continue
             technical_recipient = f"{remote_user}@{resolved}"
-            warning = await _link_mail_identity_warning(lane, technical_recipient)
+            warning =await _link_mail_identity_warning(lane, technical_recipient)
             if warning is not None:
                 await session.write_line(colored(warning, fg_color=MUTED_COLOR, bold=True))
             try:
@@ -611,6 +623,30 @@ async def _compose_mail(
             continue
         announce(session, "Message sent.")
         return
+
+
+def _link_mail_refusal(db, fingerprint: str) -> str | None:
+    """Why this node will not send mail to `fingerprint`, in words for the
+    caller, or `None` when it will (issue #804). Nothing is queued that the
+    push loop would refuse, and "Message sent." is never shown for it."""
+    decision = decide_node_action(db, fingerprint, LinkPolicyAction.LINK_MAIL)
+    if decision.allowed:
+        return None
+    label = sanitize_text(identity_for_fingerprint(db, fingerprint).label)
+    if decision.state == TrustState.PROBATIONARY:
+        return f"{label} is newly linked; mail opens once the SysOp establishes it."
+    return f"Mail to {label} is closed on this BBS."
+
+
+async def _link_mail_refusal_for_address(lane: DatabaseLane, recipient_text: str) -> str | None:
+    """`_link_mail_refusal` for a typed `user@node` address, at the To
+    prompt. An address that does not name exactly one known node is left
+    for the send step to explain."""
+    node_reference = recipient_text.split("@", 1)[1]
+    resolved = await lane.run(resolve_stored_peer_reference, node_reference, met_only=True)
+    if isinstance(resolved, list):
+        return None
+    return await lane.run(_link_mail_refusal, resolved)
 
 
 async def _compose_mail_body(

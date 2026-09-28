@@ -141,7 +141,12 @@ from netbbs.link.files import (
     materialize_carried_file_descriptor,
     withdraw_remote_file,
 )
-from netbbs.link.mail import apply_link_message_accepted, apply_link_message_bounced, deliver_link_message
+from netbbs.link.mail import (
+    apply_link_message_accepted,
+    apply_link_message_bounced,
+    bounce_link_message,
+    deliver_link_message,
+)
 from netbbs.link.node_identity import NodeIdentity, resolve_current_operational_key, rotate_operational_key
 from netbbs.identity.encryption import derive_encryption_private_key
 from netbbs.link.protocol import (
@@ -563,6 +568,15 @@ async def persist_accepted_events(
         # this node was only a bystander to the transfer, not a party
         # to it (see record_board_origin_change's own docstring).
         if object_type == LINK_MESSAGE_OBJECT_TYPE:
+            # A direct push was already decided before acceptance and refused
+            # with a 403 the sender turns into a bounce. Mail picked up from a
+            # relay mailbox has no such answer, so the same rule is applied
+            # here and a refusal becomes a signed bounce (issue #804).
+            if enforce_trust_policy and not (await lane.run(
+                decide_event_authorship, envelope, transport_peer_fingerprint=sender_fingerprint,
+            )).allowed:
+                await lane.run(bounce_link_message, envelope, "blocked_sender", node_identity=node.identity)
+                continue
             await lane.run(deliver_link_message, envelope, node_identity=node.identity)
         elif object_type == LINK_MESSAGE_ACCEPTED_OBJECT_TYPE:
             await lane.run(apply_link_message_accepted, envelope)
@@ -617,6 +631,18 @@ class LinkTransportError(Exception):
     # has to tell "this peer does not have that route" from a failure worth
     # retrying. `None` everywhere else.
     status: int | None = None
+
+
+class LinkPolicyRefused(LinkTransportError):
+    """The peer answered with its trust policy's refusal: HTTP 403 with a
+    `link_policy_*` reason code (`netbbs.link.enforcement`). Unlike a
+    transport failure, the peer did hear the request and decided, so
+    trying its next address would only ask the same question again."""
+
+    def __init__(self, message: str, reason_code: str) -> None:
+        super().__init__(message)
+        self.status = 403
+        self.reason_code = reason_code
 
 
 _NOISE_PROTOCOL_NAME = b"Noise_XX_25519_ChaChaPoly_BLAKE2s"
@@ -2639,7 +2665,11 @@ async def push_events(
         ) as response:
             if response.status != 200:
                 text = await response.text()
-                raise LinkTransportError(f"events push to {url} failed: HTTP {response.status}: {text}")
+                message = f"events push to {url} failed: HTTP {response.status}: {text}"
+                reason_code = _refusal_reason_code(text) if response.status == 403 else None
+                if reason_code is not None and reason_code.startswith("link_policy_"):
+                    raise LinkPolicyRefused(message, reason_code)
+                raise LinkTransportError(message)
             body = await response.json(loads=strict_json_loads)
     except (ClientError, TimeoutError, ValueError) as exc:
         raise LinkTransportError(f"could not reach {url}: {exc}") from exc
