@@ -214,7 +214,7 @@ def test_a_second_concurrent_change_is_refused(db, lane, sysop, identity_dir):
 
 
 def test_a_dropped_session_still_records_the_change_it_made(db, lane, sysop, identity_dir, monkeypatch):
-    import time
+    import threading
 
     from netbbs.net import admin_flow
 
@@ -223,13 +223,14 @@ def test_a_dropped_session_still_records_the_change_it_made(db, lane, sysop, ide
     set_maintenance(db.path, path, True)
     real = admin_flow._war_dialer_change_competition
 
-    import threading
-
+    # The change begins, then holds until the session has been dropped: no
+    # window of time the test has to hit, loaded machine or not.
     started = threading.Event()
+    dropped = threading.Event()
 
     def _slow(**kwargs):
         started.set()
-        time.sleep(0.4)
+        dropped.wait(30.0)
         return real(**kwargs)
 
     monkeypatch.setattr(admin_flow, "_war_dialer_change_competition", _slow)
@@ -247,6 +248,7 @@ def test_a_dropped_session_still_records_the_change_it_made(db, lane, sysop, ide
             await asyncio.sleep(0.01)
         assert started.is_set(), "the season change never began"
         task.cancel()
+        dropped.set()
         with pytest.raises(asyncio.CancelledError):
             await task
 
