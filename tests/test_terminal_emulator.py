@@ -281,3 +281,42 @@ def test_erase_display_3_leaves_the_screen_alone():
 def test_the_main_screens_saved_cursor_survives_the_alternate_screen():
     emulator = _emu("\x1b[2;3H\x1b[?1049h\x1b[4;4H\x1b7\x1b[?1049l", width=10, height=5)
     assert (emulator.row, emulator.col) == (1, 2)
+
+
+# -- post-merge review follow-ups (#784) -------------------------------------
+
+
+@pytest.mark.parametrize("sequence", ["\x1b%G", "\x1b#8", "\x1b(B", "\x1b )0"])
+def test_escape_sequences_with_intermediates_are_consumed_whole(sequence):
+    emulator = _emu("a" + sequence + "b")
+    assert _rows(emulator)[0] == "ab"
+
+
+def test_a_wide_glyph_wrapping_from_the_last_column_blanks_that_cell():
+    emulator = _emu("abcde\x1b[1;5H漢", width=5, height=3)
+    assert _rows(emulator)[0] == "abcd"
+    assert emulator.text_rows()[1].startswith("漢")
+
+
+def test_erase_line_with_a_pending_wrap_erases_nothing_and_keeps_the_wrap():
+    emulator = _emu("x" * 20 + "\x1b[K!")
+    assert _rows(emulator)[:2] == ["x" * 20, "!"]
+
+
+def test_the_alternate_screen_has_its_own_scroll_margins():
+    emulator = _emu("\x1b[2;4r\x1b[?1049h", width=10, height=6)
+    assert (emulator.top, emulator.bottom) == (0, 5)
+    emulator.feed("\x1b[3;5r\x1b[?1049l")
+    assert (emulator.top, emulator.bottom) == (1, 3)
+
+
+def test_colon_form_sgr_colours():
+    emulator = _emu("\x1b[38:2::255:0:0mR\x1b[48:5:21mB\x1b[0m")
+    cells = emulator.snapshot()[0]
+    assert cells[0].fg == (255, 0, 0)
+    assert cells[1].bg == 21
+
+
+def test_a_csi_with_an_intermediate_is_not_mistaken_for_another_command():
+    emulator = _emu("\x1b[3;1Hx\x1b[2 Ay")  # CSI 2 SP A: scroll right, not cursor up
+    assert _rows(emulator)[2] == "xy"

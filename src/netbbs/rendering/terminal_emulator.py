@@ -137,6 +137,26 @@ def _apply_sgr(pen: Pen, params: list[int]) -> Pen:
     return Pen(fg, bg, bold, underline, reverse)
 
 
+def _sgr_params_with_colons(body: str) -> list[int]:
+    """SGR parameters in ISO 8613-6 colon form (`38:2::255:0:0`,
+    `38:5:196`), turned into the semicolon form `apply_sgr` reads."""
+    params: list[int] = []
+    for part in body.split(";"):
+        if ":" not in part:
+            params.append(int(part) if part.isdigit() else 0)
+            continue
+        fields = part.split(":")
+        numbers = [int(field) if field.isdigit() else 0 for field in fields]
+        if numbers[0] in (38, 48) and len(numbers) >= 3 and numbers[1] == 5:
+            params.extend([numbers[0], 5, numbers[2]])
+        elif numbers[0] in (38, 48) and len(numbers) >= 5 and numbers[1] == 2:
+            # 38:2:<colour space>:r:g:b, the colour space optional.
+            params.extend([numbers[0], 2, *numbers[-3:]])
+        else:
+            params.append(numbers[0])  # e.g. 4:3, a curly underline: underline
+    return params
+
+
 def pen_sgr(pen: Pen) -> str:
     """The SGR sequence that sets exactly `pen`, from any state."""
     codes = ["0"]
@@ -175,6 +195,7 @@ class TerminalEmulator:
         # The main screen while the alternate one is shown, else None.
         self._main_rows: list[list[Cell]] | None = None
         self._main_saved: tuple[int, int, Pen] | None = None
+        self._main_margins: tuple[int, int] = (0, self.height - 1)
         self._state = _GROUND
         self._sequence = ""
         # Cells by pen, then character: frozen, so shared freely.
@@ -292,8 +313,10 @@ class TerminalEmulator:
                 # ESC \ ends it; anything else, give up on it.
                 self._state = _GROUND
             elif state == _CHARSET:
-                # ESC ( B and friends: the designator byte, ignored.
-                self._state = _GROUND
+                # ESC ( B, ESC % G, ESC # 8 and friends: intermediate bytes,
+                # then the final byte, all consumed and ignored.
+                if not "\x20" <= ch <= "\x2f":
+                    self._state = _GROUND
 
     def _control(self, ch: str) -> None:
         if ch == "\r":
@@ -319,7 +342,7 @@ class TerminalEmulator:
             # OSC, DCS, SOS, PM, APC: a control string the terminal consumes
             # whole, up to BEL or ST; its payload is never drawn.
             self._state = _OSC
-        elif ch in "()*+":
+        elif "\x20" <= ch <= "\x2f":
             self._state = _CHARSET
         elif ch == "7":
             self._saved = (self.row, self.col, self.pen)
@@ -360,9 +383,12 @@ class TerminalEmulator:
             self._linefeed()
             self._wrap_pending = False
         if width == 2 and self.col == self.width - 1:
-            # A wide glyph that doesn't fit wraps whole.
+            # A wide glyph that doesn't fit wraps whole, and the terminal
+            # blanks the edge cell it leaves behind.
             if self.width < 2:
                 return
+            self._split_wide(self.row, self.col, self.col + 1)
+            self._rows[self.row][self.col] = self._erased()
             self.col = 0
             self._linefeed()
         self._split_wide(self.row, self.col, self.col + width)
@@ -481,15 +507,24 @@ class TerminalEmulator:
     # -- CSI ---------------------------------------------------------------
 
     def _csi(self, sequence: str, final: str) -> None:
+        if any("\x20" <= ch <= "\x2f" for ch in sequence):
+            # An intermediate byte makes it a different command (CSI SP A is
+            # scroll right, not cursor up): not one this copy models.
+            return
         private = sequence[:1] in ("?", ">", "<", "=")
         body = sequence[1:] if private else sequence
-        params: list[int] = []
-        for part in body.split(";") if body else ():
-            if part.isdigit():
-                params.append(int(part))
-            else:
-                digits = "".join(c for c in part if c.isdigit())
-                params.append(int(digits) if digits else 0)
+        if ":" in body:
+            if final != "m" or private:
+                return  # subparameters on anything but SGR: not modelled
+            params = _sgr_params_with_colons(body)
+        else:
+            params = []
+            for part in body.split(";") if body else ():
+                if part.isdigit():
+                    params.append(int(part))
+                else:
+                    digits = "".join(c for c in part if c.isdigit())
+                    params.append(int(digits) if digits else 0)
         if final == "m" and not private:
             # By far the most frequent sequence: straight to the pen.
             self.pen = apply_sgr(self.pen, params)
@@ -569,13 +604,16 @@ class TerminalEmulator:
             # The main screen's own save is kept aside with it: a save made
             # on the alternate screen must not replace it.
             self._main_saved = (self.row, self.col, self.pen) if save_cursor else self._saved
+            self._main_margins = (self.top, self.bottom)
             self._main_rows = self._rows
             self._rows = [self._blank_row() for _ in range(self.height)]
+            self.top, self.bottom = 0, self.height - 1
             self._wrap_pending = False
         elif not enter and self._main_rows is not None:
             self._rows = self._main_rows
             self._main_rows = None
             self._saved, self._main_saved = self._main_saved, None
+            self.top, self.bottom = self._main_margins
             if save_cursor:
                 self._restore_cursor()
 
@@ -596,6 +634,10 @@ class TerminalEmulator:
     def _erase_line(self, mode: int) -> None:
         blank = self._erased()
         line = self._rows[self.row]
+        if mode == 0 and self._wrap_pending:
+            # The real cursor sits past the last column, waiting to wrap:
+            # the range to erase is empty, and the wrap stays pending.
+            return
         if mode == 0:
             self._split_wide(self.row, self.col, self.width)
             line[self.col :] = [blank] * (self.width - self.col)

@@ -487,6 +487,7 @@ from netbbs.net.resource_editor import (
     text_field,
 )
 from netbbs.net.session import Session, write_preformatted_line, write_prompt
+from netbbs.net.session_activity import records_activity
 from netbbs.net.session_registry import SessionSummary
 from netbbs.net.shutdown import (
     NodeControls,
@@ -11670,6 +11671,7 @@ def _upload_unavailable_reason(session: Session) -> str | None:
     )
 
 
+@records_activity("Uploading")
 async def _receive_sysop_upload(
     session: Session, lane: DatabaseLane, actor: User, target: SysOpUploadTarget, *, then: str,
 ) -> None:

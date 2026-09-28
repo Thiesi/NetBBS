@@ -108,10 +108,11 @@ def paint_chat(buffer: ScreenBuffer, state: ChatState, *, for_sysop: bool) -> No
     if for_sysop:
         # ASCII only: neither side's Unicode preference is known here.
         title = f"Break-in chat with {state.caller_name} - Esc ends"
-        if state.dropped:
-            title += f" - {state.dropped} keys dropped"
         if state.notice:
             title = state.notice
+        if state.dropped:
+            # Kept visible whatever else the title shows: lost input.
+            title += f" - {state.dropped} keys dropped"
         if state.caller_gone:
             title = f"{state.caller_name} has disconnected - any key returns"
     else:
@@ -188,9 +189,10 @@ def _still_connected(registry: ActiveSessionRegistry, session: Session) -> bool:
 
 async def run_break_in(
     sysop_session: Session, actor: User, registry: ActiveSessionRegistry, target: Session, caller_name: str,
-) -> None:
+) -> bool:
     """The whole break-in: take over `target`, chat until the SysOp presses
     Esc (or either side goes), then put `target` back as it was.
+    Returns whether the caller was still connected at the end.
 
     The caller must be refused beforehand for a running binary transfer;
     see `refusal`."""
@@ -277,6 +279,8 @@ async def run_break_in(
             "break-in: %s closed the chat with %s after %d s",
             actor.username, caller_name, int(time.monotonic() - started),
         )
+    # True when the caller was still there to be put back.
+    return not state.caller_gone
 
 
 def refusal(target: Session) -> str | None:
