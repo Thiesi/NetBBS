@@ -31,6 +31,9 @@ class FileAreaCategory:
     description: str | None
     parent_category_id: int | None
     created_at: str
+    # Its place among its siblings, first at 0 (issue #681): the SysOp
+    # orders categories, and every listing follows that order.
+    position: int = 0
 
     @property
     def is_top_level(self) -> bool:
@@ -61,10 +64,10 @@ def create_category(
     try:
         db.connection.execute(
             """
-            INSERT INTO file_area_categories (name, description, parent_category_id, created_at)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO file_area_categories (name, description, parent_category_id, created_at, position)
+            VALUES (?, ?, ?, ?, ?)
             """,
-            (name, description, parent_category_id, created_at),
+            (name, description, parent_category_id, created_at, _next_position(db, parent_category_id)),
         )
         db.connection.commit()
     except sqlite3.IntegrityError as exc:
@@ -100,17 +103,111 @@ def get_category_by_name(db: Database, name: str) -> FileAreaCategory:
 
 def list_top_level_categories(db: Database) -> list[FileAreaCategory]:
     rows = db.connection.execute(
-        "SELECT * FROM file_area_categories WHERE parent_category_id IS NULL ORDER BY name"
+        "SELECT * FROM file_area_categories WHERE parent_category_id IS NULL ORDER BY position, name"
     ).fetchall()
     return [_row_to_category(row) for row in rows]
 
 
 def list_subcategories(db: Database, parent_category_id: int) -> list[FileAreaCategory]:
     rows = db.connection.execute(
-        "SELECT * FROM file_area_categories WHERE parent_category_id = ? ORDER BY name",
+        "SELECT * FROM file_area_categories WHERE parent_category_id = ? ORDER BY position, name",
         (parent_category_id,),
     ).fetchall()
     return [_row_to_category(row) for row in rows]
+
+
+def update_category(
+    db: Database,
+    category: FileAreaCategory,
+    *,
+    name: str,
+    description: str | None,
+    parent_category_id: int | None,
+    changed_by: User,
+) -> FileAreaCategory:
+    """Rename `category`, change its description, or move it under
+    another top-level category or to the top level (issue #681). The
+    two-level rule holds as at creation: the new parent must be a
+    top-level category, and a category with sub-categories of its own
+    stays top-level. Moved to another parent, it goes last there."""
+    # As stored now, not as the caller's copy says: another edit or move
+    # may have happened since (Codex review on #799).
+    category = get_category_by_id(db, category.id)
+    name = name.strip()
+    if not name:
+        raise FileAreaCategoryError("name cannot be blank")
+    if parent_category_id is not None:
+        if parent_category_id == category.id:
+            raise FileAreaCategoryError("a category cannot be its own parent")
+        parent = get_category_by_id(db, parent_category_id)
+        if not parent.is_top_level:
+            raise FileAreaCategoryError(
+                f"cannot move {category.name!r} under {parent.name!r} — "
+                f"it is itself a sub-category; only two levels are allowed"
+            )
+        if list_subcategories(db, category.id):
+            raise FileAreaCategoryError(
+                f"{category.name!r} has sub-categories of its own; move or delete them first, "
+                f"since only two levels are allowed"
+            )
+    try:
+        if parent_category_id == category.parent_category_id:
+            # In place: the stored position stands, whatever this copy of
+            # the category says (Codex review on #799).
+            db.connection.execute(
+                "UPDATE file_area_categories SET name = ?, description = ? WHERE id = ?",
+                (name, description, category.id),
+            )
+        else:
+            db.connection.execute(
+                "UPDATE file_area_categories SET name = ?, description = ?, parent_category_id = ?, position = ? "
+                "WHERE id = ?",
+                (name, description, parent_category_id, _next_position(db, parent_category_id), category.id),
+            )
+        db.connection.commit()
+    except sqlite3.IntegrityError as exc:
+        raise FileAreaCategoryError(f"could not rename to {name!r} — name already in use?") from exc
+    record_action(
+        db, actor=changed_by, action="update_file_area_category", object_type="file_area_category",
+        object_id=category.id, detail=f"updated category {name!r}",
+    )
+    return get_category_by_id(db, category.id)
+
+
+def move_category(db: Database, category: FileAreaCategory, offset: int, *, moved_by: User) -> bool:
+    """Move `category` `offset` places among its siblings (-1 up, +1
+    down), and renumber them all (issue #681). Returns whether it moved:
+    the first cannot go up, nor the last down."""
+    # Among its siblings as stored now (Codex review on #799).
+    category = get_category_by_id(db, category.id)
+    siblings = (
+        list_top_level_categories(db) if category.parent_category_id is None
+        else list_subcategories(db, category.parent_category_id)
+    )
+    ids = [sibling.id for sibling in siblings]
+    if category.id not in ids:
+        raise FileAreaCategoryError(f"no such category: {category.name!r}")
+    index = ids.index(category.id)
+    target = index + offset
+    if not 0 <= target < len(ids):
+        return False
+    ids.insert(target, ids.pop(index))
+    for place, category_id in enumerate(ids):
+        db.connection.execute("UPDATE file_area_categories SET position = ? WHERE id = ?", (place, category_id))
+    db.connection.commit()
+    record_action(
+        db, actor=moved_by, action="move_file_area_category", object_type="file_area_category",
+        object_id=category.id, detail=f"moved category {category.name!r} to place {target + 1}",
+    )
+    return True
+
+
+def _next_position(db: Database, parent_category_id: int | None) -> int:
+    """The place after the last of these siblings."""
+    row = db.connection.execute(
+        "SELECT MAX(position) FROM file_area_categories WHERE parent_category_id IS ?", (parent_category_id,)
+    ).fetchone()
+    return 0 if row[0] is None else row[0] + 1
 
 
 def delete_category(db: Database, category: FileAreaCategory, *, deleted_by: User) -> None:
@@ -122,10 +219,15 @@ def delete_category(db: Database, category: FileAreaCategory, *, deleted_by: Use
         object_id=category.id, detail=f"deleted category {category.name!r} (id {category.id})",
     )
     db.connection.execute("UPDATE file_areas SET category_id = NULL WHERE category_id = ?", (category.id,))
-    db.connection.execute(
-        "UPDATE file_area_categories SET parent_category_id = NULL WHERE parent_category_id = ?",
-        (category.id,),
-    )
+    # Its sub-categories become top-level, after the existing ones and in
+    # their own order: their positions counted among their old siblings
+    # (Codex review on #799).
+    first = _next_position(db, None)
+    for offset, child in enumerate(list_subcategories(db, category.id)):
+        db.connection.execute(
+            "UPDATE file_area_categories SET parent_category_id = NULL, position = ? WHERE id = ?",
+            (first + offset, child.id),
+        )
     db.connection.execute(
         "DELETE FROM user_sort_preferences WHERE resource_kind = 'file_area' AND category_id = ?", (category.id,)
     )
@@ -140,4 +242,5 @@ def _row_to_category(row: sqlite3.Row) -> FileAreaCategory:
         description=row["description"],
         parent_category_id=row["parent_category_id"],
         created_at=row["created_at"],
+        position=row["position"],
     )

@@ -3845,7 +3845,7 @@ def test_create_and_delete_board_category_flow(db, lane, sysop):
     inputs = [
         "m", "c", "m", "c",
         "n", "Vintage", "d", "Old computers", "s",  # draft editor: name, description, save
-        "l", "0", "1", "Vintage",
+        "l", "0", "1", "r", "Vintage",  # the category's screen: [R]emove
         "b", "b", "b", "b",
     ]
     session = FakeSession(inputs)
@@ -4196,7 +4196,7 @@ def test_create_and_delete_channel_category_flow(db, lane, sysop):
     inputs = [
         "m", "c", "c", "c",
         "n", "Vintage", "d", "Old radios", "s",  # draft editor: name, description, save
-        "l", "0", "1", "Vintage",
+        "l", "0", "1", "r", "Vintage",  # the category's screen: [R]emove
         "b", "b", "b", "b",
     ]
     session = FakeSession(inputs)

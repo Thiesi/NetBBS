@@ -1890,6 +1890,15 @@ Each board, channel, or file area has zero or one Community. “Uncategorized”
 the absence of a Community, not a synthetic row. Categories remain a separate
 layer below Communities.
 
+Categories (for boards, file areas and chat channels, each kind independent)
+are at most two levels deep. The SysOp orders them: every listing follows a
+category's `position` among its siblings, not its name (issue #681). The
+console lists each sub-category under its parent. Picking a category lets the
+SysOp rename it, change its description, move it under another top-level
+category or to the top level, move it up or down, or remove it. The two-level
+rule holds on every edit: a new parent must itself be top-level, and a category
+with sub-categories stays top-level.
+
 Communities provide:
 
 - topic-first navigation;
