@@ -34,6 +34,7 @@ from netbbs.link.node_profiles import (
     reference_needle,
     resolve_peer_reference,
     unknown_node_guidance,
+    unquote_reference,
 )
 from netbbs.link.realtime_direct import DirectChatUnreachable, IncomingDirectMessage
 from netbbs.link.transport import LinkTransportError
@@ -155,13 +156,13 @@ async def check_live_reachability(
     if isinstance(resolved, list):
         if not resolved:
             await session.write_line(
-                colored(unknown_node_guidance(sanitize_text(node_prefix.strip().strip('"').strip())), fg_color=MUTED_COLOR)
+                colored(unknown_node_guidance(sanitize_text(unquote_reference(node_prefix))), fg_color=MUTED_COLOR)
             )
         else:
             await session.write_line(
                 colored(
                     ambiguous_node_guidance(
-                        sanitize_text(node_prefix.strip().strip('"').strip()), sanitize_text(target_user),
+                        sanitize_text(unquote_reference(node_prefix)), sanitize_text(target_user),
                         [
                             (sanitize_text(fingerprint), sanitize_text(_node_label(link_context, fingerprint)))
                             for fingerprint in resolved[:5]

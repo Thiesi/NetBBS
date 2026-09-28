@@ -1143,3 +1143,23 @@ def test_compose_without_link_context_treats_an_at_sign_as_an_ordinary_username_
     assert "No such user" in _written_text(session)
     lane.close()
     db.close()
+
+
+def test_compose_an_unmatched_quote_is_shown_as_typed(tmp_path):
+    """The refusal names the reference that was looked up: a missing closing
+    quote must not read as "no BBS goes by Farpoint"."""
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
+    alice = create_user(db, "alice", password="hunter2pw", user_level=10)
+    node_identity = bootstrap_node_identity("roanoke")
+    remote_identity = bootstrap_node_identity("farpoint")
+    link_context = _link_context_with_known_peer(db, node_identity, remote_identity)
+
+    session = FakeSession(keys=["c", "b"], lines=['bob@"Farpoint', ""])
+    session.terminal_width = 200
+    lane = DatabaseLane(db_path)
+    asyncio.run(browse_mail(session, lane, alice, link_context=link_context))
+
+    assert 'No BBS linked with this one goes by ""Farpoint".' in _visible_text(session)
+    lane.close()
+    db.close()

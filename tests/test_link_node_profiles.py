@@ -141,6 +141,7 @@ def test_a_node_is_found_by_the_label_screens_show_and_by_its_quoted_name(db, tm
     assert resolve_stored_peer_reference(db, '"Cats @ Night"') == cats.fingerprint
     assert resolve_stored_peer_reference(db, ' "cats @ night · CATS.example.org" ') == cats.fingerprint
     assert resolve_peer_reference([cats], '"Cats @ Night"') is cats
+    assert resolve_stored_peer_reference(db, '"Cats @ Night') == []
     assert link_address_label("bob", "Cats @ Night · cats.example.org") == 'bob@"Cats @ Night · cats.example.org"'
     assert link_address_label("bob", "Farpoint") == "bob@Farpoint"
 

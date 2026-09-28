@@ -49,7 +49,7 @@ from netbbs.link.enforcement import LinkPolicyAction, decide_node_action
 from netbbs.link.trust import TrustState
 from netbbs.link.mail import LinkMailError, compose_link_message
 from netbbs.link.node_profiles import (
-    ambiguous_node_guidance, link_address_label, unknown_node_guidance,
+    ambiguous_node_guidance, link_address_label, unknown_node_guidance, unquote_reference,
     identity_for_fingerprint, latest_identity_observation, resolve_stored_peer_reference,
 )
 from netbbs.mail import (
@@ -650,7 +650,7 @@ def _check_link_recipient(db, recipient_text: str) -> _LinkRecipient | str:
     `link_address_label` shows a name that contains `@`."""
     user, _, node_reference = recipient_text.partition("@")
     user, node_reference = user.strip(), node_reference.strip()
-    shown_node = sanitize_text(node_reference.strip('"').strip())
+    shown_node = sanitize_text(unquote_reference(node_reference))
     if not user:
         return f"Type the user's name before the @, like alice@{shown_node}." if shown_node else (
             "Type the user's name, then @ and the name of their BBS."

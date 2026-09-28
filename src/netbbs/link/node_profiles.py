@@ -222,16 +222,22 @@ def _recheck_stored_peers_against_local_claims(db: Database) -> None:
 MIN_FINGERPRINT_PREFIX = 6
 
 
-def reference_needle(reference: str) -> str:
-    """The comparison key for a typed node reference. One pair of enclosing
-    double quotes is dropped: `link_address_label` quotes a node name that
-    contains `@`, and what a caller reads must be what they can type back.
-    No friendly name, DNS name or fingerprint can contain a double quote,
-    so the quotes are never part of a name."""
+def unquote_reference(reference: str) -> str:
+    """A typed node reference without one pair of enclosing double quotes:
+    `link_address_label` quotes a node name that contains `@`, and what a
+    caller reads must be what they can type back. No friendly name, DNS name
+    or fingerprint can contain a double quote, so the quotes are never part
+    of a name. An unmatched quote is kept, so that a message about the
+    reference shows what was actually looked up."""
     value = reference.strip()
     if len(value) >= 2 and value[0] == value[-1] == '"':
         value = value[1:-1].strip()
-    return name_key(value)
+    return value
+
+
+def reference_needle(reference: str) -> str:
+    """The comparison key for a typed node reference."""
+    return name_key(unquote_reference(reference))
 
 
 def fingerprint_prefix_matches(fingerprint: str, needle: str) -> bool:
