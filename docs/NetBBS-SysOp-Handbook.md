@@ -608,6 +608,17 @@ private messages require a working live session; a failed live message is not
 silently converted to mail. Link mail is encrypted to the recipient's home
 node for ordinary accounts; the home-node operator can read it.
 
+Link mail follows node trust. Once you establish a node under **Settings →
+Policy trust → Subjects** (identity integrity and resource behavior), mail
+from all its callers is delivered here, even from callers still on probation;
+their posts still wait in the approval queue. Mail from a node you have not
+established yet, or from a caller or node you quarantined or blocked, is
+refused and bounced back to its sender. The same holds the other way: your
+callers cannot address mail to a node you have not established, and are told
+so as they type the address. Mail already waiting in the **Outbox** for a
+node goes out on the next Link pass after you establish it, and expires if
+the node is not established before its retries run out.
+
 ### Behind an HTTP proxy
 
 If your node's only way out is an HTTP proxy, set the standard variables in

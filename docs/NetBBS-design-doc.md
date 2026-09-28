@@ -4177,7 +4177,12 @@ Separate signed events represent:
 - future expiry where retry policy requires it.
 
 Outbound messages remain pending until an accepted or bounced event arrives.
-Delivery through a relay does not change the acceptance semantics.
+Delivery through a relay does not change the acceptance semantics. One answer
+is not a signed event: a recipient node whose trust policy refuses a direct
+push says so with HTTP 403 and a `link_policy_*` reason code, and the sending
+node records that as a bounce, since asking again would get the same answer,
+unless another of the recipient's addresses or relays takes the message
+(§12.4, issue #804).
 
 ### 10.4 Routing limitations
 
@@ -4647,9 +4652,46 @@ node may accept through it content independently signed by an established
 author, but refuses or holds for explicit local approval new content authored
 or node-vouched by the probationary identity. A probationary node contributes
 no trust-signal weight and is not selected to serve as a relay. A probationary
-user's posts/uploads enter applicable local approval flow and Link messages are
-refused or bounced rather than silently delivered. Private operators may
+user's posts/uploads enter applicable local approval flow. Private operators may
 establish a known node manually instead of waiting for automatic graduation.
+
+**Node trust covers Link mail (issue #804).** A `link_message` is private mail
+to one recipient, not publication, so user probation does not gate it: a
+message from a user whose home node is established here is delivered even
+while that user is still probationary. The sender's home node must be
+established; a message from a node still on probation, or from a quarantined
+or blocked user or node, is refused, and never silently. A direct push is
+refused with the policy 403 and its reason code, which the sending node
+records as a bounce rather than retrying, once none of the recipient's other
+addresses or relays took the message (the 403 is unsigned, and a stale address
+now answered by another node refuses the same way). Mail picked up from a
+relay mailbox has no synchronous answer, so the refusal becomes a signed
+`link_message_bounced` with reason `blocked_sender`, sent back even to a node
+on probation here since it carries no content. A node quarantined or blocked
+here gets no bounce by that route, because this node sends it nothing and the
+bounce could only pile up; it learns of a direct push's refusal from the 403.
+The decision is made before the message or its sender is kept, so a refused
+node cannot grow this node's trust subjects or retained events by inventing
+senders. Delivered mail registers its
+sender as a trust subject like any accepted event, so the receiving SysOp can
+find and establish them; a node refused as a whole is already a subject from
+its hello, and establishing that node is what opens its users' mail. A
+recipient's own control over who may write to them is a per-user block list
+(issue #817), not probation.
+
+The sending node applies its own policy before anything is queued: a caller
+addressing a peer this node still holds on probation is told at the To prompt
+that "<node> is newly linked; mail opens once the SysOp establishes it", and a
+quarantined or blocked peer that mail to it is closed. Mail queued before a
+peer lost standing waits in the outbox, expires when its work item
+dead-letters, and is woken on the next sync pass once the policy allows the
+peer again (§13.7), rather than after the rest of a back-off of up to six
+hours.
+
+This relaxes the earlier default, under which a probationary user's Link
+messages were refused. In practice that swallowed every message between newly
+linked nodes: the refusal happened before the sender was registered, so the
+receiving SysOp had nobody to establish, and no bounce reached the sender.
 
 Configuration may make these defaults stricter. Relaxing them is an explicit,
 audited SysOp safety deviation. Vouches are signed, scoped, expire after at
@@ -5574,6 +5616,11 @@ has resolved through some other path (a genuine accepted/bounced event, or
 an earlier dead-letter); a new `[O]utbox` SysOp screen (`System` submenu,
 gated on Link being configured, same as `[L]ink status`) lists
 retrying/dead-lettered items and lets a SysOp replay or cancel one.
+Issue #804: an attempt this node's own trust policy stops records the
+`last_error` `link policy refused target` and counts toward dead-lettering
+like any failed push, so such mail expires too; each sync pass first makes
+every item held that way due at once when the policy now allows its target,
+without resetting its attempts or age.
 Verified end to end via `tests/test_link_sync.py`'s existing real-socket
 sync tests (unchanged, still passing against the refactored push loop)
 plus new dedicated tests for the state machine, the mail/ack integration,

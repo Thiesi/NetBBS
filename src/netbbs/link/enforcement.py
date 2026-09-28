@@ -151,6 +151,25 @@ def decide_user_authorship(
     return LinkPolicyDecision(True, None, state)
 
 
+def decide_link_mail_sender(
+    db: Database, home_node_fingerprint: str, opaque_user_id: str
+) -> LinkPolicyDecision:
+    """Whether a `link_message` from this user is delivered here (issue #804).
+
+    Node trust covers mail: the sender's home node must be established, and
+    then a user still on probation is delivered like any other. User probation
+    keeps gating what the user publishes (posts, uploads), not private mail to
+    one recipient. A quarantined or blocked sender, user or node, is refused.
+    """
+    home = decide_node_action(db, home_node_fingerprint, LinkPolicyAction.LINK_MAIL)
+    if not home.allowed:
+        return home
+    user = decide_user_authorship(db, home_node_fingerprint, opaque_user_id)
+    if not user.allowed:
+        return user
+    return LinkPolicyDecision(True, None, user.state)
+
+
 def event_author(envelope: dict[str, Any]) -> TrustSubject | None:
     """Extract the independently signed author/origin from a verified envelope."""
     payload = envelope.get("envelope", envelope).get("payload", {})
@@ -184,6 +203,8 @@ def decide_event_authorship(
     author = event_author(envelope)
     if author is None:
         return decide_node_action(db, transport_peer_fingerprint, LinkPolicyAction.EVENTS)
+    if author.kind == "user" and object_type == "link_message":
+        return decide_link_mail_sender(db, author.node_fingerprint, author.opaque_user_id or "")
     if author.kind == "user":
         home = decide_node_action(db, author.node_fingerprint, LinkPolicyAction.EVENTS)
         if not home.allowed:
