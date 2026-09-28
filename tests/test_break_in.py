@@ -776,3 +776,29 @@ def test_dropped_keys_stay_visible_under_a_notice():
     paint_chat(buffer, state, for_sysop=True)
     title = _rows(buffer)[0]
     assert "Node going down" in title and "3 keys dropped" in title
+
+
+def test_a_caller_lost_during_the_restore_is_not_reported_restored(sysop, monkeypatch):
+    from netbbs.net.session import SessionClosedError
+
+    async def scenario():
+        registry = ActiveSessionRegistry()
+        caller, reader, wire = _caller()
+        task = asyncio.create_task(_prompt_task(registry, caller, []))
+        await _until(lambda: "quest" in wire.screen().text_rows()[0])
+        sysop_session = QueueSession()
+        chat = asyncio.create_task(run_break_in(sysop_session, sysop, registry, caller, "alice"))
+        await _until(lambda: caller.in_break_in)
+        real_end = caller.end_break_in
+
+        async def dies_mid_restore():
+            await real_end()
+            raise SessionClosedError("gone while the restore drained")
+
+        monkeypatch.setattr(caller, "end_break_in", dies_mid_restore)
+        sysop_session.inputs.put_nowait("ESCAPE")
+        assert await chat is False
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(scenario())

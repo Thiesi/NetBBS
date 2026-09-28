@@ -150,8 +150,10 @@ def _sgr_params_with_colons(body: str) -> list[int]:
         if numbers[0] in (38, 48) and len(numbers) >= 3 and numbers[1] == 5:
             params.extend([numbers[0], 5, numbers[2]])
         elif numbers[0] in (38, 48) and len(numbers) >= 5 and numbers[1] == 2:
-            # 38:2:<colour space>:r:g:b, the colour space optional.
-            params.extend([numbers[0], 2, *numbers[-3:]])
+            # 38:2:<colour space>:r:g:b[:...], or 38:2:r:g:b without the
+            # colour space; anything after blue is ignored, as xterm does.
+            rgb = numbers[3:6] if len(numbers) >= 6 else numbers[2:5]
+            params.extend([numbers[0], 2, *rgb])
         else:
             params.append(numbers[0])  # e.g. 4:3, a curly underline: underline
     return params
@@ -259,6 +261,9 @@ class TerminalEmulator:
             self._main_rows = reshape(self._main_rows)
         self.width, self.height = width, height
         self.top, self.bottom = 0, height - 1
+        # A parked main screen's margins were sized for the old height; a
+        # resize resets them, as it resets the active ones.
+        self._main_margins = (0, height - 1)
         self.row = min(self.row, height - 1)
         self.col = min(self.col, width - 1)
         self._wrap_pending = False
@@ -314,8 +319,11 @@ class TerminalEmulator:
                 self._state = _GROUND
             elif state == _CHARSET:
                 # ESC ( B, ESC % G, ESC # 8 and friends: intermediate bytes,
-                # then the final byte, all consumed and ignored.
-                if not "\x20" <= ch <= "\x2f":
+                # then the final byte, all consumed and ignored. Another ESC
+                # cancels the sequence and starts a new one.
+                if ch == ESC:
+                    self._state = _ESCAPE
+                elif not "\x20" <= ch <= "\x2f":
                     self._state = _GROUND
 
     def _control(self, ch: str) -> None:

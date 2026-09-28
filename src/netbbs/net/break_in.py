@@ -274,7 +274,9 @@ async def run_break_in(
         try:
             await target.end_break_in()
         except (SessionClosedError, OSError):
-            pass  # the caller is gone; nothing to put back
+            state.caller_gone = True  # gone during the restore itself
+        if not _still_connected(registry, target):
+            state.caller_gone = True
         _logger.info(
             "break-in: %s closed the chat with %s after %d s",
             actor.username, caller_name, int(time.monotonic() - started),

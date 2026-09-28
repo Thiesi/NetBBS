@@ -320,3 +320,22 @@ def test_colon_form_sgr_colours():
 def test_a_csi_with_an_intermediate_is_not_mistaken_for_another_command():
     emulator = _emu("\x1b[3;1Hx\x1b[2 Ay")  # CSI 2 SP A: scroll right, not cursor up
     assert _rows(emulator)[2] == "xy"
+
+
+def test_a_resize_on_the_alternate_screen_keeps_the_main_margins_in_range():
+    emulator = _emu("\x1b[2;9r\x1b[?1049h", width=20, height=10)
+    emulator.resize(20, 5)
+    emulator.feed("\x1b[?1049l")
+    assert 0 <= emulator.top < emulator.bottom <= 4
+
+
+def test_colon_rgb_ignores_fields_after_blue():
+    emulator = _emu("\x1b[38:2::255:0:0:1mR\x1b[38:2:0:255:0mG")
+    cells = emulator.snapshot()[0]
+    assert cells[0].fg == (255, 0, 0)
+    assert cells[1].fg == (0, 255, 0)
+
+
+def test_an_esc_cancels_an_intermediate_sequence_and_starts_a_new_one():
+    emulator = _emu("junk\x1b%\x1b[2Jafter")
+    assert _rows(emulator)[0].strip() == "after"
