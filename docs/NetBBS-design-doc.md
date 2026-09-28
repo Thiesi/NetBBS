@@ -823,7 +823,9 @@ SysOp console above all, and interrupting is the only way to reach a screen
 that is waiting for a key. The interruption ends whatever the caller was
 doing, a running door included. An editor keeps its text as a recoverable
 draft. The SysOp console also re-checks its operator at its own menu, which
-is what stops a demoted operator in the standalone CLI.
+is what stops a demoted operator in the standalone CLI. Moderator grants
+(§5.2) need no watcher: they are read from the database at each check, so a
+grant or a revocation governs the holder's next action in every session.
 
 Hard deletion preserves content provenance through denormalized display labels
 or nullable author/uploader references. Personal access rows and private state
@@ -1570,9 +1572,12 @@ node. It shows:
   and their message.
 
 Being away changes nobody's permissions. Logging in does not end it, since a
-SysOp who is away may still look in; the person ends it, or it ends by itself
-when its return date has passed, so a forgotten notice does not go on telling
-callers something false.
+SysOp who is away may still look in. The person ends it, or, when it has a
+return date, it ends by itself once that date has passed. A notice without a
+date stays until it is ended, so it never claims more than it says: wherever
+it is shown it reads "away since" the day it was set, and the person's own
+console landing screen shows it to them each time they log in, as a reminder
+to end it.
 
 Staff permissions, the Staff list and the away notice are local to the node.
 None of them is carried over Link: a staff member's moderation of carried
@@ -12252,10 +12257,13 @@ announcements board to a helper without a new concept. Age and verified-name
 gates still hold, because they are facts about the person, not trust the SysOp
 extends.
 
-**Decision 5 — away is per person and ends itself.** A node-wide notice
-would be wrong the moment one of two SysOps came back. A return date that
-passes ends the notice, so a forgotten one does not keep telling pending
-callers to wait.
+**Decision 5 — away is per person, and never outlives what it says.** A
+node-wide notice would be wrong the moment one of two SysOps came back. A
+return date that passes ends the notice. A notice without one is shown with
+the day it was set and reminded to its owner at each login, so callers can
+judge a stale one and its owner is prompted to end it. Rejected: requiring a
+return date, which a SysOp who does not know when they will be back could
+only guess.
 
 ### SFTP over the SSH transport — declined
 
