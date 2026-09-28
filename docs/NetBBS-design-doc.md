@@ -805,6 +805,14 @@ refuse ordinary names for no gain. A signup is turned down with Decline on the
 pending account, which deletes it after a yes/no. Deletion's typed-name ritual
 guards content and Link history that a never-approved account cannot have.
 
+On an approval-required node the SysOp may set one signup question, up to 200
+characters. Self-registration asks it after the password. The answer is
+optional, cut to 300 characters, and stored with the question as asked. It is
+shown on the pending account's detail screen and deleted when the account is
+approved. It was given for that one decision, and keeping it would build a
+profile nobody agreed to. Declining removes it with the account. An open node
+never asks it, because nobody reads the answer before the account is usable.
+
 Registration determines whether an account may exist and log in. Link
 probation and reputation determine what an active identity may do; these are
 separate axes.

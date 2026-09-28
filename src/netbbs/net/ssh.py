@@ -49,6 +49,7 @@ from netbbs.auth.users import (
     create_user_async,
     self_service_username_problem,
 )
+from netbbs.auth.signup_answers import get_registration_question, save_signup_answer
 from netbbs.config import RegistrationMode, get_registration_mode
 from netbbs.net import char_input
 from netbbs.net.new_account_banner_after import load_new_account_banner_after
@@ -327,6 +328,7 @@ class _NetBBSSSHServer(asyncssh.SSHServer):
         self._registration_username: str = ""
         self._registration_password: str = ""
         self._registration_username_tries = 0
+        self._registration_question: str | None = None
         # Caps registration to exactly one attempt per connection (see
         # get_kbdint_challenge below). Without this, asyncssh's client-
         # side auth loop re-offers keyboard-interactive again after
@@ -589,6 +591,8 @@ class _NetBBSSSHServer(asyncssh.SSHServer):
             return ("", "", "", [("Confirm password: ", False)])
         if step == "confirm":
             return await self._complete_registration(responses[0])
+        if step == "answer":
+            return await self._create_registered_account(responses[0] if responses else "")
         # step in (None, "done"): no registration in progress, or the
         # message-only round from _finish_registration already ran --
         # either way, fail the auth attempt outright.
@@ -614,11 +618,38 @@ class _NetBBSSSHServer(asyncssh.SSHServer):
         if problem is not None:
             return await self._finish_registration(f"{username_problem_line(problem)} Reconnect to try again.")
 
+        # Issue #835 (F072): the SysOp's optional question, one more kbdint
+        # round, asked only when an approver will read the answer. See
+        # `login_flow._register_new_account`.
+        if get_registration_mode(self._db) == RegistrationMode.APPROVAL_REQUIRED:
+            question = get_registration_question(self._db)
+            if question is not None:
+                self._registration_question = question
+                self._registration_step = "answer"
+                return (
+                    "", f"The SysOp asks: {strip_ansi(question)}", "",
+                    [("Your answer (optional, Enter to skip): ", True)],
+                )
+        return await self._create_registered_account("")
+
+    async def _create_registered_account(
+        self, answer: str
+    ) -> tuple[str, str, str, list[tuple[str, bool]]]:
+        username = self._registration_username
+        password = self._registration_password
+        question = self._registration_question
+        self._registration_step = None
+        self._registration_question = None
+
         require_approval = get_registration_mode(self._db) == RegistrationMode.APPROVAL_REQUIRED
         try:
-            await create_user_async(self._db, username, password=password, pending_approval=require_approval)
+            new_user = await create_user_async(
+                self._db, username, password=password, pending_approval=require_approval
+            )
         except AuthError as exc:
             return await self._finish_registration(f"Could not create account: {exc}")
+        if question is not None:
+            save_signup_answer(self._db, new_user.id, question=question, answer=answer)
 
         # GitHub issue #177's own "after" banner -- covers both successful
         # outcomes below (immediate vs. pending-approval), matching

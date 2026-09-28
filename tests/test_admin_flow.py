@@ -1036,7 +1036,7 @@ def test_create_user_with_blank_username_is_cancelled(db, lane, sysop):
 
 
 def test_list_users_and_select_shows_detail(db, lane, sysop):
-    session = FakeSession(["u", "l", "0", "1", "b", "b", "b"])
+    session = FakeSession(["u", "d", "0", "1", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "sysop" in _written_text(session)
     assert "Level: 255" in _normalized_visible(_written_text(session))
@@ -1187,7 +1187,7 @@ def test_list_users_defaults_to_alphabetical_ascending_with_no_sort_prompt_neede
     """[L]ist users jumps straight to the listing now -- no separate
     one-shot sort-order prompt to answer first."""
     create_user(db, "alice", password="hunter2", user_level=10)
-    session = FakeSession(["u", "l", "0", "1", "b", "b", "b"])
+    session = FakeSession(["u", "d", "0", "1", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "alice" in _written_text(session)  # item 01 alphabetically
     assert "Sorted by: Alphabetical ↑" in _written_text(session)
@@ -6298,7 +6298,7 @@ def test_list_users_shows_pending_approval_status(db, lane, sysop):
 
     create_user(db, "carol", password="hunter2pw", pending_approval=True)
     # carol sorts before sysop alphabetically -- item 01.
-    session = FakeSession(["u", "l", "0", "1", "b", "b", "b"])
+    session = FakeSession(["u", "d", "0", "1", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "pending approval" in _written_text(session)
 
@@ -6327,7 +6327,7 @@ def test_declining_the_approve_prompt_leaves_it_pending(db, lane, sysop):
 def test_detail_screen_for_a_non_pending_user_has_no_approve_prompt(db, lane, sysop):
     # sysop themselves is the sole (non-pending) user -- picking their
     # own entry must not prompt for approval at all.
-    session = FakeSession(["u", "l", "0", "1", "b", "b", "b"])
+    session = FakeSession(["u", "d", "0", "1", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "Approve this account" not in _written_text(session)
 
@@ -6378,6 +6378,31 @@ def test_registration_settings_screen_can_switch_to_approval_required(db, lane, 
     assert "Registration mode is now: approval required" in text
     # Issue #835: say plainly that a waiting caller can't look around.
     assert "can't log in at all until you approve it -- not even to look around" in text
+
+
+def test_registration_settings_screen_sets_the_signup_question(db, lane, sysop):
+    from netbbs.auth.signup_answers import get_registration_question
+
+    session = FakeSession(["u", "r", "q", "What do you write with?", "b", "b", "b"])
+    _run(session, lane, sysop)
+    assert get_registration_question(db) == "What do you write with?"
+    text = _normalized_visible(_written_text(session))
+    assert "Signup question set." in text
+    assert "Signup question: What do you write with?" in text
+
+
+def test_pending_account_detail_shows_the_signup_answer(db, lane, sysop):
+    from netbbs.auth.signup_answers import save_signup_answer
+
+    pending = create_user(db, "anna_writes", password="hunter2", pending_approval=True)
+    save_signup_answer(db, pending.id, question="What do you write with?", answer="A Lamy 2000.")
+    session = FakeSession(["u", "d", "0", "1", "b", "b", "b"])
+
+    _run(session, lane, sysop)
+
+    text = " ".join(_visible(_written_text(session)).split())
+    assert "Asked: What do you write with?" in text
+    assert "Answer: A Lamy 2000." in text
 
 
 def test_registration_settings_screen_can_switch_to_closed(db, lane, sysop):

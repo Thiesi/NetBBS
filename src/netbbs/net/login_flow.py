@@ -41,6 +41,7 @@ from netbbs.auth.users import (
     self_service_username_problem,
     touch_last_login,
 )
+from netbbs.auth.signup_answers import get_registration_question, save_signup_answer
 from netbbs.chat import ChatHub, DirectChatInvites, MessageMailbox, PresenceRegistry, list_pending_invitations_for_user
 from netbbs.config import RegistrationMode, get_node_display_name, get_registration_mode
 from netbbs.link.boards import LinkContext
@@ -1514,6 +1515,26 @@ async def _register_new_account(
             continue
 
         require_approval = registration_mode == RegistrationMode.APPROVAL_REQUIRED
+        # Issue #835 (F072): the SysOp's optional question, so whoever
+        # approves has something to judge by besides a username. Asked
+        # only when someone will read the answer before the account is
+        # usable, and optional: Enter skips it.
+        signup_question = get_registration_question(db) if require_approval else None
+        signup_answer = ""
+        if signup_question is not None:
+            await session.write_line(
+                colored(
+                    reflow(f"The SysOp asks: {sanitize_text(signup_question)}", width=session.terminal_width),
+                    fg_color=ACCENT_COLOR,
+                )
+            )
+            try:
+                await write_prompt(
+                    session, colored("Your answer (optional, Enter to skip): ", fg_color=LABEL_COLOR, bold=True)
+                )
+                signup_answer = await asyncio.wait_for(session.read_line(), timeout=idle_timeout)
+            except asyncio.TimeoutError:
+                return None
         try:
             new_user = await create_user_async(db, username, password=password, pending_approval=require_approval)
         except AuthError as exc:
@@ -1521,6 +1542,8 @@ async def _register_new_account(
             if not await _offer_signup_retry(session, attempt, _REGISTRATION_MAX_ATTEMPTS):
                 return None
             continue
+        if signup_question is not None:
+            save_signup_answer(db, new_user.id, question=signup_question, answer=signup_answer)
 
         # Dogfood report: three testers on modern (ANSI-capable) clients
         # never discovered in-place redraw existed, so never turned it
