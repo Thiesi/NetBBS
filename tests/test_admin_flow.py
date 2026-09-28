@@ -8194,10 +8194,11 @@ def test_link_status_screen_draws_the_whole_panel_before_offering_to_acknowledge
     before = len(list_identity_observations(db))
     assert before >= 1
 
-    # The panel is paged now, so "the whole panel" is both pages of it:
+    # The panel is paged now, so "the whole panel" is every page of it:
     # the script turns the page ([>] rather than [N], since [P]eers owns
-    # "p" here) and then leaves, and never answers anything.
-    session = FakeSession(["s", "l", ">", "b", "b", "b"])
+    # "p" here) through all three and then leaves, and never answers
+    # anything. (Issue #777's dial-in row made it three pages.)
+    session = FakeSession(["s", "l", ">", ">", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
 
     text = _visible(_written_text(session))

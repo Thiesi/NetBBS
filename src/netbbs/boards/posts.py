@@ -926,7 +926,7 @@ def approve_post(db: Database, post: Post, *, approved_by: User) -> Post:
     return get_post(db, post.post_id)
 
 
-def delete_post(db: Database, post: Post, *, deleted_by: User) -> None:
+def delete_post(db: Database, post: Post, *, deleted_by: User, reason: str | None = None) -> None:
     """
     Delete a post outright, requiring `deleted_by` to hold
     `BoardPermission.DELETE` on its board. Doubles as "reject" for a
@@ -971,6 +971,23 @@ def delete_post(db: Database, post: Post, *, deleted_by: User) -> None:
         raise PostError("cannot delete this post: it " + ", and ".join(reasons))
 
     action = "reject" if post.status == "pending" else "delete"
+    current = db.connection.execute("SELECT status FROM posts WHERE id = ?", (post.id,)).fetchone()
+    if current is None or current["status"] != post.status:
+        # Another moderator decided first -- approved it, or rejected it
+        # already. A decision made on a stale copy must not delete an
+        # approved post, nor record a rejection nobody made of it (Codex
+        # review on #780).
+        raise PostError("this post was already decided by another moderator")
+    if action == "reject":
+        # A rejection is recorded, not only carried out (issue #692): for a
+        # carried post the signed event is kept, and without this record
+        # `[R]epair carried posts` would publish the refused post again.
+        # `reason` is optional and kept with it.
+        db.connection.execute(
+            "INSERT OR REPLACE INTO post_rejections (post_id, board_id, rejected_by_user_id, rejected_at, reason) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (post.post_id, post.board_id, deleted_by.id, utc_now_iso(), reason),
+        )
     db.connection.execute("DELETE FROM posts WHERE id = ?", (post.id,))
     db.connection.commit()
     record_action(
