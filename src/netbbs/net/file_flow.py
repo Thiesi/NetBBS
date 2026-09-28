@@ -1624,6 +1624,16 @@ async def _render_file_page(
     await session.write_line(colored(" ".join(divider_cols), fg_color=divider_color))
 
     for position, entry in enumerate(page.entries, start=1):
+        if page.pinned_count and position == 1:
+            # The pinned files under their own labelled rule, as a board's
+            # pinned posts are (issue #675).
+            label = f"{rule_char * 2} Pinned "
+            await session.write_line(colored(
+                label + rule_char * max(0, sum(len(c) for c in divider_cols) + 4 - visible_width(label)),
+                fg_color=divider_color,
+            ))
+        if page.pinned_count and position == page.pinned_count + 1:
+            await session.write_line(colored(" ".join(divider_cols), fg_color=divider_color))
         is_highlighted = highlighted == (position - 1)
         marker = ">" if is_highlighted else " "
         idx_label = f"{marker}[{position:2d}]"

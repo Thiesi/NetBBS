@@ -520,6 +520,9 @@ _MAX_LIST_ROWS = 30
 _TABLE_MIN_WIDTH = 60
 _NEW_MARKER = "new"
 _PIN_MARKER = "pin"
+# The row a pinned block adds to the list: the plain rule parting it from
+# the dated posts (its labelled "Pinned" rule replaces the top rule).
+_PINNED_BLOCK_ROWS = 1
 # The two-column lead ("> " or "  ") and the four two-space gaps between
 # the five columns, plus one column kept free: a row that reaches the
 # last column makes many terminals wrap the cursor onto the next row.
@@ -653,6 +656,14 @@ def _post_list_rows(
             + colored(date_cell, fg_color=METADATA_COLOR)
         )
     return rows
+
+
+def _labelled_rule(label: str, *, width: int, unicode_style: bool, color) -> str:
+    """A rule with `label` set into it: "-- Pinned ------"."""
+    char = "─" if unicode_style else "-"
+    lead = char * 2
+    text = f"{lead} {label} "
+    return colored(text + char * max(0, width - display_width(text)), fg_color=color)
 
 
 def _row_marker(post: Post, new_ids: set[int]) -> str:
@@ -974,12 +985,26 @@ async def _show_board(
         heading = _post_list_heading(current_page.posts, width=width, db=db, name_requirement=name_requirement)
         if heading is not None:
             lines.append(heading)
-        lines.append(rule)
-        lines.extend(_post_list_rows(
+        rows = _post_list_rows(
             db, current_page.posts, width=width, highlighted=highlighted,
             new_ids=_new_ids(current_page), name_requirement=name_requirement,
             accent=effective_accent_color(session, db),
-        ))
+        )
+        pinned = current_page.pinned_count
+        if pinned:
+            # The pinned block under its own labelled rule, parted from the
+            # dated posts by a plain one (issue #675). The labelled rule
+            # takes the place of the plain top rule, so the block costs one
+            # row -- `_PINNED_BLOCK_ROWS`, which the page budget reserves.
+            lines.append(_labelled_rule("Pinned", width=min(width, 78), unicode_style=unicode_style,
+                                        color=238 if truecolor else RULE_COLOR))
+            lines.extend(rows[:pinned])
+            if rows[pinned:]:
+                lines.append(rule)
+            lines.extend(rows[pinned:])
+        else:
+            lines.append(rule)
+            lines.extend(rows)
         lines.extend([rule, "", below])
         for line in lines:
             await session.write_line(line)
@@ -995,9 +1020,13 @@ async def _show_board(
         to page one as an unrelated side effect."""
         rows = limit if limit is not None else _page_limit()
         if page_anchor is None:
-            return list_posts_page(db, board, user, limit=rows, with_pinned=True)
+            return list_posts_page(
+                db, board, user, limit=rows, with_pinned=True, pinned_block_rows=_PINNED_BLOCK_ROWS
+            )
         mode, cursor = page_anchor
-        return list_posts_page(db, board, user, limit=rows, with_pinned=True, **{mode: cursor})
+        return list_posts_page(
+            db, board, user, limit=rows, with_pinned=True, pinned_block_rows=_PINNED_BLOCK_ROWS, **{mode: cursor}
+        )
 
     def _refetch_keeping(current_page: PostPage, highlighted: int | None) -> tuple[PostPage, int | None]:
         """The page on screen, refetched at the budget of the moment -- which
@@ -1399,7 +1428,7 @@ async def _show_board(
     page_anchor: tuple[str, tuple[str, str]] | None = ("after", initial_cursor) if initial_cursor else None
     page = (
         list_posts_page(db, board, user, after=initial_cursor, limit=_page_limit(), with_pinned=True)
-        if initial_cursor else list_posts_page(db, board, user, limit=_page_limit(), with_pinned=True)
+        if initial_cursor else list_posts_page(db, board, user, limit=_page_limit(), with_pinned=True, pinned_block_rows=_PINNED_BLOCK_ROWS)
     )
     if initial_cursor and not page.posts:
         # Nothing newer than the cursor `[N]ew scan` jumped in with --
@@ -1408,7 +1437,7 @@ async def _show_board(
         # "has no posts yet" path below, which would falsely claim the
         # board is empty and (worse) prompt to compose the first post.
         page_anchor = None
-        page = list_posts_page(db, board, user, limit=_page_limit(), with_pinned=True)
+        page = list_posts_page(db, board, user, limit=_page_limit(), with_pinned=True, pinned_block_rows=_PINNED_BLOCK_ROWS)
     if not page.posts:
         # Dogfood report: this used to skip straight to composing the
         # first post whenever the caller could write, with no [P]ost/
@@ -1487,7 +1516,7 @@ async def _show_board(
                     await _compose_art_post()
                 else:
                     await _saved_draft_menu(from_post=choice == "p")
-                page = list_posts_page(db, board, user, limit=_page_limit(), with_pinned=True)
+                page = list_posts_page(db, board, user, limit=_page_limit(), with_pinned=True, pinned_block_rows=_PINNED_BLOCK_ROWS)
                 if page.posts:
                     # A post was actually created (not cancelled) --
                     # fall through to the ordinary render+navigation

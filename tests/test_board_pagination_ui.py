@@ -178,15 +178,21 @@ def test_post_does_not_leak_current_display_name_for_ungated_board(tmp_path):
     db.close()
 
 
-def test_min_age_gate_hides_the_post_option_when_unmet(tmp_path):
+def test_an_unmet_age_gate_keeps_a_caller_out_of_the_board(tmp_path):
+    """An age gate is a gate on entering (design doc: access fails closed),
+    not only on posting: the board's posts are not listed to a caller who
+    does not meet it -- the board picker already hides the board, and the
+    domain refuses the listing too (issue #675)."""
+    import pytest
+
+    from netbbs.boards.posts import PostError, list_posts_page
+
     db = Database(tmp_path / "node.db")
     alice = create_user(db, "alice", password="hunter2", user_level=10)
-    board = create_board(db, "adults", creator=alice, min_age=18)
-    session = FakeSession(keys=["b"])
+    board = create_board(db, "adults", creator=alice, min_age=18)  # no birthdate on file
 
-    asyncio.run(_show_board(session, db, board, alice))
-
-    assert "]ost" not in session.output  # "[P]ost" not offered -- no birthdate on file
+    with pytest.raises(PostError, match="age requirement"):
+        list_posts_page(db, board, alice)
     db.close()
 
 
