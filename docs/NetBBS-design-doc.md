@@ -3735,6 +3735,16 @@ SysOp sees and acts on both lists from Link status. That is how a local
 exclusion is represented honestly as “not carried on this node,” not
 indistinguishable disappearance.
 
+Carrying stays automatic, and the SysOp is told (issue #681, decided with the
+maintainer). A resource carried on its own arrives Uncategorized with its
+origin's settings, so it is news until the SysOp looks at it:
+`link_carried_to_review` records it, keyed by its Link id. The SysOp
+dashboard's ATTENTION panel counts newly carried resources and offers waiting at
+the cap, drawing neither count while it is zero. The console's board, file-area
+and channel lists mark each unreviewed one `to review`. Opening its detail screen
+is the look that clears it. A resource the SysOp accepted from an offer is not
+news: they chose it.
+
 Names are not identities in Link, and independently run nodes reuse them. A
 carried resource whose name is already in use here, compared without regard
 to case, is carried under that name suffixed with the first 8, then 16, then

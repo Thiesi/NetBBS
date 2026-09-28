@@ -329,8 +329,11 @@ from netbbs.link.carry import (
     CarryDecisionError,
     accept_offer,
     carried_from_elsewhere,
+    carried_to_review,
     carry_decision_counts,
+    count_carried_to_review,
     count_carry_decisions,
+    mark_carried_reviewed,
     hide_carried_resource,
     remove_linked_or_local,
     purge_excluded,
@@ -773,7 +776,35 @@ def _link_health_snapshot(db: Database, link_context: LinkContext | None) -> dic
         "dead_letters": dead_letters,
         "recent_errors": sum(entry.level == "ERROR" for entry in recent_diagnostics),
         "recent_warnings": sum(entry.level == "WARNING" for entry in recent_diagnostics),
+        # Issue #681: what Link carried in on its own and the SysOp has not
+        # looked at, and what waits at the carry cap for their decision.
+        # Read from the database, so shown whether or not Link runs now
+        # (Codex review on #800): a node that stopped Link still has them.
+        "carried_to_review": count_carried_to_review(db),
+        "carry_offers": count_carry_decisions(db, OFFERED),
     }
+
+
+async def _with_fresh_carry_counts(lane: DatabaseLane, state: dict[str, object]) -> dict[str, object]:
+    """`state` with its carry attention counts read again: a sub-console
+    that leads to Link status may have decided offers there (Codex review
+    on #800). Two counts, not the whole dashboard reload."""
+    fresh = await lane.run(lambda db: {
+        "carried_to_review": count_carried_to_review(db),
+        "carry_offers": count_carry_decisions(db, OFFERED),
+    })
+    return {**state, **fresh}
+
+
+def _carry_attention_pairs(state: dict[str, object]) -> list[tuple[str, int]]:
+    """The dashboard's Link attention counts (issue #681), only when there
+    is something to attend to: a node with nothing new draws as before."""
+    pairs = []
+    if state.get("carried_to_review"):
+        pairs.append(("Newly carried", state["carried_to_review"]))
+    if state.get("carry_offers"):
+        pairs.append(("Offered", state["carry_offers"]))
+    return pairs
 
 
 def _wrap_counts_panel(label: str, pairs: Sequence[tuple[str, int]], *, width: int, continuation: str = "  ") -> list[str]:
@@ -1383,11 +1414,15 @@ async def admin_menu(
             await _operations_menu(
                 session, lane, user, node_controls=node_controls, link_context=link_context
             )
+            # Link status is reachable from here too: its offer decisions
+            # show, without reloading the rest (Codex review on #800).
+            dashboard_state = await _with_fresh_carry_counts(lane, dashboard_state)
             await _draw_admin_menu(session, lane, user, node_controls=node_controls,
                                    link_context=link_context, state=dashboard_state)
         elif choice == "s":
             await session.write_line("")
             await _system_menu(session, lane, user, node_controls=node_controls, link_context=link_context)
+            dashboard_state = await _with_fresh_carry_counts(lane, dashboard_state)
             await _draw_admin_menu(session, lane, user, node_controls=node_controls,
                                    link_context=link_context, state=dashboard_state)
         elif choice == "n" and node_controls is not None:
@@ -1398,8 +1433,11 @@ async def admin_menu(
         elif choice == "l" and link_context is not None:
             await session.write_line("")
             await _link_status_screen(session, lane, user, link_context=link_context, node_controls=node_controls)
-            await _draw_admin_menu(session, lane, user, node_controls=node_controls,
-                                   link_context=link_context, state=dashboard_state)
+            # Reloaded: Link status is where offers are accepted or
+            # excluded (Codex review on #800).
+            dashboard_state = await _draw_admin_menu(
+                session, lane, user, node_controls=node_controls, link_context=link_context
+            )
         elif choice == "x" and link_context is not None:
             await session.write_line("")
             await _outbox_screen(session, lane, user)
@@ -1586,7 +1624,8 @@ async def _draw_admin_menu(
     health.extend(
         _wrap_counts_panel(
             "    ",
-            [("Users", state["pending_users"]), ("Posts", state["pending_posts"]), ("Files", state["pending_files"])],
+            [("Users", state["pending_users"]), ("Posts", state["pending_posts"]), ("Files", state["pending_files"]),
+             *_carry_attention_pairs(state)],
             width=box_inner_width,
         )
     )
@@ -1761,7 +1800,8 @@ def _compact_dashboard_panel(
     pending_total = state["pending_users"] + state["pending_posts"] + state["pending_files"]
     panel.extend(_wrap_counts_panel(
         _label("ATTENTION") + counts_row([("Moderation", pending_total)]) + " pending  ",
-        [("Users", state["pending_users"]), ("Posts", state["pending_posts"]), ("Files", state["pending_files"])],
+        [("Users", state["pending_users"]), ("Posts", state["pending_posts"]), ("Files", state["pending_files"]),
+         *_carry_attention_pairs(state)],
         width=width,
     ))
     backup_at, _backup_path = state["backup"]
@@ -15792,14 +15832,14 @@ async def _list_boards_screen(
     def _load_boards(db: Database):
         boards = list_boards(db, order_by="alphabetical")
         counts = {board.id: (count_listed_posts(db, board)[0], count_pending_posts(db, board)) for board in boards}
-        return boards, _effective_by_id(db, boards), counts
+        return boards, _effective_by_id(db, boards), counts, carried_to_review(db, "boards")
 
     # A board's [B]ack comes back here, on the board it left, as the detail
     # screen's action bar says (issue #681); the list is reloaded, since the
     # detail screen may have changed or deleted what it showed.
     reopen_at: int | None = None
     while True:
-        boards, effective, counts = await lane.run(_load_boards)
+        boards, effective, counts, to_review = await lane.run(_load_boards)
         if not boards and reopen_at is not None:
             # The detail screen deleted the last board: its outcome is the
             # message, not an empty list's.
@@ -15808,9 +15848,9 @@ async def _list_boards_screen(
             session, boards,
             name_of=lambda b: b.name,
             stable_id_of=lambda b: b.id,
-            description_of=lambda b: _board_description(b, effective[b.id]),
+            description_of=lambda b: _board_description(b, effective[b.id], b.board_id in to_review),
             columns=_BOARD_COLUMNS,
-            column_values_of=lambda b: _board_columns(b, effective[b.id], counts[b.id]),
+            column_values_of=lambda b: _board_columns(b, effective[b.id], counts[b.id], b.board_id in to_review),
             title="Message boards",
             empty_message="No message boards yet.",
             start_stable_id=reopen_at,
@@ -15874,7 +15914,7 @@ def _effective_by_id(db: Database, resources, *, levels: bool = True) -> dict[in
     return {r.id: _effective_for(db, r, levels=levels) for r in resources}
 
 
-def _board_description(board: Board, effective: _Effective) -> str:
+def _board_description(board: Board, effective: _Effective, to_review: bool = False) -> str:
     """The narrow-terminal form, below the width a table needs.
 
     Carries the gates too (Codex review). Without them this fallback
@@ -15882,8 +15922,11 @@ def _board_description(board: Board, effective: _Effective) -> str:
     terminal -- gated and open resources indistinguishable -- while
     design doc §3.6 promises gates appear wherever a resource is
     listed. A promise the docs make is not optional on small screens."""
-    status = _listing_status(board.moderated, board.pinned)
-    return _describe_resource(effective.read, effective.write, status, effective)
+    description = _describe_resource(
+        effective.read, effective.write, _listing_status(board.moderated, board.pinned), effective
+    )
+    # "to review" leads, so a narrow row keeps it (Codex review on #800).
+    return f"to review; {description}" if to_review else description
 
 
 def _describe_resource(read, write, status: str, effective: _Effective) -> str:
@@ -15988,8 +16031,12 @@ _CHANNEL_COLUMNS = [
 _COMMUNITY_COLUMNS = [*_LEVEL_COLUMNS, ListColumn("listed", 6, VALUE_COLOR), _GATES_COLUMN]
 
 
-def _listing_status(moderated: bool, pinned: bool) -> str:
-    """Moderated or open, and pinned to the top of its list."""
+def _listing_status(moderated: bool, pinned: bool, to_review: bool = False) -> str | tuple[str, SegmentColor]:
+    """Moderated or open, and pinned to the top of its list -- or, for a
+    resource Link carried in that the SysOp has not opened yet, that it
+    waits for a look (issue #681)."""
+    if to_review:
+        return ("to review", WARNING_COLOR)
     if pinned:
         return "mod., pinned" if moderated else "open, pinned"
     return "moderated" if moderated else "open"
@@ -16001,24 +16048,24 @@ def _count_cell(listed: int, pending: int) -> tuple[str, SegmentColor]:
 
 
 def _board_columns(
-    board: Board, effective: _Effective, counts: tuple[int, int] = (0, 0)
+    board: Board, effective: _Effective, counts: tuple[int, int] = (0, 0), to_review: bool = False,
 ) -> list[str | tuple[str, SegmentColor]]:
     return [
         str(effective.read),
         str(effective.write),
-        _listing_status(board.moderated, board.pinned),
+        _listing_status(board.moderated, board.pinned, to_review),
         _count_cell(*counts),
         _gate_cell(effective.min_age, effective.name_requirement),
     ]
 
 
 def _area_columns(
-    area: FileArea, effective: _Effective, counts: tuple[int, int] = (0, 0)
+    area: FileArea, effective: _Effective, counts: tuple[int, int] = (0, 0), to_review: bool = False,
 ) -> list[str | tuple[str, SegmentColor]]:
     return [
         str(effective.read),
         str(effective.write),
-        _listing_status(area.moderated, area.pinned),
+        _listing_status(area.moderated, area.pinned, to_review),
         _count_cell(*counts),
         _gate_cell(effective.min_age, effective.name_requirement),
     ]
@@ -16031,13 +16078,15 @@ def _channel_access(channel: Channel) -> str:
     return "+".join(access) if access else "open"
 
 
-def _channel_columns(channel: Channel, effective: _Effective) -> list[str | tuple[str, SegmentColor]]:
+def _channel_columns(
+    channel: Channel, effective: _Effective, to_review: bool = False,
+) -> list[str | tuple[str, SegmentColor]]:
     # `min_level` is a plain non-nullable int with no Community default
     # behind it, so unlike a board's read/write there is nothing to
     # resolve -- only the gates cascade for a channel.
     return [
         str(channel.min_level),
-        _channel_access(channel),
+        ("to review", WARNING_COLOR) if to_review else _channel_access(channel),
         _gate_cell(effective.min_age, effective.name_requirement),
     ]
 
@@ -16058,6 +16107,8 @@ def _community_columns(community: Community) -> list[str | tuple[str, SegmentCol
 async def _board_detail_screen(
     session: Session, lane: DatabaseLane, actor: User, board: Board, *, link_context: LinkContext | None = None
 ) -> None:
+    # Looked at: a carried board is no longer news (issue #681).
+    await lane.run(mark_carried_reviewed, "boards", board.board_id)
     linked = await lane.run(is_board_linked, board) if link_context is not None else False
     description_level = await lane.run(menu_description_level, actor)
     unicode_style = await lane.run(unicode_style_enabled, actor)
@@ -17551,21 +17602,21 @@ async def _list_areas_screen(
     def _load_areas(db: Database):
         areas = list_file_areas(db, order_by="alphabetical")
         counts = {area.id: (count_listed_files(db, area)[0], count_pending_files(db, area)) for area in areas}
-        return areas, _effective_by_id(db, areas), counts
+        return areas, _effective_by_id(db, areas), counts, carried_to_review(db, "file_areas")
 
     # As the board list: an area's [B]ack comes back here (issue #681).
     reopen_at: int | None = None
     while True:
-        areas, effective, counts = await lane.run(_load_areas)
+        areas, effective, counts, to_review = await lane.run(_load_areas)
         if not areas and reopen_at is not None:
             return
         selected = await pick_item(
             session, areas,
             name_of=lambda a: a.name,
             stable_id_of=lambda a: a.id,
-            description_of=lambda a: _area_description(a, effective[a.id]),
+            description_of=lambda a: _area_description(a, effective[a.id], a.area_id in to_review),
             columns=_AREA_COLUMNS,
-            column_values_of=lambda a: _area_columns(a, effective[a.id], counts[a.id]),
+            column_values_of=lambda a: _area_columns(a, effective[a.id], counts[a.id], a.area_id in to_review),
             title="File areas",
             empty_message="No file areas yet.",
             start_stable_id=reopen_at,
@@ -17583,16 +17634,19 @@ async def _list_areas_screen(
         )
 
 
-def _area_description(area: FileArea, effective: _Effective) -> str:
+def _area_description(area: FileArea, effective: _Effective, to_review: bool = False) -> str:
     """Narrow-terminal fallback; see `_board_description`."""
-    status = _listing_status(area.moderated, area.pinned)
-    return _describe_resource(effective.read, effective.write, status, effective)
+    description = _describe_resource(
+        effective.read, effective.write, _listing_status(area.moderated, area.pinned), effective
+    )
+    return f"to review; {description}" if to_review else description
 
 
 async def _area_detail_screen(
     session: Session, lane: DatabaseLane, actor: User, area: FileArea, *,
     link_context: LinkContext | None = None, transfers: Any = None,
 ) -> None:
+    await lane.run(mark_carried_reviewed, "file_areas", area.area_id)
     linked = await lane.run(is_area_linked, area) if link_context is not None else False
     description_level = await lane.run(menu_description_level, actor)
     unicode_style = await lane.run(unicode_style_enabled, actor)
@@ -19876,16 +19930,16 @@ async def _list_channels_screen(
         channels = list_channels(db)
         # levels=False: a channel's `min_level` is a plain int
         # with no Community default behind it to resolve.
-        return channels, _effective_by_id(db, channels, levels=False)
+        return channels, _effective_by_id(db, channels, levels=False), carried_to_review(db, "channels")
 
-    channels, effective = await lane.run(_load_channels)
+    channels, effective, to_review = await lane.run(_load_channels)
     selected = await pick_item(
         session, channels,
         name_of=lambda c: c.name,
         stable_id_of=lambda c: c.id,
-        description_of=lambda c: _channel_description(c, effective[c.id]),
+        description_of=lambda c: _channel_description(c, effective[c.id], c.channel_id in to_review),
         columns=_CHANNEL_COLUMNS,
-        column_values_of=lambda c: _channel_columns(c, effective[c.id]),
+        column_values_of=lambda c: _channel_columns(c, effective[c.id], c.channel_id in to_review),
         title="Chat channels",
         empty_message="No chat channels yet.",
         redraw_in_place=await lane.run(redraw_in_place_enabled, actor),
@@ -19898,10 +19952,11 @@ async def _list_channels_screen(
         await _channel_detail_screen(session, lane, actor, selected, link_context=link_context, mrc_bridge=mrc_bridge, chat_hub=chat_hub)
 
 
-def _channel_description(channel: Channel, effective: _Effective) -> str:
+def _channel_description(channel: Channel, effective: _Effective, to_review: bool = False) -> str:
     """Narrow-terminal fallback; see `_board_description`."""
     gates, _ = _gate_cell(effective.min_age, effective.name_requirement)
-    bits = [] if gates == "-" else [gates]  # leads; see `_describe_resource`
+    bits = ["to review"] if to_review else []
+    bits += [] if gates == "-" else [gates]  # leads; see `_describe_resource`
     bits.append(f"level {channel.min_level}")
     if channel.members_only:
         bits.append("members-only")
@@ -19915,6 +19970,7 @@ async def _channel_detail_screen(
     mrc_bridge: MrcBridge | None = None,
     chat_hub: ChatHub | None = None,
 ) -> None:
+    await lane.run(mark_carried_reviewed, "channels", channel.channel_id)
     linked = await lane.run(is_channel_linked, channel) if link_context is not None else False
     mrc_mapping = await lane.run(get_mrc_mapping, channel)
     description_level = await lane.run(menu_description_level, actor)
