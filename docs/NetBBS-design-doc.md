@@ -1555,8 +1555,10 @@ below level 255, independent of its level:
 
 - **Approve accounts:** approve or decline registrations waiting under
   `approval_required` (§4.2).
-- **Disable accounts:** disable an account and enable it again. Deleting an
-  account, and so retiring its name (§4.3), stays with the SysOp.
+- **Manage accounts:** disable an account and enable it again, reset its
+  password, and set its level anywhere from 0 to 254. Raising an account to
+  255, and deleting an account and so retiring its name (§4.3), stay with the
+  SysOp.
 - **Moderate everything:** act as moderator on every board, file area and
   channel on the node, local and carried, with every moderator permission of
   §5.2. Without it, a staff member moderates what their moderator grants
@@ -1574,7 +1576,7 @@ moderator grants, so a SysOp sees everything an account may do in one place.
 
 **What staff can never do.** A staff member acts only on accounts below level
 255 that hold no staff permission; a moderator-only account is within reach.
-They cannot change anyone's level, grant or revoke staff permissions or
+They cannot set any level to 255, grant or revoke staff permissions or
 moderator grants, or reach Settings, Link, node controls, managed DNS or
 backups. Every action they take is audited under their own name. So the
 original SysOp cannot be demoted, disabled or locked out by a helper, and the
@@ -12273,7 +12275,7 @@ on, and the only way to hand them over was level 255, which includes power
 over the SysOp who gave it. Normative description: §5.6, with §4.3 and §5.2.
 
 **Decision 1 — named staff permissions, with Co-SysOp as a preset.** Approve
-accounts, disable accounts and moderate everything, granted per account, and
+accounts, manage accounts and moderate everything, granted per account, and
 a one-step Co-SysOp preset that sets all three. Rejected: a Co-SysOp level
 band such as 250-254, the classic BBS convention, because nodes already use
 those levels as resource gates, and an upgrade would silently give console
@@ -12283,13 +12285,17 @@ into node-wide authority and still leave no one-step way to hand over the
 node's routine work.
 
 **Decision 2 — staff never reach the SysOp.** Staff act only on accounts below
-255 that hold no staff permission, and cannot change levels or grant
-anything. A second SysOp at 255 keeps full power, including over the first;
+255 that hold no staff permission, cannot raise anyone to 255, and cannot
+grant anything. A second SysOp at 255 keeps full power, including over the first;
 that is what 255 means, and staff is how to give less.
 
-**Decision 3 — disabling, not deleting.** Deletion is permanent and, on a
-Link node, retires the name (§4.3); a disable can be undone by the SysOp on
-their return.
+**Decision 3 — everyday account work, but no deleting and no 255.** Manage
+accounts covers what a helper needs while the SysOp is away: disabling and
+enabling, password resets for callers locked out, and levels up to 254 so a
+helper can open level-gated boards to members. Deletion is permanent and, on a
+Link node, retires the name (§4.3), where a disable can be undone by the SysOp
+on their return. Level 255 is the SysOp's own authority and is given only by a
+SysOp.
 
 **Decision 4 — read and write grants pass level gates.** The bits already
 existed and did nothing. Giving them meaning lets a SysOp open an
