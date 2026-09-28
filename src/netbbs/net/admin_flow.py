@@ -16779,8 +16779,13 @@ async def _post_action_screen(
             _announce_line(session, "Approved.")
             return
         if choice == "r":
+            # The last step before an irreversible action; Enter leaves the
+            # reason out. It goes to the author with the rejection (#678).
+            await session.write_line("")
+            await write_prompt(session, "Reason for the author (optional, Enter for none): ")
+            reason = (await session.read_line()).strip() or None
             try:
-                await lane.run(delete_post, post, deleted_by=actor)
+                await lane.run(delete_post, post, deleted_by=actor, reason=reason)
             except PostError as exc:
                 _announce(session, f"Error: {exc}", error=True)
                 continue

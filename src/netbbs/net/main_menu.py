@@ -33,7 +33,8 @@ from netbbs.mail import unread_count as unread_mail_count
 from netbbs.net.admin_flow import admin_menu
 from netbbs.net.board_flow import _browse_boards, _has_visible_boards
 from netbbs.net.breadcrumb_preference import breadcrumb_collapsed_enabled
-from netbbs.net.notices import write_notices
+from netbbs.boards.moderation_notices import acknowledge_moderation_notices, pending_moderation_notices
+from netbbs.net.notices import announce, write_notices
 from netbbs.net.char_input import REDRAW_KEY, InputHistory, reject_unhandled_key
 from netbbs.net.chat_flow import browse_channels, has_visible_channels, run_direct_chat_loop
 from netbbs.net.confirm import prompt_yes_no
@@ -542,7 +543,14 @@ async def _main_menu_loop(
                 if fresh is not None:
                     notice = _access_change_notice(user, fresh) or notice
                     user = _adopt_account(session, registry, fresh)
+                # What moderators decided on this caller's held posts, told
+                # once (issue #678) -- acknowledged only once the menu that
+                # shows them has been drawn.
+                moderation_lines, moderation_ids = pending_moderation_notices(db, user)
+                for outcome, text in moderation_lines:
+                    announce(session, text, tone="success" if outcome == "approved" else "error")
                 await _draw_main_menu(session, db, mailbox, user, node_controls=node_controls, notice=notice)
+                acknowledge_moderation_notices(db, moderation_ids)
                 notice = None
                 redraw = False
             set_root_activity(session, None)
