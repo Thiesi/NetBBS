@@ -7056,7 +7056,7 @@ def test_backup_status_pauses_for_a_keypress_before_returning(db, lane, sysop):
     assert "Press any key to continue..." not in backup
     # Standalone admin: status only, and the last page says why.
     assert "CREATING A BACKUP" in backup
-    assert "Live backup creation is unavailable in standalone admin." in _normalized_visible(backup)
+    assert "This console runs outside the node, so it can't make a backup itself." in _normalized_visible(backup)
     assert "[C]reate backup now" not in backup
     assert text.count("NetBBS › SysOp operations console") == 2  # and back out to the console
     assert session._inputs == []
@@ -8556,8 +8556,8 @@ def test_operations_compact_panel_omits_diagnostics_without_link_context(db, lan
 
 
 def test_operations_compact_panel_keeps_standalone_warning(db, lane, sysop):
-    """Compact mode must keep the same "Live node controls unavailable
-    in standalone mode" explanation the non-compact layout already
+    """Compact mode must keep the same "the node isn't running"
+    explanation the non-compact layout already
     shows when `node_controls` is `None` (PR #197 review, finding #6) --
     it used to render only the bare NODE HEALTH badge with no
     explanation at a narrow terminal. At this width the full sentence no
@@ -8571,9 +8571,33 @@ def test_operations_compact_panel_keeps_standalone_warning(db, lane, sysop):
     session.terminal_height = 24
     _run(session, lane, sysop)
     text = _visible(_written_text(session))
-    assert "Live node controls unavailable in" in text
-    assert "standalone mode." in text
+    assert "The node isn't running, so there" in text
+    assert "node to get them." in text
     _assert_double_frame_rows_match_border(text, "operations_compact_standalone_warning")
+
+
+def test_offline_console_says_whether_the_node_is_running(db, lane, sysop, monkeypatch):
+    """Issue #834 (F013): "Live node controls unavailable in standalone
+    mode" read as "because I declined Link". The console says what is
+    actually the case: the node is not running, or this console is not
+    the node."""
+    from netbbs.net import admin_flow as admin_flow_module
+
+    session = FakeSession(["b"])
+    _run(session, lane, sysop)
+    stopped = _normalized_visible(_written_text(session))
+    assert "The node isn't running, so there are no live controls." in stopped
+    assert "get them." in stopped
+    assert "standalone" not in stopped
+
+    monkeypatch.setattr(admin_flow_module, "running_node_pid", lambda path: 4242)
+    for keys in (["b"], ["o", "b", "b"]):
+        session = FakeSession(keys)
+        _run(session, lane, sysop)
+        running = _normalized_visible(_written_text(session))
+        assert "This console runs outside the node." in running
+        assert "open the SysOp menu there." in running
+        assert "isn't running" not in running
 
 
 def test_users_compact_panel_surfaces_pending_registration_warning(db, lane, sysop):

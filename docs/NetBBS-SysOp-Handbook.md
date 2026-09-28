@@ -253,7 +253,9 @@ its `ReadWritePaths` if you put games or state elsewhere. NetBSD's example sets
 **MANUAL — outside NetBBS:** configure firewall rules, router forwarding,
 DNS, and the reverse proxy for the connection methods you offer. A bind
 address of `0.0.0.0` means all IPv4 interfaces; it is not an address to give
-callers. A loopback listener is reachable only from the same host.
+callers. A loopback listener is reachable only from the same host. Enabling
+Telnet or web with `enabled = true` alone leaves it on loopback; the node log
+says so at every start, naming the `host` line to add.
 
 For a browser terminal and transfer links behind a proxy, replace the existing
 `[web]` table with:
@@ -276,7 +278,9 @@ Use a real hostname and certificate;
 `public_url` supplies the externally reachable base address for transfer links.
 Without it, a node bound to a wildcard or loopback address cannot give remote
 terminal callers a usable link. A specific reachable bind address may be used
-as a fallback, but explicit configuration is preferable behind a proxy.
+as a fallback, but explicit configuration is preferable behind a proxy. When
+the web listener is on and SSH or Telnet callers would get no link, the node
+log warns at every start.
 
 File transfers work through the browser, through short-lived browser links
 shown to terminal callers, or through Zmodem in a capable terminal client.
@@ -772,6 +776,10 @@ Check pending registrations/posts/files, backup recency, free disk space,
 and recent errors. Choose welcome/masthead/banner presets through Settings;
 preview before applying, or place your own files as described under
 [Custom banners and mastheads](#custom-banners-and-mastheads). Timestamp format and display timezone are node-wide.
+Until you choose a timezone under **Settings → Timestamp format**, times are
+shown in UTC: the main-menu clock says `UTC`, and the node log reminds you at
+every start. The default welcome banner mentions NetBBS Link only when the
+node ran with Link on at its last start.
 
 **Settings → Limits & retention** holds five node-wide values, saved together
 and applied without a restart:
@@ -1112,8 +1120,17 @@ self-rotating, so arrange rotation or an appropriate output policy yourself.
 The application's `netbbs.log` rotates at 10 MiB with five retained backups
 (up to about 60 MiB including the active file).
 
+Some lines are routine and need nothing from you. A caller who hangs up is one
+`INFO` line naming their address. Every node yours meets on NetBBS Link starts
+on probation here, and the log says once per node, since the node started,
+that its content is held back; a relay candidate that cannot be reached is
+also mentioned once. A `WARNING` or `ERROR` line, and any traceback, is worth
+reading.
+
 **Operations → Node log** reads that file from inside NetBBS, including from
-`python -m netbbs.admin` while the node is stopped. It shows the newest 512 KiB,
+`python -m netbbs.admin` while the node is stopped. That console runs outside
+the node, so its health panel has no live controls; it says whether the node
+is running. It shows the newest 512 KiB,
 topped up from `netbbs.log.1` after a rotation, and says when older lines exist
 that it does not show. It cannot show failures from before the log opened; for
 those, use the service manager's output above.

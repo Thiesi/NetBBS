@@ -227,7 +227,7 @@ def test_node_menu_status_without_a_running_bridge_says_so(db, lane, sysop):
     text = _visible(_written_text(session))
     assert "hat bridge (MRC)" in text
     assert "NOT AVAILABLE HERE" in text
-    assert "the standalone admin CLI can't see it" in " ".join(text.split())
+    assert "this console runs outside the node and can't see it" in " ".join(text.split())
 
 
 def test_node_status_screen_reports_live_state_rooms_and_reconnects(db, lane, sysop, lobby):
