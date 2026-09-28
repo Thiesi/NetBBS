@@ -490,7 +490,12 @@ def test_autosave_writes_the_draft_while_dirty(tmp_path):
         task = asyncio.create_task(
             edit_prose(session, initial_text=None, draft_path=draft, autosave_interval_seconds=0.05, max_bytes=100_000)
         )
-        await asyncio.sleep(0.2)
+        # Until the autosave has written, not a fixed time a loaded machine
+        # may not reach.
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 30.0
+        while loop.time() < deadline and not (draft.exists() and draft.read_text(encoding="utf-8") == "A"):
+            await asyncio.sleep(0.02)
         task.cancel()
         try:
             await task
