@@ -23,6 +23,7 @@ from netbbs.rendering.pipe_codes import PastedColor
 from netbbs.rendering.post_body import post_body_rows
 from netbbs.rendering import (
     ACCENT_COLOR,
+    ERROR_COLOR,
     HEADER_COLOR,
     LABEL_COLOR,
     MUTED_COLOR,
@@ -76,6 +77,90 @@ async def read_prefilled_field(session: Session, label: str, current: str) -> st
     if not value or value == shown.strip():
         return current
     return value
+
+
+def characters_over(text: str, max_bytes: int) -> int:
+    """How many characters `text` has to lose from its end to fit
+    `max_bytes` of UTF-8; 0 when it already fits (issue #812).
+
+    Storage limits are counted in bytes, which mean nothing to a caller:
+    200 bytes is 200 plain letters but as few as 100 accented ones. A
+    refusal says how much to remove instead, in the unit the caller is
+    typing in, and this is exact for the usual fix -- shortening the end."""
+    encoded = text.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return 0
+    kept = encoded[:max_bytes].decode("utf-8", errors="ignore")
+    return len(text) - len(kept)
+
+
+def too_long_message(what: str, over: int) -> str:
+    """"<what> N characters too long" -- the one wording every
+    composition refusal uses (issue #812), never a byte count."""
+    return f"{what} {over} character{'' if over == 1 else 's'} too long"
+
+
+async def read_subject(
+    session: Session, *, max_bytes: int, current: str = "", blank_cancels: bool = False,
+) -> str | None:
+    """The Subject prompt of every composition (issue #812), which checks
+    the subject where it is typed rather than after the body is written.
+
+    With `current`, the field opens on it and behaves as
+    `read_prefilled_field`: Enter keeps what is shown, an emptied line or
+    Esc keeps `current`. Without, it starts empty and Esc returns `None`,
+    cancelling. An empty answer asks again, saying Esc cancels -- unless
+    `blank_cancels`, for a prompt that already offers Enter as its way out
+    (a board's "Subject (or press Enter to cancel)").
+
+    A subject over `max_bytes` is refused with how many characters to
+    remove, and the prompt reopens on it to be shortened (Ctrl-U clears
+    it). The storage layer's byte check stays the backstop."""
+    if current:
+        prompt = "Subject: "
+        escape_does = "keep the previous subject"
+    elif blank_cancels:
+        prompt = "Subject (or press Enter to cancel): "
+        escape_does = "cancel"
+    else:
+        prompt = "Subject: "
+        escape_does = "cancel"
+    # Shown sanitized, and handed back untouched when saved unchanged --
+    # the same reasoning as `read_prefilled_field`.
+    shown = sanitize_text(current)
+    seed = shown
+    while True:
+        await write_prompt(session, prompt)
+        try:
+            value = await session.read_line(
+                initial=seed, cancellable=True,
+                viewport=lambda: max(1, session.terminal_width - display_width(prompt)),
+            )
+        except InputCancelled:
+            await session.write_line("")
+            return current or None
+        value = value.strip()
+        if current and (not value or value == shown.strip()):
+            return current
+        if not value:
+            if blank_cancels:
+                return None
+            await session.write_line(
+                colored(f"A subject is required -- type one, or press Esc to {escape_does}.", fg_color=ERROR_COLOR)
+            )
+            seed = ""
+            continue
+        over = characters_over(value, max_bytes)
+        if over:
+            await session.write_line(
+                colored(
+                    f"{too_long_message('That subject is', over)} -- shorten it, or press Esc to {escape_does}.",
+                    fg_color=ERROR_COLOR,
+                )
+            )
+            seed = value
+            continue
+        return value
 
 
 class ReviewAction(Enum):
@@ -197,8 +282,10 @@ async def edit_line_body(
             return False
         size = _body_bytes(candidate)
         if size > max_bytes and size > _body_bytes(lines):
+            # In characters, not bytes (issue #812).
+            over = characters_over("\n".join(candidate), max_bytes)
             await session.write_line(
-                colored(f"Body cannot exceed {max_bytes} bytes (would be {size}).", fg_color=MUTED_COLOR)
+                colored(f"{too_long_message('That would make the text', over)}.", fg_color=MUTED_COLOR)
             )
             return False
         lines[:] = candidate
