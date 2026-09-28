@@ -178,9 +178,12 @@ from netbbs.link.events import (
     event_content_id,
 )
 from netbbs.link.enforcement import (
+    REASON_NODE_PROBATIONARY,
+    REASON_USER_PROBATIONARY,
     decide_event_authorship,
     decide_node_action,
     ensure_node_subject,
+    event_author,
     node_transport_state,
     LinkPolicyAction,
 )
@@ -830,10 +833,7 @@ async def _sync_one_seed(
                         transport_peer_fingerprint=seed_peer.fingerprint,
                     )
                     if not decision.allowed:
-                        _logger.warning(
-                            "Link sync: rejected inventory event with reason_code=%s",
-                            decision.reason_code,
-                        )
+                        _log_withheld_event(node, event, decision.reason_code)
                         # Set aside rather than downloaded and refused again on
                         # every pass; asked for once more after the retry
                         # interval, which is how an author the SysOp has since
@@ -1856,6 +1856,59 @@ def _relay_base_urls_for_peer(node: LinkNode, target_fingerprint: str) -> list[s
     return urls
 
 
+_MAX_EXPLAINED_IN_LOG = 4096
+
+
+def _log_once(node: LinkNode, key: str, message: str, *args: object) -> None:
+    """Log a routine Link state at INFO the first time this process sees it.
+
+    Issue #834: a new node holds every node it meets on probation, and the
+    same held-back content or unreachable relay candidate comes round on every
+    sync pass. Said once, in plain words, it informs the SysOp; repeated, it
+    reads as a fault.
+    """
+    if key in node.explained_in_log:
+        return
+    # Keys name remote subjects, so the set is bounded: past the cap it starts
+    # over, and a subject is at worst explained a second time.
+    if len(node.explained_in_log) >= _MAX_EXPLAINED_IN_LOG:
+        node.explained_in_log.clear()
+    node.explained_in_log.add(key)
+    _logger.info(message, *args)
+
+
+def _log_withheld_event(node: LinkNode, event: dict, reason_code: str | None) -> None:
+    """Explain an inventory event this node's trust policy held back.
+
+    Probation is the normal state of every identity this node has just met,
+    so it is explained once per subject at INFO. Anything else -- a block or a
+    quarantine the SysOp set -- stays a WARNING naming the reason. Each event
+    is also noted at DEBUG, once per download.
+    """
+    _logger.debug("Link sync: withheld inventory event with reason_code=%s", reason_code)
+    author = event_author(event)
+    if reason_code == REASON_NODE_PROBATIONARY and author is not None:
+        _log_once(
+            node,
+            f"probation:{author.node_fingerprint}",
+            "Link: holding back content from node %s while it is on probation here. "
+            "This is normal for a node yours has just met; see Settings -> Policy trust -> Subjects.",
+            author.node_fingerprint,
+        )
+        return
+    if reason_code == REASON_USER_PROBATIONARY and author is not None:
+        _log_once(
+            node,
+            f"probation:{author.subject_id}",
+            "Link: holding back content from a caller of node %s while that caller is on "
+            "probation here. This is normal for a caller yours has just met; see "
+            "Settings -> Policy trust -> Subjects.",
+            author.node_fingerprint,
+        )
+        return
+    _logger.warning("Link sync: rejected inventory event with reason_code=%s", reason_code)
+
+
 async def _try_addresses_via(base_urls: list[str], attempt: Callable[[str], Awaitable[bool]]) -> bool:
     """Try `attempt(base_url)` for each of `base_urls` in order,
     stopping at the first that returns `True` (design doc §12: "peers
@@ -2016,14 +2069,30 @@ async def _request_one_relay_consent(
                 decide_node_action, relay_fingerprint, LinkPolicyAction.RELAY
             )
             if not decision.allowed:
-                _logger.info(
-                    "Link sync: relay candidate %s rejected by policy (%s)",
-                    relay_fingerprint,
-                    decision.reason_code,
-                )
+                if decision.reason_code == REASON_NODE_PROBATIONARY:
+                    _log_once(
+                        node,
+                        f"relay-probation:{relay_fingerprint}",
+                        "Link: not asking node %s to relay for yours while it is on probation here",
+                        relay_fingerprint,
+                    )
+                else:
+                    _logger.info(
+                        "Link sync: relay candidate %s rejected by policy (%s)",
+                        relay_fingerprint,
+                        decision.reason_code,
+                    )
                 return False
         response = await request_relay_consent(node, session, base_url, relay_fingerprint, lane)
-    except (LinkTransportError, LinkProtocolError) as exc:
+    except LinkTransportError as exc:
+        # Issue #834: one address of several failing is routine, and the
+        # candidate as a whole is summarised by `_maintain_relay_selection`.
+        _logger.debug(
+            "Link sync: relay consent request to %s (%s) failed: %s", relay_fingerprint, base_url, exc
+        )
+        return False
+    except LinkProtocolError as exc:
+        # A reply that fails verification is not a network hiccup.
         _logger.warning(
             "Link sync: relay consent request to %s (%s) failed: %s", relay_fingerprint, base_url, exc
         )
@@ -2123,6 +2192,15 @@ async def _maintain_relay_selection(
         # candidate kept the neutral score of one never tried, and an
         # unreachable one was asked every pass ahead of a relay that works.
         await lane.run(record_dial_outcome, candidate_fingerprint, succeeded=candidate_fingerprint in reached)
+        if candidate_fingerprint not in reached:
+            _log_once(
+                node,
+                f"relay-unreached:{candidate_fingerprint}",
+                "Link: could not reach relay candidate %s at %d address(es); "
+                "other candidates are tried, and it is asked again later",
+                candidate_fingerprint,
+                len(base_urls),
+            )
         if granted:
             needed -= 1
             declines.pop(candidate_fingerprint, None)

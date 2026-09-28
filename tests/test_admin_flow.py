@@ -6376,6 +6376,33 @@ def test_registration_settings_screen_can_switch_to_approval_required(db, lane, 
     # The screen stays up: its redraw shows the new mode and the result line.
     assert "Current mode: approval required (SysOp must approve new accounts)" in text
     assert "Registration mode is now: approval required" in text
+    # Issue #835: say plainly that a waiting caller can't look around.
+    assert "can't log in at all until you approve it -- not even to look around" in text
+
+
+def test_registration_settings_screen_sets_the_signup_question(db, lane, sysop):
+    from netbbs.auth.signup_answers import get_registration_question
+
+    session = FakeSession(["u", "r", "q", "What do you write with?", "b", "b", "b"])
+    _run(session, lane, sysop)
+    assert get_registration_question(db) == "What do you write with?"
+    text = _normalized_visible(_written_text(session))
+    assert "Signup question set." in text
+    assert "Signup question: What do you write with?" in text
+
+
+def test_pending_account_detail_shows_the_signup_answer(db, lane, sysop):
+    from netbbs.auth.signup_answers import save_signup_answer
+
+    pending = create_user(db, "anna_writes", password="hunter2", pending_approval=True)
+    save_signup_answer(db, pending.id, question="What do you write with?", answer="A Lamy 2000.")
+    session = FakeSession(["u", "d", "0", "1", "b", "b", "b"])
+
+    _run(session, lane, sysop)
+
+    text = " ".join(_visible(_written_text(session)).split())
+    assert "Asked: What do you write with?" in text
+    assert "Answer: A Lamy 2000." in text
 
 
 def test_registration_settings_screen_can_switch_to_closed(db, lane, sysop):
@@ -7056,7 +7083,7 @@ def test_backup_status_pauses_for_a_keypress_before_returning(db, lane, sysop):
     assert "Press any key to continue..." not in backup
     # Standalone admin: status only, and the last page says why.
     assert "CREATING A BACKUP" in backup
-    assert "Live backup creation is unavailable in standalone admin." in _normalized_visible(backup)
+    assert "This console runs outside the node, so it can't make a backup itself." in _normalized_visible(backup)
     assert "[C]reate backup now" not in backup
     assert text.count("NetBBS › SysOp operations console") == 2  # and back out to the console
     assert session._inputs == []
@@ -8556,8 +8583,8 @@ def test_operations_compact_panel_omits_diagnostics_without_link_context(db, lan
 
 
 def test_operations_compact_panel_keeps_standalone_warning(db, lane, sysop):
-    """Compact mode must keep the same "Live node controls unavailable
-    in standalone mode" explanation the non-compact layout already
+    """Compact mode must keep the same "the node isn't running"
+    explanation the non-compact layout already
     shows when `node_controls` is `None` (PR #197 review, finding #6) --
     it used to render only the bare NODE HEALTH badge with no
     explanation at a narrow terminal. At this width the full sentence no
@@ -8571,9 +8598,33 @@ def test_operations_compact_panel_keeps_standalone_warning(db, lane, sysop):
     session.terminal_height = 24
     _run(session, lane, sysop)
     text = _visible(_written_text(session))
-    assert "Live node controls unavailable in" in text
-    assert "standalone mode." in text
+    assert "The node isn't running, so there" in text
+    assert "node to get them." in text
     _assert_double_frame_rows_match_border(text, "operations_compact_standalone_warning")
+
+
+def test_offline_console_says_whether_the_node_is_running(db, lane, sysop, monkeypatch):
+    """Issue #834 (F013): "Live node controls unavailable in standalone
+    mode" read as "because I declined Link". The console says what is
+    actually the case: the node is not running, or this console is not
+    the node."""
+    from netbbs.net import admin_flow as admin_flow_module
+
+    session = FakeSession(["b"])
+    _run(session, lane, sysop)
+    stopped = _normalized_visible(_written_text(session))
+    assert "The node isn't running, so there are no live controls." in stopped
+    assert "get them." in stopped
+    assert "standalone" not in stopped
+
+    monkeypatch.setattr(admin_flow_module, "running_node_pid", lambda path: 4242)
+    for keys in (["b"], ["o", "b", "b"]):
+        session = FakeSession(keys)
+        _run(session, lane, sysop)
+        running = _normalized_visible(_written_text(session))
+        assert "This console runs outside the node." in running
+        assert "open the SysOp menu there." in running
+        assert "isn't running" not in running
 
 
 def test_users_compact_panel_surfaces_pending_registration_warning(db, lane, sysop):
@@ -9784,21 +9835,28 @@ def test_delete_warning_says_the_name_stays_retired_on_a_link_node(db, lane, sys
     assert "Retired names releases it" in text
 
 
-def test_delete_warning_promises_no_hold_for_a_declined_registration(db, lane, sysop):
-    """The warning and the deletion ask one predicate, so the screen cannot
-    promise a hold the deletion then does not make."""
+def test_declining_a_registration_holds_no_name_and_skips_the_delete_ritual(db, lane, sysop):
+    """A pending account gets [D]ecline, not [D]elete (issue #835): a yes/no,
+    not the permanent-delete warning and typed name. The name is not held,
+    by the same predicate `delete_user` asks."""
     from netbbs.auth.users import list_retired_usernames
     from netbbs.link.onboarding import mark_link_has_run
+    from netbbs.moderation.log import list_recent_actions
 
     mark_link_has_run(db)
     create_user(db, "alice", password="hunter2", user_level=10, pending_approval=True)
-    session = FakeSession(["u", "d", "0", "1", "d", "alice", "b", "b"])
+    session = FakeSession(["u", "d", "0", "1", "d", "y", "b", "b"])
 
     _run(session, lane, sysop)
 
-    assert "stays retired" not in " ".join(_visible(_written_text(session)).split())
+    text = " ".join(_visible(_written_text(session)).split())
+    assert "[D]ecline" in text
+    assert "stays retired" not in text
+    assert "permanently deletes" not in text
+    assert "'alice''s signup declined." in text
     assert not any(u.username == "alice" for u in list_users(db))
     assert list_retired_usernames(db) == []
+    assert any(entry.action == "decline_registration" for entry in list_recent_actions(db))
 
 
 def test_delete_warning_says_nothing_about_retirement_on_a_standalone_node(db, lane, sysop):

@@ -50,6 +50,7 @@ from urllib.parse import urlsplit
 from aiohttp import WSCloseCode, web
 
 from netbbs.net.char_input import (
+    KILL_LINE_KEY,
     REDRAW_KEY,
     REFRESH_KEY,
     CandidateListPrinter,
@@ -65,6 +66,7 @@ from netbbs.net.char_input import (
     _grapheme_start,
     LiveInputBuffer,
     apply_tab_completion,
+    kill_line,
     move_cursor,
     redraw_tail,
 )
@@ -571,6 +573,10 @@ class WebSession(Session):
                     line.pop()
                     await self.write("\b \b")
                 continue
+            if char == KILL_LINE_KEY:
+                await self.write("\b \b" * len(line))
+                line.clear()
+                continue
             if ord(char) < 0x20:
                 continue
             if len(line) < _MAX_LINE_LENGTH:
@@ -799,6 +805,12 @@ class WebSession(Session):
                                     self.write, move_back=move_back, edit_pos=cursor,
                                     line=line, new_cursor=cursor,
                                 )
+                        continue
+
+                    if char == KILL_LINE_KEY:
+                        # Ctrl-U (issue #812), through the one helper both
+                        # line editors share.
+                        cursor = await kill_line(self.write, window, line, cursor, show)
                         continue
 
                     if char == _TAB:
@@ -1112,7 +1124,8 @@ class WebServer:
         try:
             await self._session_handler(session)
         except SessionClosedError:
-            pass  # client disconnected mid-session — expected, not an error
+            # A caller closing the tab is routine: one INFO line, no traceback.
+            _logger.info("web caller %s disconnected", request.remote or "?")
         except Exception:
             _logger.exception("unhandled error in web session handler")
         finally:

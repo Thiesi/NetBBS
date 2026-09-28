@@ -82,7 +82,14 @@ from netbbs.net.breadcrumb_preference import breadcrumb_collapsed_enabled
 from netbbs.net.chat_flow import NAME_GATE_NOTE
 from netbbs.net.char_input import HELP_KEY, REDRAW_KEY, EditorKey, EditorKeyKind, reject_unhandled_key
 from netbbs.net.color_depth_preference import effective_truecolor
-from netbbs.net.composition import ReviewAction, edit_line_body, read_prefilled_field, review_composition
+from netbbs.net.composition import (
+    ReviewAction,
+    characters_over,
+    edit_line_body,
+    read_subject,
+    review_composition,
+    too_long_message,
+)
 from netbbs.net.confirm import prompt_yes_no
 from netbbs.net.detail_view import show_detail
 from netbbs.net.draft_storage import delete_draft, drafts_directory, load_draft
@@ -1306,13 +1313,11 @@ async def _show_board(
         if discard_buffered_enter is not None:
             await discard_buffered_enter()
         await session.write_line("")
-        if reply_to is None:
-            await write_prompt(session, "Subject (or press Enter to cancel): ")
-            subject = (await session.read_line()).strip()
-        else:
-            subject = (await read_prefilled_field(
-                session, "Subject", reply_subject(reply_to.subject, max_bytes=MAX_SUBJECT_BYTES)
-            )).strip()
+        # Checked as it is typed, not at Publish (issue #812).
+        subject = await read_subject(
+            session, max_bytes=MAX_SUBJECT_BYTES, blank_cancels=True,
+            current=reply_subject(reply_to.subject, max_bytes=MAX_SUBJECT_BYTES) if reply_to is not None else None,
+        )
         if not subject:
             announce(session, "Reply cancelled." if reply_to else "Post cancelled.", tone="muted")
             return False
@@ -1394,8 +1399,7 @@ async def _show_board(
         if _art_canvas(session, resumed) is None:
             return False
         await session.write_line("")
-        await write_prompt(session, "Subject (or press Enter to cancel): ")
-        subject = (await session.read_line()).strip()
+        subject = await read_subject(session, max_bytes=MAX_SUBJECT_BYTES, blank_cancels=True)
         if not subject:
             announce(session, "Post cancelled.", tone="muted")
             return False
@@ -1803,7 +1807,7 @@ async def _edit_existing_post(
         if _art_canvas(session, split_signature(initial_body)[0]) is None:
             return  # said why; the draft stays
 
-    subject = await read_prefilled_field(session, "Subject", post.subject)
+    subject = await read_subject(session, max_bytes=MAX_SUBJECT_BYTES, current=post.subject)
 
     edit_draft_path = _post_draft_path(
         db, kind="art_edit" if art else "edit", board=board, user=user, root_post_id=post.root_post_id
@@ -1892,6 +1896,12 @@ async def _review_and_commit(
         board_allows_color=board.allow_color, reader_wants_color=post_colors_enabled(db, user)
     )
     while True:
+        # Said on arrival, in characters (issue #812), rather than by the
+        # domain's byte-counting refusal at Publish: the editors stop a
+        # body at the limit, but a signature is added after them.
+        too_long = _too_long_to_post(subject, body)
+        if too_long is not None:
+            announce(session, too_long, tone="error")
         action = await review_composition(
             session,
             recipient=None,
@@ -1914,7 +1924,7 @@ async def _review_and_commit(
             announce(session, cancelled_notice, tone="muted")
             return
         if action is ReviewAction.EDIT_SUBJECT:
-            subject = await read_prefilled_field(session, "Subject", subject)
+            subject = await read_subject(session, max_bytes=MAX_SUBJECT_BYTES, current=subject)
             continue
         if action is ReviewAction.EDIT_BODY:
             editor = _draw_body if layout == "art" else partial(_compose_body, keep_pasted_color=board.allow_color)
@@ -1931,8 +1941,22 @@ async def _review_and_commit(
             else:
                 announce(session, "Body unchanged.", tone="muted")
             continue
+        if too_long is not None:
+            continue
         if await commit(subject, body):
             return
+
+
+def _too_long_to_post(subject: str, body: str) -> str | None:
+    """Why this post cannot be published as it stands, in characters --
+    or `None`. The limits `netbbs.boards.posts` enforces in bytes."""
+    over = characters_over(subject, MAX_SUBJECT_BYTES)
+    if over:
+        return f"{too_long_message('The subject is', over)} -- shorten it with [U]pdate subject."
+    over = characters_over(body, MAX_BODY_BYTES)
+    if over:
+        return f"{too_long_message('The post is', over)} -- shorten it with [B]ody."
+    return None
 
 
 async def _tombstone_existing_post(

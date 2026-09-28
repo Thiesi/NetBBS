@@ -65,7 +65,15 @@ from netbbs.mail import (
 )
 from netbbs.net.char_input import reject_unhandled_key
 from netbbs.net.color_depth_preference import effective_truecolor
-from netbbs.net.composition import ReviewAction, edit_line_body, read_prefilled_field, review_composition
+from netbbs.net.composition import (
+    ReviewAction,
+    characters_over,
+    edit_line_body,
+    read_prefilled_field,
+    read_subject,
+    review_composition,
+    too_long_message,
+)
 from netbbs.net.confirm import prompt_yes_no
 from netbbs.net.editor_preference import fullscreen_editor_enabled
 from netbbs.net.menu_description_preference import menu_description_level
@@ -492,13 +500,12 @@ async def _compose_mail(
                 continue
             break
 
-    if prefill_subject:
-        subject = await read_prefilled_field(session, "Subject", prefill_subject)
-    else:
-        await session.write("Subject: ")
-        subject = (await session.read_line()).strip()
-    if not subject:
-        announce(session, "Cancelled -- a subject is required.", tone="error")
+    # Checked here rather than at Send (issue #812): an empty subject is
+    # asked for again, one that is too long says by how much, and only
+    # Esc on a fresh prompt gives up on the message.
+    subject = await read_subject(session, max_bytes=MAX_MAIL_SUBJECT_BYTES, current=prefill_subject or None)
+    if subject is None:
+        announce(session, "Message cancelled.", tone="muted")
         return
 
     # A reply starts on the quote, with the cursor under it (issue #675).
@@ -525,6 +532,13 @@ async def _compose_mail(
     review_header_color = await lane.run(effective_header_color_256)
     review_truecolor = await lane.run(lambda db: effective_truecolor(session, db, user))
     while True:
+        # Before Review, not at Send (issue #812): an editor stops the
+        # body at the limit, but the signature is added afterwards and can
+        # carry it over. Said on the review screen, where [B]ody and
+        # [U]pdate subject fix it; Send is refused until then.
+        too_long = _too_long_to_send(subject, body)
+        if too_long is not None:
+            announce(session, too_long, tone="error")
         action = await review_composition(
             session,
             recipient=recipient_text,
@@ -548,7 +562,7 @@ async def _compose_mail(
             recipient_text = await read_prefilled_field(session, "To", recipient_text)
             continue
         if action is ReviewAction.EDIT_SUBJECT:
-            subject = await read_prefilled_field(session, "Subject", subject)
+            subject = await read_subject(session, max_bytes=MAX_MAIL_SUBJECT_BYTES, current=subject)
             continue
         if action is ReviewAction.EDIT_BODY:
             revised = await _compose_mail_body(session, lane, user, initial_text=body)
@@ -556,6 +570,8 @@ async def _compose_mail(
                 body = revised
             else:
                 announce(session, "Body unchanged.", tone="muted")
+            continue
+        if too_long is not None:
             continue
 
         if link_context is not None and "@" in recipient_text:
@@ -647,6 +663,19 @@ async def _link_mail_refusal_for_address(lane: DatabaseLane, recipient_text: str
     if isinstance(resolved, list):
         return None
     return await lane.run(_link_mail_refusal, resolved)
+
+
+def _too_long_to_send(subject: str, body: str) -> str | None:
+    """Why this message cannot be sent as it stands, in characters -- or
+    `None`. The same limits `netbbs.mail.send_mail` and
+    `netbbs.link.mail.compose_link_message` enforce in bytes."""
+    over = characters_over(subject.strip(), MAX_MAIL_SUBJECT_BYTES)
+    if over:
+        return f"{too_long_message('The subject is', over)} -- shorten it with [U]pdate subject."
+    over = characters_over(body, MAX_MAIL_BODY_BYTES)
+    if over:
+        return f"{too_long_message('The message is', over)} -- shorten it with [B]ody."
+    return None
 
 
 async def _compose_mail_body(

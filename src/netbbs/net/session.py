@@ -107,6 +107,14 @@ class SessionClosedError(Exception):
     """
 
 
+#: The socket errors a caller's hang-up surfaces as (issue #834). A reset
+#: can reach a *read* as well as a write: asyncio hands the transport's
+#: error to the stream reader, so `readexactly` raises it directly rather
+#: than `IncompleteReadError`. Every transport maps these to
+#: `SessionClosedError` at its read and write boundaries.
+CLIENT_DISCONNECT_ERRORS = (ConnectionResetError, ConnectionAbortedError, BrokenPipeError)
+
+
 class Session(ABC):
     """A single connected user's read/write channel, transport-agnostic."""
 

@@ -13,9 +13,13 @@ A browser needs no terminal software. An SSH connection looks like
 `ssh -p 2222 yourname@bbs.example.org`; substitute the actual port and address.
 Use SSH or HTTPS when available: plain Telnet does not encrypt your login.
 
-Log in with your account. If registration is offered, follow the on-screen
-steps; some nodes require approval before you can log in. If registration
-is closed, contact the SysOp. Accounts and access rules belong to each node.
+Log in with your account. If registration is offered, type `new` at the
+username prompt (over SSH, connect as `new`). Usernames use the letters A-Z
+without accents, digits, `_`, `-` and `.`, up to 32 characters; the name is
+checked before you choose a password. Some nodes require approval before you
+can log in: until the SysOp approves your account, logging in tells you it is
+still waiting, and you cannot look around in the meantime. If registration is
+closed, contact the SysOp. Accounts and access rules belong to each node.
 
 Change your password under **Profile → Account password**: you type the
 current one, then the new one twice, and nothing is echoed. If you have
@@ -25,6 +29,8 @@ forgotten it, ask the SysOp to set a new one; nobody can recover the old one.
 
 Press a highlighted letter such as **[J]** for **Jump to**. Most menus react
 immediately, without Enter. When typing text, use Enter to submit it.
+**Ctrl+U** clears the line you are typing, and at a field that allows it,
+Esc leaves it without changing anything.
 Follow the action bar on the current screen: letters can mean different
 things in different places. **[B]ack** leaves most screens.
 
@@ -54,6 +60,12 @@ keeps a post draft for later; `/cancel` discards it. In the fullscreen
 editor, **Ctrl+G** shows help and **Ctrl+X** opens the exit choices, including
 **Keep draft & exit**. A saved post draft is offered when you return to
 that board. A draft is not a published post.
+
+A post or message needs a subject. Leave it empty and mail asks again;
+press Esc there to cancel the message. A subject that is too long is caught
+as soon as you press Enter, with how many characters to remove, and the
+field stays open so you can shorten it. If your signature pushes a message
+over its length limit, the review screen says so before you can send it.
 
 ## Chat and mail
 

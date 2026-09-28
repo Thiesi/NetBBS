@@ -47,7 +47,13 @@ import socket
 from typing import Awaitable, Callable
 
 from netbbs.net import char_input
-from netbbs.net.session import Session, SessionClosedError, clamp_terminal_size, wait_until_drained
+from netbbs.net.session import (
+    CLIENT_DISCONNECT_ERRORS,
+    Session,
+    SessionClosedError,
+    clamp_terminal_size,
+    wait_until_drained,
+)
 from netbbs.rendering.pipe_codes import PastedColor
 
 # Telnet protocol constants (RFC 854, plus NAWS from RFC 1073 and
@@ -187,7 +193,10 @@ class TelnetSession(Session):
         )
         self._writer.write(bytes([IAC, WILL, BINARY]))
         self._writer.write(bytes([IAC, DO, BINARY]))
-        await self._writer.drain()
+        try:
+            await self._writer.drain()
+        except CLIENT_DISCONNECT_ERRORS as exc:
+            raise SessionClosedError("client disconnected during negotiation") from exc
 
     async def _send_text(self, text: str) -> None:
         # Normalize all line endings to CRLF (RFC 854's correct Telnet
@@ -213,7 +222,7 @@ class TelnetSession(Session):
         try:
             self._writer.write(data)
             await self._writer.drain()
-        except (ConnectionResetError, BrokenPipeError) as exc:
+        except CLIENT_DISCONNECT_ERRORS as exc:
             raise SessionClosedError("client disconnected during write") from exc
 
     async def _send_raw(self, data: bytes) -> None:
@@ -226,7 +235,7 @@ class TelnetSession(Session):
         try:
             self._writer.write(escaped)
             await self._writer.drain()
-        except (ConnectionResetError, BrokenPipeError) as exc:
+        except CLIENT_DISCONNECT_ERRORS as exc:
             raise SessionClosedError("client disconnected during write") from exc
 
     async def read_line(
@@ -303,7 +312,7 @@ class TelnetSession(Session):
         # it a short chance to drain, then drop the transport outright.
         try:
             await asyncio.wait_for(self._writer.wait_closed(), timeout=self._close_timeout_seconds)
-        except (ConnectionResetError, BrokenPipeError):
+        except CLIENT_DISCONNECT_ERRORS:
             pass
         except asyncio.TimeoutError:
             self._writer.transport.abort()
@@ -323,13 +332,13 @@ class TelnetSession(Session):
         """
         try:
             b = (await self._reader.readexactly(1))[0]
-        except asyncio.IncompleteReadError as exc:
+        except (asyncio.IncompleteReadError, *CLIENT_DISCONNECT_ERRORS) as exc:
             raise SessionClosedError("client disconnected during read") from exc
 
         if b == IAC:
             try:
                 next_byte = (await self._reader.readexactly(1))[0]
-            except asyncio.IncompleteReadError as exc:
+            except (asyncio.IncompleteReadError, *CLIENT_DISCONNECT_ERRORS) as exc:
                 raise SessionClosedError("client disconnected during read") from exc
             if next_byte == IAC:
                 # Client sent an escaped literal 0xFF as actual data
@@ -339,7 +348,7 @@ class TelnetSession(Session):
             if next_byte in (WILL, WONT, DO, DONT):
                 try:
                     await self._reader.readexactly(1)  # option byte, ignored
-                except asyncio.IncompleteReadError as exc:
+                except (asyncio.IncompleteReadError, *CLIENT_DISCONNECT_ERRORS) as exc:
                     raise SessionClosedError("client disconnected during read") from exc
                 return None
             if next_byte == SB:
@@ -365,7 +374,7 @@ class TelnetSession(Session):
         """
         try:
             peek = await asyncio.wait_for(self._reader.read(1), timeout=timeout)
-        except asyncio.TimeoutError:
+        except (asyncio.TimeoutError, *CLIENT_DISCONNECT_ERRORS):
             return None
         if not peek:
             return None
@@ -429,7 +438,7 @@ class TelnetSession(Session):
             )
         except asyncio.TimeoutError as exc:
             raise SessionClosedError("Telnet subnegotiation timed out") from exc
-        except asyncio.IncompleteReadError as exc:
+        except (asyncio.IncompleteReadError, *CLIENT_DISCONNECT_ERRORS) as exc:
             raise SessionClosedError("client disconnected during subnegotiation") from exc
 
         if option == NAWS and len(body) >= 4:
@@ -662,7 +671,10 @@ class TelnetServer:
             await session.negotiate_initial_options()
             await self._session_handler(session)
         except SessionClosedError:
-            pass  # client disconnected mid-session — expected, not an error
+            # A caller hanging up is routine: one INFO line, no traceback.
+            # Only the session's own boundaries produce this; a raw socket
+            # error from anything else in the session is a real error.
+            _logger.info("telnet caller %s disconnected", peer_address or "?")
         except Exception:
             _logger.exception("unhandled error in session handler for %s", peer)
         finally:

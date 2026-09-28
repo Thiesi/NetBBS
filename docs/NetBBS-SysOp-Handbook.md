@@ -45,8 +45,15 @@ consistently if you choose a different layout.
 A virtual environment is a private installation directory for NetBBS and its
 libraries; it keeps them separate from other programs on your server.
 
-On Debian/Ubuntu, install `python3-venv` for the Python version you use. On
-NetBSD, use pkgsrc packages such as `python312` and `py312-pip`. The SSH extra
+Check the version with `python3 --version`: it must say 3.11 or newer. On
+Debian/Ubuntu, `python3 -m venv` fails until the matching `venv` package is
+installed:
+
+```sh
+sudo apt install python3 python3-venv
+```
+
+On NetBSD, use pkgsrc packages such as `python312` and `py312-pip`. The SSH extra
 uses AsyncSSH and `cryptography`; a source build on NetBSD also needs Rust,
 a C compiler, Python headers, OpenSSL, libffi, and pkgconf. A typical pkgin
 package set is:
@@ -84,17 +91,26 @@ Run the application and games as this account, never root.
 
 ### Install a release
 
-**MANUAL — on the host:** download the desired wheel asset from GitHub Releases
-and make it readable by the service account. Replace the example wheel path
-and `VERSION` with the actual downloaded filename. On NetBSD, use `python3.12`
-in place of `python3` if that is your installed interpreter's name.
+**MANUAL — on the host:** download the wheel (the `.whl` file) from GitHub
+Releases. The service account usually cannot read files in your home directory, so
+copy the wheel somewhere it can, such as `/tmp`, first; pip reports a wheel
+it cannot read as "does not exist". In the commands below, replace `VERSION`
+with the version number only, for example `7.13.0`, and `~/Downloads` with
+the directory you downloaded to. On NetBSD, use `python3.12` in place of
+`python3` if that is your installed interpreter's name.
 
 ```sh
+sudo install -m 644 ~/Downloads/netbbs-VERSION-py3-none-any.whl /tmp/
 sudo -u netbbs python3 -m venv /var/lib/netbbs/.venv
 sudo -u netbbs /var/lib/netbbs/.venv/bin/python -m pip install --upgrade pip
-sudo -u netbbs /var/lib/netbbs/.venv/bin/python -m pip install "/path/to/netbbs-VERSION-py3-none-any.whl[ssh,web]"
-/var/lib/netbbs/.venv/bin/python -m netbbs --version
+sudo -u netbbs /var/lib/netbbs/.venv/bin/python -m pip install "/tmp/netbbs-VERSION-py3-none-any.whl[ssh,web]"
+sudo -u netbbs /var/lib/netbbs/.venv/bin/python -m netbbs --version
 ```
+
+Tried NetBBS with the website's local trial first? That trial database is
+unrelated to this installation and can simply be deleted with its directory.
+This installation starts with a fresh database, and you create your SysOp
+account again below.
 
 `--version` prints the package and database-schema versions without starting
 listeners. Choose extras according to what you enable:
@@ -125,6 +141,11 @@ Do not substitute the base system's differently versioned OpenSSL library.
 
 **MANUAL — on the host:** save this as `/etc/netbbs/netbbs.toml`, readable by
 the service account. This starts with SSH; browser access is covered below.
+Telnet and the web listener are off here, and both listen on loopback
+(`127.0.0.1`), which only this host can reach. To offer Telnet, set
+`enabled = true` **and** `host = "0.0.0.0"`, as `[ssh]` has; with
+`enabled = true` alone, outside callers cannot connect. The web
+listener stays on loopback behind an HTTPS proxy, as described below.
 
 ```toml
 [node]
@@ -141,9 +162,13 @@ port = 2222
 
 [telnet]
 enabled = false
+host = "127.0.0.1"
+port = 2323
 
 [web]
 enabled = false
+host = "127.0.0.1"
+port = 8080
 ```
 
 Create your first SysOp before starting a public listener:
@@ -253,7 +278,9 @@ its `ReadWritePaths` if you put games or state elsewhere. NetBSD's example sets
 **MANUAL — outside NetBBS:** configure firewall rules, router forwarding,
 DNS, and the reverse proxy for the connection methods you offer. A bind
 address of `0.0.0.0` means all IPv4 interfaces; it is not an address to give
-callers. A loopback listener is reachable only from the same host.
+callers. A loopback listener is reachable only from the same host. Enabling
+Telnet or web with `enabled = true` alone leaves it on loopback; the node log
+says so at every start, naming the `host` line to add.
 
 For a browser terminal and transfer links behind a proxy, replace the existing
 `[web]` table with:
@@ -273,10 +300,43 @@ a browser upload carries form framing on top of the file.
 Use a real hostname and certificate;
 `bbs.example.org` is a placeholder. Restart after changing listener settings.
 
+If you don't run a web server yet, [Caddy](https://caddyserver.com/) is the
+shortest route: it obtains and renews the certificate itself, forwards
+WebSocket upgrades, and sets no upload limit of its own. The hostname must
+already point at this host, with ports 80 and 443 reachable from outside.
+Its whole `Caddyfile` is below. Debian and Ubuntu packages read
+`/etc/caddy/Caddyfile`; on NetBSD, pkgsrc's Caddy reads
+`/usr/pkg/etc/caddy/Caddyfile`.
+
+```
+bbs.example.org {
+    reverse_proxy 127.0.0.1:8080
+}
+```
+
+With nginx, inside the `server` block that already holds your certificate:
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:8080;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_set_header Host $host;
+    proxy_read_timeout 1h;
+    client_max_body_size 101m;
+}
+```
+
+`proxy_read_timeout` keeps nginx from cutting off a browser caller who sits
+idle for a minute, and `client_max_body_size` follows the upload cap.
+
 `public_url` supplies the externally reachable base address for transfer links.
 Without it, a node bound to a wildcard or loopback address cannot give remote
 terminal callers a usable link. A specific reachable bind address may be used
-as a fallback, but explicit configuration is preferable behind a proxy.
+as a fallback, but explicit configuration is preferable behind a proxy. When
+the web listener is on and SSH or Telnet callers would get no link, the node
+log warns at every start.
 
 File transfers work through the browser, through short-lived browser links
 shown to terminal callers, or through Zmodem in a capable terminal client.
@@ -321,8 +381,19 @@ live networking. Its Backup screen is status-only; use the backup CLI there.
 Choose registration mode under **Users → Registration**:
 
 - **Open:** new accounts can log in immediately.
-- **Approval required:** approve a pending account from its detail screen.
+- **Approval required:** approve a pending account from its detail screen,
+  or turn it down there with **Decline**, which removes it after a yes/no.
+  Until you approve it, the account cannot log in at all, not even to look
+  around; when the caller tries, they are told it is waiting for your
+  approval. **Question** sets an optional question new callers answer
+  when they sign up ("What do you write with?"). The answer shows on the
+  pending account and is deleted once you approve it.
 - **Closed:** only SysOps create accounts.
+
+A caller cannot register a reserved name (`sysop`, `admin`, `root`,
+`moderator`, `guest` and a few more), a name containing "sysop", or a name
+that reads like a SysOp's own (`lnkwell` for `InkWell`). You can still create
+such an account yourself under **Users → Create**.
 
 An account's numeric level controls level-based access. Level 255 grants SysOp
 administration; ordinary levels express your local policy. NetBBS refuses an
@@ -783,6 +854,10 @@ Check pending registrations/posts/files, backup recency, free disk space,
 and recent errors. Choose welcome/masthead/banner presets through Settings;
 preview before applying, or place your own files as described under
 [Custom banners and mastheads](#custom-banners-and-mastheads). Timestamp format and display timezone are node-wide.
+Until you choose a timezone under **Settings → Timestamp format**, times are
+shown in UTC: the main-menu clock says `UTC`, and the node log reminds you at
+every start. The default welcome banner mentions NetBBS Link only when the
+node ran with Link on at its last start.
 
 **Settings → Limits & retention** holds five node-wide values, saved together
 and applied without a restart:
@@ -1123,8 +1198,17 @@ self-rotating, so arrange rotation or an appropriate output policy yourself.
 The application's `netbbs.log` rotates at 10 MiB with five retained backups
 (up to about 60 MiB including the active file).
 
+Some lines are routine and need nothing from you. A caller who hangs up is one
+`INFO` line naming their address. Every node yours meets on NetBBS Link starts
+on probation here, and the log says once per node, since the node started,
+that its content is held back; a relay candidate that cannot be reached is
+also mentioned once. A `WARNING` or `ERROR` line, and any traceback, is worth
+reading.
+
 **Operations → Node log** reads that file from inside NetBBS, including from
-`python -m netbbs.admin` while the node is stopped. It shows the newest 512 KiB,
+`python -m netbbs.admin` while the node is stopped. That console runs outside
+the node, so its health panel has no live controls; it says whether the node
+is running. It shows the newest 512 KiB,
 topped up from `netbbs.log.1` after a rotation, and says when older lines exist
 that it does not show. It cannot show failures from before the log opened; for
 those, use the service manager's output above.
