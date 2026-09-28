@@ -505,6 +505,8 @@ active sessions, Link health, moderation queues, backup and update recency,
 outbound failures, and recent Link diagnostics using concise semantic status.
 The standalone admin CLI renders the same view but states clearly that live
 node controls are unavailable rather than pretending the process is online.
+A staff member (§5.6) reaches a reduced form of this console holding only the
+screens their staff permissions cover.
 
 Navigation separates four operator intents: users, content, operations, and
 settings. Operations contains observation and intervention for the live node,
@@ -795,7 +797,9 @@ separate axes.
 ### 4.3 Account levels and the usable-SysOp invariant
 
 One integer level drives ordinary level gating. `SYSOP_LEVEL = 255` is the
-reserved top level; SysOp is not a parallel role flag.
+reserved top level; SysOp is not a parallel role flag. Levels below 255 grant
+no authority by themselves. Authority short of SysOp comes from staff
+permissions (§5.6) and moderator grants (§5.2), never from a level band.
 
 Promote, demote, disable, enable, approve, and hard-delete operations must never
 leave the node with zero **usable SysOps**. A usable SysOp:
@@ -807,9 +811,9 @@ leave the node with zero **usable SysOps**. A usable SysOp:
 The invariant is enforced transactionally against fresh database state, not
 against a stale object supplied by a caller.
 
-A change to an account's level or its verify-identity permission applies to
-that account's live sessions without a re-login (issue #659), whichever
-process made it. Each session's account watcher re-reads the account every
+A change to an account's level, its verify-identity permission or its staff
+permissions (§5.6) applies to that account's live sessions without a
+re-login (issue #659), whichever process made it. Each session's account watcher re-reads the account every
 few seconds, and an in-node change wakes it at once. A gain is picked up the
 next time the main menu is drawn, straight away if the caller is sitting on
 the menu, and nothing is interrupted. A loss interrupts the caller's current
@@ -819,7 +823,9 @@ SysOp console above all, and interrupting is the only way to reach a screen
 that is waiting for a key. The interruption ends whatever the caller was
 doing, a running door included. An editor keeps its text as a recoverable
 draft. The SysOp console also re-checks its operator at its own menu, which
-is what stops a demoted operator in the standalone CLI.
+is what stops a demoted operator in the standalone CLI. Moderator grants
+(§5.2) need no watcher: they are read from the database at each check, so a
+grant or a revocation governs the holder's next action in every session.
 
 Hard deletion preserves content provenance through denormalized display labels
 or nullable author/uploader references. Personal access rows and private state
@@ -1152,8 +1158,21 @@ Authority scopes are:
 Link-blanket authority does not imply local authority. A person who needs both
 must receive both explicitly.
 
-Only a SysOp can grant or revoke blanket authority or change node
-configuration. A suitably authorized Link-blanket moderator may initiate a new
+A board or file area's read or write grant lets its holder past that
+resource's minimum read or write level (§5.1); the age and verified-name gates
+still apply. This is how a SysOp lets a helper post on a board whose write
+level is 255, such as an announcements board, without making the helper a
+SysOp. A grant never lets anyone past a gate on a resource it does not cover.
+
+Anyone holding an approve grant is told so: the main menu shows a
+`Moderation (n)` entry with the number of posts and uploads waiting in their
+scope, and it leads to one queue across every resource the grant covers, not
+a visit to each board. A SysOp can grant moderation of every local board,
+file area and channel as one action, written as the three local-blanket grants
+in one transaction.
+
+Only a SysOp can grant or revoke moderator grants of any scope, blanket or
+per-object, or change node configuration. A suitably authorized Link-blanket moderator may initiate a new
 linked resource, but:
 
 - the node identity signs and owns the genesis event;
@@ -1488,6 +1507,82 @@ nothing is projected, and the SysOp's rebuild pass materializes the post if the
 attestation arrives later. The refusal is silent on the wire: telling the
 network which of its users fail a local gate would disclose exactly the policy
 §12.8 keeps undisclosed.
+
+### 5.6 Staff permissions, the Staff list, and the away notice (issue #836)
+
+A SysOp can share the node's day-to-day work without handing over the node.
+**Staff permissions** are account-wide grants a SysOp gives to an account
+below level 255, independent of its level:
+
+- **Approve accounts:** approve or decline registrations waiting under
+  `approval_required` (§4.2).
+- **Disable accounts:** disable an account and enable it again. Deleting an
+  account, and so retiring its name (§4.3), stays with the SysOp.
+- **Moderate everything:** act as moderator on every board, file area and
+  channel on the node, local and carried, with every moderator permission of
+  §5.2. Without it, a staff member moderates what their moderator grants
+  cover and nothing more.
+
+The verify-identity permission (§5.5) is shown and granted beside them, but it
+remains its own grant: it is about attestation, not about running the node.
+
+**Co-SysOp** is a preset, not a role. On an account's detail a SysOp can apply
+it in one confirmed step: it sets all three staff permissions. Afterwards the
+account holds exactly those permissions, and the SysOp can remove any of them
+one at a time. The account detail's privileges group lists the staff
+permissions, the verify-identity permission and a summary of the account's
+moderator grants, so a SysOp sees everything an account may do in one place.
+
+**What staff can never do.** A staff member acts only on accounts below level
+255 that hold no staff permission; a moderator-only account is within reach.
+They cannot change anyone's level, grant or revoke staff permissions or
+moderator grants, or reach Settings, Link, node controls, managed DNS or
+backups. Every action they take is audited under their own name. So the
+original SysOp cannot be demoted, disabled or locked out by a helper, and the
+usable-SysOp invariant (§4.3) is never at stake in a staff action.
+
+**The Staff console.** A staff member reaches the same `[S]` entry on the main
+menu, labelled for them `[S]taff`. It opens a reduced console: a landing view
+of its own, which holds the away notice below, and only the screens their
+permissions reach: the accounts waiting for approval and the
+account list for the account permissions, and the node-wide moderation queue
+filtered to what they moderate. The screens are the SysOp console's own, not
+copies, so they cannot drift apart. The SysOp's console is unchanged.
+
+**Who is told.** The notice that accounts are waiting for approval goes to
+usable SysOps and to holders of the approve-accounts permission, and to no one
+else.
+
+**The Staff list.** Every member can open a list of who runs the node: the
+usable SysOps, the staff members, and the moderators with what they look
+after, in the words of the account detail's grant summary. Each row shows the
+date of the person's last session, not the time. A person on the list is
+someone members are meant to find, so the Previous callers privacy choice does
+not hide them here; the confirmation that makes someone staff or a moderator
+says so. Guests and pending accounts do not see the list.
+
+**The away notice.** A SysOp or staff member can mark themselves away, from
+their console's landing view, with a message of one short line of plain
+text (no pipe codes) and an optional return date. It is per person, not per
+node. It shows:
+
+- on the Staff list, beside that person;
+- in the message a pending account sees at login and just after it
+  registers, when every account that could approve it is away: then the
+  message names the approver expected back first, their return date if any,
+  and their message.
+
+Being away changes nobody's permissions. Logging in does not end it, since a
+SysOp who is away may still look in. The person ends it, or, when it has a
+return date, it ends by itself once that date has passed. A notice without a
+date stays until it is ended, so it never claims more than it says: wherever
+it is shown it reads "away since" the day it was set, and the person's own
+console landing view shows it to them each time they log in, as a reminder
+to end it.
+
+Staff permissions, the Staff list and the away notice are local to the node.
+None of them is carried over Link: a staff member's moderation of carried
+content follows §5.2 and §9.5 exactly as a moderator's does.
 
 ---
 
@@ -12131,6 +12226,45 @@ their place.
 the Monitor drops the address, terminal size and transport columns, in that
 order. User, idle time and activity always stay. How narrow the console must
 still work follows #662.
+
+### Issue #836 — delegation short of SysOp — decided
+
+A SysOp who stepped away left signups and held posts that nobody could act
+on, and the only way to hand them over was level 255, which includes power
+over the SysOp who gave it. Normative description: §5.6, with §4.3 and §5.2.
+
+**Decision 1 — named staff permissions, with Co-SysOp as a preset.** Approve
+accounts, disable accounts and moderate everything, granted per account, and
+a one-step Co-SysOp preset that sets all three. Rejected: a Co-SysOp level
+band such as 250-254, the classic BBS convention, because nodes already use
+those levels as resource gates, and an upgrade would silently give console
+powers to accounts a SysOp raised only to open a board; and account authority
+as a new kind of moderator grant, which would stretch a per-resource table
+into node-wide authority and still leave no one-step way to hand over the
+node's routine work.
+
+**Decision 2 — staff never reach the SysOp.** Staff act only on accounts below
+255 that hold no staff permission, and cannot change levels or grant
+anything. A second SysOp at 255 keeps full power, including over the first;
+that is what 255 means, and staff is how to give less.
+
+**Decision 3 — disabling, not deleting.** Deletion is permanent and, on a
+Link node, retires the name (§4.3); a disable can be undone by the SysOp on
+their return.
+
+**Decision 4 — read and write grants pass level gates.** The bits already
+existed and did nothing. Giving them meaning lets a SysOp open an
+announcements board to a helper without a new concept. Age and verified-name
+gates still hold, because they are facts about the person, not trust the SysOp
+extends.
+
+**Decision 5 — away is per person, and never outlives what it says.** A
+node-wide notice would be wrong the moment one of two SysOps came back. A
+return date that passes ends the notice. A notice without one is shown with
+the day it was set and reminded to its owner at each login, so callers can
+judge a stale one and its owner is prompted to end it. Rejected: requiring a
+return date, which a SysOp who does not know when they will be back could
+only guess.
 
 ### SFTP over the SSH transport — declined
 
