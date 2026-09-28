@@ -262,6 +262,8 @@ class Session(ABC):
     _break_in_input: asyncio.Queue[int] | None = None
     _output_held: bool = False
     _break_in_over: asyncio.Event | None = None
+    #: Keystrokes a break-in chat had to drop because its queue was full.
+    break_in_dropped: int = 0
 
     #: True while this session is reading masked input (a password): a
     #: break-in is refused then, and any key diverted to a chat while it is
@@ -417,7 +419,12 @@ class Session(ABC):
         try:
             queue.put_nowait(value)
         except asyncio.QueueFull:
-            pass  # a runaway paste into a chat is dropped, not buffered
+            # A runaway paste into a chat: dropped rather than buffered
+            # without bound, and said so -- in the node log once per chat,
+            # and on the SysOp's chat screen (`break_in_dropped`).
+            if not self.break_in_dropped:
+                _logger.warning("break-in chat input overflowed; dropping the caller's excess keystrokes")
+            self.break_in_dropped += 1
         return True
 
     # -- break-in (issue #765) --------------------------------------------
@@ -436,6 +443,7 @@ class Session(ABC):
         self._break_in_input = asyncio.Queue(maxsize=4096)
         self._output_held = True
         self._break_in_over = asyncio.Event()
+        self.break_in_dropped = 0
         return self._break_in_input
 
     async def break_in_began(self) -> None:
@@ -456,6 +464,18 @@ class Session(ABC):
         underneath, to be put back."""
         await self._send_text(text)
 
+    def _held_raw_prefix(self) -> bytes:
+        """The start of a multi-byte character a door sent while output was
+        held, whose remaining bytes are still to come: the copy's decoder
+        is waiting on it, and the caller's terminal must be too."""
+        decoder = self._raw_decoder
+        return decoder.getstate()[0] if decoder is not None else b""
+
+    async def _send_held_prefix(self) -> None:
+        prefix = self._held_raw_prefix()
+        if prefix:
+            await self._send_raw(prefix)
+
     async def end_break_in(self) -> None:
         """Repaint the caller's screen as their own program left it,
         output that arrived during the chat included, then give input and
@@ -466,14 +486,18 @@ class Session(ABC):
                 generation = self._copy_generation
                 await self.write_through(self.screen_copy().restore_ansi())
                 if generation == self._copy_generation:
+                    await self._send_held_prefix()
                     break
             else:
                 # Output kept arriving during every repaint (a busy door on a
                 # slow line). Release first, then repaint once more: the
                 # repaint is queued on the wire before anything the caller's
                 # screen writes after the release, so nothing is lost.
+                prefix = self._held_raw_prefix()
                 self._output_held = False
                 await self.write_through(self.screen_copy().restore_ansi())
+                if prefix:
+                    await self._send_raw(prefix)
         finally:
             self._output_held = False
             self._break_in_input = None

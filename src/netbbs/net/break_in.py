@@ -31,7 +31,7 @@ from netbbs.net.char_input import EditorKey, EditorKeyKind
 from netbbs.net.live_screen import KeyOutcome, fill_row, paint_text, run_live_screen
 from netbbs.net.session import Session, SessionClosedError
 from netbbs.net.session_registry import ActiveSessionRegistry
-from netbbs.rendering.ansi import CSI
+from netbbs.rendering.ansi import CSI, strip_ansi
 from netbbs.rendering.screen_buffer import ScreenBuffer, Snapshot, diff_ansi, full_render_ansi
 from netbbs.rendering.theme import ACCENT_COLOR, ERROR_COLOR, HEADER_COLOR, PRIVILEGE_COLOR, VALUE_COLOR
 from netbbs.rendering.width import wrap_to_width
@@ -73,6 +73,10 @@ class ChatState:
     sysop: Pane = field(default_factory=Pane)
     caller: Pane = field(default_factory=Pane)
     caller_gone: bool = False
+    #: A message or broadcast for the SysOp, shown in their title row.
+    notice: str = ""
+    #: Keystrokes of the caller's the chat had to drop (a runaway paste).
+    dropped: int = 0
 
 
 def _paint_pane(buffer: ScreenBuffer, top: int, rows: int, label: str, color: int, pane: Pane) -> None:
@@ -97,6 +101,10 @@ def paint_chat(buffer: ScreenBuffer, state: ChatState, *, for_sysop: bool) -> No
     if for_sysop:
         # ASCII only: neither side's Unicode preference is known here.
         title = f"Break-in chat with {state.caller_name} - Esc ends"
+        if state.dropped:
+            title += f" - {state.dropped} keys dropped"
+        if state.notice:
+            title = state.notice
         if state.caller_gone:
             title = f"{state.caller_name} has disconnected - any key returns"
     else:
@@ -230,14 +238,25 @@ async def run_break_in(
     def paint(buffer: ScreenBuffer) -> None:
         if not state.caller_gone and not _still_connected(registry, target):
             state.caller_gone = True
+        state.dropped = target.break_in_dropped
         paint_chat(buffer, state, for_sysop=True)
+
+    def on_notice(text: str) -> None:
+        # A message or broadcast for the SysOp: shown, not swallowed.
+        state.notice = " ".join(strip_ansi(text).split())
 
     helpers = [asyncio.create_task(pump_caller()), asyncio.create_task(draw_caller())]
     try:
-        await target.break_in_began()
-        await caller_screen.render()
+        try:
+            await target.break_in_began()
+            await caller_screen.render()
+        except SessionClosedError:
+            # The caller hung up before the chat could be drawn (while the
+            # SysOp read the door warning, say). Their failure must not
+            # become the SysOp's: the chat shows them gone instead.
+            state.caller_gone = True
         await run_live_screen(
-            sysop_session, paint=paint, on_key=on_key, on_notice=lambda text: None, interval=REFRESH_SECONDS,
+            sysop_session, paint=paint, on_key=on_key, on_notice=on_notice, interval=REFRESH_SECONDS,
         )
     finally:
         for task in helpers:
