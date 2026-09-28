@@ -16766,18 +16766,33 @@ def _submitter_label(db: Database, post: Post) -> str:
     return post.author_label
 
 
-def _reply_parent_for_moderation(db: Database, post: Post) -> Post | None:
-    """The post a held reply answers, as its readers see it -- or, when that
-    post is itself held, as it waits (Codex review on #795): a carried
-    thread can arrive whole on a board this node moderates."""
-    parent = revision_for_moderation(db, post.parent_post_id)
-    if parent is not None:
-        return parent
+def _held_or_current(db: Database, post_id: str | None) -> Post | None:
+    """The post `post_id` belongs to as its readers see it -- or, when none
+    of it is approved yet, the exact revision `post_id` names as it waits
+    (Codex review on #795): a carried post can arrive with its replies and
+    edits on a board this node moderates, all of it held."""
+    if post_id is None:
+        return None
+    current = revision_for_moderation(db, post_id)
+    if current is not None:
+        return current
     try:
-        held = get_post(db, post.parent_post_id)
+        held = get_post(db, post_id)
     except PostError:
         return None
     return held if held.status == "pending" else None
+
+
+def _reply_parent_for_moderation(db: Database, post: Post) -> Post | None:
+    """The post a held reply answers (see `_held_or_current`)."""
+    return _held_or_current(db, post.parent_post_id)
+
+
+def _edit_base_for_moderation(db: Database, post: Post) -> Post | None:
+    """What a held edit would replace (see `_held_or_current`): the post's
+    current text, or, when nothing of it is approved yet, the held
+    revision this edit amends."""
+    return _held_or_current(db, post.edit_of_post_id or post.root_post_id)
 
 
 def _pending_post_kind(post: Post) -> str:
@@ -16938,7 +16953,7 @@ async def _post_action_screen(
     # #678): an edit is judged against the text it would replace.
     kind = _pending_post_kind(post)
     current, parent, submitter = await lane.run(lambda db: (
-        revision_for_moderation(db, post.root_post_id) if kind == "edit" else None,
+        _edit_base_for_moderation(db, post) if kind == "edit" else None,
         _reply_parent_for_moderation(db, post) if kind == "reply" else None,
         _submitter_label(db, post),
     ))
@@ -16996,7 +17011,9 @@ async def _post_action_screen(
         ]
         if current is not None:
             sections.append(Section(
-                "Current text (expired)" if current.status == "expired" else "Current text",
+                {"expired": "Current text (expired)", "pending": "Current text (awaiting approval)"}.get(
+                    current.status, "Current text"
+                ),
                 [Styled(post_body_rows(
                     current.body, session.terminal_width, body_mode, truecolor=truecolor, layout=current.layout
                 ))],

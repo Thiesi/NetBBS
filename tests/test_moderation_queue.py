@@ -309,3 +309,24 @@ def test_the_decision_screens_name_the_board_and_the_area(db, lane, sysop, alice
     session = FakeSession(["b"])
     asyncio.run(_file_action_screen(session, lane, sysop, entry, area))
     assert "Area:" in _visible(_written_text(session)) and "uploads" in _visible(_written_text(session))
+
+
+def test_an_edit_of_a_held_post_is_shown_against_it(db, lane, sysop, alice):
+    """Codex review on #795: a carried post and its edit can both arrive
+    held; the edit is judged against the held text it amends."""
+    board = create_board(db, "general", creator=sysop, moderated=True)
+    held = create_post(db, board, alice, "Hello", "first text")
+    db.connection.execute(
+        "INSERT INTO posts (post_id, board_id, author_user_id, author_label, subject, body, created_at, status, "
+        "root_post_id, edit_of_post_id) SELECT 'edit-1', board_id, author_user_id, author_label, subject, "
+        "'second text', created_at, 'pending', post_id, post_id FROM posts WHERE id = ?",
+        (held.id,),
+    )
+    db.connection.commit()
+    from netbbs.boards.posts import get_post
+
+    session = FakeSession(["b"])
+    asyncio.run(_post_action_screen(session, lane, sysop, get_post(db, "edit-1"), board))
+    text = _visible(_written_text(session))
+
+    assert "CURRENT TEXT (AWAITING APPROVAL)" in text and "first text" in text and "second text" in text
