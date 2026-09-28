@@ -347,7 +347,7 @@ def reindex_post(db: Database, board_id: int, root_post_id: str) -> None:
         """
         SELECT * FROM posts
         WHERE root_post_id = ? AND board_id = ? AND status = 'approved'
-        ORDER BY created_at DESC, id DESC
+        ORDER BY id DESC
         LIMIT 1
         """,
         (root_post_id, board_id),
@@ -441,12 +441,13 @@ def _expected_post_index(db: Database) -> dict[str, tuple[int, str, str]]:
     row sharing a `root_post_id`, tie-broken on `id` (GitHub issue #68),
     exactly matching `_resolve_current_version`/`reindex_post`. Computed
     with one query plus an ascending scan (each root's last-seen row in
-    `created_at, id` order is its newest), rather than one query per
+    `id` order -- local receipt order, as `_resolve_current_version` uses
+    since issue #675 -- is its newest), rather than one query per
     root_post_id, since the table can hold many roots."""
     rows = db.connection.execute(
         """
         SELECT * FROM posts WHERE status = 'approved'
-        ORDER BY created_at ASC, id ASC
+        ORDER BY id ASC
         """
     ).fetchall()
     resolved: dict[str, tuple[int, str, str]] = {}

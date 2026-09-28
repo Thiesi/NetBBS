@@ -1675,3 +1675,152 @@ def test_queue_board_post_links_a_carried_parent(db, alice, node_identity, remot
     queued = queue_board_post_if_linked(db, reply, board, node_identity=node_identity)
 
     assert queued.payload["parent_post_id"] == carried.content_id
+
+
+# -- author withdrawal (issue #675) --------------------------------------------------
+
+
+def _carried_moderated_root(db, remote_node_identity):
+    """A post from another node on a board this node carries with its own
+    moderation on."""
+    board_id = _carried_board(db, remote_node_identity)
+    db.connection.execute("UPDATE boards SET moderated = 1 WHERE board_id = ?", (board_id,))
+    db.connection.commit()
+    root = _remote_post(remote_node_identity, board_id=board_id, subject="Plans", body="what I regret")
+    materialize_carried_post(db, root, sender_fingerprint=remote_node_identity.fingerprint)
+    db.connection.execute("UPDATE posts SET status = 'approved' WHERE post_id = ?", (root.content_id,))
+    db.connection.commit()
+    return board_id, root
+
+
+def _remote_edit(
+    remote_node_identity, root, *, subject="Plans", body=None, withdrawn=False,
+    previous=None, created_at="2026-01-01T00:05:00Z",
+):
+    from netbbs.boards.posts import WITHDRAWN_PLACEHOLDER
+
+    return build_board_post_edit(
+        signing_identity=remote_node_identity.signing_key,
+        author=root.payload["author"],
+        board_id=root.payload["board_id"],
+        root_post_id=root.content_id,
+        previous_event_id=previous or root.content_id,
+        subject=subject,
+        body=WITHDRAWN_PLACEHOLDER if body is None else body,
+        created_at=created_at,
+        withdrawn=withdrawn,
+    )
+
+
+def test_a_carried_withdrawal_is_not_held_on_a_moderated_board(db, remote_node_identity):
+    """Held, this node would go on showing what the author took back."""
+    from netbbs.boards.posts import WITHDRAWN_PLACEHOLDER, visible_post
+
+    _, root = _carried_moderated_root(db, remote_node_identity)
+    db.connection.execute("UPDATE posts SET pinned = 1, exempt_from_expiry = 1 WHERE post_id = ?", (root.content_id,))
+    db.connection.commit()
+    edit = _remote_edit(remote_node_identity, root, withdrawn=True)
+
+    materialized = materialize_carried_post_edit(db, edit, sender_fingerprint=remote_node_identity.fingerprint)
+
+    assert materialized.status == "approved" and materialized.withdrawn
+    shown = visible_post(db, root.content_id)
+    assert shown.body == WITHDRAWN_PLACEHOLDER and shown.withdrawn
+    # A withdrawal clears the pin and the keep, as a removal does.
+    assert not shown.pinned and not shown.exempt_from_expiry
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"body": "brand new text", "withdrawn": True},  # the flag on real content
+        {"subject": "A new subject", "withdrawn": True},  # the flag with a new subject
+        {"withdrawn": False},  # an older node: the placeholder as an ordinary edit
+    ],
+)
+def test_anything_but_a_real_withdrawal_is_moderated_as_an_edit(db, remote_node_identity, kwargs):
+    """The flag cannot carry new text past this node's moderators."""
+    _, root = _carried_moderated_root(db, remote_node_identity)
+    edit = _remote_edit(remote_node_identity, root, **kwargs)
+
+    materialized = materialize_carried_post_edit(db, edit, sender_fingerprint=remote_node_identity.fingerprint)
+
+    assert materialized.status == "pending"
+    assert not materialized.withdrawn
+
+
+def test_a_local_withdrawal_is_sent_with_the_flag(db, alice, node_identity):
+    from netbbs.boards.posts import WITHDRAWN_PLACEHOLDER, withdraw_post
+
+    board = create_board(db, "general", creator=alice)
+    link_board(db, board, node_identity=node_identity)
+    post = create_post(db, board, alice, "Plans", "what I regret")
+    queue_board_post_if_linked(db, post, board, node_identity=node_identity)
+
+    withdrawn = withdraw_post(db, post, board, withdrawn_by=alice)
+    event = queue_board_post_edit_if_linked(db, withdrawn, board, node_identity=node_identity, edited_by=alice)
+
+    assert event.payload["withdrawn"] is True
+    assert event.payload["body"] == WITHDRAWN_PLACEHOLDER
+    # An ordinary edit carries no flag at all (the omission rule).
+    again = edit_post(db, withdrawn, board, subject="Plans", body="on second thought", edited_by=alice)
+    ordinary = queue_board_post_edit_if_linked(db, again, board, node_identity=node_identity, edited_by=alice)
+    assert "withdrawn" not in ordinary.payload
+
+
+def test_a_carried_withdrawal_shows_even_when_its_clock_runs_behind(db, remote_node_identity):
+    """The author's clock is display metadata; the chain decides which
+    revision is current (Codex review on #789)."""
+    from netbbs.boards.posts import WITHDRAWN_PLACEHOLDER, visible_post
+
+    _, root = _carried_moderated_root(db, remote_node_identity)
+    edit = _remote_edit(remote_node_identity, root, withdrawn=True, created_at="2025-06-01T00:00:00Z")
+    materialize_carried_post_edit(db, edit, sender_fingerprint=remote_node_identity.fingerprint)
+    assert visible_post(db, root.content_id).body == WITHDRAWN_PLACEHOLDER
+
+
+def test_a_withdrawal_cannot_publish_a_held_subject(db, remote_node_identity):
+    """A held edit's new subject, copied into a withdrawal, stays held
+    (Codex review on #789)."""
+    _, root = _carried_moderated_root(db, remote_node_identity)
+    held = _remote_edit(remote_node_identity, root, subject="A new subject", body="new text")
+    assert materialize_carried_post_edit(db, held, sender_fingerprint=remote_node_identity.fingerprint).status == "pending"
+    withdrawal = _remote_edit(
+        remote_node_identity, root, subject="A new subject", withdrawn=True, previous=held.content_id,
+        created_at="2026-01-01T00:06:00Z",
+    )
+    materialized = materialize_carried_post_edit(db, withdrawal, sender_fingerprint=remote_node_identity.fingerprint)
+    assert materialized.status == "pending" and not materialized.withdrawn
+
+
+def test_a_withdrawal_after_a_held_body_edit_still_shows(db, remote_node_identity):
+    """A held edit that changed only the body keeps the subject readers
+    see, so the withdrawal after it is still one (Codex review on #789)."""
+    from netbbs.boards.posts import WITHDRAWN_PLACEHOLDER, visible_post
+
+    _, root = _carried_moderated_root(db, remote_node_identity)
+    held = _remote_edit(remote_node_identity, root, body="a revised body")
+    assert materialize_carried_post_edit(db, held, sender_fingerprint=remote_node_identity.fingerprint).status == "pending"
+    withdrawal = _remote_edit(
+        remote_node_identity, root, withdrawn=True, previous=held.content_id, created_at="2026-01-01T00:06:00Z",
+    )
+    materialized = materialize_carried_post_edit(db, withdrawal, sender_fingerprint=remote_node_identity.fingerprint)
+    assert materialized.status == "approved" and materialized.withdrawn
+    assert visible_post(db, root.content_id).body == WITHDRAWN_PLACEHOLDER
+
+
+def test_supersession_follows_receipt_order_not_the_clock(db, alice):
+    """An older-received revision stamped later is still superseded by a
+    newer-received approved one (Codex review on #789)."""
+    from netbbs.boards.posts import get_post
+    from netbbs.link.boards import _superseded_by_a_newer_approved_revision
+
+    board = create_board(db, "general", creator=alice)
+    post = create_post(db, board, alice, "Plans", "v1")
+    first = edit_post(db, post, board, subject="Plans", body="v2", edited_by=alice)
+    second = edit_post(db, get_post(db, first.post_id), board, subject="Plans", body="v3", edited_by=alice)
+    # The first edit claims a later time than the second.
+    db.connection.execute("UPDATE posts SET created_at = '2030-01-01T00:00:00.000000Z' WHERE id = ?", (first.id,))
+    db.connection.commit()
+    assert _superseded_by_a_newer_approved_revision(db, get_post(db, first.post_id))
+    assert not _superseded_by_a_newer_approved_revision(db, get_post(db, second.post_id))

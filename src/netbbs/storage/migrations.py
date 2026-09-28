@@ -3349,6 +3349,38 @@ MIGRATIONS = [
     ),
     Migration(
         description=(
+            "Issue #675: `withdrawn` on posts -- the revision is an author's withdrawal, "
+            "the text replaced with \"[withdrawn by author]\". Set on a local withdrawal and "
+            "on a carried `board_post_edit` that carries `\"withdrawn\": true` (design doc "
+            "§16). A withdrawal clears the post's pin and expiry exemption, as a removal "
+            "does: a withdrawn post neither stays at the top of the board nor outlives its "
+            "expiry. Unlike a removal it is not final; the author may edit again."
+        ),
+        sql="""
+        ALTER TABLE posts ADD COLUMN withdrawn INTEGER NOT NULL DEFAULT 0 CHECK (withdrawn IN (0, 1));
+
+        -- Only the rows that still hold a flag: a withdrawal is not final,
+        -- so a remote author can alternate edits and withdrawals, and each
+        -- one must not rewrite the whole chain.
+        CREATE TRIGGER trg_posts_withdrawal_clears_flags AFTER INSERT ON posts
+        WHEN NEW.withdrawn = 1
+        BEGIN
+            UPDATE posts SET pinned = 0, exempt_from_expiry = 0
+            WHERE root_post_id = NEW.root_post_id AND board_id = NEW.board_id
+              AND (pinned = 1 OR exempt_from_expiry = 1);
+        END;
+
+        -- A post's current revision is its newest approved one in receipt
+        -- order (`id`), looked up once per listed post: without this index a
+        -- long carried chain is read and sorted whole on every board opening.
+        CREATE INDEX idx_posts_root_board_status_id ON posts(root_post_id, board_id, status, id);
+        -- Its created_at twin no longer serves any query: every lookup by root
+        -- now orders by id, and this index's prefix covers the rest.
+        DROP INDEX IF EXISTS idx_posts_root_post_id_board_id_status_created_at;
+        """,
+    ),
+    Migration(
+        description=(
             "Issue #678: `moderation_notices` -- what an author is told once, at the main "
             "menu, when a moderator approves or rejects their held post or edit, with the "
             "rejection's reason. A notice is deleted once shown. Gone with the author or the board."
