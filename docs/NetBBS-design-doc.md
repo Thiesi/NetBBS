@@ -1171,6 +1171,15 @@ edit permission can pin a post or file, and can keep it from expiring:
   out only the dated rows its block already shows. A page reached by paging
   or by a `[N]ew scan`/`[F]ind` jump has no pinned block, so a jump opens on
   its target.
+- **How the block looks:** it sits under a labelled "Pinned" rule, parted
+  from the dated rows by a plain one. On a board the labelled rule replaces
+  the list's top rule, so the block costs the page one row, reserved only
+  when there is a block.
+- **Who sees pins:** listing a board's posts, pinned ones included, checks
+  that the caller may read the board. That means the effective read level
+  through the Community cascade and the minimum age, the two gates on
+  entering. The name requirement gates posting, not reading, so it is not
+  checked here. The trust filter (§12.8) applies to pins as to every row.
 - **When `[K]eep` is offered:** only where content expires (the board or area
   has a maximum age), or where something is already kept.
 - **Both flags belong to the post, not to one revision:** an edit keeps them,
@@ -2042,8 +2051,8 @@ resources no longer visible.
   what the caller follows and everything; it is refused while nothing is
   followed. Followed rows are listed first and marked `*`.
 - **From a resource's own screen:** a board's post list and a file area's
-  screen each have a `[F]ollow`/`Un[f]ollow` toggle. A channel is followed
-  from `[N]ew scan`, which lists every channel the caller can join.
+  screen each have a `[F]ollow`/`Un[f]ollow` toggle, and a chat channel has
+  the `/follow` command, which toggles the same way.
 - **Communities:** a Community is not followed yet. The table allows it, but
   nothing would show the difference: `[N]ew scan` has no Community rows, and
   a Community's boards, channels and areas are followed one by one.
