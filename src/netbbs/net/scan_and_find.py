@@ -240,7 +240,7 @@ async def _new_scan_screen(
         positions.update({id(item): index for index, item in enumerate(scan_items, start=1)})
 
     _number(items)
-    shown = {"items": items, "all": items, "followed_only": False}
+    shown = {"items": items, "all": items, "followed_only": False, "view": set()}
     accent = effective_accent_color(session, db)
 
     async def _reload_in_place() -> list[_ScanItem]:
@@ -252,14 +252,19 @@ async def _new_scan_screen(
         place = {_identity(row): index for index, row in enumerate(shown["all"])}
         reloaded.sort(key=lambda row: place.get(_identity(row), len(place)))
         shown["all"] = reloaded
-        if shown["followed_only"] and not any(row.followed for row in reloaded):
-            # The last followed row was just unfollowed: an empty list is no
-            # view, so it is everything again.
-            shown["followed_only"] = False
-        visible = [row for row in reloaded if row.followed] if shown["followed_only"] else reloaded
+        visible = _in_view(reloaded)
         shown["items"] = visible
         _number(visible)
         return visible
+
+    def _in_view(rows: list[_ScanItem]) -> list[_ScanItem]:
+        """Everything, or -- in the followed view -- the rows followed when
+        the view was switched on. Unfollowing one there keeps it, unmarked,
+        until the view is switched off: the list does not change under the
+        highlight (Codex review on #788)."""
+        if not shown["followed_only"]:
+            return rows
+        return [row for row in rows if _identity(row) in shown["view"]]
 
     async def _toggle_follow(item: _ScanItem) -> list[_ScanItem] | None:
         """[F]ollow (issue #675): follow or stop following the row's board,
@@ -282,7 +287,8 @@ async def _new_scan_screen(
             shown["followed_only"] = False
             announce(session, "You follow nothing yet: [F]ollow a row first.", tone="muted")
             return None
-        visible = [row for row in shown["all"] if row.followed] if shown["followed_only"] else shown["all"]
+        shown["view"] = {_identity(row) for row in shown["all"] if row.followed}
+        visible = _in_view(shown["all"])
         shown["items"] = visible
         _number(visible)
         announce(

@@ -1189,7 +1189,17 @@ async def _show_area(
                 brief="Browse/fetch this file area's remote catalogue",
             )
         )
-    hints.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to the previous menu"))
+    back = MenuEntry(label=menu_key("B", "ack"), brief="Return to the previous menu")
+
+    def _empty_hints() -> list[MenuEntry]:
+        # An empty area can be followed too, to be told of its first file
+        # (Codex review on #788).
+        follow_entry = (
+            MenuEntry(label=menu_key("f", "ollow", prefix="Un"), brief="Stop following this file area")
+            if follows["on"]
+            else MenuEntry(label=menu_key("F", "ollow"), brief="List this file area first in New scan")
+        )
+        return [*hints, follow_entry, back]
 
     # Keystrokes and `[B]ack`, like the listing above it and like every
     # other menu (design doc §3.5) -- this used to be a typed
@@ -1205,7 +1215,7 @@ async def _show_area(
     # Reprinting per keystroke scrolled "This file area has no files
     # yet" off a short terminal after two stray keys.
     await session.write_line(
-        f"\r\n{_menu_row(hints, width=session.terminal_width, height=session.terminal_height, description_level=description_level)}"
+        f"\r\n{_menu_row(_empty_hints(), width=session.terminal_width, height=session.terminal_height, description_level=description_level)}"
     )
     await _write_choice_prompt(session)
     while True:
@@ -1254,6 +1264,24 @@ async def _show_area(
             await session.write_line("")
             await _browse_remote_files(session, lane, area, user, link_context)
             return
+        if choice == "f":
+            await session.write_line("")
+            if follows["on"]:
+                await lane.run(unfollow, user, "file_area", area.id)
+                announce(session, "No longer following this file area.", tone="muted")
+            else:
+                await lane.run(follow, user, "file_area", area.id)
+                announce(session, "Following this file area: New scan lists it first.")
+            follows["on"] = not follows["on"]
+            # The bar again, so its label says what [F] now does.
+            await session.write_line(
+                _menu_row(
+                    _empty_hints(), width=session.terminal_width, height=session.terminal_height,
+                    description_level=description_level,
+                )
+            )
+            await _write_choice_prompt(session)
+            continue
         await session.write(reject_unhandled_key(choice))
 
 
