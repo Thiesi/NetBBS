@@ -1475,9 +1475,31 @@ A post opens on `show_detail`:
 - The title, a byline (author, date, `edited`, `new`, the post it replies to)
   and the action bar stay on screen while a long body pages with PgUp/PgDn.
 - The post's own actions live there, offered only when they would succeed:
-  `[E]dit`, `Remove pos[t]`, and `[N]ext post`/`[P]revious post`, which cross
-  page boundaries.
+  `[R]eply`, `[E]dit`, `Remove pos[t]`, `P[i]n`/`[K]eep` (§5.3), and
+  `[N]ext post`/`[P]revious post`, which cross page boundaries.
 - `[B]ack` returns to the list with the cursor on the post last read.
+
+**Replying** (issue #675). A reply is a post with the replied-to post as its
+parent, listed on the board like any other post. There is no threaded view.
+- **Who:** `[R]eply` is offered to anyone who may post on the board, on any
+  post that has not been removed.
+- **Subject:** starts as "Re: <subject>". A subject that already starts with
+  "Re:" gets no second prefix, and the prefix never pushes a subject over its
+  limit.
+- **Body:** starts as the post quoted, with the cursor under the quote:
+  "<author> wrote:", then each line of the post before its signature with
+  `> ` in front. A line that was already quoted becomes `> > `.
+- **Quote limits:** a quote is at most 40 lines and 8 KB, and a cut quote
+  ends with `> [...]`, so a reply to a long post stays writable in the line
+  editor.
+- **Color boards:** where color is allowed, the quote is the text a reader
+  with color off sees.
+- **Art posts:** an art post is answered without a quote.
+- **Parent:** the reply's parent is the replied-to post's root, which every
+  revision and every carrying node shares. The reader's byline names it, and
+  `[N]ew scan`'s "replies to you" pass finds it.
+- **Mail:** mail's Reply starts its body with the same quote and its subject
+  with the same rule (`netbbs.quoting`).
 - The mail message view and the SysOp's pending-post review use the same
   reader.
 

@@ -1658,3 +1658,20 @@ def test_a_pending_edit_of_an_art_post_is_art_in_the_queue(db, alice):
     pending = list_pending_posts(db, board, requesting_user=sysop)
 
     assert [p.layout for p in pending] == ["art"]
+
+
+def test_queue_board_post_links_a_carried_parent(db, alice, node_identity, remote_node_identity):
+    """A local reply to a post from another node names that post as its
+    parent on the Link (issue #675). The carried post keeps its signed
+    event in `link_events`, not in `link_event_json`."""
+    board_id = _carried_board(db, remote_node_identity)
+    carried = _remote_post(remote_node_identity, board_id=board_id)
+    materialize_carried_post(db, carried, sender_fingerprint=remote_node_identity.fingerprint)
+    from netbbs.link.boards import _board_from_row
+
+    board = _board_from_row(db.connection.execute("SELECT * FROM boards WHERE board_id = ?", (board_id,)).fetchone())
+
+    reply = create_post(db, board, alice, "Re: hello", "reply body", parent_post_id=carried.content_id)
+    queued = queue_board_post_if_linked(db, reply, board, node_identity=node_identity)
+
+    assert queued.payload["parent_post_id"] == carried.content_id

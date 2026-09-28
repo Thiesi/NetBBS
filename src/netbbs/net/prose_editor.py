@@ -90,6 +90,7 @@ async def edit_prose(
     autosave_interval_seconds: float = DEFAULT_AUTOSAVE_INTERVAL_SECONDS,
     unicode_style: bool = False,
     keep_pasted_color: bool = False,
+    cursor_at_end: bool = False,
 ) -> str | None:
     """
     Run a fullscreen prose editing session against `session`, returning
@@ -119,6 +120,13 @@ async def edit_prose(
     Additional input at the ceiling is refused with a bell and a status
     line indicator, rather than silently dropped with no feedback.
 
+    `cursor_at_end` (issue #675): the cursor starts under the text rather
+    than at the top -- a reply's quote is above where the reply is written.
+    Text that ends in an empty line, as a quote does, keeps it as the blank
+    line between the two, and the cursor starts on a new line below it:
+    the reply comes out as the line editor, which appends, makes it. A
+    recovered draft is left exactly as saved, with the cursor at its end.
+
     `keep_pasted_color` (issue #754): pasted SGR color is typed into the
     text as pipe codes, which the caller will show as color -- a post on
     a board that allows it. Without it a pasted SGR is dropped.
@@ -127,14 +135,26 @@ async def edit_prose(
     height = max(_MIN_HEIGHT, session.terminal_height) - _STATUS_ROW_OFFSET - 1
 
     loaded_text: str | None
+    recovered = False
     if draft_path.exists() and await offer_draft_recovery(session):
         loaded_text = draft_path.read_text(encoding="utf-8")
+        recovered = True
     else:
         if draft_path.exists():
             draft_path.unlink()
         loaded_text = initial_text
 
     state = _EditorState(buffer=ProseBuffer.from_text(loaded_text or ""), max_bytes=max_bytes)
+    if cursor_at_end:
+        # The separator is for fresh text; a recovered draft is the caller's
+        # own words, kept line for line (Codex review on #786).
+        if not recovered and len(state.buffer.lines) > 1 and state.buffer.lines[-1] == "":
+            state.buffer.lines.append("")
+        state.buffer.cursor_line = len(state.buffer.lines) - 1
+        state.buffer.cursor_col = len(state.buffer.lines[-1])
+        # A quote taller than the screen opens on its end, where the cursor
+        # is, not on its first line (Codex review on #786).
+        _scroll_into_view(state, width, height)
     # Passed only when asked for, so a Session that predates the option
     # still reads keys here.
     read_options = {"pasted_color": PastedColor()} if keep_pasted_color else {}

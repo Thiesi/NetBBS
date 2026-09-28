@@ -1365,6 +1365,15 @@ def queue_board_post_if_linked(
         if parent_row is not None and parent_row["link_event_json"] is not None:
             parent_post = BoardPost.from_dict(json.loads(parent_row["link_event_json"]))
             link_parent_post_id = parent_post.content_id
+        elif parent_row is not None and db.connection.execute(
+            "SELECT 1 FROM link_events WHERE content_id = ? AND object_type = 'board_post'",
+            (post.parent_post_id,),
+        ).fetchone() is not None:
+            # A carried parent (issue #675): its local `post_id` is its
+            # signed event's content id, kept in `link_events` rather than
+            # in `link_event_json` (`_chain_row_event`). Without this a
+            # reply to a post from another node went out as a new thread.
+            link_parent_post_id = post.parent_post_id
 
     board_post = build_board_post(
         signing_identity=node_identity.signing_key,
