@@ -638,3 +638,111 @@ def test_keep_on_a_file_deleted_meanwhile_is_refused_not_raised(tmp_path, monkey
         lane.close()
     assert "Not changed:" in session.visible()
     db.close()
+
+
+# -- follow-ups to the #675 note ------------------------------------------------------
+
+
+def test_the_pinned_block_sits_under_a_pinned_rule_and_still_fits(db, mod, monkeypatch):
+    board = _board(db, mod)
+    made = _posts(db, board, mod, 40, monkeypatch)
+    set_post_pinned(db, made[0], True, changed_by=mod)
+    session = BoardSession(["b"], height=24)
+    asyncio.run(board_flow._show_board(session, db, board, mod))
+    screen = session.visible()
+    assert " Pinned " in screen
+    lines = screen.replace("\r\n", "\n").rstrip("\n").split("\n")
+    assert len([line for line in lines if line.strip()]) <= 24
+    # The pinned row comes after the rule, the dated rows after a plain one.
+    pinned_at = screen.index(" Pinned ")
+    assert screen.index("Subject 0") > pinned_at
+    assert screen.index("Subject 39") > screen.index("Subject 0")
+
+
+def test_no_pinned_rule_without_pins(db, mod, monkeypatch):
+    board = _board(db, mod)
+    _posts(db, board, mod, 3, monkeypatch)
+    session = BoardSession(["b"])
+    asyncio.run(board_flow._show_board(session, db, board, mod))
+    assert "Pinned" not in session.visible()
+
+
+def test_the_pinned_list_checks_the_community_cascade_and_age(db, mod):
+    from netbbs.boards.posts import PostError
+    from netbbs.communities import create_community
+    from netbbs.permissions.levels import InsufficientLevelError
+
+    low = create_user(db, "low", password="hunter2", user_level=5)
+    staff = create_community(db, "Staff", default_min_read_level=50, creator=mod)
+    # `None`: the board inherits its Community's level rather than setting 0.
+    board = create_board(db, "staff-only", creator=mod, community_id=staff.id, min_read_level=None)
+    grant_permissions(db, mod, object_type="board", object_id=board.id, permissions=BoardPermission.EDIT, granted_by=mod)
+    post = create_post(db, board, create_user(db, "boss", password="hunter2", user_level=60), "Rules", "Secret")
+    set_post_pinned(db, post, True, changed_by=mod)
+    # The board's own level is open; its Community's is not.
+    with pytest.raises(InsufficientLevelError):
+        list_pinned_posts(db, board, requesting_user=low)
+    with pytest.raises(InsufficientLevelError):
+        list_posts_page(db, board, low, with_pinned=True)
+
+    adults = create_community(db, "Adults", default_min_age=18, creator=mod)
+    gated = create_board(db, "adults", creator=mod, community_id=adults.id)
+    with pytest.raises(PostError, match="age requirement"):
+        list_pinned_posts(db, gated, requesting_user=mod)  # no birthdate on file
+
+
+def test_the_file_area_pinned_files_sit_under_a_pinned_rule(tmp_path, monkeypatch):
+    path = tmp_path / "node.db"
+    db = Database(path)
+    mod = create_user(db, "mod", password="hunter2", user_level=10)
+    area = create_file_area(db, "downloads", creator=mod)
+    grant_permissions(
+        db, mod, object_type="file_area", object_id=area.id, permissions=BoardPermission.EDIT, granted_by=mod
+    )
+    stamps = iter(f"2026-01-01T00:00:{i:02d}.000000Z" for i in range(3))
+    monkeypatch.setattr(entries_module, "utc_now_iso", lambda: next(stamps))
+    files = [upload_file(db, area, mod, f"f{i}.txt", f"payload {i}".encode()) for i in range(3)]
+    monkeypatch.undo()
+    set_file_pinned(db, files[0], True, changed_by=mod)
+    lane = DatabaseLane(path)
+    try:
+        session = FileSession(["b"])
+        asyncio.run(_show_area(session, lane, area, mod))
+    finally:
+        lane.close()
+    screen = session.visible()
+    assert " Pinned " in screen
+    assert screen.index(" Pinned ") < screen.index("pin f0.txt") < screen.index("f2.txt")
+    db.close()
+
+
+def test_a_chat_channel_is_followed_with_slash_follow(tmp_path):
+    from types import SimpleNamespace
+
+    from netbbs.activity import is_following
+    from netbbs.chat.channels import create_channel
+    from netbbs.net.chat_flow import _handle_follow
+
+    path = tmp_path / "node.db"
+    db = Database(path)
+    alice = create_user(db, "alice", password="hunter2", user_level=10)
+    channel = create_channel(db, "lobby", creator=alice)
+    lane = DatabaseLane(path)
+    written: list[str] = []
+
+    class Out:
+        async def write_line(self, text: str = "") -> None:
+            written.append(text)
+
+    ctx = SimpleNamespace(session=Out(), lane=lane, channel=channel, user=alice)
+    try:
+        asyncio.run(_handle_follow(ctx, ""))
+        assert is_following(db, alice, "channel", channel.id)
+        asyncio.run(_handle_follow(ctx, ""))
+        assert not is_following(db, alice, "channel", channel.id)
+    finally:
+        lane.close()
+    text = _SGR.sub("", "".join(written))
+    assert "Following lobby: New scan lists it first." in text
+    assert "No longer following lobby." in text
+    db.close()

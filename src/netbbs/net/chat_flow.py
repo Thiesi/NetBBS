@@ -74,7 +74,7 @@ import sqlite3
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Awaitable, Callable, Sequence
 
-from netbbs.activity import record_channel_seen
+from netbbs.activity import follow, is_following, record_channel_seen, unfollow
 from netbbs.attestation import (
     format_verified_name_unit,
     get_display_name,
@@ -3441,6 +3441,29 @@ async def _handle_mrc(ctx: ChatCommandContext, args: str) -> None:
         await ctx.session.write_line(colored("No other MRC users reported in this room yet.", fg_color=MUTED_COLOR))
 
 
+async def _handle_follow(ctx: ChatCommandContext, args: str) -> None:
+    """`/follow` (issue #675): follow `ctx.channel`, or stop. A followed
+    chat channel is listed first in [N]ew scan, as a followed board or
+    file area is; this is the channel's own toggle, beside the one [N]ew
+    scan has."""
+    channel = ctx.channel
+    user = ctx.user
+
+    def _toggle(db: Database) -> bool:
+        if is_following(db, user, "channel", channel.id):
+            unfollow(db, user, "channel", channel.id)
+            return False
+        follow(db, user, "channel", channel.id)
+        return True
+
+    now_following = await ctx.lane.run(_toggle)
+    name = sanitize_text(channel.name)
+    if now_following:
+        await ctx.session.write_line(f"Following {name}: New scan lists it first. /follow again to stop.")
+    else:
+        await ctx.session.write_line(colored(f"No longer following {name}.", fg_color=MUTED_COLOR))
+
+
 async def _handle_names(ctx: ChatCommandContext, args: str) -> None:
     """`/names` (design doc): a compact, one-line roster
     of `ctx.channel`."""
@@ -3776,6 +3799,7 @@ _COMMAND_INFO: dict[str, tuple[str, str]] = {
     "kick": ("/kick <user> [reason]", "Force a user out of this chat channel right now."),
     "finger": ("/finger <user>", "Show a user's public profile."),
     "names": ("/names", "List everyone currently in this chat channel."),
+    "follow": ("/follow", "Follow this chat channel, so New scan lists it first; again to stop."),
     "who": ("/who", "List everyone in this chat channel, with away status."),
     "list": ("/list", "List every chat channel you can see."),
     "whois": ("/whois <user>", "Show a user's profile plus online/away/chat channel status."),
@@ -3822,6 +3846,7 @@ _COMMANDS: dict[str, CommandHandler] = {
     "kick": _handle_kick,
     "finger": _handle_finger,
     "names": _handle_names,
+    "follow": _handle_follow,
     "who": _handle_who,
     "list": _handle_list,
     "whois": _handle_whois,
