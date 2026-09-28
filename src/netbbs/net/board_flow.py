@@ -526,6 +526,9 @@ _MAX_LIST_ROWS = 30
 _TABLE_MIN_WIDTH = 60
 _NEW_MARKER = "new"
 _PIN_MARKER = "pin"
+# The caller's own post or edit awaiting a moderator (issue #678).
+_HELD_MARKER = "held"
+_MARKER_WIDTH = max(len(_NEW_MARKER), len(_PIN_MARKER), len(_HELD_MARKER))
 # The row a pinned block adds to the list: the plain rule parting it from
 # the dated posts (its labelled "Pinned" rule replaces the top rule).
 _PINNED_BLOCK_ROWS = 1
@@ -594,7 +597,7 @@ def _column_widths(
     if width < _TABLE_MIN_WIDTH:
         return None
     date_width = max([display_width(w) for _, _, w in cells] + [len("Posted")])
-    available = width - number_width - len(_NEW_MARKER) - date_width - _ROW_FURNITURE
+    available = width - number_width - _MARKER_WIDTH - date_width - _ROW_FURNITURE
     author_width = min(
         _AUTHOR_MAX_WIDTH,
         max([display_width(a) for _, a, _ in cells] + [len("Author")]),
@@ -615,6 +618,7 @@ def _post_list_rows(
     new_ids: set[int],
     name_requirement: str | None,
     accent: int | tuple[int, int, int],
+    held_edits: frozenset[str] = frozenset(),
 ) -> list[str]:
     """One row per post, fitted to `width` in display columns. The number is
     what a digit key opens; the highlighted row is drawn in reverse video,
@@ -625,21 +629,22 @@ def _post_list_rows(
     widths = _column_widths(cells, width=width, number_width=number_width)
     if widths is None:
         for index, (post, (subject, author, when)) in enumerate(zip(posts, cells)):
-            marker = f"{_row_marker(post, new_ids)} " if _row_marker(post, new_ids) else ""
+            marker = _row_marker(post, new_ids, held_edits)
+            marker = f"{marker} " if marker else ""
             # The date goes first when the row is this narrow: subject and
             # author say which post it is, and the reader shows the date.
             plain = cut_to_width(f"{index + 1:>{number_width}} {marker}{subject} -- {author}", width - 1)
             rows.append(
                 colored(plain, reverse=True) if index == highlighted
-                else colored(plain, fg_color=MUTED_COLOR if post.tombstoned_at else None)
+                else colored(plain, fg_color=MUTED_COLOR if _dimmed(post) else None)
             )
         return rows
     subject_width, author_width, date_width = widths
-    marker_width = len(_NEW_MARKER)
+    marker_width = _MARKER_WIDTH
     for index, (post, (subject, author, when)) in enumerate(zip(posts, cells)):
         number = f"{index + 1:>{number_width}}"
         subject_cell = _pad(cut_to_width(subject, subject_width), subject_width)
-        marker = _row_marker(post, new_ids)
+        marker = _row_marker(post, new_ids, held_edits)
         marker_cell = _pad(marker, marker_width)
         author_cell = _pad(cut_to_width(author, author_width), author_width)
         date_cell = _pad(cut_to_width(when, date_width), date_width)
@@ -652,7 +657,7 @@ def _post_list_rows(
             "  "
             + colored(number, fg_color=accent)
             + "  "
-            + colored(subject_cell, fg_color=MUTED_COLOR if post.tombstoned_at else None)
+            + colored(subject_cell, fg_color=MUTED_COLOR if _dimmed(post) else None)
             + "  "
             + (colored(marker_cell, fg_color=SUCCESS_COLOR, bold=True) if marker == _NEW_MARKER
                else colored(marker_cell, fg_color=accent))
@@ -672,13 +677,25 @@ def _labelled_rule(label: str, *, width: int, unicode_style: bool, color) -> str
     return colored(text + char * max(0, width - display_width(text)), fg_color=color)
 
 
-def _row_marker(post: Post, new_ids: set[int]) -> str:
-    """"new" for a post this caller has not opened, else "pin" for a pinned
-    one (issue #675) -- a pinned post is also listed first, so "new" is the
-    one worth the column when it is both."""
+def _row_marker(post: Post, new_ids: set[int], held_edits: frozenset[str] = frozenset()) -> str:
+    """"held" for the caller's own post awaiting a moderator (issue #678) --
+    never news to its author, and nobody else is listed it -- else "new"
+    for a post this caller has not opened, else "held" for a post with an
+    edit of theirs awaiting a moderator, else "pin" for a pinned one (issue
+    #675) -- a pinned post is also listed first, so "new" is the one worth
+    the column when it is both."""
+    if post.status == "pending":
+        return _HELD_MARKER
     if post.id in new_ids:
         return _NEW_MARKER
+    if post.root_post_id in held_edits:
+        return _HELD_MARKER
     return _PIN_MARKER if post.pinned else ""
+
+
+def _dimmed(post: Post) -> bool:
+    """A removed post, or the caller's own post nobody else sees yet."""
+    return post.tombstoned_at is not None or post.status == "pending"
 
 
 def _post_list_heading(posts: list[Post], *, width: int, db: Database, name_requirement: str | None) -> str | None:
@@ -691,7 +708,7 @@ def _post_list_heading(posts: list[Post], *, width: int, db: Database, name_requ
     if widths is None:
         return None
     subject_width, author_width, date_width = widths
-    marker_width = len(_NEW_MARKER)
+    marker_width = _MARKER_WIDTH
     text = (
         f"  {'#':>{number_width}}  {_pad('Subject', subject_width)}  {' ' * marker_width}  "
         f"{_pad('Author', author_width)}  {_pad('Posted', date_width)}"
@@ -994,7 +1011,7 @@ async def _show_board(
         rows = _post_list_rows(
             db, current_page.posts, width=width, highlighted=highlighted,
             new_ids=_new_ids(current_page), name_requirement=name_requirement,
-            accent=effective_accent_color(session, db),
+            accent=effective_accent_color(session, db), held_edits=current_page.held_edits,
         )
         pinned = current_page.pinned_count
         if pinned:
@@ -1102,9 +1119,13 @@ async def _show_board(
                 header_color=effective_header_color(session, db),
                 node_name_gradient=session.node_name_gradient,
             )
+            # The caller's own post awaiting a moderator (issue #678): nothing
+            # can be done with it until it is approved or rejected.
+            held = post.status == "pending"
             byline = _post_byline(
                 db, post, name_requirement=name_requirement, is_new=was_new,
                 separator=separator, width=width,
+                held="post" if held else "edit" if post.root_post_id in page.held_edits else None,
             )
             body_rows = post_body_rows(post.body, width, body_mode, truecolor=truecolor, layout=post.layout)
             has_previous = index > 0 or (page.has_older and page.oldest_cursor is not None)
@@ -1112,12 +1133,12 @@ async def _show_board(
             actions = []
             # Anyone who may post here may answer a post that is still there
             # (issue #675).
-            can_reply = can_post and post.tombstoned_at is None
+            can_reply = can_post and post.tombstoned_at is None and not held
             if can_reply:
                 actions.append(("r", menu_key("R", "eply")))
             # An edited or removed post's versions, for moderators only
             # (issue #675, decided with the maintainer).
-            can_see_history = (post.is_edited or post.tombstoned_at is not None) and has_permission(
+            can_see_history = not held and (post.is_edited or post.tombstoned_at is not None) and has_permission(
                 db, user, object_type="board", object_id=post.board_id, permission=BoardPermission.EDIT
             )
             if can_see_history:
@@ -1125,15 +1146,17 @@ async def _show_board(
             # The author takes their own post back (issue #675).
             can_withdraw = (
                 post.author_user_id is not None and post.author_user_id == user.id
-                and post.tombstoned_at is None and not post.withdrawn
+                and post.tombstoned_at is None and not post.withdrawn and not held
             )
             if can_withdraw:
                 actions.append(("w", menu_key("W", "ithdraw")))
-            if _can_edit_post(db, post, user):
+            can_edit = not held and _can_edit_post(db, post, user)
+            if can_edit:
                 actions.append(("e", menu_key("E", "dit")))
-            if _can_tombstone_post(db, post, user):
+            can_tombstone = not held and _can_tombstone_post(db, post, user)
+            if can_tombstone:
                 actions.append(("t", menu_key("t", prefix="Remove pos")))
-            can_pin = _can_pin_post(db, post, user)
+            can_pin = not held and _can_pin_post(db, post, user)
             if can_pin:
                 actions.append(("i", menu_key("i", "n", prefix="Unp" if post.pinned else "P")))
                 # Keeping a post only means something where posts expire,
@@ -1193,7 +1216,7 @@ async def _show_board(
                     page = _refetch_current_page()
                     return None
                 continue
-            if key in ("e", "t") or (key in ("i", "k") and can_pin):
+            if (key == "e" and can_edit) or (key == "t" and can_tombstone) or (key in ("i", "k") and can_pin):
                 root = post.root_post_id
                 if key == "e":
                     await _edit_existing_post(session, db, board, post, user, link_context=link_context)
@@ -1382,10 +1405,9 @@ async def _show_board(
         if link_context is not None:
             queue_board_post_if_linked(db, post, board, node_identity=link_context.node_identity)
         if post.status == "pending":
-            # A moderated board holds the post back; the page the
-            # caller returns to lists approved posts only, so
-            # "Posted" would describe a post they cannot find.
-            announce(session, "Submitted. It will appear once a moderator approves it.")
+            # A moderated board holds the post back: only its author sees
+            # it, marked "held" (issue #678), until a moderator approves it.
+            announce(session, "Submitted. Others will see it once a moderator approves it.")
         else:
             announce(session, "Posted.")
         return True
@@ -2341,7 +2363,7 @@ def _remote_author_subject(author_label: str) -> TrustSubject | None:
 
 def _post_byline(
     db: Database, post: Post, *, name_requirement: str | None, is_new: bool, separator: str,
-    width: int,
+    width: int, held: str | None = None,
 ) -> list[str]:
     """The reader's lines under the subject: who, when, and what state the
     post is in -- edited, new to this caller -- and then which post it
@@ -2360,6 +2382,12 @@ def _post_byline(
         parts.append(badge("kept"))
     if is_new:
         parts.append(badge("new", tone="success"))
+    # The caller's own post, or an edit of theirs, awaiting a moderator
+    # (issue #678).
+    if held == "post":
+        parts.append(badge("awaiting approval", tone="warning"))
+    elif held == "edit":
+        parts.append(badge("your edit awaits approval", tone="warning"))
     if post.parent_post_id is not None:
         # As the feed shows the parent now: its current subject, and nothing
         # at all for a parent that is expired, pending or trust-hidden.

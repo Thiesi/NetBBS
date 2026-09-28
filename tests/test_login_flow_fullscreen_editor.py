@@ -722,14 +722,14 @@ def _sysop(db):
 
 
 def test_posting_to_a_moderated_board_says_the_post_awaits_approval(db, alice):
-    """The page lists approved posts only, so "Posted" would describe a
-    post the caller then cannot find."""
+    """Only its author sees a held post, so "Posted" would describe a post
+    nobody else can find."""
     board = create_board(db, "general", creator=alice, moderated=True)
     session = FakeSession(["p", "Hello", "Body", "", "p", "b"])
     asyncio.run(board_flow._show_board(session, db, board, alice))
     text = _visible(session)
-    assert "Submitted. It will appear once a moderator approves it." in text
-    assert "Posted" not in text
+    assert "Submitted. Others will see it once a moderator approves it." in text
+    assert "Posted." not in text
 
 
 def test_posting_to_an_unmoderated_board_says_posted_without_the_content_hash(db, alice):
