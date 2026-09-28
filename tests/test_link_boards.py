@@ -1675,3 +1675,91 @@ def test_queue_board_post_links_a_carried_parent(db, alice, node_identity, remot
     queued = queue_board_post_if_linked(db, reply, board, node_identity=node_identity)
 
     assert queued.payload["parent_post_id"] == carried.content_id
+
+
+# -- author withdrawal (issue #675) --------------------------------------------------
+
+
+def _carried_moderated_root(db, remote_node_identity):
+    """A post from another node on a board this node carries with its own
+    moderation on."""
+    board_id = _carried_board(db, remote_node_identity)
+    db.connection.execute("UPDATE boards SET moderated = 1 WHERE board_id = ?", (board_id,))
+    db.connection.commit()
+    root = _remote_post(remote_node_identity, board_id=board_id, subject="Plans", body="what I regret")
+    materialize_carried_post(db, root, sender_fingerprint=remote_node_identity.fingerprint)
+    db.connection.execute("UPDATE posts SET status = 'approved' WHERE post_id = ?", (root.content_id,))
+    db.connection.commit()
+    return board_id, root
+
+
+def _remote_edit(remote_node_identity, root, *, subject="Plans", body=None, withdrawn=False):
+    from netbbs.boards.posts import WITHDRAWN_PLACEHOLDER
+
+    return build_board_post_edit(
+        signing_identity=remote_node_identity.signing_key,
+        author=root.payload["author"],
+        board_id=root.payload["board_id"],
+        root_post_id=root.content_id,
+        previous_event_id=root.content_id,
+        subject=subject,
+        body=WITHDRAWN_PLACEHOLDER if body is None else body,
+        created_at="2026-01-01T00:05:00Z",
+        withdrawn=withdrawn,
+    )
+
+
+def test_a_carried_withdrawal_is_not_held_on_a_moderated_board(db, remote_node_identity):
+    """Held, this node would go on showing what the author took back."""
+    from netbbs.boards.posts import WITHDRAWN_PLACEHOLDER, visible_post
+
+    _, root = _carried_moderated_root(db, remote_node_identity)
+    db.connection.execute("UPDATE posts SET pinned = 1, exempt_from_expiry = 1 WHERE post_id = ?", (root.content_id,))
+    db.connection.commit()
+    edit = _remote_edit(remote_node_identity, root, withdrawn=True)
+
+    materialized = materialize_carried_post_edit(db, edit, sender_fingerprint=remote_node_identity.fingerprint)
+
+    assert materialized.status == "approved" and materialized.withdrawn
+    shown = visible_post(db, root.content_id)
+    assert shown.body == WITHDRAWN_PLACEHOLDER and shown.withdrawn
+    # A withdrawal clears the pin and the keep, as a removal does.
+    assert not shown.pinned and not shown.exempt_from_expiry
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"body": "brand new text", "withdrawn": True},  # the flag on real content
+        {"subject": "A new subject", "withdrawn": True},  # the flag with a new subject
+        {"withdrawn": False},  # an older node: the placeholder as an ordinary edit
+    ],
+)
+def test_anything_but_a_real_withdrawal_is_moderated_as_an_edit(db, remote_node_identity, kwargs):
+    """The flag cannot carry new text past this node's moderators."""
+    _, root = _carried_moderated_root(db, remote_node_identity)
+    edit = _remote_edit(remote_node_identity, root, **kwargs)
+
+    materialized = materialize_carried_post_edit(db, edit, sender_fingerprint=remote_node_identity.fingerprint)
+
+    assert materialized.status == "pending"
+    assert not materialized.withdrawn
+
+
+def test_a_local_withdrawal_is_sent_with_the_flag(db, alice, node_identity):
+    from netbbs.boards.posts import WITHDRAWN_PLACEHOLDER, withdraw_post
+
+    board = create_board(db, "general", creator=alice)
+    link_board(db, board, node_identity=node_identity)
+    post = create_post(db, board, alice, "Plans", "what I regret")
+    queue_board_post_if_linked(db, post, board, node_identity=node_identity)
+
+    withdrawn = withdraw_post(db, post, board, withdrawn_by=alice)
+    event = queue_board_post_edit_if_linked(db, withdrawn, board, node_identity=node_identity, edited_by=alice)
+
+    assert event.payload["withdrawn"] is True
+    assert event.payload["body"] == WITHDRAWN_PLACEHOLDER
+    # An ordinary edit carries no flag at all (the omission rule).
+    again = edit_post(db, withdrawn, board, subject="Plans", body="on second thought", edited_by=alice)
+    ordinary = queue_board_post_edit_if_linked(db, again, board, node_identity=node_identity, edited_by=alice)
+    assert "withdrawn" not in ordinary.payload

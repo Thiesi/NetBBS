@@ -29,6 +29,8 @@ from netbbs.boards.posts import (
     tombstone_post,
     list_post_revisions,
     Revision,
+    WITHDRAWN_PLACEHOLDER,
+    withdraw_post,
     visible_post,
 )
 
@@ -57,5 +59,7 @@ __all__ = [
     "tombstone_post",
     "list_post_revisions",
     "Revision",
+    "WITHDRAWN_PLACEHOLDER",
+    "withdraw_post",
     "visible_post",
 ]

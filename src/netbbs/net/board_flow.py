@@ -47,9 +47,11 @@ from netbbs.boards import (
     list_posts_page,
     set_post_exempt,
     set_post_pinned,
+    WITHDRAWN_PLACEHOLDER,
     list_post_revisions,
     tombstone_post,
     visible_post,
+    withdraw_post,
 )
 from netbbs.boards.categories import Category, list_subcategories, list_top_level_categories
 from netbbs.boards.categories import get_category_by_id as get_board_category_by_id
@@ -761,7 +763,7 @@ _LIST_HELP = [
     "Pinned posts are listed first, marked \"pin\". A moderator pins",
     "and unpins a post, and keeps it from expiring, while reading it.",
     "",
-    "Reading a post: Reply, Edit, Remove, Next and Previous post live there,",
+    "Reading a post: Reply, Edit, Withdraw, Remove, Next and Previous post live there,",
     "and PgUp/PgDn page a long post. A post counts as read once you",
     "open it; the list marks the ones you have not opened as new.",
 ]
@@ -1081,14 +1083,20 @@ async def _show_board(
             can_reply = can_post and post.tombstoned_at is None
             if can_reply:
                 actions.append(("r", menu_key("R", "eply")))
-            # An edited post's earlier versions (issue #675); a removed one's
-            # for a moderator only, as `list_post_revisions` decides.
-            can_see_history = post.is_edited or (
-                post.tombstoned_at is not None
-                and has_permission(db, user, object_type="board", object_id=post.board_id, permission=BoardPermission.EDIT)
+            # An edited or removed post's versions, for moderators only
+            # (issue #675, decided with the maintainer).
+            can_see_history = (post.is_edited or post.tombstoned_at is not None) and has_permission(
+                db, user, object_type="board", object_id=post.board_id, permission=BoardPermission.EDIT
             )
             if can_see_history:
                 actions.append(("h", menu_key("H", "istory")))
+            # The author takes their own post back (issue #675).
+            can_withdraw = (
+                post.author_user_id is not None and post.author_user_id == user.id
+                and post.tombstoned_at is None and not post.withdrawn
+            )
+            if can_withdraw:
+                actions.append(("w", menu_key("W", "ithdraw")))
             if _can_edit_post(db, post, user):
                 actions.append(("e", menu_key("E", "dit")))
             if _can_tombstone_post(db, post, user):
@@ -1126,6 +1134,17 @@ async def _show_board(
                     redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
                     separator=separator,
                 )
+                continue
+            if key == "w" and can_withdraw:
+                if await _withdraw_existing_post(session, db, board, post, user, link_context=link_context):
+                    root = post.root_post_id
+                    page = _refetch_current_page(limit=len(page.posts))
+                    found = next((i for i, p in enumerate(page.posts) if p.root_post_id == root), None)
+                    if found is None:
+                        page_anchor = None
+                        page = _refetch_current_page()
+                        return None
+                    index = found
                 continue
             if key == "r" and can_reply:
                 if _reply_target(db, post, board) is None:
@@ -2061,6 +2080,36 @@ async def _compose_body(
     )
 
 
+async def _withdraw_existing_post(
+    session: Session, db: Database, board: Board, post: Post, user: User, *, link_context: LinkContext | None
+) -> bool:
+    """[W]ithdraw (issue #675): the author replaces their post's text with
+    `WITHDRAWN_PLACEHOLDER`, after saying yes. An ordinary author edit, so
+    it is carried like one and can be edited again. Returns whether the
+    post was withdrawn."""
+    # Says what withdrawing does and does not do (issue #675): the text is
+    # hidden, not deleted -- other nodes keep the signed original, and a
+    # moderator can still read it in the post's history.
+    await session.write_line(colored(
+        f"Its text will read {WITHDRAWN_PLACEHOLDER} here and on every node that carries the board. "
+        "This hides it but does not delete it: a moderator can still read it, and you can edit the "
+        "post again later.",
+        fg_color=MUTED_COLOR,
+    ))
+    if not await prompt_yes_no(session, "Withdraw this post?", default=False):
+        announce(session, "Post not withdrawn.", tone="muted")
+        return False
+    try:
+        withdrawn = withdraw_post(db, post, board, withdrawn_by=user)
+    except PostError as exc:
+        announce(session, f"Could not withdraw: {exc}.", tone="error")
+        return False
+    if link_context is not None:
+        queue_board_post_edit_if_linked(db, withdrawn, board, node_identity=link_context.node_identity, edited_by=user)
+    announce(session, "Post withdrawn.")
+    return True
+
+
 async def _show_history(
     session: Session,
     db: Database,
@@ -2077,16 +2126,25 @@ async def _show_history(
     collapsed: bool,
     separator: str,
 ) -> None:
-    """[H]istory (issue #675): the versions of `post` this caller may read,
-    newest first, each opened on the same reader a post is read on. What
-    a reader may see stops at a moderator edit; a moderator sees it all
-    (`list_post_revisions`)."""
-    revisions = list_post_revisions(db, post, board, requesting_user=user)
-    if len(revisions) < 2:
+    """[H]istory (issue #675): the versions of `post`, newest first, each
+    opened read-only on the same reader a post is read on. For moderators
+    only (`list_post_revisions`)."""
+    try:
+        revisions = list_post_revisions(db, post, board, requesting_user=user)
+    except PostError as exc:
+        announce(session, f"Not available: {exc}.", tone="error")
+        return
+    removed = post.tombstoned_at is not None
+    # A removed post's one version is what it said before it was removed,
+    # which is what a moderator opens it for (claude review on #789).
+    if len(revisions) < (1 if removed else 2):
         announce(session, "There are no earlier versions of this post to show.", tone="muted")
         return
     newest_first = list(reversed(revisions))
-    labels = {id(revision): _revision_label(revision, index, len(revisions)) for index, revision in enumerate(revisions)}
+    labels = {
+        id(revision): _revision_label(revision, index, len(revisions), removed=removed)
+        for index, revision in enumerate(revisions)
+    }
 
     def _when(revision) -> str:
         return format_for_display(revision.post.created_at, db)
@@ -2142,11 +2200,14 @@ async def _show_history(
                 break
 
 
-def _revision_label(revision, index: int, count: int) -> str:
+def _revision_label(revision, index: int, count: int, *, removed: bool = False) -> str:
     """What one version is: the one shown now, the one first posted, or
-    an edit -- and whether a moderator made it."""
-    if index == count - 1:
-        kind = "current"
+    an edit -- and whether a moderator made it. A removed post has no
+    current version: what is shown now is the placeholder."""
+    if index == count - 1 and not removed:
+        kind = "current, withdrawn" if revision.post.withdrawn else "current"
+    elif revision.post.withdrawn:
+        kind = "withdrawn"
     elif revision.post.post_id == revision.post.root_post_id:
         kind = "original"
     else:

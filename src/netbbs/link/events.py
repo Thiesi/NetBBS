@@ -843,6 +843,7 @@ def build_board_post_edit(
     body: str,
     created_at: str,
     nonce: str | None = None,
+    withdrawn: bool = False,
 ) -> BoardPostEdit:
     """
     Build and sign one `board_post_edit` event, per design doc.
@@ -864,6 +865,12 @@ def build_board_post_edit(
     chain. Signed by `signing_identity` — the same home node's current
     signing key `build_board_post` itself uses, never a personal user
     key.
+
+    `withdrawn` (issue #675, design doc §16) marks the author's withdrawal
+    of the post: `"withdrawn": true`, omitted otherwise, never `false`
+    (the omission rule of §7.2). A receiving node honors it only when the
+    edit is a withdrawal and nothing else -- see
+    `netbbs.link.boards.is_withdrawal_edit`.
     """
     payload = {
         "board_id": board_id,
@@ -875,6 +882,8 @@ def build_board_post_edit(
         "created_at": created_at,
         "nonce": nonce if nonce is not None else secrets.token_hex(16),
     }
+    if withdrawn:
+        payload["withdrawn"] = True
 
     envelope = build_envelope(BOARD_POST_EDIT_OBJECT_TYPE, payload)
     signature = signing_identity.sign(canonical_bytes(envelope))

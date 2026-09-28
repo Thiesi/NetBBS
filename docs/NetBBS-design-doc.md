@@ -1475,24 +1475,45 @@ A post opens on `show_detail`:
 - The title, a byline (author, date, `edited`, `new`, the post it replies to)
   and the action bar stay on screen while a long body pages with PgUp/PgDn.
 - The post's own actions live there, offered only when they would succeed:
-  `[R]eply`, `[H]istory`, `[E]dit`, `Remove pos[t]`, `P[i]n`/`[K]eep` (§5.3),
-  and `[N]ext post`/`[P]revious post`, which cross page boundaries.
+  `[R]eply`, `[H]istory`, `[E]dit`, `[W]ithdraw`, `Remove pos[t]`,
+  `P[i]n`/`[K]eep` (§5.3), and `[N]ext post`/`[P]revious post`, which cross
+  page boundaries.
 - `[B]ack` returns to the list with the cursor on the post last read.
 
-**Revision history** (issue #675). `[H]istory` lists an edited post's
-versions, newest first. Each opens on the same reader, marked "current",
-"original" or "edit", and "by a moderator" where one wrote it.
-- **Readers** see the versions from the most recent moderator edit on: what a
-  moderator edited away stays out of view. A removed post shows no versions.
-- **Moderators** (the board's edit permission, which a moderator edit needs)
-  see every version, those of a removed post included.
-- **What is listed:** approved revisions only. Expired and pending ones are
-  left out, and so is the removal placeholder.
+**Revision history** (issue #675). `[H]istory` lists a post's versions,
+newest first. Each opens read-only on the same reader. A version is marked
+"current", "original", "edit" or "withdrawn", plus "by a moderator" where one
+wrote it.
+- **Who:** moderators only, meaning holders of the board's edit permission,
+  which a moderator edit needs. A reader, and the author, see no history,
+  only the `edited` badge. The earlier rule, where readers saw back to the
+  last moderator edit, was replaced. It depended on working out after the
+  fact who made each edit, and deleted accounts made that unreliable in the
+  direction that shows readers what a moderator edited away.
+- **What moderators see:** every approved version, those of a removed or
+  withdrawn post included. Expired and pending revisions are left out, and so
+  is the removal placeholder.
+- **Order:** the chain's own links (`edit_of_post_id`), not `created_at`,
+  which for a carried revision is another node's clock (§7.2).
 - **Limit:** at most the 50 most recent versions, because a carried post's
   chain is written by another node.
-- **How a moderator edit is recognized:** locally, by the moderation log's
-  record of who made the edit; for a carried post, by the event type of the
-  origin's `board_post_moderator_edit`.
+- **Expiry:** swept before listing.
+
+**Withdrawal** (issue #675). The author's `[W]ithdraw` replaces the post's
+text with "[withdrawn by author]" and keeps its subject, so replies still read
+as answers to something.
+- **Not final.** It is a revision the author may edit past later, not a
+  removal.
+- **Hidden, not deleted.** A moderator can still read the withdrawn text in
+  the history, and every node keeps the signed original. The confirmation
+  says so.
+- **Not held for moderation.** It only takes text away. Held, a moderated
+  board would go on showing what its author took back until a moderator got
+  to it.
+- **Pin and keep.** It clears both, as a removal does.
+- **On the Link:** a `board_post_edit` with `"withdrawn": true` (§16). A
+  carrying node that knows the field applies it the same way, without local
+  moderation or a trust hold.
 
 **Replying** (issue #675). A reply is a post with the replied-to post as its
 parent, listed on the board like any other post. There is no threaded view.
@@ -11865,6 +11886,41 @@ editor that drew the post, so `board_post_edit` and the moderator edit carry no
 layout: a revision takes its root's. The local `posts.layout` column is
 meaningful on the root row. Rejected: a layout per revision, which would let one
 edit turn a drawing into reflowed prose with nothing to say why.
+
+### Issue #675 — an author's withdrawal on the Link
+
+An author may withdraw their post: its text becomes "[withdrawn by author]"
+(§6.1). An ordinary author edit to that text would reach every node, but a
+node that carries the board with its own moderation, or that holds this
+author's posts for trust review, holds an incoming author edit for approval.
+There the withdrawn text would stay up until that node's moderator acted.
+Normative description: §6.1.
+
+**Decision 1 — an optional `withdrawn` field on `board_post_edit`.**
+`"withdrawn": true` on the author's edit; omitted otherwise, never `false`,
+per §7.2's omission rule. It is signed by the author's home node like any
+author edit, so it needs no new authorization. No `netbbs_protocol` bump, for
+the same reasons as issue #711's `layout`: §7.5 allows optional fields that old
+peers can safely preserve, and they do. A node that predates the field
+verifies and relays the edit unchanged and shows it as an ordinary edit, held
+where it holds edits. That is the old behaviour, so nothing gets worse there.
+Rejected:
+- a new event type, which older nodes would store opaquely and never show
+  (§7.5);
+- reusing `board_post_tombstone`, which is origin-signed and terminal; a
+  withdrawal is neither.
+
+**Decision 2 — honored only for a withdrawal and nothing else.** A carrying
+node lets the edit through without local moderation or a trust hold only when
+it takes the text away and changes nothing else: the body is exactly the
+placeholder and the subject is the predecessor's. Otherwise the flag would
+carry new text past every node's moderators. Anything else carrying the flag
+is an ordinary edit, moderated as one. A local tombstone still ends the chain,
+and a post nobody here approved stays unpublished either way.
+
+**Decision 3 — it clears the pin and the keep.** On every node, locally
+(`posts.withdrawn`, `trg_posts_withdrawal_clears_flags`), so a withdrawn post
+neither stays at the top of a board nor outlives its expiry.
 
 ### Issue #767 — the node map — decided
 

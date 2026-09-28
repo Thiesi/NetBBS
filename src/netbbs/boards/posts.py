@@ -95,6 +95,9 @@ class Post:
     # its lines. Set by the editor that wrote the post, on the root; an
     # edit follows its root.
     layout: str = "prose"
+    # Issue #675: this revision is its author's withdrawal. On a resolved
+    # Post, whether the current revision is.
+    withdrawn: bool = False
     # True only on a Post resolved by list_posts_page/list_pinned_posts
     # whose displayed subject/body came from a later edit, not this row
     # itself, and False when that later revision is a tombstone -- see
@@ -335,6 +338,7 @@ def edit_post(
     subject: str,
     body: str,
     edited_by: User,
+    withdrawal: bool = False,
 ) -> Post:
     """
     Create a new revision of `post`. Never mutates the existing row in place: `post_id` is
@@ -392,7 +396,10 @@ def edit_post(
         # entirely when nothing actually changed.
         return _row_to_post(current)
 
-    status = "pending" if board.moderated else "approved"
+    # A withdrawal (`withdraw_post`) only takes text away, so it is not
+    # held for approval: held, the post would keep showing what its author
+    # withdrew until a moderator got to it.
+    status = "pending" if board.moderated and not withdrawal else "approved"
     created_at = utc_now_iso()
     author_identifier = post.author_fingerprint or post.author_label
     new_post_id = compute_content_id(
@@ -407,14 +414,18 @@ def edit_post(
         }
     )
 
+    # `withdrawn` is named only on a withdrawal; everything else takes the
+    # column's default, which also keeps an edit working on a schema older
+    # than issue #675's migration.
+    withdrawn_column, withdrawn_value = (", withdrawn", ", ?") if withdrawal else ("", "")
     try:
         db.connection.execute(
-            """
+            f"""
             INSERT INTO posts
                 (post_id, board_id, parent_post_id, author_user_id, author_label,
                  author_fingerprint, subject, body, created_at, status,
-                 root_post_id, edit_of_post_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 root_post_id, edit_of_post_id{withdrawn_column})
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?{withdrawn_value})
             """,
             (
                 new_post_id,
@@ -429,6 +440,7 @@ def edit_post(
                 status,
                 post.root_post_id,
                 current["post_id"],
+                *((1,) if withdrawal else ()),
             ),
         )
         db.connection.commit()
@@ -440,7 +452,7 @@ def edit_post(
     record_action(
         db,
         actor=edited_by,
-        action="edit",
+        action="withdraw" if withdrawal else "edit",
         object_type="board",
         object_id=board.id,
         target_user_id=post.author_user_id,
@@ -448,6 +460,39 @@ def edit_post(
     )
     reindex_post(db, board.id, post.root_post_id)
     return get_post(db, new_post_id)
+
+
+# What a withdrawn post says instead of its text (issue #675).
+WITHDRAWN_PLACEHOLDER = "[withdrawn by author]"
+
+
+def withdraw_post(db: Database, post: Post, board: Board, *, withdrawn_by: User) -> Post:
+    """
+    The author takes their post back (issue #675, decided with the
+    maintainer): a revision whose text is `WITHDRAWN_PLACEHOLDER`, marked
+    `withdrawn`. The subject stays, so replies still read as answers to
+    something.
+
+    - Not held for approval on a moderated board (`edit_post`'s
+      `withdrawal`): held, the post would keep showing what its author
+      took back until a moderator got to it.
+    - Clears the post's pin and expiry exemption
+      (`trg_posts_withdrawal_clears_flags`).
+    - Not final: the author may edit the post again, and a moderator
+      still sees the withdrawn text in its history. The text is hidden,
+      not deleted.
+    - On the Link it is a `board_post_edit` carrying `"withdrawn": true`
+      (`netbbs.link.boards.queue_board_post_edit_if_linked`), which a
+      carrying node applies without holding it either; a node that
+      predates the field shows it as an ordinary edit (design doc §16).
+    """
+    if post.author_user_id is None or post.author_user_id != withdrawn_by.id:
+        raise PostError("only the post's author can withdraw it")
+    if post.withdrawn:
+        raise PostError("this post is already withdrawn")
+    return edit_post(
+        db, post, board, subject=post.subject, body=WITHDRAWN_PLACEHOLDER, edited_by=withdrawn_by, withdrawal=True,
+    )
 
 
 def get_post(db: Database, post_id: str) -> Post:
@@ -550,6 +595,7 @@ def _resolve_current_version(db: Database, root_row: sqlite3.Row) -> Post:
         body=latest["body"],
         tombstoned_at=latest["tombstoned_at"],
         is_edited=latest["tombstoned_at"] is None,
+        withdrawn=bool(latest["withdrawn"]) if "withdrawn" in latest.keys() else False,
     )
 
 
@@ -1262,46 +1308,60 @@ class Revision:
 
 def list_post_revisions(db: Database, post: Post, board: Board, *, requesting_user: User) -> list[Revision]:
     """
-    The versions of `post` a caller may read (issue #675), oldest first,
-    the current one last: every approved revision of its chain, newest
-    `MAX_LISTED_REVISIONS` of them.
+    Every version of `post` (issue #675), oldest first: the approved
+    revisions of its chain, the newest `MAX_LISTED_REVISIONS` of them.
 
-    What a reader may see stops at a moderator (decided with the
-    maintainer): a reader sees the versions from the most recent moderator
-    edit on -- what a moderator edited away stays out of view -- and
-    nothing at all of a removed post. A caller holding
-    `BoardPermission.EDIT` on the board sees every version, a removed
-    post's included; that is the permission a moderator edit needs.
+    For moderators only (decided with the maintainer): `requesting_user`
+    must hold `BoardPermission.EDIT` on the board, the permission a
+    moderator edit needs; anyone else gets `PostError`. A moderator sees
+    every version, those of a removed or withdrawn post included.
 
-    Expired and pending revisions are never listed: expiry ends a
-    caller's reach (design doc §5.3), and a pending edit is the moderation
-    queue's. The removal placeholder itself is not a version of what was
-    written, so it is not listed either.
+    In the chain's own order, following each revision's link to the one it
+    replaced (`edit_of_post_id`), not by `created_at`: a carried revision's
+    time is its author's clock, which is display metadata and may run
+    backwards (design doc §7.2). Expired and pending revisions are left
+    out, and so is the removal placeholder. Expiry is swept first: it is
+    applied lazily, and a version may pass its age while the reader is
+    open.
     """
-    require_level(requesting_user, board.min_read_level)
-    moderator = has_permission(
-        db, requesting_user, object_type="board", object_id=post.board_id, permission=BoardPermission.EDIT
-    )
-    removed = db.connection.execute(
-        "SELECT 1 FROM posts WHERE root_post_id = ? AND board_id = ? AND tombstoned_at IS NOT NULL LIMIT 1",
-        (post.root_post_id, post.board_id),
-    ).fetchone() is not None
-    if removed and not moderator:
-        return []
+    _require_board_permission(db, post, requesting_user, BoardPermission.EDIT)
+    _sweep_expired_posts(db, board)
     rows = db.connection.execute(
-        """
-        SELECT * FROM posts
-        WHERE root_post_id = ? AND board_id = ? AND status = 'approved' AND tombstoned_at IS NULL
-        ORDER BY created_at DESC, id DESC
-        LIMIT ?
-        """,
-        (post.root_post_id, post.board_id, MAX_LISTED_REVISIONS),
+        "SELECT * FROM posts WHERE root_post_id = ? AND board_id = ?",
+        (post.root_post_id, post.board_id),
     ).fetchall()
-    revisions = [Revision(_row_to_post(row), _is_moderator_revision(db, row)) for row in reversed(rows)]
-    if moderator:
-        return revisions
-    last_moderated = max((index for index, revision in enumerate(revisions) if revision.by_moderator), default=None)
-    return revisions if last_moderated is None else revisions[last_moderated:]
+    shown = [
+        row for row in _in_chain_order(rows)
+        if row["status"] == "approved" and row["tombstoned_at"] is None
+    ][-MAX_LISTED_REVISIONS:]
+    return [Revision(_row_to_post(row), _is_moderator_revision(db, row)) for row in shown]
+
+
+def _in_chain_order(rows: list[sqlite3.Row]) -> list[sqlite3.Row]:
+    """`rows` of one chain, each after the revision it replaced. Measured by
+    how many links lie between a row and the root; rows at the same depth
+    -- two pending edits of one version -- keep their local arrival order,
+    which is monotonic (`id`)."""
+    by_post_id = {row["post_id"]: row for row in rows}
+    depths: dict[str, int] = {}
+
+    def depth(row: sqlite3.Row) -> int:
+        seen: list[sqlite3.Row] = []
+        current = row
+        while current["post_id"] not in depths:
+            seen.append(current)
+            previous = by_post_id.get(current["edit_of_post_id"]) if current["edit_of_post_id"] else None
+            if previous is None or previous in seen:
+                depths[current["post_id"]] = 0
+                seen.pop()
+                break
+            current = previous
+        for walked in reversed(seen):
+            previous = by_post_id[walked["edit_of_post_id"]]
+            depths[walked["post_id"]] = depths[previous["post_id"]] + 1
+        return depths[row["post_id"]]
+
+    return sorted(rows, key=lambda row: (depth(row), row["id"]))
 
 
 def _is_moderator_revision(db: Database, row: sqlite3.Row) -> bool:
@@ -1469,4 +1529,6 @@ def _row_to_post(row: sqlite3.Row, *, is_edited: bool = False) -> Post:
         is_edited=is_edited,
         # Absent on a schema older than issue #711's migration.
         layout=row["layout"] if "layout" in row.keys() else "prose",
+        # Absent on a schema older than issue #675's migration.
+        withdrawn=bool(row["withdrawn"]) if "withdrawn" in row.keys() else False,
     )

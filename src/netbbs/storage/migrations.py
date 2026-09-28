@@ -3347,4 +3347,24 @@ MIGRATIONS = [
         );
         """,
     ),
+    Migration(
+        description=(
+            "Issue #675: `withdrawn` on posts -- the revision is an author's withdrawal, "
+            "the text replaced with \"[withdrawn by author]\". Set on a local withdrawal and "
+            "on a carried `board_post_edit` that carries `\"withdrawn\": true` (design doc "
+            "§16). A withdrawal clears the post's pin and expiry exemption, as a removal "
+            "does: a withdrawn post neither stays at the top of the board nor outlives its "
+            "expiry. Unlike a removal it is not final; the author may edit again."
+        ),
+        sql="""
+        ALTER TABLE posts ADD COLUMN withdrawn INTEGER NOT NULL DEFAULT 0 CHECK (withdrawn IN (0, 1));
+
+        CREATE TRIGGER trg_posts_withdrawal_clears_flags AFTER INSERT ON posts
+        WHEN NEW.withdrawn = 1
+        BEGIN
+            UPDATE posts SET pinned = 0, exempt_from_expiry = 0
+            WHERE root_post_id = NEW.root_post_id AND board_id = NEW.board_id;
+        END;
+        """,
+    ),
 ]
