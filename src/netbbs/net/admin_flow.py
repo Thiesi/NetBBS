@@ -772,8 +772,10 @@ def _link_health_snapshot(db: Database, link_context: LinkContext | None) -> dic
         "recent_warnings": sum(entry.level == "WARNING" for entry in recent_diagnostics),
         # Issue #681: what Link carried in on its own and the SysOp has not
         # looked at, and what waits at the carry cap for their decision.
-        "carried_to_review": count_carried_to_review(db) if link_context is not None else 0,
-        "carry_offers": count_carry_decisions(db, OFFERED) if link_context is not None else 0,
+        # Read from the database, so shown whether or not Link runs now
+        # (Codex review on #800): a node that stopped Link still has them.
+        "carried_to_review": count_carried_to_review(db),
+        "carry_offers": count_carry_decisions(db, OFFERED),
     }
 
 
@@ -1410,8 +1412,11 @@ async def admin_menu(
         elif choice == "l" and link_context is not None:
             await session.write_line("")
             await _link_status_screen(session, lane, user, link_context=link_context, node_controls=node_controls)
-            await _draw_admin_menu(session, lane, user, node_controls=node_controls,
-                                   link_context=link_context, state=dashboard_state)
+            # Reloaded: Link status is where offers are accepted or
+            # excluded (Codex review on #800).
+            dashboard_state = await _draw_admin_menu(
+                session, lane, user, node_controls=node_controls, link_context=link_context
+            )
         elif choice == "x" and link_context is not None:
             await session.write_line("")
             await _outbox_screen(session, lane, user)
@@ -15822,7 +15827,7 @@ async def _list_boards_screen(
             session, boards,
             name_of=lambda b: b.name,
             stable_id_of=lambda b: b.id,
-            description_of=lambda b: _board_description(b, effective[b.id]),
+            description_of=lambda b: _board_description(b, effective[b.id], b.board_id in to_review),
             columns=_BOARD_COLUMNS,
             column_values_of=lambda b: _board_columns(b, effective[b.id], counts[b.id], b.board_id in to_review),
             title="Message boards",
@@ -15888,7 +15893,7 @@ def _effective_by_id(db: Database, resources, *, levels: bool = True) -> dict[in
     return {r.id: _effective_for(db, r, levels=levels) for r in resources}
 
 
-def _board_description(board: Board, effective: _Effective) -> str:
+def _board_description(board: Board, effective: _Effective, to_review: bool = False) -> str:
     """The narrow-terminal form, below the width a table needs.
 
     Carries the gates too (Codex review). Without them this fallback
@@ -15896,8 +15901,11 @@ def _board_description(board: Board, effective: _Effective) -> str:
     terminal -- gated and open resources indistinguishable -- while
     design doc §3.6 promises gates appear wherever a resource is
     listed. A promise the docs make is not optional on small screens."""
-    status = _listing_status(board.moderated, board.pinned)
-    return _describe_resource(effective.read, effective.write, status, effective)
+    description = _describe_resource(
+        effective.read, effective.write, _listing_status(board.moderated, board.pinned), effective
+    )
+    # "to review" leads, so a narrow row keeps it (Codex review on #800).
+    return f"to review; {description}" if to_review else description
 
 
 def _describe_resource(read, write, status: str, effective: _Effective) -> str:
@@ -17585,7 +17593,7 @@ async def _list_areas_screen(
             session, areas,
             name_of=lambda a: a.name,
             stable_id_of=lambda a: a.id,
-            description_of=lambda a: _area_description(a, effective[a.id]),
+            description_of=lambda a: _area_description(a, effective[a.id], a.area_id in to_review),
             columns=_AREA_COLUMNS,
             column_values_of=lambda a: _area_columns(a, effective[a.id], counts[a.id], a.area_id in to_review),
             title="File areas",
@@ -17605,10 +17613,12 @@ async def _list_areas_screen(
         )
 
 
-def _area_description(area: FileArea, effective: _Effective) -> str:
+def _area_description(area: FileArea, effective: _Effective, to_review: bool = False) -> str:
     """Narrow-terminal fallback; see `_board_description`."""
-    status = _listing_status(area.moderated, area.pinned)
-    return _describe_resource(effective.read, effective.write, status, effective)
+    description = _describe_resource(
+        effective.read, effective.write, _listing_status(area.moderated, area.pinned), effective
+    )
+    return f"to review; {description}" if to_review else description
 
 
 async def _area_detail_screen(
@@ -19906,7 +19916,7 @@ async def _list_channels_screen(
         session, channels,
         name_of=lambda c: c.name,
         stable_id_of=lambda c: c.id,
-        description_of=lambda c: _channel_description(c, effective[c.id]),
+        description_of=lambda c: _channel_description(c, effective[c.id], c.channel_id in to_review),
         columns=_CHANNEL_COLUMNS,
         column_values_of=lambda c: _channel_columns(c, effective[c.id], c.channel_id in to_review),
         title="Chat channels",
@@ -19921,10 +19931,11 @@ async def _list_channels_screen(
         await _channel_detail_screen(session, lane, actor, selected, link_context=link_context, mrc_bridge=mrc_bridge, chat_hub=chat_hub)
 
 
-def _channel_description(channel: Channel, effective: _Effective) -> str:
+def _channel_description(channel: Channel, effective: _Effective, to_review: bool = False) -> str:
     """Narrow-terminal fallback; see `_board_description`."""
     gates, _ = _gate_cell(effective.min_age, effective.name_requirement)
-    bits = [] if gates == "-" else [gates]  # leads; see `_describe_resource`
+    bits = ["to review"] if to_review else []
+    bits += [] if gates == "-" else [gates]  # leads; see `_describe_resource`
     bits.append(f"level {channel.min_level}")
     if channel.members_only:
         bits.append("members-only")

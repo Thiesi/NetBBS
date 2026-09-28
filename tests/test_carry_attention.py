@@ -96,3 +96,53 @@ def test_the_board_list_marks_it_and_opening_it_is_the_look(db, lane, sysop, rem
     assert "to review" in text.split("Remote News", 1)[1].splitlines()[0]
     assert count_carried_to_review(db) == 0
     assert get_board_by_name(db, "Remote News").board_id == BOARD_ID
+
+
+
+# -- Codex review on #800 ----------------------------------------------
+
+
+def test_the_dashboard_counts_them_without_a_live_link(db, lane, sysop, remote, own):
+    _carry(db, remote, own)
+
+    session = FakeSession(["b"])
+    asyncio.run(admin_menu(session, lane, sysop))
+    text = " ".join(_visible(_written_text(session)).split())
+
+    assert "Newly carried: 1" in text
+
+
+def test_a_narrow_terminal_still_says_to_review(db, lane, sysop, remote, own):
+    _carry(db, remote, own)
+
+    session = FakeSession(["c", "m", "l", "b", "b", "b", "b"])
+    session.terminal_width = 40
+    asyncio.run(admin_menu(session, lane, sysop, link_context=_link_context()))
+    text = _visible(_written_text(session))
+
+    # The name itself is cut at 40 columns; the row's first line keeps the mark.
+    first_row = text.split("page 1/1", 1)[1].splitlines()[2]
+    assert "to review" in first_row
+
+
+def test_the_dashboard_is_reloaded_after_link_status(db, lane, sysop, remote, own):
+    from netbbs.link.carry import OFFERED, count_carry_decisions, exclude_offer
+    from netbbs.net import admin_flow
+
+    _carry(db, remote, own, cap=0)
+    assert count_carry_decisions(db, OFFERED) == 1
+
+    async def _decide_in_link_status(session, lane, user, **kwargs):
+        # Stands in for [O]ffered -> exclude inside Link status.
+        await lane.run(lambda db: exclude_offer(db, "boards", BOARD_ID, actor=user))
+
+    original = admin_flow._link_status_screen
+    admin_flow._link_status_screen = _decide_in_link_status
+    try:
+        session = FakeSession(["l", "b"])
+        asyncio.run(admin_menu(session, lane, sysop, link_context=_link_context()))
+    finally:
+        admin_flow._link_status_screen = original
+    last_dashboard = " ".join(_visible(_written_text(session)).split()).rsplit("ATTENTION", 1)[1]
+
+    assert "Offered: 1" not in last_dashboard
