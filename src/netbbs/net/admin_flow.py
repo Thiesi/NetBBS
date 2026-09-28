@@ -147,6 +147,7 @@ from netbbs.boards.categories import delete_category as delete_board_category
 from netbbs.boards.categories import get_category_by_id as get_board_category_by_id
 from netbbs.boards.categories import list_subcategories as list_board_subcategories
 from netbbs.boards.categories import list_top_level_categories as list_top_level_board_categories
+from netbbs.boards.moderation_notices import submitter_id
 from netbbs.boards.posts import (
     Post,
     PostError,
@@ -155,9 +156,9 @@ from netbbs.boards.posts import (
     delete_post,
     list_node_pending_posts,
     list_pending_posts,
+    revision_for_moderation,
     set_post_exempt,
     set_post_pinned,
-    visible_post,
 )
 from netbbs.chat.moderation import ChannelRestriction, list_active_channel_restrictions, unban_user, unmute_user
 from netbbs.chat.categories import CategoryError as ChannelCategoryError
@@ -16751,6 +16752,19 @@ def _submitted_instant(iso_timestamp: str) -> datetime.datetime:
         return datetime.datetime.max.replace(tzinfo=datetime.timezone.utc)
 
 
+def _submitter_label(db: Database, post: Post) -> str:
+    """Who submitted a held post. A revision keeps its root's author, but a
+    moderator may have made the edit (Codex review on #795): the moderation
+    log names the editor."""
+    if post.post_id != post.root_post_id:
+        editor_id = submitter_id(db, post)
+        if editor_id is not None and editor_id != post.author_user_id:
+            row = db.connection.execute("SELECT username FROM users WHERE id = ?", (editor_id,)).fetchone()
+            if row is not None:
+                return row["username"]
+    return post.author_label
+
+
 def _pending_post_kind(post: Post) -> str:
     """"edit" for a held revision of an approved post, "reply" for a held
     answer to another, else "post"."""
@@ -16796,7 +16810,7 @@ def _load_pending_items(
     for post, board in posts:
         items.append(_PendingItem(
             stable_id=post.id, title=post.subject, kind=_pending_post_kind(post), where=board.name,
-            author=post.author_label, when=_when_or_raw(post.created_at, db), post=post, board=board,
+            author=_submitter_label(db, post), when=_when_or_raw(post.created_at, db), post=post, board=board,
         ))
     for entry, area in entries:
         items.append(_PendingItem(
@@ -16907,9 +16921,10 @@ async def _post_action_screen(
     # What the held post changes or answers, as readers see it now (issue
     # #678): an edit is judged against the text it would replace.
     kind = _pending_post_kind(post)
-    current, parent = await lane.run(lambda db: (
-        visible_post(db, post.root_post_id) if kind == "edit" else None,
-        visible_post(db, post.parent_post_id) if kind == "reply" else None,
+    current, parent, submitter = await lane.run(lambda db: (
+        revision_for_moderation(db, post.root_post_id) if kind == "edit" else None,
+        revision_for_moderation(db, post.parent_post_id) if kind == "reply" else None,
+        _submitter_label(db, post),
     ))
     # An edit made before the one readers now see (Codex review on #795):
     # approving it changes nothing they see, and the screen must say so
@@ -16940,13 +16955,15 @@ async def _post_action_screen(
         # What the moderator is deciding about, then the post itself under its
         # own heading, with the pin and exempt state the toggles change.
         facts = [
-            Field("By", post.author_label, color=AUTHOR_COLOR),
+            Field("By", submitter, color=AUTHOR_COLOR),
             Field("Posted", when, color=DATE_COLOR),
             Field("Pinned", _yes_no(post.pinned)),
             Field("Exempt from auto-purge", _yes_no(post.exempt_from_expiry)),
         ]
         if parent is not None:
-            facts.append(Field("Reply to", sanitize_text(parent.subject)))
+            facts.append(Field(
+                "Reply to", sanitize_text(parent.subject) + (" (expired)" if parent.status == "expired" else "")
+            ))
         if current is not None and current.subject != post.subject:
             facts.append(Field("Current subject", sanitize_text(current.subject)))
         if superseded:
@@ -16959,9 +16976,12 @@ async def _post_action_screen(
             Section("Proposed text" if current is not None else "Message", [Styled(body_rows)]),
         ]
         if current is not None:
-            sections.append(Section("Current text", [Styled(post_body_rows(
-                current.body, session.terminal_width, body_mode, truecolor=truecolor, layout=current.layout
-            ))]))
+            sections.append(Section(
+                "Current text (expired)" if current.status == "expired" else "Current text",
+                [Styled(post_body_rows(
+                    current.body, session.terminal_width, body_mode, truecolor=truecolor, layout=current.layout
+                ))],
+            ))
         choice, page = await show_detail(
             session, title=title, sections=sections, actions=actions,
             redraw_in_place=redraw_in_place, unicode_style=unicode_style, page=page,

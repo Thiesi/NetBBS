@@ -1367,10 +1367,40 @@ def list_node_pending_posts(db: Database, *, requesting_user: User, limit: int) 
     the node carries (Codex review on #795). SysOp only: a SysOp may
     decide on every board, so no board is left out."""
     require_level(requesting_user, SYSOP_LEVEL)
+    # A board this node excluded from a carried Link keeps its rows, but no
+    # screen lists it: its held posts must not take the queue's places
+    # (Codex review on #795).
     rows = db.connection.execute(
-        f"SELECT * FROM posts WHERE status = 'pending' ORDER BY {PENDING_ORDER_SQL} LIMIT ?", (limit,)
+        f"""
+        SELECT * FROM posts WHERE status = 'pending'
+          AND board_id IN (SELECT id FROM boards WHERE link_hidden_at IS NULL)
+        ORDER BY {PENDING_ORDER_SQL} LIMIT ?
+        """,
+        (limit,),
     ).fetchall()
     return [_row_to_post(row) for row in rows]
+
+
+def revision_for_moderation(db: Database, post_id: str) -> Post | None:
+    """The newest approved or expired revision of the post `post_id`
+    belongs to: what its readers see, or last saw. A moderator deciding on
+    a held reply or edit judges it against this (issue #678). Unlike
+    `visible_post`, expiry doesn't hide it (Codex review on #795): a held
+    edit approved after the post expired brings it back, and the moderator
+    must see what it replaces."""
+    row = db.connection.execute(
+        "SELECT root_post_id, board_id FROM posts WHERE post_id = ?", (post_id,)
+    ).fetchone()
+    if row is None:
+        return None
+    latest = db.connection.execute(
+        """
+        SELECT * FROM posts WHERE root_post_id = ? AND board_id = ? AND status IN ('approved', 'expired')
+        ORDER BY id DESC LIMIT 1
+        """,
+        (row["root_post_id"], row["board_id"]),
+    ).fetchone()
+    return _row_to_post(latest) if latest is not None else None
 
 
 # At most this many pinned posts are listed at once. Pins are set by this

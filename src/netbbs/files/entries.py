@@ -733,7 +733,12 @@ def list_node_pending_files(db: Database, *, requesting_user: User, limit: int) 
     counterpart."""
     require_level(requesting_user, SYSOP_LEVEL)
     rows = db.connection.execute(
-        f"SELECT * FROM files WHERE status = 'pending' ORDER BY {PENDING_ORDER_SQL} LIMIT ?", (limit,)
+        f"""
+        SELECT * FROM files WHERE status = 'pending'
+          AND area_id IN (SELECT id FROM file_areas WHERE link_hidden_at IS NULL)
+        ORDER BY {PENDING_ORDER_SQL} LIMIT ?
+        """,
+        (limit,),
     ).fetchall()
     return [_row_to_file_entry(row) for row in rows]
 

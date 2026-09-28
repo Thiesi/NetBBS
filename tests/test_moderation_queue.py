@@ -225,3 +225,54 @@ def test_only_a_sysop_reads_the_node_wide_queue(db, alice):
         list_node_pending_posts(db, requesting_user=alice, limit=10)
     with pytest.raises(InsufficientLevelError):
         list_node_pending_files(db, requesting_user=alice, limit=10)
+
+
+def test_a_hidden_board_takes_no_place_in_the_node_wide_queue(db, sysop, alice, monkeypatch):
+    """Codex review on #795: rows of a board excluded from a carried Link
+    are left out inside the capped query, not after it."""
+    monkeypatch.setattr(admin_flow, "MAX_QUEUE_ITEMS", 1)
+    hidden = create_board(db, "hidden", creator=sysop, moderated=True)
+    shown = create_board(db, "shown", creator=sysop, moderated=True)
+    create_post(db, hidden, alice, "Old hidden 1", "x")
+    create_post(db, hidden, alice, "Old hidden 2", "x")
+    create_post(db, shown, alice, "Visible", "x")
+    db.connection.execute("UPDATE boards SET link_hidden_at = ? WHERE id = ?", ("2026-01-01T00:00:00.000000Z", hidden.id))
+    db.connection.commit()
+
+    items, more = _load_pending_items(db, sysop)
+
+    assert [item.title for item in items] == ["Visible"] and not more
+
+
+def test_a_moderators_held_edit_is_listed_as_theirs(db, lane, sysop, alice):
+    """Codex review on #795: a revision keeps its root's author; the
+    moderation log names who made the edit."""
+    from netbbs.auth.users import SYSOP_LEVEL
+
+    mod = create_user(db, "mod", password="hunter2", user_level=SYSOP_LEVEL)
+    board = create_board(db, "general", creator=sysop, moderated=True)
+    post = approve_post(db, create_post(db, board, alice, "Hello", "x"), approved_by=sysop)
+    edit = edit_post(db, post, board, subject="Hello", body="y", edited_by=mod)
+
+    [item] = _load_pending_items(db, sysop)[0]
+    assert item.author == "mod"
+
+    session = FakeSession(["b"])
+    asyncio.run(_post_action_screen(session, lane, sysop, edit, board))
+    assert "mod" in _visible(_written_text(session)).split("PENDING EDIT", 1)[1].split("PROPOSED TEXT", 1)[0]
+
+
+def test_an_expired_post_is_still_shown_against_its_held_edit(db, lane, sysop, alice):
+    """Codex review on #795: expiry hides a post from readers, not from the
+    moderator deciding on an edit that would bring it back."""
+    board = create_board(db, "general", creator=sysop, moderated=True)
+    post = approve_post(db, create_post(db, board, alice, "Hello", "old text"), approved_by=sysop)
+    edit = edit_post(db, post, board, subject="Hello", body="new text", edited_by=alice)
+    db.connection.execute("UPDATE posts SET status = 'expired' WHERE id = ?", (post.id,))
+    db.connection.commit()
+
+    session = FakeSession(["b"])
+    asyncio.run(_post_action_screen(session, lane, sysop, edit, board))
+    text = _visible(_written_text(session))
+
+    assert "CURRENT TEXT (EXPIRED)" in text and "old text" in text
