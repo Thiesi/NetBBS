@@ -404,7 +404,16 @@ def _binary_transfer(session: Session):
     return mark() if mark is not None else contextlib.nullcontext()
 
 
+async def _await_no_break_in(session: Session) -> None:
+    wait = getattr(session, "wait_for_break_in_end", None)
+    if wait is not None:
+        await wait()
+
+
 async def send_file(session: Session, filename: str, data: bytes) -> None:
+    # Nothing is awaited between the wait and the mark, so a break-in can't
+    # start in between: from the mark on, the Monitor refuses one.
+    await _await_no_break_in(session)
     with _binary_transfer(session):
         await _send_file(session, filename, data)
 
@@ -466,6 +475,7 @@ async def _send_file(session: Session, filename: str, data: bytes) -> None:
 
 
 async def receive_file(session: Session, *, max_bytes: int, dest_path: Path) -> ReceivedFile:
+    await _await_no_break_in(session)
     with _binary_transfer(session):
         return await _receive_file(session, max_bytes=max_bytes, dest_path=dest_path)
 

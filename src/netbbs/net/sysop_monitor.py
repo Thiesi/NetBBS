@@ -14,7 +14,9 @@ own disconnect draft, audit log entry included), never by the refresh.
 server-side copy every session keeps (`Session.screen_copy`). It is
 silent for the caller by decision (tracker #761), disclosed in the
 caller-facing help, and every snoop is written to the node log.
-Break-in chat (#765) joins the action bar when it lands.
+[C]hat (#765) breaks into the selected caller's session for a two-pane
+chat and puts them back exactly where they were afterwards; see
+`netbbs.net.break_in`.
 """
 
 from __future__ import annotations
@@ -42,6 +44,8 @@ from netbbs.net.live_screen import (
 from netbbs.net.session import Session, write_prompt
 from netbbs.net.session_activity import describe, records_activity
 from netbbs.net.node_theme import effective_accent_color_256, effective_header_color_256
+from netbbs.net import break_in
+from netbbs.net.confirm import prompt_yes_no
 from netbbs.net.session_registry import SessionSummary
 from netbbs.net.shutdown import NodeControls, format_remaining_seconds
 from netbbs.net.unicode_style_preference import unicode_style_enabled
@@ -127,10 +131,14 @@ class Glyphs:
     more: str
     rule: str
     select_hint: str
+    sorted_mark: str
 
 
-UNICODE_GLYPHS = Glyphs(" › ", "…", " · ", "↓", "─", "↑↓ select")
-ASCII_GLYPHS = Glyphs(" > ", "...", " - ", "v", "-", "Up/Dn select")
+UNICODE_GLYPHS = Glyphs(" › ", "…", " · ", "↓", "─", "↑↓ select", "▾")
+ASCII_GLYPHS = Glyphs(" > ", "...", " - ", "v", "-", "Up/Dn select", "v")
+
+#: Which column each order sorts by, for the heading's sort mark.
+_SORTED_COLUMN = {"time on": "on", "idle": "idle", "user": "user"}
 
 
 def layout_columns(width: int, *, id_width: int = 3) -> tuple[list[Column], int]:
@@ -309,8 +317,10 @@ def _header_flags(controls: NodeControls) -> list[tuple[str, int]]:
 def _paint_action_bar(buffer: ScreenBuffer, row: int, state: MonitorState) -> None:
     """The keys, in full when they fit and shortened when they don't, so
     [Q]uit is never the part a narrow terminal cuts off."""
-    full = [("S", "noop"), ("M", "essage"), ("K", "ick"), ("U", "nwind"), ("O", f"rder: {state.order}"), ("Q", "uit")]
-    short = [("S", "noop"), ("M", "sg"), ("K", "ick"), ("U", "nwind"), ("O", "rder"), ("Q", "uit")]
+    full = [
+        ("S", "noop"), ("C", "hat"), ("M", "essage"), ("K", "ick"), ("U", "nwind"), ("O", "rder"), ("Q", "uit"),
+    ]
+    short = [("S", "noop"), ("C", "hat"), ("M", "sg"), ("K", "ick"), ("U", "nwind"), ("O", "rder"), ("Q", "uit")]
     hint = state.glyphs.select_hint
 
     def width_of(items: list[tuple[str, str]], gap: int) -> int:
@@ -358,8 +368,12 @@ def paint_monitor(buffer: ScreenBuffer, state: MonitorState, controls: NodeContr
     id_width = max((len(str(entry.session_id)) for entry in entries), default=1)
     columns, doing_width = layout_columns(buffer.width, id_width=id_width)
     col = 0
+    sorted_key = _SORTED_COLUMN.get(state.order)
     for column in columns:
-        col = paint_text(buffer, 1, col, _fit(column.heading, column) + " ", fg=LABEL_COLOR, bold=True)
+        # The sorted column's heading carries a mark, which is how the
+        # order is shown: the action bar has no room to spell it out.
+        heading = column.heading + state.glyphs.sorted_mark if column.key == sorted_key else column.heading
+        col = paint_text(buffer, 1, col, _fit(heading, column) + " ", fg=LABEL_COLOR, bold=True)
     paint_text(buffer, 1, col, "DOING", width=doing_width, fg=LABEL_COLOR, bold=True)
 
     # Keep the selection on the same session as the list changes under it.
@@ -573,6 +587,45 @@ async def snoop_screen(
         )
 
 
+async def _chat(
+    session: Session, actor: User, state: MonitorState, controls: NodeControls, entry: SessionSummary
+) -> None:
+    """Break into `entry`'s session (#765). Refused during a file
+    transfer. A caller in a door gets one warning first: the door keeps
+    running while its player is in the chat, and a real-time door (a
+    fight, a turn timer) will not wait for them."""
+    name = _label(entry)
+    if entry.username is None:
+        # The login prompt runs under its own deadlines, which a chat would
+        # outlast: the caller would be disconnected for chatting.
+        state.say(f"{name} hasn't logged in yet; chat once they have.", ERROR_COLOR)
+        return
+    reason = break_in.refusal(entry.session)
+    if reason is not None:
+        state.say(f"{name} {reason}.", ERROR_COLOR)
+        return
+    playing = controls.presence.door_of(entry.session) if controls.presence is not None else None
+    if playing:
+        await session.write(move_cursor(session.terminal_height, 1) + clear_line() + SHOW_CURSOR)
+        try:
+            go = await prompt_yes_no(
+                session, f"{name} is in {sanitize_text(playing[1])}, which keeps running. Chat anyway?", default=False,
+            )
+        finally:
+            await write_quietly(session, HIDE_CURSOR)
+        if not go:
+            state.say("No chat opened.")
+            return
+        # The caller's state may have changed while the SysOp read the
+        # warning: another SysOp may have broken in first.
+        reason = break_in.refusal(entry.session)
+        if reason is not None:
+            state.say(f"{name} {reason}.", ERROR_COLOR)
+            return
+    await break_in.run_break_in(session, actor, controls.session_registry, entry.session, name)
+    state.say(f"Chat with {name} closed; they are back where they were.", SUCCESS_COLOR)
+
+
 def _move(state: MonitorState, controls: NodeControls, step: int) -> None:
     ids = [e.session_id for e in sort_entries(controls.session_registry.list_entries(), state.order)]
     if not ids:
@@ -634,7 +687,7 @@ async def monitor_screen(
         if choice == "o":
             state.order = ORDERS[(ORDERS.index(state.order) + 1) % len(ORDERS)]
             return KeyOutcome.CONTINUE
-        if choice not in ("s", "m", "k", "u"):
+        if choice not in ("s", "c", "m", "k", "u"):
             return KeyOutcome.CONTINUE
         entry = _selected_entry(state, controls)
         if entry is None:
@@ -648,6 +701,9 @@ async def monitor_screen(
             return KeyOutcome.CONTINUE
         if choice == "s":
             await snoop_screen(session, actor, controls, entry, glyphs=state.glyphs)
+            return KeyOutcome.REPAINT
+        if choice == "c":
+            await _chat(session, actor, state, controls, entry)
             return KeyOutcome.REPAINT
         if choice == "m":
             await _message(session, state, controls, entry)

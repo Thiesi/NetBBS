@@ -251,6 +251,29 @@ class Session(ABC):
     #: on the first write. See `screen_copy`.
     _screen_copy: TerminalEmulator | None = None
     _raw_decoder: codecs.IncrementalDecoder | None = None
+    #: Bumped on every write that reaches the copy, so a repaint from it
+    #: can tell whether output arrived while it was being sent.
+    _copy_generation: int = 0
+
+    #: Issue #765, a SysOp's break-in chat. While `_break_in_input` is set,
+    #: every byte the caller types goes there instead of to whatever read
+    #: their own screen is waiting in, and while `_output_held` is set,
+    #: what their screen writes updates the copy but is not sent. The
+    #: caller's task keeps running untouched; see `begin_break_in`.
+    _break_in_input: asyncio.Queue[int] | None = None
+    _output_held: bool = False
+    _break_in_over: asyncio.Event | None = None
+    #: Keystrokes a break-in chat had to drop because its queue was full.
+    break_in_dropped: int = 0
+
+    #: True while this session is reading masked input (a password): a
+    #: break-in is refused then, and any key diverted to a chat while it is
+    #: set is shown as `*`. Set through `secret_input`.
+    reading_secret: bool = False
+
+    #: How many times `end_break_in` repaints before it releases anyway,
+    #: when output keeps arriving during every repaint (a busy door).
+    _RESTORE_ATTEMPTS = 3
 
     def note_input(self) -> None:
         """Record that the client just sent input; see `last_input_at`."""
@@ -275,6 +298,8 @@ class Session(ABC):
             self._copy_output(self._raw_decoder.decode(b"", final=True))
             self._raw_decoder = None
         self._copy_output(_normalize_newlines(text))
+        if self._output_held:
+            return
         await self._send_text(text)
 
     async def write_raw(self, data: bytes) -> None:
@@ -298,6 +323,13 @@ class Session(ABC):
             if self._raw_decoder is None:
                 self._raw_decoder = codecs.getincrementaldecoder("utf-8")("replace")
             self._copy_output(self._raw_decoder.decode(data))
+        elif self._output_held:
+            # A transfer is refused a break-in (#765); should one start
+            # during one anyway, its frames must still reach the wire.
+            await self._send_raw(data)
+            return
+        if self._output_held:
+            return
         await self._send_raw(data)
 
     async def _send_text(self, text: str) -> None:
@@ -323,11 +355,174 @@ class Session(ABC):
     def _copy_output(self, text: str) -> None:
         if not text:
             return
+        self._copy_generation += 1
         try:
             self.screen_copy().feed(text)
         except Exception:  # pragma: no cover - a copy bug must never cost a caller their session
             _logger.exception("screen copy failed; starting a fresh one")
             self._screen_copy = None
+
+    # -- input: the other half of the shared layer (issue #765) -----------
+    #
+    # Byte-stream transports (Telnet, SSH, the local CLI) implement
+    # `_receive_byte`/`_receive_byte_with_timeout`; `read_byte` and
+    # `read_byte_with_timeout` here are what every reader calls, and the
+    # one place a break-in can take the caller's keystrokes. The web
+    # transport receives input as websocket events instead and diverts
+    # them where they arrive (`WebSession._handle_event`).
+
+    async def read_byte(self) -> int | None:
+        """
+        Read and return the next raw data byte from the client, blocking
+        until one arrives, or `None` if what was read was a pure
+        transport-level action with no data significance (a Telnet
+        negotiation sequence, an SSH terminal-resize notification) —
+        callers should just loop and call this again. Raises
+        `SessionClosedError` if the connection closes while waiting.
+
+        The lower-level primitive `read_line`/`read_key` are built on
+        (see `netbbs.net.char_input`), also usable directly by anything
+        that needs genuinely raw bytes rather than character-mode
+        line/key semantics — currently `netbbs.net.zmodem`, which
+        ZDLE-decodes its own framing and has no use for backspace/UTF-8/
+        escape-sequence handling built for human keyboard input.
+
+        During a break-in the caller's own pending read never sees a
+        keystroke: each one goes to the chat, and this keeps waiting.
+        """
+        while True:
+            value = await self._receive_byte()
+            if value is not None and self._divert(value):
+                continue
+            return value
+
+    async def read_byte_with_timeout(self, timeout: float) -> int | None:
+        """A bounded peek (escape-sequence lookahead, typeahead discard):
+        the next byte within `timeout` seconds, or `None`."""
+        value = await self._receive_byte_with_timeout(timeout)
+        if value is not None and self._divert(value):
+            return None
+        return value
+
+    async def _receive_byte(self) -> int | None:
+        """The transport's own blocking byte read; see `read_byte`."""
+        raise NotImplementedError
+
+    async def _receive_byte_with_timeout(self, timeout: float) -> int | None:
+        """The transport's own bounded peek; see `read_byte_with_timeout`."""
+        raise NotImplementedError
+
+    def _divert(self, value: int) -> bool:
+        """Hand `value` to a break-in chat if one is running."""
+        queue = self._break_in_input
+        if queue is None:
+            return False
+        try:
+            queue.put_nowait(value)
+        except asyncio.QueueFull:
+            # A runaway paste into a chat: dropped rather than buffered
+            # without bound, and said so -- in the node log once per chat,
+            # and on the SysOp's chat screen (`break_in_dropped`).
+            if not self.break_in_dropped:
+                _logger.warning("break-in chat input overflowed; dropping the caller's excess keystrokes")
+            self.break_in_dropped += 1
+        return True
+
+    # -- break-in (issue #765) --------------------------------------------
+
+    @property
+    def in_break_in(self) -> bool:
+        return self._break_in_input is not None
+
+    def begin_break_in(self) -> asyncio.Queue[int]:
+        """Take over this session's terminal for a SysOp's chat: from now
+        on the caller's keystrokes arrive on the returned queue, and their
+        own screen's output is held (kept in the copy, not sent). Draw the
+        chat with `write_through`. `end_break_in` gives it all back."""
+        if self._break_in_input is not None:
+            raise RuntimeError("this session is already in a break-in chat")
+        self._break_in_input = asyncio.Queue(maxsize=4096)
+        self._output_held = True
+        self._break_in_over = asyncio.Event()
+        self.break_in_dropped = 0
+        return self._break_in_input
+
+    async def break_in_began(self) -> None:
+        """Transport housekeeping once a break-in has taken the terminal;
+        nothing by default (see `WebSession`)."""
+
+    async def wait_for_break_in_end(self) -> None:
+        """Return once no break-in holds this session. A binary transfer
+        waits here before claiming the byte stream: the chat would divert
+        its peer's replies and interleave its own drawing with the frames
+        (`netbbs.net.zmodem`)."""
+        while self._break_in_over is not None:
+            await self._break_in_over.wait()
+
+    async def write_through(self, text: str) -> None:
+        """Write past a break-in's hold, and past the screen copy: the
+        chat is drawn over the caller's screen, and the copy keeps what is
+        underneath, to be put back."""
+        await self._send_text(text)
+
+    def _held_raw_prefix(self) -> bytes:
+        """The start of a multi-byte character a door sent while output was
+        held, whose remaining bytes are still to come: the copy's decoder
+        is waiting on it, and the caller's terminal must be too."""
+        decoder = self._raw_decoder
+        return decoder.getstate()[0] if decoder is not None else b""
+
+    async def _send_held_prefix(self) -> None:
+        prefix = self._held_raw_prefix()
+        if not prefix:
+            return
+        try:
+            await self._send_raw(prefix)
+        except NotImplementedError:
+            # The door already ended (a web session has no raw stream
+            # outside door mode): the character will never be completed, so
+            # the copy shows what the terminal would, a replacement.
+            self._drop_held_prefix()
+
+    def _drop_held_prefix(self) -> None:
+        """Give up on a held partial character: the copy shows the
+        replacement a terminal would, and whatever continuation arrives
+        later is equally a stray byte on both sides."""
+        if self._raw_decoder is not None:
+            self._copy_output(self._raw_decoder.decode(b"", final=True))
+            self._raw_decoder = None
+
+    async def end_break_in(self) -> None:
+        """Repaint the caller's screen as their own program left it,
+        output that arrived during the chat included, then give input and
+        output back. Nothing is awaited between the last repaint and the
+        release, so no write can fall between the two."""
+        try:
+            for _attempt in range(self._RESTORE_ATTEMPTS):
+                # Stable means: no output reached the copy and the terminal
+                # kept its size while the repaint -- and the held prefix after
+                # it -- were on their way.
+                before = (self._copy_generation, self.terminal_width, self.terminal_height)
+                await self.write_through(self.screen_copy().restore_ansi())
+                await self._send_held_prefix()
+                if before == (self._copy_generation, self.terminal_width, self.terminal_height):
+                    break
+            else:
+                # Output kept arriving during every repaint (a busy door on a
+                # slow line). Release first, then repaint once more: the
+                # repaint is queued on the wire before anything the caller's
+                # screen writes after the release, so nothing is lost. A held
+                # partial character can't be ordered safely against output
+                # released alongside it, so it is given up on both sides.
+                self._drop_held_prefix()
+                self._output_held = False
+                await self.write_through(self.screen_copy().restore_ansi())
+        finally:
+            self._output_held = False
+            self._break_in_input = None
+            over, self._break_in_over = self._break_in_over, None
+            if over is not None:
+                over.set()
 
     @contextmanager
     def binary_transfer(self):
@@ -515,24 +710,24 @@ class Session(ABC):
     async def close(self) -> None:
         """Close the underlying connection."""
 
-    @abstractmethod
-    async def read_byte(self) -> int | None:
-        """
-        Read and return the next raw data byte from the client, blocking
-        until one arrives, or `None` if what was read was a pure
-        transport-level action with no data significance (a Telnet
-        negotiation sequence, an SSH terminal-resize notification) —
-        callers should just loop and call this again. Raises
-        `SessionClosedError` if the connection closes while waiting.
 
-        The lower-level primitive `read_line`/`read_key` are built on
-        (see `netbbs.net.char_input`), also usable directly by anything
-        that needs genuinely raw bytes rather than character-mode
-        line/key semantics — currently `netbbs.net.zmodem`, which
-        ZDLE-decodes its own framing and has no use for backspace/UTF-8/
-        escape-sequence handling built for human keyboard input.
-        """
 
+
+@contextmanager
+def secret_input(session: object):
+    """Mark `session` as reading masked input for the span of the read
+    (issue #765): a SysOp's break-in must never show a password. Tolerates
+    sources that are not a `Session` (test doubles, stand-ins)."""
+    previous = getattr(session, "reading_secret", False)
+    try:
+        session.reading_secret = True  # type: ignore[attr-defined]
+    except AttributeError:
+        yield
+        return
+    try:
+        yield
+    finally:
+        session.reading_secret = previous  # type: ignore[attr-defined]
 
 
 def _normalize_newlines(text: str) -> str:

@@ -310,7 +310,7 @@ class TelnetSession(Session):
 
     # -- char_input.ByteSource ------------------------------------------
 
-    async def read_byte(self) -> int | None:
+    async def _receive_byte(self) -> int | None:
         """
         Read and return the next actual DATA byte from the client, or
         `None` if what was read was purely a Telnet negotiation action
@@ -352,7 +352,7 @@ class TelnetSession(Session):
         self.note_input()
         return b
 
-    async def read_byte_with_timeout(self, timeout: float) -> int | None:
+    async def _receive_byte_with_timeout(self, timeout: float) -> int | None:
         """
         Peek a single raw byte within `timeout` seconds, or `None` if
         nothing arrives or the connection closes — used by

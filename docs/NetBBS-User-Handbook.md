@@ -105,6 +105,14 @@ as you type them, so they are never visible this way. You are not told while
 it happens, but the node keeps a log of every time a SysOp watches a session.
 The last line of chat's `/help` says the same.
 
+The SysOp can also break into your session for a live chat. Your screen
+turns into a two-part chat window: the SysOp types in the top half and you
+type in the bottom half. When the SysOp ends the chat, your screen comes back
+exactly as you left it, with any half-typed line still there. If you were in
+a game, the game kept running during the chat. A break-in can't start while
+you are typing a password, and anything typed at a password prompt shows as
+`*` in the chat.
+
 ## Exchange files
 
 Open a file area and select an upload or download action. Use the browser

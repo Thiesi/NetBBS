@@ -43,7 +43,7 @@ from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import Awaitable, Callable, Protocol, Sequence
 
-from netbbs.net.session import SessionClosedError
+from netbbs.net.session import SessionClosedError, secret_input
 from netbbs.rendering.ansi import reject_keystroke
 from netbbs.rendering.pipe_codes import PastedColor
 from netbbs.rendering.width import char_width, display_width
@@ -946,7 +946,8 @@ async def read_line(
     was: a username or a subject has no use for ``|04``.
     """
     if not echo:
-        return await _read_line_masked(source, write)
+        with secret_input(source):
+            return await _read_line_masked(source, write)
     return await _read_line_editable(
         source, write, history, completer, live_buffer=live_buffer, lock=lock,
         list_candidates=list_candidates, initial=initial, cancellable=cancellable,

@@ -783,11 +783,19 @@ Under **Operations → Node and sessions**:
     it, until you press any key. The caller is not told at the time. Chat's
     `/help` and the User Handbook say that you can do this, and the node log
     records every snoop: who watched whom, and for how long.
+    **Chat** breaks into their session for a two-pane chat: you type in the
+    top pane, they type in the bottom one, and Esc ends it. Their screen is
+    then repainted exactly as they left it, with anything it printed during
+    the chat and any half-typed line included, and they carry on. It is
+    refused during a file transfer. For a caller in a door you are warned
+    first, because the door keeps running while they chat. The node log
+    records every chat.
     **Message** sends them a line. **Kick** opens
     the same disconnect screen as **Who**: an optional message, then
     **Disconnect**, which is recorded in the audit log. **Unwind** sends them
     back to the main menu.
-  - **Order** sorts by time on, idle time or name. Below the table are the
+  - **Order** sorts by time on, idle time or name; a mark in the heading
+    shows which. Below the table are the
     most recent logins, logoffs and disconnects. A message or broadcast sent
     to you while the Monitor is open appears on the line above the keys.
   - On a terminal narrower than 80 columns, the address, terminal size and
