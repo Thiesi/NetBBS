@@ -3445,6 +3445,22 @@ MIGRATIONS = [
     ),
     Migration(
         description=(
+            "Issue #835: `signup_answers` -- a caller's answer to the SysOp's optional signup "
+            "question, kept on the pending account for the approver and deleted on approval. "
+            "The question is stored beside it, since the SysOp may reword it later. Goes "
+            "with the account (ON DELETE CASCADE), so declining a signup removes it too."
+        ),
+        sql="""
+        CREATE TABLE signup_answers (
+            user_id     INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+            question    TEXT NOT NULL,
+            answer      TEXT NOT NULL,
+            answered_at TEXT NOT NULL
+        );
+        """,
+    ),
+    Migration(
+        description=(
             "Issue #838: `position` on communities -- the SysOp's order, which the Communities "
             "list follows. Existing Communities keep today's alphabetical (case-insensitive) order."
         ),

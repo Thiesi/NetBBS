@@ -3128,7 +3128,7 @@ def test_under_production_policy_an_unmet_author_is_withheld_visible_and_establi
                     await net.dial(name, session)
                 net.post("A", "hello from A")
                 await net.dial("A", session)
-                with caplog.at_level(logging.WARNING, logger="netbbs.link.sync"):
+                with caplog.at_level(logging.DEBUG, logger="netbbs.link.sync"):
                     for _ in range(3):
                         await net.dial("B", session)
                 net.post("R", "hello from R")
@@ -3146,8 +3146,13 @@ def test_under_production_policy_an_unmet_author_is_withheld_visible_and_establi
 
     try:
         asyncio.run(scenario())
-        refusals = [r for r in caplog.records if "rejected inventory event" in r.getMessage()]
+        refusals = [r for r in caplog.records if "withheld inventory event" in r.getMessage()]
         assert len(refusals) == 1
+        # Issue #834: probation is routine. One plain INFO line, no warning.
+        explained = [r for r in caplog.records if "on probation here" in r.getMessage()]
+        assert [r.levelno for r in explained] == [logging.INFO]
+        assert net.ids["A"].fingerprint in explained[0].getMessage()
+        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
         assert sorted(net.subjects_on("B")) == ["hello from A", "hello from R"]
         # Establishing the node does not establish its callers: a remote user
         # is a subject of its own, so the post waits in the approval queue.
@@ -3220,7 +3225,7 @@ def test_a_board_whose_origin_is_on_probation_is_not_downloaded_again_on_every_p
                 await net.dial("A", session)
                 net.post("A", "on A's own board", board_name="from-a")
                 await net.dial("A", session)
-                with caplog.at_level(logging.WARNING, logger="netbbs.link.sync"):
+                with caplog.at_level(logging.DEBUG, logger="netbbs.link.sync"):
                     for _ in range(3):
                         await net.dial("B", session)
                 net.post("R", "hello from R")
@@ -3234,9 +3239,11 @@ def test_a_board_whose_origin_is_on_probation_is_not_downloaded_again_on_every_p
             "SELECT COUNT(*) FROM boards WHERE name = 'from-a'"
         ).fetchone()[0]
         assert carried_on_r == 1, "the scenario needs R to carry A's board"
-        refusals = [r for r in caplog.records if "rejected inventory event" in r.getMessage()]
+        refusals = [r for r in caplog.records if "withheld inventory event" in r.getMessage()]
         # The genesis and the post, once each, and not once per pass.
         assert len(refusals) == 2
+        # Explained to the SysOp once for the node, not once per event.
+        assert len([r for r in caplog.records if "on probation here" in r.getMessage()]) == 1
         assert net.subjects_on("B") == ["hello from R"]
     finally:
         net.close()

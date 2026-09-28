@@ -13,9 +13,13 @@ A browser needs no terminal software. An SSH connection looks like
 `ssh -p 2222 yourname@bbs.example.org`; substitute the actual port and address.
 Use SSH or HTTPS when available: plain Telnet does not encrypt your login.
 
-Log in with your account. If registration is offered, follow the on-screen
-steps; some nodes require approval before you can log in. If registration
-is closed, contact the SysOp. Accounts and access rules belong to each node.
+Log in with your account. If registration is offered, type `new` at the
+username prompt (over SSH, connect as `new`). Usernames use the letters A-Z
+without accents, digits, `_`, `-` and `.`, up to 32 characters; the name is
+checked before you choose a password. Some nodes require approval before you
+can log in: until the SysOp approves your account, logging in tells you it is
+still waiting, and you cannot look around in the meantime. If registration is
+closed, contact the SysOp. Accounts and access rules belong to each node.
 
 Change your password under **Profile → Account password**: you type the
 current one, then the new one twice, and nothing is echoed. If you have
@@ -23,7 +27,7 @@ forgotten it, ask the SysOp to set a new one; nobody can recover the old one.
 
 ## Find your way around
 
-Press a highlighted letter such as **[J]** for **Jump to**. Most menus react
+Press a highlighted letter such as **[M]** for **Message boards**. Most menus react
 immediately, without Enter. When typing text, use Enter to submit it.
 **Ctrl+U** clears the line you are typing, and at a field that allows it,
 Esc leaves it without changing anything.
@@ -32,11 +36,13 @@ things in different places. **[B]ack** leaves most screens.
 
 | Main-menu choice | What it does |
 | --- | --- |
-| **Communities** | Browse subjects grouping message boards, chat channels, file areas, and doors |
-| **Uncategorized** | Browse resources outside a Community |
-| **Jump to** | Go straight to a type of resource, including games |
+| **Message boards** | Every message board on this node |
+| **Chat** | Every chat channel |
+| **Files** | Every file area |
+| **Games** | Door games, when the SysOp has set some up |
+| **Communities** (key **O**) | Topics the SysOp set up, each with its own boards, chat channels, file areas and games |
 | **New scan** | See unread activity and resources you have not visited |
-| **Find** | Search content available on this node |
+| **Find** (key **/**) | Search content available on this node |
 | **E-mail** | Read and send persistent NetBBS mail |
 | **Who's online** | See callers and available ways to contact them |
 | **Profile** | Change your public profile and personal preferences |
@@ -84,7 +90,9 @@ contact fails, send mail explicitly—chat does not silently turn it into mail.
 On a linked node, addresses can use a known, unambiguous name such as
 `alice@OtherNode`. Use the address offered by the directory or Who screen.
 If a name is ambiguous, NetBBS asks for a more specific identity. Check an
-unexpected node-identity warning with your SysOp.
+unexpected node-identity warning with your SysOp. A node that has only just
+linked with this one cannot be written to yet: the To prompt says so, and mail
+opens once your SysOp establishes that node.
 
 Channels marked **MRC** connect to a separate public chat network. Your handle
 and messages are visible there. MRC private messages are optional in your
@@ -135,7 +143,7 @@ later or tell your SysOp.
 
 ## Play a door game
 
-Choose **Jump to → Games**, or browse a Community's games. Availability
+Choose **Games** on the main menu, or a Community's games. Availability
 depends on what your SysOp has registered.
 
 - **Retro Trivia:** answer a short round of multiple-choice questions.

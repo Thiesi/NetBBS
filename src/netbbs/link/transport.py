@@ -123,7 +123,9 @@ from netbbs.link.enforcement import (
     decide_node_action,
     ensure_event_author_subject,
     ensure_node_subject,
+    node_transport_state,
 )
+from netbbs.link.trust import TrustState
 from netbbs.link.file_transfer import (
     FileNoLongerHeldError,
     FileTransferError,
@@ -141,7 +143,12 @@ from netbbs.link.files import (
     materialize_carried_file_descriptor,
     withdraw_remote_file,
 )
-from netbbs.link.mail import apply_link_message_accepted, apply_link_message_bounced, deliver_link_message
+from netbbs.link.mail import (
+    apply_link_message_accepted,
+    apply_link_message_bounced,
+    bounce_link_message,
+    deliver_link_message,
+)
 from netbbs.link.node_identity import NodeIdentity, resolve_current_operational_key, rotate_operational_key
 from netbbs.identity.encryption import derive_encryption_private_key
 from netbbs.link.protocol import (
@@ -415,6 +422,21 @@ async def persist_accepted_events(
     for content_id in accepted:
         envelope = node.events[content_id]
         object_type = envelope["envelope"]["object_type"]
+        if enforce_trust_policy and object_type == LINK_MESSAGE_OBJECT_TYPE and not (await lane.run(
+            decide_event_authorship, envelope, transport_peer_fingerprint=sender_fingerprint,
+        )).allowed:
+            # A direct push is decided before acceptance and refused with a
+            # 403 the sender turns into a bounce. Mail picked up from a relay
+            # mailbox has no such answer, so the same rule applies here and
+            # a refusal becomes a signed bounce (issue #804). Decided before
+            # anything is kept: a refused node must not grow this node's
+            # trust subjects or retained events by inventing senders. A node
+            # quarantined or blocked here is not answered at all: this node
+            # sends it nothing, so a bounce queued for it could only pile up.
+            home = envelope["envelope"]["payload"]["sender"]["home_node_fingerprint"]
+            if await lane.run(node_transport_state, home) not in {TrustState.BLOCKED, TrustState.QUARANTINED}:
+                await lane.run(bounce_link_message, envelope, "blocked_sender", node_identity=node.identity)
+            continue
         if enforce_trust_policy:
             await lane.run(ensure_event_author_subject, envelope)
         # Design doc §9.3/issue #73: board_post/board_post_edit skip
@@ -617,6 +639,18 @@ class LinkTransportError(Exception):
     # has to tell "this peer does not have that route" from a failure worth
     # retrying. `None` everywhere else.
     status: int | None = None
+
+
+class LinkPolicyRefused(LinkTransportError):
+    """The peer answered with its trust policy's refusal: HTTP 403 with a
+    `link_policy_*` reason code (`netbbs.link.enforcement`). Unlike a
+    transport failure, the peer did hear the request and decided, so
+    trying its next address would only ask the same question again."""
+
+    def __init__(self, message: str, reason_code: str) -> None:
+        super().__init__(message)
+        self.status = 403
+        self.reason_code = reason_code
 
 
 _NOISE_PROTOCOL_NAME = b"Noise_XX_25519_ChaChaPoly_BLAKE2s"
@@ -2639,7 +2673,11 @@ async def push_events(
         ) as response:
             if response.status != 200:
                 text = await response.text()
-                raise LinkTransportError(f"events push to {url} failed: HTTP {response.status}: {text}")
+                message = f"events push to {url} failed: HTTP {response.status}: {text}"
+                reason_code = _refusal_reason_code(text) if response.status == 403 else None
+                if reason_code is not None and reason_code.startswith("link_policy_"):
+                    raise LinkPolicyRefused(message, reason_code)
+                raise LinkTransportError(message)
             body = await response.json(loads=strict_json_loads)
     except (ClientError, TimeoutError, ValueError) as exc:
         raise LinkTransportError(f"could not reach {url}: {exc}") from exc

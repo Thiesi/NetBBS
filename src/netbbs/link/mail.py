@@ -219,15 +219,7 @@ def deliver_link_message(
     origin_node_fingerprint = sender_info["home_node_fingerprint"]
 
     def _bounce(reason: str) -> LinkMessageBounced:
-        bounced = build_link_message_bounced(
-            signing_identity=node_identity.signing_key,
-            recipient_node_fingerprint=node_identity.fingerprint,
-            message_content_id=message.content_id,
-            reason=reason,
-            created_at=utc_now_iso(),
-        )
-        _queue_acknowledgement(db, bounced, target_node_fingerprint=origin_node_fingerprint)
-        return bounced
+        return bounce_link_message(db, raw_message, reason, node_identity=node_identity)
 
     try:
         recipient = get_user_by_username(db, recipient_local_user_id)
@@ -265,6 +257,30 @@ def deliver_link_message(
     )
     _queue_acknowledgement(db, accepted, target_node_fingerprint=origin_node_fingerprint)
     return accepted
+
+
+def bounce_link_message(
+    db: Database, raw_message: dict, reason: str, *, node_identity: NodeIdentity
+) -> LinkMessageBounced:
+    """Answer an accepted incoming `link_message` with a signed bounce
+    instead of delivering it, queued back to the sender's home node.
+
+    `deliver_link_message` bounces this way for its own reasons; trust
+    policy calls it directly with `"blocked_sender"` for mail that arrived
+    by a path with no synchronous answer, a relay mailbox pickup (issue
+    #804)."""
+    message = LinkMessage.from_dict(raw_message)
+    bounced = build_link_message_bounced(
+        signing_identity=node_identity.signing_key,
+        recipient_node_fingerprint=node_identity.fingerprint,
+        message_content_id=message.content_id,
+        reason=reason,
+        created_at=utc_now_iso(),
+    )
+    _queue_acknowledgement(
+        db, bounced, target_node_fingerprint=message.payload["sender"]["home_node_fingerprint"]
+    )
+    return bounced
 
 
 def _make_room_or_report_full(db: Database, recipient: User) -> bool:
@@ -344,6 +360,24 @@ def apply_link_message_bounced(db: Database, raw_ack: dict) -> None:
     bounced` acknowledgement."""
     bounced = LinkMessageBounced.from_dict(raw_ack)
     _set_delivery_status(db, bounced.payload["message_content_id"], "bounced")
+
+
+def record_link_message_refused(db: Database, message_content_id: str, reason_code: str) -> None:
+    """The recipient's node answered this node's push of an outbound
+    `link_message` with a trust-policy refusal (HTTP 403 carrying a
+    `link_policy_*` reason code, issue #804): it holds this node or the
+    sending user on probation, in quarantine or blocked. That answer is
+    final for this message, so it is a bounce, not a failure to retry.
+
+    Only a still-`pending` row changes. `reason_code` is the recipient's
+    `netbbs.link.enforcement` reason; keeping it for the Sent screen is
+    #806's, so it is not stored yet; the caller logs it."""
+    db.connection.execute(
+        "UPDATE mail_messages SET link_delivery_status = 'bounced' "
+        "WHERE link_event_content_id = ? AND link_delivery_status = 'pending'",
+        (message_content_id,),
+    )
+    db.connection.commit()
 
 
 def _set_delivery_status(db: Database, message_content_id: str, status: str) -> None:

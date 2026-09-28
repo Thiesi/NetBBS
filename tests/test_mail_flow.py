@@ -29,6 +29,9 @@ from netbbs.link.events import build_endpoint_descriptor
 from netbbs.link.node_identity import bootstrap_node_identity
 from netbbs.link.protocol import LinkNode, PeerRecord
 from netbbs.link.store import save_peer
+from netbbs.link.trust import (
+    TrustDimension, TrustState, TrustSubject, register_subject, set_trust_override,
+)
 from netbbs.mail import list_inbox, list_sent, send_mail
 from netbbs.net.char_input import InputCancelled, InputHistory
 from netbbs.net.main_menu import _main_menu
@@ -747,8 +750,21 @@ def test_fullscreen_mail_delivery_failure_keeps_draft_recoverable(tmp_path, monk
 # -- compose: Link addresses --------------------------------------------------
 
 
+def _establish_node(db, fingerprint):
+    """What a SysOp does before this node sends a peer mail (issue #804)."""
+    subject = TrustSubject.node(fingerprint)
+    register_subject(db, subject, first_accepted_at=_TRUST_NOW, now_iso=_TRUST_NOW)
+    for dimension in (TrustDimension.IDENTITY_INTEGRITY, TrustDimension.RESOURCE_BEHAVIOR):
+        set_trust_override(
+            db, subject, dimension, TrustState.ESTABLISHED, reason="test", now_iso=_TRUST_NOW,
+        )
+
+
+_TRUST_NOW = "2026-01-01T00:00:00+00:00"
+
+
 def _link_context_with_known_peer(
-    db, node_identity, peer_identity, *, friendly_name="Farpoint",
+    db, node_identity, peer_identity, *, friendly_name="Farpoint", established=True,
 ):
     descriptor = build_endpoint_descriptor(
         signing_identity=peer_identity.signing_key,
@@ -768,6 +784,8 @@ def _link_context_with_known_peer(
             descriptor=descriptor,
         ),
     )
+    if established:
+        _establish_node(db, peer_identity.fingerprint)
     return LinkContext(link_node=LinkNode(identity=node_identity))
 
 
@@ -838,6 +856,56 @@ def test_compose_allows_at_signs_in_a_friendly_node_name(tmp_path):
         "SELECT recipient_remote_address FROM mail_messages"
     ).fetchone()
     assert row["recipient_remote_address"] == f"bob@{remote_identity.fingerprint}"
+    lane.close()
+    db.close()
+
+
+def test_compose_refuses_a_peer_still_on_probation_at_the_to_prompt(tmp_path):
+    """Issue #804: mail to a newly linked peer cannot be delivered, so the
+    caller hears it at the To prompt and is asked again in place -- never
+    after writing the message, and never "Message sent."."""
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
+    alice = create_user(db, "alice", password="hunter2pw", user_level=10)
+    node_identity = bootstrap_node_identity("roanoke")
+    remote_identity = bootstrap_node_identity("farpoint")
+    link_context = _link_context_with_known_peer(db, node_identity, remote_identity, established=False)
+
+    session = FakeSession(keys=["c", "b"], lines=["bob@Farpoint", ""])
+    lane = DatabaseLane(db_path)
+    asyncio.run(browse_mail(session, lane, alice, link_context=link_context))
+
+    text = _visible_text(session)
+    assert "Farpoint · farpoint.example.org is newly linked; mail opens once the SysOp establishes it." in text
+    assert text.count("To (username or user@node-name-or-dns): ") == 2
+    assert "Subject:" not in text
+    assert "Message sent." not in text
+    assert db.connection.execute("SELECT COUNT(*) FROM mail_messages").fetchone()[0] == 0
+    lane.close()
+    db.close()
+
+
+def test_compose_refuses_a_probationary_peer_chosen_from_the_review_screen(tmp_path):
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
+    alice = create_user(db, "alice", password="hunter2pw", user_level=10)
+    node_identity = bootstrap_node_identity("roanoke")
+    established = bootstrap_node_identity("farpoint")
+    newcomer = bootstrap_node_identity("newcomer")
+    link_context = _link_context_with_known_peer(db, node_identity, established)
+    _link_context_with_known_peer(db, node_identity, newcomer, friendly_name="Newcomer", established=False)
+
+    session = FakeSession(
+        keys=["c", "t", "s", "c", "b"],
+        lines=["bob@Farpoint", "Hello", "Body", "", "bob@Newcomer"],
+    )
+    lane = DatabaseLane(db_path)
+    asyncio.run(browse_mail(session, lane, alice, link_context=link_context))
+
+    text = _visible_text(session)
+    assert "Newcomer · farpoint.example.org is newly linked; mail opens once the SysOp establishes it." in text
+    assert "Message sent." not in text
+    assert db.connection.execute("SELECT COUNT(*) FROM mail_messages").fetchone()[0] == 0
     lane.close()
     db.close()
 

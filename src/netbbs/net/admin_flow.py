@@ -77,6 +77,7 @@ from netbbs.auth.users import (
     UserManagementError,
     UsernameRetiredError,
     approve_pending_user,
+    decline_pending_user,
     count_sysops,
     create_user,
     current_account,
@@ -94,6 +95,7 @@ from netbbs.auth.users import (
 )
 from netbbs.backup import (
     BackupError,
+    running_node_pid,
     create_backup,
     default_backup_destination,
     door_installs_included,
@@ -520,6 +522,12 @@ from netbbs.net.shutdown import (
 from netbbs.net.sysop_monitor import monitor_screen
 from netbbs.net.password_screen import manage_password_screen
 from netbbs.net.ssh_key_screen import manage_ssh_keys_screen
+from netbbs.auth.signup_answers import (
+    MAX_REGISTRATION_QUESTION_LENGTH,
+    get_registration_question,
+    load_signup_answer,
+    set_registration_question,
+)
 from netbbs.net.menu_description_preference import menu_description_level
 from netbbs.net.redraw_preference import (
     redraw_in_place_enabled,
@@ -843,6 +851,19 @@ def _wrap_counts_panel(label: str, pairs: Sequence[tuple[str, int]], *, width: i
         current_width += sep_width + seg_width
     lines.append(prefix + "  ".join(current))
     return lines
+
+
+def _offline_console_note(node_running: bool) -> str:
+    """What the health panel says when this console has no live node behind
+    it -- `python -m netbbs.admin`, run on the node's machine (issue #834).
+    "Standalone mode" read as "because I declined Link"; the reason is that
+    this process is not the node, and whether the node is up at all."""
+    if node_running:
+        return (
+            "This console runs outside the node. For live controls, log in to "
+            "the node and open the SysOp menu there."
+        )
+    return "The node isn't running, so there are no live controls. Start the node to get them."
 
 
 def _wrap_panel_sentence(text: str, *, prefix: str, width: int, unicode_style: bool) -> list[str]:
@@ -1530,6 +1551,7 @@ async def _draw_admin_menu(
             "unicode_style": unicode_style_enabled(db, actor),
             "collapsed": breadcrumb_collapsed_enabled(db, actor),
             "header_color": effective_header_color_256(db),
+            "node_running": node_controls is None and running_node_pid(db.path) is not None,
         }
 
     if state is None:
@@ -1569,7 +1591,7 @@ async def _draw_admin_menu(
         health.append(f"  {counts_row([('Active sessions', active_sessions)])}")
     else:
         standalone_lines = _wrap_panel_sentence(
-            "Live node controls unavailable in standalone mode.",
+            _offline_console_note(bool(state.get("node_running"))),
             prefix="  ", width=box_inner_width, unicode_style=unicode_style,
         )
         health.extend(colored(f"  {line}", fg_color=MUTED_COLOR) for line in standalone_lines)
@@ -1770,7 +1792,7 @@ def _compact_dashboard_panel(
         panel.extend(
             colored(f"  {line}", fg_color=MUTED_COLOR)
             for line in _wrap_panel_sentence(
-                "Live node controls unavailable in standalone mode.",
+                _offline_console_note(bool(state.get("node_running"))),
                 prefix="  ", width=width, unicode_style=unicode_style,
             )
         )
@@ -2071,6 +2093,7 @@ async def _operations_menu(
     """Operational observation and intervention, separate from durable settings."""
     def _load_ops(db: Database) -> dict[str, Any]:
         return {
+            "node_running": node_controls is None and running_node_pid(db.path) is not None,
             **_link_health_snapshot(db, link_context),
             "backup": _get_display_backup_summary(db),
             "description_level": menu_description_level(db, actor),
@@ -2141,7 +2164,7 @@ async def _operations_menu(
                 else:
                     panel.append(colored("NODE HEALTH: ", fg_color=LABEL_COLOR, bold=True) + node_badge)
                     standalone_lines = _wrap_panel_sentence(
-                        "Live node controls unavailable in standalone mode.",
+                        _offline_console_note(bool(state.get("node_running"))),
                         prefix="  ", width=box_inner_width, unicode_style=unicode_style,
                     )
                     panel.extend(colored(f"  {line}", fg_color=MUTED_COLOR) for line in standalone_lines)
@@ -2202,7 +2225,13 @@ async def _operations_menu(
                 if active_sessions is not None:
                     panel.append(f"  {counts_row([('Active sessions', active_sessions)])}")
                 else:
-                    panel.append(colored("  Live node controls unavailable in standalone mode.", fg_color=MUTED_COLOR))
+                    panel.extend(
+                        colored(f"  {line}", fg_color=MUTED_COLOR)
+                        for line in _wrap_panel_sentence(
+                            _offline_console_note(bool(state.get("node_running"))),
+                            prefix="  ", width=box_inner_width, unicode_style=unicode_style,
+                        )
+                    )
 
                 if link_context is None:
                     link_badge_text = "UNAVAILABLE" if node_controls is None else "DISABLED"
@@ -5813,6 +5842,15 @@ async def _draw_user_detail(
             _editable("i", "Can verify identity", f"{_yes_no(target.can_verify_identity)} (age/name attestation)"),
         ]),
     ]
+    # Issue #835 (F072): what the caller said when signing up, for whoever
+    # decides on the account. Typed by an unauthenticated caller, so
+    # sanitized like any other remote text.
+    signup_answer = await lane.run(load_signup_answer, target.id) if target.pending_approval else None
+    if signup_answer is not None:
+        sections.insert(1, Section("Signup answer", [
+            Note(f"Asked: {sanitize_text(signup_answer.question)}"),
+            Note(f"Answer: {sanitize_text(signup_answer.answer)}"),
+        ]))
     panel_rows = await _write_sections(session, sections, unicode_style=unicode_style)
     options = []
     if target.pending_approval:
@@ -5824,7 +5862,12 @@ async def _draw_user_detail(
     options.append(MenuEntry(label=menu_key("P", "assword"), brief="Set or clear this user's password"))
     options.append(MenuEntry(label=menu_key("R", "estrict login"), brief="Block or unblock this account"))
     options.append(MenuEntry(label=menu_key("H", "istory"), brief="Admin actions on this account"))
-    options.append(MenuEntry(label=menu_key("D", "elete"), brief="Permanently remove this user"))
+    if target.pending_approval:
+        # Issue #835: turning down a signup is routine, and used to need
+        # the full permanent-delete warning and typed-name confirmation.
+        options.append(MenuEntry(label=menu_key("D", "ecline"), brief="Turn down this signup"))
+    else:
+        options.append(MenuEntry(label=menu_key("D", "elete"), brief="Permanently remove this user"))
     options.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to the picker"))
     await session.write_line(
         "\r\n" + _fitted_menu(options, description_level, session=session, used_rows=panel_rows + 5)
@@ -6171,6 +6214,22 @@ async def _user_detail_screen(
             blocked = await _draw_user_detail(
                 session, lane, target, description_level, redraw_in_place, unicode_style, collapsed, selected=selected,
             )
+        elif choice == "d" and target.pending_approval:
+            await session.write_line("")
+            if await prompt_yes_no(
+                session, f"Decline {target.username!r}'s signup and remove the account?", default=False
+            ):
+                try:
+                    await lane.run(decline_pending_user, target, declined_by=actor)
+                except UserManagementError as exc:
+                    _announce_line(session, colored(str(exc), fg_color=MUTED_COLOR))
+                    target = await lane.run(get_user_by_id, target.id) or target
+                else:
+                    _announce_line(session, f"{target.username!r}'s signup declined.")
+                    return
+            blocked = await _draw_user_detail(
+                session, lane, target, description_level, redraw_in_place, unicode_style, collapsed, selected=selected,
+            )
         elif choice == "d":
             await session.write_line("")
             deleted = await _delete_user_confirm(session, lane, actor, target, node_controls)
@@ -6254,18 +6313,38 @@ async def _registration_settings_screen(session: Session, lane: DatabaseLane, ac
     it used to print the outcome and return, and the Users menu's
     redraw wiped the line before it could be read.
     """
-    def _load(db: Database) -> tuple[RegistrationMode, int]:
-        return get_registration_mode(db), sum(1 for u in list_users(db) if u.pending_approval)
+    def _load(db: Database) -> tuple[RegistrationMode, int, str | None]:
+        return (
+            get_registration_mode(db),
+            sum(1 for u in list_users(db) if u.pending_approval),
+            get_registration_question(db),
+        )
 
     modes = {"o": RegistrationMode.OPEN, "a": RegistrationMode.APPROVAL_REQUIRED, "c": RegistrationMode.CLOSED}
     chrome = await _load_chrome(lane, actor)
     message: str | None = None
     while True:
-        current, pending_count = await lane.run(_load)
+        current, pending_count, question = await lane.run(_load)
         rows: list[Field | Note] = [Field("Current mode", _REGISTRATION_MODE_LABELS[current], bold=True)]
+        # Issue #835 (F072). Shown in every mode, since a SysOp may set it
+        # before switching to approval, but asked only in approval mode.
+        rows.append(Field(
+            "Signup question",
+            sanitize_text(question) if question else "(none)",
+            color=VALUE_COLOR if question else MUTED_COLOR,
+            note=None if current == RegistrationMode.APPROVAL_REQUIRED or not question
+            else "asked only while approval is required",
+        ))
         if pending_count:
             rows.append(Field(
                 "Awaiting approval", f"{pending_count} account(s) -- see [L]ist users", color=WARNING_COLOR
+            ))
+        if current == RegistrationMode.APPROVAL_REQUIRED:
+            # Issue #835: a SysOp's banner promised newcomers they could
+            # "look around a bit" while they waited, and they can't.
+            rows.append(Note(
+                "A new account can't log in at all until you approve it -- not even to look around. "
+                "The caller is told it is waiting for your approval."
             ))
         choice, _page = await show_detail(
             session,
@@ -6278,6 +6357,7 @@ async def _registration_settings_screen(session: Session, lane: DatabaseLane, ac
                 ("o", menu_key("O", "pen")),
                 ("a", menu_key("A", "pproval required")),
                 ("c", menu_key("C", "losed")),
+                ("q", menu_key("Q", "uestion")),
                 _BACK_ACTION,
             ],
             message=message,
@@ -6285,6 +6365,34 @@ async def _registration_settings_screen(session: Session, lane: DatabaseLane, ac
         )
         if choice == "b":
             return
+        if choice == "q":
+            await session.write_line("")
+            await write_prompt(
+                session,
+                f"Question to ask new callers (up to {MAX_REGISTRATION_QUESTION_LENGTH} characters, "
+                "blank for none): ",
+            )
+            text = (await session.read_line()).strip()
+            if len(text) > MAX_REGISTRATION_QUESTION_LENGTH:
+                message = colored(
+                    f"That is {len(text)} characters; the question can be at most "
+                    f"{MAX_REGISTRATION_QUESTION_LENGTH}. Not changed.",
+                    fg_color=ERROR_COLOR,
+                )
+                continue
+
+            def _apply_question(db: Database) -> None:
+                set_registration_question(db, text or None)
+                record_action(
+                    db, actor=actor, action="set_registration_question",
+                    detail="cleared" if not text else f"question={text!r}",
+                )
+
+            await lane.run(_apply_question)
+            message = colored(
+                "Signup question set." if text else "Signup question removed.", fg_color=SUCCESS_COLOR
+            )
+            continue
         new_mode = modes[choice]
         if new_mode == current:
             message = colored("Already set to that mode.", fg_color=MUTED_COLOR)
@@ -7064,7 +7172,7 @@ async def _backup_status_screen(
             ]
         else:
             sections.append(Section("Creating a backup", [Note(
-                "Live backup creation is unavailable in standalone admin. "
+                "This console runs outside the node, so it can't make a backup itself. "
                 "Run 'python -m netbbs.backup create --to <path>' instead."
             )]))
             actions = [("s", menu_key("S", "chedule & destination")), _BACK_ACTION]
@@ -8786,7 +8894,7 @@ async def _mrc_status_screen(session: Session, lane: DatabaseLane, actor: User, 
                 session, title=title, actions=[_BACK_ACTION],
                 sections=[Section(None, [
                     Field("State", status_badge("NOT AVAILABLE HERE", tone="neutral", unicode_style=chrome.unicode_style), styled=True),
-                    Note("The MRC bridge lives inside the running node; the standalone admin CLI can't see it."),
+                    Note("The MRC bridge lives inside the running node; this console runs outside the node and can't see it."),
                 ])],
                 redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
             )
@@ -13440,7 +13548,7 @@ async def _draw_board_list_masthead_menu(
     await _write_wrapped_subtitle(
         session,
         "Shown above every board-browsing view -- the top level, a category, or a "
-        "Community/Uncategorized scope.",
+        "Community.",
     )
     await session.write_line(await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width))
     await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style)], unicode_style=unicode_style)
@@ -13716,7 +13824,7 @@ async def _draw_file_area_masthead_menu(
     await _write_wrapped_subtitle(
         session,
         "Shown above every file-area-browsing view -- the top level, a category, or a "
-        "Community/Uncategorized scope.",
+        "Community.",
     )
     await session.write_line(await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width))
     await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style)], unicode_style=unicode_style)
@@ -13990,7 +14098,7 @@ async def _draw_chat_channel_picker_masthead_menu(
     await _write_wrapped_subtitle(
         session,
         "Shown above every channel-picker view -- the top level, a category, or a "
-        "Community/Uncategorized scope. Never inside a live channel.",
+        "Community. Never inside a live channel.",
     )
     await session.write_line(await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width))
     await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style)], unicode_style=unicode_style)
@@ -14607,8 +14715,8 @@ async def _draw_content_menu(session: Session, *, stats: dict[str, Any]) -> None
         MenuEntry(label=menu_key("F", "ile areas"), brief="Create/edit file areas"),
         MenuEntry(label=menu_key("D", "oors"), brief="Register/edit door games"),
         MenuEntry(label=menu_key("n", "nels", prefix="Chat cha"), brief="Create/edit chat channels"),
-        MenuEntry(label=menu_key("C", "ategories"), brief="Organize boards/areas/channels"),
-        MenuEntry(label=menu_key("O", "mmunities", prefix="C"), brief="Manage Communities"),
+        MenuEntry(label=menu_key("C", "ategories"), brief="Group lists of one kind"),
+        MenuEntry(label=menu_key("O", "mmunities", prefix="C"), brief="Topics holding every kind"),
         MenuEntry(label=menu_key("G", "rant moderator"), brief="Grant a moderation scope"),
         MenuEntry(label=menu_key("R", "evoke moderator"), brief="Revoke a moderation scope"),
         MenuEntry(label=menu_key("P", "ending review"), brief="Posts and files awaiting approval"),
@@ -20593,6 +20701,11 @@ async def _category_menu(session: Session, lane: DatabaseLane, actor: User) -> N
         if choice == "b":
             await session.write_line("")
             return
+        elif choice == HELP_KEY:
+            await session.write_line("")
+            await _categories_help_screen(session, header_color=header_color, unicode_style=unicode_style)
+            status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
+            await _draw_category_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
         elif choice == "m":
             await session.write_line("")
             await _generic_category_screen(
@@ -20630,6 +20743,30 @@ async def _category_menu(session: Session, lane: DatabaseLane, actor: User) -> N
             await session.write(reject_unhandled_key(choice))
 
 
+async def _categories_help_screen(
+    session: Session, *, header_color: int | tuple[int, int, int], unicode_style: bool
+) -> None:
+    """Ctrl-H on the Categories screen (issue #838): the difference
+    between a category and a Community, which nothing else on screen
+    explained -- a SysOp setting up a node met both words on one menu."""
+    lines = [
+        colored("Categories", fg_color=header_color, bold=True),
+        "  Group the list of one kind: board categories group boards, file-area",
+        "  categories group file areas, chat categories group channels. A caller",
+        "  sees them as folders in that list, at most two levels deep.",
+        "",
+        colored("Communities", fg_color=header_color, bold=True),
+        "  A topic that holds every kind at once: its own boards, chat channels,",
+        "  file areas and games. Callers reach them under C[o]mmunities on the main",
+        "  menu. They are managed under Content, not here.",
+        "",
+        colored("Using both", fg_color=header_color, bold=True),
+        "  A board can have a Community and a category. Inside a Community,",
+        "  callers see only the categories its own boards use.",
+    ]
+    await show_help(session, "Categories help", lines, header_color=header_color, unicode_style=unicode_style)
+
+
 async def _draw_category_menu(
     session: Session, description_level: str, redraw_in_place: bool, unicode_style: bool, collapsed: bool,
     header_color: int | tuple[int, int, int] = HEADER_COLOR, *, status_line: str,
@@ -20650,6 +20787,7 @@ async def _draw_category_menu(
             height=session.terminal_height,
         )
     )
+    await session.write_line(colored("Ctrl-H: categories vs. Communities", fg_color=MUTED_COLOR))
     await _choice_prompt(session)
 
 

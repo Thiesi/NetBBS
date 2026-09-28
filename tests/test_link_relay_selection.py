@@ -444,3 +444,58 @@ def test_an_unreachable_high_scorer_also_goes_to_the_back(tmp_path, monkeypatch)
     finally:
         lane.close()
         database.close()
+
+
+def test_relay_candidates_that_fail_are_explained_once_without_a_warning(tmp_path, monkeypatch, caplog):
+    """Issue #834: a new node's log showed each unreachable address of each
+    relay candidate as a WARNING on every pass, followed by "standing by" at
+    the one it did reach, and the SysOp read that as Link being broken. One
+    address of several failing is not news; a candidate reached nowhere is
+    explained once, at INFO."""
+    import asyncio
+    import logging
+    from types import SimpleNamespace
+
+    import netbbs.link.sync as sync
+    from netbbs.link.transport import LinkTransportError
+    from netbbs.storage.execution import DatabaseLane
+
+    database = Database(tmp_path / "quiet.db")
+    lane = DatabaseLane(database.path)
+    node = LinkNode(identity=bootstrap_node_identity("alice"))
+
+    def descriptor(fingerprint, *hosts):
+        return build_endpoint_descriptor(
+            signing_identity=Identity.generate(IdentityKind.NODE, fingerprint),
+            subject_fingerprint=fingerprint,
+            addresses=[{"protocol": "http", "address": host, "port": 7862} for host in hosts],
+            outgoing_only=False, created_at="2026-01-01T00:00:00Z",
+        )
+
+    node.candidate_descriptors["dead"] = descriptor("dead", "203.0.113.1", "203.0.113.11")
+    node.candidate_descriptors["multi"] = descriptor("multi", "203.0.113.4", "198.51.100.4")
+
+    async def dial(_node, _session, url, _hello, _lane, **_kwargs):
+        if "198.51.100.4" not in url:
+            raise LinkTransportError("could not reach")
+        return SimpleNamespace(fingerprint="multi")
+
+    async def declined(*_args, **_kwargs):
+        return SimpleNamespace(payload={"accepted": False})
+
+    monkeypatch.setattr(sync, "dial_hello", dial)
+    monkeypatch.setattr(sync, "request_relay_consent", declined)
+    monkeypatch.setattr(sync, "select_relay_candidates", lambda db, n: ["dead", "multi"])
+    try:
+        with caplog.at_level(logging.DEBUG, logger="netbbs.link.sync"):
+            for _ in range(2):
+                asyncio.run(sync._maintain_relay_selection(node, None, lambda: None, lane))
+        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+        unreached = [r.getMessage() for r in caplog.records if "could not reach relay candidate" in r.getMessage()]
+        assert unreached == [
+            "Link: could not reach relay candidate dead at 2 address(es); "
+            "other candidates are tried, and it is asked again later"
+        ]
+    finally:
+        lane.close()
+        database.close()

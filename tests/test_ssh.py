@@ -413,7 +413,7 @@ def test_ssh_sends_a_netbbs_branded_pre_auth_banner(db):
 
     asyncio.run(scenario())
     banner = "\n".join(client.banners)
-    assert "NetBBS" in banner
+    assert "conversations across independent nodes" in banner
     assert "'new'" in banner
 
 
@@ -568,7 +568,7 @@ def test_ssh_pre_auth_banner_omits_the_registration_hint_when_registration_is_cl
 
     asyncio.run(scenario())
     banner = "\n".join(client.banners)
-    assert "NetBBS" in banner
+    assert "conversations across independent nodes" in banner
     assert "'new'" not in banner
 
 

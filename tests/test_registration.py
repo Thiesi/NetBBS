@@ -233,7 +233,11 @@ def test_registration_with_approval_required_does_not_log_in(db):
     asyncio.run(_run_login(session, db, _throttle_config(max_attempts_per_connection=2)))
 
     assert "Welcome, alice" not in session.output
-    assert "must be approved" in session.output.lower() or "must approve" in session.output.lower()
+    text = " ".join(session.output.split())
+    assert "waiting for the SysOp's approval" in text
+    assert "can't log in or look around" in text
+    # Issue #835: the redraw hint is noise to someone who cannot log in.
+    assert "In-place redraw" not in text
     created = get_user_by_username(db, "alice")
     assert created.pending_approval is True
 
@@ -292,9 +296,7 @@ def test_registration_cancels_on_blank_username(db):
 
 
 def test_registration_refuses_the_reserved_sentinel_as_a_desired_username(db):
-    session = FakeSession(
-        ["new", "new", "hunter2pw", "hunter2pw", "", "", "", ""],
-    )
+    session = FakeSession(["new", "new", "", "", "", ""])
 
     asyncio.run(_run_login(session, db, _throttle_config(max_attempts_per_connection=2)))
 
@@ -305,13 +307,14 @@ def test_registration_refuses_the_reserved_sentinel_as_a_desired_username(db):
 
 def test_registration_refuses_a_username_already_taken(db):
     create_user(db, "alice", password="hunter2")
-    session = FakeSession(
-        ["new", "alice", "hunter2pw", "hunter2pw", "", "", "", ""],
-    )
+    # Issue #835: refused before the password prompts, so the blank
+    # line after "alice" answers the retried username prompt (a cancel).
+    session = FakeSession(["new", "alice", "", "", "", ""])
 
     asyncio.run(_run_login(session, db, _throttle_config(max_attempts_per_connection=2)))
 
-    assert "already in use" in session.output
+    assert "The username 'alice' is already taken. Please choose another." in session.output
+    assert "Password (min" not in session.output
 
 
 # -- dogfood follow-up to issue #156: retry signup in place instead of --
@@ -347,12 +350,12 @@ def test_registration_retries_in_place_after_a_username_already_taken(db):
     # Attempt 1: "bob" is taken. Attempt 2: "alice" succeeds.
     # "n" answers the one-time post-login Unicode-style prompt.
     session = FakeSession(
-        ["new", "bob", "hunter2pw", "hunter2pw", "alice", "hunter2pw", "hunter2pw", "n", "y"], keys=["l"],
+        ["new", "bob", "alice", "hunter2pw", "hunter2pw", "n", "y"], keys=["l"],
     )
 
     asyncio.run(_run_login(session, db))
 
-    assert "already in use" in session.output
+    assert "already taken" in session.output
     assert "Let's try again" in session.output
     assert "Welcome, alice" in session.output
 
@@ -504,13 +507,11 @@ def test_registration_refuses_a_retired_username_in_the_words_it_uses_for_a_take
     mark_link_has_run(db)
     sysop = create_user(db, "sysop", password="hunter2", user_level=SYSOP_LEVEL)
     delete_user(db, create_user(db, "alice", password="hunter2"), deleted_by=sysop)
-    session = FakeSession(
-        ["new", "alice", "hunter2pw", "hunter2pw", "", "", "", ""],
-    )
+    session = FakeSession(["new", "alice", "", "", "", ""])
 
     asyncio.run(_run_login(session, db, _throttle_config(max_attempts_per_connection=2)))
 
-    assert "already in use" in session.output
+    assert "The username 'alice' is already taken." in session.output
     assert "deleted" not in session.output
     assert "Retired names" not in session.output
     assert is_username_retired(db, "alice")

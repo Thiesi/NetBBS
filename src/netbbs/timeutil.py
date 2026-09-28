@@ -140,6 +140,27 @@ def set_display_timezone(db: Database, tz_name: str) -> None:
     set_config(db, DISPLAY_TIMEZONE_CONFIG_KEY, tz_name)
 
 
+# The spellings of UTC itself in the IANA database, compared case-blind.
+_UTC_ZONE_NAMES = frozenset({
+    "utc", "etc/utc", "uct", "etc/uct", "gmt", "etc/gmt", "zulu", "etc/zulu",
+    "universal", "etc/universal", "gmt0", "etc/gmt0", "etc/gmt+0", "etc/gmt-0",
+    "greenwich", "etc/greenwich",
+})
+
+
+def is_utc_zone_name(tz_name: str) -> bool:
+    """Whether `tz_name` names UTC itself, not a zone that happens to be at
+    offset zero today (issue #834: a clock in UTC gets a "UTC" label, one in
+    Europe/London in winter does not)."""
+    return tz_name.lower() in _UTC_ZONE_NAMES
+
+
+def display_timezone_is_set(db: Database) -> bool:
+    """Whether a SysOp has chosen a node display timezone, rather than the
+    node falling back to UTC (issue #834)."""
+    return get_config(db, DISPLAY_TIMEZONE_CONFIG_KEY) is not None
+
+
 def get_node_timezone(db: Database) -> ZoneInfo:
     """
     The node-wide configured display timezone as an actual `ZoneInfo`

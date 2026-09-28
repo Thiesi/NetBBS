@@ -203,10 +203,23 @@ def test_run_reuses_existing_node_identity_on_second_startup(tmp_path):
 
 
 def test_run_logs_node_identity_fingerprint(tmp_path, caplog):
+    """Issue #834: the line names the display name callers see, and says the
+    `[node] name` only labels key files -- the label alone made a SysOp think
+    the name she chose at onboarding had not taken."""
+    from netbbs.config import set_node_display_name
+    from netbbs.link.node_identity import NodeIdentity
+
     config = _config(tmp_path, telnet=TransportConfig(True, "127.0.0.1", port(12403)))
+    seed = Database(config.db_path)
+    set_node_display_name(seed, "The Nib & Quill")
+    seed.close()
     with caplog.at_level(logging.INFO, logger="netbbs.__main__"):
         asyncio.run(_run_until_ready_then_shut_down(config))
-    assert any("node Link identity" in record.message for record in caplog.records)
+    fingerprint = NodeIdentity.load(config.identity_dir).fingerprint
+    assert (
+        f"node Link identity for 'The Nib & Quill': fingerprint {fingerprint} "
+        f"([node] name {config.node_name!r} only labels the key files)"
+    ) in [record.getMessage() for record in caplog.records]
 
 
 def test_startup_fails_cleanly_on_corrupted_node_identity(tmp_path):
@@ -1641,3 +1654,25 @@ def test_the_suite_ignores_proxies_that_would_route_around_the_name_check():
 
     assert not any(os.environ.get(name) for name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"))
     assert urllib.request.getproxies().get("https") is None
+
+
+def test_startup_log_explains_a_loopback_listener_and_a_utc_clock(tmp_path, caplog):
+    """Issue #834: two first-day surprises the log now names. Telnet enabled on
+    its loopback default refused every outside caller without a word (F022),
+    and the clock ran in UTC with nothing saying so (F016)."""
+    from netbbs.timeutil import set_display_timezone
+
+    config = _config(tmp_path, telnet=TransportConfig(True, "127.0.0.1", port(12445)))
+    with caplog.at_level(logging.INFO, logger="netbbs.__main__"):
+        asyncio.run(_run_until_ready_then_shut_down(config))
+    messages = [record.getMessage() for record in caplog.records]
+    assert any(m.startswith("Telnet listens on 127.0.0.1:") for m in messages)
+    assert any(m.startswith("Times are shown in UTC because no timezone is set.") for m in messages)
+
+    seed = Database(config.db_path)
+    set_display_timezone(seed, "Europe/Berlin")
+    seed.close()
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="netbbs.__main__"):
+        asyncio.run(_run_until_ready_then_shut_down(config))
+    assert not any("shown in UTC" in record.getMessage() for record in caplog.records)

@@ -42,6 +42,11 @@ from netbbs.timeutil import utc_now_iso
 KIND_LINK_MAIL_DELIVERY = "link_mail_delivery"
 KIND_LINK_MAIL_ACK = "link_mail_ack"
 
+# The `last_error` of an attempt this node's own trust policy stopped
+# (`netbbs.link.sync`); waking such items once the policy allows the target
+# again keys on this exact text (issue #804).
+POLICY_REFUSED_TARGET_ERROR = "link policy refused target"
+
 # Backoff/dead-letter thresholds (design doc §13.7): product judgment,
 # not derived from anything load-bearing -- adjustable later without a
 # migration, since they're plain Python constants, not stored config.
@@ -221,6 +226,39 @@ def record_failure(db: Database, work_item: WorkItem, *, error: str) -> WorkItem
         )
     db.connection.commit()
     return get_work_item(db, work_item.id)
+
+
+def targets_held_by(db: Database, *, error: str) -> list[str]:
+    """Every target with an unresolved item whose last attempt failed with
+    exactly `error` -- for a caller that can tell when that cause is gone
+    (issue #804: a trust-policy refusal lifted by establishing the peer)."""
+    rows = db.connection.execute(
+        """
+        SELECT DISTINCT target_fingerprint FROM link_work_items
+        WHERE status IN ('pending', 'retrying') AND last_error = ?
+        ORDER BY target_fingerprint
+        """,
+        (error,),
+    ).fetchall()
+    return [row["target_fingerprint"] for row in rows]
+
+
+def wake_work_items_for_target(db: Database, target_fingerprint: str, *, error: str) -> int:
+    """Make every unresolved item for `target_fingerprint` that last failed
+    with `error` due now, instead of after the rest of its back-off (up to
+    `_MAX_BACKOFF_SECONDS`). Attempts and age are untouched, so waking
+    never extends an item's life. Returns how many items woke."""
+    now = utc_now_iso()
+    cursor = db.connection.execute(
+        """
+        UPDATE link_work_items SET next_attempt_at = ?
+        WHERE target_fingerprint = ? AND status IN ('pending', 'retrying')
+          AND last_error = ? AND next_attempt_at > ?
+        """,
+        (now, target_fingerprint, error, now),
+    )
+    db.connection.commit()
+    return cursor.rowcount
 
 
 def replay_work_item(db: Database, work_item_id: int, *, replayed_by: User) -> WorkItem:

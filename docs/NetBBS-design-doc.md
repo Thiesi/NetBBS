@@ -337,8 +337,7 @@ picker (issue #176) -- since each renders once per view as a
 pick_item`, structurally identical to the main menu despite being a
 recursive, categorized/Community-scoped browsing hierarchy rather than
 one flat screen. Each masthead shows at *every* level that hierarchy
-reaches (the unfiltered top level, a category, a Community/Uncategorized
-scope), not only the very first screen -- it marks "you're in this
+reaches (the unfiltered top level, a category, a Community's scope), not only the very first screen -- it marks "you're in this
 section," not one specific screen state. This required `pick_item`
 itself to grow a `masthead` parameter (threaded through its own internal
 redraw closure so the masthead survives paging/search/sort/refresh, not
@@ -505,6 +504,8 @@ active sessions, Link health, moderation queues, backup and update recency,
 outbound failures, and recent Link diagnostics using concise semantic status.
 The standalone admin CLI renders the same view but states clearly that live
 node controls are unavailable rather than pretending the process is online.
+A staff member (§5.6) reaches a reduced form of this console holding only the
+screens their staff permissions cover.
 
 Navigation separates four operator intents: users, content, operations, and
 settings. Operations contains observation and intervention for the live node,
@@ -657,7 +658,7 @@ the editors' `/done`, `/exit` and `/help`.
 What a typed filename could reach and a keystroke cannot, recorded because
 it was a deliberate trade and not an oversight:
 
-- **A file on another page.** `[F]ind` covers it: searching enters the area
+- **A file on another page.** `[/] Find` covers it: searching enters the area
   with that file at the top of its page, where its number or `[D]` takes it.
   (It is the first row, not a preselected cursor — `_show_area` starts with
   no highlight.)
@@ -672,7 +673,7 @@ it was a deliberate trade and not an oversight:
   the same rule the caller-facing screens follow (issue #475).
 - **An expired file.** Nothing, and that is now the decided answer rather
   than a loss: expiry ends a file's reach to callers entirely (§5.3, issue
-  #639). The listing and `[F]ind` are approved-and-current only, and a caller
+  #639). The listing and `[/] Find` are approved-and-current only, and a caller
   who knows a name has no way to spend it. A SysOp reaches an expired file
   while the grace period lasts through `E[x]pired files` on the file area's
   admin detail screen, which carries the same `[D]ownload` (§5.3).
@@ -788,6 +789,45 @@ A node has one registration mode:
 - `closed`: the public registration option is absent and accounts are
   SysOp-created.
 
+A pending account that presents the right password is told it is waiting
+for approval and the connection ends (issue #835). Any other failure stays the
+generic "Login failed": the distinction is made only after the credential
+has matched, so it tells no one anything they could not learn by logging in.
+SSH shows the same notice as an authentication banner on a password login.
+It stays generic for a public-key lookup, because SSH asks that before the
+client has signed anything and a public key is public. A signup that created a
+pending account is not charged as a failed login attempt on its connection.
+
+Self-registration checks the desired username as soon as it is typed, before
+the password prompts, and spends a login-throttle token doing so: whether a
+name is taken is the same existence answer account creation used to give,
+only earlier. Beyond the grammar every account shares, a caller may not
+register:
+
+- a reserved name: `sysop`, `cosysop`, `admin`, `administrator`, `root`,
+  `moderator`, `mod`, `staff`, `support`, `system`, `operator`, `postmaster`,
+  `guest`, `netbbs`;
+- a name containing `sysop`;
+- a look-alike of a level-255 account's name.
+
+These names are compared by a skeleton: case folded, `_ - .` dropped, and
+`0/o`, `1/l/i`, `3/e`, `4/a`, `5/s`, `7/t`, `8/b`, `9/g`, `2/z`, `rn/m` and
+`vv/w` folded together. The rules apply to self-registration only. A SysOp
+creating an account by hand may use any name the grammar allows. Only SysOp
+names are protected, not every account's, because impersonating the operator
+is the harm the persona test found. Blocking look-alikes of every caller would
+refuse ordinary names for no gain. A signup is turned down with Decline on the
+pending account, which deletes it after a yes/no. Deletion's typed-name ritual
+guards content and Link history that a never-approved account cannot have.
+
+On an approval-required node the SysOp may set one signup question, up to 200
+characters. Self-registration asks it after the password. The answer is
+optional, cut to 300 characters, and stored with the question as asked. It is
+shown on the pending account's detail screen and deleted when the account is
+approved. It was given for that one decision, and keeping it would build a
+profile nobody agreed to. Declining removes it with the account. An open node
+never asks it, because nobody reads the answer before the account is usable.
+
 Registration determines whether an account may exist and log in. Link
 probation and reputation determine what an active identity may do; these are
 separate axes.
@@ -795,7 +835,9 @@ separate axes.
 ### 4.3 Account levels and the usable-SysOp invariant
 
 One integer level drives ordinary level gating. `SYSOP_LEVEL = 255` is the
-reserved top level; SysOp is not a parallel role flag.
+reserved top level; SysOp is not a parallel role flag. Levels below 255 grant
+no authority by themselves. Authority short of SysOp comes from staff
+permissions (§5.6) and moderator grants (§5.2), never from a level band.
 
 Promote, demote, disable, enable, approve, and hard-delete operations must never
 leave the node with zero **usable SysOps**. A usable SysOp:
@@ -807,9 +849,9 @@ leave the node with zero **usable SysOps**. A usable SysOp:
 The invariant is enforced transactionally against fresh database state, not
 against a stale object supplied by a caller.
 
-A change to an account's level or its verify-identity permission applies to
-that account's live sessions without a re-login (issue #659), whichever
-process made it. Each session's account watcher re-reads the account every
+A change to an account's level, its verify-identity permission or its staff
+permissions (§5.6) applies to that account's live sessions without a
+re-login (issue #659), whichever process made it. Each session's account watcher re-reads the account every
 few seconds, and an in-node change wakes it at once. A gain is picked up the
 next time the main menu is drawn, straight away if the caller is sitting on
 the menu, and nothing is interrupted. A loss interrupts the caller's current
@@ -819,7 +861,9 @@ SysOp console above all, and interrupting is the only way to reach a screen
 that is waiting for a key. The interruption ends whatever the caller was
 doing, a running door included. An editor keeps its text as a recoverable
 draft. The SysOp console also re-checks its operator at its own menu, which
-is what stops a demoted operator in the standalone CLI.
+is what stops a demoted operator in the standalone CLI. Moderator grants
+(§5.2) need no watcher: they are read from the database at each check, so a
+grant or a revocation governs the holder's next action in every session.
 
 Hard deletion preserves content provenance through denormalized display labels
 or nullable author/uploader references. Personal access rows and private state
@@ -1152,8 +1196,21 @@ Authority scopes are:
 Link-blanket authority does not imply local authority. A person who needs both
 must receive both explicitly.
 
-Only a SysOp can grant or revoke blanket authority or change node
-configuration. A suitably authorized Link-blanket moderator may initiate a new
+A board or file area's read or write grant lets its holder past that
+resource's minimum read or write level (§5.1); the age and verified-name gates
+still apply. This is how a SysOp lets a helper post on a board whose write
+level is 255, such as an announcements board, without making the helper a
+SysOp. A grant never lets anyone past a gate on a resource it does not cover.
+
+Anyone holding an approve grant is told so: the main menu shows a
+`Moderation (n)` entry with the number of posts and uploads waiting in their
+scope, and it leads to one queue across every resource the grant covers, not
+a visit to each board. A SysOp can grant moderation of every local board,
+file area and channel as one action, written as the three local-blanket grants
+in one transaction.
+
+Only a SysOp can grant or revoke moderator grants of any scope, blanket or
+per-object, or change node configuration. A suitably authorized Link-blanket moderator may initiate a new
 linked resource, but:
 
 - the node identity signs and owns the genesis event;
@@ -1183,7 +1240,7 @@ edit permission can pin a post or file, and can keep it from expiring:
   also stays in the dated listing where it was posted. So a pin the block
   has no room for is still reached by paging, and the opening page leaves
   out only the dated rows its block already shows. A page reached by paging
-  or by a `[N]ew scan`/`[F]ind` jump has no pinned block, so a jump opens on
+  or by a `[N]ew scan`/`[/] Find` jump has no pinned block, so a jump opens on
   its target.
 - **How the block looks:** it sits under a labelled "Pinned" rule, parted
   from the dated rows by a plain one. On a board the labelled rule replaces
@@ -1244,7 +1301,7 @@ The moderators are listed there, not on the detail screen itself, which at
 
 **Expiry is a caller-facing boundary, not only a delisting** (issue #639).
 Once a post or a file is `expired`, no keystroke a caller can press reaches
-it: listings, `[F]ind` and the file area's own screens are
+it: listings, `[/] Find` and the file area's own screens are
 approved-and-current only, and knowing an exact name buys nothing. This
 holds for both boards and file areas, and it is the whole of what a caller
 may rely on.
@@ -1489,6 +1546,84 @@ attestation arrives later. The refusal is silent on the wire: telling the
 network which of its users fail a local gate would disclose exactly the policy
 §12.8 keeps undisclosed.
 
+### 5.6 Staff permissions, the Staff list, and the away notice (issue #836)
+
+A SysOp can share the node's day-to-day work without handing over the node.
+**Staff permissions** are account-wide grants a SysOp gives to an account
+below level 255, independent of its level:
+
+- **Approve accounts:** approve or decline registrations waiting under
+  `approval_required` (§4.2).
+- **Manage accounts:** disable an account and enable it again, reset its
+  password, and set its level anywhere from 0 to 254. Raising an account to
+  255, and deleting an account and so retiring its name (§4.3), stay with the
+  SysOp.
+- **Moderate everything:** act as moderator on every board, file area and
+  channel on the node, local and carried, with every moderator permission of
+  §5.2. Without it, a staff member moderates what their moderator grants
+  cover and nothing more.
+
+The verify-identity permission (§5.5) is shown and granted beside them, but it
+remains its own grant: it is about attestation, not about running the node.
+
+**Co-SysOp** is a preset, not a role. On an account's detail a SysOp can apply
+it in one confirmed step: it sets all three staff permissions. Afterwards the
+account holds exactly those permissions, and the SysOp can remove any of them
+one at a time. The account detail's privileges group lists the staff
+permissions, the verify-identity permission and a summary of the account's
+moderator grants, so a SysOp sees everything an account may do in one place.
+
+**What staff can never do.** A staff member acts only on accounts below level
+255 that hold no staff permission; a moderator-only account is within reach.
+They cannot set any level to 255, grant or revoke staff permissions or
+moderator grants, or reach Settings, Link, node controls, managed DNS or
+backups. Every action they take is audited under their own name. So the
+original SysOp cannot be demoted, disabled or locked out by a helper, and the
+usable-SysOp invariant (§4.3) is never at stake in a staff action.
+
+**The Staff console.** A staff member reaches the same `[S]` entry on the main
+menu, labelled for them `[S]taff`. It opens a reduced console: a landing view
+of its own, which holds the away notice below, and only the screens their
+permissions reach: the accounts waiting for approval and the
+account list for the account permissions, and the node-wide moderation queue
+filtered to what they moderate. The screens are the SysOp console's own, not
+copies, so they cannot drift apart. The SysOp's console is unchanged.
+
+**Who is told.** The notice that accounts are waiting for approval goes to
+usable SysOps and to holders of the approve-accounts permission, and to no one
+else.
+
+**The Staff list.** Every member can open a list of who runs the node: the
+usable SysOps, the staff members, and the moderators with what they look
+after, in the words of the account detail's grant summary. Each row shows the
+date of the person's last session, not the time. A person on the list is
+someone members are meant to find, so the Previous callers privacy choice does
+not hide them here; the confirmation that makes someone staff or a moderator
+says so. Guests and pending accounts do not see the list.
+
+**The away notice.** A SysOp or staff member can mark themselves away, from
+their console's landing view, with a message of one short line of plain
+text (no pipe codes) and an optional return date. It is per person, not per
+node. It shows:
+
+- on the Staff list, beside that person;
+- in the message a pending account sees at login and just after it
+  registers, when every account that could approve it is away: then the
+  message names the approver expected back first, their return date if any,
+  and their message.
+
+Being away changes nobody's permissions. Logging in does not end it, since a
+SysOp who is away may still look in. The person ends it, or, when it has a
+return date, it ends by itself once that date has passed. A notice without a
+date stays until it is ended, so it never claims more than it says: wherever
+it is shown it reads "away since" the day it was set, and the person's own
+console landing view shows it to them each time they log in, as a reminder
+to end it.
+
+Staff permissions, the Staff list and the away notice are local to the node.
+None of them is carried over Link: a staff member's moderation of carried
+content follows §5.2 and §9.5 exactly as a moderator's does.
+
 ---
 
 ## 6. Local product domains
@@ -1532,7 +1667,7 @@ The list:
   a post in the list does not count as reading it. `[M]ark all read` counts
   everything on the board as read; it is offered only while something is
   unread.
-- Opens a `[N]ew scan` or `[F]ind` jump with the cursor on its target.
+- Opens a `[N]ew scan` or `[/] Find` jump with the cursor on its target.
 
 A post opens on `show_detail`:
 - The title, a byline (author, date, `edited`, `new`, the post it replies to)
@@ -1928,15 +2063,30 @@ Communities provide:
 - Community-scoped blanket moderator grants;
 - a future unit for Link carry and governance.
 
-The main navigation exposes:
+The main menu (issue #838) offers content two ways:
 
-- Communities;
-- Uncategorized resources;
-- Jump/search by resource type.
+- **By kind:** `[M]essage boards`, `[C]hat`, `[F]iles` and `[G]ames` open
+  the whole node's list of that kind, whichever Community each item belongs
+  to. They come first, because they are what callers who know other BBSes
+  look for. M, C and F are always shown; Games only while a door is visible.
+- **By topic:** `C[o]mmunities`, shown while at least one Community is
+  visible, lists them; picking one opens its page -- its description and an
+  entry per kind it holds, with how many -- which leads to the same board,
+  channel, area or door browsers scoped to that Community. Back from a
+  Community's page returns to the Communities list.
 
-Each path leads to the same resource-type submenu and then the normal board,
-channel, or area browser. Resources unrelated to Communities—mail, directory,
-profiles, preferences, and administration—retain their own navigation.
+"Uncategorized" (no Community) is a data-model term only. A resource with no
+Community is listed under its kind like any other, so there is no menu entry
+for "resources outside a Community". The earlier design had one, next to a
+`[J]ump to...` type picker; a first-time SysOp created a Community only to
+escape the word, and callers read Jump as a name search (field test, #831).
+Both were removed. `[/] Find` holds the slash because `[F]` is Files, and `[?]`
+is kept for the main menu's help entry (#840).
+
+A SysOp on a node with no boards, channels or file areas at all sees, and
+nobody else does, where to create the first one. Resources unrelated to
+Communities—mail, directory, profiles, preferences, and administration—retain
+their own navigation.
 
 Community-scoped category views must filter at the query layer so a category
 used by resources in several Communities does not leak another Community’s
@@ -1949,7 +2099,7 @@ Deleting a Community:
 - shows the blast radius before confirmation.
 
 Existing nodes migrate safely because the nullable Community reference leaves
-all existing resources Uncategorized until a SysOp assigns them.
+all existing resources without a Community until a SysOp assigns them.
 
 #### Link Communities
 
@@ -2167,8 +2317,7 @@ resources no longer visible.
 
 A single new main-menu entry — `[N]ew scan`, the traditional BBS term for
 exactly this feature — is the fast, always-shown surface issue #56 asks
-for, following the same unconditional-visibility
-precedent `[J]ump to...` already sets.
+for, always shown like `[M]essage boards`, `[C]hat` and `[F]iles`.
 
 New scan covers **every board, channel, and file area the user can currently
 access**, not only followed ones — matching the traditional meaning of a
@@ -2230,7 +2379,7 @@ capability from the item picker's simple, per-call substring name match
   built, is a distinct protocol extension requiring its own explicit design
   (rate limits, query exposure, opt-in) — never an implied consequence of
   local search existing;
-- **UI**: a new, always-shown `[F]ind` main-menu entry (`netbbs.net.
+- **UI**: a new, always-shown `[/] Find` main-menu entry (`netbbs.net.
   scan_and_find._find_screen`), alongside `[N]ew scan` — prompts for one
   free-text query, matches it against all three content types at once, and
   jumps straight to a selected hit: a post/file lands on the exact matched
@@ -4048,7 +4197,12 @@ Separate signed events represent:
 - future expiry where retry policy requires it.
 
 Outbound messages remain pending until an accepted or bounced event arrives.
-Delivery through a relay does not change the acceptance semantics.
+Delivery through a relay does not change the acceptance semantics. One answer
+is not a signed event: a recipient node whose trust policy refuses a direct
+push says so with HTTP 403 and a `link_policy_*` reason code, and the sending
+node records that as a bounce, since asking again would get the same answer,
+unless another of the recipient's addresses or relays takes the message
+(§12.4, issue #804).
 
 ### 10.4 Routing limitations
 
@@ -4518,9 +4672,46 @@ node may accept through it content independently signed by an established
 author, but refuses or holds for explicit local approval new content authored
 or node-vouched by the probationary identity. A probationary node contributes
 no trust-signal weight and is not selected to serve as a relay. A probationary
-user's posts/uploads enter applicable local approval flow and Link messages are
-refused or bounced rather than silently delivered. Private operators may
+user's posts/uploads enter applicable local approval flow. Private operators may
 establish a known node manually instead of waiting for automatic graduation.
+
+**Node trust covers Link mail (issue #804).** A `link_message` is private mail
+to one recipient, not publication, so user probation does not gate it: a
+message from a user whose home node is established here is delivered even
+while that user is still probationary. The sender's home node must be
+established; a message from a node still on probation, or from a quarantined
+or blocked user or node, is refused, and never silently. A direct push is
+refused with the policy 403 and its reason code, which the sending node
+records as a bounce rather than retrying, once none of the recipient's other
+addresses or relays took the message (the 403 is unsigned, and a stale address
+now answered by another node refuses the same way). Mail picked up from a
+relay mailbox has no synchronous answer, so the refusal becomes a signed
+`link_message_bounced` with reason `blocked_sender`, sent back even to a node
+on probation here since it carries no content. A node quarantined or blocked
+here gets no bounce by that route, because this node sends it nothing and the
+bounce could only pile up; it learns of a direct push's refusal from the 403.
+The decision is made before the message or its sender is kept, so a refused
+node cannot grow this node's trust subjects or retained events by inventing
+senders. Delivered mail registers its
+sender as a trust subject like any accepted event, so the receiving SysOp can
+find and establish them; a node refused as a whole is already a subject from
+its hello, and establishing that node is what opens its users' mail. A
+recipient's own control over who may write to them is a per-user block list
+(issue #817), not probation.
+
+The sending node applies its own policy before anything is queued: a caller
+addressing a peer this node still holds on probation is told at the To prompt
+that "<node> is newly linked; mail opens once the SysOp establishes it", and a
+quarantined or blocked peer that mail to it is closed. Mail queued before a
+peer lost standing waits in the outbox, expires when its work item
+dead-letters, and is woken on the next sync pass once the policy allows the
+peer again (§13.7), rather than after the rest of a back-off of up to six
+hours.
+
+This relaxes the earlier default, under which a probationary user's Link
+messages were refused. In practice that swallowed every message between newly
+linked nodes: the refusal happened before the sender was registered, so the
+receiving SysOp had nobody to establish, and no bounce reached the sender.
 
 Configuration may make these defaults stricter. Relaxing them is an explicit,
 audited SysOp safety deviation. Vouches are signed, scoped, expire after at
@@ -5445,6 +5636,11 @@ has resolved through some other path (a genuine accepted/bounced event, or
 an earlier dead-letter); a new `[O]utbox` SysOp screen (`System` submenu,
 gated on Link being configured, same as `[L]ink status`) lists
 retrying/dead-lettered items and lets a SysOp replay or cancel one.
+Issue #804: an attempt this node's own trust policy stops records the
+`last_error` `link policy refused target` and counts toward dead-lettering
+like any failed push, so such mail expires too; each sync pass first makes
+every item held that way due at once when the policy now allows its target,
+without resetting its attempts or age.
 Verified end to end via `tests/test_link_sync.py`'s existing real-socket
 sync tests (unchanged, still passing against the refactored push loop)
 plus new dedicated tests for the state machine, the mail/ack integration,
@@ -7985,7 +8181,7 @@ scripted tests.
 Also implemented: local FTS5-backed search (`netbbs.search`) over board
 posts, files, and channel scrollback, synced from every write path, gated by
 the exact same visibility rules browsing already enforces, and surfaced as a
-new `[F]ind` main-menu entry that jumps straight to a selected hit. FTS5
+new `[/] Find` main-menu entry that jumps straight to a selected hit. FTS5
 availability, this round's stated blocker, was resolved by tracing pkgsrc's
 actual build chain rather than empirical access to a NetBSD box: `lang/
 python312` buildlinks against `databases/sqlite3`, whose own Makefile passes
@@ -8298,7 +8494,7 @@ local chat stays fully usable and Link-unaware.
 
 Minimal threading, no broader `chat_flow` refactor: only `browse_channels`/
 `_chat_loop` gained the new parameter, and only the three existing `netbbs.
-net.login_flow` call sites (`[N]ew scan`, `[F]ind`, the main channel-browse
+net.login_flow` call sites (`[N]ew scan`, `[/] Find`, the main channel-browse
 menu) needed updating to pass their own already-in-scope `link_context`
 through. A real two-node end-to-end test (`tests/test_link_end_to_end.py`)
 drives `_chat_loop` itself with a scripted `FakeSession`, not a direct
@@ -11461,7 +11657,7 @@ Two things found while deciding it, which changed the shape of the answer:
 
 **Decision 1 — expiry ends a caller's reach, in both subsystems.** A caller
 may rely on this: expired means gone. Rejected: a `show expired` toggle on
-the file listing, and returning expired rows from `[F]ind` labelled. Both put
+the file listing, and returning expired rows from `[/] Find` labelled. Both put
 delisted content back in front of callers, which is the one thing expiry
 exists to stop, and the second costs the most to build — the expiry sweep
 calls `reindex_file`, which *deletes* a row from `file_search` as soon as it
@@ -12138,6 +12334,49 @@ their place.
 the Monitor drops the address, terminal size and transport columns, in that
 order. User, idle time and activity always stay. How narrow the console must
 still work follows #662.
+
+### Issue #836 — delegation short of SysOp — decided
+
+A SysOp who stepped away left signups and held posts that nobody could act
+on, and the only way to hand them over was level 255, which includes power
+over the SysOp who gave it. Normative description: §5.6, with §4.3 and §5.2.
+
+**Decision 1 — named staff permissions, with Co-SysOp as a preset.** Approve
+accounts, manage accounts and moderate everything, granted per account, and
+a one-step Co-SysOp preset that sets all three. Rejected: a Co-SysOp level
+band such as 250-254, the classic BBS convention, because nodes already use
+those levels as resource gates, and an upgrade would silently give console
+powers to accounts a SysOp raised only to open a board; and account authority
+as a new kind of moderator grant, which would stretch a per-resource table
+into node-wide authority and still leave no one-step way to hand over the
+node's routine work.
+
+**Decision 2 — staff never reach the SysOp.** Staff act only on accounts below
+255 that hold no staff permission, cannot raise anyone to 255, and cannot
+grant anything. A second SysOp at 255 keeps full power, including over the first;
+that is what 255 means, and staff is how to give less.
+
+**Decision 3 — everyday account work, but no deleting and no 255.** Manage
+accounts covers what a helper needs while the SysOp is away: disabling and
+enabling, password resets for callers locked out, and levels up to 254 so a
+helper can open level-gated boards to members. Deletion is permanent and, on a
+Link node, retires the name (§4.3), where a disable can be undone by the SysOp
+on their return. Level 255 is the SysOp's own authority and is given only by a
+SysOp.
+
+**Decision 4 — read and write grants pass level gates.** The bits already
+existed and did nothing. Giving them meaning lets a SysOp open an
+announcements board to a helper without a new concept. Age and verified-name
+gates still hold, because they are facts about the person, not trust the SysOp
+extends.
+
+**Decision 5 — away is per person, and never outlives what it says.** A
+node-wide notice would be wrong the moment one of two SysOps came back. A
+return date that passes ends the notice. A notice without one is shown with
+the day it was set and reminded to its owner at each login, so callers can
+judge a stale one and its owner is prompted to end it. Rejected: requiring a
+return date, which a SysOp who does not know when they will be back could
+only guess.
 
 ### SFTP over the SSH transport — declined
 

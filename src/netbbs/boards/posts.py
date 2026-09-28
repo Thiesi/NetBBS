@@ -778,7 +778,7 @@ def list_posts_page(
     stay in the dated feed as well, so a pin the block has no room for is
     still reached by paging; the newest page only leaves out the feed rows
     its block already shows. A page reached by a cursor -- paging, or a
-    `[N]ew scan`/`[F]ind` jump that must open on its target -- never gets
+    `[N]ew scan`/`[/] Find` jump that must open on its target -- never gets
     the block.
 
     `pinned_block_rows` is what the screen draws around a pinned block
