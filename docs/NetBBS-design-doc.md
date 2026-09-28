@@ -1542,8 +1542,9 @@ original SysOp cannot be demoted, disabled or locked out by a helper, and the
 usable-SysOp invariant (§4.3) is never at stake in a staff action.
 
 **The Staff console.** A staff member reaches the same `[S]` entry on the main
-menu, labelled for them `[S]taff`. It opens a reduced console with only the
-screens their permissions reach: the accounts waiting for approval and the
+menu, labelled for them `[S]taff`. It opens a reduced console: a landing view
+of its own, which holds the away notice below, and only the screens their
+permissions reach: the accounts waiting for approval and the
 account list for the account permissions, and the node-wide moderation queue
 filtered to what they moderate. The screens are the SysOp console's own, not
 copies, so they cannot drift apart. The SysOp's console is unchanged.
@@ -1561,7 +1562,7 @@ not hide them here; the confirmation that makes someone staff or a moderator
 says so. Guests and pending accounts do not see the list.
 
 **The away notice.** A SysOp or staff member can mark themselves away, from
-their console's landing screen, with a message of one short line of plain
+their console's landing view, with a message of one short line of plain
 text (no pipe codes) and an optional return date. It is per person, not per
 node. It shows:
 
@@ -1576,7 +1577,7 @@ SysOp who is away may still look in. The person ends it, or, when it has a
 return date, it ends by itself once that date has passed. A notice without a
 date stays until it is ended, so it never claims more than it says: wherever
 it is shown it reads "away since" the day it was set, and the person's own
-console landing screen shows it to them each time they log in, as a reminder
+console landing view shows it to them each time they log in, as a reminder
 to end it.
 
 Staff permissions, the Staff list and the away notice are local to the node.
