@@ -214,7 +214,7 @@ def test_a_second_concurrent_change_is_refused(db, lane, sysop, identity_dir):
 
 
 def test_a_dropped_session_still_records_the_change_it_made(db, lane, sysop, identity_dir, monkeypatch):
-    import time
+    import threading
 
     from netbbs.net import admin_flow
 
@@ -223,8 +223,14 @@ def test_a_dropped_session_still_records_the_change_it_made(db, lane, sysop, ide
     set_maintenance(db.path, path, True)
     real = admin_flow._war_dialer_change_competition
 
+    # The change begins, then holds until the session has been dropped: no
+    # window of time the test has to hit, loaded machine or not.
+    started = threading.Event()
+    dropped = threading.Event()
+
     def _slow(**kwargs):
-        time.sleep(0.4)
+        started.set()
+        dropped.wait(30.0)
         return real(**kwargs)
 
     monkeypatch.setattr(admin_flow, "_war_dialer_change_competition", _slow)
@@ -234,8 +240,15 @@ def test_a_dropped_session_still_records_the_change_it_made(db, lane, sysop, ide
         session = FakeSession(["rollover", path.name])
         task = asyncio.create_task(admin_flow._war_dialer_competition_flow(
             session, lane, sysop, door, path, status, reset=False, identity_dir=identity_dir, db_path=db.path))
-        await asyncio.sleep(0.15)
+        # The session drops while the change runs -- once it has begun, not
+        # after a fixed time, which a loaded machine may not have reached.
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 30.0
+        while not started.is_set() and loop.time() < deadline:
+            await asyncio.sleep(0.01)
+        assert started.is_set(), "the season change never began"
         task.cancel()
+        dropped.set()
         with pytest.raises(asyncio.CancelledError):
             await task
 
