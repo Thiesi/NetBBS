@@ -598,7 +598,19 @@ each dimension's state, because callers do not see them at all. Each node's
 screen adds its Link addresses, relay roles and reliability. Last heard is your
 own last contact with the node, or the time its newest descriptor says it was
 signed, never later than when you first stored it; a node not heard of for 30
-days is marked stale, not removed. Policy trust settings
+days is marked stale, not removed.
+
+**Link status → Dial-in** sets the addresses other nodes show callers on their
+node maps: up to four, each `telnet://host:port`, `ssh://host:port` or an
+`https://` URL (plain `http://` is refused). **Use suggestions** fills the
+draft from your DNS name, your enabled Telnet and SSH listeners and an
+`https://` `[web] public_url`; nothing is saved until **Save**, and peers get
+the list with the next hello. Until you save a list, the node publishes
+`[web] public_url` when it is `https://` and the web listener was on at the
+last start. Saving an empty list publishes nothing. The **Dial-in** row on
+Link status shows what is published now and where it came from.
+
+Policy trust settings
 separate identity integrity, resource behavior, and content conduct: a complaint
 about content should not be treated as proof of a forged identity.
 
