@@ -35,7 +35,7 @@ from typing import TYPE_CHECKING
 
 from netbbs.auth.users import User, get_user_by_id
 from netbbs.boards.boards import Board, usable_max_age_days
-from netbbs.boards.posts import Post
+from netbbs.boards.posts import WITHDRAWN_PLACEHOLDER, Post
 from netbbs.communities import get_effective_min_age, get_effective_name_requirement
 from netbbs.link.enforcement import decide_event_authorship, ensure_event_author_subject
 from netbbs.link.events import (
@@ -438,6 +438,7 @@ def _post_from_row(row) -> Post:
         root_post_id=row["root_post_id"], edit_of_post_id=row["edit_of_post_id"],
         tombstoned_at=row["tombstoned_at"],
         layout=row["layout"] if "layout" in row.keys() else "prose",
+        withdrawn=bool(row["withdrawn"]) if "withdrawn" in row.keys() else False,
     )
 
 
@@ -657,9 +658,15 @@ def materialize_carried_post_edit(
     if _board_is_hidden(db, root_row["board_id"]):
         return None
     # An author's own edit follows local moderation and the author's
-    # trust decision, as a new post does (issue #677).
+    # trust decision, as a new post does (issue #677) -- except a
+    # withdrawal, which only takes text away (issue #675): held, this node
+    # would go on showing what the author took back until a moderator here
+    # got to it. A tombstone still ends the chain, and a post nobody here
+    # approved stays unpublished either way.
+    withdrawal = is_withdrawal_edit(db, edit)
     status = _carried_revision_status(
-        db, payload["root_post_id"], local_moderation=True, requested=initial_status
+        db, payload["root_post_id"], local_moderation=not withdrawal,
+        requested="approved" if withdrawal else initial_status,
     )
     # Past a local tombstone nothing is projected, so a predecessor that was
     # itself retained but never projected must not keep this event from
@@ -693,13 +700,15 @@ def materialize_carried_post_edit(
     if status is None or not predecessor_projected or _rejected_here(db, edit.content_id):
         db.connection.commit()
         return None
+    # `withdrawn` is named only on a withdrawal, as `edit_post` does.
+    withdrawn_column, withdrawn_value = (", withdrawn", ", 1") if withdrawal else ("", "")
     db.connection.execute(
-        """
+        f"""
         INSERT INTO posts
             (post_id, board_id, parent_post_id, author_user_id, author_label,
              author_fingerprint, subject, body, created_at, status,
-             root_post_id, edit_of_post_id)
-        VALUES (?, ?, ?, NULL, ?, NULL, ?, ?, ?, ?, ?, ?)
+             root_post_id, edit_of_post_id{withdrawn_column})
+        VALUES (?, ?, ?, NULL, ?, NULL, ?, ?, ?, ?, ?, ?{withdrawn_value})
         """,
         (
             edit.content_id, board_local_id, root_row["parent_post_id"], author_label,
@@ -713,6 +722,37 @@ def materialize_carried_post_edit(
     return _post_from_row(
         db.connection.execute("SELECT * FROM posts WHERE post_id = ?", (edit.content_id,)).fetchone()
     )
+
+
+def is_withdrawal_edit(db: Database, edit: BoardPostEdit) -> bool:
+    """Whether a received `board_post_edit` is its author's withdrawal of
+    the post (issue #675, design doc §16), and so is let through without
+    local moderation.
+
+    The flag alone is not enough: an author could otherwise put new text
+    past every carrying node's moderators by marking an ordinary edit
+    withdrawn. It counts only when the edit takes the text away and
+    changes nothing else -- the body is exactly the placeholder and the
+    subject is the one it replaces. Anything else carrying the flag is an
+    ordinary edit, moderated as one."""
+    payload = edit.payload
+    if payload.get("withdrawn") is not True or payload.get("body") != WITHDRAWN_PLACEHOLDER:
+        return False
+    # The subject must be the one readers here see now -- the post's
+    # current approved revision -- not merely its predecessor's: a held
+    # edit's new subject, copied into the withdrawal, would otherwise be
+    # published past the moderation holding it, while a held edit that
+    # changed only the body must not keep a real withdrawal from showing
+    # (Codex review on #789).
+    if db.connection.execute(
+        "SELECT 1 FROM posts WHERE post_id = ?", (payload.get("previous_event_id"),)
+    ).fetchone() is None:
+        return False
+    shown = db.connection.execute(
+        "SELECT subject FROM posts WHERE root_post_id = ? AND status = 'approved' ORDER BY id DESC LIMIT 1",
+        (payload.get("root_post_id"),),
+    ).fetchone()
+    return shown is not None and shown["subject"] == payload.get("subject")
 
 
 def _retain_only(db: Database, event, object_type: str, sender_fingerprint: str, board_id: str) -> None:
@@ -1442,20 +1482,18 @@ def queue_approved_board_post_if_linked(
 
 def _superseded_by_a_newer_approved_revision(db: Database, revision: Post) -> bool:
     """Whether an approved revision of `revision`'s post sorts after it, in
-    `_resolve_current_version`'s own order."""
-    row = db.connection.execute(
-        "SELECT created_at, id FROM posts WHERE post_id = ?", (revision.post_id,)
-    ).fetchone()
+    `_resolve_current_version`'s own order: local receipt order (`id`),
+    never the authored `created_at` (Codex review on #789)."""
+    row = db.connection.execute("SELECT id FROM posts WHERE post_id = ?", (revision.post_id,)).fetchone()
     if row is None:
         return False
     return db.connection.execute(
         """
         SELECT 1 FROM posts
-        WHERE root_post_id = ? AND board_id = ? AND status = 'approved' AND post_id != ?
-          AND (created_at > ? OR (created_at = ? AND id > ?))
+        WHERE root_post_id = ? AND board_id = ? AND status = 'approved' AND post_id != ? AND id > ?
         LIMIT 1
         """,
-        (revision.root_post_id, revision.board_id, revision.post_id, row["created_at"], row["created_at"], row["id"]),
+        (revision.root_post_id, revision.board_id, revision.post_id, row["id"]),
     ).fetchone() is not None
 
 
@@ -1542,6 +1580,7 @@ def queue_board_post_edit_if_linked(
         subject=edited_post.subject,
         body=edited_post.body,
         created_at=edited_post.created_at,
+        withdrawn=edited_post.withdrawn,
     )
 
     db.connection.execute(
@@ -1585,7 +1624,7 @@ def _resolve_edit_chain_predecessors(db: Database, edited_post: Post) -> tuple[B
         """
         SELECT post_id, link_event_json FROM posts
         WHERE root_post_id = ? AND board_id = ? AND status = 'approved' AND post_id != ?
-        ORDER BY created_at DESC, id DESC
+        ORDER BY id DESC
         LIMIT 1
         """,
         (edited_post.root_post_id, edited_post.board_id, edited_post.post_id),

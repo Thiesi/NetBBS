@@ -27,6 +27,10 @@ from netbbs.boards.posts import (
     set_post_exempt,
     set_post_pinned,
     tombstone_post,
+    list_post_revisions,
+    Revision,
+    WITHDRAWN_PLACEHOLDER,
+    withdraw_post,
     visible_post,
 )
 
@@ -53,5 +57,9 @@ __all__ = [
     "set_post_exempt",
     "set_post_pinned",
     "tombstone_post",
+    "list_post_revisions",
+    "Revision",
+    "WITHDRAWN_PLACEHOLDER",
+    "withdraw_post",
     "visible_post",
 ]
