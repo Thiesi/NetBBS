@@ -243,3 +243,15 @@ def test_a_door_without_a_fixed_size_leaves_the_session_size_alone():
         await session.leave_door_mode()
 
     asyncio.run(scenario())
+
+
+def test_a_door_that_dies_mid_character_leaves_the_same_replacement_in_the_copy():
+    async def scenario():
+        session = _ssh()
+        await session.write_raw("é".encode()[:1])  # the door stops mid-character
+        await session.write("\r\nBack at the menu")
+        rows = session.screen_copy().text_rows()
+        assert rows[0].startswith("�")
+        assert rows[1].startswith("Back at the menu")
+
+    asyncio.run(scenario())

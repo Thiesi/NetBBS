@@ -542,10 +542,12 @@ async def snoop_screen(
     async def on_key(key: EditorKey) -> KeyOutcome:
         return KeyOutcome.EXIT
 
+    # Only the latest notice is shown, so only the latest is kept: a
+    # stream of messages must not grow memory for as long as this is open.
     notices: list[str] = []
 
     def on_notice(text: str) -> None:
-        notices.append(" ".join(strip_ansi(text).split()))
+        notices[:] = [" ".join(strip_ansi(text).split())]
 
     try:
         await run_live_screen(

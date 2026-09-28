@@ -25,6 +25,7 @@ Pure: no I/O, no `Session`. Rendering the grid goes through
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import replace
 from typing import NamedTuple
 
@@ -167,6 +168,8 @@ class TerminalEmulator:
         self.bottom = self.height - 1
         self._wrap_pending = False
         self._saved: tuple[int, int, Pen] | None = None
+        # The main screen while the alternate one is shown, else None.
+        self._main_rows: list[list[Cell]] | None = None
         self._state = _GROUND
         self._sequence = ""
         # Cells by pen, then character: frozen, so shared freely.
@@ -202,9 +205,13 @@ class TerminalEmulator:
         height = max(1, min(height, _MAX_HEIGHT))
         if (width, height) == (self.width, self.height):
             return
-        rows = [row[:width] + [_BLANK] * (width - len(row)) for row in self._rows[:height]]
-        rows += [[_BLANK] * width for _ in range(height - len(rows))]
-        self._rows = rows
+        def reshape(grid: list[list[Cell]]) -> list[list[Cell]]:
+            rows = [row[:width] + [_BLANK] * (width - len(row)) for row in grid[:height]]
+            return rows + [[_BLANK] * width for _ in range(height - len(rows))]
+
+        self._rows = reshape(self._rows)
+        if self._main_rows is not None:
+            self._main_rows = reshape(self._main_rows)
         self.width, self.height = width, height
         self.top, self.bottom = 0, height - 1
         self.row = min(self.row, height - 1)
@@ -305,6 +312,12 @@ class TerminalEmulator:
     # -- printing ----------------------------------------------------------
 
     def _print(self, ch: str) -> None:
+        if not ch.isprintable() and not unicodedata.combining(ch):
+            # C1 controls (U+0080-U+009F, CSI among them in 8-bit terminals),
+            # bidi overrides and other format characters: a caller could
+            # otherwise plant them on their own screen and have snoop replay
+            # them to the SysOp's terminal. Dropped, never stored.
+            return
         width = char_width(ch)
         if width == 0:
             # A combining mark joins the character before it.
@@ -326,6 +339,7 @@ class TerminalEmulator:
                 return
             self.col = 0
             self._linefeed()
+        self._split_wide(self.row, self.col, self.col + width)
         cell = self._pen_cell(ch)
         self._rows[self.row][self.col] = cell
         if width == 2:
@@ -360,6 +374,7 @@ class TerminalEmulator:
                 self._linefeed()
                 self._wrap_pending = False
             take = min(len(run) - start, width - self.col)
+            self._split_wide(self.row, self.col, self.col + take)
             cells = [self._pen_cell(ch) for ch in run[start : start + take]]
             self._rows[self.row][self.col : self.col + take] = cells
             self.col += take
@@ -367,6 +382,16 @@ class TerminalEmulator:
             if self.col >= width:
                 self.col = width - 1
                 self._wrap_pending = True
+
+    def _split_wide(self, row: int, start: int, end: int) -> None:
+        """Before cells `start`..`end` are overwritten, blank the other half
+        of any wide glyph they cut through, as a terminal does: a leading
+        half left of `start`, a continuation right of `end`."""
+        line = self._rows[row]
+        if 0 < start < self.width and not line[start].char:
+            line[start - 1] = self._erased()
+        if 0 < end < self.width and not line[end].char and line[end - 1].char:
+            line[end] = self._erased()
 
     def _blank_row(self) -> list[Cell]:
         return [_BLANK] * self.width
@@ -448,6 +473,8 @@ class TerminalEmulator:
         if private:
             if final in "hl" and 25 in params:
                 self.cursor_visible = final == "h"
+            if final in "hl" and {47, 1047, 1049} & set(params):
+                self._alternate_screen(final == "h", save_cursor=1049 in params)
             return
         if final in "Hf":
             self._move_to(arg(0) - 1, arg(1) - 1)
@@ -501,6 +528,22 @@ class TerminalEmulator:
             self._restore_cursor()
         elif final == "m":
             self.pen = apply_sgr(self.pen, params)
+
+    def _alternate_screen(self, enter: bool, *, save_cursor: bool) -> None:
+        """xterm's alternate buffer, which full-screen programs (native
+        doors) switch to and back from: the main screen is kept aside
+        untouched and comes back when the program leaves."""
+        if enter and self._main_rows is None:
+            if save_cursor:
+                self._saved = (self.row, self.col, self.pen)
+            self._main_rows = self._rows
+            self._rows = [self._blank_row() for _ in range(self.height)]
+            self._wrap_pending = False
+        elif not enter and self._main_rows is not None:
+            self._rows = self._main_rows
+            self._main_rows = None
+            if save_cursor:
+                self._restore_cursor()
 
     def _erase_display(self, mode: int) -> None:
         blank = self._erased()

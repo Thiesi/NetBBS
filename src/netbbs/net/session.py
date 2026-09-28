@@ -267,6 +267,12 @@ class Session(ABC):
     async def write(self, text: str) -> None:
         """Send text to the client, no trailing newline added. Bare `\\n`
         becomes `\\r\\n` on every transport."""
+        if self._raw_decoder is not None:
+            # Raw output ended mid-character (a door that died partway):
+            # the terminal shows a replacement for it before this text, so
+            # the copy must too.
+            self._copy_output(self._raw_decoder.decode(b"", final=True))
+            self._raw_decoder = None
         self._copy_output(_normalize_newlines(text))
         await self._send_text(text)
 

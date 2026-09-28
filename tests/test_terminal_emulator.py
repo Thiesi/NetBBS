@@ -181,3 +181,35 @@ def test_a_combining_mark_after_a_wide_glyph_joins_the_glyph():
     assert row[0].char == "漢́"
     assert row[1].char == ""
     assert row[2].char == "x"
+
+
+@pytest.mark.parametrize("hostile", ["\u009b31m", "‮", "\u0085", "‎"])
+def test_c1_controls_and_format_characters_never_reach_the_copy(hostile):
+    # A caller could plant these on their own screen; snoop would replay
+    # them raw to the SysOp's terminal.
+    emulator = _emu("a" + hostile + "b")
+    chars = "".join(cell.char for cell in emulator.snapshot()[0])
+    assert all(ch.isprintable() for ch in chars)
+    assert chars.startswith("ab") or chars.startswith("a31mb")
+
+
+def test_overwriting_half_a_wide_glyph_blanks_the_other_half():
+    emulator = _emu("漢字", width=10)
+    emulator.feed("\x1b[1;2Hx")  # onto the continuation of 漢
+    row = emulator.snapshot()[0]
+    assert row[0].char == " " or row[0].char == ""
+    assert row[1].char == "x"
+    assert row[2].char == "字"
+    emulator.feed("\x1b[1;3Hy")  # onto the leading half of 字
+    row = emulator.snapshot()[0]
+    assert row[2].char == "y"
+    assert row[3] == row[3].__class__() or row[3].char == " "
+
+
+def test_the_alternate_screen_keeps_the_main_one():
+    emulator = _emu("main menu\r\nChoice: ", width=20, height=4)
+    emulator.feed("\x1b[?1049h\x1b[2J\x1b[Hdoor screen")
+    assert _rows(emulator)[0] == "door screen"
+    emulator.feed("\x1b[?1049l")
+    assert _rows(emulator)[:2] == ["main menu", "Choice:"]
+    assert (emulator.row, emulator.col) == (1, len("Choice: "))
