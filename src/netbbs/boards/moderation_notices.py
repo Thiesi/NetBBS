@@ -17,6 +17,8 @@ a moderator deciding on their own post.
 
 from __future__ import annotations
 
+import logging
+
 from netbbs.auth.users import User, get_user_by_username
 from netbbs.mail import MAX_MAIL_BODY_BYTES, MAX_MAIL_SUBJECT_BYTES, MailboxFullError, MailError, send_mail
 from netbbs.rendering.post_body import plain_post_body
@@ -32,6 +34,8 @@ _NOTICE_SUBJECT_COLUMNS = 40
 # line (Codex review on #792).
 MAX_NOTICES_SHOWN = 10
 
+logger = logging.getLogger(__name__)
+
 
 def record_moderation_outcome(
     db: Database, post, *, outcome: str, moderator: User, reason: str | None = None
@@ -41,9 +45,10 @@ def record_moderation_outcome(
     reject path, so every way a held post is decided tells its author."""
     if outcome not in OUTCOMES:
         raise ValueError(f"outcome must be one of {OUTCOMES}, got {outcome!r}")
-    if post.author_user_id is None or post.author_user_id == moderator.id:
+    recipient_id = _submitter_id(db, post)
+    if recipient_id is None or recipient_id == moderator.id:
         return
-    author_row = db.connection.execute("SELECT * FROM users WHERE id = ?", (post.author_user_id,)).fetchone()
+    author_row = db.connection.execute("SELECT * FROM users WHERE id = ?", (recipient_id,)).fetchone()
     if author_row is None:
         return
     reason = (reason or "").strip() or None
@@ -51,13 +56,30 @@ def record_moderation_outcome(
         "INSERT INTO moderation_notices (user_id, board_id, post_id, subject, is_edit, outcome, reason, created_at) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         (
-            post.author_user_id, post.board_id, post.post_id, post.subject,
+            recipient_id, post.board_id, post.post_id, post.subject,
             int(post.post_id != post.root_post_id), outcome, reason, utc_now_iso(),
         ),
     )
     db.connection.commit()
     if outcome == "rejected":
         _mail_rejection(db, post, author_row, moderator=moderator, reason=reason)
+
+
+def _submitter_id(db: Database, post) -> int | None:
+    """Who submitted what is being decided. A revision keeps its root's
+    author, but a moderator may have made it (Claude review on #792): the
+    editor is the one whose edit was held, so the one to tell. A revision
+    with no local edit on record came over the Link, and nobody here is
+    told."""
+    if post.post_id == post.root_post_id:
+        return post.author_user_id
+    row = db.connection.execute(
+        "SELECT actor_user_id FROM moderation_log "
+        "WHERE action = 'edit' AND object_type = 'board' AND object_id = ? AND detail = ? "
+        "ORDER BY id DESC LIMIT 1",
+        (post.board_id, post.post_id),
+    ).fetchone()
+    return row["actor_user_id"] if row is not None else None
 
 
 def pending_moderation_notices(db: Database, user: User) -> tuple[list[tuple[str, str]], list[int]]:
@@ -138,5 +160,9 @@ def _mail_rejection(db: Database, post, author_row, *, moderator: User, reason: 
         text = text.encode("utf-8")[:room].decode("utf-8", errors="ignore") + "\n[...]"
     try:
         send_mail(db, moderator, author, subject, head + text)
-    except (MailboxFullError, MailError):
-        pass
+    except (MailboxFullError, MailError) as exc:
+        # The notice still tells them; the SysOp should know the text went
+        # undelivered (Claude review on #792).
+        logger.warning(
+            "Rejection mail for post %s to %s was not delivered: %s", post.post_id, author_row["username"], exc
+        )

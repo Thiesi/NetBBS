@@ -95,6 +95,48 @@ def test_a_moderator_deciding_on_their_own_post_is_not_told(db, sysop, board):
     assert take_moderation_notices(db, sysop) == []
 
 
+def test_a_moderators_edit_of_someone_elses_post_tells_the_moderator(db, sysop, alice, board):
+    """Claude review on #792: the one who made the held edit is told, not
+    the root's author."""
+    mod = create_user(db, "mod", password="hunter2", user_level=SYSOP_LEVEL)
+    post = approve_post(db, create_post(db, board, alice, "Hello", "x"), approved_by=sysop)
+    take_moderation_notices(db, alice)
+    edit = edit_post(db, post, board, subject="Hello", body="y", edited_by=mod)
+    assert edit.status == "pending"
+
+    delete_post(db, edit, deleted_by=sysop, reason="no")
+
+    assert take_moderation_notices(db, alice) == [] and list_inbox(db, alice) == []
+    assert take_moderation_notices(db, mod)[0][1].startswith('Your edit of "Hello"')
+    assert len(list_inbox(db, mod)) == 1
+
+
+def test_a_moderator_rejecting_their_own_edit_of_someone_elses_post_tells_nobody(db, sysop, alice, board):
+    post = approve_post(db, create_post(db, board, alice, "Hello", "x"), approved_by=sysop)
+    take_moderation_notices(db, alice)
+    edit = edit_post(db, post, board, subject="Hello", body="y", edited_by=sysop)
+
+    delete_post(db, edit, deleted_by=sysop)
+
+    assert take_moderation_notices(db, alice) == [] and take_moderation_notices(db, sysop) == []
+
+
+def test_an_undelivered_rejection_mail_is_logged(db, sysop, alice, board, monkeypatch, caplog):
+    from netbbs.boards import moderation_notices
+    from netbbs.mail import MailboxFullError
+
+    def full(*args, **kwargs):
+        raise MailboxFullError("full")
+
+    monkeypatch.setattr(moderation_notices, "send_mail", full)
+
+    with caplog.at_level("WARNING", logger="netbbs.boards.moderation_notices"):
+        delete_post(db, create_post(db, board, alice, "Hello", "x"), deleted_by=sysop)
+
+    assert "was not delivered" in caplog.text
+    assert len(take_moderation_notices(db, alice)) == 1
+
+
 def test_the_main_menu_tells_it_once(db, sysop, alice, board):
     delete_post(db, create_post(db, board, alice, "Hello", "x"), deleted_by=sysop, reason="spam")
     lane = DatabaseLane(db.path)
