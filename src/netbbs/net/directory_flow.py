@@ -24,6 +24,13 @@ from netbbs.net.breadcrumb_preference import breadcrumb_collapsed_enabled
 from netbbs.net.char_input import reject_unhandled_key
 from netbbs.net.chat_flow import run_direct_chat_invite_flow
 from netbbs.net.menu_description_preference import menu_description_level
+from netbbs.net.node_map_flow import (
+    MAP_HOTKEY,
+    MAP_MENU_TEXT,
+    may_open_node_map,
+    node_map_available,
+    node_map_screen,
+)
 from netbbs.net.node_theme import effective_accent_color, effective_header_color
 from netbbs.net.picker import pick_item
 from netbbs.net.redraw_preference import redraw_in_place_enabled
@@ -57,7 +64,10 @@ from netbbs.timeutil import format_for_display
 # -- user directory & vCard/finger (design doc) ------
 
 
-async def _browse_directory(session: Session, db: Database, user: User) -> None:
+async def _browse_directory(
+    session: Session, db: Database, user: User, *,
+    lane: DatabaseLane | None = None, link_context: LinkContext | None = None,
+) -> None:
     """
     The user directory: a table-style listing of every registered
     account (`netbbs.auth.users.list_users`). Selecting an entry shows
@@ -71,9 +81,22 @@ async def _browse_directory(session: Session, db: Database, user: User) -> None:
     which a one-shot "view one, then dumped back to the main menu"
     flow made needlessly costly to do for more than one person in a
     row (dogfood follow-up).
+
+    Issue #777: `Node [m]ap` opens the node map (design doc §8.12), "Nodes
+    known to <board>", on a node with Link enabled, for anyone at or above
+    the SysOp's node map level. Otherwise the key is not offered at all.
     """
     while True:
         users = list_users(db)
+        live_keys = None
+        live_nav: list[MenuEntry] = []
+        if lane is not None and node_map_available(link_context) and may_open_node_map(db, user):
+            async def _open_node_map() -> None:
+                await node_map_screen(session, lane, user, link_context=link_context)
+                return None
+
+            live_keys = {MAP_HOTKEY: _open_node_map}
+            live_nav = [MenuEntry(label=MAP_MENU_TEXT, brief="Other boards this one knows")]
         selected = await pick_item(
             session,
             users,
@@ -82,6 +105,8 @@ async def _browse_directory(session: Session, db: Database, user: User) -> None:
             description_of=lambda u: _directory_description(db, u),
             title="User directory",
             empty_message="No registered users yet.",
+            live_keys=live_keys,
+            live_nav=live_nav,
             redraw_in_place=redraw_in_place_enabled(db, user),
             unicode_style=unicode_style_enabled(db, user),
             collapsed=breadcrumb_collapsed_enabled(db, user),

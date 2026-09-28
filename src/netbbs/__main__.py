@@ -1082,7 +1082,15 @@ async def run(
             except ImportError:
                 pass
             else:
-                link_realtime_registry = LinkRealtimeSessionRegistry(own_fingerprint=node_identity.fingerprint)
+                from netbbs.link.store import record_direct_contact
+
+                async def _record_realtime_contact(fingerprint: str, at: str) -> None:
+                    # Issue #777: an open authenticated session is contact.
+                    await background_lane.run(record_direct_contact, fingerprint, at)
+
+                link_realtime_registry = LinkRealtimeSessionRegistry(
+                    own_fingerprint=node_identity.fingerprint, on_contact=_record_realtime_contact,
+                )
                 link_realtime_bridge = LiveChannelBridge(
                     hub=hub, lane=background_lane, presence=presence, registry=link_realtime_registry
                 )

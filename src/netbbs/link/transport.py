@@ -47,6 +47,7 @@ import json
 import logging
 import random
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Awaitable, Callable, Sequence
 from urllib.parse import urljoin, urlparse
 
@@ -935,6 +936,10 @@ REALTIME_DEFAULT_HEARTBEAT_LEASE_SECONDS = 45.0
 REALTIME_DEFAULT_MAX_FRAMES_PER_WINDOW = 100
 REALTIME_DEFAULT_FRAME_WINDOW_SECONDS = 10.0
 REALTIME_DEFAULT_MAX_PROTOCOL_STRIKES = 5
+# Issue #777: how often an open real-time session refreshes its peer's last
+# direct contact. Coarse on purpose: the node map shows last-heard as a
+# relative time and marks a node stale after 30 days.
+REALTIME_CONTACT_RECORD_INTERVAL_SECONDS = 300.0
 
 
 class LinkRealtimeSession:
@@ -1062,6 +1067,15 @@ class LinkRealtimeSession:
             pass
         self.closed.set()
 
+    def seconds_since_activity(self) -> float:
+        """How long ago the peer last sent anything on this session -- zero
+        before `start()`. What makes a session's close a contact time (issue
+        #777): a session the lease closed was last heard of this long ago,
+        not at the moment it was torn down."""
+        if self._last_activity is None:
+            return 0.0
+        return max(0.0, asyncio.get_running_loop().time() - self._last_activity)
+
     def _register_frame_arrival(self, *, now: float) -> bool:
         if self._frame_window_start is None or now - self._frame_window_start > self._frame_window_seconds:
             self._frame_window_start = now
@@ -1170,10 +1184,27 @@ class LinkRealtimeSessionRegistry:
     deregister it once it closes) -- bounded by construction, since
     there is at most one such task per registry entry, and gathered by
     `close_all()` on node shutdown.
+
+    Issue #777: an authenticated real-time session is direct contact for as
+    long as it stays open (design doc §8.12). `on_contact`, when given, is
+    how the registry says so -- called with the remote fingerprint and an ISO
+    time when a session is admitted, every `contact_interval_seconds` while
+    it stays open, and once when it closes. The same watcher task makes the
+    calls, so there is still one task per session, and at most one call per
+    interval per peer, since the registry holds one session per peer. A
+    failing call is logged and never touches the session.
     """
 
-    def __init__(self, *, own_fingerprint: str) -> None:
+    def __init__(
+        self,
+        *,
+        own_fingerprint: str,
+        on_contact: Callable[[str, str], Awaitable[None]] | None = None,
+        contact_interval_seconds: float = REALTIME_CONTACT_RECORD_INTERVAL_SECONDS,
+    ) -> None:
         self._own_fingerprint = own_fingerprint
+        self._on_contact = on_contact
+        self._contact_interval = contact_interval_seconds
         self._sessions: dict[str, LinkRealtimeSession] = {}
         self._watchers: set[asyncio.Task] = set()
         # Issue #624: transport keys a rotation retired. A handshake that
@@ -1226,9 +1257,33 @@ class LinkRealtimeSessionRegistry:
         watcher.add_done_callback(self._watchers.discard)
 
     async def _watch(self, session: LinkRealtimeSession) -> None:
-        await session.closed.wait()
-        if self._sessions.get(session.remote_fingerprint) is session:
-            del self._sessions[session.remote_fingerprint]
+        try:
+            if self._on_contact is None:
+                await session.closed.wait()
+                return
+            await self._record_contact(session)
+            while not session.closed.is_set():
+                try:
+                    await asyncio.wait_for(session.closed.wait(), timeout=self._contact_interval)
+                except TimeoutError:
+                    await self._record_contact(session)
+            await self._record_contact(session)
+        finally:
+            if self._sessions.get(session.remote_fingerprint) is session:
+                del self._sessions[session.remote_fingerprint]
+
+    async def _record_contact(self, session: LinkRealtimeSession) -> None:
+        # The peer's last frame, not this moment: a session the heartbeat
+        # lease closed went quiet a lease ago.
+        at = datetime.now(timezone.utc) - timedelta(seconds=session.seconds_since_activity())
+        try:
+            await self._on_contact(session.remote_fingerprint, at.strftime("%Y-%m-%dT%H:%M:%S.%fZ"))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _logger.warning(
+                "could not record real-time contact with %s", session.remote_fingerprint, exc_info=True
+            )
 
     async def close_all(self, *, reason: str) -> None:
         for session in list(self._sessions.values()):
