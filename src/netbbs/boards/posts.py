@@ -1068,7 +1068,10 @@ def delete_post(db: Database, post: Post, *, deleted_by: User, reason: str | Non
     still-`'pending'` post — there is no separate rejected status
     — and the moderation log records which of the two actually
     happened, distinguished by the post's status at the moment of
-    deletion.
+    deletion. Rejecting takes `BoardPermission.APPROVE` as well as
+    DELETE (issue #678): deciding on a held post is one job, and an
+    "Approver only" moderator who could approve but not reject could
+    not do it.
 
     Refuses with a `PostError` (GitHub issue #37), rather than letting
     SQLite's FK constraint raise `sqlite3.IntegrityError`, if this post
@@ -1084,7 +1087,10 @@ def delete_post(db: Database, post: Post, *, deleted_by: User, reason: str | Non
     refusal rather than a session-crashing exception.
     """
     _refuse_if_board_hidden(db, post.board_id)
-    _require_board_permission(db, post, deleted_by, BoardPermission.DELETE)
+    if not (post.status == "pending" and has_permission(
+        db, deleted_by, object_type="board", object_id=post.board_id, permission=BoardPermission.APPROVE
+    )):
+        _require_board_permission(db, post, deleted_by, BoardPermission.DELETE)
 
     blockers = db.connection.execute(
         """
@@ -1113,6 +1119,15 @@ def delete_post(db: Database, post: Post, *, deleted_by: User, reason: str | Non
         # approved post, nor record a rejection nobody made of it (Codex
         # review on #780).
         raise PostError("this post was already decided by another moderator")
+    # The status the decision was made on is part of the delete itself, not
+    # only of the check above (Codex review on #796): a rejection authorized
+    # by APPROVE must never remove a post approved in between.
+    deleted = db.connection.execute(
+        "DELETE FROM posts WHERE id = ? AND status = ?", (post.id, post.status)
+    ).rowcount
+    if not deleted:
+        db.connection.rollback()
+        raise PostError("this post was already decided by another moderator")
     if action == "reject":
         # A rejection is recorded, not only carried out (issue #692): for a
         # carried post the signed event is kept, and without this record
@@ -1123,7 +1138,6 @@ def delete_post(db: Database, post: Post, *, deleted_by: User, reason: str | Non
             "VALUES (?, ?, ?, ?, ?)",
             (post.post_id, post.board_id, deleted_by.id, utc_now_iso(), reason),
         )
-    db.connection.execute("DELETE FROM posts WHERE id = ?", (post.id,))
     db.connection.commit()
     record_action(
         db,
@@ -1359,6 +1373,14 @@ def list_pending_posts(
             (board.id, requesting_user.id, cap),
         ).fetchall()
     return [_row_to_post(row) for row in rows]
+
+
+def count_pending_posts(db: Database, board: Board) -> int:
+    """How many posts wait for a moderator on `board` -- what a caller who
+    may approve them is told on the board's page (issue #678)."""
+    return db.connection.execute(
+        "SELECT COUNT(*) FROM posts WHERE board_id = ? AND status = 'pending'", (board.id,)
+    ).fetchone()[0]
 
 
 def list_node_pending_posts(db: Database, *, requesting_user: User, limit: int) -> list[Post]:

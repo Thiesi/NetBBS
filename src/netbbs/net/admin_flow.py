@@ -451,6 +451,7 @@ from netbbs.moderation.roles import (
     ModeratorGrantError,
     get_grant,
     grant_permissions,
+    has_permission,
     list_grants_for_community,
     list_grants_for_user,
     revoke_permissions,
@@ -16942,7 +16943,12 @@ async def _post_action_screen(
     collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
     redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
     header_color = await lane.run(effective_header_color_256)
-    status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
+    # The node's health line is the SysOp's; a board moderator reaching this
+    # from the board's own [Q]ueue (issue #678) is shown the post alone.
+    status_line = (
+        await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
+        if actor.user_level >= SYSOP_LEVEL else None
+    )
     display_format, display_timezone = await lane.run(resolve_display_preferences)
     when = _when_or_raw(post.created_at, override_format=display_format, override_timezone=display_timezone)
     body_mode = post_body_mode(
@@ -16964,11 +16970,14 @@ async def _post_action_screen(
         "SELECT MAX(id) FROM posts WHERE root_post_id = ? AND board_id = ? AND status = 'approved'",
         (post.root_post_id, post.board_id),
     ).fetchone()[0] or 0) > post.id)
+    # Pinning and keeping take EDIT, which an approver need not hold.
+    can_flag = await lane.run(lambda db: has_permission(
+        db, actor, object_type="board", object_id=board.id, permission=BoardPermission.EDIT
+    ))
     actions = [
         ("a", menu_key("A", "pprove")),
         ("r", menu_key("R", "eject")),
-        ("p", menu_key("P", "in toggle")),
-        ("x", menu_key("X", "empt toggle")),
+        *([("p", menu_key("P", "in toggle")), ("x", menu_key("X", "empt toggle"))] if can_flag else []),
         ("b", menu_key("B", "ack")),
     ]
     page = 0
@@ -17021,7 +17030,7 @@ async def _post_action_screen(
         choice, page = await show_detail(
             session, title=title, sections=sections, actions=actions,
             redraw_in_place=redraw_in_place, unicode_style=unicode_style, page=page,
-            preamble=[status_line],
+            preamble=[status_line] if status_line else [],
         )
         if choice == "b":
             return
@@ -17766,6 +17775,7 @@ async def _draw_file_action(
     when: str,
     can_download: bool = False,
     area_name: str | None = None,
+    can_flag: bool = True,
 ) -> None:
     # Which area it waits in (Codex review on #795): reached from the
     # node-wide queue, the list that said so is gone.
@@ -17797,11 +17807,12 @@ async def _draw_file_action(
         entries.append(
             MenuEntry(label=menu_key("D", "ownload"), brief="Fetch it before deciding")
         )
-    entries += [
-        MenuEntry(label=menu_key("P", "in toggle"), brief="Toggle showing at the top"),
-        MenuEntry(label=menu_key("X", "empt toggle"), brief="Toggle exempt from auto-purge"),
-        MenuEntry(label=menu_key("B", "ack"), brief="Return to the pending list"),
-    ]
+    if can_flag:
+        entries += [
+            MenuEntry(label=menu_key("P", "in toggle"), brief="Toggle showing at the top"),
+            MenuEntry(label=menu_key("X", "empt toggle"), brief="Toggle exempt from auto-purge"),
+        ]
+    entries.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to the pending list"))
     options = _fitted_menu(entries, description_level, session=session, used_rows=used_rows)
     await session.write_line(f"\r\n{options}")
     await _choice_prompt(session)
@@ -17822,9 +17833,17 @@ async def _file_action_screen(
     collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
     redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
     header_color = await lane.run(effective_header_color_256)
-    status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
+    # As on the pending-post screen: the node's health line is the SysOp's,
+    # and pinning or keeping takes EDIT, which an approver need not hold.
+    status_line = (
+        await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
+        if actor.user_level >= SYSOP_LEVEL else ""
+    )
+    can_flag = await lane.run(lambda db: has_permission(
+        db, actor, object_type="file_area", object_id=area.id, permission=BoardPermission.EDIT
+    ))
     display_format, display_timezone = await lane.run(resolve_display_preferences)
-    when = format_for_display(entry.created_at, override_format=display_format, override_timezone=display_timezone)
+    when = _when_or_raw(entry.created_at, override_format=display_format, override_timezone=display_timezone)
     # Imported here rather than at module scope: this is the only
     # place `admin_flow` reaches into the caller-facing file screens,
     # and `door_profile_flow` above sets the same local-import
@@ -17841,6 +17860,7 @@ async def _file_action_screen(
         await _draw_file_action(
             session, entry, description_level, redraw_in_place, unicode_style, collapsed, header_color,
             status_line=status_line, when=when, can_download=can_download, area_name=area.name,
+            can_flag=can_flag,
         )
 
     await _draw()
@@ -17885,7 +17905,7 @@ async def _file_action_screen(
                 continue
             _announce_line(session, "Rejected.")
             return
-        elif choice in ("p", "x"):
+        elif choice in ("p", "x") and can_flag:
             await session.write_line("")
             # Refused, not raised, when the file is gone or its area hidden
             # meanwhile -- the same as approve and reject just above.

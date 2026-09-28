@@ -515,7 +515,8 @@ def delete_file(db: Database, entry: FileEntry, *, deleted_by: User) -> None:
     `BoardPermission.DELETE` on its area. Doubles as "reject" for a
     still-`'pending'` upload — no separate rejected status, mirroring
     `netbbs.boards.posts.delete_post` exactly, including which of the
-    two the moderation log records.
+    two the moderation log records and that rejecting takes
+    `BoardPermission.APPROVE` as well as DELETE (issue #678).
 
     Only removes the database row — the underlying bytes in
     `netbbs.files.storage` are deliberately left alone. Storage-level
@@ -523,10 +524,21 @@ def delete_file(db: Database, entry: FileEntry, *, deleted_by: User) -> None:
     different file entry could in principle share the same bytes) is
     a separate concern handled by `netbbs.files.gc`, not by this function.
     """
-    _require_area_permission(db, entry, deleted_by, BoardPermission.DELETE)
+    if not (entry.status == "pending" and has_permission(
+        db, deleted_by, object_type="file_area", object_id=entry.area_id, permission=BoardPermission.APPROVE
+    )):
+        _require_area_permission(db, entry, deleted_by, BoardPermission.DELETE)
 
     action = "reject" if entry.status == "pending" else "delete"
-    db.connection.execute("DELETE FROM files WHERE id = ?", (entry.id,))
+    # Only the file as it was decided on (Codex review on #796): a rejection
+    # authorized by APPROVE must never remove an upload approved in between,
+    # and a decision on a stale copy must not be logged as made.
+    deleted = db.connection.execute(
+        "DELETE FROM files WHERE id = ? AND status = ?", (entry.id, entry.status)
+    ).rowcount
+    if not deleted:
+        db.connection.rollback()
+        raise FileEntryError("this file was already decided by another moderator")
     db.connection.commit()
     record_action(
         db,
@@ -725,6 +737,14 @@ def list_pending_files(
             (area.id, requesting_user.id, cap),
         ).fetchall()
     return [_row_to_file_entry(row) for row in rows]
+
+
+def count_pending_files(db: Database, area: FileArea) -> int:
+    """How many uploads wait for a moderator in `area` -- `count_pending_posts`'
+    counterpart."""
+    return db.connection.execute(
+        "SELECT COUNT(*) FROM files WHERE area_id = ? AND status = 'pending'", (area.id,)
+    ).fetchone()[0]
 
 
 def list_node_pending_files(db: Database, *, requesting_user: User, limit: int) -> list[FileEntry]:
