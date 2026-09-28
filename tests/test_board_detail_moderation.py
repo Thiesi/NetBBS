@@ -143,3 +143,36 @@ def test_the_object_history_is_read_through_the_object_index(db):
     detail = " ".join(row[-1] for row in plan)
 
     assert "idx_moderation_log_object" in detail and "TEMP B-TREE" not in detail
+
+
+def test_a_purged_carried_board_is_a_history_boundary_too(db, sysop):
+    """Codex review on #797: purging a hidden carried board logs
+    purge_link_resource, not delete_board."""
+    from netbbs.moderation.log import record_action
+
+    board = create_board(db, "first", creator=sysop)
+    record_action(db, actor=sysop, action="purge_link_resource", object_type="board", object_id=board.id)
+    record_action(db, actor=sysop, action="update_board", object_type="board", object_id=board.id)
+
+    actions = list_recent_actions(db, object_type="board", object_id=board.id)
+
+    assert [entry.action for entry in actions] == ["update_board"]
+
+
+def test_a_long_moderator_line_is_cut_to_one_row(db, lane, sysop):
+    """Codex review on #797: the detail screen has no row to spare."""
+    board = create_board(db, "general", creator=sysop)
+    for i in range(2):
+        long_name = f"a_rather_long_moderator_name_{i:02d}"
+        grant_permissions(
+            db, create_user(db, long_name, password="hunter2", user_level=10), object_type="board",
+            object_id=board.id, permissions=BoardPermission.EDIT | BoardPermission.DELETE | BoardPermission.APPROVE,
+            granted_by=sysop,
+        )
+
+    session = FakeSession(["b"])
+    asyncio.run(_board_detail_screen(session, lane, sysop, board))
+    lines = _visible(_written_text(session)).splitlines()
+    [row] = [line for line in lines if "Moderators:" in line]
+
+    assert row.rstrip().endswith("...") and len(row.rstrip()) <= 80

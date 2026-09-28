@@ -687,6 +687,7 @@ from netbbs.rendering import (
 from netbbs.rendering.detail import Field, Note, Section, Styled, Table, render_sections
 from netbbs.rendering.post_body import post_body_mode, post_body_rows
 from netbbs.rendering.reflow import wrap_terminal_text
+from netbbs.rendering.width import display_width
 from netbbs.net import notices as _notices
 from netbbs.guest import (
     guest_user,
@@ -16536,7 +16537,7 @@ async def _draw_board_detail(
             _description_field(board.description),
             Field("Posts", f"{post_count} ({activity})"),
             Field("Community", await lane.run(_community_label, board.community_id)),
-            await lane.run(_moderators_field, "board", board.id),
+            await lane.run(lambda db: _moderators_field(db, "board", board.id, width=session.terminal_width)),
         ]),
         Section("Access", [
             Field("Read level", _inheritable(board.min_read_level)),
@@ -16629,11 +16630,13 @@ async def _draw_board_detail(
 
 
 # How many moderators a board's or file area's detail screen names; the
-# rest are counted. One row of the screen, which has little to spare.
+# rest are counted.
 _MODERATORS_SHOWN = 3
+# What the detail screen's label column and indent take from a row.
+_DETAIL_LABEL_COLUMNS = 22
 
 
-def _moderators_field(db: Database, object_type: str, object_id: int) -> Field:
+def _moderators_field(db: Database, object_type: str, object_id: int, *, width: int = 80) -> Field:
     """Who may moderate this board or file area, and with what (issue
     #678): every grant that applies to it, its own and blanket ones, as
     `list_grants_for_object` answers."""
@@ -16656,7 +16659,14 @@ def _moderators_field(db: Database, object_type: str, object_id: int) -> Field:
         named.append(f"{name} ({permissions}{scope})")
     if len(grants) > _MODERATORS_SHOWN:
         named.append(f"+{len(grants) - _MODERATORS_SHOWN} more")
-    return Field("Moderators", "; ".join(named))
+    # One row of a screen with none to spare (Codex review on #797): long
+    # names are cut rather than wrapped. The names are sanitized first --
+    # a username is the caller's own text.
+    summary = sanitize_text("; ".join(named))
+    room = max(10, width - _DETAIL_LABEL_COLUMNS)
+    if display_width(summary) > room:
+        summary = cut_to_width(summary, room - 3) + "..."
+    return Field("Moderators", summary)
 
 
 async def _delete_board_screen(
@@ -17581,7 +17591,7 @@ async def _draw_area_detail(
             _description_field(area.description),
             Field("Files", f"{file_count} ({activity})"),
             Field("Community", await lane.run(_community_label, area.community_id)),
-            await lane.run(_moderators_field, "file_area", area.id),
+            await lane.run(lambda db: _moderators_field(db, "file_area", area.id, width=session.terminal_width)),
         ]),
         Section("Access", [
             Field("Read level", _inheritable(area.min_read_level)),

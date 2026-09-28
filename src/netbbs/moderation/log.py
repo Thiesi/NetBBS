@@ -146,9 +146,10 @@ def list_recent_actions(
     - It is read newest first through `idx_moderation_log_object`, which
       ends in `created_at`, so the limit bounds the work as well as the
       rows.
-    - It starts after the object's last deletion (`delete_<object_type>`).
-      A deleted board's integer id can be reused by the next one created,
-      and the log keeps the deleted one's rows.
+    - It starts after the object's last deletion (`delete_<object_type>`,
+      or `purge_link_resource` for a hidden carried one). A deleted board's
+      integer id can be reused by the next one created, and the log keeps
+      the deleted one's rows.
     """
     if object_type is not None:
         rows = db.connection.execute(
@@ -157,7 +158,8 @@ def list_recent_actions(
             WHERE object_type = ? AND object_id = ?
               AND id > COALESCE((
                   SELECT MAX(id) FROM moderation_log
-                  WHERE object_type = ? AND object_id = ? AND action = 'delete_' || ?
+                  WHERE object_type = ? AND object_id = ?
+                    AND action IN ('delete_' || ?, 'purge_link_resource')
               ), 0)
             ORDER BY created_at DESC LIMIT ?
             """,
