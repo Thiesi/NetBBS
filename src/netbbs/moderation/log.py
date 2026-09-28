@@ -140,12 +140,28 @@ def list_recent_actions(
     With `object_type` and `object_id`, only what was done to that one
     board, file area or channel -- its moderation history, bounded the
     same way (issue #678), unlike `list_actions_for_object`, which reads
-    all of it.
+    all of it. Two things differ from the node-wide trail (Codex review
+    on #797):
+
+    - It is read newest first through `idx_moderation_log_object`, which
+      ends in `created_at`, so the limit bounds the work as well as the
+      rows.
+    - It starts after the object's last deletion (`delete_<object_type>`).
+      A deleted board's integer id can be reused by the next one created,
+      and the log keeps the deleted one's rows.
     """
     if object_type is not None:
         rows = db.connection.execute(
-            "SELECT * FROM moderation_log WHERE object_type = ? AND object_id = ? ORDER BY id DESC LIMIT ?",
-            (object_type, object_id, limit),
+            """
+            SELECT * FROM moderation_log
+            WHERE object_type = ? AND object_id = ?
+              AND id > COALESCE((
+                  SELECT MAX(id) FROM moderation_log
+                  WHERE object_type = ? AND object_id = ? AND action = 'delete_' || ?
+              ), 0)
+            ORDER BY created_at DESC LIMIT ?
+            """,
+            (object_type, object_id, object_type, object_id, object_type, limit),
         ).fetchall()
     else:
         rows = db.connection.execute(

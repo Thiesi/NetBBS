@@ -16037,7 +16037,10 @@ async def _board_detail_screen(
             await session.write_line("")
             await _audit_log_screen(
                 session, lane, actor, object_type="board", object_id=board.id,
-                title=f"History of {board.name}", breadcrumb=("SysOp", "Message boards"),
+                # A carried board's name is its origin's: sanitized before it
+                # reaches a title, as the detail heading does (Codex review
+                # on #797).
+                title=f"History of {sanitize_text(board.name)}", breadcrumb=("SysOp", "Message boards"),
             )
             is_origin, has_incoming_offer, is_closed = await _draw_board_detail(
                 session, lane, board, linked=linked, link_context=link_context,
@@ -17533,7 +17536,7 @@ async def _area_detail_screen(
             await session.write_line("")
             await _audit_log_screen(
                 session, lane, actor, object_type="file_area", object_id=area.id,
-                title=f"History of {area.name}", breadcrumb=("SysOp", "File areas"),
+                title=f"History of {sanitize_text(area.name)}", breadcrumb=("SysOp", "File areas"),
             )
             await _draw_area_detail(session, lane, area, linked=linked, link_context=link_context, description_level=description_level, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed)
         elif choice == "x":

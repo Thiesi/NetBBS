@@ -102,3 +102,44 @@ def test_the_file_area_detail_names_moderators_and_history(db, lane, sysop):
 
     assert "mod (approve)" in text
     assert "History of uploads" in text and "approve" in text
+
+
+# -- Codex review on #797 ----------------------------------------------
+
+
+def test_a_reused_board_id_does_not_inherit_the_deleted_boards_history(db, sysop):
+    from netbbs.boards.boards import delete_board
+
+    first = create_board(db, "first", creator=sysop)
+    delete_board(db, first, deleted_by=sysop)
+    again = create_board(db, "again", creator=sysop)
+    assert again.id == first.id  # SQLite reused the id
+
+    actions = list_recent_actions(db, object_type="board", object_id=again.id)
+
+    assert [entry.action for entry in actions] == ["create_board"]
+
+
+def test_the_history_title_is_sanitized(db, lane, sysop):
+    import dataclasses
+
+    # As a carried board's name, supplied by its origin, could be.
+    board = dataclasses.replace(create_board(db, "general", creator=sysop), name="evil\x1b[2Jname")
+
+    session = FakeSession(["h", "b", "b"])
+    asyncio.run(_board_detail_screen(session, lane, sysop, board))
+    written = _written_text(session)
+
+    assert "History of evil" in _visible(written) and "evil\x1b" not in written
+
+
+def test_the_object_history_is_read_through_the_object_index(db):
+    plan = db.connection.execute(
+        """
+        EXPLAIN QUERY PLAN SELECT * FROM moderation_log WHERE object_type = 'board' AND object_id = 1
+        ORDER BY created_at DESC LIMIT 200
+        """
+    ).fetchall()
+    detail = " ".join(row[-1] for row in plan)
+
+    assert "idx_moderation_log_object" in detail and "TEMP B-TREE" not in detail
