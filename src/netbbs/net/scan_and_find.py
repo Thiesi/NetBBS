@@ -1,5 +1,5 @@
 """
-`[N]ew scan` and `[F]ind` (issue #56): a caller's unread-activity summary
+`[N]ew scan` and `[/] Find` (issue #56): a caller's unread-activity summary
 across every board/channel/file area they can currently access, and a
 local free-text search over approved post/file/retained-chat content.
 
@@ -378,7 +378,7 @@ async def _new_scan_screen(
 
 @dataclass(frozen=True)
 class _SearchResultItem:
-    """One row in issue #56's `[F]ind` results picker -- a matched post,
+    """One row in issue #56's `[/] Find` results picker -- a matched post,
     file, or retained channel message, already filtered to what `user`
     can currently access (`search_posts`/`search_files`/
     `search_channel_messages`'s own authorization). Built fresh per

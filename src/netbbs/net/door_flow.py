@@ -42,13 +42,9 @@ def has_visible_doors(
     db: Database, user: User, *, community_id: int | None = None, community_scoped: bool = False
 ) -> bool:
     """Whether `user` can see at least one door under the given Community
-    filter -- backs `netbbs.net.login_flow`'s shared resource-type
-    sub-menu, same convention as `_has_visible_boards`/`has_visible_areas`/
-    `has_visible_channels` (design doc §16)."""
-    doors = [d for d in list_doors(db) if meets_level(user, d.min_play_level)]
-    if community_scoped:
-        doors = [d for d in doors if d.community_id == community_id]
-    return bool(doors)
+    filter -- gates the main menu's `[G]ames` (issue #838), same
+    convention as `[I]nvitations`."""
+    return bool(_visible_doors(db, user, community_id=community_id, community_scoped=community_scoped))
 
 
 def _visible_doors(db: Database, user: User, *, community_id: int | None, community_scoped: bool) -> list[Door]:

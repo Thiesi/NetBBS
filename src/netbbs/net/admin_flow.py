@@ -13547,7 +13547,7 @@ async def _draw_board_list_masthead_menu(
     await _write_wrapped_subtitle(
         session,
         "Shown above every board-browsing view -- the top level, a category, or a "
-        "Community/Uncategorized scope.",
+        "Community.",
     )
     await session.write_line(await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width))
     await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style)], unicode_style=unicode_style)
@@ -13823,7 +13823,7 @@ async def _draw_file_area_masthead_menu(
     await _write_wrapped_subtitle(
         session,
         "Shown above every file-area-browsing view -- the top level, a category, or a "
-        "Community/Uncategorized scope.",
+        "Community.",
     )
     await session.write_line(await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width))
     await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style)], unicode_style=unicode_style)
@@ -14097,7 +14097,7 @@ async def _draw_chat_channel_picker_masthead_menu(
     await _write_wrapped_subtitle(
         session,
         "Shown above every channel-picker view -- the top level, a category, or a "
-        "Community/Uncategorized scope. Never inside a live channel.",
+        "Community. Never inside a live channel.",
     )
     await session.write_line(await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width))
     await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style)], unicode_style=unicode_style)
@@ -14714,8 +14714,8 @@ async def _draw_content_menu(session: Session, *, stats: dict[str, Any]) -> None
         MenuEntry(label=menu_key("F", "ile areas"), brief="Create/edit file areas"),
         MenuEntry(label=menu_key("D", "oors"), brief="Register/edit door games"),
         MenuEntry(label=menu_key("n", "nels", prefix="Chat cha"), brief="Create/edit chat channels"),
-        MenuEntry(label=menu_key("C", "ategories"), brief="Organize boards/areas/channels"),
-        MenuEntry(label=menu_key("O", "mmunities", prefix="C"), brief="Manage Communities"),
+        MenuEntry(label=menu_key("C", "ategories"), brief="Group lists of one kind"),
+        MenuEntry(label=menu_key("O", "mmunities", prefix="C"), brief="Topics holding every kind"),
         MenuEntry(label=menu_key("G", "rant moderator"), brief="Grant a moderation scope"),
         MenuEntry(label=menu_key("R", "evoke moderator"), brief="Revoke a moderation scope"),
         MenuEntry(label=menu_key("P", "ending review"), brief="Posts and files awaiting approval"),
@@ -20672,6 +20672,11 @@ async def _category_menu(session: Session, lane: DatabaseLane, actor: User) -> N
         if choice == "b":
             await session.write_line("")
             return
+        elif choice == HELP_KEY:
+            await session.write_line("")
+            await _categories_help_screen(session, header_color=header_color, unicode_style=unicode_style)
+            status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
+            await _draw_category_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
         elif choice == "m":
             await session.write_line("")
             await _generic_category_screen(
@@ -20709,6 +20714,30 @@ async def _category_menu(session: Session, lane: DatabaseLane, actor: User) -> N
             await session.write(reject_unhandled_key(choice))
 
 
+async def _categories_help_screen(
+    session: Session, *, header_color: int | tuple[int, int, int], unicode_style: bool
+) -> None:
+    """Ctrl-H on the Categories screen (issue #838): the difference
+    between a category and a Community, which nothing else on screen
+    explained -- a SysOp setting up a node met both words on one menu."""
+    lines = [
+        colored("Categories", fg_color=header_color, bold=True),
+        "  Group the list of one kind: board categories group boards, file-area",
+        "  categories group file areas, chat categories group channels. A caller",
+        "  sees them as folders in that list, at most two levels deep.",
+        "",
+        colored("Communities", fg_color=header_color, bold=True),
+        "  A topic that holds every kind at once: its own boards, chat channels,",
+        "  file areas and games. Callers reach them under C[o]mmunities on the main",
+        "  menu. They are managed under Content, not here.",
+        "",
+        colored("Using both", fg_color=header_color, bold=True),
+        "  A board can have a Community and a category. Inside a Community,",
+        "  callers see only the categories its own boards use.",
+    ]
+    await show_help(session, "Categories help", lines, header_color=header_color, unicode_style=unicode_style)
+
+
 async def _draw_category_menu(
     session: Session, description_level: str, redraw_in_place: bool, unicode_style: bool, collapsed: bool,
     header_color: int | tuple[int, int, int] = HEADER_COLOR, *, status_line: str,
@@ -20729,6 +20758,7 @@ async def _draw_category_menu(
             height=session.terminal_height,
         )
     )
+    await session.write_line(colored("Ctrl-H: categories vs. Communities", fg_color=MUTED_COLOR))
     await _choice_prompt(session)
 
 

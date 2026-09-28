@@ -193,3 +193,24 @@ def test_a_move_from_a_stale_copy_moves_it_among_its_current_siblings(db, sysop,
     assert module.move_category(db, stale, -1, moved_by=sysop)
 
     assert [c.name for c in module.list_subcategories(db, parent.id)] == ["Second", "First"]
+
+
+def test_ctrl_h_on_the_categories_screen_tells_categories_from_communities(db, lane, sysop):
+    """Issue #838 (F030): both words sat on one menu with nothing saying
+    how they differ, and this screen answered Ctrl-H with nothing."""
+    session = FakeSession(["m", "c", "\x08", " ", "b", "b", "b"])
+    _run(session, lane, sysop)
+    text = _visible(_written_text(session))
+
+    assert "Ctrl-H: categories vs. Communities" in text
+    assert "Categories help" in text
+    assert "A topic that holds every kind at once" in text
+
+
+def test_the_content_screen_says_what_categories_and_communities_are(db, lane, sysop):
+    session = FakeSession(["m", "b", "b"])
+    _run(session, lane, sysop)
+    text = _visible(_written_text(session))
+
+    assert "Group lists of one kind" in text
+    assert "Topics holding every kind" in text

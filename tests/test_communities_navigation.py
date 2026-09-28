@@ -1,8 +1,8 @@
 """
-Tests for the Communities main-menu navigation restructuring (design
-doc §16): [C]ommunities/[U]ncategorized/[J]ump to...
-replacing the flat [M]essage Boards/[C]hat/[F]ile areas split, the
-shared resource-type sub-menu, and category leak prevention. The
+Tests for the main menu's content entries and the Communities path
+(design doc §16, issue #838): [M]essage boards/[C]hat/[F]iles/[G]ames
+over the whole node, C[o]mmunities with each Community's own page, and
+category leak prevention. The
 underlying data model/core logic (netbbs.communities) is covered
 separately in tests/test_communities.py; these drive the real
 netbbs.net.login_flow entry points.
@@ -88,20 +88,52 @@ def _run_main_menu(session, db, user):
         lane.close()
 
 
-# -- main-menu conditional visibility ----------------------------------------
+# -- main-menu content entries ------------------------------------------------
 
 
-def test_main_menu_hides_communities_and_uncategorized_with_nothing_to_show(tmp_path):
+def test_main_menu_always_offers_boards_chat_and_files(tmp_path):
     db = Database(tmp_path / "node.db")
     bob = create_user(db, "bob", password="hunter2pw", user_level=10)
     session = FakeSession(keys=["l"])
 
     _run_main_menu(session, db, bob)
 
-    text = _written_text(session)
-    assert "ommunities" not in text
+    text = _visible_text(session)
+    assert "[M]essage boards" in text
+    assert "[C]hat" in text
+    assert "[F]iles" in text
+    assert "[/] Find" in text
+    # Issue #838: the old type picker and the "outside a Community"
+    # bucket are gone from the menu entirely.
     assert "ncategorized" not in text
-    assert "ump to..." in text  # always shown
+    assert "ump to" not in text
+    assert "mmunities" not in text
+    db.close()
+
+
+def test_main_menu_hides_games_with_no_doors(tmp_path):
+    # Issue #838 (F108): "Games" led to "No doors are available to you yet".
+    db = Database(tmp_path / "node.db")
+    bob = create_user(db, "bob", password="hunter2pw", user_level=10)
+    session = FakeSession(keys=["g", "l"])
+
+    _run_main_menu(session, db, bob)
+
+    text = _visible_text(session)
+    assert "[G]ames" not in text
+    assert "No doors" not in text
+    db.close()
+
+
+def test_main_menu_shows_games_once_a_door_exists(tmp_path):
+    db = Database(tmp_path / "node.db")
+    bob = create_user(db, "bob", password="hunter2pw", user_level=10)
+    create_door(db, "Retro Trivia", "/bin/true", creator=bob)
+    session = FakeSession(keys=["l"])
+
+    _run_main_menu(session, db, bob)
+
+    assert "[G]ames" in _visible_text(session)
     db.close()
 
 
@@ -113,49 +145,7 @@ def test_main_menu_shows_communities_when_one_exists(tmp_path):
 
     _run_main_menu(session, db, bob)
 
-    assert "ommunities" in _written_text(session)
-    db.close()
-
-
-def test_main_menu_shows_uncategorized_when_an_uncategorized_board_exists(tmp_path):
-    db = Database(tmp_path / "node.db")
-    bob = create_user(db, "bob", password="hunter2pw", user_level=10)
-    create_board(db, "general", creator=bob)  # no community_id
-    session = FakeSession(keys=["l"])
-
-    _run_main_menu(session, db, bob)
-
-    assert "ncategorized" in _written_text(session)
-    db.close()
-
-
-def test_main_menu_shows_uncategorized_when_only_an_uncategorized_door_exists(tmp_path):
-    # GitHub issue #204 (2026-08-31 ReLink dogfood): a lone uncategorized
-    # door game didn't make [U]ncategorized appear at all, even though
-    # jumping directly to the door still worked -- `_has_uncategorized_
-    # resources` never checked `has_visible_doors`, unlike the shared
-    # resource-type sub-menu one screen deeper, which already did.
-    db = Database(tmp_path / "node.db")
-    bob = create_user(db, "bob", password="hunter2pw", user_level=10)
-    create_door(db, "Retro Trivia", "/bin/true", creator=bob)  # no community_id
-    session = FakeSession(keys=["l"])
-
-    _run_main_menu(session, db, bob)
-
-    assert "ncategorized" in _written_text(session)
-    db.close()
-
-
-def test_main_menu_hides_uncategorized_when_every_board_belongs_to_a_community(tmp_path):
-    db = Database(tmp_path / "node.db")
-    bob = create_user(db, "bob", password="hunter2pw", user_level=10)
-    community = create_community(db, "Vintage Computing", creator=bob)
-    create_board(db, "amiga", community_id=community.id, creator=bob)
-    session = FakeSession(keys=["l"])
-
-    _run_main_menu(session, db, bob)
-
-    assert "ncategorized" not in _written_text(session)
+    assert "C[o]mmunities" in _visible_text(session)
     db.close()
 
 
@@ -167,7 +157,7 @@ def test_main_menu_hides_communities_that_are_all_hidden_from_a_regular_user(tmp
 
     _run_main_menu(session, db, bob)
 
-    assert "ommunities" not in _written_text(session)
+    assert "C[o]mmunities" not in _visible_text(session)
     db.close()
 
 
@@ -179,32 +169,117 @@ def test_main_menu_shows_hidden_community_to_a_sysop(tmp_path):
 
     _run_main_menu(session, db, sysop)
 
-    assert "ommunities" in _written_text(session)
+    assert "C[o]mmunities" in _visible_text(session)
     db.close()
 
 
-# -- entering a Community: scoped browsing + resource-type sub-menu ---------
-
-
-def test_entering_a_community_only_offers_resource_types_with_matching_items(tmp_path):
+def test_boards_entry_lists_every_board_whatever_its_community(tmp_path):
+    # Issue #838 (F043): a board outside every Community is simply a
+    # board -- no "Uncategorized" bucket to find it in.
     db = Database(tmp_path / "node.db")
     bob = create_user(db, "bob", password="hunter2pw", user_level=10)
     community = create_community(db, "Vintage Computing", creator=bob)
     create_board(db, "amiga", community_id=community.id, creator=bob)
-    # No channel or file area in this Community -- sub-menu should only
-    # offer [M]essage Boards. "c","0","1" enters the Community picker
-    # and selects the only one; "b" backs out of the resource-type
-    # sub-menu straight back to the main menu (_enter_communities isn't
-    # itself a loop, so no extra "b" is needed there).
-    session = FakeSession(keys=["c", "0", "1", "b", "l"])
+    create_board(db, "general", creator=bob)
+
+    session = FakeSession(keys=["m", "b", "l"])
 
     _run_main_menu(session, db, bob)
 
     text = _visible_text(session)
-    assert "NetBBS › Communities › Vintage Computing" in text
-    assert "Choose a space to explore" in text
-    assert "essage Boards" in text
-    assert "hat" not in text  # [C]hat never rendered -- no channel in this Community
+    assert "amiga" in text
+    assert "general" in text
+    assert "Available message boards" in text
+    assert "ncategorized" not in text
+    db.close()
+
+
+def test_chat_and_files_entries_list_every_channel_and_area(tmp_path):
+    db = Database(tmp_path / "node.db")
+    bob = create_user(db, "bob", password="hunter2pw", user_level=10)
+    community = create_community(db, "Vintage Computing", creator=bob)
+    create_channel(db, "amiga-chat", community_id=community.id, creator=bob)
+    create_channel(db, "general-chat", creator=bob)
+    create_file_area(db, "amiga-files", community_id=community.id, creator=bob)
+    create_file_area(db, "general-files", creator=bob)
+
+    session = FakeSession(keys=["c", "b", "f", "b", "l"])
+
+    _run_main_menu(session, db, bob)
+
+    text = _written_text(session)
+    for name in ("amiga-chat", "general-chat", "amiga-files", "general-files"):
+        assert name in text
+    db.close()
+
+
+def test_sysop_on_an_empty_node_is_told_where_to_create_content(tmp_path):
+    # Issue #838 (F017).
+    db = Database(tmp_path / "node.db")
+    sysop = create_user(db, "sysop", password="hunter2pw", user_level=SYSOP_LEVEL)
+    session = FakeSession(keys=["l"])
+
+    _run_main_menu(session, db, sysop)
+
+    assert "No boards yet: create one under SysOp" in _visible_text(session)
+    db.close()
+
+
+def test_empty_node_hint_is_for_the_sysop_only_and_goes_once_content_exists(tmp_path):
+    db = Database(tmp_path / "node.db")
+    sysop = create_user(db, "sysop", password="hunter2pw", user_level=SYSOP_LEVEL)
+    bob = create_user(db, "bob", password="hunter2pw", user_level=10)
+    session = FakeSession(keys=["l"])
+    _run_main_menu(session, db, bob)
+    assert "No boards yet" not in _visible_text(session)
+
+    create_file_area(db, "uploads", creator=sysop)
+    session = FakeSession(keys=["l"])
+    _run_main_menu(session, db, sysop)
+    assert "No boards yet" not in _visible_text(session)
+    db.close()
+
+
+# -- entering a Community: its page, scoped browsing -------------------------
+
+
+def test_community_page_offers_only_kinds_it_holds_with_counts(tmp_path):
+    db = Database(tmp_path / "node.db")
+    bob = create_user(db, "bob", password="hunter2pw", user_level=10)
+    community = create_community(db, "Vintage Computing", description="Old machines, new tricks", creator=bob)
+    create_board(db, "amiga", community_id=community.id, creator=bob)
+    create_board(db, "c64", community_id=community.id, creator=bob)
+    # No channel or file area in this Community.
+    session = FakeSession(keys=["o", "0", "1", "b", "b", "l"])
+
+    _run_main_menu(session, db, bob)
+
+    text = _visible_text(session)
+    page = text[text.index("NetBBS › Communities › Vintage Computing"):]
+    assert "Old machines, new tricks" in page
+    assert "[M]essage boards" in page
+    assert "2 boards" in page
+    assert "[C]hat" not in page.split("Choice:")[0]
+    assert "[F]iles" not in page.split("Choice:")[0]
+    db.close()
+
+
+def test_back_from_a_community_page_returns_to_the_communities_list(tmp_path):
+    # Issue #838 (F045): one level down, so Back goes one level up.
+    db = Database(tmp_path / "node.db")
+    bob = create_user(db, "bob", password="hunter2pw", user_level=10)
+    vintage = create_community(db, "Vintage Computing", creator=bob)
+    create_board(db, "amiga", community_id=vintage.id, creator=bob)
+    create_community(db, "Politics", creator=bob)
+    session = FakeSession(keys=["o", "0", "2", "b", "b", "l"])
+
+    _run_main_menu(session, db, bob)
+
+    text = _visible_text(session)
+    after_page = text[text.index("NetBBS › Communities › Vintage Computing"):]
+    # The list is drawn again, on the Community just left.
+    assert "Communities" in after_page
+    assert "> 02." in after_page
     db.close()
 
 
@@ -215,56 +290,17 @@ def test_community_scoped_board_browsing_excludes_other_communities_and_uncatego
     politics = create_community(db, "Politics", creator=bob)
     create_board(db, "amiga", community_id=vintage.id, creator=bob)
     create_board(db, "elections", community_id=politics.id, creator=bob)
-    create_board(db, "general", creator=bob)  # uncategorized
+    create_board(db, "general", creator=bob)  # no Community
 
-    # main menu -> Communities -> pick #01 (alphabetical: Politics is
-    # created second but let's just pick and check which board shows)
-    session = FakeSession(keys=["c", "0", "1", "m", "b", "b", "b", "l"])
-
-    _run_main_menu(session, db, bob)
-
-    text = _written_text(session)
-    # Exactly one of the two Community boards should appear (whichever
-    # Community sorts first alphabetically), and neither the other
-    # Community's board nor the uncategorized one should ever appear.
-    assert ("amiga" in text) != ("elections" in text)  # exactly one, not both
-    assert "general" not in text
-    db.close()
-
-
-def test_uncategorized_board_browsing_shows_only_uncategorized_boards(tmp_path):
-    db = Database(tmp_path / "node.db")
-    bob = create_user(db, "bob", password="hunter2pw", user_level=10)
-    community = create_community(db, "Vintage Computing", creator=bob)
-    create_board(db, "amiga", community_id=community.id, creator=bob)
-    create_board(db, "general", creator=bob)  # uncategorized
-
-    session = FakeSession(keys=["u", "m", "b", "b", "l"])
+    # Alphabetical: Politics is #01.
+    session = FakeSession(keys=["o", "0", "1", "m", "b", "b", "b", "l"])
 
     _run_main_menu(session, db, bob)
 
     text = _written_text(session)
-    assert "general" in text
+    assert "elections" in text
     assert "amiga" not in text
-    assert "Uncategorized" in text
-    db.close()
-
-
-def test_jump_shows_the_full_unfiltered_list(tmp_path):
-    db = Database(tmp_path / "node.db")
-    bob = create_user(db, "bob", password="hunter2pw", user_level=10)
-    community = create_community(db, "Vintage Computing", creator=bob)
-    create_board(db, "amiga", community_id=community.id, creator=bob)
-    create_board(db, "general", creator=bob)
-
-    session = FakeSession(keys=["j", "m", "b", "b", "l"])
-
-    _run_main_menu(session, db, bob)
-
-    text = _written_text(session)
-    assert "amiga" in text
-    assert "general" in text
-    assert "Available message boards" in text  # unchanged title
+    assert "general" not in text
     db.close()
 
 
@@ -274,7 +310,7 @@ def test_community_scoped_board_browsing_shows_community_name_in_title(tmp_path)
     community = create_community(db, "Vintage Computing", creator=bob)
     create_board(db, "amiga", community_id=community.id, creator=bob)
 
-    session = FakeSession(keys=["c", "0", "1", "m", "b", "b", "b", "l"])
+    session = FakeSession(keys=["o", "0", "1", "m", "b", "b", "b", "l"])
 
     _run_main_menu(session, db, bob)
 
@@ -286,22 +322,6 @@ def test_community_scoped_board_browsing_shows_community_name_in_title(tmp_path)
     # like every other ancestor, with only "Message boards" itself in
     # the current-location color.
     assert "NetBBS › Vintage Computing › Message boards" in _visible_text(session)
-    db.close()
-
-
-def test_uncategorized_browsing_shows_uncategorized_in_title(tmp_path):
-    db = Database(tmp_path / "node.db")
-    bob = create_user(db, "bob", password="hunter2pw", user_level=10)
-    create_board(db, "general", creator=bob)
-
-    session = FakeSession(keys=["u", "m", "b", "b", "l"])
-
-    _run_main_menu(session, db, bob)
-
-    # See test_community_scoped_board_browsing_shows_community_name_in_title's
-    # own comment: "Uncategorized" is now a real breadcrumb ancestor
-    # segment, not baked into the title text.
-    assert "NetBBS › Uncategorized › Message boards" in _visible_text(session)
     db.close()
 
 
@@ -321,7 +341,7 @@ def test_category_used_only_by_another_communitys_board_does_not_leak(tmp_path):
     # Enter `vintage` specifically (need to know which pick index it is
     # -- alphabetically "Politics" < "Vintage Computing", so vintage is
     # #02).
-    session = FakeSession(keys=["c", "0", "2", "m", "b", "b", "b", "l"])
+    session = FakeSession(keys=["o", "0", "2", "m", "b", "b", "b", "l"])
 
     _run_main_menu(session, db, bob)
 
@@ -338,7 +358,7 @@ def test_category_used_by_a_board_in_this_community_is_shown(tmp_path):
     category = create_board_category(db, "Hardware", created_by=bob)
     create_board(db, "amiga", community_id=community.id, category_id=category.id, creator=bob)
 
-    session = FakeSession(keys=["c", "0", "1", "m", "b", "b", "b", "l"])
+    session = FakeSession(keys=["o", "0", "1", "m", "b", "b", "b", "l"])
 
     _run_main_menu(session, db, bob)
 
@@ -354,11 +374,11 @@ def test_community_scoped_channel_and_area_browsing_are_filtered_too(tmp_path):
     bob = create_user(db, "bob", password="hunter2pw", user_level=10)
     community = create_community(db, "Vintage Computing", creator=bob)
     create_channel(db, "amiga-chat", community_id=community.id, creator=bob)
-    create_channel(db, "general-chat", creator=bob)  # uncategorized
+    create_channel(db, "general-chat", creator=bob)  # no Community
     create_file_area(db, "amiga-files", community_id=community.id, creator=bob)
-    create_file_area(db, "general-files", creator=bob)  # uncategorized
+    create_file_area(db, "general-files", creator=bob)  # no Community
 
-    session = FakeSession(keys=["c", "0", "1", "c", "b", "f", "b", "b", "l"])
+    session = FakeSession(keys=["o", "0", "1", "c", "b", "f", "b", "b", "b", "l"])
 
     _run_main_menu(session, db, bob)
 
