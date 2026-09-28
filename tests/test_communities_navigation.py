@@ -318,10 +318,9 @@ def test_category_used_only_by_another_communitys_board_does_not_leak(tmp_path):
     create_board(db, "elections", community_id=politics.id, category_id=category.id, creator=bob)
     create_board(db, "amiga", community_id=vintage.id, creator=bob)  # uncategorized within vintage
 
-    # Enter `vintage` specifically (need to know which pick index it is
-    # -- alphabetically "Politics" < "Vintage Computing", so vintage is
-    # #02).
-    session = FakeSession(keys=["c", "0", "2", "m", "b", "b", "b", "l"])
+    # Enter `vintage` specifically: Communities are listed in the SysOp's
+    # order, and a new one goes last (issue #838), so vintage is #01.
+    session = FakeSession(keys=["c", "0", "1", "m", "b", "b", "b", "l"])
 
     _run_main_menu(session, db, bob)
 

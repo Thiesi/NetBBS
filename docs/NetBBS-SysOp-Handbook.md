@@ -399,6 +399,9 @@ draft and save it explicitly.
 - **Communities:** group related resources and provide inherited defaults.
   Inspect effective gates on child resources before changing a shared default.
   A Community is not an automatic grant to every resource inside it.
+  Callers see Communities in your order: a new one goes last, and **Up** and
+  **Down** on its screen move it. **Remove** deletes it; its resources stay,
+  without a Community.
 - **Doors:** attach registered games to a Community or leave them uncategorized.
 
 Moderator grants belong to a resource or Community. Membership alone does not

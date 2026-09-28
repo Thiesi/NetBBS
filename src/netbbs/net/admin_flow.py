@@ -182,6 +182,7 @@ from netbbs.communities import (
     CommunityError,
     create_community,
     delete_community,
+    move_community,
     get_community,
     get_effective_min_age,
     get_effective_min_read_level,
@@ -15390,23 +15391,32 @@ async def _community_screen(
 
 
 async def _list_communities_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
-    communities = await lane.run(list_communities)
-    selected = await pick_item(
-        session, communities,
-        name_of=lambda c: c.name,
-        stable_id_of=lambda c: c.id,
-        description_of=_community_description,
-        columns=_COMMUNITY_COLUMNS,
-        column_values_of=_community_columns,
-        title="Communities",
-        empty_message="No Communities yet.",
-        redraw_in_place=await lane.run(redraw_in_place_enabled, actor),
-        unicode_style=await lane.run(unicode_style_enabled, actor),
-        collapsed=await lane.run(breadcrumb_collapsed_enabled, actor),
-        accent_color=await lane.run(effective_accent_color_256),
-        header_color=await lane.run(effective_header_color_256),
-    )
-    if selected is not None:
+    """The Communities in the order callers see them (issue #838). Picking
+    one opens its screen, to edit, move or remove it; leaving that comes
+    back here, on it -- the same loop the category list has, so a SysOp
+    ordering several Communities sees each move land."""
+    reopen_at: int | None = None
+    while True:
+        communities = await lane.run(list_communities)
+        selected = await pick_item(
+            session, communities,
+            name_of=lambda c: c.name,
+            stable_id_of=lambda c: c.id,
+            description_of=_community_description,
+            columns=_COMMUNITY_COLUMNS,
+            column_values_of=_community_columns,
+            title="Communities",
+            empty_message="No Communities yet.",
+            start_stable_id=reopen_at,
+            redraw_in_place=await lane.run(redraw_in_place_enabled, actor),
+            unicode_style=await lane.run(unicode_style_enabled, actor),
+            collapsed=await lane.run(breadcrumb_collapsed_enabled, actor),
+            accent_color=await lane.run(effective_accent_color_256),
+            header_color=await lane.run(effective_header_color_256),
+        )
+        if selected is None:
+            return
+        reopen_at = selected.id
         await _community_detail_screen(session, lane, actor, selected)
 
 
@@ -15431,14 +15441,26 @@ def _community_description(community: Community) -> str:
 
 async def _community_detail_screen(session: Session, lane: DatabaseLane, actor: User, community: Community) -> None:
     """No "pending" equivalent here, unlike boards/areas -- a Community
-    holds no content of its own (design doc §16)."""
+    holds no content of its own (design doc §16). Move [U]p and [D]own
+    set where it sits in the callers' Communities list (issue #838);
+    [R]emove, as on a category's screen, deletes it."""
     description_level = await lane.run(menu_description_level, actor)
     unicode_style = await lane.run(unicode_style_enabled, actor)
     collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
     redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
     header_color = await lane.run(effective_header_color_256)
-    status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
-    await _draw_community_detail(session, community, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
+
+    async def _redraw() -> tuple[int, int]:
+        order = [c.id for c in await lane.run(list_communities)]
+        place = order.index(community.id) if community.id in order else 0
+        status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
+        await _draw_community_detail(
+            session, community, description_level, redraw_in_place, unicode_style, collapsed, header_color,
+            status_line=status_line, place=place, total=len(order),
+        )
+        return place, len(order)
+
+    place, total = await _redraw()
     while True:
         choice = (await session.read_key()).lower()
 
@@ -15450,15 +15472,17 @@ async def _community_detail_screen(session: Session, lane: DatabaseLane, actor: 
             updated = await _community_screen(session, lane, actor, existing=community)
             if updated is not None:
                 community = updated
-            status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
-            await _draw_community_detail(session, community, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
-        elif choice == "d":
+            place, total = await _redraw()
+        elif (choice == "u" and place > 0) or (choice == "d" and place < total - 1):
+            await session.write_line("")
+            await lane.run(move_community, community, -1 if choice == "u" else 1, moved_by=actor)
+            place, total = await _redraw()
+        elif choice == "r":
             await session.write_line("")
             deleted = await _delete_community_screen(session, lane, actor, community)
             if deleted:
                 return
-            status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
-            await _draw_community_detail(session, community, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
+            place, total = await _redraw()
         else:
             await session.write(reject_unhandled_key(choice))
 
@@ -15470,6 +15494,8 @@ async def _draw_community_detail(
     header_color: int | tuple[int, int, int] = HEADER_COLOR,
     *,
     status_line: str,
+    place: int = 0,
+    total: int = 1,
 ) -> None:
     await session.write_line(
         "\r\n" + screen_title(sanitize_text(community.name),
@@ -15481,6 +15507,7 @@ async def _draw_community_detail(
         Section("Community", [
             _description_field(community.description),
             Field("Hidden", _yes_no(community.hidden)),
+            Field("Place", f"{place + 1} of {total}"),
         ]),
         Section("Defaults for its boards, areas and channels", [
             Field("Read level", _optional_int_label(community.default_min_read_level)),
@@ -15492,7 +15519,9 @@ async def _draw_community_detail(
     options = _fitted_menu(
         [
             MenuEntry(label=menu_key("E", "dit"), brief="Change this Community's settings"),
-            MenuEntry(label=menu_key("D", "elete"), brief="Permanently remove it"),
+            *([MenuEntry(label=menu_key("U", "p"), brief="Earlier in the callers' list")] if place > 0 else []),
+            *([MenuEntry(label=menu_key("D", "own"), brief="Later in the callers' list")] if place < total - 1 else []),
+            MenuEntry(label=menu_key("R", "emove"), brief="Permanently remove it"),
             MenuEntry(label=menu_key("B", "ack"), brief="Return to the list"),
         ],
         description_level, session=session, used_rows=panel_rows + 4,
@@ -15504,7 +15533,7 @@ async def _draw_community_detail(
 async def _delete_community_screen(session: Session, lane: DatabaseLane, actor: User, community: Community) -> bool:
     """Shows the blast radius before committing (design doc §16's exact
     confirmation wording): how many boards/channels/areas
-    will revert to Uncategorized, and how many Community-blanket
+    will be left without a Community, and how many Community-blanket
     moderator grants will be revoked outright."""
 
     def _counts(db: Database) -> tuple[int, int, int, int]:
@@ -15518,8 +15547,8 @@ async def _delete_community_screen(session: Session, lane: DatabaseLane, actor: 
     await session.write_line(
         colored(
             f"\r\nThis Community has {board_count} message board(s), {channel_count} chat channel(s), "
-            f"{area_count} file area(s), and {grant_count} moderator grant(s). Deleting will "
-            "un-categorize its resources and revoke those grants. This cannot be undone.",
+            f"{area_count} file area(s), and {grant_count} moderator grant(s). Removing it leaves "
+            "those resources without a Community and revokes those grants. This cannot be undone.",
             fg_color=MUTED_COLOR,
         )
     )

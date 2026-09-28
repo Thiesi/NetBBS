@@ -4302,14 +4302,14 @@ def test_edit_and_delete_community_flow(db, lane, sysop):
     create_community(db, "Politics", creator=sysop)
 
     # content menu -> Communities -> list -> pick(01) -> e(dit): toggle
-    # Hidden via the field menu -> [S]ave -> back to detail -> d(elete)
-    # -> retype name -> deletion returns straight up to the community
-    # menu (redraws) -> back x3 (community menu, content menu, admin
-    # menu). Every other field is left untouched.
+    # Hidden via the field menu -> [S]ave -> back to detail -> r(emove)
+    # -> retype name -> back to the (now empty) list, which says so and
+    # returns to the community menu -> back x3 (community menu, content
+    # menu, admin menu). Every other field is left untouched.
     inputs = [
         "m", "o", "l", "0", "1", "e",
         "h", "s",
-        "d", "Politics",
+        "r", "Politics",
         "b", "b", "b",
     ]
     session = FakeSession(inputs)
@@ -4319,6 +4319,25 @@ def test_edit_and_delete_community_flow(db, lane, sysop):
     assert "Updated 'Politics'" in text
     assert "'Politics' deleted." in text
     assert list_communities(db) == []
+
+
+def test_the_console_moves_a_community_up_the_callers_list(db, lane, sysop):
+    """Issue #838 (F044): "The Clubhouse -- Start here" came last with no
+    way to move it. Content -> Communities -> List -> 02 -> Up; leaving
+    the screen returns to the list, on the Community just moved."""
+    from netbbs.communities import create_community, list_communities
+
+    create_community(db, "Pen Talk", creator=sysop)
+    create_community(db, "The Clubhouse", creator=sysop)
+
+    session = FakeSession(["m", "o", "l", "0", "2", "u", "b", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+
+    assert [c.name for c in list_communities(db)] == ["The Clubhouse", "Pen Talk"]
+    text = _visible(_written_text(session))
+    assert "Place" in text and "2 of 2" in text and "1 of 2" in text
+    after_move = text[text.rindex("1 of 2"):]
+    assert "> 01." in after_move
 
 
 def test_create_board_assigns_a_community(db, lane, sysop):

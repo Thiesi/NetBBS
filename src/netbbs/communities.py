@@ -58,6 +58,9 @@ class Community:
     default_min_age: int | None
     default_name_requirement: str | None  # None | "verified" | "verified_and_displayed"
     created_at: str
+    # The SysOp's order among Communities (issue #838); `list_communities`
+    # follows it.
+    position: int = 0
 
 
 def create_community(
@@ -100,8 +103,8 @@ def create_community(
             """
             INSERT INTO communities
                 (name, description, hidden, default_min_read_level, default_min_write_level,
-                 default_min_age, default_name_requirement, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                 default_min_age, default_name_requirement, created_at, position)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(position) + 1, 0) FROM communities))
             """,
             (
                 name,
@@ -145,11 +148,37 @@ def get_community_by_name(db: Database, name: str) -> Community:
 
 
 def list_communities(db: Database) -> list[Community]:
-    """Every Community, alphabetical -- no activity/volume sort the way
-    `list_boards`/`list_file_areas` have, since a Community has no
-    content or timestamped activity of its own to rank by."""
-    rows = db.connection.execute("SELECT * FROM communities ORDER BY name COLLATE NOCASE ASC").fetchall()
+    """Every Community, in the SysOp's order (issue #838) -- a new one
+    goes last, and `move_community` changes the order. No activity/volume
+    sort the way `list_boards`/`list_file_areas` have, since a Community
+    has no content or timestamped activity of its own to rank by."""
+    rows = db.connection.execute(
+        "SELECT * FROM communities ORDER BY position ASC, name COLLATE NOCASE ASC"
+    ).fetchall()
     return [_row_to_community(row) for row in rows]
+
+
+def move_community(db: Database, community: Community, offset: int, *, moved_by: User) -> bool:
+    """Move `community` `offset` places in the list (-1 up, +1 down), and
+    renumber them all (issue #838), the same way a category moves among its
+    siblings. Returns whether it moved: the first cannot go up, nor the last
+    down."""
+    ids = [c.id for c in list_communities(db)]
+    if community.id not in ids:
+        raise CommunityError(f"no such Community: {community.name!r}")
+    index = ids.index(community.id)
+    target = index + offset
+    if not 0 <= target < len(ids):
+        return False
+    ids.insert(target, ids.pop(index))
+    for place, community_id in enumerate(ids):
+        db.connection.execute("UPDATE communities SET position = ? WHERE id = ?", (place, community_id))
+    db.connection.commit()
+    record_action(
+        db, actor=moved_by, action="move_community", object_type="community", object_id=community.id,
+        detail=f"moved Community {community.name!r} to place {target + 1}",
+    )
+    return True
 
 
 def update_community(
@@ -306,4 +335,5 @@ def _row_to_community(row: sqlite3.Row) -> Community:
         default_min_age=row["default_min_age"],
         default_name_requirement=row["default_name_requirement"],
         created_at=row["created_at"],
+        position=row["position"],
     )
