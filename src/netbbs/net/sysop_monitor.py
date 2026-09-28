@@ -622,8 +622,10 @@ async def _chat(
         if reason is not None:
             state.say(f"{name} {reason}.", ERROR_COLOR)
             return
-    await break_in.run_break_in(session, actor, controls.session_registry, entry.session, name)
-    state.say(f"Chat with {name} closed; they are back where they were.", SUCCESS_COLOR)
+    if await break_in.run_break_in(session, actor, controls.session_registry, entry.session, name):
+        state.say(f"Chat with {name} closed; they are back where they were.", SUCCESS_COLOR)
+    else:
+        state.say(f"{name} disconnected during the chat.", ERROR_COLOR)
 
 
 def _move(state: MonitorState, controls: NodeControls, step: int) -> None:

@@ -699,3 +699,106 @@ def test_the_bounded_restore_gives_up_a_held_partial_character_on_both_sides():
         assert "�" in caller.screen_copy().text_rows()[0]
 
     asyncio.run(scenario())
+
+
+# -- post-merge review follow-ups (#785) -------------------------------------
+
+
+def test_every_zmodem_caller_marks_itself_as_a_transfer():
+    """A break-in is refused while a transfer screen is on the activity
+    trail; a Zmodem call site without the mark leaves a window where a chat
+    can start and the transfer then waits on the caller's only input pump."""
+    import ast
+    import pathlib
+
+    import netbbs
+
+    root = pathlib.Path(netbbs.__file__).parent
+    unmarked = []
+    for path in root.rglob("*.py"):
+        if path.name == "zmodem.py":
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.AsyncFunctionDef):
+                continue
+            calls = {
+                call.func.attr
+                for call in ast.walk(node)
+                if isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
+                and isinstance(call.func.value, ast.Name) and call.func.value.id == "zmodem"
+            }
+            if not calls & {"send_file", "receive_file"}:
+                continue
+            marks = [
+                ast.literal_eval(dec.args[0])
+                for dec in node.decorator_list
+                if isinstance(dec, ast.Call) and getattr(dec.func, "id", "") == "records_activity"
+                and dec.args and isinstance(dec.args[0], ast.Constant)
+            ]
+            if not {"Uploading", "Downloading"} & set(marks):
+                unmarked.append(f"{path.relative_to(root)}:{node.name}")
+    assert not unmarked, unmarked
+
+
+def test_a_caller_lost_during_the_chat_is_reported_not_restored(db, lane, sysop):
+    async def scenario():
+        controls = _controls()
+        registry = controls.session_registry
+        viewer = QueueSession()
+        viewer_task = await _connect(registry, viewer, "sysop")
+        caller, reader, wire = _caller()
+        caller_task = asyncio.create_task(_prompt_task(registry, caller, []))
+        await _until(lambda: "quest" in wire.screen().text_rows()[0])
+        monitor = asyncio.create_task(sysop_monitor.monitor_screen(
+            viewer, lane, sysop, controls, disconnect=lambda entry: asyncio.sleep(0),
+        ))
+        _select(viewer, controls, "alice")
+        viewer.inputs.put_nowait("c")
+        await _until(lambda: caller.in_break_in)
+        caller_task.cancel()
+        await asyncio.gather(caller_task, return_exceptions=True)
+        await _until(lambda: "has disconnected" in strip_ansi("".join(viewer.written)))
+        viewer.inputs.put_nowait("x")
+        await _until(lambda: "disconnected during the chat" in strip_ansi("".join(viewer.written)))
+        assert "back where they were" not in strip_ansi("".join(viewer.written))
+        viewer.inputs.put_nowait("q")
+        await monitor
+        viewer_task.cancel()
+        await asyncio.gather(viewer_task, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_dropped_keys_stay_visible_under_a_notice():
+    state = ChatState(sysop_name="sysop", caller_name="alice", notice="*** Node going down ***", dropped=3)
+    buffer = ScreenBuffer(80, 12)
+    paint_chat(buffer, state, for_sysop=True)
+    title = _rows(buffer)[0]
+    assert "Node going down" in title and "3 keys dropped" in title
+
+
+def test_a_caller_lost_during_the_restore_is_not_reported_restored(sysop, monkeypatch):
+    from netbbs.net.session import SessionClosedError
+
+    async def scenario():
+        registry = ActiveSessionRegistry()
+        caller, reader, wire = _caller()
+        task = asyncio.create_task(_prompt_task(registry, caller, []))
+        await _until(lambda: "quest" in wire.screen().text_rows()[0])
+        sysop_session = QueueSession()
+        chat = asyncio.create_task(run_break_in(sysop_session, sysop, registry, caller, "alice"))
+        await _until(lambda: caller.in_break_in)
+        real_end = caller.end_break_in
+
+        async def dies_mid_restore():
+            await real_end()
+            raise SessionClosedError("gone while the restore drained")
+
+        monkeypatch.setattr(caller, "end_break_in", dies_mid_restore)
+        sysop_session.inputs.put_nowait("ESCAPE")
+        assert await chat is False
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(scenario())
