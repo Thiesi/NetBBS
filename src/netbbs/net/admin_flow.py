@@ -20788,10 +20788,14 @@ async def _category_screen(
         if key == "b":
             return
         if key == "e" and update is not None:
-            await _create_category_screen(
+            edited = await _create_category_screen(
                 session, lane, actor, create=create, list_top_level=list_top_level, error_type=error_type,
                 existing=category, update=update,
             )
+            if edited is not None:
+                # Moved under another parent, it is found among its new
+                # siblings (Codex review on #799).
+                category = edited
             continue
         if key in ("u", "d") and move is not None:
             await lane.run(move, category, -1 if key == "u" else 1, moved_by=actor)

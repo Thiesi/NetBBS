@@ -143,15 +143,20 @@ def update_category(
                 f"{category.name!r} has sub-categories of its own; move or delete them first, "
                 f"since only two levels are allowed"
             )
-    position = (
-        category.position if parent_category_id == category.parent_category_id
-        else _next_position(db, parent_category_id)
-    )
     try:
-        db.connection.execute(
-            "UPDATE channel_categories SET name = ?, description = ?, parent_category_id = ?, position = ? WHERE id = ?",
-            (name, description, parent_category_id, position, category.id),
-        )
+        if parent_category_id == category.parent_category_id:
+            # In place: the stored position stands, whatever this copy of
+            # the category says (Codex review on #799).
+            db.connection.execute(
+                "UPDATE channel_categories SET name = ?, description = ? WHERE id = ?",
+                (name, description, category.id),
+            )
+        else:
+            db.connection.execute(
+                "UPDATE channel_categories SET name = ?, description = ?, parent_category_id = ?, position = ? "
+                "WHERE id = ?",
+                (name, description, parent_category_id, _next_position(db, parent_category_id), category.id),
+            )
         db.connection.commit()
     except sqlite3.IntegrityError as exc:
         raise CategoryError(f"could not rename to {name!r} — name already in use?") from exc
@@ -210,10 +215,15 @@ def delete_category(db: Database, category: Category, *, deleted_by: User) -> No
         object_id=category.id, detail=f"deleted category {category.name!r} (id {category.id})",
     )
     db.connection.execute("UPDATE channels SET category_id = NULL WHERE category_id = ?", (category.id,))
-    db.connection.execute(
-        "UPDATE channel_categories SET parent_category_id = NULL WHERE parent_category_id = ?",
-        (category.id,),
-    )
+    # Its sub-categories become top-level, after the existing ones and in
+    # their own order: their positions counted among their old siblings
+    # (Codex review on #799).
+    first = _next_position(db, None)
+    for offset, child in enumerate(list_subcategories(db, category.id)):
+        db.connection.execute(
+            "UPDATE channel_categories SET parent_category_id = NULL, position = ? WHERE id = ?",
+            (first + offset, child.id),
+        )
     db.connection.execute(
         "DELETE FROM user_sort_preferences WHERE resource_kind = 'channel' AND category_id = ?", (category.id,)
     )

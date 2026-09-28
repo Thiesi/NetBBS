@@ -113,10 +113,54 @@ def test_the_migration_places_existing_categories_in_name_order(db, sysop):
     for name in ("Zulu", "Alpha", "Mike"):
         board_categories.create_category(db, name, parent_category_id=top.id, created_by=sysop)
     db.connection.execute("UPDATE board_categories SET position = 0")
-    backfill = [
-        statement for statement in MIGRATIONS[-1].sql.split(";")
-        if "UPDATE board_categories" in statement
-    ]
+    # Found by what it is, not where it sits: later migrations follow it.
+    [migration] = [m for m in MIGRATIONS if "Issue #681: `position`" in m.description]
+    backfill = [statement for statement in migration.sql.split(";") if "UPDATE board_categories" in statement]
     db.connection.executescript(backfill[0] + ";")
 
     assert [c.name for c in board_categories.list_subcategories(db, top.id)] == ["Alpha", "Mike", "Zulu"]
+
+
+# -- Codex review on #799 ----------------------------------------------
+
+
+@pytest.mark.parametrize("kind", MODULES)
+def test_deleting_a_parent_puts_its_children_last_in_their_order(db, sysop, kind):
+    module, _error = kind
+    first = module.create_category(db, "First", created_by=sysop)
+    parent = module.create_category(db, "Parent", created_by=sysop)
+    module.create_category(db, "Zulu", parent_category_id=parent.id, created_by=sysop)
+    module.create_category(db, "Alpha", parent_category_id=parent.id, created_by=sysop)
+    module.create_category(db, "Last", created_by=sysop)
+    assert first.position == 0
+
+    module.delete_category(db, module.get_category_by_name(db, "Parent"), deleted_by=sysop)
+
+    assert [c.name for c in module.list_top_level_categories(db)] == ["First", "Last", "Zulu", "Alpha"]
+
+
+@pytest.mark.parametrize("kind", MODULES)
+def test_an_edit_in_place_keeps_the_stored_position(db, sysop, kind):
+    module, _error = kind
+    module.create_category(db, "Alpha", created_by=sysop)
+    beta = module.create_category(db, "Beta", created_by=sysop)
+    module.move_category(db, beta, -1, moved_by=sysop)
+
+    # `beta` is a copy from before the move.
+    module.update_category(db, beta, name="Bravo", description=None, parent_category_id=None, changed_by=sysop)
+
+    assert [c.name for c in module.list_top_level_categories(db)] == ["Bravo", "Alpha"]
+
+
+def test_the_category_screen_follows_a_category_moved_under_a_parent(db, lane, sysop):
+    board_categories.create_category(db, "Retro", created_by=sysop)
+    board_categories.create_category(db, "Amiga", created_by=sysop)
+
+    # List, 02 (Amiga, made second), Edit, Parent, pick Retro, Save: still Amiga's screen.
+    session = FakeSession(["m", "c", "m", "l", "0", "2", "e", "p", "0", "2", "s", "b", "b", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    text = _visible(_written_text(session))
+
+    # The screen drawn with the save's outcome is still Amiga's, now under Retro.
+    screen = text.split("Saved category 'Amiga'.", 1)[0].rsplit("Categories › Amiga", 1)[1]
+    assert "Retro" in screen.split("Parent:", 1)[1].splitlines()[0]
