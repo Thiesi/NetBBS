@@ -2687,7 +2687,7 @@ def test_create_board_ctrl_h_shows_real_help_text_for_every_field(db, lane, syso
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "No help is available" not in text
-    assert "posts older than this are automatically purged" in text.lower()
+    assert "posts older than this expire" in text.lower()
     assert "inherit its default read/write/age/name-requirement" in text
 
 
@@ -2760,7 +2760,7 @@ def test_edit_board_field_menu_can_be_navigated_in_any_order(db, lane, sysop):
 
     create_board(db, "General", creator=sysop)
 
-    inputs = ["m", "m", "l", "0", "1", "e", "m", "n", "General2", "s", "b", "b", "b", "b"]
+    inputs = ["m", "m", "l", "0", "1", "e", "m", "n", "General2", "s", "b", "b", "b", "b", "b"]
     session = FakeSession(inputs)
     _run(session, lane, sysop)
 
@@ -2779,7 +2779,7 @@ def test_sysop_approves_a_pending_post_with_zero_grants(db, lane, sysop):
     post = create_post(db, board, alice, "Hello", "Body text")
     assert post.status == "pending"
 
-    inputs = ["m", "m", "l", "0", "1", "p", "0", "1", "a", "b", "b", "b", "b"]
+    inputs = ["m", "m", "l", "0", "1", "p", "0", "1", "a", "b", "b", "b", "b", "b"]
     session = FakeSession(inputs)
     _run(session, lane, sysop)
     assert "Approved" in _written_text(session)
@@ -2791,7 +2791,7 @@ def test_board_detail_shows_no_posts_yet_for_an_empty_board(db, lane, sysop):
 
     create_board(db, "General", creator=sysop)
 
-    session = FakeSession(["m", "m", "l", "0", "1", "b", "b", "b", "b"])
+    session = FakeSession(["m", "m", "l", "0", "1", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
 
     assert "Posts: 0 (no posts yet)" in _normalized_visible(_written_text(session))
@@ -2809,7 +2809,7 @@ def test_board_detail_shows_post_count_and_last_activity(db, lane, sysop):
     create_post(db, board, alice, "Hello", "Body text")
     create_post(db, board, alice, "Second", "More body")
 
-    session = FakeSession(["m", "m", "l", "0", "1", "b", "b", "b", "b"])
+    session = FakeSession(["m", "m", "l", "0", "1", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
 
     assert "Posts: 2 (last post" in _normalized_visible(_written_text(session))
@@ -2837,7 +2837,7 @@ def test_area_detail_shows_no_files_yet_for_an_empty_area(db, lane, sysop):
 
     create_file_area(db, "docs", creator=sysop)
 
-    session = FakeSession(["m", "f", "l", "0", "1", "b", "b", "b", "b"])
+    session = FakeSession(["m", "f", "l", "0", "1", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
 
     assert "Files: 0 (no files yet)" in _normalized_visible(_written_text(session))
@@ -2852,7 +2852,7 @@ def test_area_detail_shows_file_count_and_last_activity(db, lane, sysop):
     upload_file(db, area, alice, "first.txt", b"data")
     upload_file(db, area, alice, "second.txt", b"data")
 
-    session = FakeSession(["m", "f", "l", "0", "1", "b", "b", "b", "b"])
+    session = FakeSession(["m", "f", "l", "0", "1", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
 
     assert "Files: 2 (last upload" in _normalized_visible(_written_text(session))
@@ -2881,8 +2881,7 @@ def test_link_this_board_flow(db, lane, sysop):
         "m", "m", "l", "0", "1",  # navigate to board detail
         "l",  # [L]ink this board -- opens the draft field-editor screen
         "s",  # save with every field left at its default recommendation
-        "b", "b", "b", "b",
-    ]
+        "b", "b", "b", "b","b"]
     session = FakeSession(inputs)
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
 
@@ -2989,8 +2988,7 @@ def test_link_this_board_screen_keeps_the_draft_after_a_bad_field_entry(db, lane
         "m",  # toggle Moderated -- no recommendation -> yes
         "x", "not-a-number",  # bad entry on a later, unrelated field
         "s",  # save anyway
-        "b", "b", "b", "b",
-    ]
+        "b", "b", "b", "b","b"]
     session = FakeSession(inputs)
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
 
@@ -3010,7 +3008,7 @@ def test_link_this_board_is_not_offered_once_already_linked(db, lane, sysop):
     link_context = _link_context()
     link_board(db, board, node_identity=link_context.node_identity)
 
-    inputs = ["m", "m", "l", "0", "1", "b", "b", "b", "b"]
+    inputs = ["m", "m", "l", "0", "1", "b", "b", "b", "b", "b"]
     session = FakeSession(inputs)
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
 
@@ -3037,8 +3035,7 @@ def test_link_this_file_area_flow(db, lane, sysop):
         "m", "f", "l", "0", "1",  # navigate to file area detail
         "l",  # [L]ink this file area -- opens the draft field-editor screen
         "s",  # save with every field left at its default recommendation
-        "b", "b", "b", "b",
-    ]
+        "b", "b", "b", "b","b"]
     session = FakeSession(inputs)
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
 
@@ -3080,7 +3077,7 @@ def test_approving_a_pending_file_announces_it_to_link_peers(db, lane, sysop):
 
     assert announced() == []  # still pending: never leaked to the network
 
-    inputs = ["m", "f", "l", "0", "1", "p", "0", "1", "a", "b", "b", "b", "b"]
+    inputs = ["m", "f", "l", "0", "1", "p", "0", "1", "a", "b", "b", "b", "b", "b"]
     session = FakeSession(inputs)
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
 
@@ -3101,7 +3098,7 @@ def test_link_this_file_area_is_not_offered_once_already_linked(db, lane, sysop)
     area = list_file_areas(db)[0]
     link_file_area(db, area, node_identity=link_context.node_identity)
 
-    inputs = ["m", "f", "l", "0", "1", "b", "b", "b", "b"]
+    inputs = ["m", "f", "l", "0", "1", "b", "b", "b", "b", "b"]
     session = FakeSession(inputs)
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
 
@@ -3237,8 +3234,7 @@ def test_transfer_board_origin_flow(db, lane, sysop):
         "t",  # [T]ransfer origin
         "0", "1",  # select the only peer by friendly name
         "y",  # confirm
-        "b", "b", "b", "b",
-    ]
+        "b", "b", "b", "b","b"]
     session = FakeSession(inputs)
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
 
@@ -3277,8 +3273,7 @@ def test_transfer_board_origin_disambiguates_duplicate_peer_labels(db, lane, sys
     inputs = [
         "m", "m", "l", "0", "1",
         "t", "0", "1", "n",
-        "b", "b", "b", "b",
-    ]
+        "b", "b", "b", "b","b"]
     session = FakeSession(inputs)
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
 
@@ -3343,8 +3338,7 @@ def test_close_board_flow(db, lane, sysop):
         "c",  # [C]lose board
         "archived",  # optional reason
         "y",  # confirm
-        "b", "b", "b", "b",
-    ]
+        "b", "b", "b", "b","b"]
     session = FakeSession(inputs)
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
 
@@ -3363,7 +3357,7 @@ def test_close_board_option_is_hidden_once_already_closed(db, lane, sysop):
     link_board(db, board, node_identity=link_context.node_identity)
     close_board_if_linked(db, board, node_identity=link_context.node_identity)
 
-    inputs = ["m", "m", "l", "0", "1", "b", "b", "b", "b"]
+    inputs = ["m", "m", "l", "0", "1", "b", "b", "b", "b", "b"]
     session = FakeSession(inputs)
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
 
@@ -3386,7 +3380,7 @@ def test_transfer_origin_is_not_offered_once_an_offer_is_outstanding(db, lane, s
     )
     link_context.link_node.pending_origin_transfers[board.board_id] = offer
 
-    inputs = ["m", "m", "l", "0", "1", "b", "b", "b", "b"]
+    inputs = ["m", "m", "l", "0", "1", "b", "b", "b", "b", "b"]
     session = FakeSession(inputs)
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
 
@@ -3413,7 +3407,7 @@ def test_board_detail_shows_the_origin_fingerprint_when_its_profile_is_unavailab
     )
     db.connection.commit()
 
-    inputs = ["m", "m", "l", "0", "1", "b", "b", "b", "b"]
+    inputs = ["m", "m", "l", "0", "1", "b", "b", "b", "b", "b"]
     session = FakeSession(inputs)
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
 
@@ -3452,8 +3446,7 @@ def test_accept_board_origin_transfer_flow(db, lane, sysop):
         "m", "m", "l", "0", "1",  # navigate to board detail
         "a",  # [A]ccept transfer
         "y",  # confirm
-        "b", "b", "b", "b",
-    ]
+        "b", "b", "b", "b","b"]
     session = FakeSession(inputs)
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
 
@@ -3530,7 +3523,7 @@ def test_approving_a_pending_post_on_a_linked_board_queues_a_board_post(db, lane
     link_board(db, board, node_identity=link_context.node_identity)
     post = create_post(db, board, alice, "Hello", "Body text")
 
-    inputs = ["m", "m", "l", "0", "1", "p", "0", "1", "a", "b", "b", "b", "b"]
+    inputs = ["m", "m", "l", "0", "1", "p", "0", "1", "a", "b", "b", "b", "b", "b"]
     session = FakeSession(inputs)
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
 
@@ -3568,7 +3561,7 @@ def test_create_area_ctrl_h_shows_real_help_text_for_every_field(db, lane, sysop
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "No help is available" not in text
-    assert "files older than this are automatically purged" in text.lower()
+    assert "files older than this expire" in text.lower()
 
 
 def test_create_area_can_be_cancelled_without_creating_anything(db, lane, sysop):
@@ -3590,7 +3583,7 @@ def test_edit_file_area_flow(db, lane, sysop):
     create_file_area(db, "Docs", creator=sysop)
 
     # list -> pick(01) -> e(dit) -> rename via the field menu -> [S]ave.
-    inputs = ["m", "f", "l", "0", "1", "e", "n", "Docs2", "s", "b", "b", "b", "b"]
+    inputs = ["m", "f", "l", "0", "1", "e", "n", "Docs2", "s", "b", "b", "b", "b", "b"]
     session = FakeSession(inputs)
     _run(session, lane, sysop)
 
@@ -3744,7 +3737,7 @@ def test_sysop_approves_a_pending_file_with_zero_grants(db, lane, sysop):
     entry = upload_file(db, area, alice, "readme.txt", b"hello")
     assert entry.status == "pending"
 
-    inputs = ["m", "f", "l", "0", "1", "p", "0", "1", "a", "b", "b", "b", "b"]
+    inputs = ["m", "f", "l", "0", "1", "p", "0", "1", "a", "b", "b", "b", "b", "b"]
     session = FakeSession(inputs)
     _run(session, lane, sysop)
     assert "Approved" in _written_text(session)
@@ -3767,7 +3760,7 @@ def test_pending_file_review_shows_a_diz_description_line_by_line(db, lane, syso
 
     # Same walk as the approval test above: the review screen is
     # rendered before the approve keystroke is read.
-    inputs = ["m", "f", "l", "0", "1", "p", "0", "1", "a", "b", "b", "b", "b"]
+    inputs = ["m", "f", "l", "0", "1", "p", "0", "1", "a", "b", "b", "b", "b", "b"]
     session = FakeSession(inputs)
     _run(session, lane, sysop)
 
@@ -3797,7 +3790,7 @@ def test_a_moderator_can_download_a_pending_file_before_deciding(db, lane, sysop
     # Same walk as the approval test above, with [D] in place of [A]:
     # the download leaves the file still pending and the action bar
     # redrawn, so [B] backs out of a decision not yet made.
-    inputs = ["m", "f", "l", "0", "1", "p", "0", "1", "d", "b", "b", "b", "b", "b", "b"]
+    inputs = ["m", "f", "l", "0", "1", "p", "0", "1", "d", "b", "b", "b", "b", "b", "b", "b"]
     session = FakeSession(inputs)
     _run(session, lane, sysop)
 
@@ -3833,7 +3826,7 @@ def test_a_sysop_can_recover_an_expired_file_before_it_is_purged(db, lane, sysop
     db.connection.execute("UPDATE files SET created_at = ? WHERE id = ?", (backdated, entry.id))
     db.connection.commit()
 
-    inputs = ["m", "f", "l", "0", "1", "x", "0", "1", "d", "b", "b", "b", "b", "b", "b"]
+    inputs = ["m", "f", "l", "0", "1", "x", "0", "1", "d", "b", "b", "b", "b", "b", "b", "b"]
     session = FakeSession(inputs)
     _run(session, lane, sysop)
 
@@ -10468,7 +10461,7 @@ def test_a_closed_boards_detail_shows_the_closure_reason(db, lane, sysop):
     closure = close_board_if_linked(db, board, node_identity=link_context.node_identity, reason="archived")
     link_context.link_node.board_closures[board.board_id] = closure
 
-    session = FakeSession(["m", "m", "l", "0", "1", "b", "b", "b", "b"])
+    session = FakeSession(["m", "m", "l", "0", "1", "b", "b", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
 
     assert "Closure reason: archived" in _normalized_visible(_written_text(session))

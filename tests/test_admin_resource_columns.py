@@ -34,7 +34,7 @@ from netbbs.net.admin_flow import (
     _level_cell,
 )
 from netbbs.boards.boards import create_board
-from netbbs.rendering import GATE_COLOR, MUTED_COLOR
+from netbbs.rendering import GATE_COLOR, MUTED_COLOR, VALUE_COLOR, WARNING_COLOR
 from netbbs.storage.database import Database
 
 
@@ -90,8 +90,9 @@ def test_the_reported_area_row_now_shows_both_its_gates(tmp_path):
         db, "Test", creator=sysop, min_read_level=100, min_write_level=100,
         min_age=18, name_requirement="verified",
     )
+    # Issue #681 added the files column: listed, and held for a moderator.
     assert _area_columns(area, _effective_for(db, area)) == [
-        "100", "100", "open", ("18+ name", GATE_COLOR),
+        "100", "100", "open", ("0", VALUE_COLOR), ("18+ name", GATE_COLOR),
     ]
     db.close()
 
@@ -105,13 +106,21 @@ def test_an_ungated_area_is_visibly_different_from_a_gated_one(tmp_path):
     db.close()
 
 
-def test_a_board_row_carries_the_same_four_fields(tmp_path):
+def test_a_board_row_carries_the_same_fields(tmp_path):
     db, sysop = _db(tmp_path)
     board = create_board(db, "News", creator=sysop, moderated=True, name_requirement="verified")
-    cells = _board_columns(board, _effective_for(db, board))
+    cells = _board_columns(board, _effective_for(db, board), (12, 3))
     assert len(cells) == len(_BOARD_COLUMNS)
     assert cells[2] == "moderated"
-    assert cells[3] == ("name", GATE_COLOR)
+    # Issue #681: 12 posts listed, 3 held for a moderator.
+    assert cells[3] == ("12 +3", WARNING_COLOR)
+    assert cells[4] == ("name", GATE_COLOR)
+
+
+def test_a_pinned_board_says_so_in_its_status(tmp_path):
+    db, sysop = _db(tmp_path)
+    board = create_board(db, "News", creator=sysop, pinned=True)
+    assert _board_columns(board, _effective_for(db, board))[2] == "open, pinned"
     db.close()
 
 

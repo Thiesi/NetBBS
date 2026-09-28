@@ -478,6 +478,27 @@ def count_visible_files(db: Database, area: FileArea) -> tuple[int, str | None]:
     return row[0], row[1]
 
 
+def count_listed_files(db: Database, area: FileArea) -> tuple[int, str | None]:
+    """`count_visible_files` without the expiry sweep: read only, for the
+    SysOp dashboard and area list (issue #681), counting a file past the
+    area's age limit as gone whether or not a sweep has marked it yet --
+    `netbbs.boards.posts.count_listed_posts`' counterpart."""
+    if area.max_file_age_days is None:
+        row = db.connection.execute(
+            "SELECT COUNT(*), MAX(created_at) FROM files WHERE area_id = ? AND status = 'approved'",
+            (area.id,),
+        ).fetchone()
+    else:
+        row = db.connection.execute(
+            """
+            SELECT COUNT(*), MAX(created_at) FROM files
+            WHERE area_id = ? AND status = 'approved' AND (exempt_from_expiry = 1 OR created_at >= ?)
+            """,
+            (area.id, _cutoff_iso(area.max_file_age_days)),
+        ).fetchone()
+    return row[0], row[1]
+
+
 def download_file(entry: FileEntry) -> bytes:
     """Read a file entry's bytes back from storage."""
     return read_bytes(Path(entry.storage_path))
