@@ -503,7 +503,7 @@ def withdraw_post(db: Database, post: Post, board: Board, *, withdrawn_by: User)
     ).fetchone()
     if current is None:
         raise PostError("no currently-approved version of this post exists to withdraw")
-    if post.withdrawn or current["withdrawn"]:
+    if current["withdrawn"]:
         raise PostError("this post is already withdrawn")
     return edit_post(
         db, post, board, subject=current["subject"], body=WITHDRAWN_PLACEHOLDER, edited_by=withdrawn_by,

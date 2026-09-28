@@ -3374,6 +3374,9 @@ MIGRATIONS = [
         -- order (`id`), looked up once per listed post: without this index a
         -- long carried chain is read and sorted whole on every board opening.
         CREATE INDEX idx_posts_root_board_status_id ON posts(root_post_id, board_id, status, id);
+        -- Its created_at twin no longer serves any query: every lookup by root
+        -- now orders by id, and this index's prefix covers the rest.
+        DROP INDEX IF EXISTS idx_posts_root_post_id_board_id_status_created_at;
         """,
     ),
 ]
