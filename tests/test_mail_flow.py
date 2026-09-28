@@ -30,7 +30,7 @@ from netbbs.link.node_identity import bootstrap_node_identity
 from netbbs.link.protocol import LinkNode, PeerRecord
 from netbbs.link.store import save_peer
 from netbbs.mail import list_inbox, list_sent, send_mail
-from netbbs.net.char_input import InputHistory
+from netbbs.net.char_input import InputCancelled, InputHistory
 from netbbs.net.main_menu import _main_menu
 from netbbs.net.mail_flow import browse_mail
 from netbbs.rendering import (
@@ -46,6 +46,10 @@ from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 
 
+# A scripted line that presses Esc instead of answering (issue #812).
+ESC = object()
+
+
 class FakeSession:
     def __init__(self, keys=None, lines=None):
         self._keys = iter(keys or [])
@@ -56,6 +60,7 @@ class FakeSession:
         self.node_name_gradient = None
         self.terminal_height = 24
         self.peer_address = "203.0.113.5"
+        self.seeded: list[str] = []
 
     async def write(self, text: str) -> None:
         self.written.append(text)
@@ -70,7 +75,12 @@ class FakeSession:
         return key
 
     async def read_line(self, echo: bool = True, history=None, completer=None, *, live_buffer=None, lock=None, **kwargs) -> str:
-        return next(self._lines, "")
+        self.seeded.append(kwargs.get("initial", ""))
+        line = next(self._lines, "")
+        if line is ESC:
+            assert kwargs.get("cancellable"), "Esc pressed at a prompt that does not accept it"
+            raise InputCancelled()
+        return line
 
 
 def _written_text(session: FakeSession) -> str:
@@ -469,17 +479,112 @@ def test_compose_cancels_on_blank_recipient(tmp_path):
     db.close()
 
 
-def test_compose_rejects_blank_subject(tmp_path):
+def test_compose_asks_again_for_a_blank_subject(tmp_path):
+    """Issue #812: an empty subject asks again in place, rather than
+    throwing the whole message away."""
     db_path = tmp_path / "node.db"
     db = Database(db_path)
     alice = create_user(db, "alice", password="hunter2pw", user_level=10)
-    create_user(db, "bob", password="hunter2pw", user_level=10)
+    bob = create_user(db, "bob", password="hunter2pw", user_level=10)
 
-    session = FakeSession(keys=["c", "b"], lines=["bob", "   "])
+    session = FakeSession(keys=["c", "s", "b"], lines=["bob", "   ", "Hello", "Body", ""])
     lane = DatabaseLane(db_path)
     asyncio.run(browse_mail(session, lane, alice))
 
-    assert "a subject is required" in _written_text(session)
+    text = _written_text(session)
+    assert "A subject is required -- type one, or press Esc to cancel." in text
+    assert "Cancelled -- a subject is required" not in text
+    assert [m.subject for m in list_inbox(db, bob)] == ["Hello"]
+    lane.close()
+    db.close()
+
+
+def test_compose_esc_at_the_subject_cancels_the_message(tmp_path):
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
+    alice = create_user(db, "alice", password="hunter2pw", user_level=10)
+    bob = create_user(db, "bob", password="hunter2pw", user_level=10)
+
+    session = FakeSession(keys=["c", "b"], lines=["bob", "", ESC])
+    lane = DatabaseLane(db_path)
+    asyncio.run(browse_mail(session, lane, alice))
+
+    assert "Message cancelled." in _written_text(session)
+    assert list_inbox(db, bob) == []
+    lane.close()
+    db.close()
+
+
+def test_compose_refuses_a_long_subject_at_its_prompt_in_characters(tmp_path):
+    """Issue #812: 150 accented letters are 300 bytes. Refused where they
+    are typed -- not after the body is written -- in characters, and the
+    prompt reopens on them so they can be shortened."""
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
+    alice = create_user(db, "alice", password="hunter2pw", user_level=10)
+    bob = create_user(db, "bob", password="hunter2pw", user_level=10)
+
+    long_subject = "é" * 150
+    session = FakeSession(keys=["c", "s", "b"], lines=["bob", long_subject, "é" * 100, "Body", ""])
+    lane = DatabaseLane(db_path)
+    asyncio.run(browse_mail(session, lane, alice))
+
+    text = _visible_text(session)
+    assert "That subject is 50 characters too long -- shorten it, or press Esc to cancel." in text
+    assert "bytes" not in text
+    # The retry opened on what was typed, not on an empty line.
+    assert long_subject in session.seeded
+    assert [m.subject for m in list_inbox(db, bob)] == ["é" * 100]
+    lane.close()
+    db.close()
+
+
+def test_compose_update_subject_refuses_a_long_subject_and_esc_keeps_the_old_one(tmp_path):
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
+    alice = create_user(db, "alice", password="hunter2pw", user_level=10)
+    bob = create_user(db, "bob", password="hunter2pw", user_level=10)
+
+    session = FakeSession(
+        keys=["c", "u", "s", "b"], lines=["bob", "Hello", "Body", "", "x" * 229, ESC],
+    )
+    lane = DatabaseLane(db_path)
+    asyncio.run(browse_mail(session, lane, alice))
+
+    text = _visible_text(session)
+    assert "That subject is 29 characters too long -- shorten it, or press Esc to keep the previous subject." in text
+    assert [m.subject for m in list_inbox(db, bob)] == ["Hello"]
+    lane.close()
+    db.close()
+
+
+def test_compose_a_signature_that_overflows_the_body_is_caught_before_send(tmp_path, monkeypatch):
+    """Issue #812: the editors stop the body at the limit, but the
+    signature is added after them. The review says so, in characters, and
+    Send is refused until the body is shortened."""
+    import netbbs.net.mail_flow as mail_flow_module
+    from netbbs.signature import set_signature
+
+    monkeypatch.setattr(mail_flow_module, "MAX_MAIL_BODY_BYTES", 40)
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
+    alice = create_user(db, "alice", password="hunter2pw", user_level=10)
+    bob = create_user(db, "bob", password="hunter2pw", user_level=10)
+    set_signature(db, alice, "Alice of the Long Signature")
+
+    session = FakeSession(
+        keys=["c", "s", "b", "s", "b"],
+        lines=["bob", "Hello", "Twenty characters!!", "", "/delete 1", "/list", ""],
+    )
+    lane = DatabaseLane(db_path)
+    asyncio.run(browse_mail(session, lane, alice))
+
+    text = _visible_text(session)
+    assert "The message is" in text and "characters too long -- shorten it with [B]ody." in text
+    assert "bytes" not in text
+    inbox = list_inbox(db, bob)
+    assert len(inbox) == 1
+    assert "Twenty" not in inbox[0].body
     lane.close()
     db.close()
 

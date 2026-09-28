@@ -56,6 +56,7 @@ _BS = 0x08  # Backspace
 _DEL = 0x7F  # Delete — many terminals send this for the Backspace key
 _ESC = 0x1B
 _TAB = 0x09
+_KILL = 0x15  # Ctrl-U, see KILL_LINE_KEY
 
 # Issue #102: the control bytes `read_key()` recognizes and returns as
 # their own distinct keys, rather than the generic "no meaning as a
@@ -98,6 +99,14 @@ HELP_KEY = "\x08"  # Ctrl-H
 # wrong for that caller). Extending real-text-entry cancellation is
 # left for a later, separately-scoped increment.
 CANCEL_KEY = "\x03"  # Ctrl-C
+# Issue #812: Ctrl-U empties the line being typed, at every `read_line`
+# prompt on every transport -- the POSIX terminal's own "kill" character,
+# and the readline binding most callers' fingers already know. A long
+# value opened for editing (a subject, a description) otherwise took one
+# Backspace per character to clear. Unlike Ctrl-C there is no competing
+# meaning to weigh: no caller gives 0x15 one, and it was discarded before.
+# Masked (password) reads honor it too.
+KILL_LINE_KEY = "\x15"  # Ctrl-U
 
 
 class InputCancelled(Exception):
@@ -584,6 +593,33 @@ class LineViewport:
         self.drawn = 0
 
 
+async def kill_line(
+    write: WriteFunc,
+    window: LineViewport | None,
+    line: list[str],
+    cursor: int,
+    show: Callable[[], Awaitable[None]],
+) -> int:
+    """Ctrl-U (issue #812): empty `line` in place and return the new
+    cursor, 0. Shared by both line editors -- `_read_line_editable` here
+    and `netbbs.net.web.WebSession`'s copy -- so the two cannot drift.
+
+    Without a viewport the text sits on the row from the prompt onward,
+    so moving back to where it starts and erasing from there clears it,
+    through the same primitive every other edit uses. With one, the
+    window redraws itself empty; `show` is the caller's own renderer,
+    which re-reads a live terminal width first."""
+    if not line:
+        return 0
+    move_back = display_width("".join(line[:cursor]))
+    line.clear()
+    if window is not None:
+        await show()
+    else:
+        await redraw_tail(write, move_back=move_back, edit_pos=0, line=line, new_cursor=0)
+    return 0
+
+
 async def redraw_tail(
     write: WriteFunc, *, move_back: int, edit_pos: int, line: list[str], new_cursor: int
 ) -> None:
@@ -975,6 +1011,11 @@ async def _read_line_masked(source: ByteSource, write: WriteFunc) -> str:
                 await write("\b \b")
             continue
 
+        if b == _KILL:
+            await write("\b \b" * len(line))
+            line.clear()
+            continue
+
         if b == _ESC:
             await _read_escape_sequence(source)
             continue
@@ -1132,6 +1173,10 @@ async def _read_line_editable(
                             await redraw_tail(
                                 write, move_back=move_back, edit_pos=cursor, line=line, new_cursor=cursor
                             )
+                    continue
+
+                if b == _KILL:
+                    cursor = await kill_line(write, window, line, cursor, show)
                     continue
 
                 if b == _TAB:
