@@ -1214,6 +1214,13 @@ included. The SysOp console's content menu has one node-wide
 `[P]ending review` queue of every held post and upload, oldest first, so
 nobody has to open each board and area to find what waits.
 
+A caller granted APPROVE on a board or file area has the same queue on its
+own page: `[Q]ueue (N)` appears there while anything waits, and opens the
+same decision screens without the SysOp's node status line, and without the
+pin and exempt keys unless they also hold EDIT. APPROVE covers the whole
+decision: it lets its holder reject a held post or upload as well as publish
+it. Deleting something already published still takes DELETE.
+
 A board's and a file area's detail screen in the console names its
 moderators: each grant that applies there, its own and blanket ones, with
 its permissions. `[H]istory` lists what moderators did there, newest first,
