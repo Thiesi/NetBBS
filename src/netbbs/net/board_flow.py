@@ -1608,6 +1608,8 @@ async def _show_board(
             if choice == "q" and _queue_count():
                 await session.write_line("")
                 await _open_queue()
+                # As on a populated page: an approved post may be new here.
+                unread["count"] = unread_post_count(db, user, board) or 0
                 page = list_posts_page(db, board, user, limit=_page_limit(), with_pinned=True, pinned_block_rows=_PINNED_BLOCK_ROWS)
                 if page.posts:
                     # An approval gave the board its first post.
@@ -1730,6 +1732,9 @@ async def _show_board(
         elif char == "q" and _queue_count():
             await _moved_on()
             await _open_queue()
+            # An approved post may be new to the caller, and the page's
+            # count and [M]ark all read must say so (Codex review on #796).
+            unread["count"] = unread_post_count(db, user, board) or 0
             # Back on the page the caller was reading (Codex review on
             # #796): an approved post joins the list in its dated place.
             page, highlighted = _refetch_keeping(page, highlighted)

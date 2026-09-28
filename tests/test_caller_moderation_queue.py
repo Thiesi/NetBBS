@@ -231,3 +231,39 @@ def test_leaving_the_queue_keeps_the_board_page_the_caller_was_on(db, sysop, ali
 
     # Still an older page: the newest has nothing newer to offer.
     assert "[N]ewer" in after_queue
+
+
+def test_backing_out_of_the_queue_on_an_empty_area_stays_on_one_screen(db, sysop, alice, mod):
+    """Codex review on #796: [Q]ueue then [B]ack, again and again, must not
+    pile up screens."""
+    area = create_file_area(db, "uploads", creator=sysop, moderated=True)
+    grant_permissions(
+        db, mod, object_type="file_area", object_id=area.id, permissions=BoardPermission.APPROVE, granted_by=sysop,
+    )
+    upload_file(db, area, alice, "notes.txt", b"data")
+    rounds = 5
+    lane = DatabaseLane(db.path)
+    try:
+        session = _FakeSession(["q", "b"] * rounds + ["b"])
+        asyncio.run(_show_area(session, lane, area, mod))
+    finally:
+        lane.close()
+
+    # The area's screen was drawn once; each round redrew only its key bar.
+    assert session.text.count("This file area has no files yet") == 1
+    assert session.text.count("[Q]ueue (1)") == rounds + 1
+
+
+def test_approving_from_the_queue_counts_the_post_as_unread_for_the_board(db, sysop, alice, mod):
+    """Codex review on #796: the page's new-post count follows an approval."""
+    from netbbs.activity import unread_post_count
+
+    board = create_board(db, "general", creator=sysop, moderated=True)
+    _approver_on_board(db, sysop, mod, board)
+    create_post(db, board, alice, "Held one", "text")
+
+    session = _FakeSession(["q", "0", "1", "a", "b", "b"])
+    asyncio.run(_show_board(session, db, board, mod))
+
+    assert unread_post_count(db, mod, board) == 1
+    assert "[M]ark all read" in session.text.rsplit("Pending posts in", 1)[1]

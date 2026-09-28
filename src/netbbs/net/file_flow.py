@@ -86,7 +86,7 @@ from netbbs.files.categories import (
     list_top_level_categories,
 )
 from netbbs.files.diz import MAX_DESCRIPTION_BYTES, MAX_DESCRIPTION_LINES, read_archive_description
-from netbbs.files.entries import count_pending_files
+from netbbs.files.entries import count_pending_files, count_visible_files
 from netbbs.files.storage import new_incoming_temp_path
 from netbbs.net.file_transfer import (
     DEFAULT_GRANT_TTL_SECONDS,
@@ -1121,20 +1121,20 @@ async def _show_area(
                 if not await _queue_count():
                     await _reject_after_echo(session)
                     continue
-                waiting = await _queue_count()
+                listed = (await lane.run(count_visible_files, area))[0]
                 await _open_queue()
                 # What `[E]` could reach has changed with the decisions
                 # (Codex review on #796): a decided upload is no longer one
                 # of the caller's waiting ones.
                 pending_uploads = await lane.run(lambda db: list_pending_files(db, area, requesting_user=user))
                 describable_pending = [entry for entry in pending_uploads if _may_describe(entry)]
-                if await _queue_count() != waiting:
-                    # A decision changed the listing: the newest page shows
-                    # what was approved.
+                if (await lane.run(count_visible_files, area))[0] != listed:
+                    # An approval added to the listing: the newest page
+                    # shows it.
                     page = await lane.run(list_files_page, area, user, with_pinned=True)
                     highlighted = None
-                # Otherwise the caller is back on the page they left
-                # (Codex review on #796).
+                # Otherwise -- nothing decided, or only rejections -- the
+                # caller is back on the page they left (Codex review on #796).
                 await _render_and_advance_cursor(page, highlighted=highlighted)
                 continue
             elif kind == "follow":
@@ -1317,9 +1317,22 @@ async def _show_area(
         if choice == "q" and queued:
             await session.write_line("")
             await _open_queue()
-            # Drawn afresh: an approval may have given the area its first file.
-            await _show_area(session, lane, area, user, link_context=link_context, transfers=transfers)
-            return
+            if (await lane.run(count_visible_files, area))[0]:
+                # An approval gave the area its first file: its listing.
+                await _show_area(session, lane, area, user, link_context=link_context, transfers=transfers)
+                return
+            # Still empty: this bar again, in this loop rather than a fresh
+            # screen, so backing out of the queue repeatedly does not pile up
+            # screens (Codex review on #796).
+            queued = await _queue_count()
+            await session.write_line(
+                _menu_row(
+                    _empty_hints(), width=session.terminal_width, height=session.terminal_height,
+                    description_level=description_level,
+                )
+            )
+            await _write_choice_prompt(session)
+            continue
         if choice == "f":
             await session.write_line("")
             if follows["on"]:
