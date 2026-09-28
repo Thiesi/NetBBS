@@ -332,12 +332,11 @@ class WebSession(Session):
                 width, _ = clamp_terminal_size(cols, height)
             if isinstance(rows, int) and not isinstance(rows, bool) and rows > 0:
                 _, height = clamp_terminal_size(width, rows)
-            if self._pre_door_size is not None:
-                # A fixed-size door keeps its geometry; the browser's new size
-                # applies once the door ends.
-                self._pre_door_size = (width, height)
-            else:
+            if self._pre_door_size is None:
                 self.terminal_width, self.terminal_height = width, height
+            # During a fixed-size door the client reports the door's own
+            # size (it doesn't refit xterm), so there is nothing to learn;
+            # it sends the browser's size again once the door ends.
         # Unknown event types are ignored rather than treated as an
         # error — a forward-compatible client sending a message type
         # this version doesn't understand yet shouldn't break the

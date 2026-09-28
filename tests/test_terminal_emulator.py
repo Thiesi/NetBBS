@@ -248,3 +248,36 @@ def test_restore_keeps_a_pending_wrap():
     replica.feed("!")
     source.feed("!")
     assert replica.text_rows() == source.text_rows()
+
+
+def test_restore_keeps_a_pending_wrap_after_a_wide_glyph():
+    source = _emu("x" * 18 + "漢", width=20, height=3)
+    assert source._wrap_pending
+    replica = TerminalEmulator(20, 3)
+    replica.feed(source.restore_ansi())
+    replica.feed("!")
+    source.feed("!")
+    assert replica.text_rows() == source.text_rows()
+
+
+def test_resize_never_keeps_half_a_wide_glyph():
+    emulator = _emu("abc漢", width=10, height=2)
+    emulator.resize(4, 2)
+    row = emulator.snapshot()[0]
+    assert [cell.char for cell in row] == ["a", "b", "c", " "]
+
+
+def test_insert_and_delete_line_return_to_the_first_column():
+    for sequence in ("\x1b[L", "\x1b[M"):
+        emulator = _emu("\x1b[2;5H" + sequence + "Z", width=10, height=4)
+        assert emulator.text_rows()[1].startswith("Z")
+
+
+def test_erase_display_3_leaves_the_screen_alone():
+    emulator = _emu("still here\x1b[3J")
+    assert _rows(emulator)[0] == "still here"
+
+
+def test_the_main_screens_saved_cursor_survives_the_alternate_screen():
+    emulator = _emu("\x1b[2;3H\x1b[?1049h\x1b[4;4H\x1b7\x1b[?1049l", width=10, height=5)
+    assert (emulator.row, emulator.col) == (1, 2)

@@ -528,8 +528,11 @@ def paint_snoop(
             # terminal: its visible half is blanked instead.
             buffer.put_cell(row + 1, cols - 1, Cell())
     if copy.cursor_visible and copy.row < rows and copy.col < cols:
-        cell = snapshot[copy.row][copy.col]
-        buffer.put_cell(copy.row + 1, copy.col, replace(cell, char=cell.char or " ", reverse=not cell.reverse))
+        col = copy.col
+        if col > 0 and not snapshot[copy.row][col].char:
+            col -= 1  # on a wide glyph's second half: mark the glyph itself
+        cell = snapshot[copy.row][col]
+        buffer.put_cell(copy.row + 1, col, replace(cell, char=cell.char or " ", reverse=not cell.reverse))
 
 
 async def snoop_screen(

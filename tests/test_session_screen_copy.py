@@ -223,12 +223,13 @@ def test_a_fixed_size_web_door_sets_the_session_size_and_gives_it_back():
         session.terminal_width, session.terminal_height = 120, 40
         await session.enter_door_mode(encoding="cp437", width=80, height=25)
         assert (session.terminal_width, session.terminal_height) == (80, 25)
-        # The browser resizing meanwhile doesn't move a fixed door...
-        await session._handle_event({"type": "resize", "cols": 100, "rows": 30})
+        # In a fixed door the client reports the door's own size on a
+        # window resize, which says nothing about the browser: ignored.
+        await session._handle_event({"type": "resize", "cols": 80, "rows": 25})
         assert (session.terminal_width, session.terminal_height) == (80, 25)
         await session.leave_door_mode()
-        # ...but is what the session has once the door ends.
-        assert (session.terminal_width, session.terminal_height) == (100, 30)
+        # The browser's own size is back until the client reports a new one.
+        assert (session.terminal_width, session.terminal_height) == (120, 40)
 
     asyncio.run(scenario())
 

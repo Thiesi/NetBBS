@@ -954,3 +954,22 @@ def test_snoop_never_crops_through_a_wide_glyph():
         await asyncio.gather(*tasks, return_exceptions=True)
 
     asyncio.run(scenario())
+
+
+def test_the_snoop_cursor_on_a_wide_glyph_marks_the_glyph():
+    async def scenario():
+        controls = _controls()
+        viewer, alice = QueueSession(), CopyingSession(width=20, height=5)
+        tasks = [await _connect(controls.session_registry, viewer, "sysop"),
+                 await _connect(controls.session_registry, alice, "alice")]
+        await alice.write("x" * 18 + "漢")
+        entry = next(e for e in controls.session_registry.list_entries() if e.username == "alice")
+        buffer = ScreenBuffer(80, 24)
+        sysop_monitor.paint_snoop(buffer, entry, controls)
+        assert buffer.get_cell(1, 18).char == "漢" and buffer.get_cell(1, 18).reverse
+        assert buffer.get_cell(1, 19).char == ""
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    asyncio.run(scenario())

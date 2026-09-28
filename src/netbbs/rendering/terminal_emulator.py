@@ -174,6 +174,7 @@ class TerminalEmulator:
         self._saved: tuple[int, int, Pen] | None = None
         # The main screen while the alternate one is shown, else None.
         self._main_rows: list[list[Cell]] | None = None
+        self._main_saved: tuple[int, int, Pen] | None = None
         self._state = _GROUND
         self._sequence = ""
         # Cells by pen, then character: frozen, so shared freely.
@@ -201,7 +202,11 @@ class TerminalEmulator:
             # Output ended in the last column. A cursor move clears a real
             # terminal's pending wrap, so reprint that last cell: the
             # terminal is then waiting to wrap, as this copy is.
-            cell = self._rows[self.row][self.col]
+            col = self.col
+            if col > 0 and not self._rows[self.row][col].char:
+                col -= 1  # a wide glyph ended the row: reprint it whole
+                parts.append(move_cursor(self.row + 1, col + 1))
+            cell = self._rows[self.row][col]
             if cell.char:
                 parts.append(colored(
                     cell.char, fg_color=cell.fg, bg_color=cell.bg, bold=cell.bold,
@@ -220,7 +225,12 @@ class TerminalEmulator:
         if (width, height) == (self.width, self.height):
             return
         def reshape(grid: list[list[Cell]]) -> list[list[Cell]]:
-            rows = [row[:width] + [_BLANK] * (width - len(row)) for row in grid[:height]]
+            rows = []
+            for row in grid[:height]:
+                kept = row[:width] + [_BLANK] * (width - len(row))
+                if width < len(row) and not row[width].char and kept[-1].char:
+                    kept[-1] = _BLANK  # the new edge cuts a wide glyph in two
+                rows.append(kept)
             return rows + [[_BLANK] * width for _ in range(height - len(rows))]
 
         self._rows = reshape(self._rows)
@@ -520,9 +530,11 @@ class TerminalEmulator:
         elif final == "L":
             if self.top <= self.row <= self.bottom:
                 self._scroll_down(arg(), top=self.row)
+                self._move_to(self.row, 0)
         elif final == "M":
             if self.top <= self.row <= self.bottom:
                 self._scroll_up(arg(), top=self.row)
+                self._move_to(self.row, 0)
         elif final == "@":
             self._insert_chars(arg())
         elif final == "P":
@@ -554,14 +566,16 @@ class TerminalEmulator:
         doors) switch to and back from: the main screen is kept aside
         untouched and comes back when the program leaves."""
         if enter and self._main_rows is None:
-            if save_cursor:
-                self._saved = (self.row, self.col, self.pen)
+            # The main screen's own save is kept aside with it: a save made
+            # on the alternate screen must not replace it.
+            self._main_saved = (self.row, self.col, self.pen) if save_cursor else self._saved
             self._main_rows = self._rows
             self._rows = [self._blank_row() for _ in range(self.height)]
             self._wrap_pending = False
         elif not enter and self._main_rows is not None:
             self._rows = self._main_rows
             self._main_rows = None
+            self._saved, self._main_saved = self._main_saved, None
             if save_cursor:
                 self._restore_cursor()
 
@@ -575,7 +589,7 @@ class TerminalEmulator:
             self._erase_line(1)
             for row in range(0, self.row):
                 self._rows[row] = [blank] * self.width
-        elif mode in (2, 3):
+        elif mode == 2:
             self._rows = [[blank] * self.width for _ in range(self.height)]
         self._wrap_pending = False
 
