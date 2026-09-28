@@ -65,7 +65,7 @@ from netbbs.selfupdate import run_scheduled_update_check
 from netbbs.update_apply import RESTART_EXIT_CODE, reconcile_install_at_startup, restart_exit_requested
 from netbbs.storage.database import Database, DatabaseIntegrityError
 from netbbs.storage.execution import DatabaseLane
-from netbbs.timeutil import utc_now_iso
+from netbbs.timeutil import display_timezone_is_set, utc_now_iso
 
 _logger = logging.getLogger(__name__)
 
@@ -928,7 +928,14 @@ async def run(
             node_identity = load_or_bootstrap_node_identity(config.identity_dir, label=config.node_name)
         except NodeIdentityError as exc:
             raise StartupError(f"could not load or bootstrap this node's Link identity: {exc}") from exc
-        _logger.info("node Link identity %r: fingerprint %s", config.node_name, node_identity.fingerprint)
+        # Issue #834: named by the display name callers and other nodes see.
+        # The `[node] name` label alone read as "the name I chose didn't take".
+        from netbbs.config import get_node_display_name
+
+        _logger.info(
+            "node Link identity for %r: fingerprint %s ([node] name %r only labels the key files)",
+            get_node_display_name(db), node_identity.fingerprint, config.node_name,
+        )
         # Issue #201: managed-DNS registration is deliberately Link-
         # independent (a board can want a friendly hostname without ever
         # federating), so it can't reach this fingerprint through
@@ -1012,6 +1019,15 @@ async def run(
         # explicitly configured one does.
         for warning in config.describe_insecure_bindings():
             _logger.warning(warning)
+        for note in config.describe_loopback_listeners():
+            _logger.info(note)
+        if not display_timezone_is_set(db):
+            # Issue #834: the main-menu clock was two hours off the server's
+            # own time on a fresh node, and nothing said why.
+            _logger.info(
+                "Times are shown in UTC because no timezone is set. Choose one in the SysOp "
+                "console under Settings -> Timestamp format."
+            )
         # Decision 6: a node may not participate in Link under the
         # shipped placeholder display name -- every default-named node
         # on a mesh would be indistinguishable in conversation. Refused
@@ -1276,6 +1292,9 @@ async def run(
                 from netbbs.net.file_transfer import TransferGateway, TransferGrants
 
                 transfer_grants = TransferGrants(base_url=_transfer_base_url(config))
+                gap = _transfer_link_gap(config)
+                if gap is not None:
+                    _logger.warning(gap)
                 transfer_gateway = TransferGateway(
                     transfer_grants, foreground_lane,
                     # Signs a Link announcement for anything uploaded
@@ -1749,6 +1768,28 @@ def _is_unroutable_bind(host: str) -> bool:
     except ValueError:
         return False
     return address.is_loopback or address.is_unspecified
+
+
+def _transfer_link_gap(config) -> str | None:
+    """Why Telnet and SSH callers will get no transfer links, if they won't.
+
+    Issue #834: without a `[web] public_url` (and with a web listener
+    whose own address is no use to a remote caller), a Telnet or SSH
+    caller asking for a browser download or upload is told the node has
+    no public web address. Nobody found that out until a caller tried,
+    so the SysOp is told at startup instead.
+    """
+    if not config.web.enabled or _transfer_base_url(config) is not None:
+        return None
+    callers = [label for label, transport in (("SSH", config.ssh), ("Telnet", config.telnet)) if transport.enabled]
+    if not callers:
+        return None
+    return (
+        f"[web] public_url is not set, so {' and '.join(callers)} callers cannot download or "
+        "upload files through a browser link, and callers whose terminal has no Zmodem "
+        "cannot transfer files at all. Set public_url under [web] to the address callers open "
+        "in their browser (for example \"https://bbs.example.org\") and restart."
+    )
 
 
 def _transfer_base_url(config) -> str | None:

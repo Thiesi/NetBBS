@@ -1976,6 +1976,10 @@ class LinkNode:
     channel_events: ChannelEventState = field(default_factory=ChannelEventState)
     # Design doc §11, issue #89.
     file_area_events: FileAreaEventState = field(default_factory=FileAreaEventState)
+    # Issue #834: routine Link states (a subject on probation here, a relay
+    # candidate not reached) the node log has already explained once since
+    # this process started, so they are not repeated on every sync pass.
+    explained_in_log: set[str] = field(default_factory=set)
 
     @property
     def peers(self) -> dict[str, "PeerRecord"]:

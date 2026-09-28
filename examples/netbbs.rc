@@ -1,14 +1,13 @@
 #!/bin/sh
 #
-# rc.d script for running a NetBBS node under NetBSD (design doc §2.1
-# Tier 1, issue #82).
+# rc.d script for running a NetBBS node under NetBSD.
 #
 # PROVIDE: netbbs
 # REQUIRE: NETWORKING SERVERS
 # KEYWORD: shutdown
 #
 # rc.conf(5) variables (all optional -- the defaults below match the
-# install layout in docs/NetBBS-operator-guide.md §1b/§2):
+# install layout in the SysOp handbook's "Installing NetBBS" section):
 #
 #	netbbs=YES					# enable the service
 #	netbbs_user="netbbs"				# unprivileged user to run as

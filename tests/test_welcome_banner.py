@@ -11,7 +11,9 @@ import re
 
 import pytest
 
+from netbbs.link.onboarding import set_configured_link_enabled
 from netbbs.net.welcome_banner import (
+    DEFAULT_LINK_WELCOME_BANNER,
     DEFAULT_WELCOME_BANNER,
     MAX_BANNER_SIZE_BYTES,
     WelcomeBannerStatus,
@@ -127,7 +129,7 @@ def test_truecolor_false_returns_the_static_default_banner(db):
 def test_truecolor_true_gradients_the_bbs_name(db):
     result = load_welcome_banner(db, truecolor=True)
     assert result != DEFAULT_WELCOME_BANNER
-    assert "NetBBS" in result
+    assert "conversations across independent nodes" in result
     # The showcase spans both 48-character borders plus the name, making
     # negotiated truecolor unmistakable rather than a six-character novelty.
     assert result.count("\x1b[38;2;") >= 96
@@ -182,15 +184,18 @@ def test_no_accent_override_returns_the_unchanged_default_banner(db):
 def test_accent_override_changes_the_256_color_default_banner(db):
     from netbbs.net.node_theme import set_accent_color_override
 
+    # The accent colours the NetBBS Link line, which a Link node shows.
+    set_configured_link_enabled(db, True)
     set_accent_color_override(db, (10, 20, 30))
     result = load_welcome_banner(db, truecolor=False)
-    assert result != DEFAULT_WELCOME_BANNER
+    assert result != DEFAULT_LINK_WELCOME_BANNER
     assert "NetBBS Link" in result
 
 
 def test_accent_override_appears_as_raw_rgb_in_the_truecolor_banner(db):
     from netbbs.net.node_theme import set_accent_color_override
 
+    set_configured_link_enabled(db, True)
     set_accent_color_override(db, (10, 20, 30))
     result = load_welcome_banner(db, truecolor=True)
     assert "\x1b[38;2;10;20;30m" in result
@@ -345,3 +350,37 @@ def test_login_flow_does_not_crash_with_oversized_banner_file(db):
     session = _LoginFakeSession(["nosuchuser", "wrongpass"] * 3)
     _run_login(db, session)
     assert "Too many failed attempts" in session.output
+
+
+# -- the NetBBS Link line follows the node's Link setting (issue #834) ------
+
+
+@pytest.mark.parametrize("truecolor", [False, True])
+def test_a_node_without_link_does_not_advertise_it(db, truecolor):
+    """F015: a SysOp who declined Link saw "NetBBS Link > private experimental
+    federation" on her own login screen and wondered whether declining took."""
+    set_configured_link_enabled(db, False)
+    assert "NetBBS Link" not in load_welcome_banner(db, truecolor=truecolor)
+
+
+@pytest.mark.parametrize("truecolor", [False, True])
+def test_a_node_that_never_started_does_not_advertise_link(db, truecolor):
+    assert "NetBBS Link" not in load_welcome_banner(db, truecolor=truecolor)
+
+
+@pytest.mark.parametrize("truecolor", [False, True])
+def test_a_link_node_shows_the_link_line(db, truecolor):
+    set_configured_link_enabled(db, True)
+    result = load_welcome_banner(db, truecolor=truecolor)
+    assert "NetBBS Link" in result
+    if not truecolor:
+        assert result == DEFAULT_LINK_WELCOME_BANNER
+
+
+def test_a_silent_config_follows_the_participation_decision(db):
+    from netbbs.link.onboarding import Participation, set_participation
+
+    set_configured_link_enabled(db, None)
+    assert "NetBBS Link" not in load_welcome_banner(db)
+    set_participation(db, Participation.ACCEPTED)
+    assert "NetBBS Link" in load_welcome_banner(db)

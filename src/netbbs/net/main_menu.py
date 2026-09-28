@@ -85,7 +85,7 @@ from netbbs.rendering import (
 )
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
-from netbbs.timeutil import format_for_display, utc_now_iso
+from netbbs.timeutil import format_for_display, is_utc_zone_name, resolve_display_preferences, utc_now_iso
 
 #: What the SysOp monitor shows for a caller who took each main-menu branch
 #: (issue #762), named as the menu names it. Every key `_main_menu_loop`
@@ -374,13 +374,18 @@ def _main_menu_prompt(db: Database, user: User, node_controls: NodeControls | No
     if node_controls is None:
         return "Choice: "
 
-    time_only = format_for_display(utc_now_iso(), db, override_format="%H:%M:%S")
+    _fmt, tz_name = resolve_display_preferences(db)
+    time_only = format_for_display(utc_now_iso(), override_format="%H:%M:%S", override_timezone=tz_name)
     hours, minutes, seconds = time_only.split(":")
     separator = colored(":", fg_color=MUTED_COLOR)
     clock_color = effective_clock_color_256(db)
     time_str = separator.join(
         colored(part, fg_color=clock_color) for part in (hours, minutes, seconds)
     )
+    if is_utc_zone_name(tz_name):
+        # Issue #834: a fresh node's clock is UTC, and unlabelled it read as
+        # a wrong local time. A named local zone needs no label.
+        time_str += colored(" UTC", fg_color=MUTED_COLOR)
     tags: list[str] = []
     if node_controls.shutdown_scheduler.is_scheduled():
         remaining = node_controls.shutdown_scheduler.remaining_seconds()

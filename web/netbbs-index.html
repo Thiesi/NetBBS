@@ -186,7 +186,8 @@
   pre.qs-body .cm{color:var(--dim);}
   pre.qs-body .p{color:var(--teal);}
   .qs-note{color:var(--sub); font-size:0.9rem; margin-top:1.1rem; line-height:1.7;}
-  .qs-note code{background:var(--panel); border:1px solid var(--line); border-radius:5px; padding:0.1rem 0.4rem; font-size:0.85em;}
+  .section-head p + p{margin-top:0.9rem;}
+  .qs-note code, .section-head code{background:var(--panel); border:1px solid var(--line); border-radius:5px; padding:0.1rem 0.4rem; font-size:0.85em;}
 
   /* final cta */
   .final-cta{
@@ -247,7 +248,7 @@
             <a class="btn btn-primary" href="#quickstart">Get started →</a>
             <a class="btn btn-ghost" href="overview.html" id="overview-link">Explore the features</a>
           </div>
-          <p class="fineprint">NetBSD-first. Linux supported. Install from GitHub Releases.</p>
+          <p class="fineprint">NetBSD-first; Debian, Ubuntu and other mainstream Linux work fine. Install from GitHub Releases.</p>
         </div>
 
         <div class="term">
@@ -692,22 +693,24 @@
       <div class="section-head">
         <span class="eyebrow">Get started</span>
         <h2>Start with a local look around.</h2>
-        <p>With Python 3.11+ installed, download a wheel from <a href="https://github.com/Thiesi/NetBBS/releases" target="_blank" rel="noopener">GitHub Releases</a>. In a fresh directory, replace VERSION below with its filename. The <a href="https://github.com/Thiesi/NetBBS/blob/main/docs/NetBBS-SysOp-Handbook.md" target="_blank" rel="noopener">SysOp handbook</a> covers a permanent installation.</p>
+        <p>This is a trial on your own machine: only you can connect to it. A node that callers can reach is a permanent installation with its own service account, which the <a href="https://github.com/Thiesi/NetBBS/blob/main/docs/NetBBS-SysOp-Handbook.md#installing-netbbs" target="_blank" rel="noopener">SysOp handbook</a> walks through. The trial database can simply be deleted afterwards.</p>
+        <p>You need Python 3.11 or newer: <code>python3 --version</code> tells you which you have. On Debian and Ubuntu, also run <code>sudo apt install python3-venv</code> first. Download the <code>.whl</code> file (the &ldquo;wheel&rdquo;, a ready-to-install package) from <a href="https://github.com/Thiesi/NetBBS/releases" target="_blank" rel="noopener">GitHub Releases</a> into a fresh directory. In the commands below, replace VERSION with the version number only, for example <code>7.13.0</code>.</p>
       </div>
       <div class="quickstart-box">
         <div class="qs-bar">
           <span>shell</span>
           <button class="copy-btn" id="copy-quickstart" type="button">Copy</button>
         </div>
-        <pre class="qs-body" id="quickstart-code"><span class="cm"># install the downloaded release in a local environment</span>
+        <pre class="qs-body" id="quickstart-code"><span class="cm"># install the downloaded release in a private environment (.venv)</span>
+<span class="cm"># [ssh,web] adds SSH callers, browser callers and NetBBS Link: keep it</span>
 python3 -m venv .venv &amp;&amp; . .venv/bin/activate
 python -m pip install "./netbbs-VERSION-py3-none-any.whl[ssh,web]"
 
-<span class="cm"># create yourself as SysOp (prompts for username/password), then start the node</span>
+<span class="cm"># create yourself as SysOp; setup then opens the SysOp console: [B]ack leaves it</span>
 python -m netbbs.admin --db netbbs.db
 python -m netbbs --db netbbs.db --ssh-host 127.0.0.1 --disable-link</pre>
       </div>
-      <p class="qs-note">For this local trial, decline network participation and managed DNS during setup. From another terminal, run <code>ssh -p 2222 yourname@localhost</code> using the account you created. On NetBSD, install the SSH build prerequisites from the handbook first. For source development, see the <a href="https://github.com/Thiesi/NetBBS/blob/main/docs/NetBBS-Developer-Handbook.md" target="_blank" rel="noopener">developer handbook</a>.</p>
+      <p class="qs-note">Setup asks for your username and a password or key, then two questions: whether to join NetBBS Link, the network of other nodes, and whether to take a free <code>yourname.netbbs.org</code> address. Answer no to both for this trial; both default to yes, so read before pressing Enter. <code>--disable-link</code> keeps the trial off NetBBS Link even if you said yes by accident. You can say yes on your permanent node. Once the node is running, from another terminal, run <code>ssh -p 2222 yourname@localhost</code> using the account you created. On NetBSD, install the SSH build prerequisites from the handbook first. For source development, see the <a href="https://github.com/Thiesi/NetBBS/blob/main/docs/NetBBS-Developer-Handbook.md" target="_blank" rel="noopener">developer handbook</a>.</p>
     </div>
   </section>
 

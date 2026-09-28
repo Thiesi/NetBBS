@@ -702,6 +702,29 @@ class NodeConfig:
             )
         return warnings
 
+    def describe_loopback_listeners(self) -> list[str]:
+        """
+        Notes for every enabled caller listener bound to loopback only
+        (issue #834). Telnet and web default to 127.0.0.1, so a SysOp who
+        sets `enabled = true` and nothing else gets a listener no other
+        machine can reach, and callers are disconnected before they see a
+        thing. A loopback web listener with a `public_url` is the
+        recommended reverse-proxy setup, so it gets no note.
+        """
+        notes: list[str] = []
+        for name, label in (("telnet", "Telnet"), ("ssh", "SSH"), ("web", "The web transport")):
+            transport = getattr(self, name)
+            if not transport.enabled or not is_loopback_host(transport.host):
+                continue
+            if name == "web" and transport.public_url:
+                continue
+            notes.append(
+                f"{label} listens on {transport.host}:{transport.port}, which only this machine "
+                f"can reach. To let callers in from elsewhere, set host = \"0.0.0.0\" under "
+                f"[{name}] and restart."
+            )
+        return notes
+
 
 _TRANSPORTS = ("telnet", "ssh", "web")
 

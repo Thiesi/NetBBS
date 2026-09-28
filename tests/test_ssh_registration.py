@@ -303,9 +303,9 @@ def test_registration_refuses_the_reserved_sentinel_as_a_desired_username(db):
     async def scenario():
         server = await _run_server(db, _noop_handler, throttle=_throttle())
         try:
-            client = await _attempt_kbdint_registration(
-                server.port, responses=["new", "hunter2pw", "hunter2pw"]
-            )
+            # Issue #835: refused at the username prompt and asked again,
+            # three times, before the attempt ends.
+            client = await _attempt_kbdint_registration(server.port, responses=["new", "New", "NEW"])
             return client
         finally:
             await server.stop()
