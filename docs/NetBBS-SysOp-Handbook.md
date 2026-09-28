@@ -302,7 +302,9 @@ If you don't run a web server yet, [Caddy](https://caddyserver.com/) is the
 shortest route: it obtains and renews the certificate itself, forwards
 WebSocket upgrades, and sets no upload limit of its own. The hostname must
 already point at this host, with ports 80 and 443 reachable from outside.
-Its whole `/etc/caddy/Caddyfile` is:
+Its whole `Caddyfile` is below. Debian and Ubuntu packages read
+`/etc/caddy/Caddyfile`; on NetBSD, pkgsrc's Caddy reads
+`/usr/pkg/etc/caddy/Caddyfile`.
 
 ```
 bbs.example.org {
