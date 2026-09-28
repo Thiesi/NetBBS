@@ -3400,4 +3400,31 @@ MIGRATIONS = [
         CREATE INDEX idx_moderation_notices_user ON moderation_notices(user_id);
         """,
     ),
+    Migration(
+        description=(
+            "Issue #681: `position` on board, file-area and chat categories -- the SysOp's "
+            "order among a category's siblings, which every listing follows. Existing "
+            "categories keep today's alphabetical order."
+        ),
+        sql="""
+        ALTER TABLE board_categories ADD COLUMN position INTEGER NOT NULL DEFAULT 0;
+        UPDATE board_categories SET position = (
+            SELECT COUNT(*) FROM board_categories sibling
+            WHERE sibling.parent_category_id IS board_categories.parent_category_id
+              AND sibling.name < board_categories.name
+        );
+        ALTER TABLE file_area_categories ADD COLUMN position INTEGER NOT NULL DEFAULT 0;
+        UPDATE file_area_categories SET position = (
+            SELECT COUNT(*) FROM file_area_categories sibling
+            WHERE sibling.parent_category_id IS file_area_categories.parent_category_id
+              AND sibling.name < file_area_categories.name
+        );
+        ALTER TABLE channel_categories ADD COLUMN position INTEGER NOT NULL DEFAULT 0;
+        UPDATE channel_categories SET position = (
+            SELECT COUNT(*) FROM channel_categories sibling
+            WHERE sibling.parent_category_id IS channel_categories.parent_category_id
+              AND sibling.name < channel_categories.name
+        );
+        """,
+    ),
 ]
