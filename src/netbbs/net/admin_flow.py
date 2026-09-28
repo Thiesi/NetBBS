@@ -77,6 +77,7 @@ from netbbs.auth.users import (
     UserManagementError,
     UsernameRetiredError,
     approve_pending_user,
+    decline_pending_user,
     count_sysops,
     create_user,
     current_account,
@@ -520,6 +521,12 @@ from netbbs.net.shutdown import (
 from netbbs.net.sysop_monitor import monitor_screen
 from netbbs.net.password_screen import manage_password_screen
 from netbbs.net.ssh_key_screen import manage_ssh_keys_screen
+from netbbs.auth.signup_answers import (
+    MAX_REGISTRATION_QUESTION_LENGTH,
+    get_registration_question,
+    load_signup_answer,
+    set_registration_question,
+)
 from netbbs.net.menu_description_preference import menu_description_level
 from netbbs.net.redraw_preference import (
     redraw_in_place_enabled,
@@ -5834,6 +5841,15 @@ async def _draw_user_detail(
             _editable("i", "Can verify identity", f"{_yes_no(target.can_verify_identity)} (age/name attestation)"),
         ]),
     ]
+    # Issue #835 (F072): what the caller said when signing up, for whoever
+    # decides on the account. Typed by an unauthenticated caller, so
+    # sanitized like any other remote text.
+    signup_answer = await lane.run(load_signup_answer, target.id) if target.pending_approval else None
+    if signup_answer is not None:
+        sections.insert(1, Section("Signup answer", [
+            Note(f"Asked: {sanitize_text(signup_answer.question)}"),
+            Note(f"Answer: {sanitize_text(signup_answer.answer)}"),
+        ]))
     panel_rows = await _write_sections(session, sections, unicode_style=unicode_style)
     options = []
     if target.pending_approval:
@@ -5845,7 +5861,12 @@ async def _draw_user_detail(
     options.append(MenuEntry(label=menu_key("P", "assword"), brief="Set or clear this user's password"))
     options.append(MenuEntry(label=menu_key("R", "estrict login"), brief="Block or unblock this account"))
     options.append(MenuEntry(label=menu_key("H", "istory"), brief="Admin actions on this account"))
-    options.append(MenuEntry(label=menu_key("D", "elete"), brief="Permanently remove this user"))
+    if target.pending_approval:
+        # Issue #835: turning down a signup is routine, and used to need
+        # the full permanent-delete warning and typed-name confirmation.
+        options.append(MenuEntry(label=menu_key("D", "ecline"), brief="Turn down this signup"))
+    else:
+        options.append(MenuEntry(label=menu_key("D", "elete"), brief="Permanently remove this user"))
     options.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to the picker"))
     await session.write_line(
         "\r\n" + _fitted_menu(options, description_level, session=session, used_rows=panel_rows + 5)
@@ -6192,6 +6213,22 @@ async def _user_detail_screen(
             blocked = await _draw_user_detail(
                 session, lane, target, description_level, redraw_in_place, unicode_style, collapsed, selected=selected,
             )
+        elif choice == "d" and target.pending_approval:
+            await session.write_line("")
+            if await prompt_yes_no(
+                session, f"Decline {target.username!r}'s signup and remove the account?", default=False
+            ):
+                try:
+                    await lane.run(decline_pending_user, target, declined_by=actor)
+                except UserManagementError as exc:
+                    _announce_line(session, colored(str(exc), fg_color=MUTED_COLOR))
+                    target = await lane.run(get_user_by_id, target.id) or target
+                else:
+                    _announce_line(session, f"{target.username!r}'s signup declined.")
+                    return
+            blocked = await _draw_user_detail(
+                session, lane, target, description_level, redraw_in_place, unicode_style, collapsed, selected=selected,
+            )
         elif choice == "d":
             await session.write_line("")
             deleted = await _delete_user_confirm(session, lane, actor, target, node_controls)
@@ -6275,18 +6312,38 @@ async def _registration_settings_screen(session: Session, lane: DatabaseLane, ac
     it used to print the outcome and return, and the Users menu's
     redraw wiped the line before it could be read.
     """
-    def _load(db: Database) -> tuple[RegistrationMode, int]:
-        return get_registration_mode(db), sum(1 for u in list_users(db) if u.pending_approval)
+    def _load(db: Database) -> tuple[RegistrationMode, int, str | None]:
+        return (
+            get_registration_mode(db),
+            sum(1 for u in list_users(db) if u.pending_approval),
+            get_registration_question(db),
+        )
 
     modes = {"o": RegistrationMode.OPEN, "a": RegistrationMode.APPROVAL_REQUIRED, "c": RegistrationMode.CLOSED}
     chrome = await _load_chrome(lane, actor)
     message: str | None = None
     while True:
-        current, pending_count = await lane.run(_load)
+        current, pending_count, question = await lane.run(_load)
         rows: list[Field | Note] = [Field("Current mode", _REGISTRATION_MODE_LABELS[current], bold=True)]
+        # Issue #835 (F072). Shown in every mode, since a SysOp may set it
+        # before switching to approval, but asked only in approval mode.
+        rows.append(Field(
+            "Signup question",
+            sanitize_text(question) if question else "(none)",
+            color=VALUE_COLOR if question else MUTED_COLOR,
+            note=None if current == RegistrationMode.APPROVAL_REQUIRED or not question
+            else "asked only while approval is required",
+        ))
         if pending_count:
             rows.append(Field(
                 "Awaiting approval", f"{pending_count} account(s) -- see [L]ist users", color=WARNING_COLOR
+            ))
+        if current == RegistrationMode.APPROVAL_REQUIRED:
+            # Issue #835: a SysOp's banner promised newcomers they could
+            # "look around a bit" while they waited, and they can't.
+            rows.append(Note(
+                "A new account can't log in at all until you approve it -- not even to look around. "
+                "The caller is told it is waiting for your approval."
             ))
         choice, _page = await show_detail(
             session,
@@ -6299,6 +6356,7 @@ async def _registration_settings_screen(session: Session, lane: DatabaseLane, ac
                 ("o", menu_key("O", "pen")),
                 ("a", menu_key("A", "pproval required")),
                 ("c", menu_key("C", "losed")),
+                ("q", menu_key("Q", "uestion")),
                 _BACK_ACTION,
             ],
             message=message,
@@ -6306,6 +6364,34 @@ async def _registration_settings_screen(session: Session, lane: DatabaseLane, ac
         )
         if choice == "b":
             return
+        if choice == "q":
+            await session.write_line("")
+            await write_prompt(
+                session,
+                f"Question to ask new callers (up to {MAX_REGISTRATION_QUESTION_LENGTH} characters, "
+                "blank for none): ",
+            )
+            text = (await session.read_line()).strip()
+            if len(text) > MAX_REGISTRATION_QUESTION_LENGTH:
+                message = colored(
+                    f"That is {len(text)} characters; the question can be at most "
+                    f"{MAX_REGISTRATION_QUESTION_LENGTH}. Not changed.",
+                    fg_color=ERROR_COLOR,
+                )
+                continue
+
+            def _apply_question(db: Database) -> None:
+                set_registration_question(db, text or None)
+                record_action(
+                    db, actor=actor, action="set_registration_question",
+                    detail="cleared" if not text else f"question={text!r}",
+                )
+
+            await lane.run(_apply_question)
+            message = colored(
+                "Signup question set." if text else "Signup question removed.", fg_color=SUCCESS_COLOR
+            )
+            continue
         new_mode = modes[choice]
         if new_mode == current:
             message = colored("Already set to that mode.", fg_color=MUTED_COLOR)
