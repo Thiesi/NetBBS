@@ -49,6 +49,7 @@ from netbbs.boards import (
 )
 from netbbs.boards.categories import Category, list_subcategories, list_top_level_categories
 from netbbs.boards.categories import get_category_by_id as get_board_category_by_id
+from netbbs.boards.posts import sweep_expired_posts
 from netbbs.communities import (
     get_community,
     get_effective_min_age,
@@ -1087,7 +1088,7 @@ async def _show_board(
             if key == "b":
                 return index
             if key == "r" and can_reply:
-                if _reply_target(db, post) is None:
+                if _reply_target(db, post, board) is None:
                     # Expired or removed while this screen was open (Codex
                     # review on #786): back to the list, which no longer
                     # shows it.
@@ -1183,7 +1184,7 @@ async def _show_board(
         published = {"done": False}
 
         async def _commit(commit_subject: str, commit_body: str) -> bool:
-            if reply_to is not None and _reply_target(db, reply_to) is None:
+            if reply_to is not None and _reply_target(db, reply_to, board) is None:
                 # Gone while the reply was written: the text stays in review
                 # to be copied or cancelled, not published under a post no
                 # one can reach.
@@ -2002,9 +2003,14 @@ async def _compose_body(
     )
 
 
-def _reply_target(db: Database, post: Post) -> Post | None:
+def _reply_target(db: Database, post: Post, board: Board) -> Post | None:
     """`post` as a reader would find it now, or `None` when a reply to it
-    must not be written: expired, pending, hidden by trust, or removed."""
+    must not be written: expired, pending, hidden by trust, or removed.
+
+    Expiry is swept first: it is applied lazily, by the reads that show a
+    board, and a post can pass its age while its reader is open (Codex
+    review on #786)."""
+    sweep_expired_posts(db, board)
     current = visible_post(db, post.root_post_id)
     if current is None or current.tombstoned_at is not None:
         return None

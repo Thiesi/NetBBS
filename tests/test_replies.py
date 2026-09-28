@@ -287,3 +287,33 @@ def test_a_post_removed_while_it_was_read_cannot_be_replied_to(db, alice, bob):
     asyncio.run(board_flow._show_board(session, db, board, bob))
     assert "no longer available to reply to" in session.visible()
     assert not any(p.subject.startswith("Re:") for p in list_posts_page(db, board, bob).posts)
+
+
+def test_a_post_past_its_age_cannot_be_replied_to_before_anyone_lists_the_board(db, alice):
+    """Expiry is applied lazily; the reply check sweeps first (Codex review
+    on #786)."""
+    import datetime
+
+    board = create_board(db, "news", creator=alice, max_post_age_days=30)
+    post = create_post(db, board, alice, "Old news", "Stale.")
+    assert board_flow._reply_target(db, post, board) is not None
+    stamp = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=40)).strftime(
+        "%Y-%m-%dT%H:%M:%S.%fZ"
+    )
+    db.connection.execute("UPDATE posts SET created_at = ? WHERE id = ?", (stamp, post.id))
+    db.connection.commit()
+    assert board_flow._reply_target(db, post, board) is None
+
+
+def test_a_recovered_reply_draft_is_kept_as_saved(tmp_path):
+    """No separator is added to a draft the caller saved themselves."""
+    from netbbs.net.prose_editor import edit_prose
+
+    draft = tmp_path / "d.draft"
+    saved = "alice wrote:\n> Lunch?\n\nI would, but\n"
+    draft.write_text(saved, encoding="utf-8")
+    session = FakeSession(["y", "CTRL+O"])
+    result = asyncio.run(edit_prose(
+        session, initial_text="alice wrote:\n> Lunch?\n", draft_path=draft, max_bytes=100_000, cursor_at_end=True,
+    ))
+    assert result == saved

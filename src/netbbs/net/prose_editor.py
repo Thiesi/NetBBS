@@ -124,7 +124,8 @@ async def edit_prose(
     than at the top -- a reply's quote is above where the reply is written.
     Text that ends in an empty line, as a quote does, keeps it as the blank
     line between the two, and the cursor starts on a new line below it:
-    the reply comes out as the line editor, which appends, makes it.
+    the reply comes out as the line editor, which appends, makes it. A
+    recovered draft is left exactly as saved, with the cursor at its end.
 
     `keep_pasted_color` (issue #754): pasted SGR color is typed into the
     text as pipe codes, which the caller will show as color -- a post on
@@ -134,8 +135,10 @@ async def edit_prose(
     height = max(_MIN_HEIGHT, session.terminal_height) - _STATUS_ROW_OFFSET - 1
 
     loaded_text: str | None
+    recovered = False
     if draft_path.exists() and await offer_draft_recovery(session):
         loaded_text = draft_path.read_text(encoding="utf-8")
+        recovered = True
     else:
         if draft_path.exists():
             draft_path.unlink()
@@ -143,7 +146,9 @@ async def edit_prose(
 
     state = _EditorState(buffer=ProseBuffer.from_text(loaded_text or ""), max_bytes=max_bytes)
     if cursor_at_end:
-        if len(state.buffer.lines) > 1 and state.buffer.lines[-1] == "":
+        # The separator is for fresh text; a recovered draft is the caller's
+        # own words, kept line for line (Codex review on #786).
+        if not recovered and len(state.buffer.lines) > 1 and state.buffer.lines[-1] == "":
             state.buffer.lines.append("")
         state.buffer.cursor_line = len(state.buffer.lines) - 1
         state.buffer.cursor_col = len(state.buffer.lines[-1])
