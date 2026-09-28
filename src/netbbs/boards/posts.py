@@ -21,10 +21,12 @@ import datetime
 import sqlite3
 from dataclasses import dataclass, replace
 
+from netbbs.attestation import meets_age
 from netbbs.auth.users import User
 from netbbs.boards.boards import Board
 from netbbs.boards.content_id import compute_content_id
 from netbbs.boards.limits import MAX_BODY_BYTES, MAX_SUBJECT_BYTES
+from netbbs.communities import get_effective_min_age, get_effective_min_read_level
 from netbbs.config import get_expiry_grace_period_days
 from netbbs.link.enforcement import envelope_content_visible, link_content_visible
 from netbbs.moderation import BoardPermission, has_permission, record_action
@@ -666,6 +668,17 @@ class PostPage:
         return (feed[-1].created_at, feed[-1].post_id) if feed else None
 
 
+def _require_board_readable(db: Database, board: Board, user: User) -> None:
+    """Whether `user` may read `board` at all (issue #675): its effective
+    read level -- the board's own, raised by its Community's (the cascade)
+    -- and its effective minimum age, the two gates on reading a board.
+    (The name requirement gates posting, not reading.) Checked by every
+    listing of a board's posts, not only by the screens that lead to one."""
+    require_level(user, get_effective_min_read_level(db, board))
+    if not meets_age(db, user, get_effective_min_age(db, board)):
+        raise PostError("this message board has an age requirement you do not meet")
+
+
 def list_posts_page(
     db: Database,
     board: Board,
@@ -675,6 +688,7 @@ def list_posts_page(
     after: PostCursor | None = None,
     limit: int = _DEFAULT_PAGE_SIZE,
     with_pinned: bool = False,
+    pinned_block_rows: int = 0,
 ) -> PostPage:
     """
     Fetch one bounded page of posts on `board` (design doc, issue #10)
@@ -750,8 +764,12 @@ def list_posts_page(
     its block already shows. A page reached by a cursor -- paging, or a
     `[N]ew scan`/`[F]ind` jump that must open on its target -- never gets
     the block.
+
+    `pinned_block_rows` is what the screen draws around a pinned block
+    beyond its rows (the "Pinned" rule, issue #675), taken from the feed's
+    share of `limit` only when there is a block.
     """
-    require_level(requesting_user, board.min_read_level)
+    _require_board_readable(db, board, requesting_user)
     if before is not None and after is not None:
         raise ValueError("specify at most one of before/after")
 
@@ -772,7 +790,7 @@ def list_posts_page(
         if pinned and posts:
             feed_bounds = ((posts[0].created_at, posts[0].post_id), (posts[-1].created_at, posts[-1].post_id))
             shown = {post.post_id for post in pinned}
-            room = limit - len(pinned)
+            room = max(0, limit - len(pinned) - pinned_block_rows)
             posts = [post for post in posts if post.post_id not in shown][-room:] if room else []
             if posts:
                 feed_bounds = ((posts[0].created_at, posts[0].post_id), feed_bounds[1])
@@ -1280,12 +1298,11 @@ def list_pinned_posts(
     first, each resolved to its current revision.
 
     "May see" is the feed's rule (`_visible_roots`): some revision is
-    approved and the post is not hidden by trust. Access to the board
-    itself -- its Community cascade, `min_age`, name requirement -- is
-    the caller's to check before showing the board at all, exactly as
-    for `list_posts_page`; this checks `min_read_level` as that does.
+    approved and the post is not hidden by trust. Reading the board at
+    all is checked here too, as `list_posts_page` checks it: the effective
+    read level through the Community cascade, and the minimum age.
     """
-    require_level(requesting_user, board.min_read_level)
+    _require_board_readable(db, board, requesting_user)
     # Batched past trust-hidden roots, as `_visible_roots` is (Codex review
     # on #783): a hidden pin must not take a visible one's place.
     found: list[Post] = []
