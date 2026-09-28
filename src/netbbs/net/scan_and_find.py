@@ -19,7 +19,9 @@ from dataclasses import dataclass
 from netbbs.activity import (
     board_read_cursor,
     file_area_read_cursor,
+    follow,
     is_following,
+    unfollow,
     mark_board_read,
     unread_channel_count,
     unread_file_count,
@@ -238,8 +240,55 @@ async def _new_scan_screen(
         positions.update({id(item): index for index, item in enumerate(scan_items, start=1)})
 
     _number(items)
-    shown = {"items": items}
+    shown = {"items": items, "all": items, "followed_only": False}
     accent = effective_accent_color(session, db)
+
+    async def _reload_in_place() -> list[_ScanItem]:
+        """The list reloaded in the order already on screen, so the
+        highlight and every (#N) still name the row they did (Codex review
+        on #723). Anything new goes last. Narrowed to followed items while
+        that view is on."""
+        reloaded, state["replies"], state["boards"] = await lane.run(_load)
+        place = {_identity(row): index for index, row in enumerate(shown["all"])}
+        reloaded.sort(key=lambda row: place.get(_identity(row), len(place)))
+        shown["all"] = reloaded
+        if shown["followed_only"] and not any(row.followed for row in reloaded):
+            # The last followed row was just unfollowed: an empty list is no
+            # view, so it is everything again.
+            shown["followed_only"] = False
+        visible = [row for row in reloaded if row.followed] if shown["followed_only"] else reloaded
+        shown["items"] = visible
+        _number(visible)
+        return visible
+
+    async def _toggle_follow(item: _ScanItem) -> list[_ScanItem] | None:
+        """[F]ollow (issue #675): follow or stop following the row's board,
+        channel or file area. A followed one is listed first on the next
+        visit and is what [V]iew followed narrows the list to."""
+        object_id = _identity(item)[1]
+        if item.followed:
+            await lane.run(unfollow, user, item.kind, object_id)
+            announce(session, f"No longer following {sanitize_text(item.name)}.", tone="muted")
+        else:
+            await lane.run(follow, user, item.kind, object_id)
+            announce(session, f"Following {sanitize_text(item.name)}: it is listed first here.")
+        return await _reload_in_place()
+
+    async def _toggle_followed_only() -> list[_ScanItem] | None:
+        """[V]iew followed (issue #675, design doc §6.6): the follows-only
+        view, one keystroke from the full one and back."""
+        shown["followed_only"] = not shown["followed_only"]
+        if shown["followed_only"] and not any(row.followed for row in shown["all"]):
+            shown["followed_only"] = False
+            announce(session, "You follow nothing yet: [F]ollow a row first.", tone="muted")
+            return None
+        visible = [row for row in shown["all"] if row.followed] if shown["followed_only"] else shown["all"]
+        shown["items"] = visible
+        _number(visible)
+        announce(
+            session, "Showing what you follow." if shown["followed_only"] else "Showing everything.", tone="muted"
+        )
+        return visible
 
     async def _mark_read(item: _ScanItem) -> list[_ScanItem] | None:
         """[M]ark read (issue #710): every post on one board counts as
@@ -250,15 +299,7 @@ async def _new_scan_screen(
             return None
         await lane.run(mark_board_read, user, item.board)
         announce(session, f"{sanitize_text(item.name)}: every post marked read.", tone="muted")
-        reloaded, state["replies"], state["boards"] = await lane.run(_load)
-        # In the order already on screen, so the highlight and every (#N)
-        # still name the row they did even if activity reordered the
-        # sources meanwhile (Codex review on #723). Anything new goes last.
-        place = {_identity(row): index for index, row in enumerate(shown["items"])}
-        reloaded.sort(key=lambda row: place.get(_identity(row), len(place)))
-        shown["items"] = reloaded
-        _number(reloaded)
-        return reloaded
+        return await _reload_in_place()
 
     def _name_segments(item: _ScanItem) -> list[tuple[str, SegmentColor]]:
         """The gate note rides with the name here too (issue #541).
@@ -296,9 +337,14 @@ async def _new_scan_screen(
         description_of=_description,
         title="New scan",
         empty_message="Nothing accessible yet.",
-        item_keys={"m": _mark_read},
+        item_keys={"m": _mark_read, "f": _toggle_follow},
+        live_keys={"v": _toggle_followed_only},
         masthead=_replies_summary,
-        live_nav=[MenuEntry(label=menu_key("M", "ark read"), brief="Count a message board's posts as read")],
+        live_nav=[
+            MenuEntry(label=menu_key("M", "ark read"), brief="Count a message board's posts as read"),
+            MenuEntry(label=menu_key("F", "ollow"), brief="Follow a board, channel or file area, or stop"),
+            MenuEntry(label=menu_key("V", "iew followed"), brief="Only what you follow, or everything again"),
+        ],
         redraw_in_place=redraw_in_place_enabled(db, user),
         unicode_style=unicode_style_enabled(db, user),
         collapsed=breadcrumb_collapsed_enabled(db, user),

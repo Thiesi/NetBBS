@@ -238,7 +238,8 @@ def test_board_page_has_location_post_count_and_actions(tmp_path, monkeypatch):
 
 def test_back_choice_exits_without_navigating(tmp_path, monkeypatch):
     db = Database(tmp_path / "node.db")
-    total = _PAGE_SIZE * 2
+    # More posts than any one page holds, whatever the frame leaves it.
+    total = 40
     board, user = _make_board_with_posts(db, total, monkeypatch)
     session = FakeSession(keys=["b"])
 

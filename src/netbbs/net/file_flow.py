@@ -54,7 +54,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Callable
 
-from netbbs.activity import record_file_area_seen
+from netbbs.activity import follow, is_following, record_file_area_seen, unfollow
 from netbbs.attestation import format_name_for_resource, meets_age, meets_name_requirement
 from netbbs.auth.users import User, get_user_by_id
 from netbbs.communities import (
@@ -469,6 +469,7 @@ async def _render_area_page(
     show_remote_hint: bool = False,
     can_pin: bool = False,
     can_keep: bool = False,
+    following: bool | None = None,
     description_level: str = "off",
     redraw_in_place: bool = False,
     unicode_style: bool = False,
@@ -538,6 +539,12 @@ async def _render_area_page(
                 label=menu_key("L", "ink catalogue"),
                 brief="Browse/fetch this file area's remote catalogue",
             )
+        )
+    if following is not None:
+        # Issue #675: a followed area is listed first in [N]ew scan.
+        hints.append(
+            MenuEntry(label=menu_key("f", "ollow", prefix="Un"), brief="Stop following this file area") if following
+            else MenuEntry(label=menu_key("F", "ollow"), brief="List this file area first in New scan")
         )
     if can_pin and n_files > 0:
         hints.append(MenuEntry(label=menu_key("i", "n", prefix="P"), brief="Pin or unpin a file at the top"))
@@ -642,6 +649,8 @@ def _key_action(
         return ("pin", None, highlighted)
     if lowered == "k":
         return ("keep", None, highlighted)
+    if lowered == "f":
+        return ("follow", None, highlighted)
     return None
 
 
@@ -664,6 +673,7 @@ async def _read_file_choice(
       ('remote', None, highlighted) - the Link catalogue (issue #92)
       ('pin'|'keep', None, highlighted) - a moderator's pin or expiry
           exemption toggle (issue #675), target still to resolve
+      ('follow', None, highlighted) - follow the area or stop (issue #675)
       ('refresh', None, highlighted) - re-query and redraw (Ctrl-L)
       ('highlight', None, new_index) - arrow key highlight change
       ('none', None, highlighted) - no-op / rejected key
@@ -920,6 +930,7 @@ async def _show_area(
         return any(_may_describe(entry) for entry in _describe_candidates(current_page).entries)
 
     show_remote_hint = link_context is not None and area_linked
+    follows = {"on": await lane.run(is_following, user, "file_area", area.id)}
 
     async def _render_and_advance_cursor(current_page: FileEntryPage, highlighted: int | None = None) -> None:
         """The one place every render in this loop funnels through
@@ -931,7 +942,7 @@ async def _show_area(
             describable_pending=bool(describable_pending),
             show_transfer_hint=transfers is not None,
             show_remote_hint=show_remote_hint, can_pin=can_edit_any_file,
-            can_keep=_keep_offered(area, current_page),
+            can_keep=_keep_offered(area, current_page), following=follows["on"],
             description_level=description_level, redraw_in_place=redraw_in_place,
             unicode_style=unicode_style, collapsed=collapsed, truecolor=truecolor, highlighted=highlighted,
         )
@@ -1077,6 +1088,16 @@ async def _show_area(
                     continue
                 page = await lane.run(list_files_page, area, user, with_pinned=True)
                 highlighted = None
+                await _render_and_advance_cursor(page, highlighted=highlighted)
+                continue
+            elif kind == "follow":
+                if follows["on"]:
+                    await lane.run(unfollow, user, "file_area", area.id)
+                    announce(session, "No longer following this file area.", tone="muted")
+                else:
+                    await lane.run(follow, user, "file_area", area.id)
+                    announce(session, "Following this file area: New scan lists it first.")
+                follows["on"] = not follows["on"]
                 await _render_and_advance_cursor(page, highlighted=highlighted)
                 continue
             elif kind in ("pin", "keep"):
