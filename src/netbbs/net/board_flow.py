@@ -679,7 +679,7 @@ def _labelled_rule(label: str, *, width: int, unicode_style: bool, color) -> str
 
 def _row_marker(post: Post, new_ids: set[int], held_edits: frozenset[str] = frozenset()) -> str:
     """"held" for the caller's own post awaiting a moderator (issue #678) --
-    never news to its author, and nobody else is listed it -- else "new"
+    never news to its author, and listed to nobody else -- else "new"
     for a post this caller has not opened, else "held" for a post with an
     edit of theirs awaiting a moderator, else "pin" for a pinned one (issue
     #675) -- a pinned post is also listed first, so "new" is the one worth

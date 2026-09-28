@@ -10,9 +10,12 @@ from __future__ import annotations
 import asyncio
 import re
 
+import itertools
+
 import pytest
 
 from netbbs.auth.users import SYSOP_LEVEL, create_user
+from netbbs.boards import posts as posts_module
 from netbbs.boards.boards import create_board
 from netbbs.boards.posts import approve_post, count_visible_posts, create_post, edit_post, list_posts_page
 from netbbs.net.board_flow import _show_board
@@ -20,7 +23,10 @@ from netbbs.storage.database import Database
 
 
 @pytest.fixture
-def db(tmp_path):
+def db(tmp_path, monkeypatch):
+    # One second apart: posts made in the same instant are ordered by hash.
+    seconds = itertools.count()
+    monkeypatch.setattr(posts_module, "utc_now_iso", lambda: _at(next(seconds)))
     database = Database(tmp_path / "node.db")
     yield database
     database.close()
@@ -116,6 +122,10 @@ def test_the_reader_says_an_edit_awaits_approval(db, sysop, alice, board):
 
     assert re.search(r"Hello\s+held\s+alice", text)
     assert "[your edit awaits approval]" in text and "approved text" in text
+
+
+def _at(second: int) -> str:
+    return f"2026-01-01T{second // 3600:02d}:{second // 60 % 60:02d}:{second % 60:02d}.000000Z"
 
 
 class _FakeSession:
