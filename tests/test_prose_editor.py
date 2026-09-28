@@ -496,11 +496,15 @@ def test_autosave_writes_the_draft_while_dirty(tmp_path):
         deadline = loop.time() + 30.0
         while loop.time() < deadline and not (draft.exists() and draft.read_text(encoding="utf-8") == "A"):
             await asyncio.sleep(0.02)
+        # Before cancelling: cancellation writes the dirty buffer itself, so
+        # only a draft already on disk here proves the autosave wrote it.
+        autosaved = draft.exists() and draft.read_text(encoding="utf-8") == "A"
         task.cancel()
         try:
             await task
         except asyncio.CancelledError:
             pass
+        assert autosaved, "the autosave never wrote the draft"
 
     asyncio.run(scenario())
     assert draft.exists()
