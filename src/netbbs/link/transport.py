@@ -420,6 +420,17 @@ async def persist_accepted_events(
     for content_id in accepted:
         envelope = node.events[content_id]
         object_type = envelope["envelope"]["object_type"]
+        if enforce_trust_policy and object_type == LINK_MESSAGE_OBJECT_TYPE and not (await lane.run(
+            decide_event_authorship, envelope, transport_peer_fingerprint=sender_fingerprint,
+        )).allowed:
+            # A direct push is decided before acceptance and refused with a
+            # 403 the sender turns into a bounce. Mail picked up from a relay
+            # mailbox has no such answer, so the same rule applies here and
+            # a refusal becomes a signed bounce (issue #804). Decided before
+            # anything is kept: a refused node must not grow this node's
+            # trust subjects or retained events by inventing senders.
+            await lane.run(bounce_link_message, envelope, "blocked_sender", node_identity=node.identity)
+            continue
         if enforce_trust_policy:
             await lane.run(ensure_event_author_subject, envelope)
         # Design doc §9.3/issue #73: board_post/board_post_edit skip
@@ -568,15 +579,6 @@ async def persist_accepted_events(
         # this node was only a bystander to the transfer, not a party
         # to it (see record_board_origin_change's own docstring).
         if object_type == LINK_MESSAGE_OBJECT_TYPE:
-            # A direct push was already decided before acceptance and refused
-            # with a 403 the sender turns into a bounce. Mail picked up from a
-            # relay mailbox has no such answer, so the same rule is applied
-            # here and a refusal becomes a signed bounce (issue #804).
-            if enforce_trust_policy and not (await lane.run(
-                decide_event_authorship, envelope, transport_peer_fingerprint=sender_fingerprint,
-            )).allowed:
-                await lane.run(bounce_link_message, envelope, "blocked_sender", node_identity=node.identity)
-                continue
             await lane.run(deliver_link_message, envelope, node_identity=node.identity)
         elif object_type == LINK_MESSAGE_ACCEPTED_OBJECT_TYPE:
             await lane.run(apply_link_message_accepted, envelope)

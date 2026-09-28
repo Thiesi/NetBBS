@@ -167,13 +167,14 @@ def _signed_mail(sender_identity, recipient_identity, *, user="nib"):
     )
 
 
-def _persist_picked_up(tmp_path, *, quarantine_user: bool):
+def _persist_picked_up(tmp_path, *, quarantine_user: bool, establish_node: bool = True):
     sender_identity = bootstrap_node_identity("sender")
     recipient_identity = bootstrap_node_identity("recipient")
     node = LinkNode(identity=recipient_identity)
     recipient = _NodeDb(tmp_path, "recipient")
     create_user(recipient.db, "bob", password="hunter2pw", user_level=10)
-    _establish_node(recipient.db, sender_identity.fingerprint)
+    if establish_node:
+        _establish_node(recipient.db, sender_identity.fingerprint)
     if quarantine_user:
         _set_state(recipient.db, TrustSubject.user(sender_identity.fingerprint, "nib"), TrustState.QUARANTINED)
     message = _signed_mail(sender_identity, recipient_identity)
@@ -195,6 +196,27 @@ def test_relayed_mail_from_a_quarantined_user_bounces_as_blocked_sender(tmp_path
             "SELECT ack_event_json FROM link_mail_acknowledgements"
         ).fetchone()[0])
         assert ack["envelope"]["object_type"] == "link_message_bounced"
+        assert ack["envelope"]["payload"]["reason"] == "blocked_sender"
+    finally:
+        recipient.close()
+
+
+def test_relayed_mail_from_a_node_on_probation_bounces_and_keeps_nothing(tmp_path):
+    """A refused node must not grow trust subjects or retained events here by
+    sending under invented user ids."""
+    recipient, sender = _persist_picked_up(tmp_path, quarantine_user=False, establish_node=False)
+    try:
+        assert recipient.db.connection.execute("SELECT COUNT(*) FROM mail_messages").fetchone()[0] == 0
+        user = TrustSubject.user(sender.fingerprint, "nib")
+        assert recipient.db.connection.execute(
+            "SELECT 1 FROM link_trust_subjects WHERE subject_id = ?", (user.subject_id,)
+        ).fetchone() is None
+        assert recipient.db.connection.execute(
+            "SELECT COUNT(*) FROM link_events WHERE object_type = 'link_message'"
+        ).fetchone()[0] == 0
+        ack = json.loads(recipient.db.connection.execute(
+            "SELECT ack_event_json FROM link_mail_acknowledgements"
+        ).fetchone()[0])
         assert ack["envelope"]["payload"]["reason"] == "blocked_sender"
     finally:
         recipient.close()
@@ -298,7 +320,7 @@ def test_establishing_the_peer_wakes_mail_held_for_it(tmp_path):
 # -- over a real transport: the recipient's refusal becomes a bounce ----------
 
 
-def _exchange(tmp_path, *, establish_sender_at_recipient: bool):
+def _exchange(tmp_path, *, establish_sender_at_recipient: bool, stale_address_first: bool = False):
     sender_identity = bootstrap_node_identity("sender")
     recipient_identity = bootstrap_node_identity("recipient")
     sender_node = LinkNode(identity=sender_identity)
@@ -311,16 +333,35 @@ def _exchange(tmp_path, *, establish_sender_at_recipient: bool):
     if establish_sender_at_recipient:
         _establish_node(recipient.db, sender_identity.fingerprint)
 
+    # Some other node, now answering at an address the recipient once had:
+    # it knows nothing of the sender and refuses it as a stranger.
+    stranger_node = LinkNode(identity=bootstrap_node_identity("stranger"))
+    stranger = _NodeDb(tmp_path, "stranger")
+
+    def recipient_addresses():
+        addresses = [{"protocol": "http", "address": "127.0.0.1", "port": recipient_server.port}]
+        if stale_address_first:
+            addresses.insert(0, {"protocol": "http", "address": "127.0.0.1", "port": stranger_server.port})
+        return addresses
+
     async def scenario():
+        nonlocal recipient_server, stranger_server
         recipient_server = LinkServer(
             host="127.0.0.1", port=0, node=recipient_node,
             own_hello_provider=lambda: recipient_node.build_hello(
-                addresses=[{"protocol": "http", "address": "127.0.0.1", "port": recipient_server.port}],
-                outgoing_only=False, created_at=NOW,
+                addresses=recipient_addresses(), outgoing_only=False, created_at=NOW,
             ),
             lane=recipient.lane, enforce_trust_policy=True,
         )
+        stranger_server = LinkServer(
+            host="127.0.0.1", port=0, node=stranger_node,
+            own_hello_provider=lambda: stranger_node.build_hello(
+                addresses=None, outgoing_only=True, created_at=NOW,
+            ),
+            lane=stranger.lane, enforce_trust_policy=True,
+        )
         await recipient_server.start()
+        await stranger_server.start()
         seed_url = f"http://127.0.0.1:{recipient_server.port}"
         try:
             async with aiohttp.ClientSession() as session:
@@ -337,9 +378,14 @@ def _exchange(tmp_path, *, establish_sender_at_recipient: bool):
                 await _push_pending_link_mail(sender_node, session, sender.lane, enforce_trust_policy=True)
         finally:
             await recipient_server.stop()
+            await stranger_server.stop()
         return message
 
-    return sender, recipient, asyncio.run(scenario())
+    recipient_server = stranger_server = None
+    try:
+        return sender, recipient, asyncio.run(scenario())
+    finally:
+        stranger.close()
 
 
 def test_a_recipient_policy_refusal_is_recorded_as_a_bounce_not_retried(tmp_path):
@@ -349,6 +395,20 @@ def test_a_recipient_policy_refusal_is_recorded_as_a_bounce_not_retried(tmp_path
         item = list_work_items(sender.db, kind=KIND_LINK_MAIL_DELIVERY)[0]
         assert item.status == "pushed"
         assert recipient.db.connection.execute("SELECT COUNT(*) FROM mail_messages").fetchone()[0] == 0
+    finally:
+        sender.close()
+        recipient.close()
+
+
+def test_a_refusal_from_a_stale_address_does_not_bounce_mail_the_next_address_takes(tmp_path):
+    """The policy 403 is unsigned: a refusal from whatever now answers at an
+    old address must not stop the recipient's real address from being tried."""
+    sender, recipient, message = _exchange(
+        tmp_path, establish_sender_at_recipient=True, stale_address_first=True,
+    )
+    try:
+        assert recipient.db.connection.execute("SELECT COUNT(*) FROM mail_messages").fetchone()[0] == 1
+        assert _status(sender.db, message) == "pending"
     finally:
         sender.close()
         recipient.close()

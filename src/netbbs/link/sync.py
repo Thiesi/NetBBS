@@ -2282,16 +2282,19 @@ async def _push_one(node: LinkNode, session: ClientSession, base_url: str, event
 async def _push_mail_one(
     node: LinkNode, session: ClientSession, base_url: str, message: LinkMessage, refusals: list[str],
 ) -> bool:
-    """`_push_one` for one outbound `link_message`, except that the
-    recipient's trust-policy refusal is an answer, not a failure: its
-    reason code lands in `refusals` and no further address is tried,
-    since each would ask the same node the same question (issue #804)."""
+    """`_push_one` for one outbound `link_message`, except that a
+    trust-policy refusal's reason code lands in `refusals` (issue #804).
+
+    The refusal still counts as a failed attempt here, so the next address
+    and the relays are tried: the 403 is unsigned, and a stale address now
+    answered by some other node would refuse this node the same way. Only
+    when no route took the message is the refusal recorded as a bounce."""
     try:
         await push_events(node, session, base_url, [message])
         return True
     except LinkPolicyRefused as exc:
         refusals.append(exc.reason_code)
-        return True
+        return False
     except LinkTransportError:
         return False
 
@@ -2380,17 +2383,6 @@ async def _push_pending_link_mail(
             delivered = await _try_addresses_via(
                 base_urls, lambda url: _push_mail_one(node, session, url, message, refusals)
             )
-        if refusals:
-            # The recipient's node heard the message and its trust policy
-            # refused it (issue #804): a final answer, recorded as a bounce
-            # rather than retried until the item dead-letters.
-            await lane.run(record_link_message_refused, work_item.reference_id, refusals[0])
-            await lane.run(record_success, work_item)
-            _logger.info(
-                "Link sync: %s refused mail from this node (%s); recorded as bounced",
-                target_fingerprint, refusals[0],
-            )
-            continue
         if not delivered:
             # Issue #58 (issue #94: the acknowledgement loop below now
             # gets the identical fallback, no longer only this one):
@@ -2404,6 +2396,17 @@ async def _push_pending_link_mail(
 
         if delivered:
             await lane.run(record_success, work_item)
+        elif refusals:
+            # The recipient's node heard the message and its trust policy
+            # refused it, and no other route took it (issue #804): a final
+            # answer, recorded as a bounce rather than retried until the
+            # item dead-letters.
+            await lane.run(record_link_message_refused, work_item.reference_id, refusals[0])
+            await lane.run(record_success, work_item)
+            _logger.info(
+                "Link sync: %s refused mail from this node (%s); recorded as bounced",
+                target_fingerprint, refusals[0],
+            )
         else:
             updated = await lane.run(
                 record_failure, work_item, error="could not push on any known or relayed address"

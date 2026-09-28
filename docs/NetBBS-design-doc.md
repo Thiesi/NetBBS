@@ -4030,7 +4030,8 @@ Outbound messages remain pending until an accepted or bounced event arrives.
 Delivery through a relay does not change the acceptance semantics. One answer
 is not a signed event: a recipient node whose trust policy refuses a direct
 push says so with HTTP 403 and a `link_policy_*` reason code, and the sending
-node records that as a bounce, since asking again would get the same answer
+node records that as a bounce, since asking again would get the same answer,
+unless another of the recipient's addresses or relays takes the message
 (§12.4, issue #804).
 
 ### 10.4 Routing limitations
@@ -4511,10 +4512,14 @@ while that user is still probationary. The sender's home node must be
 established; a message from a node still on probation, or from a quarantined
 or blocked user or node, is refused, and never silently. A direct push is
 refused with the policy 403 and its reason code, which the sending node
-records as a bounce rather than retrying; mail picked up from a relay mailbox
-has no synchronous answer, so the refusal becomes a signed
+records as a bounce rather than retrying, once none of the recipient's other
+addresses or relays took the message (the 403 is unsigned, and a stale address
+now answered by another node refuses the same way). Mail picked up from a
+relay mailbox has no synchronous answer, so the refusal becomes a signed
 `link_message_bounced` with reason `blocked_sender`, sent back even to a node
-on probation here since it carries no content. Delivered mail registers its
+on probation here since it carries no content; it is decided before the
+message or its sender is kept, so a refused node cannot grow this node's trust
+subjects or retained events by inventing senders. Delivered mail registers its
 sender as a trust subject like any accepted event, so the receiving SysOp can
 find and establish them; a node refused as a whole is already a subject from
 its hello, and establishing that node is what opens its users' mail. A
