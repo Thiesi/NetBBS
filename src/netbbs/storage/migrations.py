@@ -3400,4 +3400,20 @@ MIGRATIONS = [
         CREATE INDEX idx_moderation_notices_user ON moderation_notices(user_id);
         """,
     ),
+    Migration(
+        description=(
+            "Issue #681: `link_carried_to_review` -- boards, channels and file areas carried "
+            "automatically over NetBBS Link that the SysOp has not opened yet. Keyed by the "
+            "resource's Link id, which is never reused; a row goes when the SysOp opens the "
+            "resource's screen. The dashboard counts them."
+        ),
+        sql="""
+        CREATE TABLE link_carried_to_review (
+            kind        TEXT NOT NULL CHECK (kind IN ('boards', 'channels', 'file_areas')),
+            resource_id TEXT NOT NULL,
+            carried_at  TEXT NOT NULL,
+            PRIMARY KEY (kind, resource_id)
+        );
+        """,
+    ),
 ]

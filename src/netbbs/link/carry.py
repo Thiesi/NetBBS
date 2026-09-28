@@ -293,6 +293,13 @@ def accept_genesis(
             try:
                 _materialize(db, kind, envelope, own_fingerprint=own_fingerprint, cap=cap)
                 outcome = "carried"
+                # Carried on its own, with its origin's settings and no
+                # category: the SysOp is told, until they look at it
+                # (issue #681, decided with the maintainer).
+                db.connection.execute(
+                    "INSERT OR IGNORE INTO link_carried_to_review (kind, resource_id, carried_at) VALUES (?, ?, ?)",
+                    (kind, resource_id, utc_now_iso()),
+                )
             except _CARRY_LIMIT_ERRORS as exc:
                 outcome = _refusal_reason(exc)
                 record_carry_decision(db, kind, resource_id, OFFERED, outcome, commit=False)
@@ -304,6 +311,37 @@ def accept_genesis(
 
 
 _LOCAL = {"boards": ("boards", "board_id"), "channels": ("channels", "channel_id"), "file_areas": ("file_areas", "area_id")}
+
+
+def carried_to_review(db: Database, kind: str) -> set[str]:
+    """The resource ids of `kind` carried automatically that the SysOp
+    has not looked at yet (issue #681) -- still present and not hidden."""
+    table, column = _LOCAL[kind]
+    return {
+        row[0] for row in db.connection.execute(
+            f"""
+            SELECT r.resource_id FROM link_carried_to_review r
+            JOIN {table} local ON local.{column} = r.resource_id AND local.link_hidden_at IS NULL
+            WHERE r.kind = ?
+            """,
+            (kind,),
+        ).fetchall()
+    }
+
+
+def count_carried_to_review(db: Database) -> int:
+    """How many carried boards, channels and file areas wait for the
+    SysOp's first look, for the dashboard's ATTENTION panel."""
+    return sum(len(carried_to_review(db, kind)) for kind in _LOCAL)
+
+
+def mark_carried_reviewed(db: Database, kind: str, resource_id: str) -> None:
+    """The SysOp has opened this carried resource's own screen: it is no
+    longer news."""
+    db.connection.execute(
+        "DELETE FROM link_carried_to_review WHERE kind = ? AND resource_id = ?", (kind, resource_id)
+    )
+    db.connection.commit()
 
 
 def _hidden_row(db: Database, kind: str, resource_id: str):
