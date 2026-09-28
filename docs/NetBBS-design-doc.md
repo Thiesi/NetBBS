@@ -1179,6 +1179,19 @@ edit permission can pin a post or file, and can keep it from expiring:
 - **Local only:** a pin is this node's own presentation and is never carried
   over the Link. A carried board's moderator pins for this node's callers.
 
+**The author is told** (issue #678). When a moderator approves or rejects a
+held post or edit, its local author is told:
+- **once, at the main menu:** a one-line notice (`moderation_notices`), for
+  example `Your post "X" on general was rejected: off topic`;
+- **by mail, for a rejection:** from the moderator who rejected it, with the
+  reason and the rejected text, since a rejection deletes the post and the
+  author would otherwise have lost what they wrote.
+
+Rejecting asks for a reason, which is optional (Enter leaves it out). It is
+kept with the rejection record (§9.3's `post_rejections`) and goes to the
+author. A carried post's author is on another node and is told nothing here,
+and a moderator deciding on their own post isn't told either.
+
 **Expiry is a caller-facing boundary, not only a delisting** (issue #639).
 Once a post or a file is `expired`, no keystroke a caller can press reaches
 it: listings, `[F]ind` and the file area's own screens are

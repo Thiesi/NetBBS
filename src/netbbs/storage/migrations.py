@@ -3347,4 +3347,26 @@ MIGRATIONS = [
         );
         """,
     ),
+    Migration(
+        description=(
+            "Issue #678: `moderation_notices` -- what an author is told once, at the main "
+            "menu, when a moderator approves or rejects their held post or edit, with the "
+            "rejection's reason. `shown_at` marks it told. Gone with the author or the board."
+        ),
+        sql="""
+        CREATE TABLE moderation_notices (
+            id          INTEGER PRIMARY KEY,
+            user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            board_id    INTEGER NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
+            post_id     TEXT NOT NULL,
+            subject     TEXT NOT NULL,
+            is_edit     INTEGER NOT NULL DEFAULT 0,
+            outcome     TEXT NOT NULL CHECK (outcome IN ('approved', 'rejected')),
+            reason      TEXT,
+            created_at  TEXT NOT NULL,
+            shown_at    TEXT
+        );
+        CREATE INDEX idx_moderation_notices_unshown ON moderation_notices(user_id, shown_at);
+        """,
+    ),
 ]

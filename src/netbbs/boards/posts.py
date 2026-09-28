@@ -25,6 +25,7 @@ from netbbs.auth.users import User
 from netbbs.boards.boards import Board
 from netbbs.boards.content_id import compute_content_id
 from netbbs.boards.limits import MAX_BODY_BYTES, MAX_SUBJECT_BYTES
+from netbbs.boards.moderation_notices import record_moderation_outcome
 from netbbs.config import get_expiry_grace_period_days
 from netbbs.link.enforcement import envelope_content_visible, link_content_visible
 from netbbs.moderation import BoardPermission, has_permission, record_action
@@ -923,6 +924,8 @@ def approve_post(db: Database, post: Post, *, approved_by: User) -> Post:
         detail=post.post_id,
     )
     reindex_post(db, post.board_id, post.root_post_id)
+    # The author is told (issue #678).
+    record_moderation_outcome(db, post, outcome="approved", moderator=approved_by)
     return get_post(db, post.post_id)
 
 
@@ -1000,6 +1003,10 @@ def delete_post(db: Database, post: Post, *, deleted_by: User, reason: str | Non
         detail=post.post_id,
     )
     reindex_post(db, post.board_id, post.root_post_id)
+    if action == "reject":
+        # The author is told, with the reason and -- by mail -- their text
+        # (issue #678).
+        record_moderation_outcome(db, post, outcome="rejected", moderator=deleted_by, reason=reason)
 
 
 _TOMBSTONE_PLACEHOLDER = "[removed by moderator]"
