@@ -927,17 +927,22 @@ def test_compose_prompt_mentions_link_address_option_when_link_context_given(tmp
 
 
 def test_compose_rejects_a_link_address_for_a_node_never_seen(tmp_path):
+    """Issue #807: an unknown node is said at the To prompt, which asks
+    again in place -- not after the subject and body are written."""
     db_path = tmp_path / "node.db"
     db = Database(db_path)
     alice = create_user(db, "alice", password="hunter2pw", user_level=10)
     node_identity = bootstrap_node_identity("roanoke")
     link_context = LinkContext(link_node=LinkNode(identity=node_identity))
 
-    session = FakeSession(keys=["c", "s", "c", "b"], lines=["bob@neverseenfingerprint", "Hello", "World", ""])
+    session = FakeSession(keys=["c", "b"], lines=["bob@nowhere", ""])
     lane = DatabaseLane(db_path)
     asyncio.run(browse_mail(session, lane, alice, link_context=link_context))
 
-    assert "Could not send" in _written_text(session)
+    text = _visible_text(session)
+    assert 'No BBS linked with this one goes by "nowhere". Check the name after the @' in text
+    assert text.count("To (username or user@node-name-or-dns): ") == 2
+    assert "Subject:" not in text
     assert db.connection.execute("SELECT COUNT(*) FROM mail_messages").fetchone()[0] == 0
     lane.close()
     db.close()
@@ -958,18 +963,170 @@ def test_compose_ambiguous_link_address_shows_usable_technical_identities(tmp_pa
             db, node_identity, remote_identity, friendly_name="Shared Node",
         )
     assert link_context is not None
+    chosen = remote_identities[1].fingerprint
     session = FakeSession(
-        keys=["c", "s", "c", "b"],
-        lines=["bob@farpoint.example.org", "Hello", "Ambiguous route", ""],
+        keys=["c", "s", "b"],
+        lines=["bob@farpoint.example.org", f"bob@{chosen}", "Hello", "Ambiguous route", ""],
     )
+    session.terminal_width = 200
     lane = DatabaseLane(db_path)
 
     asyncio.run(browse_mail(session, lane, alice, link_context=link_context))
 
-    text = _written_text(session)
-    assert "user@technical-identity" in text
-    assert all(identity.fingerprint in text for identity in remote_identities)
+    text = _visible_text(session)
+    assert 'More than one linked node goes by "farpoint.example.org". Type one of these instead:' in text
+    assert "technical-identity" not in text
+    assert all(
+        f"bob@{identity.fingerprint} for Shared Node · farpoint.example.org" in text
+        for identity in remote_identities
+    )
+    assert text.index("Type one of these instead") < text.index("Subject:")
+    row = db.connection.execute("SELECT recipient_remote_address FROM mail_messages").fetchone()
+    assert row["recipient_remote_address"] == f"bob@{chosen}"
+    lane.close()
+    db.close()
+
+
+def test_compose_addresses_a_capitalized_name_exactly_as_displayed(tmp_path):
+    """Issue #807: `OldNib@Farpoint`, typed as the From line shows it, is
+    accepted; the recipient's node looks the name up case-insensitively."""
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
+    alice = create_user(db, "alice", password="hunter2pw", user_level=10)
+    node_identity = bootstrap_node_identity("roanoke")
+    remote_identity = bootstrap_node_identity("farpoint")
+    link_context = _link_context_with_known_peer(db, node_identity, remote_identity)
+
+    session = FakeSession(keys=["c", "s", "b"], lines=["OldNib@Farpoint", "Hello", "Body", ""])
+    lane = DatabaseLane(db_path)
+    asyncio.run(browse_mail(session, lane, alice, link_context=link_context))
+
+    assert "Message sent." in _visible_text(session)
+    row = db.connection.execute("SELECT recipient_remote_address FROM mail_messages").fetchone()
+    assert row["recipient_remote_address"] == f"OldNib@{remote_identity.fingerprint}"
+    lane.close()
+    db.close()
+
+
+def test_compose_asks_again_for_a_malformed_link_address(tmp_path):
+    """Issue #807: each malformed address is refused at the To prompt with
+    what to type instead, and the prompt asks again."""
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
+    alice = create_user(db, "alice", password="hunter2pw", user_level=10)
+    node_identity = bootstrap_node_identity("roanoke")
+    remote_identity = bootstrap_node_identity("farpoint")
+    link_context = _link_context_with_known_peer(db, node_identity, remote_identity)
+
+    session = FakeSession(
+        keys=["c", "b"],
+        lines=["Bob Case@Farpoint", "@Farpoint", "bob@", f"{'b' * 33}@Farpoint", ""],
+    )
+    session.terminal_width = 200
+    lane = DatabaseLane(db_path)
+    asyncio.run(browse_mail(session, lane, alice, link_context=link_context))
+
+    text = _visible_text(session)
+    assert "'Bob Case' is not a user name. Type the name as their BBS shows it: letters, digits" in text
+    assert "Type the user's name before the @, like alice@Farpoint." in text
+    assert "Type the name of their BBS after the @, like bob@TheirBBS." in text
+    assert "is longer than a user name can be" in text
+    assert "[a-z0-9_.-]" not in text
+    assert text.count("To (username or user@node-name-or-dns): ") == 5
+    assert "Subject:" not in text
+    lane.close()
+    db.close()
+
+
+def test_compose_checks_an_address_changed_from_the_review_screen(tmp_path):
+    """Issue #807: Send repeats the To prompt's checks, since [T]o on the
+    review screen can change the address after it was checked."""
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
+    alice = create_user(db, "alice", password="hunter2pw", user_level=10)
+    node_identity = bootstrap_node_identity("roanoke")
+    remote_identity = bootstrap_node_identity("farpoint")
+    link_context = _link_context_with_known_peer(db, node_identity, remote_identity)
+
+    for changed, said in (
+        ("bob@Nowhere", 'No BBS linked with this one goes by "Nowhere".'),
+        ("Bob Case@Farpoint", "'Bob Case' is not a user name."),
+    ):
+        session = FakeSession(
+            keys=["c", "t", "s", "c", "b"], lines=["bob@Farpoint", "Hello", "Body", "", changed],
+        )
+        session.terminal_width = 200
+        lane = DatabaseLane(db_path)
+        asyncio.run(browse_mail(session, lane, alice, link_context=link_context))
+        lane.close()
+
+        text = _visible_text(session)
+        assert said in text
+        assert "Message sent." not in text
     assert db.connection.execute("SELECT COUNT(*) FROM mail_messages").fetchone()[0] == 0
+    db.close()
+
+
+def test_compose_a_one_letter_node_name_is_not_taken_for_a_fingerprint(tmp_path):
+    """Issue #807: a node called "Q" stayed unaddressable whenever another
+    peer's technical identity happened to start with q."""
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
+    alice = create_user(db, "alice", password="hunter2pw", user_level=10)
+    node_identity = bootstrap_node_identity("roanoke")
+    other = bootstrap_node_identity("other")
+    short = bootstrap_node_identity("short")
+    _link_context_with_known_peer(db, node_identity, other, friendly_name="Other")
+    link_context = _link_context_with_known_peer(
+        db, node_identity, short, friendly_name=other.fingerprint[0].upper(),
+    )
+
+    session = FakeSession(
+        keys=["c", "s", "b"], lines=[f"bob@{other.fingerprint[0].upper()}", "Hello", "Body", ""],
+    )
+    lane = DatabaseLane(db_path)
+    asyncio.run(browse_mail(session, lane, alice, link_context=link_context))
+
+    row = db.connection.execute("SELECT recipient_remote_address FROM mail_messages").fetchone()
+    assert row["recipient_remote_address"] == f"bob@{short.fingerprint}"
+    lane.close()
+    db.close()
+
+
+def test_a_node_name_with_an_at_sign_is_quoted_on_the_from_line_and_can_be_typed_back(tmp_path):
+    """Issue #807: `bob@"Cats @ Night · ..."` shows where the user name
+    ends, and the quoted address is accepted at the To prompt."""
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
+    alice = create_user(db, "alice", password="hunter2pw", user_level=10)
+    node_identity = bootstrap_node_identity("roanoke")
+    remote_identity = bootstrap_node_identity("farpoint")
+    link_context = _link_context_with_known_peer(
+        db, node_identity, remote_identity, friendly_name="Cats @ Night",
+    )
+    db.connection.execute(
+        "INSERT INTO mail_messages (sender_user_id, sender_label, recipient_user_id, subject, body, created_at)"
+        " VALUES (NULL, ?, ?, 'Hi', 'Hello there', '2026-01-01T00:00:00+00:00')",
+        (f"BobCase@{remote_identity.fingerprint}", alice.id),
+    )
+    db.connection.commit()
+    shown = '"Cats @ Night · farpoint.example.org"'
+
+    session = FakeSession(
+        keys=["i", "0", "1", "b", "b", "c", "s", "b"],
+        lines=[f"BobCase@{shown}", "Re: Hi", "Back at you", ""],
+    )
+    session.terminal_width = 200
+    lane = DatabaseLane(db_path)
+    asyncio.run(browse_mail(session, lane, alice, link_context=link_context))
+
+    text = _visible_text(session)
+    assert f"BobCase@{shown}" in text
+    assert "Message sent." in text
+    row = db.connection.execute(
+        "SELECT recipient_remote_address FROM mail_messages WHERE recipient_remote_address IS NOT NULL"
+    ).fetchone()
+    assert row["recipient_remote_address"] == f"BobCase@{remote_identity.fingerprint}"
     lane.close()
     db.close()
 

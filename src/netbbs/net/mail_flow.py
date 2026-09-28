@@ -39,14 +39,17 @@ directly anymore):
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 from netbbs.auth.users import AuthError, User, get_user_by_id, get_user_by_username
+from netbbs.identity.addressing import is_valid_user_part, user_part_problem
 from netbbs.link.boards import LinkContext
 from netbbs.link.enforcement import LinkPolicyAction, decide_node_action
 from netbbs.link.trust import TrustState
 from netbbs.link.mail import LinkMailError, compose_link_message
 from netbbs.link.node_profiles import (
+    ambiguous_node_guidance, link_address_label, unknown_node_guidance,
     identity_for_fingerprint, latest_identity_observation, resolve_stored_peer_reference,
 )
 from netbbs.mail import (
@@ -368,7 +371,7 @@ async def _display_sender_label(lane: DatabaseLane, message: MailMessage) -> str
         return message.sender_label
     user_id, fingerprint = message.sender_label.split("@", 1)
     node_label = (await lane.run(identity_for_fingerprint, fingerprint)).label
-    return f"{user_id}@{node_label}"
+    return link_address_label(user_id, node_label)
 
 
 async def _link_mail_identity_warning(
@@ -480,9 +483,12 @@ async def _compose_mail(
                 announce(session, "Cancelled.", tone="muted")
                 return
             if link_context is not None and "@" in recipient_text:
-                refusal = await _link_mail_refusal_for_address(lane, recipient_text)
-                if refusal is not None:
-                    await session.write_line(colored(refusal, fg_color=ERROR_COLOR))
+                # Checked as it is typed, like a local name (issue #807):
+                # a bad address is asked for again here, not after the
+                # message is written.
+                checked = await lane.run(_check_link_recipient, recipient_text)
+                if isinstance(checked, str):
+                    await session.write_line(colored(checked, fg_color=ERROR_COLOR))
                     continue
                 break
             try:
@@ -575,41 +581,14 @@ async def _compose_mail(
             continue
 
         if link_context is not None and "@" in recipient_text:
-            remote_user, node_reference = recipient_text.split("@", 1)
-            resolved = await lane.run(resolve_stored_peer_reference, node_reference, met_only=True)
-            if isinstance(resolved, list):
-                if resolved:
-                    candidates = []
-                    for fingerprint in resolved[:5]:
-                        identity = await lane.run(identity_for_fingerprint, fingerprint)
-                        candidates.append(
-                            f"{sanitize_text(identity.label)} [{sanitize_text(fingerprint)}]"
-                        )
-                    announce_styled(
-                        session,
-                        colored(
-                            f"Could not send: {sanitize_text(node_reference)!r} matches more than one node "
-                            f"({', '.join(candidates)}). Address the recipient as "
-                            "user@technical-identity.",
-                            fg_color=ERROR_COLOR,
-                        ),
-                    )
-                else:
-                    announce_styled(
-                        session,
-                        colored(
-                            f"Could not send: no linked node is known as {sanitize_text(node_reference)!r}.",
-                            fg_color=ERROR_COLOR,
-                        ),
-                    )
-                continue
             # The To prompt checks this too; the address may have been
-            # edited from the review screen since.
-            refusal = await lane.run(_link_mail_refusal, resolved)
-            if refusal is not None:
-                announce_styled(session, colored(refusal, fg_color=ERROR_COLOR))
+            # edited from the review screen since, and a peer's standing
+            # can change while the message is written.
+            checked = await lane.run(_check_link_recipient, recipient_text)
+            if isinstance(checked, str):
+                announce_styled(session, colored(checked, fg_color=ERROR_COLOR))
                 continue
-            technical_recipient = f"{remote_user}@{resolved}"
+            technical_recipient = f"{checked.user}@{checked.fingerprint}"
             warning = await _link_mail_identity_warning(lane, technical_recipient)
             if warning is not None:
                 await session.write_line(colored(warning, fg_color=MUTED_COLOR, bold=True))
@@ -654,15 +633,47 @@ def _link_mail_refusal(db, fingerprint: str) -> str | None:
     return f"Mail to {label} is closed on this BBS."
 
 
-async def _link_mail_refusal_for_address(lane: DatabaseLane, recipient_text: str) -> str | None:
-    """`_link_mail_refusal` for a typed `user@node` address, at the To
-    prompt. An address that does not name exactly one known node is left
-    for the send step to explain."""
-    node_reference = recipient_text.split("@", 1)[1]
-    resolved = await lane.run(resolve_stored_peer_reference, node_reference, met_only=True)
+@dataclass(frozen=True)
+class _LinkRecipient:
+    user: str
+    fingerprint: str
+
+
+def _check_link_recipient(db, recipient_text: str) -> _LinkRecipient | str:
+    """Check a typed `user@node` address (issue #807): its form, that it
+    names exactly one node this BBS is linked with, and that this node will
+    send that node mail (issue #804). Returns the recipient, or why not in
+    words that say what to type instead.
+
+    The user half ends at the first `@`: a user name cannot contain one,
+    and a node's friendly name can. The node half may be quoted, the way
+    `link_address_label` shows a name that contains `@`."""
+    user, _, node_reference = recipient_text.partition("@")
+    user, node_reference = user.strip(), node_reference.strip()
+    shown_node = sanitize_text(node_reference.strip('"').strip())
+    if not user:
+        return f"Type the user's name before the @, like alice@{shown_node}." if shown_node else (
+            "Type the user's name, then @ and the name of their BBS."
+        )
+    if not shown_node:
+        return f"Type the name of their BBS after the @, like {sanitize_text(user)}@TheirBBS."
+    if not is_valid_user_part(user):
+        return sanitize_text(user_part_problem(user))
+    resolved = resolve_stored_peer_reference(db, node_reference, met_only=True)
     if isinstance(resolved, list):
-        return None
-    return await lane.run(_link_mail_refusal, resolved)
+        if not resolved:
+            return unknown_node_guidance(shown_node)
+        return ambiguous_node_guidance(
+            shown_node, sanitize_text(user),
+            [
+                (fingerprint, sanitize_text(identity_for_fingerprint(db, fingerprint).label))
+                for fingerprint in resolved[:5]
+            ],
+        )
+    refusal = _link_mail_refusal(db, resolved)
+    if refusal is not None:
+        return refusal
+    return _LinkRecipient(user=user, fingerprint=resolved)
 
 
 def _too_long_to_send(subject: str, body: str) -> str | None:

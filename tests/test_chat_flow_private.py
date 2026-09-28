@@ -600,7 +600,7 @@ def test_private_with_an_unknown_remote_node_is_refused(lane, hub, presence, mai
         lane, hub, presence, mailbox, channel, alice, ["/private bob@nope", "/quit"],
         link_context=_FakeLinkContext("remote-node-fingerprint-abc123", _FakeDirectChat()),
     ))
-    assert "No linked node this board knows as 'nope'" in _written(session)
+    assert 'No BBS linked with this one goes by "nope".' in _written(session)
 
 
 def test_private_with_a_remote_target_survives_a_rejected_line(lane, hub, presence, mailbox, alice, channel, db):

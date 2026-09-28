@@ -916,18 +916,38 @@ an administratively configured fingerprint) is shown by that fingerprint rather
 than a shared placeholder. A full fingerprint is available as **Technical
 identity** in the relevant SysOp detail view and remains accepted as an
 advanced/backward-compatible input. Friendly-name resolution must be unique;
-an ambiguous presentation name is refused with a request to use an unambiguous
-DNS name or the technical identity. DNS and friendly claims share that one
+an ambiguous presentation name is refused, and the refusal spells out the
+address to type for each candidate -- `user@<technical identity>`, with the
+name that node goes by -- rather than repeating the already-ambiguous claim.
+DNS and friendly claims share that one
 namespace, so a reference matching one node's DNS claim and another node's
 friendly claim is ambiguous rather than silently preferring either. Presentation
 claims and abbreviated fingerprint input likewise resolve as one candidate set:
 a name which equals another node's fingerprint prefix is ambiguous rather than
-silently shadowing that technical address. Exact full fingerprints retain
-precedence. When
-ambiguity remains because friendly and DNS claims collide, the refusal
-shows each candidate's full technical identity; it never repeats the unusable
-advice to enter the already-ambiguous DNS claim. Fingerprints remain hidden in
-the ordinary unique-name path. Friendly names are compared in one Unicode
+silently shadowing that technical address. Abbreviated fingerprint input counts
+only from six characters, the length the node map shows (issue #807): below it
+a one- or two-letter friendly name collided with every peer whose fingerprint
+started with the same letters -- one peer in 32 for a single letter -- and
+could never be used, while a deliberate six-character imitation of a prefix is
+still ambiguous. Exact full fingerprints retain precedence. Fingerprints remain
+hidden in the ordinary unique-name path.
+
+What a caller reads after the `@` is what they can type back (issue #807). A
+reference also matches a node's full display label (`Name · dns.example`; the
+`·` is reserved, so a label never equals another node's name), and a node name
+that contains `@` is shown in double quotes -- `bob@"Cats @ Night"` -- so a
+reader can tell where the user name ends; one pair of enclosing quotes is
+dropped from a typed reference, which is unambiguous because no friendly name,
+DNS name or fingerprint may contain a double quote. A typed address splits at
+its first `@`, since a user name cannot contain one and a node name can.
+
+The user half of an address follows the local username grammar (ASCII letters,
+digits, `_`, `-`, `.`, at most 32 characters), capitals included: a name is
+addressed exactly as it is displayed, and the recipient node looks it up
+case-insensitively, so `OldNib@Q` and `oldnib@Q` reach the same account. A
+sender's name goes out as it is spelled; an account older than the username
+rules whose name falls outside that grammar cannot send Link mail, since no
+reply could reach it, and is told to ask for a rename. Friendly names are compared in one Unicode
 normalization form (NFC), so canonically
 equivalent spellings are one name, never two claims. UI delimiters, invisible
 control/format characters, and the `Unnamed linked node` and `Unknown linked
@@ -4133,8 +4153,13 @@ tracking. Issue #85's inventory diff extends to `channel_id`-scoped
 ### 10.1 Product model
 
 A Link message extends the ordinary local mailbox. The user composes to a
-`user@node-fingerprint` address and reads the result in the same inbox/sent UI
-as local mail.
+`user@node` address (§4.4) and reads the result in the same inbox/sent UI
+as local mail. The To prompt checks a Link address as it is typed, the way it
+checks a local name, and asks again in place with what to type instead: a
+malformed address, a node this BBS is not linked with, a name more than one
+linked node goes by, and a peer this node will not send mail to (§12.4) are
+all refused there, never after the message is written. Send repeats the
+checks, because the review screen's `[T]o` can change the address.
 
 The message is point-to-point to one recipient node, not flood-filled public
 content.

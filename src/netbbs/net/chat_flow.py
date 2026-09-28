@@ -147,6 +147,7 @@ from netbbs.link.node_profiles import (
     identity_for_fingerprint,
     identity_for_peer,
     latest_identity_observation,
+    link_address_label,
 )
 from netbbs.chat.channels import OPEN_ROOM_NAME_PREFIX
 from netbbs.rendering.pipe_codes import cga_to_xterm
@@ -1453,7 +1454,7 @@ def _message_author_label(db: Database, channel: Channel, message: ChannelMessag
     if durable_author is not None:
         local_user_id, fingerprint = durable_author
         node_label = identity_for_fingerprint(db, fingerprint).label
-        return sanitize_text(f"{local_user_id}@{node_label}")
+        return sanitize_text(link_address_label(local_user_id, node_label))
     author = _resolve_message_author(db, message.author_label)
     if author is None:
         return sanitize_text(message.author_label)
@@ -1811,7 +1812,7 @@ class RemotePrivateTarget:
 
     @property
     def label(self) -> str:
-        return f"{self.username}@{self.node_label}"
+        return link_address_label(self.username, self.node_label)
 
 
 @dataclass(frozen=True)

@@ -615,7 +615,10 @@ their posts still wait in the approval queue. Mail from a node you have not
 established yet, or from a caller or node you quarantined or blocked, is
 refused and bounced back to its sender. The same holds the other way: your
 callers cannot address mail to a node you have not established, and are told
-so as they type the address. Mail already waiting in the **Outbox** for a
+so as they type the address. An address is written as its name is displayed,
+capitals included. An account from before the username rules whose name has
+a space or other punctuation cannot send Link mail, because no reply could
+reach it; rename it if its owner needs to. Mail already waiting in the **Outbox** for a
 node goes out on the next Link pass after you establish it, and expires if
 the node is not established before its retries run out.
 

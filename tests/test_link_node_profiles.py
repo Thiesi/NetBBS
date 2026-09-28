@@ -7,6 +7,8 @@ import pytest
 from netbbs.link.node_identity import bootstrap_node_identity
 from netbbs.link.node_profiles import (
     MAX_IDENTITY_OBSERVATIONS_PER_PEER,
+    MIN_FINGERPRINT_PREFIX,
+    link_address_label,
     identity_for_fingerprint,
     identity_for_peer,
     normalize_friendly_name,
@@ -111,6 +113,43 @@ def test_resolver_refuses_a_reference_shared_by_name_and_fingerprint_prefix(db, 
     assert set(resolve_stored_peer_reference(db, technical.fingerprint[:12])) == {
         named.fingerprint, technical.fingerprint,
     }
+
+
+def test_a_short_name_is_not_ambiguous_with_a_fingerprint_that_starts_the_same(db, tmp_path):
+    """Issue #807: a one-letter name used to collide with every peer whose
+    technical identity began with that letter. A prefix counts from six
+    characters, the length the node map shows."""
+    other = _peer(tmp_path, "other", "Other Node", "other.example.org")
+    short = _peer(tmp_path, "short", other.fingerprint[0].upper(), "short.example.org")
+    save_peer(db, other)
+    save_peer(db, short)
+
+    assert resolve_peer_reference([other, short], other.fingerprint[0]) is short
+    assert resolve_stored_peer_reference(db, other.fingerprint[0]) == short.fingerprint
+    assert resolve_stored_peer_reference(db, other.fingerprint[:5]) == []
+    assert resolve_stored_peer_reference(db, other.fingerprint[:MIN_FINGERPRINT_PREFIX]) == other.fingerprint
+    assert resolve_peer_reference([other, short], other.fingerprint[:MIN_FINGERPRINT_PREFIX]) is other
+
+
+def test_a_node_is_found_by_the_label_screens_show_and_by_its_quoted_name(db, tmp_path):
+    """What a caller reads after the @ is what they can type back: the full
+    `Name · dns` label, and a name containing @ in the quotes it is shown in."""
+    cats = _peer(tmp_path, "cats", "Cats @ Night", "cats.example.org")
+    save_peer(db, cats)
+
+    assert resolve_stored_peer_reference(db, "Cats @ Night · cats.example.org") == cats.fingerprint
+    assert resolve_stored_peer_reference(db, '"Cats @ Night"') == cats.fingerprint
+    assert resolve_stored_peer_reference(db, ' "cats @ night · CATS.example.org" ') == cats.fingerprint
+    assert resolve_peer_reference([cats], '"Cats @ Night"') is cats
+    assert link_address_label("bob", "Cats @ Night · cats.example.org") == 'bob@"Cats @ Night · cats.example.org"'
+    assert link_address_label("bob", "Farpoint") == "bob@Farpoint"
+
+
+def test_a_carried_author_on_a_node_named_with_an_at_sign_is_quoted(db, tmp_path):
+    cats = _peer(tmp_path, "cats", "Cats@Night", "cats.example.org")
+    save_peer(db, cats)
+
+    assert present_link_author_label(db, f"bob@{cats.fingerprint}") == 'bob@"Cats@Night · cats.example.org"'
 
 
 def test_resolver_preserves_terminal_periods_in_friendly_names(db, tmp_path):

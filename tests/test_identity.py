@@ -213,6 +213,26 @@ def test_parse_address_uses_last_at_sign_as_delimiter():
     assert "alpha@beta" in str(exc_info.value)
 
 
+def test_address_user_part_accepts_every_local_username_as_displayed():
+    """Issue #807: the user half follows the local username grammar, so a
+    name with capitals is addressable exactly as the From line shows it."""
+    identity = Identity.generate(IdentityKind.NODE, "roanoke")
+    parsed = parse_address(f"OldNib.the-2nd_@{identity.fingerprint}")
+    assert parsed.user == "OldNib.the-2nd_"
+    assert format_address("A" * 32, identity.fingerprint)
+
+
+def test_address_user_part_errors_say_what_to_type():
+    identity = Identity.generate(IdentityKind.NODE, "roanoke")
+    with pytest.raises(AddressError) as excinfo:
+        parse_address(f"Bob Case@{identity.fingerprint}")
+    assert "letters, digits, '.', '_' and '-' only" in str(excinfo.value)
+    assert "[a-z0-9_.-]" not in str(excinfo.value)
+    with pytest.raises(AddressError) as excinfo:
+        parse_address(f"{'a' * 33}@{identity.fingerprint}")
+    assert "at most 32 characters" in str(excinfo.value)
+
+
 def test_format_address_rejects_invalid_user_part():
     with pytest.raises(AddressError):
         format_address("Thiesi With Spaces!", "abcdefgh")
