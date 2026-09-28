@@ -1188,8 +1188,13 @@ edit permission can pin a post or file, and can keep it from expiring:
 - **Local only:** a pin is this node's own presentation and is never carried
   over the Link. A carried board's moderator pins for this node's callers.
 
-**The author is told** (issue #678). When a moderator approves or rejects a
-held post or edit, its local author is told:
+**The author is told** (issue #678). Until a moderator decides, the author
+sees their held post in the board's list, in its dated place, marked `held`
+and dimmed; nobody else does. It opens read only, badged "awaiting
+approval". A post with an edit of theirs held is marked `held` too, and its
+reader says the edit awaits approval while it shows the current text. When
+a moderator approves or rejects a held post or edit, its local author is
+told:
 - **once, at the main menu:** a one-line notice (`moderation_notices`), for
   example `Your post "X" on general was rejected: off topic`;
 - **by mail, for a rejection:** from the moderator who rejected it, with the

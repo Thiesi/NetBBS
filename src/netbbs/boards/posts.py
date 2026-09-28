@@ -662,6 +662,10 @@ class PostPage:
     # the first and last feed row on the page: the newest page drops the
     # feed rows its pinned block already shows.
     feed_bounds: tuple[PostCursor, PostCursor] | None = None
+    # Issue #678: the `root_post_id`s of listed posts with an edit the
+    # requesting caller submitted that still awaits a moderator. Their own
+    # held *posts* are listed as `status == "pending"` rows instead.
+    held_edits: frozenset[str] = frozenset()
 
     @property
     def oldest_cursor(self) -> PostCursor | None:
@@ -780,6 +784,12 @@ def list_posts_page(
     `pinned_block_rows` is what the screen draws around a pinned block
     beyond its rows (the "Pinned" rule, issue #675), taken from the feed's
     share of `limit` only when there is a block.
+
+    The requesting caller's own held posts are listed too, in their dated
+    place, as `status == "pending"` rows (issue #678): the author sees
+    what awaits a moderator where the post will appear, and nobody else
+    does. `PostPage.held_edits` names the listed posts with an edit of
+    theirs still held.
     """
     _require_board_readable(db, board, requesting_user)
     if before is not None and after is not None:
@@ -787,12 +797,13 @@ def list_posts_page(
 
     _sweep_expired_posts(db, board)
 
+    held_for = requesting_user.id
     if after is not None:
-        roots = _visible_roots(db, board, newer_than=after, limit=limit)
+        roots = _visible_roots(db, board, newer_than=after, limit=limit, held_for=held_for)
     elif before is not None:
-        roots = list(reversed(_visible_roots(db, board, older_than=before, limit=limit)))
+        roots = list(reversed(_visible_roots(db, board, older_than=before, limit=limit, held_for=held_for)))
     else:
-        roots = list(reversed(_visible_roots(db, board, limit=limit)))
+        roots = list(reversed(_visible_roots(db, board, limit=limit, held_for=held_for)))
 
     posts = [_resolve_current_version(db, row) for row in roots]
     pinned: list[Post] = []
@@ -812,12 +823,38 @@ def list_posts_page(
     oldest, newest = feed_bounds or (
         ((posts[0].created_at, posts[0].post_id), (posts[-1].created_at, posts[-1].post_id)) if posts else (None, None)
     )
-    has_older = oldest is not None and bool(_visible_roots(db, board, older_than=oldest, limit=1))
-    has_newer = newest is not None and bool(_visible_roots(db, board, newer_than=newest, limit=1))
+    has_older = oldest is not None and bool(
+        _visible_roots(db, board, older_than=oldest, limit=1, held_for=held_for)
+    )
+    has_newer = newest is not None and bool(
+        _visible_roots(db, board, newer_than=newest, limit=1, held_for=held_for)
+    )
     return PostPage(
         posts=pinned + posts, has_older=has_older, has_newer=has_newer,
         pinned_count=len(pinned), feed_bounds=feed_bounds,
+        held_edits=_held_edits(db, board, requesting_user, [post.root_post_id for post in pinned + posts]),
     )
+
+
+def _held_edits(db: Database, board: Board, user: User, root_post_ids: list[str]) -> frozenset[str]:
+    """Which of `root_post_ids` have an edit `user` submitted still held
+    for a moderator (issue #678). Who submitted an edit is its `edit`
+    entry in the moderation log: a revision keeps its root's author even
+    when a moderator made it."""
+    if not root_post_ids:
+        return frozenset()
+    rows = db.connection.execute(
+        f"""
+        SELECT DISTINCT v.root_post_id FROM posts v
+        JOIN moderation_log m
+          ON m.action = 'edit' AND m.object_type = 'board' AND m.object_id = v.board_id
+         AND m.detail = v.post_id AND m.actor_user_id = ?
+        WHERE v.board_id = ? AND v.status = 'pending' AND v.post_id != v.root_post_id
+          AND v.root_post_id IN ({','.join('?' * len(root_post_ids))})
+        """,
+        (user.id, board.id, *root_post_ids),
+    ).fetchall()
+    return frozenset(row["root_post_id"] for row in rows)
 
 
 # How many candidate roots `_visible_roots` reads per query. Hidden roots
@@ -833,6 +870,7 @@ def _visible_roots(
     newer_than: PostCursor | None = None,
     older_than: PostCursor | None = None,
     limit: int,
+    held_for: int | None = None,
 ) -> list[sqlite3.Row]:
     """Up to `limit` root rows of `board` that a reader may see, nearest
     the cursor first: ascending after `newer_than`, descending before
@@ -847,13 +885,20 @@ def _visible_roots(
     five hidden roots produce an empty page on a board with posts, and
     let `has_older`/`has_newer` count roots no reader could reach
     (issue #677). Batches continue past hidden roots until `limit`
-    visible ones are found or the board runs out."""
+    visible ones are found or the board runs out.
+
+    `held_for` adds that user's own held roots (issue #678): a post only
+    its author and the moderation queue see until it is approved."""
     if newer_than is not None and older_than is not None:
         raise ValueError("specify at most one of newer_than/older_than")
     ascending = newer_than is not None
     boundary = newer_than if ascending else older_than
     found: list[sqlite3.Row] = []
     author_cache: dict = {}
+    held_sql, held_params = (
+        ("", ()) if held_for is None
+        else ("OR (root.status = 'pending' AND root.author_user_id = ?)", (held_for,))
+    )
     while len(found) < limit:
         if boundary is None:
             position_sql, params = "", ()
@@ -867,11 +912,11 @@ def _visible_roots(
             LEFT JOIN link_events e ON e.content_id = root.post_id
             WHERE root.board_id = ? AND root.post_id = root.root_post_id
               {position_sql}
-              AND {_HAS_APPROVED_VERSION_SQL}
+              AND ({_HAS_APPROVED_VERSION_SQL} {held_sql})
             ORDER BY root.created_at {order}, root.post_id {order}
             LIMIT ?
             """,
-            (board.id, *params, _VISIBLE_ROOTS_BATCH),
+            (board.id, *params, *held_params, _VISIBLE_ROOTS_BATCH),
         ).fetchall()
         for row in rows:
             envelope_json = row["link_envelope_json"]
