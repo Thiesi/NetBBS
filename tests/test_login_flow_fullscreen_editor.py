@@ -513,18 +513,17 @@ def test_compose_post_with_oversized_subject_shows_a_friendly_error(db, alice):
     """Regression test for GitHub issue #32 (reopened): the plain
     single-line prompt has no length cap of its own (only the 4,096-
     char line editor ceiling), so a subject can clear that and still
-    exceed create_post()'s own MAX_SUBJECT_BYTES domain limit. Before
-    this fix, the resulting PostError propagated straight out of
-    _compose_new_post() and terminated the session instead of being
-    shown as a normal rejection."""
+    exceed create_post()'s own MAX_SUBJECT_BYTES domain limit. Issue
+    #812 moved the refusal to the Subject prompt itself, before a body
+    is written, in characters, with the prompt reopened to shorten it."""
     board = create_board(db, "general", creator=alice)
     oversized_subject = "x" * (MAX_SUBJECT_BYTES + 1)
-    session = FakeSession(["p", oversized_subject, "A normal body", "", "p", "c", "b"])
+    session = FakeSession(["p", oversized_subject, "Short", "A normal body", "", "p", "b"])
     asyncio.run(board_flow._show_board(session, db, board, alice))
-    text = _written_text(session)
-    assert "Posted" not in text
-    assert "Could not create post" in text
-    assert list_posts_page(db, board, alice).posts == []
+    text = _visible(session)
+    assert "That subject is 1 character too long" in text
+    assert "bytes" not in text
+    assert [post.subject for post in list_posts_page(db, board, alice).posts] == ["Short"]
 
 
 def test_compose_post_with_oversized_multibyte_subject_shows_a_friendly_error(db, alice):
@@ -536,12 +535,13 @@ def test_compose_post_with_oversized_multibyte_subject_shows_a_friendly_error(db
     oversized_subject = "€" * 150  # each euro sign is 3 UTF-8 bytes
     assert len(oversized_subject) < MAX_SUBJECT_BYTES
     assert len(oversized_subject.encode("utf-8")) > MAX_SUBJECT_BYTES
-    session = FakeSession(["p", oversized_subject, "A normal body", "", "p", "c", "b"])
+    session = FakeSession(["p", oversized_subject, "Short", "A normal body", "", "p", "b"])
     asyncio.run(board_flow._show_board(session, db, board, alice))
-    text = _written_text(session)
-    assert "Posted" not in text
-    assert "Could not create post" in text
-    assert list_posts_page(db, board, alice).posts == []
+    text = _visible(session)
+    # 450 bytes of 300: 50 of the 150 characters have to go.
+    assert "That subject is 50 characters too long" in text
+    assert "bytes" not in text
+    assert [post.subject for post in list_posts_page(db, board, alice).posts] == ["Short"]
 
 
 def test_compose_post_with_subject_exactly_at_the_byte_boundary_succeeds(db, alice):
@@ -780,16 +780,19 @@ def test_an_edit_is_reviewed_before_it_is_saved(db, alice):
 
 def test_a_refused_edit_stays_in_review_with_the_revision_intact(db, alice):
     """The editor deletes its draft when it hands the body back, so a
-    refusal that returned to the board would lose the revision."""
+    refusal that returned to the board would lose the revision. An
+    over-long subject is refused at its prompt (issue #812), and one
+    typed in review under [U]pdate subject leaves review and the revised
+    body as they were."""
     board = create_board(db, "general", creator=alice)
     create_post(db, board, alice, "Subject", "Body")
     too_long = "x" * (MAX_SUBJECT_BYTES + 1)
     session = FakeSession(
-        ["1", "e", too_long, "/edit 1", "Revised body", "", "s", "u", "Short subject", "s", "b", "b"]
+        ["1", "e", "", "/edit 1", "Revised body", "", "u", too_long, "Short subject", "s", "b", "b"]
     )
     asyncio.run(board_flow._show_board(session, db, board, alice))
     text = _visible(session)
-    assert "Could not save edit" in text
+    assert "That subject is 1 character too long" in text
     assert "Post updated." in text
     saved = list_posts_page(db, board, alice).posts[0]
     assert saved.subject == "Short subject"
