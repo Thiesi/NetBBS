@@ -1241,6 +1241,92 @@ def list_pinned_posts(
     return found
 
 
+# The most recent revisions a history lists. A carried post's chain is
+# written by another node, so its length is not this node's to bound.
+MAX_LISTED_REVISIONS = 50
+
+# The Link event type of an origin's moderator edit (`netbbs.link.events`),
+# spelled here rather than imported: that module depends on this one.
+_MODERATOR_EDIT_EVENT = "board_post_moderator_edit"
+
+
+@dataclass(frozen=True)
+class Revision:
+    """One version of a post, as `list_post_revisions` lists it: the
+    revision row exactly as stored, and whether a moderator wrote it
+    rather than the post's author."""
+
+    post: Post
+    by_moderator: bool
+
+
+def list_post_revisions(db: Database, post: Post, board: Board, *, requesting_user: User) -> list[Revision]:
+    """
+    The versions of `post` a caller may read (issue #675), oldest first,
+    the current one last: every approved revision of its chain, newest
+    `MAX_LISTED_REVISIONS` of them.
+
+    What a reader may see stops at a moderator (decided with the
+    maintainer): a reader sees the versions from the most recent moderator
+    edit on -- what a moderator edited away stays out of view -- and
+    nothing at all of a removed post. A caller holding
+    `BoardPermission.EDIT` on the board sees every version, a removed
+    post's included; that is the permission a moderator edit needs.
+
+    Expired and pending revisions are never listed: expiry ends a
+    caller's reach (design doc §5.3), and a pending edit is the moderation
+    queue's. The removal placeholder itself is not a version of what was
+    written, so it is not listed either.
+    """
+    require_level(requesting_user, board.min_read_level)
+    moderator = has_permission(
+        db, requesting_user, object_type="board", object_id=post.board_id, permission=BoardPermission.EDIT
+    )
+    removed = db.connection.execute(
+        "SELECT 1 FROM posts WHERE root_post_id = ? AND board_id = ? AND tombstoned_at IS NOT NULL LIMIT 1",
+        (post.root_post_id, post.board_id),
+    ).fetchone() is not None
+    if removed and not moderator:
+        return []
+    rows = db.connection.execute(
+        """
+        SELECT * FROM posts
+        WHERE root_post_id = ? AND board_id = ? AND status = 'approved' AND tombstoned_at IS NULL
+        ORDER BY created_at DESC, id DESC
+        LIMIT ?
+        """,
+        (post.root_post_id, post.board_id, MAX_LISTED_REVISIONS),
+    ).fetchall()
+    revisions = [Revision(_row_to_post(row), _is_moderator_revision(db, row)) for row in reversed(rows)]
+    if moderator:
+        return revisions
+    last_moderated = max((index for index, revision in enumerate(revisions) if revision.by_moderator), default=None)
+    return revisions if last_moderated is None else revisions[last_moderated:]
+
+
+def _is_moderator_revision(db: Database, row: sqlite3.Row) -> bool:
+    """Whether a moderator wrote this revision rather than the post's
+    author: an origin's carried moderator edit is its own event type, and
+    a local edit is logged with who made it."""
+    if row["post_id"] == row["root_post_id"]:
+        return False
+    carried = db.connection.execute(
+        "SELECT 1 FROM link_events WHERE content_id = ? AND object_type = ?",
+        (row["post_id"], _MODERATOR_EDIT_EVENT),
+    ).fetchone()
+    if carried is not None:
+        return True
+    return db.connection.execute(
+        """
+        SELECT 1 FROM moderation_log
+        WHERE action = 'edit' AND object_type = 'board' AND detail = ?
+          AND actor_user_id IS NOT target_user_id
+        LIMIT 1
+        """,
+        (row["post_id"],),
+    ).fetchone() is not None
+
+
 def _require_board_permission(db: Database, post: Post, user: User, permission: BoardPermission) -> None:
     if not has_permission(db, user, object_type="board", object_id=post.board_id, permission=permission):
         raise PostError(

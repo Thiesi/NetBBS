@@ -1475,9 +1475,24 @@ A post opens on `show_detail`:
 - The title, a byline (author, date, `edited`, `new`, the post it replies to)
   and the action bar stay on screen while a long body pages with PgUp/PgDn.
 - The post's own actions live there, offered only when they would succeed:
-  `[R]eply`, `[E]dit`, `Remove pos[t]`, `P[i]n`/`[K]eep` (§5.3), and
-  `[N]ext post`/`[P]revious post`, which cross page boundaries.
+  `[R]eply`, `[H]istory`, `[E]dit`, `Remove pos[t]`, `P[i]n`/`[K]eep` (§5.3),
+  and `[N]ext post`/`[P]revious post`, which cross page boundaries.
 - `[B]ack` returns to the list with the cursor on the post last read.
+
+**Revision history** (issue #675). `[H]istory` lists an edited post's
+versions, newest first. Each opens on the same reader, marked "current",
+"original" or "edit", and "by a moderator" where one wrote it.
+- **Readers** see the versions from the most recent moderator edit on: what a
+  moderator edited away stays out of view. A removed post shows no versions.
+- **Moderators** (the board's edit permission, which a moderator edit needs)
+  see every version, those of a removed post included.
+- **What is listed:** approved revisions only. Expired and pending ones are
+  left out, and so is the removal placeholder.
+- **Limit:** at most the 50 most recent versions, because a carried post's
+  chain is written by another node.
+- **How a moderator edit is recognized:** locally, by the moderation log's
+  record of who made the edit; for a carried post, by the event type of the
+  origin's `board_post_moderator_edit`.
 
 **Replying** (issue #675). A reply is a post with the replied-to post as its
 parent, listed on the board like any other post. There is no threaded view.

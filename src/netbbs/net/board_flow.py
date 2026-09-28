@@ -47,6 +47,7 @@ from netbbs.boards import (
     list_posts_page,
     set_post_exempt,
     set_post_pinned,
+    list_post_revisions,
     tombstone_post,
     visible_post,
 )
@@ -1080,6 +1081,14 @@ async def _show_board(
             can_reply = can_post and post.tombstoned_at is None
             if can_reply:
                 actions.append(("r", menu_key("R", "eply")))
+            # An edited post's earlier versions (issue #675); a removed one's
+            # for a moderator only, as `list_post_revisions` decides.
+            can_see_history = post.is_edited or (
+                post.tombstoned_at is not None
+                and has_permission(db, user, object_type="board", object_id=post.board_id, permission=BoardPermission.EDIT)
+            )
+            if can_see_history:
+                actions.append(("h", menu_key("H", "istory")))
             if _can_edit_post(db, post, user):
                 actions.append(("e", menu_key("E", "dit")))
             if _can_tombstone_post(db, post, user):
@@ -1110,6 +1119,14 @@ async def _show_board(
             )
             if key == "b":
                 return index
+            if key == "h" and can_see_history:
+                await _show_history(
+                    session, db, board, post, user, breadcrumb=(session.node_display_name, *breadcrumb, board_name),
+                    name_requirement=name_requirement, body_mode=body_mode, truecolor=truecolor,
+                    redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
+                    separator=separator,
+                )
+                continue
             if key == "r" and can_reply:
                 if _reply_target(db, post, board) is None:
                     # Expired or removed while this screen was open (Codex
@@ -2042,6 +2059,99 @@ async def _compose_body(
         draft_path=draft_path,
         keep_pasted_color=keep_pasted_color,
     )
+
+
+async def _show_history(
+    session: Session,
+    db: Database,
+    board: Board,
+    post: Post,
+    user: User,
+    *,
+    breadcrumb: tuple[str, ...],
+    name_requirement: str | None,
+    body_mode: str,
+    truecolor: bool,
+    redraw_in_place: bool,
+    unicode_style: bool,
+    collapsed: bool,
+    separator: str,
+) -> None:
+    """[H]istory (issue #675): the versions of `post` this caller may read,
+    newest first, each opened on the same reader a post is read on. What
+    a reader may see stops at a moderator edit; a moderator sees it all
+    (`list_post_revisions`)."""
+    revisions = list_post_revisions(db, post, board, requesting_user=user)
+    if len(revisions) < 2:
+        announce(session, "There are no earlier versions of this post to show.", tone="muted")
+        return
+    newest_first = list(reversed(revisions))
+    labels = {id(revision): _revision_label(revision, index, len(revisions)) for index, revision in enumerate(revisions)}
+
+    def _when(revision) -> str:
+        return format_for_display(revision.post.created_at, db)
+
+    while True:
+        chosen = await pick_item(
+            session, newest_first,
+            name_of=_when,
+            stable_id_of=lambda revision: newest_first.index(revision) + 1,
+            description_of=lambda revision: labels[id(revision)],
+            title=f"Versions of {sanitize_text(post.subject)}",
+            empty_message="No versions to show.",
+            redraw_in_place=redraw_in_place,
+            unicode_style=unicode_style,
+            collapsed=collapsed,
+            accent_color=effective_accent_color(session, db),
+            header_color=effective_header_color(session, db),
+        )
+        if chosen is None:
+            return
+        version = chosen.post
+        byline = [
+            colored(separator, fg_color=METADATA_COLOR).join([
+                _author_display_name(db, post, name_requirement=name_requirement),
+                colored(_when(chosen), fg_color=METADATA_COLOR),
+                badge(labels[id(chosen)]),
+            ])
+        ]
+        title = screen_title(
+            sanitize_text(version.subject),
+            breadcrumb=(*breadcrumb, "Versions"),
+            width=session.terminal_width,
+            clear=False,
+            unicode_style=unicode_style, collapsed=collapsed,
+            header_color=effective_header_color(session, db),
+            node_name_gradient=session.node_name_gradient,
+        )
+        page = 0
+        while True:
+            key, page = await show_detail(
+                session,
+                title=title,
+                sections=[Section(None, [Styled(post_body_rows(
+                    version.body, session.terminal_width, body_mode, truecolor=truecolor, layout=post.layout,
+                ))])],
+                actions=[("b", menu_key("B", "ack"))],
+                redraw_in_place=redraw_in_place,
+                unicode_style=unicode_style,
+                page=page,
+                preamble=byline,
+            )
+            if key == "b":
+                break
+
+
+def _revision_label(revision, index: int, count: int) -> str:
+    """What one version is: the one shown now, the one first posted, or
+    an edit -- and whether a moderator made it."""
+    if index == count - 1:
+        kind = "current"
+    elif revision.post.post_id == revision.post.root_post_id:
+        kind = "original"
+    else:
+        kind = "edit"
+    return f"{kind}, by a moderator" if revision.by_moderator else kind
 
 
 def _reply_target(db: Database, post: Post, board: Board) -> Post | None:
