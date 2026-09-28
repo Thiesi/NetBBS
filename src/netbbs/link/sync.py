@@ -1849,6 +1849,9 @@ def _relay_base_urls_for_peer(node: LinkNode, target_fingerprint: str) -> list[s
     return urls
 
 
+_MAX_EXPLAINED_IN_LOG = 4096
+
+
 def _log_once(node: LinkNode, key: str, message: str, *args: object) -> None:
     """Log a routine Link state at INFO the first time this process sees it.
 
@@ -1859,6 +1862,10 @@ def _log_once(node: LinkNode, key: str, message: str, *args: object) -> None:
     """
     if key in node.explained_in_log:
         return
+    # Keys name remote subjects, so the set is bounded: past the cap it starts
+    # over, and a subject is at worst explained a second time.
+    if len(node.explained_in_log) >= _MAX_EXPLAINED_IN_LOG:
+        node.explained_in_log.clear()
     node.explained_in_log.add(key)
     _logger.info(message, *args)
 
@@ -2070,10 +2077,16 @@ async def _request_one_relay_consent(
                     )
                 return False
         response = await request_relay_consent(node, session, base_url, relay_fingerprint, lane)
-    except (LinkTransportError, LinkProtocolError) as exc:
+    except LinkTransportError as exc:
         # Issue #834: one address of several failing is routine, and the
         # candidate as a whole is summarised by `_maintain_relay_selection`.
         _logger.debug(
+            "Link sync: relay consent request to %s (%s) failed: %s", relay_fingerprint, base_url, exc
+        )
+        return False
+    except LinkProtocolError as exc:
+        # A reply that fails verification is not a network hiccup.
+        _logger.warning(
             "Link sync: relay consent request to %s (%s) failed: %s", relay_fingerprint, base_url, exc
         )
         return False
