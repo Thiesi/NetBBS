@@ -189,7 +189,7 @@ class TelnetSession(Session):
         self._writer.write(bytes([IAC, DO, BINARY]))
         await self._writer.drain()
 
-    async def write(self, text: str) -> None:
+    async def _send_text(self, text: str) -> None:
         # Normalize all line endings to CRLF (RFC 854's correct Telnet
         # line terminator) here, at the transport boundary — not the
         # caller's job. Rendering utilities like netbbs.rendering.reflow
@@ -216,7 +216,7 @@ class TelnetSession(Session):
         except (ConnectionResetError, BrokenPipeError) as exc:
             raise SessionClosedError("client disconnected during write") from exc
 
-    async def write_raw(self, data: bytes) -> None:
+    async def _send_raw(self, data: bytes) -> None:
         # Unlike write(), this data isn't guaranteed UTF-8 — it's
         # arbitrary bytes (ZMODEM framing, raw file content), so 0xFF
         # (IAC) really can appear and must be doubled per RFC 854's

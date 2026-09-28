@@ -56,6 +56,10 @@ class Cell:
     fg: _Color | None = None
     bg: _Color | None = None
     bold: bool = False
+    # Issue #764: the terminal emulator's copy of a caller's screen keeps
+    # these too, so repainting a terminal from it loses nothing visible.
+    underline: bool = False
+    reverse: bool = False
 
 
 class ScreenBuffer:
@@ -98,6 +102,13 @@ class ScreenBuffer:
         if col + 1 < self.width:
             self.write_cell(row, col + 1, "", fg=fg, bg=bg, bold=bold)
 
+    def put_cell(self, row: int, col: int, cell: Cell) -> None:
+        """Place an existing `Cell` as it is, every attribute included --
+        copying one grid onto another (the SysOp's snoop view, issue
+        #764)."""
+        self._check_bounds(row, col)
+        self._rows[row][col] = cell
+
     def get_cell(self, row: int, col: int) -> Cell:
         self._check_bounds(row, col)
         return self._rows[row][col]
@@ -113,8 +124,13 @@ class ScreenBuffer:
             raise ValueError(f"cell ({row}, {col}) out of bounds for a {self.width}x{self.height} buffer")
 
 
-def _style(cell: Cell) -> tuple[_Color | None, _Color | None, bool]:
-    return (cell.fg, cell.bg, cell.bold)
+def _style(cell: Cell) -> tuple[_Color | None, _Color | None, bool, bool, bool]:
+    return (cell.fg, cell.bg, cell.bold, cell.underline, cell.reverse)
+
+
+def _render_run(text: str, style: tuple[_Color | None, _Color | None, bool, bool, bool]) -> str:
+    fg_color, bg_color, bold, underline, reverse = style
+    return colored(text, fg_color=fg_color, bg_color=bg_color, bold=bold, underline=underline, reverse=reverse)
 
 
 def diff_ansi(previous: Snapshot, current: Snapshot) -> str:
@@ -139,7 +155,7 @@ def diff_ansi(previous: Snapshot, current: Snapshot) -> str:
                 chars.append(cur_row[col].char)
                 col += 1
             parts.append(move_cursor(row_index + 1, start_col + 1))
-            parts.append(colored("".join(chars), fg_color=style[0], bg_color=style[1], bold=style[2]))
+            parts.append(_render_run("".join(chars), style))
     return "".join(parts)
 
 
@@ -164,5 +180,5 @@ def full_render_ansi(current: Snapshot) -> str:
                 chars.append(cur_row[col].char)
                 col += 1
             parts.append(move_cursor(row_index + 1, start_col + 1))
-            parts.append(colored("".join(chars), fg_color=style[0], bg_color=style[1], bold=style[2]))
+            parts.append(_render_run("".join(chars), style))
     return "".join(parts)

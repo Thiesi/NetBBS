@@ -569,7 +569,7 @@ def test_a_long_outcome_wraps_instead_of_losing_its_tail():
         paint_monitor(buffer, state, controls)
         text = " ".join(row.strip() for row in _rows(buffer))
         assert "Try again in a moment." in text
-        assert "[Q]uit" in _rows(buffer)[-1]
+        assert "[Q]" in _rows(buffer)[-1]
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
 
@@ -764,5 +764,212 @@ def test_a_notice_is_on_screen_before_delivery_is_reported(db, lane, sysop, monk
         await asyncio.gather(monitor, return_exceptions=True)
         await controls.session_registry.disconnect_one(viewer)
         assert task.done()
+
+    asyncio.run(scenario())
+
+
+# -- snoop (issue #764) ------------------------------------------------------
+
+
+class CopyingSession(QueueSession):
+    """A caller whose output goes through the real shared output layer,
+    so its screen copy is fed exactly as a transport's would be."""
+
+    write = Session.write
+
+    async def _send_text(self, text: str) -> None:
+        self.written.append(text)
+
+
+def test_snoop_shows_the_callers_screen_with_their_cursor():
+    async def scenario():
+        controls = _controls()
+        viewer, alice = QueueSession(), CopyingSession()
+        tasks = [await _connect(controls.session_registry, viewer, "sysop"),
+                 await _connect(controls.session_registry, alice, "alice")]
+        await alice.write("\x1b[2J\x1b[HWelcome to the boards\r\n\x1b[31mRetro\x1b[0m> ")
+        entry = next(e for e in controls.session_registry.list_entries() if e.username == "alice")
+        buffer = ScreenBuffer(80, 24)
+        sysop_monitor.paint_snoop(buffer, entry, controls)
+        rows = _rows(buffer)
+        assert rows[0].startswith("Watching alice · 80x24")
+        assert rows[1].startswith("Welcome to the boards")
+        assert rows[2].startswith("Retro> ")
+        assert buffer.get_cell(2, 0).fg == 1
+        # The caller's cursor, after the prompt, is shown in reverse video.
+        assert buffer.get_cell(2, 7).reverse
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_snoop_crops_a_larger_screen_and_says_so():
+    async def scenario():
+        controls = _controls()
+        viewer, alice = QueueSession(), CopyingSession(width=132, height=50)
+        tasks = [await _connect(controls.session_registry, viewer, "sysop"),
+                 await _connect(controls.session_registry, alice, "alice")]
+        await alice.write("x" * 132)
+        entry = next(e for e in controls.session_registry.list_entries() if e.username == "alice")
+        buffer = ScreenBuffer(80, 24)
+        sysop_monitor.paint_snoop(buffer, entry, controls)
+        assert "(cropped)" in _rows(buffer)[0]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_snooping_is_logged_and_follows_live_output(db, lane, sysop, monkeypatch, caplog):
+    monkeypatch.setattr(sysop_monitor, "SNOOP_REFRESH_SECONDS", 0.01)
+
+    async def scenario():
+        controls = _controls()
+        viewer, alice = QueueSession(), CopyingSession()
+        tasks = [await _connect(controls.session_registry, viewer, "sysop"),
+                 await _connect(controls.session_registry, alice, "alice")]
+        monitor = asyncio.create_task(_monitor(viewer, lane, sysop, controls))
+        _select(viewer, controls, "alice")
+        viewer.inputs.put_nowait("s")
+        await _until(lambda: "Watching alice" in viewer.text())
+        await alice.write("typing_live")
+        await _until(lambda: "typing_live" in viewer.text())
+        mark = len(viewer.written)
+        viewer.inputs.put_nowait("x")  # any key stops
+        await _until(lambda: "DOING" in strip_ansi("".join(viewer.written[mark:])))
+        viewer.inputs.put_nowait("q")
+        await monitor
+        assert any("snoop by sysop: alice" in e.text for e in controls.session_registry.recent_events())
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    with caplog.at_level("INFO", logger="netbbs.net.sysop_monitor"):
+        asyncio.run(scenario())
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("sysop started watching" in m and "alice" in m for m in messages)
+    assert any("sysop stopped watching" in m and "alice" in m for m in messages)
+
+
+def test_you_cannot_snoop_yourself(db, lane, sysop):
+    async def scenario():
+        controls = _controls()
+        viewer = QueueSession()
+        task = await _connect(controls.session_registry, viewer, "sysop")
+        monitor = asyncio.create_task(_monitor(viewer, lane, sysop, controls))
+        viewer.inputs.put_nowait("s")
+        await _until(lambda: "That's your own session." in viewer.text())
+        viewer.inputs.put_nowait("q")
+        await monitor
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_a_caller_who_leaves_while_watched_is_reported():
+    async def scenario():
+        controls = _controls()
+        viewer, alice = QueueSession(), CopyingSession()
+        tasks = [await _connect(controls.session_registry, viewer, "sysop"),
+                 await _connect(controls.session_registry, alice, "alice")]
+        entry = next(e for e in controls.session_registry.list_entries() if e.username == "alice")
+        tasks[1].cancel()
+        await asyncio.gather(tasks[1], return_exceptions=True)
+        buffer = ScreenBuffer(80, 24)
+        sysop_monitor.paint_snoop(buffer, entry, controls)
+        assert "alice has disconnected" in _rows(buffer)[0]
+        tasks[0].cancel()
+        await asyncio.gather(tasks[0], return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_a_notice_during_snoop_is_shown_not_swallowed(db, lane, sysop, monkeypatch):
+    monkeypatch.setattr(sysop_monitor, "SNOOP_REFRESH_SECONDS", 10.0)
+
+    async def scenario():
+        controls = _controls()
+        viewer, alice = QueueSession(), CopyingSession()
+        tasks = [await _connect(controls.session_registry, viewer, "sysop"),
+                 await _connect(controls.session_registry, alice, "alice")]
+        monitor = asyncio.create_task(_monitor(viewer, lane, sysop, controls))
+        _select(viewer, controls, "alice")
+        viewer.inputs.put_nowait("s")
+        await _until(lambda: "Watching alice" in viewer.text())
+        assert await controls.session_registry.notify_one(viewer, "*** Node going down ***")
+        assert "Node going down" in viewer.text()
+        viewer.inputs.put_nowait("x")
+        viewer.inputs.put_nowait("q")
+        await monitor
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_the_cursor_is_hidden_again_after_snoop(db, lane, sysop, monkeypatch):
+    monkeypatch.setattr(sysop_monitor, "SNOOP_REFRESH_SECONDS", 0.01)
+
+    async def scenario():
+        controls = _controls()
+        viewer, alice = QueueSession(), CopyingSession()
+        tasks = [await _connect(controls.session_registry, viewer, "sysop"),
+                 await _connect(controls.session_registry, alice, "alice")]
+        monitor = asyncio.create_task(_monitor(viewer, lane, sysop, controls))
+        _select(viewer, controls, "alice")
+        viewer.inputs.put_nowait("s")
+        await _until(lambda: "Watching alice" in viewer.text())
+        mark = len(viewer.written)
+        viewer.inputs.put_nowait("x")
+        await _until(lambda: "DOING" in strip_ansi("".join(viewer.written[mark:])))
+        after = "".join(viewer.written[mark:])
+        assert after.rfind("\x1b[?25l") > after.rfind(SHOW_CURSOR)
+        viewer.inputs.put_nowait("q")
+        await monitor
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_snoop_never_crops_through_a_wide_glyph():
+    async def scenario():
+        controls = _controls()
+        viewer, alice = QueueSession(), CopyingSession(width=100, height=24)
+        tasks = [await _connect(controls.session_registry, viewer, "sysop"),
+                 await _connect(controls.session_registry, alice, "alice")]
+        await alice.write("x" * 79 + "漢")  # the glyph starts in the SysOp's last column
+        entry = next(e for e in controls.session_registry.list_entries() if e.username == "alice")
+        buffer = ScreenBuffer(80, 24)
+        sysop_monitor.paint_snoop(buffer, entry, controls)
+        assert buffer.get_cell(1, 79).char == " "
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_the_snoop_cursor_on_a_wide_glyph_marks_the_glyph():
+    async def scenario():
+        controls = _controls()
+        viewer, alice = QueueSession(), CopyingSession(width=20, height=5)
+        tasks = [await _connect(controls.session_registry, viewer, "sysop"),
+                 await _connect(controls.session_registry, alice, "alice")]
+        await alice.write("x" * 18 + "漢")
+        entry = next(e for e in controls.session_registry.list_entries() if e.username == "alice")
+        buffer = ScreenBuffer(80, 24)
+        sysop_monitor.paint_snoop(buffer, entry, controls)
+        assert buffer.get_cell(1, 18).char == "漢" and buffer.get_cell(1, 18).reverse
+        assert buffer.get_cell(1, 19).char == ""
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     asyncio.run(scenario())

@@ -51,6 +51,7 @@ project's networking work has held to.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import re
 from dataclasses import dataclass
@@ -396,7 +397,19 @@ async def _read_subpacket(session: Session) -> tuple[bytes, int]:
 # -- sender (download: NetBBS sends a file to the connecting client) -----
 
 
+def _binary_transfer(session: Session):
+    """Keep Zmodem's frames out of the session's screen copy (issue #764).
+    A duck-typed session without the hook simply has no copy to protect."""
+    mark = getattr(session, "binary_transfer", None)
+    return mark() if mark is not None else contextlib.nullcontext()
+
+
 async def send_file(session: Session, filename: str, data: bytes) -> None:
+    with _binary_transfer(session):
+        await _send_file(session, filename, data)
+
+
+async def _send_file(session: Session, filename: str, data: bytes) -> None:
     """
     Send `data` to the client as `filename` via Zmodem.
 
@@ -453,6 +466,11 @@ async def send_file(session: Session, filename: str, data: bytes) -> None:
 
 
 async def receive_file(session: Session, *, max_bytes: int, dest_path: Path) -> ReceivedFile:
+    with _binary_transfer(session):
+        return await _receive_file(session, max_bytes=max_bytes, dest_path=dest_path)
+
+
+async def _receive_file(session: Session, *, max_bytes: int, dest_path: Path) -> ReceivedFile:
     """
     Receive one file from the client via Zmodem, streaming it directly
     to `dest_path` as it arrives and returning its filename, content

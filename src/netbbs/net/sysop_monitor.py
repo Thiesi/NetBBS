@@ -10,14 +10,19 @@ status snapshot. The database is touched only on entry (display
 preferences) and by an action the SysOp takes (Kick is the Who screen's
 own disconnect draft, audit log entry included), never by the refresh.
 
-Snoop (#764) and break-in chat (#765) join the action bar when they land.
+[S]noop (#764) shows the selected caller's screen, live, from the
+server-side copy every session keeps (`Session.screen_copy`). It is
+silent for the caller by decision (tracker #761), disclosed in the
+caller-facing help, and every snoop is written to the node log.
+Break-in chat (#765) joins the action bar when it lands.
 """
 
 from __future__ import annotations
 
 import datetime
+import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from typing import Awaitable, Callable
@@ -43,7 +48,7 @@ from netbbs.net.unicode_style_preference import unicode_style_enabled
 from netbbs.rendering import sanitize_text
 from netbbs.rendering.gradient import gradient_color
 from netbbs.rendering.ansi import clear_line, colored, move_cursor, strip_ansi
-from netbbs.rendering.screen_buffer import ScreenBuffer
+from netbbs.rendering.screen_buffer import Cell, ScreenBuffer
 from netbbs.rendering.theme import (
     ACCENT_COLOR,
     ALERT_COLOR,
@@ -67,6 +72,12 @@ from netbbs.timeutil import resolve_display_preferences
 #: Seconds between refreshes. Idle times count in seconds, and two seconds
 #: keeps them visibly moving without making the screen restless.
 REFRESH_SECONDS = 2.0
+
+#: The snoop view follows typing, so it refreshes much faster. Each tick
+#: only copies cells the caller's own output already produced.
+SNOOP_REFRESH_SECONDS = 0.25
+
+_logger = logging.getLogger(__name__)
 
 #: The selected row's background.
 _SELECTED_BG = 238
@@ -298,8 +309,8 @@ def _header_flags(controls: NodeControls) -> list[tuple[str, int]]:
 def _paint_action_bar(buffer: ScreenBuffer, row: int, state: MonitorState) -> None:
     """The keys, in full when they fit and shortened when they don't, so
     [Q]uit is never the part a narrow terminal cuts off."""
-    full = [("M", "essage"), ("K", "ick"), ("U", "nwind"), ("O", f"rder: {state.order}"), ("Q", "uit")]
-    short = [("M", "sg"), ("K", "ick"), ("U", "nwind"), ("O", "rder"), ("Q", "uit")]
+    full = [("S", "noop"), ("M", "essage"), ("K", "ick"), ("U", "nwind"), ("O", f"rder: {state.order}"), ("Q", "uit")]
+    short = [("S", "noop"), ("M", "sg"), ("K", "ick"), ("U", "nwind"), ("O", "rder"), ("Q", "uit")]
     hint = state.glyphs.select_hint
 
     def width_of(items: list[tuple[str, str]], gap: int) -> int:
@@ -310,6 +321,9 @@ def _paint_action_bar(buffer: ScreenBuffer, row: int, state: MonitorState) -> No
         hint = ""
     if width_of(items, gap) > buffer.width:
         items, gap = short, 1
+    if width_of(items, gap) > buffer.width:
+        # The keys alone, still every one of them.
+        items, gap = [(key, "") for key, _rest in short], 1
     col = 0
     for key, rest in items:
         col = paint_text(buffer, row, col, "[", fg=VALUE_COLOR)
@@ -472,6 +486,93 @@ def _unwind(state: MonitorState, controls: NodeControls, entry: SessionSummary) 
         state.say(f"{name} can't be sent back right now. Try again in a moment.", ERROR_COLOR)
 
 
+def paint_snoop(
+    buffer: ScreenBuffer,
+    entry: SessionSummary,
+    controls: NodeControls,
+    *,
+    glyphs: Glyphs = UNICODE_GLYPHS,
+    notice: str = "",
+) -> None:
+    """One frame of the snoop view: a header row naming the caller, and
+    under it their screen as the copy has it, cropped to this terminal,
+    with their cursor shown in reverse video."""
+    name = _label(entry)
+    live = any(e.session is entry.session for e in controls.session_registry.list_entries())
+    if not live:
+        fill_row(buffer, 0, bg=_SELECTED_BG)
+        paint_text(buffer, 0, 0, f"{name} has disconnected. Any key returns.", fg=ERROR_COLOR, bg=_SELECTED_BG)
+        return
+    copy = entry.session.screen_copy()
+    cropped = copy.width > buffer.width or copy.height > buffer.height - 1
+    header = f"Watching {name}{glyphs.dot}{copy.width}x{copy.height}"
+    if cropped:
+        header += " (cropped)"
+    header += f"{glyphs.dot}any key stops"
+    fill_row(buffer, 0, bg=_SELECTED_BG)
+    if notice:
+        # A message or broadcast for the SysOp takes the header row: it
+        # matters more than the caption.
+        paint_text(buffer, 0, 0, notice, fg=ALERT_COLOR, bg=_SELECTED_BG, bold=True)
+    else:
+        paint_text(buffer, 0, 0, header, fg=EMPHASIS_COLOR, bg=_SELECTED_BG, bold=True)
+    snapshot = copy.snapshot()
+    rows = min(copy.height, buffer.height - 1)
+    cols = min(copy.width, buffer.width)
+    for row in range(rows):
+        source = snapshot[row]
+        for col in range(cols):
+            buffer.put_cell(row + 1, col, source[col])
+        if cols < copy.width and cols and source[cols - 1].char and not source[cols].char:
+            # A wide glyph cut by the crop would wrap on the SysOp's
+            # terminal: its visible half is blanked instead.
+            buffer.put_cell(row + 1, cols - 1, Cell())
+    if copy.cursor_visible and copy.row < rows and copy.col < cols:
+        col = copy.col
+        if col > 0 and not snapshot[copy.row][col].char:
+            col -= 1  # on a wide glyph's second half: mark the glyph itself
+        cell = snapshot[copy.row][col]
+        buffer.put_cell(copy.row + 1, col, replace(cell, char=cell.char or " ", reverse=not cell.reverse))
+
+
+async def snoop_screen(
+    session: Session, actor: User, controls: NodeControls, entry: SessionSummary, *, glyphs: Glyphs = UNICODE_GLYPHS
+) -> None:
+    """Watch `entry`'s screen until any key. Silent for the caller; the
+    node log and the Monitor's event tail record who watched whom, and
+    for how long."""
+    name = _label(entry)
+    started = time.monotonic()
+    _logger.info("snoop: %s started watching session %d (%s)", actor.username, entry.session_id, name)
+    controls.session_registry.note_event(f"snoop by {actor.username}: {name}")
+
+    async def on_key(key: EditorKey) -> KeyOutcome:
+        return KeyOutcome.EXIT
+
+    # Only the latest notice is shown, so only the latest is kept: a
+    # stream of messages must not grow memory for as long as this is open.
+    notices: list[str] = []
+
+    def on_notice(text: str) -> None:
+        notices[:] = [" ".join(strip_ansi(text).split())]
+
+    try:
+        await run_live_screen(
+            session,
+            paint=lambda buffer: paint_snoop(
+                buffer, entry, controls, glyphs=glyphs, notice=notices[-1] if notices else "",
+            ),
+            on_key=on_key,
+            on_notice=on_notice,
+            interval=SNOOP_REFRESH_SECONDS,
+        )
+    finally:
+        _logger.info(
+            "snoop: %s stopped watching session %d (%s) after %d s",
+            actor.username, entry.session_id, name, int(time.monotonic() - started),
+        )
+
+
 def _move(state: MonitorState, controls: NodeControls, step: int) -> None:
     ids = [e.session_id for e in sort_entries(controls.session_registry.list_entries(), state.order)]
     if not ids:
@@ -533,7 +634,7 @@ async def monitor_screen(
         if choice == "o":
             state.order = ORDERS[(ORDERS.index(state.order) + 1) % len(ORDERS)]
             return KeyOutcome.CONTINUE
-        if choice not in ("m", "k", "u"):
+        if choice not in ("s", "m", "k", "u"):
             return KeyOutcome.CONTINUE
         entry = _selected_entry(state, controls)
         if entry is None:
@@ -545,6 +646,9 @@ async def monitor_screen(
         if choice == "u":
             _unwind(state, controls, entry)
             return KeyOutcome.CONTINUE
+        if choice == "s":
+            await snoop_screen(session, actor, controls, entry, glyphs=state.glyphs)
+            return KeyOutcome.REPAINT
         if choice == "m":
             await _message(session, state, controls, entry)
         else:

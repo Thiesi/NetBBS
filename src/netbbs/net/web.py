@@ -239,6 +239,7 @@ class WebSession(Session):
         self._door_active = False
         self._door_stream = 0
         self._door_encoding = "utf-8"
+        self._pre_door_size: tuple[int, int] | None = None
         self._input_closed = False
         self._input_error = "client disconnected"
         self.peer_address = peer_address
@@ -337,10 +338,16 @@ class WebSession(Session):
             # were real dimensions -- excluded explicitly rather than
             # silently treating them as 1/0.
             cols, rows = event.get("cols"), event.get("rows")
+            width, height = self._pre_door_size or (self.terminal_width, self.terminal_height)
             if isinstance(cols, int) and not isinstance(cols, bool) and cols > 0:
-                self.terminal_width, _ = clamp_terminal_size(cols, self.terminal_height)
+                width, _ = clamp_terminal_size(cols, height)
             if isinstance(rows, int) and not isinstance(rows, bool) and rows > 0:
-                _, self.terminal_height = clamp_terminal_size(self.terminal_width, rows)
+                _, height = clamp_terminal_size(width, rows)
+            if self._pre_door_size is None:
+                self.terminal_width, self.terminal_height = width, height
+            # During a fixed-size door the client reports the door's own
+            # size (it doesn't refit xterm), so there is nothing to learn;
+            # it sends the browser's size again once the door ends.
         # Unknown event types are ignored rather than treated as an
         # error — a forward-compatible client sending a message type
         # this version doesn't understand yet shouldn't break the
@@ -375,7 +382,7 @@ class WebSession(Session):
             if isinstance(item, str):
                 return item
 
-    async def write(self, text: str) -> None:
+    async def _send_text(self, text: str) -> None:
         # Same CRLF normalization TelnetSession.write/SSHSession.write
         # perform, and the same reasoning: xterm.js is a real terminal
         # emulator, not a browser textarea — it needs an explicit CR to
@@ -386,7 +393,7 @@ class WebSession(Session):
         except (ConnectionResetError, RuntimeError) as exc:
             raise SessionClosedError("client disconnected during write") from exc
 
-    async def write_raw(self, data: bytes) -> None:
+    async def _send_raw(self, data: bytes) -> None:
         if not self._door_active:
             raise NotImplementedError("raw web I/O requires door mode; Zmodem is unavailable")
         try:
@@ -423,6 +430,14 @@ class WebSession(Session):
         self._door_stream += 1
         self._door_encoding = encoding
         self._door_active = True
+        if width and height:
+            # The client resizes xterm to a fixed-size door's geometry as soon
+            # as it sees this frame, without a resize event of its own. The
+            # session's size -- which the screen copy and a break-in chat are
+            # drawn at (issues #764, #765) -- follows it, and the browser's own
+            # size is kept for when the door ends.
+            self._pre_door_size = (self.terminal_width, self.terminal_height)
+            self.terminal_width, self.terminal_height = clamp_terminal_size(width, height)
         try:
             await self._ws.send_json({"type": "door_mode", "active": True,
                                      "stream": self._door_stream, "encoding": encoding,
@@ -460,6 +475,9 @@ class WebSession(Session):
         was_active = self._door_active
         self._door_active = False
         self._clear_door_input()
+        if self._pre_door_size is not None:
+            self.terminal_width, self.terminal_height = self._pre_door_size
+            self._pre_door_size = None
         if was_active and not self._ws.closed:
             try:
                 await self._ws.send_json({"type": "door_mode", "active": False,
