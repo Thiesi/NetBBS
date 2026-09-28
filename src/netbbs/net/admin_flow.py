@@ -144,6 +144,8 @@ from netbbs.boards.boards import Board, BoardError, create_board, delete_board, 
 from netbbs.boards.categories import Category, CategoryError
 from netbbs.boards.categories import create_category as create_board_category
 from netbbs.boards.categories import delete_category as delete_board_category
+from netbbs.boards.categories import move_category as move_board_category
+from netbbs.boards.categories import update_category as update_board_category
 from netbbs.boards.categories import get_category_by_id as get_board_category_by_id
 from netbbs.boards.categories import list_subcategories as list_board_subcategories
 from netbbs.boards.categories import list_top_level_categories as list_top_level_board_categories
@@ -165,6 +167,8 @@ from netbbs.chat.moderation import ChannelRestriction, list_active_channel_restr
 from netbbs.chat.categories import CategoryError as ChannelCategoryError
 from netbbs.chat.categories import create_category as create_channel_category
 from netbbs.chat.categories import delete_category as delete_channel_category
+from netbbs.chat.categories import move_category as move_channel_category
+from netbbs.chat.categories import update_category as update_channel_category
 from netbbs.chat.categories import get_category_by_id as get_channel_category_by_id
 from netbbs.chat.categories import list_subcategories as list_channel_subcategories
 from netbbs.chat.categories import list_top_level_categories as list_top_level_channel_categories
@@ -237,6 +241,8 @@ from netbbs.files.categories import FileAreaCategory
 from netbbs.files.categories import FileAreaCategoryError as FileCategoryError
 from netbbs.files.categories import create_category as create_file_category
 from netbbs.files.categories import delete_category as delete_file_category
+from netbbs.files.categories import move_category as move_file_category
+from netbbs.files.categories import update_category as update_file_category
 from netbbs.files.categories import get_category_by_id as get_file_area_category_by_id
 from netbbs.files.categories import list_subcategories as list_file_subcategories
 from netbbs.files.categories import list_top_level_categories as list_top_level_file_categories
@@ -20451,6 +20457,7 @@ async def _category_menu(session: Session, lane: DatabaseLane, actor: User) -> N
                 session, lane, actor,
                 create=create_board_category, list_top_level=list_top_level_board_categories,
                 list_subcategories=list_board_subcategories, delete=delete_board_category,
+                update=update_board_category, move=move_board_category,
                 error_type=CategoryError, title="Message board categories",
             )
             status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
@@ -20461,6 +20468,7 @@ async def _category_menu(session: Session, lane: DatabaseLane, actor: User) -> N
                 session, lane, actor,
                 create=create_file_category, list_top_level=list_top_level_file_categories,
                 list_subcategories=list_file_subcategories, delete=delete_file_category,
+                update=update_file_category, move=move_file_category,
                 error_type=FileCategoryError, title="File-area categories",
             )
             status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
@@ -20471,6 +20479,7 @@ async def _category_menu(session: Session, lane: DatabaseLane, actor: User) -> N
                 session, lane, actor,
                 create=create_channel_category, list_top_level=list_top_level_channel_categories,
                 list_subcategories=list_channel_subcategories, delete=delete_channel_category,
+                update=update_channel_category, move=move_channel_category,
                 error_type=ChannelCategoryError, title="Chat channel categories",
             )
             status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
@@ -20504,7 +20513,7 @@ async def _draw_category_menu(
 
 async def _generic_category_screen(
     session: Session, lane: DatabaseLane, actor: User, *, create, list_top_level, list_subcategories, delete,
-    error_type, title: str,
+    error_type, title: str, update=None, move=None,
 ) -> None:
     description_level = await lane.run(menu_description_level, actor)
     unicode_style = await lane.run(unicode_style_enabled, actor)
@@ -20531,6 +20540,7 @@ async def _generic_category_screen(
             await _list_categories_screen(
                 session, lane, actor, list_top_level=list_top_level,
                 list_subcategories=list_subcategories, delete=delete,
+                update=update, move=move, create=create, error_type=error_type,
             )
             status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
             await _draw_generic_category_menu(session, title, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
@@ -20553,7 +20563,7 @@ async def _draw_generic_category_menu(
         _menu_row(
             [
                 MenuEntry(label=menu_key("C", "reate"), brief="Add a new category"),
-                MenuEntry(label=menu_key("L", "ist/delete"), brief="Browse and remove categories"),
+                MenuEntry(label=menu_key("L", "ist"), brief="Edit, order and remove categories"),
                 MenuEntry(label=menu_key("B", "ack"), brief="Return to Categories"),
             ],
             description_level,
@@ -20565,7 +20575,8 @@ async def _draw_generic_category_menu(
 
 
 async def _create_category_screen(
-    session: Session, lane: DatabaseLane, actor: User, *, create, list_top_level, error_type
+    session: Session, lane: DatabaseLane, actor: User, *, create, list_top_level, error_type,
+    existing=None, update=None,
 ):
     # Returns the category it created, or `None` if the SysOp backed
     # out -- `edit_resource_draft` already returns whatever `save`
@@ -20588,14 +20599,25 @@ async def _create_category_screen(
     accent_color = await lane.run(effective_accent_color_256)
     header_color = await lane.run(effective_header_color_256)
 
+    # With `existing` and `update`, the same draft edits a category
+    # (issue #681): its name, description and parent, prefilled.
     draft: dict = {"name": "", "description": None, "parent": None}
+    if existing is not None:
+        parents = {category.id: category for category in await lane.run(list_top_level)}
+        draft = {
+            "name": existing.name, "description": existing.description,
+            "parent": parents.get(existing.parent_category_id),
+        }
 
     async def _parent_prompt(session: Session, lane: DatabaseLane, draft: dict) -> None:
         # (name, category-or-None) pairs: a "no parent" entry leads the
         # list so clearing a previously chosen parent is a pick like any
         # other, and backing out of the picker keeps the draft as-is.
         choices = [("(none -- a top-level category)", None)]
-        choices += [(category.name, category) for category in await lane.run(list_top_level)]
+        choices += [
+            (category.name, category) for category in await lane.run(list_top_level)
+            if existing is None or category.id != existing.id
+        ]
         selected = await pick_item(
             session, choices,
             name_of=lambda item: item[0],
@@ -20643,6 +20665,13 @@ async def _create_category_screen(
             # (Codex review on #289); the caught error keeps the draft up.
             raise error_type("name cannot be blank")
         parent = draft["parent"]
+        if existing is not None:
+            category = await lane.run(
+                update, existing, name=draft["name"], description=draft["description"],
+                parent_category_id=parent.id if parent is not None else None, changed_by=actor,
+            )
+            _announce_line(session, f"Saved category {category.name!r}.")
+            return category
         category = await lane.run(
             create, draft["name"], description=draft["description"],
             parent_category_id=parent.id if parent is not None else None, created_by=actor,
@@ -20652,7 +20681,7 @@ async def _create_category_screen(
 
     return await edit_resource_draft(
         session, lane,
-        title="Create category",
+        title="Edit category" if existing is not None else "Create category",
         fields=fields, draft=draft, save=save, error_type=error_type,
         save_menu_text=menu_key("S", "ave"), back_menu_text=menu_key("B", "ack"),
         description_level=await lane.run(menu_description_level, actor),
@@ -20663,48 +20692,129 @@ async def _create_category_screen(
 
 
 async def _list_categories_screen(
-    session: Session, lane: DatabaseLane, actor: User, *, list_top_level, list_subcategories, delete
+    session: Session, lane: DatabaseLane, actor: User, *, list_top_level, list_subcategories, delete,
+    update=None, move=None, create=None, error_type=Exception,
 ) -> None:
+    """Every category, each sub-category under its parent, in the SysOp's
+    order (issue #681). Picking one opens its screen, to edit, move or
+    remove it; leaving that comes back here, on it."""
     def _load(db: Database) -> list:
-        top_level = list_top_level(db)
-        all_categories = list(top_level)
-        for top in top_level:
-            all_categories.extend(list_subcategories(db, top.id))
-        return all_categories
+        tree = []
+        for top in list_top_level(db):
+            tree.append(top)
+            tree.extend(list_subcategories(db, top.id))
+        return tree
 
-    all_categories = await lane.run(_load)
-    selected = await pick_item(
-        session, all_categories,
-        name_of=lambda c: c.name,
-        stable_id_of=lambda c: c.id,
-        description_of=lambda c: "top-level" if c.is_top_level else "sub-category",
-        title="Categories",
-        empty_message="No categories yet.",
-        redraw_in_place=await lane.run(redraw_in_place_enabled, actor),
-        unicode_style=await lane.run(unicode_style_enabled, actor),
-        collapsed=await lane.run(breadcrumb_collapsed_enabled, actor),
-        accent_color=await lane.run(effective_accent_color_256),
-        header_color=await lane.run(effective_header_color_256),
-    )
-    if selected is None:
-        return
-    await session.write_line(
-        colored(
-            "\r\nDeleting this category sets any message boards/file areas/chat channels "
-            "assigned to it (and any of its own sub-categories) back to uncategorized.",
-            fg_color=MUTED_COLOR,
+    reopen_at: int | None = None
+    while True:
+        tree = await lane.run(_load)
+        if not tree and reopen_at is not None:
+            # The last category was just removed: that outcome is the message.
+            return
+        by_id = {category.id: category for category in tree}
+        selected = await pick_item(
+            session, tree,
+            name_of=lambda c: c.name if c.is_top_level else f"  - {c.name}",
+            stable_id_of=lambda c: c.id,
+            description_of=lambda c: (
+                f"in {by_id[c.parent_category_id].name}" if not c.is_top_level and c.parent_category_id in by_id
+                else sanitize_text(c.description) if c.description else "top-level"
+            ),
+            title="Categories",
+            empty_message="No categories yet.",
+            start_stable_id=reopen_at,
+            redraw_in_place=await lane.run(redraw_in_place_enabled, actor),
+            unicode_style=await lane.run(unicode_style_enabled, actor),
+            collapsed=await lane.run(breadcrumb_collapsed_enabled, actor),
+            accent_color=await lane.run(effective_accent_color_256),
+            header_color=await lane.run(effective_header_color_256),
         )
-    )
-    await write_prompt(
-        session,
-        f"Type the category name {selected.name!r} to confirm deletion, or anything else to cancel: ",
-    )
-    confirmation = (await session.read_line()).strip()
-    if confirmation != selected.name:
-        _announce_line(session, "Cancelled.")
-        return
-    await lane.run(delete, selected, deleted_by=actor)
-    _announce_line(session, f"{selected.name!r} deleted.")
+        if selected is None:
+            return
+        reopen_at = selected.id
+        await _category_screen(
+            session, lane, actor, selected, list_top_level=list_top_level,
+            list_subcategories=list_subcategories, delete=delete, update=update, move=move,
+            create=create, error_type=error_type,
+        )
+
+
+async def _category_screen(
+    session: Session, lane: DatabaseLane, actor: User, category, *, list_top_level, list_subcategories,
+    delete, update, move, create, error_type,
+) -> None:
+    """One category: what it is, where it sits, and [E]dit, move [U]p or
+    [D]own among its siblings, and [R]emove (issue #681)."""
+    chrome = await _load_chrome(lane, actor)
+
+    def _load(db: Database):
+        siblings = (
+            list_top_level(db) if category.parent_category_id is None
+            else list_subcategories(db, category.parent_category_id)
+        )
+        current = next((sibling for sibling in siblings if sibling.id == category.id), None)
+        parent = (
+            next((top for top in list_top_level(db) if top.id == category.parent_category_id), None)
+            if category.parent_category_id is not None else None
+        )
+        children = list_subcategories(db, category.id) if category.parent_category_id is None else []
+        return current, siblings, parent, children
+
+    while True:
+        current, siblings, parent, children = await lane.run(_load)
+        if current is None:
+            return
+        category = current
+        place = [sibling.id for sibling in siblings].index(category.id)
+        fields = [
+            Field("Description", sanitize_text(category.description) if category.description else "(none)"),
+            Field("Parent", sanitize_text(parent.name) if parent is not None else "(none -- top-level)"),
+            Field("Place", f"{place + 1} of {len(siblings)}"),
+        ]
+        if category.parent_category_id is None:
+            fields.append(Field("Sub-categories", ", ".join(sanitize_text(c.name) for c in children) or "none"))
+        actions = [("e", menu_key("E", "dit"))] if update is not None else []
+        if move is not None and place > 0:
+            actions.append(("u", menu_key("U", "p")))
+        if move is not None and place < len(siblings) - 1:
+            actions.append(("d", menu_key("D", "own")))
+        actions += [("r", menu_key("R", "emove")), _BACK_ACTION]
+        key, _page = await show_detail(
+            session,
+            title=_detail_title(session, chrome, sanitize_text(category.name), breadcrumb=("SysOp", "Categories")),
+            sections=[Section(None, fields)], actions=actions,
+            redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+        )
+        if key == "b":
+            return
+        if key == "e" and update is not None:
+            await _create_category_screen(
+                session, lane, actor, create=create, list_top_level=list_top_level, error_type=error_type,
+                existing=category, update=update,
+            )
+            continue
+        if key in ("u", "d") and move is not None:
+            await lane.run(move, category, -1 if key == "u" else 1, moved_by=actor)
+            continue
+        if key == "r":
+            await session.write_line(
+                colored(
+                    "\r\nDeleting this category sets any message boards/file areas/chat channels "
+                    "assigned to it (and any of its own sub-categories) back to uncategorized.",
+                    fg_color=MUTED_COLOR,
+                )
+            )
+            await write_prompt(
+                session,
+                f"Type the category name {category.name!r} to confirm deletion, or anything else to cancel: ",
+            )
+            confirmation = (await session.read_line()).strip()
+            if confirmation != category.name:
+                _announce_line(session, "Cancelled.")
+                continue
+            await lane.run(delete, category, deleted_by=actor)
+            _announce_line(session, f"{category.name!r} deleted.")
+            return
 
 
 # -- moderator grants -----------------------------------------------------
