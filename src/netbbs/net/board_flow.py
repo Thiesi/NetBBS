@@ -1087,6 +1087,14 @@ async def _show_board(
             if key == "b":
                 return index
             if key == "r" and can_reply:
+                if _reply_target(db, post) is None:
+                    # Expired or removed while this screen was open (Codex
+                    # review on #786): back to the list, which no longer
+                    # shows it.
+                    announce(session, "That post is no longer available to reply to.", tone="error")
+                    page_anchor = None
+                    page = _refetch_current_page()
+                    return None
                 if await _compose_new_post(reply_to=post):
                     # A reply lands on the newest page, like any new post.
                     page_anchor = None
@@ -1175,6 +1183,12 @@ async def _show_board(
         published = {"done": False}
 
         async def _commit(commit_subject: str, commit_body: str) -> bool:
+            if reply_to is not None and _reply_target(db, reply_to) is None:
+                # Gone while the reply was written: the text stays in review
+                # to be copied or cancelled, not published under a post no
+                # one can reach.
+                announce(session, "The post you are replying to is no longer available.", tone="error")
+                return False
             done = await _publish(
                 commit_subject, commit_body, parent_post_id=reply_to.root_post_id if reply_to else None
             )
@@ -1986,6 +2000,15 @@ async def _compose_body(
         draft_path=draft_path,
         keep_pasted_color=keep_pasted_color,
     )
+
+
+def _reply_target(db: Database, post: Post) -> Post | None:
+    """`post` as a reader would find it now, or `None` when a reply to it
+    must not be written: expired, pending, hidden by trust, or removed."""
+    current = visible_post(db, post.root_post_id)
+    if current is None or current.tombstoned_at is not None:
+        return None
+    return current
 
 
 def _reply_quote(db: Database, post: Post, board: Board, *, name_requirement: str | None) -> str:

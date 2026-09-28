@@ -104,7 +104,10 @@ class FakeSession(Session):
     async def read_editor_key(self, **kwargs) -> EditorKey:
         if not self._inputs:
             raise AssertionError("ran out of scripted input (read_editor_key)")
-        return EditorKey(EditorKeyKind.CHAR, char=self._inputs.pop(0))
+        raw = self._inputs.pop(0)
+        if raw.startswith("CTRL+"):
+            return EditorKey(EditorKeyKind.CTRL, char=raw[len("CTRL+"):].lower())
+        return EditorKey(EditorKeyKind.CHAR, char=raw)
 
     async def close(self) -> None:
         pass
@@ -218,3 +221,69 @@ def test_mail_reply_quotes_the_message(tmp_path):
     assert sent[0].subject == "Re: Hello"
     assert sent[0].body.startswith("alice wrote:\n> How are you?\n\nFine, thanks.")
     db.close()
+
+
+# -- review (Codex on #786) ------------------------------------------------------------
+
+
+def test_quoting_a_huge_body_of_blank_lines_is_quick():
+    """A carried body can hold 200,000 blank lines; quoting it must stay
+    linear (the front of the list was popped one line at a time)."""
+    import time
+
+    started = time.monotonic()
+    assert quote_body("\n" * 200_000 + "x", author="a") == "a wrote:\n> x\n"
+    assert time.monotonic() - started < 1.0
+
+
+def test_the_fullscreen_editor_writes_a_reply_like_the_line_editor(db, alice, bob):
+    """The blank line between quote and reply survives, whichever editor
+    the caller uses."""
+    from netbbs.net.editor_preference import set_fullscreen_editor_enabled
+
+    set_fullscreen_editor_enabled(db, bob, True)
+    board = create_board(db, "general", creator=alice)
+    create_post(db, board, alice, "Lunch?", "Anyone for lunch?")
+    session = FakeSession(["1", "r", "", *"Count me in.", "CTRL+O", "p", "b"])
+    asyncio.run(board_flow._show_board(session, db, board, bob))
+    reply = next(p for p in list_posts_page(db, board, bob).posts if p.subject.startswith("Re:"))
+    assert reply.body == "alice wrote:\n> Anyone for lunch?\n\nCount me in."
+
+
+def test_a_long_quote_opens_on_its_end(tmp_path):
+    from netbbs.net.prose_editor import edit_prose
+
+    text = "\n".join(f"quoted line {i}" for i in range(60)) + "\n"
+    session = FakeSession(["CTRL+O"], height=20)
+    result = asyncio.run(edit_prose(
+        session, initial_text=text, draft_path=tmp_path / "d.draft", max_bytes=100_000, cursor_at_end=True,
+    ))
+    assert result == text + "\n"
+    # The renderer places words with cursor moves, not spaces.
+    first_screen = session.visible().replace(" ", "")
+    assert "quotedline59" in first_screen
+    assert "quotedline0" not in first_screen
+
+
+def test_a_post_removed_while_it_was_read_cannot_be_replied_to(db, alice, bob):
+    from netbbs.boards.posts import get_post, tombstone_post
+    from netbbs.moderation import BoardPermission, grant_permissions
+
+    board = create_board(db, "general", creator=alice)
+    grant_permissions(
+        db, alice, object_type="board", object_id=board.id, permissions=BoardPermission.DELETE, granted_by=alice
+    )
+    post = create_post(db, board, alice, "Lunch?", "Anyone for lunch?")
+
+    class RemovingSession(FakeSession):
+        async def read_editor_key(self, **kwargs):
+            key = await super().read_editor_key(**kwargs)
+            if key.char == "r":
+                tombstone_post(db, get_post(db, post.post_id), board, tombstoned_by=alice)
+            return key
+
+    # [R]eply is refused and the reader goes back to the list; [B]ack leaves.
+    session = RemovingSession(["1", "r", "b"])
+    asyncio.run(board_flow._show_board(session, db, board, bob))
+    assert "no longer available to reply to" in session.visible()
+    assert not any(p.subject.startswith("Re:") for p in list_posts_page(db, board, bob).posts)

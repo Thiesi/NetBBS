@@ -120,9 +120,11 @@ async def edit_prose(
     Additional input at the ceiling is refused with a bell and a status
     line indicator, rather than silently dropped with no feedback.
 
-    `cursor_at_end` (issue #675): the cursor starts after the last
-    character rather than at the top -- a reply's quote is above where the
-    reply is written.
+    `cursor_at_end` (issue #675): the cursor starts under the text rather
+    than at the top -- a reply's quote is above where the reply is written.
+    Text that ends in an empty line, as a quote does, keeps it as the blank
+    line between the two, and the cursor starts on a new line below it:
+    the reply comes out as the line editor, which appends, makes it.
 
     `keep_pasted_color` (issue #754): pasted SGR color is typed into the
     text as pipe codes, which the caller will show as color -- a post on
@@ -141,8 +143,13 @@ async def edit_prose(
 
     state = _EditorState(buffer=ProseBuffer.from_text(loaded_text or ""), max_bytes=max_bytes)
     if cursor_at_end:
+        if len(state.buffer.lines) > 1 and state.buffer.lines[-1] == "":
+            state.buffer.lines.append("")
         state.buffer.cursor_line = len(state.buffer.lines) - 1
         state.buffer.cursor_col = len(state.buffer.lines[-1])
+        # A quote taller than the screen opens on its end, where the cursor
+        # is, not on its first line (Codex review on #786).
+        _scroll_into_view(state, width, height)
     # Passed only when asked for, so a Session that predates the option
     # still reads keys here.
     read_options = {"pasted_color": PastedColor()} if keep_pasted_color else {}

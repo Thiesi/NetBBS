@@ -48,12 +48,13 @@ def quote_body(body: str, *, author: str) -> str:
     if _SIGNATURE_DELIMITER in text:
         text = text.rsplit(_SIGNATURE_DELIMITER, 1)[0]
     lines = text.split("\n")
-    while lines and not lines[-1].strip():
-        lines.pop()
-    while lines and not lines[0].strip():
-        lines.pop(0)
-    if not lines:
+    # Found by index, never by popping the front: a carried body of many
+    # thousand blank lines made that quadratic (Codex review on #786).
+    first = next((i for i, line in enumerate(lines) if line.strip()), None)
+    if first is None:
         return ""
+    last = next(i for i in range(len(lines) - 1, -1, -1) if lines[i].strip())
+    lines = lines[first:min(last + 1, first + MAX_QUOTED_LINES + 1)]
 
     quoted: list[str] = []
     size = 0
