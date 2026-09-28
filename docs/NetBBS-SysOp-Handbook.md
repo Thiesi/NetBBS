@@ -404,8 +404,8 @@ draft and save it explicitly.
 **Where callers find it.** The main menu's **Message boards**, **Chat** and
 **Files** list everything of that kind on the node, whichever Community it
 belongs to; a resource with no Community is simply listed there, so you do
-not need a Community to make a board easy to find. **Games** appears once a
-door is registered. **Communities** (key **O**) appears once one exists and
+not need a Community to make a board easy to find. **Games** appears for a
+caller once a registered door is open to their level. **Communities** (key **O**) appears once one exists and
 shows each Community's description and what it holds; give each a
 description, because that is what callers read first.
 
