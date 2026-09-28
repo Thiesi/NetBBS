@@ -20,7 +20,10 @@ from netbbs.net import login_flow
 from netbbs.net.logoff_banner import logoff_banner_path, set_logoff_banner_enabled
 from netbbs.net.maintenance import MaintenanceMode
 from netbbs.net.nodeconfig import ThrottleConfig
-from netbbs.net.profile_flow import _show_logoff_summary_screen
+from netbbs.net.profile_flow import (
+    _LOGOFF_SUMMARY_GRADIENT,
+    _show_logoff_summary_screen,
+)
 from netbbs.net.session_registry import ActiveSessionRegistry
 from netbbs.net.throttle import LoginThrottle
 from netbbs.net.unicode_style_preference import set_unicode_style_enabled
@@ -141,6 +144,45 @@ def test_logoff_summary_formats_duration_and_fits_256_color_terminal(db):
     assert "40 x 24  /  256 COLOR" in visible
     assert "\x1b[38;2;" not in session.output
     assert all(display_width(line) <= 40 for line in visible.splitlines())
+
+
+def _bar_colors(output: str) -> list[tuple[str, str]]:
+    """The (left, right) truecolor SGR of every framed row's side bars."""
+    bars = []
+    for line in output.split("\n"):
+        found = re.findall(r"(\x1b\[[0-9;]*38;2;(\d+;\d+;\d+)m)[^\x1b]*║", line)
+        if len(found) == 2:
+            bars.append((found[0][1], found[1][1]))
+    return bars
+
+
+def test_logoff_summary_side_bars_keep_the_rule_colors(db):
+    """The side bars used to take each row's content color -- the
+    header's, then each fact label's -- instead of continuing the
+    rules' corners: the gradient's first stop on the left, its last on
+    the right."""
+    alice = create_user(db, "alice", password="hunter2pw", user_level=10)
+    set_unicode_style_enabled(db, alice, True)
+    session = FakeSession()
+    session.supports_truecolor = True
+    entry = SessionHistoryEntry(
+        id=1,
+        user_id=alice.id,
+        username_label="alice",
+        connected_at="2026-01-02T10:00:00.000000Z",
+        disconnected_at="2026-01-02T11:02:03.000000Z",
+        interrupted_at=None,
+        name_visible_fallback=True,
+    )
+
+    asyncio.run(_show_logoff_summary_screen(session, db, alice, entry))
+
+    first = ";".join(map(str, _LOGOFF_SUMMARY_GRADIENT[0]))
+    last = ";".join(map(str, _LOGOFF_SUMMARY_GRADIENT[-1]))
+    bars = _bar_colors(session.output)
+    # Title, subtitle and the four facts.
+    assert len(bars) == 6, bars
+    assert set(bars) == {(first, last)}, bars
 
 
 def test_logoff_summary_is_skipped_when_main_menu_exit_is_not_voluntary(db, monkeypatch):

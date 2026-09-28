@@ -255,21 +255,34 @@ def _render_previous_callers_panel(
         )
         return " " * left_pad + rendered + " " * right_pad
 
-    def _framed(content: str, border_color: int | tuple[int, int, int]) -> str:
+    # The side bars continue the rules' corners -- the gradient's first
+    # stop on the left, its last on the right -- rather than taking each
+    # row's content color.
+    # The rules are solid `header_color` on a 256-color session.
+    left_bar_color, right_bar_color = (
+        (
+            gradient_color(_PREVIOUS_CALLERS_GRADIENT, 0.0),
+            gradient_color(_PREVIOUS_CALLERS_GRADIENT, 1.0),
+        )
+        if use_truecolor
+        else (header_color, header_color)
+    )
+
+    def _framed(content: str) -> str:
         padding = max(0, body_width - visible_width(content))
         return (
-            colored(f"{left} ", fg_color=border_color, bold=True)
+            colored(f"{left} ", fg_color=left_bar_color, bold=True)
             + content
             + " " * padding
-            + colored(f" {right}", fg_color=border_color, bold=True)
+            + colored(f" {right}", fg_color=right_bar_color, bold=True)
         )
 
     title = f"{marker}  P R E V I O U S   C A L L E R S  {marker}"
     subtitle = "SIGNALS RECENTLY RECEIVED BY THIS NODE"
     rendered: list[str] = [
         _rule(top_left, top_right),
-        _framed(_centered(title, gradient=True, bold=True), header_color),
-        _framed(_centered(subtitle, gradient=use_truecolor), header_color),
+        _framed(_centered(title, gradient=True, bold=True)),
+        _framed(_centered(subtitle, gradient=use_truecolor)),
         _rule(middle_left, middle_right),
     ]
 
@@ -396,7 +409,7 @@ def _render_previous_callers_panel(
                 (status, status_color),
             ])
         rendered.append(
-            _framed(colored_truncate(segments, body_width), rail_color)
+            _framed(colored_truncate(segments, body_width))
         )
 
     rendered.append(_rule(bottom_left, bottom_right))
@@ -584,11 +597,6 @@ async def _show_logoff_summary_screen(
 
     frame_width = min(76, terminal_width)
     body_width = frame_width - 4
-    header_color = (
-        effective_header_color(session, db)
-        if use_truecolor
-        else effective_header_color_256(db)
-    )
     accent_color = (
         effective_accent_color(session, db)
         if use_truecolor
@@ -612,13 +620,23 @@ async def _show_logoff_summary_screen(
             bold=True,
         )
 
-    def _framed(content: str, border_color: int | tuple[int, int, int]) -> str:
+    # The side bars continue the rules' corners -- the gradient's first
+    # stop on the left, its last on the right -- rather than taking each
+    # row's content color.
+    left_bar_color = gradient_color(
+        _LOGOFF_SUMMARY_GRADIENT, 0.0, truecolor=use_truecolor
+    )
+    right_bar_color = gradient_color(
+        _LOGOFF_SUMMARY_GRADIENT, 1.0, truecolor=use_truecolor
+    )
+
+    def _framed(content: str) -> str:
         padding = max(0, body_width - visible_width(content))
         return (
-            colored(f"{left} ", fg_color=border_color, bold=True)
+            colored(f"{left} ", fg_color=left_bar_color, bold=True)
             + content
             + " " * padding
-            + colored(f" {right}", fg_color=border_color, bold=True)
+            + colored(f" {right}", fg_color=right_bar_color, bold=True)
         )
 
     def _centered(text: str, *, gradient: bool = False) -> str:
@@ -634,9 +652,8 @@ async def _show_logoff_summary_screen(
         _rule(top_left, top_right),
         _framed(
             _centered(f"{marker}  C A L L   C O M P L E T E  {marker}", gradient=True),
-            header_color,
         ),
-        _framed(_centered("FINAL SESSION TELEMETRY"), header_color),
+        _framed(_centered("FINAL SESSION TELEMETRY")),
         _rule(middle_left, middle_right),
     ]
     for index, (label, value) in enumerate(facts):
@@ -652,7 +669,7 @@ async def _show_logoff_summary_screen(
             ],
             body_width,
         )
-        rendered.append(_framed(content, rail_color))
+        rendered.append(_framed(content))
     rendered.append(_rule(bottom_left, bottom_right))
     await session.write_line("\r\n" + "\r\n".join(rendered))
 

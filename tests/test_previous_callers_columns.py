@@ -21,7 +21,10 @@ import re
 import pytest
 
 from netbbs.auth.users import create_user
-from netbbs.net.profile_flow import _show_previous_callers_screen
+from netbbs.net.profile_flow import (
+    _PREVIOUS_CALLERS_GRADIENT,
+    _show_previous_callers_screen,
+)
 from netbbs.rendering import display_width
 from netbbs.session_history import (
     record_session_end,
@@ -229,6 +232,28 @@ def test_the_gradient_covers_the_name_not_its_padding(tmp_path):
     # which are colored separately by `_framed`/`_rule` and legitimately
     # include a space.
     assert len(colored) < 10, colored
+
+
+def test_the_side_bars_keep_the_rule_colors(tmp_path):
+    """The side bars used to take each row's rail color, which moves
+    down the gradient row by row, instead of continuing the rules'
+    corners."""
+    db, viewer = _setup(tmp_path, ["al", "Bartholomew", "zoe"])
+    session = FakeSession()
+    session.supports_truecolor = True
+    asyncio.run(_show_previous_callers_screen(session, db, viewer, current_history_id=None))
+    db.close()
+
+    first = ";".join(map(str, _PREVIOUS_CALLERS_GRADIENT[0]))
+    last = ";".join(map(str, _PREVIOUS_CALLERS_GRADIENT[-1]))
+    bars = []
+    for line in session.output.split("\n"):
+        found = re.findall(r"\x1b\[[0-9;]*38;2;(\d+;\d+;\d+)m[^\x1b]*║", line)
+        if len(found) == 2:
+            bars.append(tuple(found))
+    # Title, subtitle and the three callers.
+    assert len(bars) == 5, bars
+    assert set(bars) == {(first, last)}, bars
 
 
 def test_a_tab_in_the_timestamp_format_does_not_break_the_columns(tmp_path, monkeypatch):
