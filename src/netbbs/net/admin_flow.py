@@ -779,6 +779,17 @@ def _link_health_snapshot(db: Database, link_context: LinkContext | None) -> dic
     }
 
 
+async def _with_fresh_carry_counts(lane: DatabaseLane, state: dict[str, object]) -> dict[str, object]:
+    """`state` with its carry attention counts read again: a sub-console
+    that leads to Link status may have decided offers there (Codex review
+    on #800). Two counts, not the whole dashboard reload."""
+    fresh = await lane.run(lambda db: {
+        "carried_to_review": count_carried_to_review(db),
+        "carry_offers": count_carry_decisions(db, OFFERED),
+    })
+    return {**state, **fresh}
+
+
 def _carry_attention_pairs(state: dict[str, object]) -> list[tuple[str, int]]:
     """The dashboard's Link attention counts (issue #681), only when there
     is something to attend to: a node with nothing new draws as before."""
@@ -1397,11 +1408,15 @@ async def admin_menu(
             await _operations_menu(
                 session, lane, user, node_controls=node_controls, link_context=link_context
             )
+            # Link status is reachable from here too: its offer decisions
+            # show, without reloading the rest (Codex review on #800).
+            dashboard_state = await _with_fresh_carry_counts(lane, dashboard_state)
             await _draw_admin_menu(session, lane, user, node_controls=node_controls,
                                    link_context=link_context, state=dashboard_state)
         elif choice == "s":
             await session.write_line("")
             await _system_menu(session, lane, user, node_controls=node_controls, link_context=link_context)
+            dashboard_state = await _with_fresh_carry_counts(lane, dashboard_state)
             await _draw_admin_menu(session, lane, user, node_controls=node_controls,
                                    link_context=link_context, state=dashboard_state)
         elif choice == "n" and node_controls is not None:

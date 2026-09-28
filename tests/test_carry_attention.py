@@ -146,3 +146,26 @@ def test_the_dashboard_is_reloaded_after_link_status(db, lane, sysop, remote, ow
     last_dashboard = " ".join(_visible(_written_text(session)).split()).rsplit("ATTENTION", 1)[1]
 
     assert "Offered: 1" not in last_dashboard
+
+
+
+def test_the_counts_are_fresh_after_link_status_inside_operations(db, lane, sysop, remote, own):
+    """Codex review on #800: Operations leads to Link status as well."""
+    from netbbs.link.carry import exclude_offer
+    from netbbs.net import admin_flow
+
+    _carry(db, remote, own, cap=0)
+
+    async def _decide_in_operations(session, lane, user, **kwargs):
+        await lane.run(lambda db: exclude_offer(db, "boards", BOARD_ID, actor=user))
+
+    original = admin_flow._operations_menu
+    admin_flow._operations_menu = _decide_in_operations
+    try:
+        session = FakeSession(["o", "b"])
+        asyncio.run(admin_menu(session, lane, sysop, link_context=_link_context()))
+    finally:
+        admin_flow._operations_menu = original
+    last_dashboard = " ".join(_visible(_written_text(session)).split()).rsplit("ATTENTION", 1)[1]
+
+    assert "Offered: 1" not in last_dashboard
