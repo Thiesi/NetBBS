@@ -366,8 +366,10 @@ def username_skeleton(name: str) -> str:
     equal (issue #835): case folded, the separators '_', '-' and '.'
     dropped, and look-alike characters (0/o, 1/l/i, 5/s, rn/m, vv/w)
     folded together. "InkWell", "lnk_well" and "1NKWELL" share one."""
-    folded = name.casefold().replace("rn", "m").replace("vv", "w")
-    folded = "".join(ch for ch in folded if ch not in "_-.")
+    # Separators first (Claude review): "r.nod" must fold to "mod" too, and
+    # would not if the digraphs were matched before the dot came out.
+    folded = "".join(ch for ch in name.casefold() if ch not in "_-.")
+    folded = folded.replace("rn", "m").replace("vv", "w")
     return folded.translate(_SKELETON_FOLD)
 
 

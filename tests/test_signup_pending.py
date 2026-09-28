@@ -219,6 +219,9 @@ def test_username_skeleton_folds_look_alikes():
     assert username_skeleton("InkWell") == username_skeleton("lnk_well") == username_skeleton("1NKWELL")
     assert username_skeleton("Sys0p") == username_skeleton("s.y.s.o.p") == "sysop"
     assert username_skeleton("corn") == username_skeleton("com")
+    # A separator inside a digraph does not hide it.
+    assert username_skeleton("r.nod") == username_skeleton("mod")
+    assert username_skeleton("v_v") == username_skeleton("w")
     assert username_skeleton("alice") != username_skeleton("alicia")
 
 
