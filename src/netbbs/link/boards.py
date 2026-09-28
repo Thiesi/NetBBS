@@ -738,10 +738,16 @@ def is_withdrawal_edit(db: Database, edit: BoardPostEdit) -> bool:
     payload = edit.payload
     if payload.get("withdrawn") is not True or payload.get("body") != WITHDRAWN_PLACEHOLDER:
         return False
+    # The predecessor must be one readers here were shown: a held edit's
+    # new subject, copied into the withdrawal, would otherwise be published
+    # past the moderation holding it (Codex review on #789).
     previous = db.connection.execute(
-        "SELECT subject FROM posts WHERE post_id = ?", (payload.get("previous_event_id"),)
+        "SELECT subject, status FROM posts WHERE post_id = ?", (payload.get("previous_event_id"),)
     ).fetchone()
-    return previous is not None and previous["subject"] == payload.get("subject")
+    return (
+        previous is not None and previous["status"] == "approved"
+        and previous["subject"] == payload.get("subject")
+    )
 
 
 def _retain_only(db: Database, event, object_type: str, sender_fingerprint: str, board_id: str) -> None:
@@ -1615,7 +1621,7 @@ def _resolve_edit_chain_predecessors(db: Database, edited_post: Post) -> tuple[B
         """
         SELECT post_id, link_event_json FROM posts
         WHERE root_post_id = ? AND board_id = ? AND status = 'approved' AND post_id != ?
-        ORDER BY created_at DESC, id DESC
+        ORDER BY id DESC
         LIMIT 1
         """,
         (edited_post.root_post_id, edited_post.board_id, edited_post.post_id),

@@ -377,7 +377,7 @@ def edit_post(
         """
         SELECT * FROM posts
         WHERE root_post_id = ? AND board_id = ? AND status = 'approved'
-        ORDER BY created_at DESC, id DESC
+        ORDER BY id DESC
         LIMIT 1
         """,
         (post.root_post_id, board.id),
@@ -387,13 +387,16 @@ def edit_post(
     if current["tombstoned_at"] is not None:
         raise PostError("this post has been tombstoned and can no longer be edited")
 
-    if subject == current["subject"] and body == current["body"]:
+    if subject == current["subject"] and body == current["body"] and not withdrawal:
         # No-op edit (GitHub issue #41): every edit gets a fresh
         # created_at, which alone would produce a new content-addressed
         # post_id and make list_posts_page/_resolve_current_version
         # treat this as a genuine newer revision -- misleadingly marking
         # an unchanged post "(edited)". Skip the new row/is_edited flip
-        # entirely when nothing actually changed.
+        # entirely when nothing actually changed. Not for a withdrawal,
+        # though: text that already reads as the placeholder is still not
+        # withdrawn until a withdrawal revision says so (Codex review on
+        # #789) -- it is what clears the pin and carries the Link flag.
         return _row_to_post(current)
 
     # A withdrawal (`withdraw_post`) only takes text away, so it is not
@@ -568,6 +571,15 @@ def _resolve_current_version(db: Database, root_row: sqlite3.Row) -> Post:
     this query picks among competing revisions of the *same* post, where
     picking wrong is a real correctness bug, not just a display quirk.
 
+    Which revision is newest is local receipt order (`id`), not
+    `created_at` (issue #675, Codex review on #789): a carried revision's
+    `created_at` is its author's clock, display metadata that may run
+    backwards (design doc §7.2), while the Link accepts an edit only when
+    it extends the chain's current head, so rows arrive -- and the
+    rebuild re-inserts them -- in chain order. A local edit's `id` and time
+    agree anyway. Every "current revision" query in this module, the
+    search index and the Link's predecessor lookup use the same order.
+
     `tombstoned_at` is also substituted from the latest revision (design
     doc §9.5, issue #88), same as `subject`/`body` -- without this, a
     tombstoned post's placeholder content would display correctly but
@@ -578,7 +590,7 @@ def _resolve_current_version(db: Database, root_row: sqlite3.Row) -> Post:
         """
         SELECT * FROM posts
         WHERE root_post_id = ? AND board_id = ? AND status = 'approved'
-        ORDER BY created_at DESC, id DESC
+        ORDER BY id DESC
         LIMIT 1
         """,
         (root_row["root_post_id"], root_row["board_id"]),
@@ -1077,7 +1089,7 @@ def tombstone_post(db: Database, post: Post, board: Board, *, tombstoned_by: Use
         """
         SELECT * FROM posts
         WHERE root_post_id = ? AND board_id = ? AND status = 'approved'
-        ORDER BY created_at DESC, id DESC
+        ORDER BY id DESC
         LIMIT 1
         """,
         (post.root_post_id, board.id),
@@ -1129,6 +1141,20 @@ def tombstone_post(db: Database, post: Post, board: Board, *, tombstoned_by: Use
     return get_post(db, new_post_id)
 
 
+def _refuse_if_withdrawn(db: Database, post: Post) -> None:
+    """A withdrawn post is not pinned or kept either (issue #675): the
+    withdrawal cleared both, and setting them again would put the
+    placeholder back at the top of the board or keep it past its expiry
+    (Codex review on #789). Unpinning or un-keeping stays allowed."""
+    current = db.connection.execute(
+        "SELECT withdrawn FROM posts WHERE root_post_id = ? AND board_id = ? AND status = 'approved' "
+        "ORDER BY id DESC LIMIT 1",
+        (post.root_post_id, post.board_id),
+    ).fetchone()
+    if current is not None and current["withdrawn"]:
+        raise PostError("this post has been withdrawn by its author")
+
+
 def _refuse_if_removed(db: Database, post: Post) -> None:
     """A removed post is neither pinned nor kept (issue #675): removal
     clears both, and a reader left open since must not set them again on
@@ -1158,6 +1184,8 @@ def set_post_pinned(db: Database, post: Post, pinned: bool, *, changed_by: User)
     _refuse_if_board_hidden(db, post.board_id)
     _require_board_permission(db, post, changed_by, BoardPermission.EDIT)
     _refuse_if_removed(db, post)
+    if pinned:
+        _refuse_if_withdrawn(db, post)
 
     db.connection.execute(
         "UPDATE posts SET pinned = ? WHERE root_post_id = ? AND board_id = ?",
@@ -1188,6 +1216,8 @@ def set_post_exempt(db: Database, post: Post, exempt: bool, *, changed_by: User)
     _refuse_if_board_hidden(db, post.board_id)
     _require_board_permission(db, post, changed_by, BoardPermission.EDIT)
     _refuse_if_removed(db, post)
+    if exempt:
+        _refuse_if_withdrawn(db, post)
 
     db.connection.execute(
         "UPDATE posts SET exempt_from_expiry = ? WHERE root_post_id = ? AND board_id = ?",
@@ -1316,52 +1346,26 @@ def list_post_revisions(db: Database, post: Post, board: Board, *, requesting_us
     moderator edit needs; anyone else gets `PostError`. A moderator sees
     every version, those of a removed or withdrawn post included.
 
-    In the chain's own order, following each revision's link to the one it
-    replaced (`edit_of_post_id`), not by `created_at`: a carried revision's
-    time is its author's clock, which is display metadata and may run
-    backwards (design doc §7.2). Expired and pending revisions are left
-    out, and so is the removal placeholder. Expiry is swept first: it is
-    applied lazily, and a version may pass its age while the reader is
-    open.
+    In local receipt order (`id`), which is the chain's order -- see
+    `_resolve_current_version` -- and never `created_at`, another node's
+    clock. The read itself is bounded to the tail: a carried chain's
+    length is set by another node (Codex review on #789). Expired and
+    pending revisions are left out, and so is the removal placeholder.
+    Expiry is swept first: it is applied lazily, and a version may pass
+    its age while the reader is open.
     """
     _require_board_permission(db, post, requesting_user, BoardPermission.EDIT)
     _sweep_expired_posts(db, board)
     rows = db.connection.execute(
-        "SELECT * FROM posts WHERE root_post_id = ? AND board_id = ?",
-        (post.root_post_id, post.board_id),
+        """
+        SELECT * FROM posts
+        WHERE root_post_id = ? AND board_id = ? AND status = 'approved' AND tombstoned_at IS NULL
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (post.root_post_id, post.board_id, MAX_LISTED_REVISIONS),
     ).fetchall()
-    shown = [
-        row for row in _in_chain_order(rows)
-        if row["status"] == "approved" and row["tombstoned_at"] is None
-    ][-MAX_LISTED_REVISIONS:]
-    return [Revision(_row_to_post(row), _is_moderator_revision(db, row)) for row in shown]
-
-
-def _in_chain_order(rows: list[sqlite3.Row]) -> list[sqlite3.Row]:
-    """`rows` of one chain, each after the revision it replaced. Measured by
-    how many links lie between a row and the root; rows at the same depth
-    -- two pending edits of one version -- keep their local arrival order,
-    which is monotonic (`id`)."""
-    by_post_id = {row["post_id"]: row for row in rows}
-    depths: dict[str, int] = {}
-
-    def depth(row: sqlite3.Row) -> int:
-        seen: list[sqlite3.Row] = []
-        current = row
-        while current["post_id"] not in depths:
-            seen.append(current)
-            previous = by_post_id.get(current["edit_of_post_id"]) if current["edit_of_post_id"] else None
-            if previous is None or previous in seen:
-                depths[current["post_id"]] = 0
-                seen.pop()
-                break
-            current = previous
-        for walked in reversed(seen):
-            previous = by_post_id[walked["edit_of_post_id"]]
-            depths[walked["post_id"]] = depths[previous["post_id"]] + 1
-        return depths[row["post_id"]]
-
-    return sorted(rows, key=lambda row: (depth(row), row["id"]))
+    return [Revision(_row_to_post(row), _is_moderator_revision(db, row)) for row in reversed(rows)]
 
 
 def _is_moderator_revision(db: Database, row: sqlite3.Row) -> bool:

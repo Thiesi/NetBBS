@@ -347,7 +347,7 @@ def reindex_post(db: Database, board_id: int, root_post_id: str) -> None:
         """
         SELECT * FROM posts
         WHERE root_post_id = ? AND board_id = ? AND status = 'approved'
-        ORDER BY created_at DESC, id DESC
+        ORDER BY id DESC
         LIMIT 1
         """,
         (root_post_id, board_id),

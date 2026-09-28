@@ -482,6 +482,9 @@ def _can_pin_post(db: Database, post: Post, user: User) -> bool:
     carried board's moderator pins for this node's callers only."""
     if post.tombstoned_at is not None:
         return False
+    if post.withdrawn and not (post.pinned or post.exempt_from_expiry):
+        # A withdrawn post may be unpinned or un-kept, never pinned or kept.
+        return False
     return has_permission(db, user, object_type="board", object_id=post.board_id, permission=BoardPermission.EDIT)
 
 
@@ -2104,8 +2107,20 @@ async def _withdraw_existing_post(
     except PostError as exc:
         announce(session, f"Could not withdraw: {exc}.", tone="error")
         return False
-    if link_context is not None:
+    sent = (
         queue_board_post_edit_if_linked(db, withdrawn, board, node_identity=link_context.node_identity, edited_by=user)
+        if link_context is not None else None
+    )
+    if is_board_linked(db, board) and sent is None:
+        # The post's local chain has a gap the Link cannot extend (an edit
+        # made while Link was off), so other nodes keep the old text. Said,
+        # not hidden behind "withdrawn" (Codex review on #789).
+        announce(
+            session,
+            "Post withdrawn here, but it could not be sent to other nodes: they keep showing the old text.",
+            tone="error",
+        )
+        return True
     announce(session, "Post withdrawn.")
     return True
 

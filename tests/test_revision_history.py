@@ -322,3 +322,44 @@ def test_the_author_withdraws_from_the_reader(db, clock, board, alice, reader):
     session = FakeSession(["1", "b", "b"])
     asyncio.run(board_flow._show_board(session, db, board, reader))
     assert "[W]ithdraw" not in session.visible()
+
+
+# -- review (Codex on #789) -------------------------------------------------------------
+
+
+def test_text_that_already_reads_as_the_placeholder_is_still_withdrawn(db, clock, board, alice):
+    post = create_post(db, board, alice, "Plans", "v1")
+    _edit(db, board, post, WITHDRAWN_PLACEHOLDER, alice)  # typed by hand: not a withdrawal
+    assert not visible_post(db, post.post_id).withdrawn
+    withdraw_post(db, visible_post(db, post.post_id), board, withdrawn_by=alice)
+    assert visible_post(db, post.post_id).withdrawn
+
+
+def test_a_withdrawn_post_cannot_be_pinned_or_kept_again(db, clock, board, alice, mod):
+    from netbbs.boards.posts import set_post_exempt, set_post_pinned
+
+    post = create_post(db, board, alice, "Plans", "v1")
+    withdraw_post(db, post, board, withdrawn_by=alice)
+    shown = visible_post(db, post.post_id)
+    with pytest.raises(PostError, match="withdrawn"):
+        set_post_pinned(db, shown, True, changed_by=mod)
+    with pytest.raises(PostError, match="withdrawn"):
+        set_post_exempt(db, shown, True, changed_by=mod)
+    set_post_pinned(db, shown, False, changed_by=mod)  # unpinning stays allowed
+
+
+def test_a_withdrawal_the_link_cannot_carry_says_so(db, clock, alice, mod):
+    """A post written before its board was Linked has no chain to extend;
+    the author is told other nodes keep the old text (Codex review on
+    #789)."""
+    from netbbs.link.boards import link_board
+    from netbbs.link.node_identity import bootstrap_node_identity
+    from netbbs.net.notices import take_notices
+
+    board = create_board(db, "linked", creator=alice)
+    post = create_post(db, board, alice, "Plans", "v1")  # before linking
+    link_board(db, board, node_identity=bootstrap_node_identity("here"))
+    session = FakeSession(["y"])
+    assert asyncio.run(board_flow._withdraw_existing_post(session, db, board, post, alice, link_context=None))
+    notices = _SGR.sub("", "".join(take_notices(session)))
+    assert "could not be sent to other nodes" in notices

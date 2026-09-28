@@ -1693,7 +1693,10 @@ def _carried_moderated_root(db, remote_node_identity):
     return board_id, root
 
 
-def _remote_edit(remote_node_identity, root, *, subject="Plans", body=None, withdrawn=False):
+def _remote_edit(
+    remote_node_identity, root, *, subject="Plans", body=None, withdrawn=False,
+    previous=None, created_at="2026-01-01T00:05:00Z",
+):
     from netbbs.boards.posts import WITHDRAWN_PLACEHOLDER
 
     return build_board_post_edit(
@@ -1701,10 +1704,10 @@ def _remote_edit(remote_node_identity, root, *, subject="Plans", body=None, with
         author=root.payload["author"],
         board_id=root.payload["board_id"],
         root_post_id=root.content_id,
-        previous_event_id=root.content_id,
+        previous_event_id=previous or root.content_id,
         subject=subject,
         body=WITHDRAWN_PLACEHOLDER if body is None else body,
-        created_at="2026-01-01T00:05:00Z",
+        created_at=created_at,
         withdrawn=withdrawn,
     )
 
@@ -1763,3 +1766,28 @@ def test_a_local_withdrawal_is_sent_with_the_flag(db, alice, node_identity):
     again = edit_post(db, withdrawn, board, subject="Plans", body="on second thought", edited_by=alice)
     ordinary = queue_board_post_edit_if_linked(db, again, board, node_identity=node_identity, edited_by=alice)
     assert "withdrawn" not in ordinary.payload
+
+
+def test_a_carried_withdrawal_shows_even_when_its_clock_runs_behind(db, remote_node_identity):
+    """The author's clock is display metadata; the chain decides which
+    revision is current (Codex review on #789)."""
+    from netbbs.boards.posts import WITHDRAWN_PLACEHOLDER, visible_post
+
+    _, root = _carried_moderated_root(db, remote_node_identity)
+    edit = _remote_edit(remote_node_identity, root, withdrawn=True, created_at="2025-06-01T00:00:00Z")
+    materialize_carried_post_edit(db, edit, sender_fingerprint=remote_node_identity.fingerprint)
+    assert visible_post(db, root.content_id).body == WITHDRAWN_PLACEHOLDER
+
+
+def test_a_withdrawal_cannot_publish_a_held_subject(db, remote_node_identity):
+    """A held edit's new subject, copied into a withdrawal, stays held
+    (Codex review on #789)."""
+    _, root = _carried_moderated_root(db, remote_node_identity)
+    held = _remote_edit(remote_node_identity, root, subject="A new subject", body="new text")
+    assert materialize_carried_post_edit(db, held, sender_fingerprint=remote_node_identity.fingerprint).status == "pending"
+    withdrawal = _remote_edit(
+        remote_node_identity, root, subject="A new subject", withdrawn=True, previous=held.content_id,
+        created_at="2026-01-01T00:06:00Z",
+    )
+    materialized = materialize_carried_post_edit(db, withdrawal, sender_fingerprint=remote_node_identity.fingerprint)
+    assert materialized.status == "pending" and not materialized.withdrawn
