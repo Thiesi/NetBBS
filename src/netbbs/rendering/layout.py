@@ -568,6 +568,7 @@ def menu_grid(
     width: int = 80,
     height: int | None = None,
     description_level: str = "off",
+    min_entries_per_column: int = _MIN_ENTRIES_PER_COLUMN,
 ) -> str:
     """Render named menu groups in columns when space permits, one
     column per fixed width breakpoint (GitHub issue #160: 1 below 72,
@@ -597,6 +598,11 @@ def menu_grid(
     for, a standing muted note is appended explaining why -- mirroring
     this codebase's existing "AT LENGTH LIMIT"-style always-visible
     state indicators, not a one-off flash the caller could miss.
+
+    `min_entries_per_column` is how full a column of a lone flat section
+    must be before it splits into columns. A picker's nav passes 1: its
+    entries are short paging keys, and at three of them one column costs
+    the list two rows of items (issue #838).
     """
     if width < 1:
         raise ValueError("width must be >= 1")
@@ -630,7 +636,7 @@ def menu_grid(
     if columns == 1 and len(populated) == 1 and populated[0][0] == "":
         flat_entries = populated[0][1]
         flat_columns = _column_count(width, len(flat_entries))
-        if flat_columns > 1 and len(flat_entries) >= flat_columns * _MIN_ENTRIES_PER_COLUMN:
+        if flat_columns > 1 and len(flat_entries) >= flat_columns * min_entries_per_column:
             result = "\r\n".join(
                 _flat_entry_columns(
                     flat_entries, description_level=effective_level, width=width, columns=flat_columns

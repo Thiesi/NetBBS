@@ -4857,10 +4857,9 @@ async def _published_identity_screen(
         selected = await pick_item(
             session, live,
             name_of=_issued_subject,
-            # `pick_item`'s [G]oto # parses its input with `int()` and compares
-            # that to `stable_id_of`, so a hex content_id makes the advertised
-            # goto path unusable -- the same derivation the other hash-backed
-            # trust pickers use (Codex review of #590).
+            # `pick_item` wants an `int` identity per row, and a hex content_id
+            # is not one -- the same derivation the other hash-backed trust
+            # pickers use (Codex review of #590).
             stable_id_of=lambda record: _stable_id_for(record.content_id),
             description_of=lambda record: f"signed {record.issued_at[:10]}, expires {record.expires_at[:10]}",
             columns=_ISSUED_COLUMNS,
@@ -5590,7 +5589,7 @@ async def _pick_target_user(session: Session, lane: DatabaseLane, actor: User, *
     by name, and paying for this screen's features with the thing they
     asked for is not a refactor, it is a regression with a tidy diff.
 
-    The filter scopes search and goto too, as it did before -- the whole
+    The filter scopes search too, as it did before -- the whole
     point of hiding a class of accounts is to stop having to reach them
     until the SysOp widens the filter again.
     """
@@ -17125,7 +17124,7 @@ def _load_pending_items(
     """Everything `actor` may decide on in `boards` and `areas` (every
     board and area when both are `None`), oldest first, at most
     `MAX_QUEUE_ITEMS` of it, and whether more waits. Each item keeps its
-    own id as its `(#N)`; in the node-wide queue, where a post and a file
+    own id as its picker identity; in the node-wide queue, where a post and a file
     may share an id, a file's is negative, as category pickers do
     (worklog, "Stable identity and pagination")."""
     node_wide = boards is None and areas is None

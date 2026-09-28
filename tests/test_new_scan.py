@@ -259,14 +259,12 @@ def test_selecting_a_channel_calls_browse_channels_with_that_channel(db, lane, a
     assert calls[0].id == channel.id
 
 
-def test_new_scan_numbers_its_rows_rather_than_printing_an_address(db, lane, alice):
-    """`pick_item` prints each row's stable id as its `(#N)` reference,
-    and `id(item)` is about fifteen digits -- at 40 columns that prefix
-    plus an ordinary name consumed the whole row, clipping the
-    description away before anyone could read it (issue #541, Codex
-    review). A row number is equally stable for as long as this list
-    exists, and makes `[G]oto #` mean something here for the first
-    time."""
+def test_new_scan_rows_print_no_reference_number(db, lane, alice):
+    """`pick_item` used to print each row's stable id as a `(#N)`
+    reference, and `id(item)` is about fifteen digits -- at 40 columns
+    that prefix plus an ordinary name consumed the whole row (issue
+    #541). Issue #838 removed the reference from every picker; a row
+    shows only the number that selects it."""
     import re
 
     other = create_user(db, "bob", password="hunter2", user_level=10)
@@ -276,8 +274,8 @@ def test_new_scan_numbers_its_rows_rather_than_printing_an_address(db, lane, ali
     session = _run_main_menu(db, lane, alice, ["n", "b", "b", "l", "y"])
     text = _written_text(session)
 
-    assert "(#1)" in text
-    assert not re.search(r"\(#\d{6,}\)", text), "a reference number nobody could type or read"
+    assert re.search(r"01\. ", text)
+    assert "(#" not in text
 
 
 # -- issue #710: [M]ark read -------------------------------------------------
@@ -330,7 +328,7 @@ def test_mark_read_brings_the_replies_summary_up_to_date(db, lane, alice, monkey
 
 def test_mark_read_keeps_each_row_where_it_was(db, lane, alice, monkeypatch):
     """Activity can reorder the boards while [M]ark read reloads them; the
-    rows stay where they were, so (#N) still names the same board."""
+    rows stay where they were, so a row's number still names the same board."""
     from netbbs.activity import ensure_board_baseline
 
     first = create_board(db, "first-board", creator=alice)

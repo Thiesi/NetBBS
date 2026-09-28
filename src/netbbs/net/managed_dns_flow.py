@@ -823,9 +823,9 @@ async def administer_service(session: Session, lane: DatabaseLane, actor: User) 
     if rows is None:
         return
 
-    # The goto number is the row's position in the service's own
-    # name-ordered table: short, and as stable as that table between two
-    # refreshes, which is all the picker asks of it here. Rebuilt on
+    # A row's identity is its position in the service's own name-ordered
+    # table: as stable as that table between two refreshes, which is all
+    # the picker asks of it here. Rebuilt on
     # every load, since Ctrl-R can bring rows that were not there when
     # the screen opened (Codex review of PR #609).
     positions: dict[str, int] = {}

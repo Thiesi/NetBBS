@@ -154,15 +154,15 @@ def test_name_segments_of_colors_each_field_independently():
     asyncio.run(scenario())
 
 
-def test_search_and_goto_are_rejected_when_the_list_is_empty_but_refreshable():
+def test_search_is_rejected_when_the_list_is_empty_but_refreshable():
     """
     Dogfood report, issue #155: an empty list with a `refresh` callback
     (Who's Online's own use, so Ctrl-R can revive a list that goes
     stale while you're looking at it) stays in the interactive loop
     instead of the plain early-return a refresh-less empty list gets --
-    [S]earch and [G]oto # must not be silently functional there just
-    because that loop is still running, when neither is even shown on
-    the empty-state prompt.
+    [S]earch must not be silently functional there just because that
+    loop is still running, when it is not even shown on the empty-state
+    prompt.
     """
     result = {}
 
@@ -184,19 +184,12 @@ def test_search_and_goto_are_rejected_when_the_list_is_empty_but_refreshable():
             first = await _read_until_quiet(reader)
             assert b"No one else is online right now." in first
             assert b"Search" not in first
-            assert b"Goto" not in first
 
             writer.write(b"s")
             await writer.drain()
             after_search = await _read_until_quiet(reader)
             assert b"\a" in after_search
             assert b"Search:" not in after_search
-
-            writer.write(b"g")
-            await writer.drain()
-            after_goto = await _read_until_quiet(reader)
-            assert b"\a" in after_goto
-            assert b"Go to #:" not in after_goto
 
             writer.write(b"b")
             await writer.drain()
@@ -273,7 +266,7 @@ def test_ctrl_h_shows_real_navigation_help():
         return help_text
 
     help_text = asyncio.run(scenario())
-    assert b"permanent '(#N)' reference" in help_text
+    assert b"Goto" not in help_text  # issue #838
     assert b"Order" not in help_text  # no on_sort given to this picker
 
 
@@ -781,107 +774,6 @@ def test_search_tab_completion_offers_what_the_search_will_actually_find():
     assert result["value"] == "alpha"
 
 
-# -- goto --------------------------------------------------------------
-
-
-def test_goto_absolute_index():
-    result = {}
-    items = [f"item{i}" for i in range(1, 21)]
-
-    async def handler(session: Session):
-        result["value"] = await pick_item(
-            session, items, name_of=lambda x: x, stable_id_of=lambda x: items.index(x) + 1, title="Items", empty_message="none"
-        )
-
-    async def scenario():
-        server = await _run_server(handler)
-        try:
-            reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
-            await skip_initial_negotiation(reader)
-            await _read_until_quiet(reader)
-            writer.write(b"g")
-            await writer.drain()
-            await _read_until_quiet(reader)
-            writer.write(b"15\r\n")
-            await writer.drain()
-            await _read_until_quiet(reader)
-            writer.close()
-            await writer.wait_closed()
-        finally:
-            await server.stop()
-
-    asyncio.run(scenario())
-    assert result["value"] == "item15"
-
-
-def test_goto_out_of_range_reports_and_stays_in_picker():
-    result = {}
-    items = ["a", "b", "c"]
-
-    async def handler(session: Session):
-        result["value"] = await pick_item(
-            session, items, name_of=lambda x: x, stable_id_of=lambda x: items.index(x) + 1, title="I", empty_message="none"
-        )
-
-    async def scenario():
-        server = await _run_server(handler)
-        try:
-            reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
-            await skip_initial_negotiation(reader)
-            await _read_until_quiet(reader)
-            writer.write(b"g")
-            await writer.drain()
-            await _read_until_quiet(reader)
-            writer.write(b"999\r\n")
-            await writer.drain()
-            data = await _read_until_quiet(reader)
-            assert b"Out of range." in data
-            writer.write(b"b")
-            await writer.drain()
-            await _read_until_quiet(reader)
-            writer.close()
-            await writer.wait_closed()
-        finally:
-            await server.stop()
-
-    asyncio.run(scenario())
-    assert result["value"] is None
-
-
-def test_goto_non_numeric_input_reports_and_stays_in_picker():
-    result = {}
-    items = ["a", "b"]
-
-    async def handler(session: Session):
-        result["value"] = await pick_item(
-            session, items, name_of=lambda x: x, stable_id_of=lambda x: items.index(x) + 1, title="I", empty_message="none"
-        )
-
-    async def scenario():
-        server = await _run_server(handler)
-        try:
-            reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
-            await skip_initial_negotiation(reader)
-            await _read_until_quiet(reader)
-            writer.write(b"g")
-            await writer.drain()
-            await _read_until_quiet(reader)
-            writer.write(b"notanumber\r\n")
-            await writer.drain()
-            data = await _read_until_quiet(reader)
-            assert b"Not a number." in data
-            writer.write(b"b")
-            await writer.drain()
-            await _read_until_quiet(reader)
-            writer.close()
-            await writer.wait_closed()
-        finally:
-            await server.stop()
-
-    asyncio.run(scenario())
-    assert result["value"] is None
-
-
 # -- pagination, adaptive to negotiated terminal height ---------------------
 
 
@@ -976,18 +868,19 @@ def test_description_level_brief_shows_nav_descriptions():
 
 def test_description_level_brief_reserves_extra_lines_for_the_taller_nav_block():
     """The nav row grows taller once descriptions are on (issue #160's
-    own flat-section column-splitting packs the 5 Next/Prev/Search/
-    Goto/Back entries into 2 columns of 6 lines total at this width,
-    rather than 1 column of 10), so `_page_size` must reserve more
-    lines than the `description_level="off"` case -- otherwise the item
-    list plus the now-taller nav block would overflow a real terminal
-    of this height. At a negotiated 80x20 terminal: off leaves 12 items
-    a page, brief leaves 7 -- verified here by checking exactly 7 of 20
-    items appear on page 1.
+    own flat-section column-splitting packs the 4 Next/Prev/Search/Back
+    entries into 2 columns of 4 lines total at this width, rather than
+    1 column of 8), so `_page_size` must reserve more lines than the
+    `description_level="off"` case -- otherwise the item list plus the
+    now-taller nav block would overflow a real terminal of this height.
+    At a negotiated 80x20 terminal: off leaves 12 items a page, brief
+    leaves 9 -- verified here by checking exactly 9 of 20 items appear
+    on page 1.
 
     The numbers were 14 and 9 until #538/#550 found that a page drew two
-    rows more than the terminal had; the claim -- brief reserves
-    strictly more -- is the same one."""
+    rows more than the terminal had, and brief left 7 until issue #838
+    dropped [G]oto from the nav; the claim -- brief reserves strictly
+    more -- is the same one."""
     result = {}
     items = [f"item{i:02d}" for i in range(1, 21)]
 
@@ -1009,8 +902,8 @@ def test_description_level_brief_reserves_extra_lines_for_the_taller_nav_block()
             await writer.drain()
 
             text = (await _read_until_quiet(reader)).decode()
-            assert "item01" in text and "item07" in text
-            assert "item08" not in text
+            assert "item01" in text and "item09" in text
+            assert "item10" not in text
 
             writer.write(b"b")
             await writer.drain()
@@ -1344,12 +1237,12 @@ def test_the_highlighted_row_is_a_reverse_video_bar():
             assert reverse in data, "the highlighted row is not inverted"
 
             # The bar is continuous: every segment of the row carries the
-            # attribute, so the selector, the reference and the name are
-            # each inside their own inverted run rather than one field
-            # being inverted and the rest left plain.
+            # attribute, so the selector and the name are each inside
+            # their own inverted run rather than one field being
+            # inverted and the rest left plain.
             row = [line for line in data.split(b"\r\n") if b"alpha" in line]
             assert row, "the highlighted row was not redrawn"
-            assert row[0].count(reverse) >= 3, row[0]
+            assert row[0].count(reverse) >= 2, row[0]
 
             writer.write(b"b")
             await writer.drain()
@@ -1697,66 +1590,9 @@ def test_description_shown_alongside_name():
     assert result["value"] == ("general", "General discussion")
 
 
-# -- goto stability across search filtering (regression tests) --------
-
-
-def test_goto_after_search_uses_stable_original_index_not_filtered_position():
-    """
-    Regression test for a real bug found while reviewing this module:
-    `goto` used to index into `working_set` (whatever a prior search had
-    narrowed the view to), not the original unfiltered list — so "goto
-    #3" after searching could silently return a different item than
-    "goto #3" would with no search active. Confirmed with this exact
-    scenario before the fix (searching "item1" against item1..item20,
-    then "goto 3", incorrectly returned "item11" — the 3rd search match
-    — instead of "item3", the 3rd item overall).
-    """
-    result = {}
-    items = [f"item{i}" for i in range(1, 21)]
-
-    async def handler(session: Session):
-        result["value"] = await pick_item(
-            session, items, name_of=lambda x: x, stable_id_of=lambda x: items.index(x) + 1, title="Items", empty_message="none"
-        )
-
-    async def scenario():
-        server = await _run_server(handler)
-        try:
-            reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
-            await skip_initial_negotiation(reader)
-            await _read_until_quiet(reader)
-
-            writer.write(b"s")
-            await writer.drain()
-            await _read_until_quiet(reader)
-            writer.write(b"item1\r\n")  # matches item1, item10-item19
-            await writer.drain()
-            await _read_until_quiet(reader)
-
-            writer.write(b"g")
-            await writer.drain()
-            await _read_until_quiet(reader)
-            writer.write(b"3\r\n")
-            await writer.drain()
-            await _read_until_quiet(reader)
-
-            writer.close()
-            await writer.wait_closed()
-        finally:
-            await server.stop()
-
-    asyncio.run(scenario())
-    assert result["value"] == "item3"
-
-
-def test_stable_absolute_index_is_displayed_alongside_page_relative_number():
-    """
-    Without displaying an item's stable absolute index somewhere on
-    screen, `goto` would be nearly undiscoverable — nothing else
-    reveals what number to type for it. Confirms the "(#N)" annotation
-    is actually present and correct, not just that goto works when a
-    caller already happens to know the right number.
-    """
+def test_each_row_shows_one_number():
+    """Issue #838 (F032): "02. (#1) Fountain Pens" put two numbers on a
+    row. Only the one that selects it is left."""
     result = {}
     items = [f"item{i}" for i in range(1, 21)]
 
@@ -1771,13 +1607,10 @@ def test_stable_absolute_index_is_displayed_alongside_page_relative_number():
             reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
             await skip_initial_negotiation(reader)
             data = await _read_until_quiet(reader)
-            # Issue #171 dogfood report: stable_id_of references now
-            # right-pad to the widest id on the page (item10's "(#10)"
-            # here), so single-digit ids get one extra trailing space --
-            # "(#1)  item1", not "(#1) item1" -- see picker.py's own
-            # comment on `max_id_width` for why.
-            assert b"01. (#1)  item1" in _visible(data)
-            assert b"02. (#2)  item2" in _visible(data)
+            assert b"01. item1" in _visible(data)
+            assert b"02. item2" in _visible(data)
+            assert b"(#" not in _visible(data)
+            assert b"Goto" not in _visible(data)
             writer.write(b"b")
             await writer.drain()
             await _read_until_quiet(reader)
@@ -1790,10 +1623,8 @@ def test_stable_absolute_index_is_displayed_alongside_page_relative_number():
     assert result["value"] is None
 
 
-def test_stable_index_correct_on_second_page():
-    """The stable "(#N)" shown for an item on page 2+ must be its true
-    absolute position, not restarted per page the way the 2-digit
-    selector correctly is."""
+def test_second_page_numbers_restart_at_one():
+    """The number shown on page 2+ is what selects the row on that page."""
     result = {}
     items = [f"item{i}" for i in range(1, 21)]
 
@@ -1824,59 +1655,15 @@ def test_stable_index_correct_on_second_page():
     data = asyncio.run(scenario())
     # Default terminal height (80x24, no NAWS sent) gives page_size=16
     # (18 until #538/#550 found the page drawing two rows more than the
-    # terminal had), so page 2 starts at item17: absolute index 17, not
-    # restarted at 1.
-    assert b"01. (#17) item17" in _visible(data)
-    assert b"02. (#18) item18" in _visible(data)
+    # terminal had), so page 2 starts at item17.
+    assert b"01. item17" in _visible(data)
+    assert b"02. item18" in _visible(data)
 
 
 # -- genuine stable-ID/position decoupling (not just index-based IDs) -----
 
 
-def test_goto_uses_caller_supplied_stable_id_not_list_position():
-    """
-    Real proof of decoupling, not just re-confirming index-based IDs
-    still work: items here have deliberately non-sequential,
-    non-positional stable IDs (as real database IDs would be), and goto
-    must resolve by that ID, never by position in the list.
-    """
-    result = {}
-    # (stable_id, name) pairs, stable IDs deliberately out of order and
-    # non-sequential -- position 1 has ID 205, position 2 has ID 7, etc.
-    items = [(205, "gamma"), (7, "alpha"), (999, "delta"), (42, "beta")]
-
-    async def handler(session: Session):
-        result["value"] = await pick_item(
-            session,
-            items,
-            name_of=lambda x: x[1],
-            stable_id_of=lambda x: x[0],
-            title="Items",
-            empty_message="none",
-        )
-
-    async def scenario():
-        server = await _run_server(handler)
-        try:
-            reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
-            await skip_initial_negotiation(reader)
-            await _read_until_quiet(reader)
-            writer.write(b"g")
-            await writer.drain()
-            await _read_until_quiet(reader)
-            writer.write(b"42\r\n")  # goto stable ID 42, which is "beta", at position 4
-            await writer.drain()
-            await _read_until_quiet(reader)
-            writer.close()
-            await writer.wait_closed()
-        finally:
-            await server.stop()
-
-    asyncio.run(scenario())
-    assert result["value"] == (42, "beta")
-
-
-def test_display_shows_caller_supplied_stable_id_not_position():
+def test_display_never_shows_the_callers_stable_id():
     result = {}
     items = [(205, "gamma"), (7, "alpha")]
 
@@ -1896,13 +1683,11 @@ def test_display_shows_caller_supplied_stable_id_not_position():
             reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
             await skip_initial_negotiation(reader)
             data = await _read_until_quiet(reader)
-            # Position 1 on screen ("01.") shows stable ID 205, not "1" —
-            # and position 2 ("02.") shows stable ID 7, not "2". "(#7)"
-            # gets two extra trailing spaces (issue #171) so "alpha"
-            # still starts at the same column "gamma" does, despite its
-            # id being two digits narrower than "(#205)".
-            assert b"01. (#205) gamma" in _visible(data)
-            assert b"02. (#7)   alpha" in _visible(data)
+            # Issue #838: the stable ID identifies the item internally
+            # (reopening a list on it); it is not printed.
+            assert b"01. gamma" in _visible(data)
+            assert b"02. alpha" in _visible(data)
+            assert b"205" not in _visible(data)
             writer.write(b"b")
             await writer.drain()
             await _read_until_quiet(reader)
@@ -1915,122 +1700,7 @@ def test_display_shows_caller_supplied_stable_id_not_position():
     assert result["value"] is None
 
 
-def test_goto_ignores_current_search_filter_with_non_positional_ids():
-    """Combines both properties at once: goto by permanent stable ID,
-    unaffected by an active search filter, using IDs that don't match
-    position — the real-world shape of the scenario this whole redesign
-    was for."""
-    result = {}
-    items = [(205, "gamma"), (7, "alpha widget"), (999, "delta"), (42, "beta widget")]
-
-    async def handler(session: Session):
-        result["value"] = await pick_item(
-            session,
-            items,
-            name_of=lambda x: x[1],
-            stable_id_of=lambda x: x[0],
-            title="Items",
-            empty_message="none",
-        )
-
-    async def scenario():
-        server = await _run_server(handler)
-        try:
-            reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
-            await skip_initial_negotiation(reader)
-            await _read_until_quiet(reader)
-
-            # Search narrows to the two "widget" items first.
-            writer.write(b"s")
-            await writer.drain()
-            await _read_until_quiet(reader)
-            writer.write(b"widget\r\n")
-            await writer.drain()
-            await _read_until_quiet(reader)
-
-            # goto 205 ("gamma") isn't even among the search matches --
-            # must still resolve correctly against the full original list.
-            writer.write(b"g")
-            await writer.drain()
-            await _read_until_quiet(reader)
-            writer.write(b"205\r\n")
-            await writer.drain()
-            await _read_until_quiet(reader)
-
-            writer.close()
-            await writer.wait_closed()
-        finally:
-            await server.stop()
-
-    asyncio.run(scenario())
-    assert result["value"] == (205, "gamma")
-
-
 # -- mixed-type lists (category + item sharing one picker call) -----------
-
-
-def test_mixed_category_and_item_list_disambiguates_colliding_ids():
-    """
-    Real usage pattern from netbbs.net.login_flow/chat_flow: categories
-    and boards/channels come from different database tables, so their
-    raw IDs can collide (both start at 1). Mixed into one picker call
-    (so a user can pick either a category to drill into, or a board/
-    channel directly), that collision would make `goto` ambiguous
-    between two different things showing the same number, unless
-    disambiguated — verified here with genuinely colliding IDs (a
-    category id=1 and a board id=1 both present), using the actual
-    disambiguation scheme login_flow.py/chat_flow.py use: negate the
-    category's ID for picker purposes only.
-    """
-    from dataclasses import dataclass
-
-    @dataclass(frozen=True)
-    class FakeCategory:
-        id: int
-        name: str
-
-    @dataclass(frozen=True)
-    class FakeBoard:
-        id: int
-        name: str
-
-    result = {}
-    categories = [FakeCategory(id=1, name="Vintage Computing"), FakeCategory(id=2, name="Politics")]
-    boards = [FakeBoard(id=1, name="general"), FakeBoard(id=2, name="offtopic")]
-    mixed = [*categories, *boards]
-
-    def render_name(item):
-        return f"[{item.name}]" if isinstance(item, FakeCategory) else item.name
-
-    def stable_id(item):
-        return item.id if isinstance(item, FakeBoard) else -item.id
-
-    async def handler(session: Session):
-        result["value"] = await pick_item(
-            session, mixed, name_of=render_name, stable_id_of=stable_id,
-            title="Mixed", empty_message="none",
-        )
-
-    async def scenario():
-        server = await _run_server(handler)
-        try:
-            reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
-            await skip_initial_negotiation(reader)
-            await _read_until_quiet(reader)
-            writer.write(b"g")
-            await writer.drain()
-            await _read_until_quiet(reader)
-            writer.write(b"-1\r\n")  # goto the category with raw id=1
-            await writer.drain()
-            await _read_until_quiet(reader)
-            writer.close()
-            await writer.wait_closed()
-        finally:
-            await server.stop()
-
-    asyncio.run(scenario())
-    assert isinstance(result["value"], FakeCategory)
-    assert result["value"].id == 1  # the category, not the board sharing the same raw id
 
 
 def test_mixed_list_two_digit_selection_unaffected_by_id_disambiguation():

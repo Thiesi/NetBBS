@@ -992,7 +992,7 @@ def test_operator_lists_picks_and_revokes_a_registration(tmp_path):
     ))
     text = " ".join(_visible("".join(session.written)).split())
     assert "Managed DNS service administration" in text
-    assert "01. 1 alpha" in text and "02. 2 beta" in text  # position is the goto number
+    assert "01. alpha" in text and "02. beta" in text
     assert "beta.netbbs.org" in text  # the detail screen's title
     assert "NetBBS › NetBBS" not in text  # the picker prepends the node name itself
     assert "Node fingerprint: fp-2" in text
@@ -1143,7 +1143,7 @@ def test_operator_screen_survives_a_refresh_that_brings_a_new_row(tmp_path):
 
     session = asyncio.run(scenario())
     text = " ".join(_visible("".join(session.written)).split())
-    assert "03. 3 gamma" in text
+    assert "03. gamma" in text
     assert "Node fingerprint: fp-3" in text
 
 

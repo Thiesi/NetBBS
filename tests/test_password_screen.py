@@ -284,7 +284,7 @@ def test_user_detail_password_action_resets_another_account(db, lane, sysop, ali
     # Back on the user detail screen, [H]istory is where the account's admin
     # actions are listed now (it used to be the tail of the detail screen).
     session = FakeSession(
-        ["u", "l", "g", str(alice.id), "p", "c", "by-sysop", "by-sysop", "b", "h", "b", "b", "b", "b"]
+        ["u", "l", "s", "alice", "p", "c", "by-sysop", "by-sysop", "b", "h", "b", "b", "b", "b"]
     )
     asyncio.run(admin_menu(session, lane, sysop))
 
@@ -297,7 +297,7 @@ def test_user_detail_password_action_resets_another_account(db, lane, sysop, ali
 
 
 def test_user_detail_shows_the_password_line_and_help(db, lane, sysop, alice):
-    session = FakeSession(["u", "l", "g", str(alice.id), "CTRL+H", " ", "b", "b", "b"])
+    session = FakeSession(["u", "l", "s", "alice", "CTRL+H", " ", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop))
 
     text = _visible(_written_text(session))
@@ -311,7 +311,7 @@ def test_user_detail_arrow_nav_reaches_the_password_field(db, lane, sysop, alice
     # opens the password screen, whose [B]ack returns to the detail
     # screen.
     session = FakeSession(
-        ["u", "l", "g", str(alice.id), "DOWN", "DOWN", "DOWN", "DOWN", "DOWN", " ", "b", "b", "b", "b"]
+        ["u", "l", "s", "alice", "DOWN", "DOWN", "DOWN", "DOWN", "DOWN", " ", "b", "b", "b", "b"]
     )
     asyncio.run(admin_menu(session, lane, sysop))
 

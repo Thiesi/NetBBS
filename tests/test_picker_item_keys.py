@@ -1,6 +1,6 @@
 """`pick_item`'s `item_keys` (issue #710): a caller's key that acts on
-one row -- the highlighted one, or the one whose reference is typed when
-nothing is highlighted -- and keeps the page and the highlight."""
+one row -- the highlighted one, or the one whose number on the page is
+typed when nothing is highlighted -- and keeps the page and the highlight."""
 
 from __future__ import annotations
 
@@ -71,6 +71,33 @@ def test_an_item_key_asks_for_the_row_when_nothing_is_highlighted():
     acted_on, _selected = _pick(["m", "3", "b"])
 
     assert acted_on == ["gamma"]
+
+
+def test_the_typed_number_is_the_rows_place_on_this_page_not_its_id():
+    """Issue #838: rows show only the number that selects them, so that is
+    the number a row key asks for -- on page 2, "01" is that page's first
+    row, whatever its id."""
+    names = [f"item {i:02d}" for i in range(40)]
+    acted_on: list[str] = []
+
+    async def _mark(item: str):
+        acted_on.append(item)
+        return None
+
+    session = FakeSession(["n", "m", "01", "b"])
+    asyncio.run(pick_item(
+        session, names,
+        name_of=lambda item: item,
+        stable_id_of=lambda item: 1000 + names.index(item),
+        title="Things",
+        empty_message="Nothing here.",
+        item_keys={"m": _mark},
+    ))
+
+    written = "".join(session.written)
+    assert "Which one (01-" in written
+    assert acted_on and acted_on[0] != "item 00"
+    assert written.index(acted_on[0]) > written.index("page 2/")
 
 
 def test_an_unknown_reference_acts_on_nothing():

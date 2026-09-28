@@ -68,8 +68,8 @@ class SessionSummary:
     needs.
 
     `session_id` (issue #113): a compact, NetBBS-owned, node-lifetime
-    identifier -- what the shared picker's `(#N)`/`Go to #` should
-    display and accept for a Who screen, replacing `id(session)`
+    identifier -- what the shared picker identifies a Who screen's row
+    by (reopening the list on it), replacing `id(session)`
     (Python's own process-local object identity, memory-address-like on
     CPython and entirely accidental as a *stable* value -- it only
     happens to stay fixed for as long as nothing else reuses that

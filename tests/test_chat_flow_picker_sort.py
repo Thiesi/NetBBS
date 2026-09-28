@@ -184,7 +184,7 @@ def test_order_command_in_the_mixed_categories_view_only_reorders_channels(db, l
     # The category is still the first row (position 01) after the
     # channel-only re-sort -- categories are never interleaved with
     # channels regardless of sort mode.
-    assert re.search(r"01\.\s*\(#-?\d+\)\s*\[Vintage\]", text)
+    assert re.search(r"01\.\s*\[Vintage\]", text)
 
 
 def test_order_command_activity_mode_reflects_live_hub_state(db, lane, hub, presence, alice):

@@ -22,10 +22,8 @@ class FakeSession(Session):
         self.written.append(text)
 
     async def read_line(self, echo: bool = True, history=None, completer=None, **kwargs) -> str:
-        # Same ordered queue read_key() serves from -- no existing test
-        # in this file exercises a read_line-driven sub-prompt (goto,
-        # search), so this was previously left unimplemented; the
-        # on_sort tests below need goto's own "Go to #: " prompt to work.
+        # Same ordered queue read_key() serves from -- the on_sort tests
+        # below need search's own "Search: " prompt to work.
         return self._keys.pop(0)
 
     async def read_key(self, echo: bool = True) -> str:
@@ -143,12 +141,11 @@ def test_o_is_rejected_like_any_unrecognized_key_without_on_sort():
 
 
 def test_on_sort_replaces_items_and_working_set_and_resets_to_page_one():
-    """A re-sort must be reflected by a later goto/search too, not just
-    the immediate redraw -- proven here by paging to page 2 first, then
-    re-sorting, then using goto (which always scans the full `items`,
-    per that command's own docstring) to reach an item only present in
-    the *new* list."""
-    session = FakeSession(["n", "o", "g", "9"])
+    """A re-sort must be reflected by a later search too, not just the
+    immediate redraw -- proven here by paging to page 2 first, then
+    re-sorting, then searching for an item only present in the *new*
+    list (a single match selects it)."""
+    session = FakeSession(["n", "o", "s", "zzz"])
     on_sort_calls = 0
 
     async def on_sort():
