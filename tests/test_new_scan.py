@@ -360,3 +360,113 @@ def test_with_nothing_to_list_the_replies_summary_still_shows(db, lane, alice):
     text = _visible_text(session)
     assert "Nothing accessible yet." in text
     assert "Replies to you: none." in text
+
+
+# -- following (issue #675) ------------------------------------------------------
+
+
+def test_follow_from_new_scan_lists_the_row_first(db, lane, alice):
+    from netbbs.activity import is_following
+
+    # Boards are listed before file areas, so the file area is row 2
+    # whatever order two same-millisecond boards would have come in.
+    create_board(db, "aardvarks", creator=alice)
+    area = create_file_area(db, "zebras", creator=alice)
+    session = _run_main_menu(db, lane, alice, ["n", "f", "2", "b", "l", "y"])
+    assert "Following zebras: it is listed first here." in _visible_text(session)
+    assert is_following(db, alice, "file_area", area.id)
+
+    session = _run_main_menu(db, lane, alice, ["n", "b", "l", "y"])
+    text = _visible_text(session)
+    assert text.index("zebras") < text.index("aardvarks")
+    assert "* file area" in text
+
+
+def test_view_followed_narrows_the_list_and_back(db, lane, alice):
+    from netbbs.activity import follow
+
+    create_board(db, "aardvarks", creator=alice)
+    area = create_file_area(db, "zebras", creator=alice)
+    follow(db, alice, "file_area", area.id)
+    session = _run_main_menu(db, lane, alice, ["n", "v", "v", "b", "l", "y"])
+    text = _visible_text(session)
+    # Each outcome is written above the list it redrew.
+    following_only = text.split("Showing what you follow.")[1].split("Showing everything.")[0]
+    everything = text.split("Showing everything.")[1]
+    assert "zebras" in following_only and "aardvarks" not in following_only
+    assert "zebras" in everything and "aardvarks" in everything
+
+
+def test_view_followed_with_nothing_followed_says_so(db, lane, alice):
+    create_board(db, "aardvarks", creator=alice)
+    session = _run_main_menu(db, lane, alice, ["n", "v", "b", "l", "y"])
+    assert "You follow nothing yet" in _visible_text(session)
+
+
+def test_a_board_is_followed_from_its_own_list(db, lane, alice):
+    from netbbs.activity import is_following
+    from netbbs.net.board_flow import _show_board
+
+    board = create_board(db, "general", creator=alice)
+    create_post(db, board, alice, "hello", "world")
+    session = FakeSession(["f", "f", "b"])
+    asyncio.run(_show_board(session, db, board, alice))
+    text = _visible_text(session)
+    assert "Following this board: New scan lists it first." in text
+    assert "No longer following this board." in text
+    assert "Un[f]ollow" in text
+    assert not is_following(db, alice, "board", board.id)
+
+
+def test_a_file_area_is_followed_from_its_own_screen(db, lane, alice):
+    from netbbs.activity import is_following
+    from netbbs.net.file_flow import _show_area
+
+    area = create_file_area(db, "downloads", creator=alice)
+    upload_file(db, area, alice, "a.txt", b"a")
+    session = FakeSession(["f", "b"])
+    asyncio.run(_show_area(session, lane, area, alice))
+    assert "Following this file area: New scan lists it first." in _visible_text(session)
+    assert is_following(db, alice, "file_area", area.id)
+
+
+def test_an_empty_board_can_be_followed(db, lane, alice):
+    from netbbs.activity import is_following
+    from netbbs.net.board_flow import _show_board
+
+    board = create_board(db, "general", creator=alice)
+    session = FakeSession(["f", "b"])
+    asyncio.run(_show_board(session, db, board, alice))
+    text = _visible_text(session)
+    assert "Following this board: New scan lists it first." in text
+    assert "Un[f]ollow" in text  # the redrawn bar
+    assert is_following(db, alice, "board", board.id)
+
+
+def test_an_empty_file_area_can_be_followed(db, lane, alice):
+    from netbbs.activity import is_following
+    from netbbs.net.file_flow import _show_area
+
+    area = create_file_area(db, "downloads", creator=alice)
+    session = FakeSession(["f", "b"])
+    asyncio.run(_show_area(session, lane, area, alice))
+    text = _visible_text(session)
+    assert "Following this file area: New scan lists it first." in text
+    assert "Un[f]ollow" in text
+    assert is_following(db, alice, "file_area", area.id)
+
+
+def test_unfollowing_in_the_followed_view_keeps_the_row_there(db, lane, alice):
+    """The view keeps the rows it was switched on with, so the list does
+    not change under the highlight (Codex review on #788)."""
+    from netbbs.activity import follow, is_following
+
+    create_board(db, "aardvarks", creator=alice)
+    area = create_file_area(db, "zebras", creator=alice)
+    follow(db, alice, "file_area", area.id)
+    # [V]iew followed, then [F]ollow row 1 (zebras, the only one) off.
+    session = _run_main_menu(db, lane, alice, ["n", "v", "f", "1", "b", "l", "y"])
+    text = _visible_text(session)
+    after = text.split("No longer following zebras.")[1]
+    assert "zebras" in after and "aardvarks" not in after.split("Choice")[0]
+    assert not is_following(db, alice, "file_area", area.id)

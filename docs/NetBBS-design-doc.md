@@ -2036,6 +2036,18 @@ filtered out of every follows-aware view at display time, the same
 lazy-filter approach category/board listings already use elsewhere for
 resources no longer visible.
 
+**Following, as a caller does it** (issue #675):
+- **From `[N]ew scan`:** `[F]ollow` follows the highlighted board, channel or
+  file area, or stops following it. `[V]iew followed` switches between only
+  what the caller follows and everything; it is refused while nothing is
+  followed. Followed rows are listed first and marked `*`.
+- **From a resource's own screen:** a board's post list and a file area's
+  screen each have a `[F]ollow`/`Un[f]ollow` toggle. A channel is followed
+  from `[N]ew scan`, which lists every channel the caller can join.
+- **Communities:** a Community is not followed yet. The table allows it, but
+  nothing would show the difference: `[N]ew scan` has no Community rows, and
+  a Community's boards, channels and areas are followed one by one.
+
 #### Activity summary and direct jump ("new scan")
 
 A single new main-menu entry — `[N]ew scan`, the traditional BBS term for

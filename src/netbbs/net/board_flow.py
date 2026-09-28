@@ -24,10 +24,13 @@ from pathlib import Path
 
 from netbbs.activity import (
     ensure_board_baseline,
+    follow,
+    is_following,
     mark_board_read,
     record_post_opened,
     unread_post_count,
     unread_post_ids,
+    unfollow,
 )
 from netbbs.attestation import format_name_for_resource, meets_age, meets_name_requirement
 from netbbs.auth.users import User, get_user_by_id
@@ -685,7 +688,7 @@ def _pad(text: str, width: int) -> str:
 
 def _list_options(
     page: PostPage, *, can_post: bool, has_draft: bool, row_count: int, has_unread: bool,
-    can_draw: bool = False,
+    can_draw: bool = False, following: bool = False,
 ) -> list[MenuEntry]:
     options = []
     if row_count:
@@ -704,6 +707,11 @@ def _list_options(
         options.append(_DRAFT_MENU_ENTRY)
     if has_unread:
         options.append(MenuEntry(label=menu_key("M", "ark all read"), brief="Count every post here as read"))
+    # Issue #675: a followed board is listed first in [N]ew scan.
+    options.append(
+        MenuEntry(label=menu_key("f", "ollow", prefix="Un"), brief="Stop following this board") if following
+        else MenuEntry(label=menu_key("F", "ollow"), brief="List this board first in New scan")
+    )
     options.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to the previous menu"))
     return options
 
@@ -745,6 +753,7 @@ _LIST_HELP = [
     "A            draw a post in the ANSI art editor (boards with color)",
     "D            resume or discard a saved draft",
     "M            count every post on this board as read",
+    "F            follow this board: New scan lists it first",
     "Ctrl-L       redraw the list",
     "B            back to the list of boards",
     "",
@@ -851,11 +860,23 @@ async def _show_board(
     # off the screen.
     unread["menu"] = bool(unread["count"])
     separator = " · " if unicode_style else " - "
+    follows = {"on": is_following(db, user, "board", board.id)}
+
+    def _toggle_follow() -> None:
+        """[F]ollow (issue #675): a followed board is listed first in
+        [N]ew scan. Offered on the post list and on an empty board alike."""
+        if follows["on"]:
+            unfollow(db, user, "board", board.id)
+            announce(session, "No longer following this board.", tone="muted")
+        else:
+            follow(db, user, "board", board.id)
+            announce(session, "Following this board: New scan lists it first.")
+        follows["on"] = not follows["on"]
 
     def _new_ids(current_page: PostPage) -> set[int]:
         return unread_post_ids(db, user, board, current_page.posts)
 
-    def _frame(current_page: PostPage, *, row_count: int | None = None) -> tuple[str, str]:
+    def _frame(current_page: PostPage, *, row_count: int | None = None, measuring: bool = False) -> tuple[str, str]:
         """Everything above the list's rows and everything below them."""
         subtitle = ["Older posts" if current_page.has_newer else "Newest posts"]
         if unread["count"]:
@@ -892,7 +913,9 @@ async def _show_board(
         options = _list_options(
             current_page, can_post=can_post, has_draft=has_draft,
             row_count=len(current_page.posts) if row_count is None else row_count,
-            has_unread=unread["menu"], can_draw=can_draw,
+            # The page budget measures the longer Un[f]ollow, so following
+            # never changes how many posts fit (Codex review on #788).
+            has_unread=unread["menu"], can_draw=can_draw, following=follows["on"] or measuring,
         )
         # Descriptions double the action bar. Where they would leave the
         # list fewer rows than a page worth having, the bar goes compact:
@@ -903,7 +926,7 @@ async def _show_board(
             _list_options(
                 PostPage(posts=[], has_older=True, has_newer=True),
                 can_post=can_post, has_draft=has_draft, row_count=9, has_unread=unread["menu"],
-                can_draw=can_draw,
+                can_draw=can_draw, following=True,  # the longer label
             ),
             width=session.terminal_width, height=session.terminal_height,
             description_level=description_level,
@@ -933,7 +956,7 @@ async def _show_board(
         unread["menu"] = bool(unread["count"])
         # Nine rows, so the read entry is in the action bar exactly as a
         # populated page draws it (Codex review on #719).
-        above, below = _frame(PostPage(posts=[], has_older=True, has_newer=True), row_count=9)
+        above, below = _frame(PostPage(posts=[], has_older=True, has_newer=True), row_count=9, measuring=True)
         fixed = (
             _count_rows(above, width) + 1 + (1 if width >= _TABLE_MIN_WIDTH else 0) + 2 + 1
             + _count_rows(below, width) + pending_notice_rows(session) + 1
@@ -1424,6 +1447,13 @@ async def _show_board(
                 options.append(MenuEntry(label=menu_key("A", "rt post"), brief="Draw the first post"))
             if has_draft:
                 options.append(_DRAFT_MENU_ENTRY)
+            # An empty board can be followed too, to be told of its first
+            # post (Codex review on #788).
+            options.append(
+                MenuEntry(label=menu_key("f", "ollow", prefix="Un"), brief="Stop following this board")
+                if follows["on"]
+                else MenuEntry(label=menu_key("F", "ollow"), brief="List this board first in New scan")
+            )
             options.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to the previous menu"))
             await session.write_line(
                 "\r\n" + menu_row(
@@ -1446,6 +1476,11 @@ async def _show_board(
             if choice == "b":
                 await session.write_line("")
                 return
+            if choice == "f":
+                await session.write_line("")
+                _toggle_follow()
+                has_draft = await _draw_empty_board()
+                continue
             if (choice == "p" and can_post) or (choice == "d" and has_draft) or (choice == "a" and can_draw):
                 await session.write_line("")
                 if choice == "a":
@@ -1552,6 +1587,12 @@ async def _show_board(
                 # "Draft deleted." must not cost the highlighted row (Codex
                 # review on #719).
                 page, highlighted = _refetch_keeping(page, highlighted)
+            await _render_fresh(page, highlighted)
+        elif char == "f":
+            await _moved_on()
+            _toggle_follow()
+            # Refetched: the notice takes a row the page was not sized for.
+            page, highlighted = _refetch_keeping(page, highlighted)
             await _render_fresh(page, highlighted)
         elif char == "m" and unread["menu"]:
             await _moved_on()

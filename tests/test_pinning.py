@@ -512,7 +512,7 @@ def test_unpinning_an_old_post_returns_to_the_list(db, mod, monkeypatch):
     """Its dated place is on an older page; the reader must not go on to
     show some other post as if it were this one."""
     board = _board(db, mod)
-    made = _posts(db, board, mod, 12, monkeypatch)
+    made = _posts(db, board, mod, 40, monkeypatch)
     set_post_pinned(db, made[0], True, changed_by=mod)
     # Open the pinned row, unpin it, and one [B]ack leaves the board: the
     # unpin already went back to the list.
