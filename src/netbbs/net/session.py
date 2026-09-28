@@ -483,10 +483,13 @@ class Session(ABC):
         release, so no write can fall between the two."""
         try:
             for _attempt in range(self._RESTORE_ATTEMPTS):
-                generation = self._copy_generation
+                # Stable means: no output reached the copy and the terminal
+                # kept its size while the repaint -- and the held prefix after
+                # it -- were on their way.
+                before = (self._copy_generation, self.terminal_width, self.terminal_height)
                 await self.write_through(self.screen_copy().restore_ansi())
-                if generation == self._copy_generation:
-                    await self._send_held_prefix()
+                await self._send_held_prefix()
+                if before == (self._copy_generation, self.terminal_width, self.terminal_height):
                     break
             else:
                 # Output kept arriving during every repaint (a busy door on a

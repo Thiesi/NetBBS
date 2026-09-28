@@ -558,3 +558,79 @@ def test_a_character_split_across_the_release_reaches_the_caller_whole():
         assert "é" in wire.data.decode("utf-8", errors="replace")
 
     asyncio.run(scenario())
+
+
+def test_a_resize_during_the_restore_repaints_at_the_new_size():
+    async def scenario():
+        caller, reader, wire = _caller()
+        await caller.write("steady")
+        caller.begin_break_in()
+        real = caller.write_through
+        repaints = []
+
+        async def resizing_write_through(text):
+            repaints.append((caller.terminal_width, caller.terminal_height))
+            await real(text)
+            if len(repaints) == 1:
+                caller.terminal_width, caller.terminal_height = 100, 30  # NAWS mid-repaint
+
+        caller.write_through = resizing_write_through
+        await caller.end_break_in()
+        assert repaints == [(80, 24), (100, 30)]
+
+    asyncio.run(scenario())
+
+
+def test_a_continuation_arriving_while_the_prefix_drains_is_not_lost():
+    class _SlowWire(_Wire):
+        def __init__(self):
+            super().__init__()
+            self.gate = asyncio.Event()
+            self.slow_once = True
+
+        async def drain(self):
+            if self.slow_once and self.data.endswith("é".encode()[:1]):
+                self.slow_once = False
+                await self.gate.wait()
+
+    async def scenario():
+        reader, wire = asyncio.StreamReader(), _SlowWire()
+        caller = TelnetSession(reader, wire)
+        caller.begin_break_in()
+        encoded = "é".encode()
+        await caller.write_raw(encoded[:1])  # held: a door mid-character
+        ending = asyncio.create_task(caller.end_break_in())
+        await _until(lambda: not wire.slow_once)  # the prefix is draining
+        await caller.write_raw(encoded[1:])  # the continuation, still held
+        wire.gate.set()
+        await ending
+        # The caller's terminal ends up showing the character whole.
+        terminal = TerminalEmulator(80, 24)
+        terminal.feed(wire.data.decode("utf-8", errors="replace"))
+        assert "é" in terminal.text_rows()[0]
+
+    asyncio.run(scenario())
+
+
+def test_no_break_in_at_the_login_prompt(db, lane, sysop):
+    async def scenario():
+        controls = _controls()
+        registry = controls.session_registry
+        viewer = QueueSession()
+        viewer_task = await _connect(registry, viewer, "sysop")
+        stranger = QueueSession()
+        stranger_task = await _connect(registry, stranger, None)
+        monitor = asyncio.create_task(sysop_monitor.monitor_screen(
+            viewer, lane, sysop, controls, disconnect=lambda entry: asyncio.sleep(0),
+        ))
+        viewer.inputs.put_nowait("DOWN")
+        viewer.inputs.put_nowait("c")
+        await _until(lambda: "hasn't logged in yet" in strip_ansi("".join(viewer.written)))
+        assert not stranger.in_break_in
+        viewer.inputs.put_nowait("q")
+        await monitor
+        for task in (viewer_task, stranger_task):
+            task.cancel()
+        await asyncio.gather(viewer_task, stranger_task, return_exceptions=True)
+
+    asyncio.run(scenario())

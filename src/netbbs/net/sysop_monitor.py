@@ -595,6 +595,11 @@ async def _chat(
     running while its player is in the chat, and a real-time door (a
     fight, a turn timer) will not wait for them."""
     name = _label(entry)
+    if entry.username is None:
+        # The login prompt runs under its own deadlines, which a chat would
+        # outlast: the caller would be disconnected for chatting.
+        state.say(f"{name} hasn't logged in yet; chat once they have.", ERROR_COLOR)
+        return
     reason = break_in.refusal(entry.session)
     if reason is not None:
         state.say(f"{name} {reason}.", ERROR_COLOR)
