@@ -65,8 +65,10 @@ def test_the_node_wide_queue_names_each_kind_oldest_first(db, sysop, alice):
         ("file", "uploads", "notes.txt"),
     ]
     assert all(item.author == "alice" for item in items)
-    # A post and a file may share an id: the node-wide queue numbers by place.
-    assert [item.stable_id for item in items] == [1, 2, 3, 4]
+    # A post and a file may share an id: each keeps its own, a file's
+    # negative (Codex review on #795).
+    assert [item.stable_id for item in items[:3]] == [item.post.id for item in items[:3]]
+    assert items[3].stable_id == -items[3].entry.id
 
 
 def test_a_board_queue_lists_only_that_board(db, sysop, alice):

@@ -16778,9 +16778,10 @@ def _load_pending_items(
 ) -> tuple[list[_PendingItem], bool]:
     """Everything `actor` may decide on in `boards` and `areas` (every
     board and area when both are `None`), oldest first, at most
-    `MAX_QUEUE_ITEMS` of it, and whether more waits. One board's or area's
-    queue refers to each item by its own id; the node-wide one, where a
-    post and a file may share an id, by its place in the queue."""
+    `MAX_QUEUE_ITEMS` of it, and whether more waits. Each item keeps its
+    own id as its `(#N)`; in the node-wide queue, where a post and a file
+    may share an id, a file's is negative, as category pickers do
+    (worklog, "Stable identity and pagination")."""
     node_wide = boards is None and areas is None
     cap = MAX_QUEUE_ITEMS + 1
     posts: list[tuple[Post, Board]] = []
@@ -16823,7 +16824,7 @@ def _load_pending_items(
     more = more or len(items) > MAX_QUEUE_ITEMS
     items = items[:MAX_QUEUE_ITEMS]
     if node_wide:
-        items = [dataclasses.replace(item, stable_id=place) for place, item in enumerate(items, start=1)]
+        items = [dataclasses.replace(item, stable_id=-item.stable_id) if item.entry else item for item in items]
     return items, more
 
 
