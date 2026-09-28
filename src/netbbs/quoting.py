@@ -3,13 +3,15 @@ Replying with a quote (issue #675): the subject a reply starts with and
 the quoted text its body starts with. Shared by a board post's `[R]eply`
 and mail's Reply, so the two read the same.
 
-Both take text the caller has already made plain -- a post body through
-`netbbs.rendering.post_body.plain_post_body`, a mail body as it is -- and
-return text for an editor, never anything rendered.
+A board caller hands `quote_body` the body a reader with color off sees
+(`netbbs.rendering.post_body.plain_post_body`), mail its body as stored;
+either way it is sanitized again here, since it can come from another
+node. Both return text for an editor, never anything rendered.
 """
 
 from __future__ import annotations
 
+from netbbs.rendering.sanitize import sanitize_text
 from netbbs.rendering.width import cut_to_width
 
 # The signature delimiter (`netbbs.signature`): a quote stops at it, since
@@ -43,8 +45,14 @@ def quote_body(body: str, *, author: str) -> str:
     becomes "> > ..."), then an empty line to write on.
 
     Bounded by `MAX_QUOTED_LINES` and `MAX_QUOTED_BYTES`; a cut quote ends
-    with "> [...]". Empty when there is nothing to quote."""
-    text = body.replace("\r\n", "\n").replace("\r", "\n")
+    with "> [...]". Empty when there is nothing to quote.
+
+    Both `body` and `author` may come from another node, so both are
+    sanitized here, whatever the caller did first (claude review on
+    #786): the quote goes into an editor and from there into what the
+    replier sends, and a control sequence in it would reach both."""
+    text = sanitize_text(body.replace("\r\n", "\n").replace("\r", "\n"), allow_newlines=True)
+    author = sanitize_text(author)
     if _SIGNATURE_DELIMITER in text:
         text = text.rsplit(_SIGNATURE_DELIMITER, 1)[0]
     lines = text.split("\n")

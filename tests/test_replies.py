@@ -317,3 +317,12 @@ def test_a_recovered_reply_draft_is_kept_as_saved(tmp_path):
         session, initial_text="alice wrote:\n> Lunch?\n", draft_path=draft, max_bytes=100_000, cursor_at_end=True,
     ))
     assert result == saved
+
+
+def test_a_quote_carries_no_control_sequences():
+    """A mail body or sender label from another node can hold escape
+    sequences; the quote an editor opens on must not (claude review on
+    #786)."""
+    quoted = quote_body("hi\x1b[2J\x1b]0;owned\x07 there\x07", author="evil\x1b[31m")
+    assert "\x1b" not in quoted and "\x07" not in quoted
+    assert quoted.startswith("evil[31m wrote:\n> hi")
