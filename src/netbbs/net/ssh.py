@@ -55,6 +55,7 @@ from netbbs.net.session import Session, SessionClosedError, clamp_terminal_size,
 from netbbs.net.throttle import LoginThrottle
 from netbbs.net.welcome_banner import load_welcome_banner
 from netbbs.rendering import strip_ansi
+from netbbs.rendering.pipe_codes import PastedColor
 from netbbs.storage.database import Database
 
 _logger = logging.getLogger(__name__)
@@ -191,6 +192,7 @@ class SSHSession(Session):
         cancellable: bool = False,
         viewport: int | Callable[[], int] | None = None,
         viewport_owns_row: bool = False,
+        pasted_color: PastedColor | None = None,
     ) -> str:
         # live_buffer/lock/list_candidates pass straight through to
         # char_input.read_line unchanged -- see that function's
@@ -199,6 +201,7 @@ class SSHSession(Session):
             self, self.write, echo, history, completer,
             live_buffer=live_buffer, lock=lock, list_candidates=list_candidates,
             initial=initial, cancellable=cancellable, viewport=viewport, viewport_owns_row=viewport_owns_row,
+            pasted_color=pasted_color,
         )
 
     async def read_key(self, echo: bool = True) -> str:
@@ -209,8 +212,12 @@ class SSHSession(Session):
         lives in `netbbs.net.char_input.read_any_key`."""
         return await char_input.read_any_key(self, self.write, echo)
 
-    async def read_editor_key(self, *, distinguish_ctrl_h: bool = False) -> char_input.EditorKey:
-        return await char_input.read_editor_key(self, distinguish_ctrl_h=distinguish_ctrl_h)
+    async def read_editor_key(
+        self, *, distinguish_ctrl_h: bool = False, pasted_color: PastedColor | None = None
+    ) -> char_input.EditorKey:
+        return await char_input.read_editor_key(
+            self, distinguish_ctrl_h=distinguish_ctrl_h, pasted_color=pasted_color
+        )
 
     async def discard_buffered_enter(self) -> None:
         await char_input.discard_buffered_enter(self)

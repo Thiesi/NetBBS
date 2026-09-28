@@ -455,6 +455,7 @@ def build_endpoint_descriptor(
     friendly_name: str | None = None,
     canonical_dns_name: str | None = None,
     capabilities: tuple[str, ...] = LINK_CAPABILITIES,
+    dial_in: list[str] | tuple[str, ...] | None = None,
 ) -> EndpointDescriptor:
     """
     Build and sign one `endpoint_descriptor` event, per design doc §12
@@ -513,6 +514,12 @@ def build_endpoint_descriptor(
         # descriptor this version signs carries it. Same "omitted when empty"
         # convention as the lists above.
         payload["capabilities"] = list(capabilities)
+    if dial_in:
+        # Issue #777 (design doc §8.2): where a *caller* reaches this board,
+        # as its SysOp stated it (`netbbs.link.dial_in`). Display-only, and
+        # validated by the reader rather than here, so a bad entry costs
+        # only itself. Same "omitted when empty" convention.
+        payload["dial_in"] = list(dial_in)
 
     envelope = build_envelope(ENDPOINT_DESCRIPTOR_OBJECT_TYPE, payload)
     signature = signing_identity.sign(canonical_bytes(envelope))

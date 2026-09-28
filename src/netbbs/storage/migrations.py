@@ -3185,4 +3185,166 @@ MIGRATIONS = [
            );
         """,
     ),
+    Migration(
+        description=(
+            "Issue #692: `post_rejections` records every post a moderator rejected here -- "
+            "local or carried, a new post or an edit -- by its `post_id` (for a carried post, "
+            "its event's content id), with who, when and an optional reason. Rejecting still "
+            "deletes the post row; this record is what makes the decision last. A carried "
+            "post's signed event is kept (§9.3), so without it `[R]epair carried posts` "
+            "re-materialized, and published, the post the moderator refused. Earlier "
+            "rejections are taken from the moderation log."
+        ),
+        sql="""
+        CREATE TABLE post_rejections (
+            post_id              TEXT PRIMARY KEY,
+            board_id             INTEGER NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
+            rejected_by_user_id  INTEGER REFERENCES users(id) ON DELETE SET NULL,
+            rejected_at          TEXT NOT NULL,
+            reason               TEXT
+        );
+
+        -- Rejections made before this table existed are in the moderation
+        -- log (`delete_post` logged each with the post id as its detail).
+        -- Without them the first repair after upgrading would republish
+        -- every post already refused.
+        INSERT OR IGNORE INTO post_rejections (post_id, board_id, rejected_by_user_id, rejected_at)
+        SELECT m.detail, m.object_id, m.actor_user_id, m.created_at
+          FROM moderation_log m
+         WHERE m.action = 'reject' AND m.object_type = 'board' AND m.detail IS NOT NULL
+           AND m.object_id IN (SELECT id FROM boards)
+         ORDER BY m.id;
+
+        -- A refused carried post an earlier repair already brought back is
+        -- taken down again, where nothing depends on it: a root with no
+        -- replies and no revisions (anything else keeps its row, for a
+        -- moderator to remove). Its search entry goes with it.
+        -- An edit with no later edit built on it is taken down the same way,
+        -- and its post's search entry falls back to the version before it.
+        CREATE TEMP TABLE resurrected_rejections AS
+        SELECT p.post_id, p.root_post_id, p.board_id FROM posts p JOIN post_rejections r ON r.post_id = p.post_id
+         WHERE EXISTS (SELECT 1 FROM link_events e WHERE e.content_id = p.post_id)
+           AND NOT EXISTS (SELECT 1 FROM posts c WHERE c.parent_post_id = p.post_id)
+           AND NOT EXISTS (SELECT 1 FROM posts c WHERE c.edit_of_post_id = p.post_id)
+           AND (p.post_id != p.root_post_id
+                OR NOT EXISTS (SELECT 1 FROM posts c WHERE c.root_post_id = p.post_id AND c.post_id != p.post_id));
+        DELETE FROM post_search WHERE root_post_id IN (SELECT root_post_id FROM resurrected_rejections);
+        DELETE FROM posts WHERE post_id IN (SELECT post_id FROM resurrected_rejections);
+        INSERT INTO post_search (subject, body, board_id, root_post_id)
+        SELECT p.subject, netbbs_plain_post_body(p.body), p.board_id, p.root_post_id
+          FROM posts p
+         WHERE p.root_post_id IN (SELECT root_post_id FROM resurrected_rejections)
+           AND p.status = 'approved'
+           AND p.id = (
+               SELECT q.id FROM posts q
+                WHERE q.root_post_id = p.root_post_id AND q.board_id = p.board_id AND q.status = 'approved'
+                ORDER BY q.created_at DESC, q.id DESC
+                LIMIT 1
+           );
+        DROP TABLE resurrected_rejections;
+        """,
+    ),
+    Migration(
+        description=(
+            "Issue #675: a post's pin and expiry exemption belong to the post, not to one "
+            "revision. Both were stored per row, and an edit started unpinned and "
+            "unexempt, so an exempt post's edit expired and the post fell back to its "
+            "pre-edit text. Every revision now carries its root's flags: a flag already "
+            "set on any revision moves to the root, the root's flags are copied to its "
+            "revisions, and a trigger gives every new revision -- local or carried -- its "
+            "root's flags. A removed (tombstoned) post is neither pinned nor kept: removal "
+            "clears both, so the placeholder neither stays at the top of the board nor "
+            "outlives the board's expiry."
+        ),
+        sql="""
+        UPDATE posts SET pinned = 1
+         WHERE post_id = root_post_id AND pinned = 0
+           AND EXISTS (
+               SELECT 1 FROM posts v
+                WHERE v.root_post_id = posts.post_id AND v.board_id = posts.board_id AND v.pinned = 1
+           );
+        UPDATE posts SET exempt_from_expiry = 1
+         WHERE post_id = root_post_id AND exempt_from_expiry = 0
+           AND EXISTS (
+               SELECT 1 FROM posts v
+                WHERE v.root_post_id = posts.post_id AND v.board_id = posts.board_id
+                  AND v.exempt_from_expiry = 1
+           );
+        UPDATE posts SET
+            pinned = (SELECT r.pinned FROM posts r WHERE r.post_id = posts.root_post_id AND r.board_id = posts.board_id),
+            exempt_from_expiry = (
+                SELECT r.exempt_from_expiry FROM posts r
+                 WHERE r.post_id = posts.root_post_id AND r.board_id = posts.board_id
+            )
+         WHERE post_id != root_post_id
+           AND EXISTS (SELECT 1 FROM posts r WHERE r.post_id = posts.root_post_id AND r.board_id = posts.board_id);
+        UPDATE posts SET pinned = 0, exempt_from_expiry = 0
+         WHERE EXISTS (
+             SELECT 1 FROM posts t
+              WHERE t.root_post_id = posts.root_post_id AND t.board_id = posts.board_id
+                AND t.tombstoned_at IS NOT NULL
+         );
+
+        CREATE TRIGGER trg_posts_revision_flags AFTER INSERT ON posts
+        WHEN NEW.post_id != NEW.root_post_id
+        BEGIN
+            UPDATE posts SET
+                pinned = COALESCE(
+                    (SELECT r.pinned FROM posts r WHERE r.post_id = NEW.root_post_id AND r.board_id = NEW.board_id), 0
+                ),
+                exempt_from_expiry = COALESCE(
+                    (SELECT r.exempt_from_expiry FROM posts r
+                      WHERE r.post_id = NEW.root_post_id AND r.board_id = NEW.board_id), 0
+                )
+            WHERE id = NEW.id;
+        END;
+
+        -- The pinned block is looked up on every board and area opening; a
+        -- partial index keeps that from scanning a board's whole history.
+        -- Roots only: every revision carries its root's flag, and a long edit
+        -- history must not cost the lookup a row per revision.
+        CREATE INDEX idx_posts_pinned ON posts(board_id, created_at, post_id)
+            WHERE pinned = 1 AND post_id = root_post_id;
+        CREATE INDEX idx_files_pinned ON files(area_id, status, created_at, file_id) WHERE pinned = 1;
+
+        CREATE TRIGGER trg_posts_tombstone_clears_flags AFTER INSERT ON posts
+        WHEN NEW.tombstoned_at IS NOT NULL
+        BEGIN
+            UPDATE posts SET pinned = 0, exempt_from_expiry = 0
+            WHERE root_post_id = NEW.root_post_id AND board_id = NEW.board_id;
+        END;
+        """,
+    ),
+    Migration(
+        description=(
+            "Issue #777: `descriptor_first_stored_at` on link_peers, link_introduced_identities "
+            "and link_peer_candidates -- when this node first stored the descriptor the row now "
+            "holds, moved only when the descriptor itself changes. The node map (design doc "
+            "§8.12) caps a descriptor's signed `created_at` at it, so that a descriptor dated in "
+            "the future cannot keep a node fresh. `first_named_at` on link_peer_candidates is "
+            "when a peer list first named the candidate, which the SysOp's node map shows. "
+            "Existing rows start from `updated_at`, the best information there is: it is no "
+            "earlier than the descriptor was first stored. `link_node_numbers` gives each node "
+            "the map lists a small permanent number, assigned the first time the map meets it "
+            "and never reused, so that #3 means the same node to every caller and the SysOp. "
+            "`last_direct_contact_at` on link_introduced_identities: an introduced node the "
+            "SysOp has established may hold an authenticated real-time session with this one "
+            "without ever completing a hello, and that session is contact; it starts empty."
+        ),
+        sql="""
+        ALTER TABLE link_peers ADD COLUMN descriptor_first_stored_at TEXT;
+        UPDATE link_peers SET descriptor_first_stored_at = updated_at;
+        ALTER TABLE link_introduced_identities ADD COLUMN descriptor_first_stored_at TEXT;
+        UPDATE link_introduced_identities SET descriptor_first_stored_at = updated_at;
+        ALTER TABLE link_introduced_identities ADD COLUMN last_direct_contact_at TEXT;
+        ALTER TABLE link_peer_candidates ADD COLUMN descriptor_first_stored_at TEXT;
+        ALTER TABLE link_peer_candidates ADD COLUMN first_named_at TEXT;
+        UPDATE link_peer_candidates SET descriptor_first_stored_at = updated_at, first_named_at = updated_at;
+
+        CREATE TABLE link_node_numbers (
+            fingerprint  TEXT PRIMARY KEY,
+            number       INTEGER NOT NULL UNIQUE
+        );
+        """,
+    ),
 ]

@@ -191,6 +191,9 @@ from netbbs.config import (
     get_invitation_expiry_days,
     get_max_upload_bytes,
     get_node_display_name,
+    get_node_map_min_level,
+    MAX_NODE_MAP_MIN_LEVEL,
+    NODE_MAP_MIN_LEVEL_CONFIG_KEY,
     get_registration_mode,
     is_node_display_name_placeholder,
     set_config_without_commit,
@@ -275,16 +278,18 @@ from netbbs.link.files import (
     link_file_area,
     queue_file_descriptor_if_linked,
 )
+from netbbs.link.dial_in import (
+    MAX_DIAL_IN_ADDRESSES, MAX_DIAL_IN_URL_BYTES, DialInError, get_stated_dial_in, published_dial_in,
+    set_stated_dial_in_without_commit, suggested_dial_in,
+)
 from netbbs.link.key_rotation import KeyRotationError
 from netbbs.link.node_identity import operational_key_history
-from netbbs.link.protocol import PeerRecord
 from netbbs.link.node_profiles import (
     dismiss_identity_observation, identity_for_fingerprint, identity_for_peer,
     is_node_fingerprint, latest_identity_observation, list_identity_observations,
     name_key, own_canonical_dns_name, resolve_stored_peer_reference,
 )
 from netbbs.link.relay_mailbox import mailbox_sizes
-from netbbs.link.reliability import reliability_score
 from netbbs.link.remote_attestation import (
     clear_remote_attestation_override,
     configure_attestation_authority,
@@ -330,6 +335,17 @@ from netbbs.link.onboarding import (
 )
 from netbbs.link.reliable_nodes import effective_reliable_nodes, reliable_nodes_source
 from netbbs.link.store import load_peer_last_contact
+from netbbs.link.node_map import CANDIDATE as NODE_MAP_CANDIDATE
+from netbbs.link.node_map import NodeMapEntry, build_node_map, has_known_nodes
+from netbbs.net.node_map_flow import NODE_MAP_COLUMNS, all_carried_names
+from netbbs.net.node_map_flow import utc_now as node_map_now
+from netbbs.net.node_map_flow import map_title as node_map_title
+from netbbs.net.node_map_flow import node_sections as node_map_sections
+from netbbs.net.node_map_flow import row_cells as node_map_row_cells
+from netbbs.net.node_map_flow import row_description as node_map_row_description
+from netbbs.net.node_map_flow import row_labels as node_map_row_labels
+from netbbs.net.node_map_flow import search_text as node_map_search_text
+from netbbs.net.node_map_flow import stable_id as node_map_stable_id
 from netbbs.link.trust_issuance import (
     MAX_VOUCH_EXPLANATION_CHARS,
     VouchIntentError,
@@ -7721,6 +7737,7 @@ async def _limits_settings_screen(session: Session, lane: DatabaseLane, actor: U
             "grace_days": get_expiry_grace_period_days(db),
             "invite_days": get_invitation_expiry_days(db),
             "scrollback": get_scrollback_limit(db),
+            "map_level": get_node_map_min_level(db),
         }
 
     current = await lane.run(_load)
@@ -7799,6 +7816,18 @@ async def _limits_settings_screen(session: Session, lane: DatabaseLane, actor: U
                 "something is said there."
             ),
         ),
+        FieldSpec(
+            key="map_level", hotkey="n", menu_text=menu_key("N", "ode map level"),
+            label="Node map level",
+            render=lambda d: f"level {d['map_level']} and up",
+            prompt=_int_field("map_level", "Lowest level"),
+            brief="Who may open the node map", section="Directory",
+            help=(
+                f"The lowest level that may open the node map, \"Nodes known to\" this board, from the "
+                f"Directory (0-{MAX_NODE_MAP_MIN_LEVEL}). A guest is an ordinary account: to keep the map "
+                "from guests, set this above the guest account's level. Only offered while Link is on."
+            ),
+        ),
     ]
 
     async def save(draft: dict) -> list[str]:
@@ -7808,6 +7837,7 @@ async def _limits_settings_screen(session: Session, lane: DatabaseLane, actor: U
             "grace_days": draft["grace_days"],
             "invite_days": draft["invite_days"],
             "scrollback": draft["scrollback"],
+            "map_level": draft["map_level"],
         }
         # Checked here, before anything is written, so one bad value
         # cannot leave the others half saved; the setters check again.
@@ -7819,6 +7849,8 @@ async def _limits_settings_screen(session: Session, lane: DatabaseLane, actor: U
             raise _LimitsError(f"Invitation expiry must be 1-{MAX_SETTING_DAYS} days, or blank for never.")
         if not 0 < values["scrollback"] <= MAX_SCROLLBACK_LIMIT:
             raise _LimitsError(f"Chat scrollback must be 1-{MAX_SCROLLBACK_LIMIT} messages.")
+        if not 0 <= values["map_level"] <= MAX_NODE_MAP_MIN_LEVEL:
+            raise _LimitsError(f"Node map level must be 0-{MAX_NODE_MAP_MIN_LEVEL}.")
         changed = [key for key in values if values[key] != current[key]]
 
         config_keys = {
@@ -7826,6 +7858,7 @@ async def _limits_settings_screen(session: Session, lane: DatabaseLane, actor: U
             "grace_days": EXPIRY_GRACE_PERIOD_CONFIG_KEY,
             "invite_days": INVITATION_EXPIRY_DAYS_CONFIG_KEY,
             "scrollback": SCROLLBACK_LIMIT_CONFIG_KEY,
+            "map_level": NODE_MAP_MIN_LEVEL_CONFIG_KEY,
         }
 
         def _persist(db: Database) -> None:
@@ -8773,6 +8806,12 @@ async def _link_status_sections(
                 identity.append(Field("Advertised address", f"{config.advertised_host}:{config.advertised_port}"))
             else:
                 identity.append(Field("Advertised address", "(not configured)", color=WARNING_COLOR))
+    # Issue #777: where callers reach this board, as its descriptor says.
+    dial_in, dial_in_source = await lane.run(_published_dial_in_summary)
+    identity.append(Field(
+        "Dial-in", _describe_published_dial_in(dial_in, dial_in_source),
+        color=VALUE_COLOR if dial_in else MUTED_COLOR,
+    ))
     sections = [Section("Identity", identity)]
 
     identity_notices = await lane.run(list_identity_observations)
@@ -8881,91 +8920,87 @@ async def _link_status_sections(
     return sections, identity_notices
 
 
-def _link_peer_sections(
-    peer: PeerRecord, *, node, label: str, score: float, last_contact: str
-) -> list[Section]:
-    """One verified peer's detail. `peer.descriptor`'s fields are
-    peer-controlled; `Field` sanitizes every value it is handed."""
-    addresses = peer.descriptor.payload.get("addresses") or []
-    reach: list[Field | Note] = [
-        Field("Address", f"{a.get('protocol')}://{a.get('address')}:{a.get('port')}") for a in addresses
-    ] or [Field("Addresses", "none published (outgoing-only)", color=MUTED_COLOR)]
-    relays = peer.descriptor.payload.get("relays") or []
-    if relays:
-        reach.append(Field("Published relays", str(len(relays))))
-    return [
-        Section("Identity", [
-            Field("Node", label, bold=True),
-            Field("Technical identity", peer.fingerprint, color=METADATA_COLOR),
-            Field("Kind", "outgoing-only" if peer.descriptor.payload.get("outgoing_only") else "full peer"),
-        ]),
-        Section("Health", [
-            Field("Reliability", f"{score:.2f}"),
-            Field("Last contact", last_contact, color=MUTED_COLOR if last_contact == "never" else VALUE_COLOR),
-        ]),
-        Section("Reachability", reach),
-        Section("Relaying", [
-            Field("We relay for it", _yes_no(peer.fingerprint in node.relaying_for)),
-            Field("It relays for us", _yes_no(peer.fingerprint in node.relays_serving_me)),
-        ]),
-    ]
-
-
-async def _link_peer_detail(
+async def _node_map_sysop_screen(
     session: Session, lane: DatabaseLane, actor: User, *, link_context: LinkContext
 ) -> None:
-    """Picker over the verified peers, then one peer's own detail screen."""
-    node = link_context.link_node
-    def _load(db: Database) -> tuple[dict[str, float], dict[str, str]]:
-        return (
-            {fingerprint: reliability_score(db, fingerprint) for fingerprint in node.peers},
-            load_peer_last_contact(db),
+    """The SysOp's node map (design doc §8.12, issue #777), behind Link status
+    `[P]eers`: the list callers see, plus peer-list candidates and the nodes
+    callers do not see because this node quarantines or blocks them, each
+    with its trust state per dimension, Link addresses, relay roles and
+    reliability. It replaced the verified-peer list that used to be here, and
+    keeps what that showed: identity, kind, reliability, last contact,
+    addresses, published relays and both relaying directions."""
+    own_fingerprint = link_context.node_identity.fingerprint
+
+    def _load(db: Database) -> dict:
+        return {
+            "board": get_node_display_name(db),
+            "entries": build_node_map(db, own_fingerprint=own_fingerprint, sysop=True),
+            "display": resolve_display_preferences(db),
+        }
+
+    reopen_at: int | None = None
+    while True:
+        state = await lane.run(_load)
+        chrome = await _load_chrome(lane, actor)
+        now = node_map_now()
+        title = node_map_title(state["board"])
+
+        def _cells(entry: NodeMapEntry) -> list:
+            cells = node_map_row_cells(entry, now=now)
+            if entry.source == NODE_MAP_CANDIDATE:
+                cells[0] = ("unverified", WARNING_COLOR)
+            elif entry.trust_hidden:
+                strongest = "blocked" if "blocked" in entry.trust.values() else "quarantined"
+                cells[0] = (strongest, ALERT_COLOR if strongest == "blocked" else WARNING_COLOR)
+            return cells
+
+        labels = node_map_row_labels(state["entries"])
+        selected = await pick_item(
+            session, state["entries"],
+            name_of=lambda entry: labels[entry.fingerprint],
+            search_text_of=lambda entry: node_map_search_text(entry, labels[entry.fingerprint]),
+            stable_id_of=node_map_stable_id,
+            description_of=lambda entry: node_map_row_description(entry, now=now),
+            columns=NODE_MAP_COLUMNS,
+            column_values_of=_cells,
+            title=title,
+            breadcrumb=("SysOp", "Operations", "Link status"),
+            empty_message="No other nodes are known here yet.",
+            start_stable_id=reopen_at,
+            redraw_in_place=chrome.redraw_in_place,
+            unicode_style=chrome.unicode_style,
+            collapsed=chrome.collapsed,
+            accent_color=chrome.accent_color,
+            header_color=chrome.header_color,
+        )
+        if selected is None:
+            return
+        reopen_at = node_map_stable_id(selected)
+        carried = await lane.run(all_carried_names, selected.fingerprint)
+        display_format, display_timezone = state["display"]
+        first_named = None
+        if selected.first_named is not None:
+            first_named = format_for_display(
+                selected.first_named.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+                override_format=display_format, override_timezone=display_timezone,
+            )
+        await show_detail(
+            session,
+            title=_detail_title(
+                session, chrome, selected.friendly_name,
+                breadcrumb=("SysOp", "Operations", "Link status", title),
+            ),
+            sections=node_map_sections(
+                selected, carried=carried, now=now, sysop=True, first_named=first_named,
+            ),
+            actions=[_BACK_ACTION],
+            redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
         )
 
-    scores, last_contact = await lane.run(_load)
-    display_format, display_timezone = await lane.run(resolve_display_preferences)
-    chrome = await _load_chrome(lane, actor)
 
-    def _peer_description(peer: PeerRecord) -> str:
-        # Kept to a single short word -- this is squeezed onto one line
-        # alongside the fingerprint (32+ chars) and pick_item's own
-        # "(#<id>)" reference, then truncated to terminal width
-        # (netbbs.net.picker.truncate); reliability and last-contact
-        # both get their own row on the detail screen instead, where
-        # truncation isn't a concern.
-        return "outgoing-only" if peer.descriptor.payload.get("outgoing_only") else "full peer"
-
-    selected = await pick_item(
-        session, list(node.peers.values()),
-        name_of=lambda peer: identity_for_peer(peer).label,
-        stable_id_of=lambda peer: id(peer),  # in-memory only, no persisted/NetBBS-owned identifier exists here
-        description_of=_peer_description,
-        title="Verified peers",
-        empty_message="No verified peers.",
-        redraw_in_place=chrome.redraw_in_place,
-        unicode_style=chrome.unicode_style,
-        collapsed=chrome.collapsed,
-        accent_color=chrome.accent_color,
-        header_color=chrome.header_color,
-    )
-    if selected is None:
-        return
-
-    label = identity_for_peer(selected).label
-    when = last_contact.get(selected.fingerprint)
-    last = (
-        format_for_display(when, override_format=display_format, override_timezone=display_timezone)
-        if when else "never"
-    )
-    await show_detail(
-        session,
-        title=_detail_title(session, chrome, label, breadcrumb=("SysOp", "Operations", "Link status", "Verified peers")),
-        sections=_link_peer_sections(
-            selected, node=node, label=label, score=scores.get(selected.fingerprint, 0.5), last_contact=last
-        ),
-        actions=[_BACK_ACTION],
-        redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
-    )
+async def _node_map_has_rows(lane: DatabaseLane, link_context: LinkContext) -> bool:
+    return await lane.run(has_known_nodes, own_fingerprint=link_context.node_identity.fingerprint)
 
 
 # -- carry decisions: offered and excluded resources (design doc §9.3, --------
@@ -9157,6 +9192,136 @@ async def _carry_decisions_screen(
                     return
 
 
+def _published_dial_in_summary(db: Database) -> tuple[tuple[str, ...], str]:
+    """What this node's next descriptor carries as `dial_in`, and where it
+    comes from: `"stated"` (the SysOp saved a list, possibly empty),
+    `"public_url"` (never saved; `[web] public_url` stands in) or
+    `"none"`."""
+    if get_stated_dial_in(db) is not None:
+        return published_dial_in(db), "stated"
+    published = published_dial_in(db)
+    return published, "public_url" if published else "none"
+
+
+def _describe_published_dial_in(published: tuple[str, ...], source: str) -> str:
+    """One plain-text line for the Link status panel and the editor. The
+    URLs are this node's own validated entries; the caller sanitizes the
+    line before styling it, as for any text."""
+    if not published:
+        return "none (you saved an empty list)" if source == "stated" else "none"
+    listed = ", ".join(published)
+    return f"{listed} (from [web] public_url until you save a list)" if source == "public_url" else listed
+
+
+async def _dial_in_editor(
+    session: Session, lane: DatabaseLane, actor: User, *, link_context: LinkContext,
+) -> None:
+    """The SysOp's statement of where callers reach this board (issue #777,
+    design doc §8.2 and §8.12, §16 issue #767 Decision 6).
+
+    A draft editor (§3.5): four address slots, seeded from the saved list,
+    and `[U]se suggestions`, which copies the suggested entries -- this
+    node's DNS name with its enabled telnet and SSH listener ports, and an
+    `https://` `[web] public_url` -- into the draft. Nothing is published
+    until `[S]ave`; the node cannot see what is in front of its listeners,
+    so a suggestion is only ever a starting point. `[S]ave` validates every
+    slot with the same `parse_dial_in_url` a reader applies and raises
+    `DialInError` on the first bad one, keeping the draft. Saving with
+    every slot empty is a statement too: the node then publishes nothing,
+    and `[web] public_url` no longer stands in."""
+    config = link_context.link_config
+    advertised_host = config.advertised_host if config is not None else None
+    stated = await lane.run(get_stated_dial_in)
+    published, source = await lane.run(_published_dial_in_summary)
+    suggestions = await lane.run(suggested_dial_in, advertised_host)
+    seed = list(stated if stated is not None else published)
+    slots = [f"address_{index}" for index in range(1, MAX_DIAL_IN_ADDRESSES + 1)]
+    draft = {key: (seed[position] if position < len(seed) else "") for position, key in enumerate(slots)}
+
+    async def use_suggestions_prompt(session: Session, lane: DatabaseLane, draft: dict) -> None:
+        # Fills the draft only; `[S]ave` is still what publishes.
+        for position, key in enumerate(slots):
+            draft[key] = suggestions[position] if position < len(suggestions) else ""
+
+    fields = [
+        FieldSpec(
+            key=key, hotkey=str(position), menu_text=menu_key(str(position), f" Address {position}"),
+            label=f"Address {position}", render=lambda d, key=key: d[key] or "(empty)",
+            prompt=text_field(key),
+            brief="telnet://, ssh:// or https://",
+            help=(
+                "Where a caller reaches this board: telnet://host:port, ssh://host:port or an "
+                f"https:// URL, at most {MAX_DIAL_IN_URL_BYTES} bytes. Plain http:// is not accepted. "
+                "Empty the line to drop the entry."
+            ),
+        )
+        for position, key in enumerate(slots, start=1)
+    ]
+    fields.append(FieldSpec(
+        key="suggestions", hotkey="u", menu_text=menu_key("U", "se suggestions"), label="Suggested",
+        render=lambda d: ", ".join(suggestions) if suggestions else "(none -- no DNS name or listeners on record)",
+        prompt=use_suggestions_prompt,
+        brief="Fill the slots; not saved yet",
+        help=(
+            "Suggestions come from this node's DNS name and its enabled telnet and SSH listener "
+            "ports, plus an https:// [web] public_url. They are not published by themselves: check "
+            "them against your port forwards and proxies, then save."
+        ),
+    ))
+
+    def preamble(_draft: dict) -> str:
+        now = sanitize_text(_describe_published_dial_in(published, source))
+        return "\r\n".join([
+            colored("Published now: ", fg_color=LABEL_COLOR) + colored(now, fg_color=VALUE_COLOR),
+            colored(
+                "Callers dial these; other boards show them on their node map. Suggested entries "
+                "are not published until you save.", fg_color=MUTED_COLOR,
+            ),
+        ])
+
+    async def save(draft: dict) -> list[str]:
+        values = [draft[key] for key in slots]
+
+        def _persist(db: Database) -> list[str]:
+            # The list and its audit entry commit together or not at all,
+            # as the limits-and-retention save does.
+            db.connection.execute("BEGIN IMMEDIATE")
+            try:
+                accepted = set_stated_dial_in_without_commit(db, values)
+                record_action_without_commit(
+                    db, actor=actor, action="set_dial_in",
+                    detail=", ".join(accepted) if accepted else "(none)",
+                )
+            except BaseException:
+                db.connection.rollback()
+                raise
+            else:
+                db.connection.commit()
+            return accepted
+
+        accepted = await lane.run(_persist)
+        if accepted:
+            _announce_line(session, f"Dial-in addresses saved ({len(accepted)}); the next hello publishes them.")
+        else:
+            _announce_line(session, "Dial-in addresses saved empty; this node publishes none.")
+        return accepted
+
+    await edit_resource_draft(
+        session, lane,
+        title="Dial-in addresses",
+        subtitle="Where callers reach this board, as other boards will show it.",
+        fields=fields, draft=draft, save=save, error_type=DialInError,
+        save_menu_text=menu_key("S", "ave"), back_menu_text=menu_key("B", "ack"),
+        preamble=preamble,
+        description_level=await lane.run(menu_description_level, actor),
+        redraw_in_place=await lane.run(redraw_in_place_enabled, actor),
+        unicode_style=await lane.run(unicode_style_enabled, actor),
+        collapsed=await lane.run(breadcrumb_collapsed_enabled, actor),
+        accent_color=await lane.run(effective_accent_color_256),
+        header_color=await lane.run(effective_header_color_256),
+    )
+
+
 async def _link_status_screen(
     session: Session, lane: DatabaseLane, actor: User, *, link_context: LinkContext,
     node_controls: NodeControls | None = None,
@@ -9177,7 +9342,8 @@ async def _link_status_screen(
     security notice to read, the SysOp had to answer a mutating
     question before seeing the rest. Now the whole panel is drawn
     first and acknowledging is an explicit hotkey on the action bar,
-    alongside `[P]eers` for the per-peer detail.
+    alongside `[P]eers` for the node map (issue #777), which replaced the
+    per-peer list.
 
     The panel is grouped and paged (`show_detail`): it used to be some
     twenty `Label: value` sentences in one colour, two rows taller than
@@ -9196,14 +9362,18 @@ async def _link_status_screen(
     while True:
         chrome = await _load_chrome(lane, actor)
         sections, identity_notices = await _link_status_sections(lane, link_context=link_context)
-        has_peers = bool(link_context.link_node.peers)
         actions = []
-        if has_peers:
+        # Issue #777: the node map, which replaced the verified-peer list.
+        # Offered whenever it has a row: a candidate or a carried origin is
+        # a node to look at even before any hello completes.
+        if await _node_map_has_rows(lane, link_context):
             actions.append(("p", menu_key("P", "eers")))
         if identity_notices:
             actions.append(("a", menu_key("A", "cknowledge identity changes")))
         # Issue #624: the node's own keys and their rotation.
         actions.append(("k", menu_key("K", "eys")))
+        # Issue #777: where callers reach this board.
+        actions.append(("d", menu_key("D", "ial-in")))
         # Issue #683: what this node holds and does not carry.
         offered, excluded = await _carry_decision_totals(lane)
         if offered:
@@ -9227,12 +9397,14 @@ async def _link_status_screen(
         if choice == "b":
             return
         if choice == "p":
-            await _link_peer_detail(session, lane, actor, link_context=link_context)
+            await _node_map_sysop_screen(session, lane, actor, link_context=link_context)
         elif choice == "k":
             await _node_keys_screen(
                 session, lane, actor, link_context=link_context,
                 key_rotation=node_controls.key_rotation if node_controls is not None else None,
             )
+        elif choice == "d":
+            await _dial_in_editor(session, lane, actor, link_context=link_context)
         elif choice == "a":
             for notice in identity_notices[:5]:
                 await lane.run(dismiss_identity_observation, notice.id)
@@ -16612,10 +16784,15 @@ async def _post_action_screen(
                 continue
             _announce_line(session, "Rejected.")
             return
-        if choice == "p":
-            post = await lane.run(set_post_pinned, post, not post.pinned, changed_by=actor)
-        else:
-            post = await lane.run(set_post_exempt, post, not post.exempt_from_expiry, changed_by=actor)
+        # Refused, not raised, when the post was removed or its board hidden
+        # meanwhile -- the same as approve and reject just above.
+        try:
+            if choice == "p":
+                post = await lane.run(set_post_pinned, post, not post.pinned, changed_by=actor)
+            else:
+                post = await lane.run(set_post_exempt, post, not post.exempt_from_expiry, changed_by=actor)
+        except PostError as exc:
+            _announce(session, f"Error: {exc}", error=True)
 
 
 # -- file areas ----------------------------------------------------------
@@ -17447,13 +17624,17 @@ async def _file_action_screen(
                 continue
             _announce_line(session, "Rejected.")
             return
-        elif choice == "p":
+        elif choice in ("p", "x"):
             await session.write_line("")
-            entry = await lane.run(set_file_pinned, entry, not entry.pinned, changed_by=actor)
-            await _draw()
-        elif choice == "x":
-            await session.write_line("")
-            entry = await lane.run(set_file_exempt, entry, not entry.exempt_from_expiry, changed_by=actor)
+            # Refused, not raised, when the file is gone or its area hidden
+            # meanwhile -- the same as approve and reject just above.
+            try:
+                if choice == "p":
+                    entry = await lane.run(set_file_pinned, entry, not entry.pinned, changed_by=actor)
+                else:
+                    entry = await lane.run(set_file_exempt, entry, not entry.exempt_from_expiry, changed_by=actor)
+            except FileEntryError as exc:
+                _announce(session, f"Error: {exc}", error=True)
             await _draw()
         else:
             await session.write(reject_unhandled_key(choice))

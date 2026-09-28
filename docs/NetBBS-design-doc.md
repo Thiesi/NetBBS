@@ -1157,9 +1157,27 @@ visible. Local maintenance follows:
 
 `active -> expired -> deleted`
 
-with a grace period between expiration and deletion. Pin and expiry-exemption
-currently use the existing edit permission. Local pruning never becomes a
-network-wide deletion instruction.
+with a grace period between expiration and deletion. Local pruning never
+becomes a network-wide deletion instruction.
+
+**Pinning and keeping** (issue #675). A moderator with the board's or area's
+edit permission can pin a post or file, and can keep it from expiring:
+- **Where:** from the post reader (`P[i]n`, `[K]eep`) or the file area screen,
+  on any approved post or file, not only one awaiting approval.
+- **What a pin does:** a pinned post or file is listed first on the page a
+  board or area opens on, marked "pin", in at most half the page's rows. It
+  also stays in the dated listing where it was posted. So a pin the block
+  has no room for is still reached by paging, and the opening page leaves
+  out only the dated rows its block already shows. A page reached by paging
+  or by a `[N]ew scan`/`[F]ind` jump has no pinned block, so a jump opens on
+  its target.
+- **When `[K]eep` is offered:** only where content expires (the board or area
+  has a maximum age), or where something is already kept.
+- **Both flags belong to the post, not to one revision:** an edit keeps them,
+  and a kept post's edit does not expire out from under it. Removing a post
+  clears both.
+- **Local only:** a pin is this node's own presentation and is never carried
+  over the Link. A carried board's moderator pins for this node's callers.
 
 **Expiry is a caller-facing boundary, not only a delisting** (issue #639).
 Once a post or a file is `expired`, no keystroke a caller can press reaches
@@ -1495,6 +1513,18 @@ carried exactly as written and filtered on output
   carried over. The layout belongs to the post, set by the editor that drew it:
   editing an art post reopens the art editor, and a carried post brings its
   layout along (§9.2).
+- **Pasted color** (issue #754): the post editors show color as pipe codes, so
+  that is how pasted color arrives. On a board that allows color, the line and
+  fullscreen prose editors type a pasted SGR (`ESC [ <digits;> m`) in at the
+  cursor as the equivalent pipe codes. Bold becomes the bright foreground, a
+  bright background its base color, and a return to the default foreground
+  `|07`. Underline, blink, 256-color and truecolor have no pipe code and are
+  dropped. The editors have no notation of their own for bold, underline or
+  blink. The author sees and edits the codes as text, and the stored body stays
+  in the one notation the editors show. On a board without color, and at every
+  other prompt, a pasted SGR is dropped as before. A post with SGR of its own
+  (carried over the Link, or written by another client) still shows it through
+  the filter above.
 
 ### 6.2 File areas
 
@@ -3362,8 +3392,9 @@ list is not the whole network: peers pass on only the nodes they have met
 themselves (§8.3), and there is no directory. The screen says so in its title,
 "Nodes known to <board>", and nowhere else.
 
-**What a caller sees.** Per node: its friendly name and DNS name; how this
-board knows it, *direct* (met) or *via <carrier>* (introduced; *via another
+**What a caller sees.** Per node: its friendly name, with its DNS name beside
+it only where two listed nodes share a friendly name (the DNS name is otherwise
+in the detail view, and search matches it); how this board knows it, *direct* (met) or *via <carrier>* (introduced; *via another
 node* when the carrier is itself left off the caller's list); when it was
 last heard of, as a relative time, marked stale past 30 days; and, in its
 detail view, the `dial_in` addresses its descriptor carries (§8.2) and the
@@ -3531,9 +3562,10 @@ reindex_post(db, board_id, root_post_id)`, the same call every other
 `posts` write path already makes, right after each materialization.
 
 **Repairing a gap.** Because persistence and projection are now atomic for
-new events, the only way a `board_post`/`board_post_edit` in `link_events`
-can lack a corresponding `posts` row is a node that carried boards *before*
-this feature shipped. A repair pass — scan `link_events` for `board_post`/
+new events, a `board_post`/`board_post_edit` in `link_events` lacks a
+corresponding `posts` row only where a node carried boards *before* this
+feature shipped, where the expiry sweep deleted it, or where a moderator
+rejected it -- and a rejection is recorded so that it stays that way (below). A repair pass — scan `link_events` for `board_post`/
 `board_post_edit` rows with no matching `posts.post_id`, and materialize them
 in chain order — closes that one-time gap and doubles as the "supported
 rebuild path" issue #73's own acceptance criteria ask for, the same
@@ -3544,6 +3576,19 @@ explicit-SysOp-trigger-only shape `netbbs.files.gc`'s reference-aware blob
 reclaim already established — purely additive (fills in a missing row from
 an already-verified signed event, never deletes or rewrites anything), so
 unlike blob reclaim it needs no dry-run/confirm step.
+
+**A rejection is a record, not only a deletion** (issue #692). Rejecting a
+held post or edit deletes its `posts` row, but a carried one's signed event
+stays in `link_events`. The repair pass would take that as a gap and publish
+the refused post again. So every rejection, local or carried, is written to
+`post_rejections`: the post id (for a carried post, its event's `content_id`),
+the board, who, when, and an optional reason. Every materialization path
+skips a recorded id: the repair pass, and a carried post or author edit
+arriving again. The signed event is kept, since local moderation never
+rewrites it. A post the repair pass does restore gets the status sync would
+have given it: this node's moderation, and a hold where the author's trust
+requires approval. The same record is where a rejection's reason and the
+author's notice come from (issue #678).
 
 Linked resources are carried by default within the supported topology. Every
 genesis a node has accepted is in exactly one recorded state (issue #561):

@@ -157,17 +157,24 @@ def _build_link_throttle(link_config: LinkConfig) -> LinkRequestThrottle:
 def _load_own_identity_claims(
     db: Database,
     advertised_host: str | None,
-    previous_claims: tuple[str, str | None] | None,
-) -> tuple[str, str | None]:
-    """Load and, when changed, persist the local human-facing identity."""
+    previous_claims: tuple[str, str | None, tuple[str, ...]] | None,
+) -> tuple[str, str | None, tuple[str, ...]]:
+    """Load and, when changed, persist the local human-facing identity.
+
+    The third element is the `dial_in` list the next descriptor carries
+    (issue #777, design doc §8.2): the SysOp's saved statement, or the
+    `[web] public_url` fallback. It is display-only and never part of the
+    remembered identity-claim history, which is about names."""
     from netbbs.config import get_node_display_name
+    from netbbs.link.dial_in import published_dial_in
     from netbbs.link.node_profiles import own_canonical_dns_name, remember_own_identity_claims
 
     claims = (
         get_node_display_name(db),
         own_canonical_dns_name(db, advertised_host),
+        published_dial_in(db),
     )
-    if claims != previous_claims:
+    if previous_claims is None or claims[:2] != previous_claims[:2]:
         remember_own_identity_claims(db, canonical_dns_name=claims[1])
     return claims
 
@@ -179,21 +186,21 @@ class _OwnHelloProvider:
         self,
         link_node: LinkNode,
         link_config: LinkConfig,
-        claims: tuple[str, str | None],
+        claims: tuple[str, str | None, tuple[str, ...]],
         live_relays_provider=None,
     ) -> None:
         self._link_node = link_node
         self._link_config = link_config
-        self._friendly_name, self._canonical_dns_name = claims
+        self._friendly_name, self._canonical_dns_name, self._dial_in = claims
         self._live_relays_provider = live_relays_provider
 
     async def refresh(self, lane: DatabaseLane) -> None:
         claims = await lane.run(
             _load_own_identity_claims,
             self._link_config.advertised_host,
-            (self._friendly_name, self._canonical_dns_name),
+            (self._friendly_name, self._canonical_dns_name, self._dial_in),
         )
-        self._friendly_name, self._canonical_dns_name = claims
+        self._friendly_name, self._canonical_dns_name, self._dial_in = claims
 
     def __call__(self) -> HelloMessage:
         addresses = None
@@ -233,6 +240,7 @@ class _OwnHelloProvider:
             ),
             friendly_name=self._friendly_name,
             canonical_dns_name=self._canonical_dns_name,
+            dial_in=self._dial_in,
         )
 
 
@@ -1074,7 +1082,15 @@ async def run(
             except ImportError:
                 pass
             else:
-                link_realtime_registry = LinkRealtimeSessionRegistry(own_fingerprint=node_identity.fingerprint)
+                from netbbs.link.store import record_direct_contact
+
+                async def _record_realtime_contact(fingerprint: str, at: str) -> None:
+                    # Issue #777: an open authenticated session is contact.
+                    await background_lane.run(record_direct_contact, fingerprint, at)
+
+                link_realtime_registry = LinkRealtimeSessionRegistry(
+                    own_fingerprint=node_identity.fingerprint, on_contact=_record_realtime_contact,
+                )
                 link_realtime_bridge = LiveChannelBridge(
                     hub=hub, lane=background_lane, presence=presence, registry=link_realtime_registry
                 )

@@ -582,6 +582,30 @@ class PostPage:
     posts: list[Post]
     has_older: bool
     has_newer: bool
+    # Issue #675: how many of `posts`, from the front, are pinned posts
+    # listed above the dated feed on the newest page. The page's cursors
+    # come from the feed, never from them.
+    pinned_count: int = 0
+    # The feed's own (oldest, newest) cursors, when they are not simply
+    # the first and last feed row on the page: the newest page drops the
+    # feed rows its pinned block already shows.
+    feed_bounds: tuple[PostCursor, PostCursor] | None = None
+
+    @property
+    def oldest_cursor(self) -> PostCursor | None:
+        """The cursor for the page before this one."""
+        if self.feed_bounds is not None:
+            return self.feed_bounds[0]
+        feed = self.posts[self.pinned_count:]
+        return (feed[0].created_at, feed[0].post_id) if feed else None
+
+    @property
+    def newest_cursor(self) -> PostCursor | None:
+        """The cursor for the page after this one."""
+        if self.feed_bounds is not None:
+            return self.feed_bounds[1]
+        feed = self.posts[self.pinned_count:]
+        return (feed[-1].created_at, feed[-1].post_id) if feed else None
 
 
 def list_posts_page(
@@ -592,6 +616,7 @@ def list_posts_page(
     before: PostCursor | None = None,
     after: PostCursor | None = None,
     limit: int = _DEFAULT_PAGE_SIZE,
+    with_pinned: bool = False,
 ) -> PostPage:
     """
     Fetch one bounded page of posts on `board` (design doc, issue #10)
@@ -658,6 +683,15 @@ def list_posts_page(
     expiry/deletion first (`_sweep_expired_posts`) so this always
     reflects an up-to-date view, given there's no background job doing
     that separately.
+
+    `with_pinned` (issue #675): on the page a board opens on -- the newest,
+    asked for with no cursor -- pinned posts are listed first, in
+    `PostPage.pinned_count` rows of its `limit`, at most half of it. They
+    stay in the dated feed as well, so a pin the block has no room for is
+    still reached by paging; the newest page only leaves out the feed rows
+    its block already shows. A page reached by a cursor -- paging, or a
+    `[N]ew scan`/`[F]ind` jump that must open on its target -- never gets
+    the block.
     """
     require_level(requesting_user, board.min_read_level)
     if before is not None and after is not None:
@@ -673,13 +707,29 @@ def list_posts_page(
         roots = list(reversed(_visible_roots(db, board, limit=limit)))
 
     posts = [_resolve_current_version(db, row) for row in roots]
-    if not posts:
+    pinned: list[Post] = []
+    feed_bounds = None
+    if with_pinned and before is None and after is None:
+        pinned = list_pinned_posts(db, board, requesting_user=requesting_user, limit=max(1, limit // 2))
+        if pinned and posts:
+            feed_bounds = ((posts[0].created_at, posts[0].post_id), (posts[-1].created_at, posts[-1].post_id))
+            shown = {post.post_id for post in pinned}
+            room = limit - len(pinned)
+            posts = [post for post in posts if post.post_id not in shown][-room:] if room else []
+            if posts:
+                feed_bounds = ((posts[0].created_at, posts[0].post_id), feed_bounds[1])
+    if not posts and not pinned:
         return PostPage(posts=[], has_older=False, has_newer=False)
 
-    oldest, newest = posts[0], posts[-1]
-    has_older = bool(_visible_roots(db, board, older_than=(oldest.created_at, oldest.post_id), limit=1))
-    has_newer = bool(_visible_roots(db, board, newer_than=(newest.created_at, newest.post_id), limit=1))
-    return PostPage(posts=posts, has_older=has_older, has_newer=has_newer)
+    oldest, newest = feed_bounds or (
+        ((posts[0].created_at, posts[0].post_id), (posts[-1].created_at, posts[-1].post_id)) if posts else (None, None)
+    )
+    has_older = oldest is not None and bool(_visible_roots(db, board, older_than=oldest, limit=1))
+    has_newer = newest is not None and bool(_visible_roots(db, board, newer_than=newest, limit=1))
+    return PostPage(
+        posts=pinned + posts, has_older=has_older, has_newer=has_newer,
+        pinned_count=len(pinned), feed_bounds=feed_bounds,
+    )
 
 
 # How many candidate roots `_visible_roots` reads per query. Hidden roots
@@ -876,7 +926,7 @@ def approve_post(db: Database, post: Post, *, approved_by: User) -> Post:
     return get_post(db, post.post_id)
 
 
-def delete_post(db: Database, post: Post, *, deleted_by: User) -> None:
+def delete_post(db: Database, post: Post, *, deleted_by: User, reason: str | None = None) -> None:
     """
     Delete a post outright, requiring `deleted_by` to hold
     `BoardPermission.DELETE` on its board. Doubles as "reject" for a
@@ -921,6 +971,23 @@ def delete_post(db: Database, post: Post, *, deleted_by: User) -> None:
         raise PostError("cannot delete this post: it " + ", and ".join(reasons))
 
     action = "reject" if post.status == "pending" else "delete"
+    current = db.connection.execute("SELECT status FROM posts WHERE id = ?", (post.id,)).fetchone()
+    if current is None or current["status"] != post.status:
+        # Another moderator decided first -- approved it, or rejected it
+        # already. A decision made on a stale copy must not delete an
+        # approved post, nor record a rejection nobody made of it (Codex
+        # review on #780).
+        raise PostError("this post was already decided by another moderator")
+    if action == "reject":
+        # A rejection is recorded, not only carried out (issue #692): for a
+        # carried post the signed event is kept, and without this record
+        # `[R]epair carried posts` would publish the refused post again.
+        # `reason` is optional and kept with it.
+        db.connection.execute(
+            "INSERT OR REPLACE INTO post_rejections (post_id, board_id, rejected_by_user_id, rejected_at, reason) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (post.post_id, post.board_id, deleted_by.id, utc_now_iso(), reason),
+        )
     db.connection.execute("DELETE FROM posts WHERE id = ?", (post.id,))
     db.connection.commit()
     record_action(
@@ -1016,6 +1083,18 @@ def tombstone_post(db: Database, post: Post, board: Board, *, tombstoned_by: Use
     return get_post(db, new_post_id)
 
 
+def _refuse_if_removed(db: Database, post: Post) -> None:
+    """A removed post is neither pinned nor kept (issue #675): removal
+    clears both, and a reader left open since must not set them again on
+    the placeholder (Codex review on #783)."""
+    removed = db.connection.execute(
+        "SELECT 1 FROM posts WHERE root_post_id = ? AND board_id = ? AND tombstoned_at IS NOT NULL LIMIT 1",
+        (post.root_post_id, post.board_id),
+    ).fetchone()
+    if removed is not None:
+        raise PostError("this post has been removed")
+
+
 def set_post_pinned(db: Database, post: Post, pinned: bool, *, changed_by: User) -> Post:
     """
     Pin or unpin a post within its own board's listing — a distinct
@@ -1023,14 +1102,21 @@ def set_post_pinned(db: Database, post: Post, pinned: bool, *, changed_by: User)
     sorts first among *all* boards). Requires `BoardPermission.EDIT`,
     per the existing pin/exempt-under-`edit` sign-off note.
 
-    Does not reorder `list_posts_page`'s cursor-paginated feed itself
-    (that would break keyset pagination's stability guarantees) — see
-    `list_pinned_posts` for the dedicated pinned view.
+    A pinned post is listed first on the page a board opens on
+    (`list_posts_page(with_pinned=True)`, issue #675).
+
+    The flag belongs to the post, not to one revision: every row of the
+    edit chain is set, and a later revision takes its root's flag
+    (`trg_posts_revision_flags`).
     """
     _refuse_if_board_hidden(db, post.board_id)
     _require_board_permission(db, post, changed_by, BoardPermission.EDIT)
+    _refuse_if_removed(db, post)
 
-    db.connection.execute("UPDATE posts SET pinned = ? WHERE id = ?", (int(pinned), post.id))
+    db.connection.execute(
+        "UPDATE posts SET pinned = ? WHERE root_post_id = ? AND board_id = ?",
+        (int(pinned), post.root_post_id, post.board_id),
+    )
     db.connection.commit()
     record_action(
         db,
@@ -1047,12 +1133,19 @@ def set_post_pinned(db: Database, post: Post, pinned: bool, *, changed_by: User)
 def set_post_exempt(db: Database, post: Post, exempt: bool, *, changed_by: User) -> Post:
     """Exempt or unexempt a post from the expiry sweep. Requires
     `BoardPermission.EDIT`, per the existing pin/exempt-under-`edit`
-    sign-off note."""
+    sign-off note.
+
+    Set on every revision of the post, as `set_post_pinned` does (issue
+    #675): the sweep ages rows one by one, and an exempt post whose edit
+    was not exempt used to fall back to its pre-edit text when the edit
+    expired."""
     _refuse_if_board_hidden(db, post.board_id)
     _require_board_permission(db, post, changed_by, BoardPermission.EDIT)
+    _refuse_if_removed(db, post)
 
     db.connection.execute(
-        "UPDATE posts SET exempt_from_expiry = ? WHERE id = ?", (int(exempt), post.id)
+        "UPDATE posts SET exempt_from_expiry = ? WHERE root_post_id = ? AND board_id = ?",
+        (int(exempt), post.root_post_id, post.board_id),
     )
     db.connection.commit()
     record_action(
@@ -1097,31 +1190,55 @@ def list_pending_posts(db: Database, board: Board, *, requesting_user: User) -> 
     return [_row_to_post(row) for row in rows]
 
 
-def list_pinned_posts(db: Database, board: Board, *, requesting_user: User) -> list[Post]:
-    """
-    Every currently-pinned, approved post on `board`, oldest first.
-    Requires only `board.min_read_level` — pinning is a display
-    convenience, not an access restriction, so anyone who can read the
-    board can see what's pinned. A dedicated view rather than
-    reordering `list_posts_page`'s feed (see `set_post_pinned`).
+# At most this many pinned posts are listed at once. Pins are set by this
+# node's moderators only, never carried; a pin past the page's share is
+# still in the dated feed.
+MAX_PINNED_POSTS = 50
 
-    `pinned` is a root-level property (`set_post_pinned` operates on
-    whatever `Post` it's given, and every caller passes it an already-
-    resolved, root-identified `Post` -- see `_resolve_current_version`),
-    so filtering on it here already naturally selects root rows only;
-    each is still resolved to its current content the same as
-    `list_posts_page`, so a pinned-then-edited post shows its latest
-    body here too, not a stale snapshot from when it was pinned.
+
+def list_pinned_posts(
+    db: Database, board: Board, *, requesting_user: User, limit: int = MAX_PINNED_POSTS
+) -> list[Post]:
+    """
+    Up to `limit` pinned posts on `board` that a reader may see, oldest
+    first, each resolved to its current revision.
+
+    "May see" is the feed's rule (`_visible_roots`): some revision is
+    approved and the post is not hidden by trust. Access to the board
+    itself -- its Community cascade, `min_age`, name requirement -- is
+    the caller's to check before showing the board at all, exactly as
+    for `list_posts_page`; this checks `min_read_level` as that does.
     """
     require_level(requesting_user, board.min_read_level)
-    rows = db.connection.execute(
-        """
-        SELECT * FROM posts WHERE board_id = ? AND status = 'approved' AND pinned = 1
-        ORDER BY created_at
-        """,
-        (board.id,),
-    ).fetchall()
-    return [_resolve_current_version(db, row) for row in rows]
+    # Batched past trust-hidden roots, as `_visible_roots` is (Codex review
+    # on #783): a hidden pin must not take a visible one's place.
+    found: list[Post] = []
+    author_cache: dict = {}
+    after: PostCursor | None = None
+    while len(found) < limit:
+        position_sql = "AND (root.created_at, root.post_id) > (?, ?)" if after is not None else ""
+        rows = db.connection.execute(
+            f"""
+            SELECT root.*, e.envelope_json AS link_envelope_json FROM posts root
+            LEFT JOIN link_events e ON e.content_id = root.post_id
+            WHERE root.board_id = ? AND root.pinned = 1 AND root.post_id = root.root_post_id
+              {position_sql}
+              AND {_HAS_APPROVED_VERSION_SQL}
+            ORDER BY root.created_at, root.post_id
+            LIMIT ?
+            """,
+            (board.id, *(after or ()), _VISIBLE_ROOTS_BATCH),
+        ).fetchall()
+        for row in rows:
+            envelope_json = row["link_envelope_json"]
+            if envelope_json is None or envelope_content_visible(db, envelope_json, author_cache=author_cache):
+                found.append(_resolve_current_version(db, row))
+                if len(found) == limit:
+                    break
+        if len(rows) < _VISIBLE_ROOTS_BATCH:
+            break
+        after = (rows[-1]["created_at"], rows[-1]["post_id"])
+    return found
 
 
 def _require_board_permission(db: Database, post: Post, user: User, permission: BoardPermission) -> None:

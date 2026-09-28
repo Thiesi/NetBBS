@@ -786,6 +786,22 @@ rows may remain expired indefinitely.
 Ranking queries must account for effective expiry even when lazy sweeping has
 not yet materialized the status change.
 
+A post's `pinned` and `exempt_from_expiry` belong to the post but are stored on
+every revision row (issue #675). The expiry sweep ages rows one at a time, so
+each revision must carry the flag itself. The setters write the whole chain;
+`trg_posts_revision_flags` copies the root's flags onto every revision
+inserted later, local or carried; `trg_posts_tombstone_clears_flags` clears
+both on removal. Anything new that inserts a revision gets this for free.
+Anything that reads the flag may read it from any row, and should read the
+root's.
+
+Pinned posts and files are listed first only on the page a board or area opens
+on (`list_posts_page`/`list_files_page` with `with_pinned=True` and no cursor).
+They also stay in the dated feed, so a pin past the block's half-page share is
+never unreachable. The page's `oldest_cursor`/`newest_cursor` are the feed's
+own (`feed_bounds`), so code that pages must never take a cursor from
+`posts[0]` or `entries[0]`.
+
 ### Files and transfers
 
 File contents are content-addressed filesystem blobs; SQLite stores metadata.
@@ -2712,6 +2728,32 @@ Seeds introduce addresses; they do not confer trust.
 A full peer must advertise a usable address. Outgoing-only nodes may have no
 inbound address. Link-only startup does not count as an interactive BBS
 listener: at least one user-facing transport must start.
+
+Last heard (the node map, issue #777) rests on two stored times, and both are
+easy to break from an unrelated save path. `last_direct_contact_at` moves only
+on contact with the node itself: a hello, an events exchange, or an open
+authenticated real-time session, which `LinkRealtimeSessionRegistry` records
+through its `on_contact` hook at admission, every
+`REALTIME_CONTACT_RECORD_INTERVAL_SECONDS` while open, and at close (the
+peer's last frame time, not the teardown time). A save of secondhand
+knowledge passes `direct_contact=False`. `descriptor_first_stored_at` moves
+only when the stored descriptor's *content id* changes, and
+`store.descriptor_first_stored_at` looks for the same descriptor in all three
+tables that hold one (`link_peers`, `link_introduced_identities`,
+`link_peer_candidates`), so a descriptor moving between them keeps its time.
+Compare by content id, never by stored JSON: a re-serialized copy of the same
+signed descriptor need not match byte for byte. Any new writer of a
+`descriptor_json` column must set the first-stored time the same way, or a
+future-dated descriptor escapes its cap.
+
+The map's node numbers (`link_node_numbers`) are pruned on every map build
+against the *complete* set of known nodes (peers, introductions, candidates,
+carried origins), never against one viewer's filtered list, or a caller's
+visit would drop the numbers of nodes hidden from callers. Pruning is what
+bounds the table against a carrier churning introductions; never-reuse comes
+from the high-water mark in `node_config`
+(`link_node_number_high_water`), not from `MAX(number)`, which pruning can
+lower.
 
 ### Event acceptance
 
