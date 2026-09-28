@@ -77,6 +77,7 @@ from netbbs.auth.users import (
     UserManagementError,
     UsernameRetiredError,
     approve_pending_user,
+    decline_pending_user,
     count_sysops,
     create_user,
     current_account,
@@ -5823,7 +5824,12 @@ async def _draw_user_detail(
     options.append(MenuEntry(label=menu_key("P", "assword"), brief="Set or clear this user's password"))
     options.append(MenuEntry(label=menu_key("R", "estrict login"), brief="Block or unblock this account"))
     options.append(MenuEntry(label=menu_key("H", "istory"), brief="Admin actions on this account"))
-    options.append(MenuEntry(label=menu_key("D", "elete"), brief="Permanently remove this user"))
+    if target.pending_approval:
+        # Issue #835: turning down a signup is routine, and used to need
+        # the full permanent-delete warning and typed-name confirmation.
+        options.append(MenuEntry(label=menu_key("D", "ecline"), brief="Turn down this signup"))
+    else:
+        options.append(MenuEntry(label=menu_key("D", "elete"), brief="Permanently remove this user"))
     options.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to the picker"))
     await session.write_line(
         "\r\n" + _fitted_menu(options, description_level, session=session, used_rows=panel_rows + 5)
@@ -6170,6 +6176,22 @@ async def _user_detail_screen(
             blocked = await _draw_user_detail(
                 session, lane, target, description_level, redraw_in_place, unicode_style, collapsed, selected=selected,
             )
+        elif choice == "d" and target.pending_approval:
+            await session.write_line("")
+            if await prompt_yes_no(
+                session, f"Decline {target.username!r}'s signup and remove the account?", default=False
+            ):
+                try:
+                    await lane.run(decline_pending_user, target, declined_by=actor)
+                except UserManagementError as exc:
+                    _announce_line(session, colored(str(exc), fg_color=MUTED_COLOR))
+                    target = await lane.run(get_user_by_id, target.id) or target
+                else:
+                    _announce_line(session, f"{target.username!r}'s signup declined.")
+                    return
+            blocked = await _draw_user_detail(
+                session, lane, target, description_level, redraw_in_place, unicode_style, collapsed, selected=selected,
+            )
         elif choice == "d":
             await session.write_line("")
             deleted = await _delete_user_confirm(session, lane, actor, target, node_controls)
@@ -6265,6 +6287,13 @@ async def _registration_settings_screen(session: Session, lane: DatabaseLane, ac
         if pending_count:
             rows.append(Field(
                 "Awaiting approval", f"{pending_count} account(s) -- see [L]ist users", color=WARNING_COLOR
+            ))
+        if current == RegistrationMode.APPROVAL_REQUIRED:
+            # Issue #835: a SysOp's banner promised newcomers they could
+            # "look around a bit" while they waited, and they can't.
+            rows.append(Note(
+                "A new account can't log in at all until you approve it -- not even to look around. "
+                "The caller is told it is waiting for your approval."
             ))
         choice, _page = await show_detail(
             session,

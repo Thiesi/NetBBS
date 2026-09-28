@@ -790,6 +790,37 @@ A node has one registration mode:
 - `closed`: the public registration option is absent and accounts are
   SysOp-created.
 
+A pending account that presents the right password is told it is waiting
+for approval and the connection ends (issue #835). Any other failure stays the
+generic "Login failed": the distinction is made only after the credential
+has matched, so it tells no one anything they could not learn by logging in.
+SSH shows the same notice as an authentication banner on a password login.
+It stays generic for a public-key lookup, because SSH asks that before the
+client has signed anything and a public key is public. A signup that created a
+pending account is not charged as a failed login attempt on its connection.
+
+Self-registration checks the desired username as soon as it is typed, before
+the password prompts, and spends a login-throttle token doing so: whether a
+name is taken is the same existence answer account creation used to give,
+only earlier. Beyond the grammar every account shares, a caller may not
+register:
+
+- a reserved name: `sysop`, `cosysop`, `admin`, `administrator`, `root`,
+  `moderator`, `mod`, `staff`, `support`, `system`, `operator`, `postmaster`,
+  `guest`, `netbbs`;
+- a name containing `sysop`;
+- a look-alike of a level-255 account's name.
+
+These names are compared by a skeleton: case folded, `_ - .` dropped, and
+`0/o`, `1/l/i`, `3/e`, `4/a`, `5/s`, `7/t`, `8/b`, `9/g`, `2/z`, `rn/m` and
+`vv/w` folded together. The rules apply to self-registration only. A SysOp
+creating an account by hand may use any name the grammar allows. Only SysOp
+names are protected, not every account's, because impersonating the operator
+is the harm the persona test found. Blocking look-alikes of every caller would
+refuse ordinary names for no gain. A signup is turned down with Decline on the
+pending account, which deletes it after a yes/no. Deletion's typed-name ritual
+guards content and Link history that a never-approved account cannot have.
+
 Registration determines whether an account may exist and log in. Link
 probation and reputation determine what an active identity may do; these are
 separate axes.

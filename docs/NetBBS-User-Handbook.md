@@ -13,9 +13,13 @@ A browser needs no terminal software. An SSH connection looks like
 `ssh -p 2222 yourname@bbs.example.org`; substitute the actual port and address.
 Use SSH or HTTPS when available: plain Telnet does not encrypt your login.
 
-Log in with your account. If registration is offered, follow the on-screen
-steps; some nodes require approval before you can log in. If registration
-is closed, contact the SysOp. Accounts and access rules belong to each node.
+Log in with your account. If registration is offered, type `new` at the
+username prompt (over SSH, connect as `new`). Usernames use the letters A-Z
+without accents, digits, `_`, `-` and `.`, up to 32 characters; the name is
+checked before you choose a password. Some nodes require approval before you
+can log in: until the SysOp approves your account, logging in tells you it is
+still waiting, and you cannot look around in the meantime. If registration is
+closed, contact the SysOp. Accounts and access rules belong to each node.
 
 Change your password under **Profile → Account password**: you type the
 current one, then the new one twice, and nothing is echoed. If you have

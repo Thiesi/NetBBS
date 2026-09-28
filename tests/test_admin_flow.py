@@ -6376,6 +6376,8 @@ def test_registration_settings_screen_can_switch_to_approval_required(db, lane, 
     # The screen stays up: its redraw shows the new mode and the result line.
     assert "Current mode: approval required (SysOp must approve new accounts)" in text
     assert "Registration mode is now: approval required" in text
+    # Issue #835: say plainly that a waiting caller can't look around.
+    assert "can't log in at all until you approve it -- not even to look around" in text
 
 
 def test_registration_settings_screen_can_switch_to_closed(db, lane, sysop):
@@ -9784,21 +9786,28 @@ def test_delete_warning_says_the_name_stays_retired_on_a_link_node(db, lane, sys
     assert "Retired names releases it" in text
 
 
-def test_delete_warning_promises_no_hold_for_a_declined_registration(db, lane, sysop):
-    """The warning and the deletion ask one predicate, so the screen cannot
-    promise a hold the deletion then does not make."""
+def test_declining_a_registration_holds_no_name_and_skips_the_delete_ritual(db, lane, sysop):
+    """A pending account gets [D]ecline, not [D]elete (issue #835): a yes/no,
+    not the permanent-delete warning and typed name. The name is not held,
+    by the same predicate `delete_user` asks."""
     from netbbs.auth.users import list_retired_usernames
     from netbbs.link.onboarding import mark_link_has_run
+    from netbbs.moderation.log import list_recent_actions
 
     mark_link_has_run(db)
     create_user(db, "alice", password="hunter2", user_level=10, pending_approval=True)
-    session = FakeSession(["u", "d", "0", "1", "d", "alice", "b", "b"])
+    session = FakeSession(["u", "d", "0", "1", "d", "y", "b", "b"])
 
     _run(session, lane, sysop)
 
-    assert "stays retired" not in " ".join(_visible(_written_text(session)).split())
+    text = " ".join(_visible(_written_text(session)).split())
+    assert "[D]ecline" in text
+    assert "stays retired" not in text
+    assert "permanently deletes" not in text
+    assert "'alice''s signup declined." in text
     assert not any(u.username == "alice" for u in list_users(db))
     assert list_retired_usernames(db) == []
+    assert any(entry.action == "decline_registration" for entry in list_recent_actions(db))
 
 
 def test_delete_warning_says_nothing_about_retirement_on_a_standalone_node(db, lane, sysop):
