@@ -83,14 +83,13 @@ def test_telnet_reset_during_initial_negotiation_is_a_session_close():
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("error", [SessionClosedError("gone"), ConnectionResetError(104, "reset")])
-def test_telnet_hangup_logs_one_info_line(caplog, error):
+def test_telnet_hangup_logs_one_info_line(caplog):
     async def handler(session) -> None:
-        raise error
+        await session.read_byte()
 
     async def scenario() -> None:
         server = TelnetServer("127.0.0.1", 0, handler)
-        await server._handle_connection(asyncio.StreamReader(), _Writer())
+        await server._handle_connection(_reset_reader(), _Writer())
 
     with caplog.at_level(logging.DEBUG, logger=telnet_module.__name__):
         asyncio.run(scenario())
@@ -101,9 +100,13 @@ def test_telnet_hangup_logs_one_info_line(caplog, error):
     assert all(r.exc_info is None for r in records)
 
 
-def test_telnet_real_error_still_logs_a_traceback(caplog):
+@pytest.mark.parametrize("error", [ValueError("a real bug"), ConnectionResetError(104, "an outbound socket")])
+def test_telnet_real_error_still_logs_a_traceback(caplog, error):
+    """A socket error that did not come through the caller's own session --
+    an outbound request the session made -- is not a hang-up (Claude review)."""
+
     async def handler(session) -> None:
-        raise ValueError("a real bug")
+        raise error
 
     async def scenario() -> None:
         server = TelnetServer("127.0.0.1", 0, handler)
@@ -173,14 +176,14 @@ def test_ssh_reset_during_read_and_write_is_a_session_close(error):
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("error", [SessionClosedError("gone"), ConnectionResetError(104, "reset")])
+@pytest.mark.parametrize("error", [ConnectionResetError(104, "reset"), asyncssh.ConnectionLost("lost")])
 def test_ssh_hangup_logs_one_info_line(caplog, error):
     async def handler(session) -> None:
-        raise error
+        await session.read_byte()
 
     async def scenario() -> None:
         server = ssh_module.SSHServer("127.0.0.1", 0, None, handler)
-        await server._handle_process(_Process(ConnectionResetError()))
+        await server._handle_process(_Process(error))
 
     with caplog.at_level(logging.DEBUG, logger=ssh_module.__name__):
         asyncio.run(scenario())

@@ -70,7 +70,7 @@ from netbbs.net.char_input import (
     move_cursor,
     redraw_tail,
 )
-from netbbs.net.session import CLIENT_DISCONNECT_ERRORS, Session, SessionClosedError, clamp_terminal_size, secret_input
+from netbbs.net.session import Session, SessionClosedError, clamp_terminal_size, secret_input
 from netbbs.rendering.pipe_codes import PastedColor
 from netbbs.rendering.width import char_width, display_width
 
@@ -1123,7 +1123,7 @@ class WebServer:
         session = WebSession(ws, request.remote)
         try:
             await self._session_handler(session)
-        except (SessionClosedError, *CLIENT_DISCONNECT_ERRORS):
+        except SessionClosedError:
             # A caller closing the tab is routine: one INFO line, no traceback.
             _logger.info("web caller %s disconnected", request.remote or "?")
         except Exception:

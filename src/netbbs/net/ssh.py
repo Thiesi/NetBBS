@@ -740,8 +740,10 @@ class SSHServer:
         session = SSHSession(process)
         try:
             await self._session_handler(session)
-        except (SessionClosedError, asyncssh.DisconnectError, *CLIENT_DISCONNECT_ERRORS):
+        except SessionClosedError:
             # A caller hanging up is routine: one INFO line, no traceback.
+            # Only the session's own boundaries produce this; a raw socket
+            # error from anything else in the session is a real error.
             _logger.info("SSH caller %s disconnected", session.peer_address or "?")
         except Exception:
             _logger.exception("unhandled error in SSH session handler")
