@@ -370,6 +370,18 @@ as applicable, commit explicitly, or cancel; leaving either editor never sends
 or posts by itself. Fullscreen-editor output passes through the same review
 boundary so editor preference cannot change send/commit safety.
 
+Size limits are enforced where the text is typed, in characters (issue #812).
+Storage limits are UTF-8 bytes, which mean nothing to a caller -- 200 bytes is
+as few as 100 accented letters -- so every refusal says how many characters to
+remove, never a byte count. The Subject prompt refuses an over-long subject
+when Enter is pressed and reopens on it to be shortened; an empty subject is
+asked for again with Esc to cancel, except at a board's fresh prompt, which
+offers Enter as its way out ("Subject (or press Enter to cancel)"). The
+editors stop a body at its limit, and because the signature is appended after
+them, review re-checks subject and body on arrival, says what is over, and
+refuses the commit until it is fixed. The domain's byte checks remain the
+backstop for every other caller.
+
 Board post composition (new posts and edits) additionally distinguishes
 discarding from saving: `/cancel` (line editor) or discarding (fullscreen
 editor) always deletes any in-progress draft; `/exit`/`/quit` (line editor)
@@ -582,7 +594,9 @@ a "Turn X on?" question that doubles as the exit. A "blank keeps the current
 value" prompt writes nothing else, including a sibling visibility flag.
 A text field opens on its current value instead (issue #529): Enter saves what
 is shown, an emptied line clears it, and Esc leaves it unchanged -- "keep" is a
-key rather than an overload of the empty string. Width is no longer a reason to fall back (issue #546): the line editor
+key rather than an overload of the empty string. Ctrl-U empties the line at
+every single-line prompt on every transport, masked ones included (issue #812),
+so clearing a long value is one key rather than one Backspace per character. Width is no longer a reason to fall back (issue #546): the line editor
 keeps a one-row window over the buffer and scrolls it to follow the cursor, so a
 value wider than the terminal is edited like any other. A value longer than the
 editor's own buffer cap still falls back to the older prompt, blank-keeps-it and

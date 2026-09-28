@@ -358,7 +358,7 @@ def test_edit_profile_bio_keeps_accepted_lines_when_a_later_one_exceeds_the_byte
     asyncio.run(_edit_profile(session, lane, user))
 
     assert get_bio(db, user) == "A short first line."
-    assert "cannot exceed" in session.output
+    assert "characters too long" in session.output
     lane.close()
 
 

@@ -184,7 +184,8 @@ def test_line_editor_rejects_byte_overflow_without_losing_the_draft():
     session = FakeSession(lines=("okay", "€€", "/done"))
     body = asyncio.run(edit_line_body(session, initial_text=None, max_bytes=6, max_lines=20))
     assert body == "okay"
-    assert "would be" in _text(session)
+    assert "That would make the text 2 characters too long." in _text(session)
+    assert "bytes" not in _text(session)
 
 
 def test_review_renders_all_fields_and_returns_explicit_actions():
