@@ -144,8 +144,9 @@ def list_recent_actions(
     on #797):
 
     - It is read newest first through `idx_moderation_log_object`, which
-      ends in `created_at`, so the limit bounds the work as well as the
-      rows.
+      ends in `created_at` (and, as every SQLite index does, the row id
+      that breaks a tie between actions in one microsecond), so the limit
+      bounds the work as well as the rows.
     - It starts after the object's last deletion (`delete_<object_type>`,
       or `purge_link_resource` for a hidden carried one). A deleted board's
       integer id can be reused by the next one created, and the log keeps
@@ -161,7 +162,7 @@ def list_recent_actions(
                   WHERE object_type = ? AND object_id = ?
                     AND action IN ('delete_' || ?, 'purge_link_resource')
               ), 0)
-            ORDER BY created_at DESC LIMIT ?
+            ORDER BY created_at DESC, id DESC LIMIT ?
             """,
             (object_type, object_id, object_type, object_id, object_type, limit),
         ).fetchall()

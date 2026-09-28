@@ -139,7 +139,7 @@ def test_the_object_history_is_read_through_the_object_index(db):
     plan = db.connection.execute(
         """
         EXPLAIN QUERY PLAN SELECT * FROM moderation_log WHERE object_type = 'board' AND object_id = 1
-        ORDER BY created_at DESC LIMIT 200
+        ORDER BY created_at DESC, id DESC LIMIT 200
         """
     ).fetchall()
     detail = " ".join(row[-1] for row in plan)
@@ -182,3 +182,24 @@ def test_every_moderator_is_listed_in_full_and_the_rest_counted(db, lane, sysop)
 
     assert "a_rather_long_moderator_name_00: edit, delete, approve" in text
     assert "...and 2 more" in text
+
+
+def test_the_moderator_lines_stay_one_row_on_a_narrow_terminal(db, lane, sysop):
+    """Codex review on #797: the heading is not paged, so each line is cut."""
+    board, _other = _moderated_board(db, sysop)
+    for i in range(4):
+        grant_permissions(
+            db, create_user(db, f"a_rather_long_moderator_name_{i:02d}", password="hunter2", user_level=10),
+            object_type="board", object_id=None,
+            permissions=BoardPermission.EDIT | BoardPermission.DELETE | BoardPermission.APPROVE, granted_by=sysop,
+        )
+
+    session = FakeSession(["h", "b", "b"])
+    session.terminal_width = 40
+    asyncio.run(_board_detail_screen(session, lane, sysop, board))
+    lines = _visible(_written_text(session)).splitlines()
+    heading = lines.index(next(line for line in lines if line.strip() == "MODERATORS"))
+    moderator_rows = lines[heading + 1: heading + 6]
+
+    assert all(len(row) <= 40 for row in moderator_rows)
+    assert any(row.endswith("...") for row in moderator_rows)

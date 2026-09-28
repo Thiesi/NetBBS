@@ -667,6 +667,7 @@ from netbbs.rendering import (
     colored_truncate,
     counts_row,
     cut_to_width,
+    display_width,
     GRADIENTS,
     decode_ansi_bytes,
     double_frame,
@@ -9850,8 +9851,18 @@ async def _audit_log_screen(
             sections=[*moderator_section, Section(None, [Note("Nothing logged yet.")])],
         )
         return
+    # One row each, whatever the terminal (Codex review on #797): the
+    # picker pages its items, not this heading, so a wrapped line would push
+    # the list off a narrow screen. The revoke screen lists a user's grants
+    # in full.
+    masthead_width = max(8, session.terminal_width - 1)
     masthead = "\r\n".join(
-        [colored("MODERATORS", fg_color=LABEL_COLOR, bold=True), *(f"  {line}" for line in moderators)]
+        [colored("MODERATORS", fg_color=LABEL_COLOR, bold=True)]
+        + [
+            f"  {line}" if display_width(f"  {line}") <= masthead_width
+            else cut_to_width(f"  {line}", masthead_width - 3) + "..."
+            for line in moderators
+        ]
     ) if moderators is not None else ""
 
     newest_first = list(entries)
