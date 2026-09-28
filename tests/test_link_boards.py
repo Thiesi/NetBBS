@@ -1791,3 +1791,36 @@ def test_a_withdrawal_cannot_publish_a_held_subject(db, remote_node_identity):
     )
     materialized = materialize_carried_post_edit(db, withdrawal, sender_fingerprint=remote_node_identity.fingerprint)
     assert materialized.status == "pending" and not materialized.withdrawn
+
+
+def test_a_withdrawal_after_a_held_body_edit_still_shows(db, remote_node_identity):
+    """A held edit that changed only the body keeps the subject readers
+    see, so the withdrawal after it is still one (Codex review on #789)."""
+    from netbbs.boards.posts import WITHDRAWN_PLACEHOLDER, visible_post
+
+    _, root = _carried_moderated_root(db, remote_node_identity)
+    held = _remote_edit(remote_node_identity, root, body="a revised body")
+    assert materialize_carried_post_edit(db, held, sender_fingerprint=remote_node_identity.fingerprint).status == "pending"
+    withdrawal = _remote_edit(
+        remote_node_identity, root, withdrawn=True, previous=held.content_id, created_at="2026-01-01T00:06:00Z",
+    )
+    materialized = materialize_carried_post_edit(db, withdrawal, sender_fingerprint=remote_node_identity.fingerprint)
+    assert materialized.status == "approved" and materialized.withdrawn
+    assert visible_post(db, root.content_id).body == WITHDRAWN_PLACEHOLDER
+
+
+def test_supersession_follows_receipt_order_not_the_clock(db, alice):
+    """An older-received revision stamped later is still superseded by a
+    newer-received approved one (Codex review on #789)."""
+    from netbbs.boards.posts import get_post
+    from netbbs.link.boards import _superseded_by_a_newer_approved_revision
+
+    board = create_board(db, "general", creator=alice)
+    post = create_post(db, board, alice, "Plans", "v1")
+    first = edit_post(db, post, board, subject="Plans", body="v2", edited_by=alice)
+    second = edit_post(db, get_post(db, first.post_id), board, subject="Plans", body="v3", edited_by=alice)
+    # The first edit claims a later time than the second.
+    db.connection.execute("UPDATE posts SET created_at = '2030-01-01T00:00:00.000000Z' WHERE id = ?", (first.id,))
+    db.connection.commit()
+    assert _superseded_by_a_newer_approved_revision(db, get_post(db, first.post_id))
+    assert not _superseded_by_a_newer_approved_revision(db, get_post(db, second.post_id))

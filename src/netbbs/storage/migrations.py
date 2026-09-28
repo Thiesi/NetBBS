@@ -3359,12 +3359,21 @@ MIGRATIONS = [
         sql="""
         ALTER TABLE posts ADD COLUMN withdrawn INTEGER NOT NULL DEFAULT 0 CHECK (withdrawn IN (0, 1));
 
+        -- Only the rows that still hold a flag: a withdrawal is not final,
+        -- so a remote author can alternate edits and withdrawals, and each
+        -- one must not rewrite the whole chain.
         CREATE TRIGGER trg_posts_withdrawal_clears_flags AFTER INSERT ON posts
         WHEN NEW.withdrawn = 1
         BEGIN
             UPDATE posts SET pinned = 0, exempt_from_expiry = 0
-            WHERE root_post_id = NEW.root_post_id AND board_id = NEW.board_id;
+            WHERE root_post_id = NEW.root_post_id AND board_id = NEW.board_id
+              AND (pinned = 1 OR exempt_from_expiry = 1);
         END;
+
+        -- A post's current revision is its newest approved one in receipt
+        -- order (`id`), looked up once per listed post: without this index a
+        -- long carried chain is read and sorted whole on every board opening.
+        CREATE INDEX idx_posts_root_board_status_id ON posts(root_post_id, board_id, status, id);
         """,
     ),
 ]

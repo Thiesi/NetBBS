@@ -493,10 +493,21 @@ def withdraw_post(db: Database, post: Post, board: Board, *, withdrawn_by: User)
     """
     if post.author_user_id is None or post.author_user_id != withdrawn_by.id:
         raise PostError("only the post's author can withdraw it")
-    if post.withdrawn:
+    # The subject as it is now, not as the author's open reader had it: a
+    # moderator may have changed it since, and the withdrawal must not put
+    # the old one back (Codex review on #789).
+    current = db.connection.execute(
+        "SELECT subject, withdrawn FROM posts WHERE root_post_id = ? AND board_id = ? AND status = 'approved' "
+        "ORDER BY id DESC LIMIT 1",
+        (post.root_post_id, post.board_id),
+    ).fetchone()
+    if current is None:
+        raise PostError("no currently-approved version of this post exists to withdraw")
+    if post.withdrawn or current["withdrawn"]:
         raise PostError("this post is already withdrawn")
     return edit_post(
-        db, post, board, subject=post.subject, body=WITHDRAWN_PLACEHOLDER, edited_by=withdrawn_by, withdrawal=True,
+        db, post, board, subject=current["subject"], body=WITHDRAWN_PLACEHOLDER, edited_by=withdrawn_by,
+        withdrawal=True,
     )
 
 

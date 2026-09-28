@@ -738,16 +738,21 @@ def is_withdrawal_edit(db: Database, edit: BoardPostEdit) -> bool:
     payload = edit.payload
     if payload.get("withdrawn") is not True or payload.get("body") != WITHDRAWN_PLACEHOLDER:
         return False
-    # The predecessor must be one readers here were shown: a held edit's
-    # new subject, copied into the withdrawal, would otherwise be published
-    # past the moderation holding it (Codex review on #789).
-    previous = db.connection.execute(
-        "SELECT subject, status FROM posts WHERE post_id = ?", (payload.get("previous_event_id"),)
+    # The subject must be the one readers here see now -- the post's
+    # current approved revision -- not merely its predecessor's: a held
+    # edit's new subject, copied into the withdrawal, would otherwise be
+    # published past the moderation holding it, while a held edit that
+    # changed only the body must not keep a real withdrawal from showing
+    # (Codex review on #789).
+    if db.connection.execute(
+        "SELECT 1 FROM posts WHERE post_id = ?", (payload.get("previous_event_id"),)
+    ).fetchone() is None:
+        return False
+    shown = db.connection.execute(
+        "SELECT subject FROM posts WHERE root_post_id = ? AND status = 'approved' ORDER BY id DESC LIMIT 1",
+        (payload.get("root_post_id"),),
     ).fetchone()
-    return (
-        previous is not None and previous["status"] == "approved"
-        and previous["subject"] == payload.get("subject")
-    )
+    return shown is not None and shown["subject"] == payload.get("subject")
 
 
 def _retain_only(db: Database, event, object_type: str, sender_fingerprint: str, board_id: str) -> None:
@@ -1477,20 +1482,18 @@ def queue_approved_board_post_if_linked(
 
 def _superseded_by_a_newer_approved_revision(db: Database, revision: Post) -> bool:
     """Whether an approved revision of `revision`'s post sorts after it, in
-    `_resolve_current_version`'s own order."""
-    row = db.connection.execute(
-        "SELECT created_at, id FROM posts WHERE post_id = ?", (revision.post_id,)
-    ).fetchone()
+    `_resolve_current_version`'s own order: local receipt order (`id`),
+    never the authored `created_at` (Codex review on #789)."""
+    row = db.connection.execute("SELECT id FROM posts WHERE post_id = ?", (revision.post_id,)).fetchone()
     if row is None:
         return False
     return db.connection.execute(
         """
         SELECT 1 FROM posts
-        WHERE root_post_id = ? AND board_id = ? AND status = 'approved' AND post_id != ?
-          AND (created_at > ? OR (created_at = ? AND id > ?))
+        WHERE root_post_id = ? AND board_id = ? AND status = 'approved' AND post_id != ? AND id > ?
         LIMIT 1
         """,
-        (revision.root_post_id, revision.board_id, revision.post_id, row["created_at"], row["created_at"], row["id"]),
+        (revision.root_post_id, revision.board_id, revision.post_id, row["id"]),
     ).fetchone() is not None
 
 

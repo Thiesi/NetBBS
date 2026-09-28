@@ -363,3 +363,26 @@ def test_a_withdrawal_the_link_cannot_carry_says_so(db, clock, alice, mod):
     assert asyncio.run(board_flow._withdraw_existing_post(session, db, board, post, alice, link_context=None))
     notices = _SGR.sub("", "".join(take_notices(session)))
     assert "could not be sent to other nodes" in notices
+
+
+def test_a_withdrawal_keeps_a_subject_a_moderator_changed_meanwhile(db, clock, board, alice, mod):
+    """The author's reader was opened before the moderator's change
+    (Codex review on #789)."""
+    post = create_post(db, board, alice, "Rude title", "v1")
+    stale = visible_post(db, post.post_id)
+    edit_post(db, get_post(db, post.post_id), board, subject="Plans", body="v1", edited_by=mod)
+    withdraw_post(db, stale, board, withdrawn_by=alice)
+    shown = visible_post(db, post.post_id)
+    assert shown.withdrawn and shown.subject == "Plans"
+
+
+def test_the_full_search_rebuild_indexes_a_skewed_withdrawal(db, clock, board, alice):
+    """A withdrawal stamped earlier than what it replaced is still what the
+    rebuilt index holds, not the withdrawn text (Codex review on #789)."""
+    from netbbs.search import _expected_post_index
+
+    post = create_post(db, board, alice, "Plans", "what I regret")
+    clock.fixed = "2020-01-01T00:00:00.000000Z"  # a clock far behind
+    withdraw_post(db, visible_post(db, post.post_id), board, withdrawn_by=alice)
+    _board_id, _subject, body = _expected_post_index(db)[post.root_post_id]
+    assert "regret" not in body
