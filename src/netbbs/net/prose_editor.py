@@ -90,6 +90,7 @@ async def edit_prose(
     autosave_interval_seconds: float = DEFAULT_AUTOSAVE_INTERVAL_SECONDS,
     unicode_style: bool = False,
     keep_pasted_color: bool = False,
+    cursor_at_end: bool = False,
 ) -> str | None:
     """
     Run a fullscreen prose editing session against `session`, returning
@@ -119,6 +120,10 @@ async def edit_prose(
     Additional input at the ceiling is refused with a bell and a status
     line indicator, rather than silently dropped with no feedback.
 
+    `cursor_at_end` (issue #675): the cursor starts after the last
+    character rather than at the top -- a reply's quote is above where the
+    reply is written.
+
     `keep_pasted_color` (issue #754): pasted SGR color is typed into the
     text as pipe codes, which the caller will show as color -- a post on
     a board that allows it. Without it a pasted SGR is dropped.
@@ -135,6 +140,9 @@ async def edit_prose(
         loaded_text = initial_text
 
     state = _EditorState(buffer=ProseBuffer.from_text(loaded_text or ""), max_bytes=max_bytes)
+    if cursor_at_end:
+        state.buffer.cursor_line = len(state.buffer.lines) - 1
+        state.buffer.cursor_col = len(state.buffer.lines[-1])
     # Passed only when asked for, so a Session that predates the option
     # still reads keys here.
     read_options = {"pasted_color": PastedColor()} if keep_pasted_color else {}

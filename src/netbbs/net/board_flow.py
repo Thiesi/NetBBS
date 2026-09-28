@@ -33,6 +33,7 @@ from netbbs.attestation import format_name_for_resource, meets_age, meets_name_r
 from netbbs.auth.users import User, get_user_by_id
 from netbbs.boards import (
     MAX_BODY_BYTES,
+    MAX_SUBJECT_BYTES,
     Board,
     Post,
     PostError,
@@ -114,13 +115,16 @@ from netbbs.rendering.detail import Section, Styled
 from netbbs.rendering.post_body import (
     art_body_from_editor,
     art_styles_editable,
+    plain_post_body,
     post_body_mode,
     post_body_rows,
+    post_body_text,
     split_signature,
     styled_post_body,
 )
 from netbbs.rendering.reflow import wrap_terminal_text
 from netbbs.rendering.width import cut_to_width, display_width, wrap_to_width
+from netbbs.quoting import quote_body, reply_subject
 from netbbs.signature import append_signature, get_signature
 from netbbs.sort_preferences import get_effective_sort_mode, set_sort_preference
 from netbbs.storage.database import Database
@@ -746,7 +750,7 @@ _LIST_HELP = [
     "Pinned posts are listed first, marked \"pin\". A moderator pins",
     "and unpins a post, and keeps it from expiring, while reading it.",
     "",
-    "Reading a post: Edit, Remove, Next and Previous post live there,",
+    "Reading a post: Reply, Edit, Remove, Next and Previous post live there,",
     "and PgUp/PgDn page a long post. A post counts as read once you",
     "open it; the list marks the ones you have not opened as new.",
 ]
@@ -1047,6 +1051,11 @@ async def _show_board(
             has_previous = index > 0 or (page.has_older and page.oldest_cursor is not None)
             has_next = index < len(page.posts) - 1 or (page.has_newer and page.newest_cursor is not None)
             actions = []
+            # Anyone who may post here may answer a post that is still there
+            # (issue #675).
+            can_reply = can_post and post.tombstoned_at is None
+            if can_reply:
+                actions.append(("r", menu_key("R", "eply")))
             if _can_edit_post(db, post, user):
                 actions.append(("e", menu_key("E", "dit")))
             if _can_tombstone_post(db, post, user):
@@ -1077,6 +1086,13 @@ async def _show_board(
             )
             if key == "b":
                 return index
+            if key == "r" and can_reply:
+                if await _compose_new_post(reply_to=post):
+                    # A reply lands on the newest page, like any new post.
+                    page_anchor = None
+                    page = _refetch_current_page()
+                    return None
+                continue
             if key in ("e", "t") or (key in ("i", "k") and can_pin):
                 root = post.root_post_id
                 if key == "e":
@@ -1125,7 +1141,10 @@ async def _show_board(
                 page = _refetch_current_page()
                 return None
 
-    async def _compose_new_post(*, initial_body: str | None = None) -> None:
+    async def _compose_new_post(*, initial_body: str | None = None, reply_to: Post | None = None) -> bool:
+        """[P]ost, or with `reply_to` a reply to that post (issue #675): the
+        subject starts as "Re: ...", the body as the post quoted, with the
+        cursor under the quote. Returns whether a post was published."""
         # `[P]ost` is a hotkey followed straight by a line prompt: an Enter
         # typed right behind it ("P<Enter>") would otherwise be read as a
         # blank subject and cancel the post. Same guard as mail's compose.
@@ -1133,15 +1152,38 @@ async def _show_board(
         if discard_buffered_enter is not None:
             await discard_buffered_enter()
         await session.write_line("")
-        await write_prompt(session, "Subject (or press Enter to cancel): ")
-        subject = (await session.read_line()).strip()
+        if reply_to is None:
+            await write_prompt(session, "Subject (or press Enter to cancel): ")
+            subject = (await session.read_line()).strip()
+        else:
+            subject = (await read_prefilled_field(
+                session, "Subject", reply_subject(reply_to.subject, max_bytes=MAX_SUBJECT_BYTES)
+            )).strip()
         if not subject:
-            announce(session, "Post cancelled.", tone="muted")
-            return
-        draft_path = _post_draft_path(db, kind="new", board=board, user=user)
+            announce(session, "Reply cancelled." if reply_to else "Post cancelled.", tone="muted")
+            return False
+        if reply_to is None:
+            draft_path = _post_draft_path(db, kind="new", board=board, user=user)
+            draft_saved_notice = "Draft saved -- you'll be offered it next time you visit this message board."
+            cancelled_notice = "Post cancelled."
+        else:
+            draft_path = _post_draft_path(db, kind="reply", board=board, user=user, root_post_id=reply_to.root_post_id)
+            draft_saved_notice = "Draft saved -- you'll be offered it when you reply to this post again."
+            cancelled_notice = "Reply cancelled."
+            if initial_body is None:
+                initial_body = _reply_quote(db, reply_to, board, name_requirement=name_requirement) or None
+        published = {"done": False}
+
+        async def _commit(commit_subject: str, commit_body: str) -> bool:
+            done = await _publish(
+                commit_subject, commit_body, parent_post_id=reply_to.root_post_id if reply_to else None
+            )
+            published["done"] = published["done"] or done
+            return done
+
         body = await _compose_body(
             session, db, user, initial_text=initial_body, draft_path=draft_path,
-            keep_pasted_color=board.allow_color,
+            keep_pasted_color=board.allow_color, cursor_at_end=reply_to is not None,
         )
         if body is not None:
             # `append_signature` is idempotent (its own docstring): a
@@ -1160,19 +1202,18 @@ async def _show_board(
             # thing distinguishing this from an explicit /cancel here,
             # since both return `None` the same way.
             if draft_path.exists():
-                announce(
-                    session, "Draft saved -- you'll be offered it next time you visit this message board.", tone="muted"
-                )
+                announce(session, draft_saved_notice, tone="muted")
             else:
-                announce(session, "Post cancelled.", tone="muted")
-            return
+                announce(session, cancelled_notice, tone="muted")
+            return False
         await _review_and_commit(
             session, db, user, board, subject=subject, body=body, draft_path=draft_path,
-            commit_key="p", commit_label="ost", commit_brief="Publish this post",
-            cancelled_notice="Post cancelled.",
-            draft_saved_notice="Draft saved -- you'll be offered it next time you visit this message board.",
-            commit=_publish,
+            commit_key="p", commit_label="ost", commit_brief="Publish this reply" if reply_to else "Publish this post",
+            cancelled_notice=cancelled_notice,
+            draft_saved_notice=draft_saved_notice,
+            commit=_commit,
         )
+        return published["done"]
 
     async def _compose_art_post() -> bool:
         """[A]rt post (issue #711): a subject, then the ANSI art editor,
@@ -1219,9 +1260,11 @@ async def _show_board(
         )
         return True
 
-    async def _publish(subject: str, body: str, *, layout: str = "prose") -> bool:
+    async def _publish(
+        subject: str, body: str, *, layout: str = "prose", parent_post_id: str | None = None
+    ) -> bool:
         try:
-            post = create_post(db, board, user, subject, body, layout=layout)
+            post = create_post(db, board, user, subject, body, layout=layout, parent_post_id=parent_post_id)
         except PostError as exc:
             announce(session, f"Could not create post: {exc}", tone="muted")
             return False
@@ -1914,6 +1957,7 @@ async def _compose_body(
     initial_text: str | None = None,
     draft_path: Path,
     keep_pasted_color: bool = False,
+    cursor_at_end: bool = False,
 ) -> str | None:
     """The single place a post body (or an edit of one) is actually
     entered: the fullscreen prose editor if `user` has opted in,
@@ -1932,6 +1976,7 @@ async def _compose_body(
         return await edit_prose(
             session, initial_text=initial_text, draft_path=draft_path, max_bytes=MAX_BODY_BYTES,
             unicode_style=unicode_style_enabled(db, user), keep_pasted_color=keep_pasted_color,
+            cursor_at_end=cursor_at_end,
         )
     return await edit_line_body(
         session,
@@ -1941,6 +1986,19 @@ async def _compose_body(
         draft_path=draft_path,
         keep_pasted_color=keep_pasted_color,
     )
+
+
+def _reply_quote(db: Database, post: Post, board: Board, *, name_requirement: str | None) -> str:
+    """`post` quoted for a reply (issue #675): its text as a reader with
+    color off sees it -- where pipe codes are color they are dropped, where
+    they are text they stay -- under "<author> wrote:". An art post is a
+    drawing, and a quote of it is not text anyone can answer, so it quotes
+    nothing."""
+    if post.layout == "art":
+        return ""
+    text = plain_post_body(post.body) if board.allow_color else post_body_text(post.body)
+    author = strip_ansi(_author_display_name(db, post, name_requirement=name_requirement))
+    return quote_body(text, author=author)
 
 
 def _author_display_name(db: Database, post: Post, *, name_requirement: str | None) -> str:

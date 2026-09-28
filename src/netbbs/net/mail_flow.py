@@ -49,6 +49,7 @@ from netbbs.link.node_profiles import (
 )
 from netbbs.mail import (
     MAX_MAIL_BODY_BYTES,
+    MAX_MAIL_SUBJECT_BYTES,
     MailboxFullError,
     MailError,
     MailMessage,
@@ -76,6 +77,7 @@ from netbbs.net.detail_view import show_detail
 from netbbs.net.notices import announce, announce_styled, take_notices, write_notices
 from netbbs.net.session import Session, write_prompt
 from netbbs.rendering.detail import Section, Styled
+from netbbs.quoting import quote_body, reply_subject
 from netbbs.signature import append_signature, get_signature
 from netbbs.rendering import (
     ERROR_COLOR,
@@ -400,8 +402,12 @@ async def _show_inbox_message(session: Session, lane: DatabaseLane, user: User, 
         if sender is None:
             announce(session, "That sender's account no longer exists -- can't reply.", tone="error")
             continue
-        reply_subject = message.subject if message.subject.lower().startswith("re:") else f"Re: {message.subject}"
-        await _compose_mail(session, lane, user, prefill_recipient=sender, prefill_subject=reply_subject)
+        # The same subject rule and quote a board reply uses (issue #675).
+        await _compose_mail(
+            session, lane, user, prefill_recipient=sender,
+            prefill_subject=reply_subject(message.subject, max_bytes=MAX_MAIL_SUBJECT_BYTES),
+            prefill_body=quote_body(message.body, author=message.sender_label) or None,
+        )
 
 
 async def _show_sent_message(session: Session, lane: DatabaseLane, user: User, message: MailMessage) -> None:
@@ -427,6 +433,7 @@ async def _compose_mail(
     *,
     prefill_recipient: User | None = None,
     prefill_subject: str = "",
+    prefill_body: str | None = None,
     link_context: LinkContext | None = None,
 ) -> None:
     """
@@ -488,7 +495,10 @@ async def _compose_mail(
         announce(session, "Cancelled -- a subject is required.", tone="error")
         return
 
-    body = await _compose_mail_body(session, lane, user, initial_text=None)
+    # A reply starts on the quote, with the cursor under it (issue #675).
+    body = await _compose_mail_body(
+        session, lane, user, initial_text=prefill_body, cursor_at_end=prefill_body is not None
+    )
     if body is None or not body.strip():
         announce(session, "Message cancelled.", tone="muted")
         return
@@ -604,7 +614,7 @@ async def _compose_mail(
 
 
 async def _compose_mail_body(
-    session: Session, lane: DatabaseLane, user: User, *, initial_text: str | None
+    session: Session, lane: DatabaseLane, user: User, *, initial_text: str | None, cursor_at_end: bool = False
 ) -> str | None:
     """Enter or revise one mail body through the user's chosen editor.
 
@@ -614,7 +624,7 @@ async def _compose_mail_body(
     if await lane.run(fullscreen_editor_enabled, user):
         return await edit_prose(
             session, initial_text=initial_text, draft_path=_mail_draft_path(lane, user), max_bytes=MAX_MAIL_BODY_BYTES,
-            unicode_style=await lane.run(unicode_style_enabled, user),
+            unicode_style=await lane.run(unicode_style_enabled, user), cursor_at_end=cursor_at_end,
         )
     return await edit_line_body(
         session,
