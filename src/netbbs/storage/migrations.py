@@ -3459,4 +3459,18 @@ MIGRATIONS = [
         );
         """,
     ),
+    Migration(
+        description=(
+            "Issue #838: `position` on communities -- the SysOp's order, which the Communities "
+            "list follows. Existing Communities keep today's alphabetical (case-insensitive) order."
+        ),
+        sql="""
+        ALTER TABLE communities ADD COLUMN position INTEGER NOT NULL DEFAULT 0;
+        UPDATE communities SET position = (
+            SELECT COUNT(*) FROM communities other
+            WHERE other.name COLLATE NOCASE < communities.name COLLATE NOCASE
+               OR (other.name COLLATE NOCASE = communities.name COLLATE NOCASE AND other.name < communities.name)
+        );
+        """,
+    ),
 ]

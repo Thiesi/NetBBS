@@ -2039,6 +2039,13 @@ Each board, channel, or file area has zero or one Community. “Uncategorized”
 the absence of a Community, not a synthetic row. Categories remain a separate
 layer below Communities.
 
+The SysOp orders Communities (issue #838): the callers' Communities list
+follows each one's `position`, not its name, and a new Community goes last. A
+Community's console screen moves it up or down and shows its place. Nodes
+upgraded from before this keep the alphabetical order they showed. The first
+field test's SysOp named a Community "The Clubhouse -- Start here" and watched
+it sort last, with nothing she could do about it.
+
 Categories (for boards, file areas and chat channels, each kind independent)
 are at most two levels deep. The SysOp orders them: every listing follows a
 category's `position` among its siblings, not its name (issue #681). The

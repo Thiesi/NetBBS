@@ -24,6 +24,7 @@ from netbbs.communities import (
     get_effective_min_write_level,
     get_effective_name_requirement,
     list_communities,
+    move_community,
     update_community,
 )
 from netbbs.files.areas import create_file_area, get_file_area_by_name
@@ -82,11 +83,56 @@ def test_get_community_returns_none_for_unknown_id(db):
     assert get_community(db, 99999) is None
 
 
-def test_list_communities_alphabetical(db, sysop):
+def test_a_new_community_goes_last(db, sysop):
+    # Issue #838: the SysOp's order, not the alphabet.
     create_community(db, "Zebras", creator=sysop)
     create_community(db, "Amiga", creator=sysop)
     names = [c.name for c in list_communities(db)]
-    assert names == ["Amiga", "Zebras"]
+    assert names == ["Zebras", "Amiga"]
+
+
+def test_communities_are_listed_in_the_sysops_order(db, sysop):
+    for name in ("Alpha", "Beta", "The Clubhouse"):
+        create_community(db, name, creator=sysop)
+    clubhouse = get_community_by_name(db, "The Clubhouse")
+
+    assert move_community(db, clubhouse, -1, moved_by=sysop)
+    assert move_community(db, clubhouse, -1, moved_by=sysop)
+    assert not move_community(db, clubhouse, -1, moved_by=sysop)
+    assert [c.name for c in list_communities(db)] == ["The Clubhouse", "Alpha", "Beta"]
+
+    assert move_community(db, get_community_by_name(db, "Alpha"), 1, moved_by=sysop)
+    assert not move_community(db, get_community_by_name(db, "Alpha"), 1, moved_by=sysop)
+    assert [c.name for c in list_communities(db)] == ["The Clubhouse", "Beta", "Alpha"]
+    assert any(e.action == "move_community" for e in list_actions_for_object(db, "community", clubhouse.id))
+
+
+def test_removing_a_community_keeps_the_others_in_order(db, sysop):
+    for name in ("Alpha", "Beta", "Gamma"):
+        create_community(db, name, creator=sysop)
+    delete_community(db, get_community_by_name(db, "Beta"), deleted_by=sysop)
+    create_community(db, "Delta", creator=sysop)
+    gamma = get_community_by_name(db, "Gamma")
+
+    assert move_community(db, gamma, -1, moved_by=sysop)
+    assert [c.name for c in list_communities(db)] == ["Gamma", "Alpha", "Delta"]
+
+
+def test_the_migration_places_existing_communities_in_name_order(db, sysop):
+    """Communities made before issue #838 all sat at position 0; the
+    backfill keeps the case-insensitive alphabetical order they were
+    shown in."""
+    from netbbs.storage.migrations import MIGRATIONS
+
+    for name in ("zebras", "Amiga", "Mike"):
+        create_community(db, name, creator=sysop)
+    db.connection.execute("UPDATE communities SET position = 0")
+    # Found by what it is, not where it sits: later migrations follow it.
+    [migration] = [m for m in MIGRATIONS if "Issue #838: `position` on communities" in m.description]
+    backfill = [statement for statement in migration.sql.split(";") if "UPDATE communities" in statement]
+    db.connection.executescript(backfill[0] + ";")
+
+    assert [c.name for c in list_communities(db)] == ["Amiga", "Mike", "zebras"]
 
 
 def test_create_community_records_moderation_log_entry(db, sysop):
