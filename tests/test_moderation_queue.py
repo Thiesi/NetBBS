@@ -278,3 +278,34 @@ def test_an_expired_post_is_still_shown_against_its_held_edit(db, lane, sysop, a
     text = _visible(_written_text(session))
 
     assert "CURRENT TEXT (EXPIRED)" in text and "old text" in text
+
+
+def test_a_reply_to_a_held_post_names_it(db, lane, sysop, alice):
+    """Codex review on #795: a carried thread can arrive whole and held."""
+    board = create_board(db, "general", creator=sysop, moderated=True)
+    parent = create_post(db, board, alice, "Opening", "x")
+    reply = create_post(db, board, alice, "Re: Opening", "y", parent_post_id=parent.post_id)
+
+    session = FakeSession(["b"])
+    asyncio.run(_post_action_screen(session, lane, sysop, reply, board))
+
+    assert "Opening (awaiting approval)" in _visible(_written_text(session))
+
+
+def test_the_decision_screens_name_the_board_and_the_area(db, lane, sysop, alice):
+    """Codex review on #795: reached from the node-wide queue, the screen
+    itself must say where the item waits."""
+    from netbbs.net.admin_flow import _file_action_screen
+
+    board, area = _held_everything(db, sysop, alice)
+    items, _more = _load_pending_items(db, sysop)
+    post = next(item.post for item in items if item.kind == "post")
+    entry = next(item.entry for item in items if item.kind == "file")
+
+    session = FakeSession(["b"])
+    asyncio.run(_post_action_screen(session, lane, sysop, post, board))
+    assert "Board:" in _visible(_written_text(session)) and "general" in _visible(_written_text(session))
+
+    session = FakeSession(["b"])
+    asyncio.run(_file_action_screen(session, lane, sysop, entry, area))
+    assert "Area:" in _visible(_written_text(session)) and "uploads" in _visible(_written_text(session))

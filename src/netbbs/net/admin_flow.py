@@ -154,6 +154,7 @@ from netbbs.boards.posts import (
     approve_post,
     count_visible_posts,
     delete_post,
+    get_post,
     list_node_pending_posts,
     list_pending_posts,
     revision_for_moderation,
@@ -16765,6 +16766,20 @@ def _submitter_label(db: Database, post: Post) -> str:
     return post.author_label
 
 
+def _reply_parent_for_moderation(db: Database, post: Post) -> Post | None:
+    """The post a held reply answers, as its readers see it -- or, when that
+    post is itself held, as it waits (Codex review on #795): a carried
+    thread can arrive whole on a board this node moderates."""
+    parent = revision_for_moderation(db, post.parent_post_id)
+    if parent is not None:
+        return parent
+    try:
+        held = get_post(db, post.parent_post_id)
+    except PostError:
+        return None
+    return held if held.status == "pending" else None
+
+
 def _pending_post_kind(post: Post) -> str:
     """"edit" for a held revision of an approved post, "reply" for a held
     answer to another, else "post"."""
@@ -16924,7 +16939,7 @@ async def _post_action_screen(
     kind = _pending_post_kind(post)
     current, parent, submitter = await lane.run(lambda db: (
         revision_for_moderation(db, post.root_post_id) if kind == "edit" else None,
-        revision_for_moderation(db, post.parent_post_id) if kind == "reply" else None,
+        _reply_parent_for_moderation(db, post) if kind == "reply" else None,
         _submitter_label(db, post),
     ))
     # An edit made before the one readers now see (Codex review on #795):
@@ -16956,15 +16971,18 @@ async def _post_action_screen(
         # What the moderator is deciding about, then the post itself under its
         # own heading, with the pin and exempt state the toggles change.
         facts = [
+            # Which board it waits on (Codex review on #795): reached from
+            # the node-wide queue, the list that said so is gone.
+            Field("Board", board.name),
             Field("By", submitter, color=AUTHOR_COLOR),
             Field("Posted", when, color=DATE_COLOR),
             Field("Pinned", _yes_no(post.pinned)),
             Field("Exempt from auto-purge", _yes_no(post.exempt_from_expiry)),
         ]
         if parent is not None:
-            facts.append(Field(
-                "Reply to", sanitize_text(parent.subject) + (" (expired)" if parent.status == "expired" else "")
-            ))
+            facts.append(Field("Reply to", sanitize_text(parent.subject) + {
+                "expired": " (expired)", "pending": " (awaiting approval)",
+            }.get(parent.status, "")))
         if current is not None and current.subject != post.subject:
             facts.append(Field("Current subject", sanitize_text(current.subject)))
         if superseded:
@@ -17730,9 +17748,14 @@ async def _draw_file_action(
     status_line: str,
     when: str,
     can_download: bool = False,
+    area_name: str | None = None,
 ) -> None:
+    # Which area it waits in (Codex review on #795): reached from the
+    # node-wide queue, the list that said so is gone.
+    area_field = [Field("Area", area_name)] if area_name is not None else []
     used_rows = await _write_file_record(
         session, entry, heading="Pending file", fields=[
+            *area_field,
             Field("By", entry.uploader_label, color=AUTHOR_COLOR),
             Field("Uploaded", when, color=DATE_COLOR),
             Field("Size", f"{_format_bytes(entry.size_bytes)} ({entry.size_bytes} bytes)"),
@@ -17800,7 +17823,7 @@ async def _file_action_screen(
     async def _draw() -> None:
         await _draw_file_action(
             session, entry, description_level, redraw_in_place, unicode_style, collapsed, header_color,
-            status_line=status_line, when=when, can_download=can_download,
+            status_line=status_line, when=when, can_download=can_download, area_name=area.name,
         )
 
     await _draw()
