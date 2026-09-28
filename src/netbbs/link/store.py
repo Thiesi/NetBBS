@@ -334,6 +334,67 @@ def load_link_node(db: Database, identity: NodeIdentity) -> LinkNode:
     return node
 
 
+_DESCRIPTOR_TABLES = ("link_peers", "link_introduced_identities", "link_peer_candidates")
+
+
+def _stored_descriptor_content_id(raw: str) -> str | None:
+    try:
+        return EndpointDescriptor.from_dict(json.loads(raw)).content_id
+    except Exception:
+        return None
+
+
+def descriptor_first_stored_at(db: Database, fingerprint: str, descriptor: EndpointDescriptor, now: str) -> str:
+    """When this node first stored `descriptor` for `fingerprint` (issue #777,
+    design doc §8.12), for a save about to write it.
+
+    The same signed descriptor already on file -- in any of the three tables a
+    descriptor is kept in, so a candidate's descriptor that arrives again in
+    an introduction keeps its time -- keeps the time it was first stored;
+    anything else is stored for the first time `now`. The node map caps a
+    descriptor's self-declared `created_at` at this time, so that a descriptor
+    dated in the future cannot keep its node fresh. Compared by content id,
+    not by stored JSON, which a re-serialized copy need not match byte for
+    byte.
+    """
+    content_id = descriptor.content_id
+    earliest: str | None = None
+    for table in _DESCRIPTOR_TABLES:
+        row = db.connection.execute(
+            f"SELECT descriptor_json, descriptor_first_stored_at FROM {table} WHERE fingerprint = ?",
+            (fingerprint,),
+        ).fetchone()
+        if row is None or row["descriptor_first_stored_at"] is None:
+            continue
+        if _stored_descriptor_content_id(row["descriptor_json"]) != content_id:
+            continue
+        if earliest is None or row["descriptor_first_stored_at"] < earliest:
+            earliest = row["descriptor_first_stored_at"]
+    return earliest if earliest is not None else now
+
+
+def record_direct_contact(db: Database, fingerprint: str, at: str | None = None) -> None:
+    """Advance a node's `last_direct_contact_at` to `at` (issue #777).
+
+    For contact that is not a hello or an events exchange: an authenticated
+    real-time session, which counts as contact for as long as it stays open
+    (design doc §8.12). Recorded on whichever row holds the node: its
+    `link_peers` row, or -- for an introduced node the SysOp has established,
+    which real-time admission lets in without a hello -- its
+    `link_introduced_identities` row. It is never promoted to a peer: a row
+    in `link_peers` means a completed hello (§8.11). Never moves the time
+    backwards, and does nothing for a node with neither row.
+    """
+    when = at or utc_now_iso()
+    for table in ("link_peers", "link_introduced_identities"):
+        db.connection.execute(
+            f"""UPDATE {table} SET last_direct_contact_at = ?
+                WHERE fingerprint = ? AND (last_direct_contact_at IS NULL OR last_direct_contact_at < ?)""",
+            (when, fingerprint, when),
+        )
+    db.connection.commit()
+
+
 def load_peer_last_contact(db: Database) -> dict[str, str | None]:
     """
     fingerprint -> `link_peers.last_direct_contact_at` (ISO 8601) for
@@ -381,17 +442,20 @@ def save_peer(db: Database, peer: PeerRecord, *, direct_contact: bool = True) ->
 
     record_peer_identity_observation(db, peer)
     now = utc_now_iso()
+    first_stored = descriptor_first_stored_at(db, peer.fingerprint, peer.descriptor, now)
     db.connection.execute(
         """
         INSERT INTO link_peers
-            (fingerprint, root_public_key, transitions_json, descriptor_json, updated_at, last_direct_contact_at)
-        VALUES (?, ?, ?, ?, ?, ?)
+            (fingerprint, root_public_key, transitions_json, descriptor_json, updated_at, last_direct_contact_at,
+             descriptor_first_stored_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(fingerprint) DO UPDATE SET
             root_public_key = excluded.root_public_key,
             transitions_json = excluded.transitions_json,
             descriptor_json = excluded.descriptor_json,
             updated_at = excluded.updated_at,
-            last_direct_contact_at = COALESCE(excluded.last_direct_contact_at, link_peers.last_direct_contact_at)
+            last_direct_contact_at = COALESCE(excluded.last_direct_contact_at, link_peers.last_direct_contact_at),
+            descriptor_first_stored_at = excluded.descriptor_first_stored_at
         """,
         (
             peer.fingerprint,
@@ -400,6 +464,7 @@ def save_peer(db: Database, peer: PeerRecord, *, direct_contact: bool = True) ->
             json.dumps(peer.descriptor.to_dict()),
             now,
             now if direct_contact else None,
+            first_stored,
         ),
     )
     db.connection.execute("DELETE FROM link_peer_candidates WHERE fingerprint = ?", (peer.fingerprint,))
@@ -446,17 +511,20 @@ def save_introduced_identity(db: Database, record: PeerRecord, *, introduced_by:
     ).fetchone() is not None:
         return
     record_peer_identity_observation(db, record, met=False)
+    now = utc_now_iso()
     db.connection.execute(
         """
         INSERT INTO link_introduced_identities
-            (fingerprint, root_public_key, transitions_json, descriptor_json, introduced_by, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?)
+            (fingerprint, root_public_key, transitions_json, descriptor_json, introduced_by, updated_at,
+             descriptor_first_stored_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(fingerprint) DO UPDATE SET
             root_public_key = excluded.root_public_key,
             transitions_json = excluded.transitions_json,
             descriptor_json = excluded.descriptor_json,
             introduced_by = excluded.introduced_by,
-            updated_at = excluded.updated_at
+            updated_at = excluded.updated_at,
+            descriptor_first_stored_at = excluded.descriptor_first_stored_at
         """,
         (
             record.fingerprint,
@@ -464,7 +532,8 @@ def save_introduced_identity(db: Database, record: PeerRecord, *, introduced_by:
             json.dumps([t.to_dict() for t in record.transitions]),
             json.dumps(record.descriptor.to_dict()),
             introduced_by,
-            utc_now_iso(),
+            now,
+            descriptor_first_stored_at(db, record.fingerprint, record.descriptor, now),
         ),
     )
     db.connection.commit()
@@ -507,16 +576,27 @@ def save_candidate_descriptor(db: Database, fingerprint: str, descriptor: Endpoi
     peer_list` itself already refuses to record a candidate for an
     existing peer in the first place (see that method's own docstring),
     so this function has no reason to duplicate that check.
+
+    Issue #777: `first_named_at` is when a peer list first named the
+    candidate, kept across refreshes; `descriptor_first_stored_at` is when
+    this node first stored the descriptor it now holds for it.
     """
+    now = utc_now_iso()
     db.connection.execute(
         """
-        INSERT INTO link_peer_candidates (fingerprint, descriptor_json, updated_at)
-        VALUES (?, ?, ?)
+        INSERT INTO link_peer_candidates
+            (fingerprint, descriptor_json, updated_at, descriptor_first_stored_at, first_named_at)
+        VALUES (?, ?, ?, ?, ?)
         ON CONFLICT(fingerprint) DO UPDATE SET
             descriptor_json = excluded.descriptor_json,
-            updated_at = excluded.updated_at
+            updated_at = excluded.updated_at,
+            descriptor_first_stored_at = excluded.descriptor_first_stored_at,
+            first_named_at = COALESCE(link_peer_candidates.first_named_at, excluded.first_named_at)
         """,
-        (fingerprint, json.dumps(descriptor.to_dict()), utc_now_iso()),
+        (
+            fingerprint, json.dumps(descriptor.to_dict()), now,
+            descriptor_first_stored_at(db, fingerprint, descriptor, now), now,
+        ),
     )
     db.connection.commit()
 

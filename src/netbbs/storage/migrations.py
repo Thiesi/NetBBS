@@ -3315,4 +3315,36 @@ MIGRATIONS = [
         END;
         """,
     ),
+    Migration(
+        description=(
+            "Issue #777: `descriptor_first_stored_at` on link_peers, link_introduced_identities "
+            "and link_peer_candidates -- when this node first stored the descriptor the row now "
+            "holds, moved only when the descriptor itself changes. The node map (design doc "
+            "§8.12) caps a descriptor's signed `created_at` at it, so that a descriptor dated in "
+            "the future cannot keep a node fresh. `first_named_at` on link_peer_candidates is "
+            "when a peer list first named the candidate, which the SysOp's node map shows. "
+            "Existing rows start from `updated_at`, the best information there is: it is no "
+            "earlier than the descriptor was first stored. `link_node_numbers` gives each node "
+            "the map lists a small permanent number, assigned the first time the map meets it "
+            "and never reused, so that #3 means the same node to every caller and the SysOp. "
+            "`last_direct_contact_at` on link_introduced_identities: an introduced node the "
+            "SysOp has established may hold an authenticated real-time session with this one "
+            "without ever completing a hello, and that session is contact; it starts empty."
+        ),
+        sql="""
+        ALTER TABLE link_peers ADD COLUMN descriptor_first_stored_at TEXT;
+        UPDATE link_peers SET descriptor_first_stored_at = updated_at;
+        ALTER TABLE link_introduced_identities ADD COLUMN descriptor_first_stored_at TEXT;
+        UPDATE link_introduced_identities SET descriptor_first_stored_at = updated_at;
+        ALTER TABLE link_introduced_identities ADD COLUMN last_direct_contact_at TEXT;
+        ALTER TABLE link_peer_candidates ADD COLUMN descriptor_first_stored_at TEXT;
+        ALTER TABLE link_peer_candidates ADD COLUMN first_named_at TEXT;
+        UPDATE link_peer_candidates SET descriptor_first_stored_at = updated_at, first_named_at = updated_at;
+
+        CREATE TABLE link_node_numbers (
+            fingerprint  TEXT PRIMARY KEY,
+            number       INTEGER NOT NULL UNIQUE
+        );
+        """,
+    ),
 ]
