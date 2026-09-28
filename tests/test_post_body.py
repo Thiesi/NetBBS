@@ -318,3 +318,46 @@ def test_a_painted_delimiter_line_is_not_a_signature():
     assert split_signature(drawing) == (drawing, "")
     rows = post_body_rows(drawing, 80, "color", truecolor=True, layout="art")
     assert _SGR.sub("", rows[-1]) == "A|12B"
+
+
+# -- the attribution line keeps its own line (issue #837, F123) ------------------
+
+from netbbs.quoting import quote_body  # noqa: E402
+
+
+def _trimmed_reply(author: str) -> str:
+    """A reply whose writer deleted every quoted line but kept the
+    attribution, then wrote straight under it: the field test's shape."""
+    header = quote_body("Is my nib ruined?", author=author).split("\n")[0]
+    return f"{header}\nHello Lena, welcome!\nYour nib is almost certainly fine."
+
+
+@pytest.mark.parametrize("mode", ["color", "plain", "text"])
+def test_a_trimmed_quote_keeps_the_attribution_on_its_own_line(mode):
+    rows = [_SGR.sub("", row) for row in post_body_rows(_trimmed_reply("lena_h"), 80, mode, truecolor=False)]
+
+    assert rows[0] == "lena_h wrote:"
+    assert rows[1] == "Hello Lena, welcome! Your nib is almost certainly fine."
+
+
+@pytest.mark.parametrize("mode", ["color", "plain", "text"])
+def test_an_attribution_for_an_author_with_spaces_keeps_its_line(mode):
+    rows = [_SGR.sub("", row) for row in post_body_rows(_trimmed_reply("(deleted account)"), 80, mode, truecolor=False)]
+
+    assert rows[0] == "(deleted account) wrote:"
+
+
+@pytest.mark.parametrize("mode", ["color", "plain", "text"])
+def test_text_above_an_attribution_does_not_swallow_it(mode):
+    body = "Thanks, both of you.\nlena_h wrote:\n> Is my nib ruined?"
+    rows = [_SGR.sub("", row) for row in post_body_rows(body, 80, mode, truecolor=False)]
+
+    assert rows[:3] == ["Thanks, both of you.", "lena_h wrote:", "> Is my nib ruined?"]
+
+
+@pytest.mark.parametrize("mode", ["color", "plain", "text"])
+def test_wrote_inside_a_sentence_is_still_prose(mode):
+    body = "She wrote: the ink\nwas dry by then."
+    rows = [_SGR.sub("", row) for row in post_body_rows(body, 80, mode, truecolor=False)]
+
+    assert rows[0] == "She wrote: the ink was dry by then."

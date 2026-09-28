@@ -77,7 +77,7 @@ from netbbs.net.detail_view import show_detail
 from netbbs.net.notices import announce, announce_styled, take_notices, write_notices
 from netbbs.net.session import Session, write_prompt
 from netbbs.rendering.detail import Section, Styled
-from netbbs.quoting import quote_body, reply_subject
+from netbbs.quoting import is_attribution, quote_body, reply_subject
 from netbbs.signature import append_signature, get_signature
 from netbbs.rendering import (
     ERROR_COLOR,
@@ -316,9 +316,45 @@ async def _message_view(
         message.created_at, override_format=display_format, override_timezone=display_timezone
     )
     preamble.append(colored("Date: ", fg_color=LABEL_COLOR) + colored(displayed_date, fg_color=METADATA_COLOR))
-    body = reflow(sanitize_text(message.body, allow_newlines=True), width=session.terminal_width)
-    body_rows = [colored(line, fg_color=VALUE_COLOR) if line else "" for line in body.splitlines()]
+    body = _mail_body_lines(sanitize_text(message.body, allow_newlines=True), session.terminal_width)
+    body_rows = [colored(line, fg_color=VALUE_COLOR) if line else "" for line in body]
     return title, preamble, body_rows
+
+
+def _mail_body_lines(body: str, width: int) -> list[str]:
+    """`body` reflowed to `width`, a quote's "<author> wrote:" line kept a
+    line of its own: reflowed into the reply under it, once the replier
+    has trimmed the quote between them, it credited the reply to the
+    quoted author (issue #837). Everything else reflows as before."""
+    lines = body.split("\n")
+    if not any(is_attribution(line) for line in lines):
+        return reflow(body, width=width).splitlines()
+    rows: list[str] = []
+    pending: list[str] = []
+
+    def flush() -> None:
+        # A run's blank edges are rows of their own: `reflow` alone would
+        # fold a single blank line at a run's edge into the text.
+        while pending and not pending[0].strip():
+            rows.append("")
+            pending.pop(0)
+        trailing = 0
+        while pending and not pending[-1].strip():
+            trailing += 1
+            pending.pop()
+        if pending:
+            rows.extend(reflow("\n".join(pending), width=width).splitlines())
+        rows.extend([""] * trailing)
+        pending.clear()
+
+    for line in lines:
+        if is_attribution(line):
+            flush()
+            rows.extend(reflow(line.strip(), width=width).splitlines())
+        else:
+            pending.append(line)
+    flush()
+    return rows
 
 
 async def _show_message(

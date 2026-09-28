@@ -26,6 +26,12 @@ MAX_QUOTED_BYTES = 8_000
 _ELIDED = ">"
 _ELISION_NOTE = "> [...]"
 
+# The end of the line a quote starts with, "<author> wrote:". Readers keep
+# that line on its own (`is_attribution`): reflowed into the reply under it,
+# once the replier has trimmed the quote between them, it would credit the
+# reply to the quoted author (issue #837).
+ATTRIBUTION_SUFFIX = " wrote:"
+
 
 def reply_subject(subject: str, *, max_bytes: int) -> str:
     """`subject` with "Re: " in front, unless it already starts with one,
@@ -37,6 +43,19 @@ def reply_subject(subject: str, *, max_bytes: int) -> str:
     if len(encoded) <= max_bytes:
         return text
     return encoded[:max_bytes].decode("utf-8", errors="ignore").rstrip()
+
+
+def is_attribution(line: str) -> bool:
+    """Whether `line`, color codes already removed, is a quote's
+    attribution: text ending in "wrote:", alone on its line and not
+    itself quoted. A reader lays it out as a line of its own, never
+    joined to the text around it."""
+    stripped = line.strip()
+    return (
+        stripped.endswith(ATTRIBUTION_SUFFIX)
+        and len(stripped) > len(ATTRIBUTION_SUFFIX)
+        and not stripped.startswith(">")
+    )
 
 
 def quote_body(body: str, *, author: str) -> str:
@@ -73,5 +92,5 @@ def quote_body(body: str, *, author: str) -> str:
             quoted.append(_ELISION_NOTE)
             break
         quoted.append(row)
-    header = f"{cut_to_width(author, 60)} wrote:"
+    header = f"{cut_to_width(author, 60)}{ATTRIBUTION_SUFFIX}"
     return "\n".join([header, *quoted, ""])
