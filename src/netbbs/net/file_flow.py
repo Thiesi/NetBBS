@@ -21,9 +21,9 @@ mail_flow`'s proof-of-pattern exactly: every function reachable from
 `browse_file_areas` takes `lane: DatabaseLane` instead of `db:
 Database`. Two exceptions, deliberately unmigrated:
 
-- `has_visible_areas` stays on `db: Database`, synchronous — it's a
-  menu-*gating* check called from `netbbs.net.login_flow`'s still-
-  unmigrated menu-drawing code (`_resource_type_menu`'s `show_areas`),
+- `visible_areas` stays on `db: Database`, synchronous — it's a
+  menu-*gating* check called from `netbbs.net.main_menu`'s still-
+  unmigrated menu-drawing code (a Community's page),
   not part of the file-areas feature itself.
 - `_uploader_display_name` keeps `db: Database` as its own first
   parameter, unchanged — it's dispatched *through* the lane
@@ -221,14 +221,12 @@ async def browse_file_areas(
     )
 
 
-def has_visible_areas(
+def visible_areas(
     db: Database, user: User, *, community_id: int | None = None, community_scoped: bool = False
-) -> bool:
-    """Whether `user` can see at least one file area under the given
-    Community filter -- backs `netbbs.net.login_flow`'s shared
-    resource-type sub-menu, same convention as `_has_visible_boards`/
-    `netbbs.net.chat_flow.has_visible_channels` (design doc §16).
-    Deliberately still `db`-based, not `lane`-based -- see this
+) -> list[FileArea]:
+    """Every file area `user` can see under the given Community filter --
+    what a Community's page offers and counts (design doc §16, issue
+    #838). Deliberately still `db`-based, not `lane`-based -- see this
     module's own docstring for why."""
     areas = [
         a for a in list_file_areas(db)
@@ -236,7 +234,7 @@ def has_visible_areas(
     ]
     if community_scoped:
         areas = [a for a in areas if a.community_id == community_id]
-    return bool(areas)
+    return areas
 
 
 async def _browse_areas_in_category(
@@ -319,7 +317,7 @@ async def _browse_areas_in_category(
     # GitHub issue #176: resolved once, reused for both pick_item calls
     # below (flat and mixed-with-categories) -- shows at every level of
     # file-area browsing this recursive function reaches (top level, a
-    # category, a Community/Uncategorized scope), matching
+    # category, a Community's scope), matching
     # `board_flow._browse_boards_in_category`'s own identical wiring.
     area_masthead = await lane.run(load_file_area_banner)
     mode_box = {"mode": current_mode}
@@ -698,7 +696,7 @@ async def _read_file_choice(
     editor-key support (issue #184's numbered download shortcuts), and
     when keys arrived only navigation and download were given them.
     `/download <name>` was the one form that reached a file on another
-    page; `[F]ind` reaches it instead, landing in this area with that
+    page; `[/] Find` reaches it instead, landing in this area with that
     file at the top of its page (as row 1, not as a preselected cursor
     -- this screen always starts with no highlight).
 
@@ -826,7 +824,7 @@ async def _show_area(
     `[D]ownload` (like `[E]`) acts on the file under the cursor, on the
     only file on the page, or on whichever one `pick_item` returns — a
     number key `1`-`5` names one directly. A file on *another* page is
-    reached through `[F]ind` (`netbbs.net.scan_and_find`), which enters
+    reached through `[/] Find` (`netbbs.net.scan_and_find`), which enters
     this area positioned on that file; `/download <filename>`'s
     area-wide by-name lookup is what that replaced.
 
@@ -1913,7 +1911,7 @@ async def _choose_entry(
     Shared by `[D]ownload` and `[E]dit description` so one hotkey cannot
     drift into resolving its target differently from the other; it is
     also what `/download <filename>`'s area-wide name lookup was
-    replaced with, `[F]ind` being how a file on another page is reached.
+    replaced with, `[/] Find` being how a file on another page is reached.
     """
     if highlighted is not None and 0 <= highlighted < len(page.entries):
         return page.entries[highlighted]

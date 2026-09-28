@@ -399,7 +399,23 @@ draft and save it explicitly.
 - **Communities:** group related resources and provide inherited defaults.
   Inspect effective gates on child resources before changing a shared default.
   A Community is not an automatic grant to every resource inside it.
-- **Doors:** attach registered games to a Community or leave them uncategorized.
+- **Doors:** attach registered games to a Community, or to none.
+
+**Where callers find it.** The main menu's **Message boards**, **Chat** and
+**Files** list everything of that kind on the node, whichever Community it
+belongs to; a resource with no Community is simply listed there, so you do
+not need a Community to make a board easy to find. **Games** appears once a
+door is registered. **Communities** (key **O**) appears once one exists and
+shows each Community's description and what it holds; give each a
+description, because that is what callers read first.
+
+**Categories and Communities are different things.** A category groups the
+list of one kind (board categories group boards) and shows up as a folder in
+that list. A Community is a topic that holds every kind at once. A resource
+can have both. Ctrl-H on the Categories screen says the same.
+
+Until the node has a board, chat channel or file area, your own main menu
+shows where to create one.
 
 Moderator grants belong to a resource or Community. Membership alone does not
 make someone a moderator. Grant only the scope required; use approval queues
@@ -414,8 +430,8 @@ caller can access on this node, including carried linked content.
 
 Open **Content → Doors → Gallery** to register Retro Trivia, Voidrunner, or
 War Dialer. Gallery entries fill a draft with the installed interpreter and
-sensible defaults; review and Save. Callers reach games through Jump to or a
-Community.
+sensible defaults; review and Save. Callers reach games through **Games** on
+the main menu or a Community's page.
 
 Third-party native programs, DOS games through DOSBox-X, doors built only for
 another platform (in a per-caller qemu VM you provision), and remote RLogin
