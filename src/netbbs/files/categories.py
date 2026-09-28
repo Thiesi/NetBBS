@@ -130,6 +130,9 @@ def update_category(
     two-level rule holds as at creation: the new parent must be a
     top-level category, and a category with sub-categories of its own
     stays top-level. Moved to another parent, it goes last there."""
+    # As stored now, not as the caller's copy says: another edit or move
+    # may have happened since (Codex review on #799).
+    category = get_category_by_id(db, category.id)
     name = name.strip()
     if not name:
         raise FileAreaCategoryError("name cannot be blank")
@@ -175,6 +178,8 @@ def move_category(db: Database, category: FileAreaCategory, offset: int, *, move
     """Move `category` `offset` places among its siblings (-1 up, +1
     down), and renumber them all (issue #681). Returns whether it moved:
     the first cannot go up, nor the last down."""
+    # Among its siblings as stored now (Codex review on #799).
+    category = get_category_by_id(db, category.id)
     siblings = (
         list_top_level_categories(db) if category.parent_category_id is None
         else list_subcategories(db, category.parent_category_id)

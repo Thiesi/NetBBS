@@ -20798,7 +20798,12 @@ async def _category_screen(
                 category = edited
             continue
         if key in ("u", "d") and move is not None:
-            await lane.run(move, category, -1 if key == "u" else 1, moved_by=actor)
+            try:
+                await lane.run(move, category, -1 if key == "u" else 1, moved_by=actor)
+            except error_type as exc:
+                # Deleted meanwhile: said, and the screen reloads -- which
+                # returns to the list (Codex review on #799).
+                _announce(session, f"Error: {exc}", error=True)
             continue
         if key == "r":
             await session.write_line(

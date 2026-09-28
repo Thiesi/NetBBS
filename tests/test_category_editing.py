@@ -164,3 +164,32 @@ def test_the_category_screen_follows_a_category_moved_under_a_parent(db, lane, s
     # The screen drawn with the save's outcome is still Amiga's, now under Retro.
     screen = text.split("Saved category 'Amiga'.", 1)[0].rsplit("Categories › Amiga", 1)[1]
     assert "Retro" in screen.split("Parent:", 1)[1].splitlines()[0]
+
+
+
+@pytest.mark.parametrize("kind", MODULES)
+def test_an_edit_from_a_stale_copy_still_moves_the_category(db, sysop, kind):
+    """Codex review on #799: the requested parent is compared with the
+    stored one, not with the caller's copy."""
+    module, _error = kind
+    parent = module.create_category(db, "Parent", created_by=sysop)
+    stale = module.create_category(db, "Loose", created_by=sysop)
+    module.update_category(db, stale, name="Loose", description=None, parent_category_id=parent.id, changed_by=sysop)
+
+    # `stale` still says top-level; the SysOp asks for top-level again.
+    module.update_category(db, stale, name="Loose", description=None, parent_category_id=None, changed_by=sysop)
+
+    assert module.get_category_by_name(db, "Loose").parent_category_id is None
+
+
+@pytest.mark.parametrize("kind", MODULES)
+def test_a_move_from_a_stale_copy_moves_it_among_its_current_siblings(db, sysop, kind):
+    module, _error = kind
+    parent = module.create_category(db, "Parent", created_by=sysop)
+    module.create_category(db, "First", parent_category_id=parent.id, created_by=sysop)
+    stale = module.create_category(db, "Second", created_by=sysop)
+    module.update_category(db, stale, name="Second", description=None, parent_category_id=parent.id, changed_by=sysop)
+
+    assert module.move_category(db, stale, -1, moved_by=sysop)
+
+    assert [c.name for c in module.list_subcategories(db, parent.id)] == ["Second", "First"]
