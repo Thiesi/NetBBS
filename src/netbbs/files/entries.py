@@ -31,8 +31,9 @@ import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
-from netbbs.auth.users import User
+from netbbs.auth.users import SYSOP_LEVEL, User
 from netbbs.boards.content_id import compute_content_id
+from netbbs.boards.posts import PENDING_ORDER_SQL
 from netbbs.config import get_expiry_grace_period_days
 from netbbs.files.areas import FileArea
 from netbbs.files.diz import (
@@ -698,28 +699,47 @@ def set_file_exempt(db: Database, entry: FileEntry, exempt: bool, *, changed_by:
     return get_file(db, entry.file_id)
 
 
-def list_pending_files(db: Database, area: FileArea, *, requesting_user: User) -> list[FileEntry]:
+def list_pending_files(
+    db: Database, area: FileArea, *, requesting_user: User, limit: int | None = None
+) -> list[FileEntry]:
     """
     The moderation queue for `area`: every pending file if
     `requesting_user` holds `BoardPermission.APPROVE`, otherwise only
     their own pending uploads. Not cursor-paginated, same reasoning as
-    `netbbs.boards.posts.list_pending_posts`.
+    `netbbs.boards.posts.list_pending_posts`, whose `limit` this shares.
     """
+    cap = -1 if limit is None else limit
     if has_permission(
         db, requesting_user, object_type="file_area", object_id=area.id, permission=BoardPermission.APPROVE
     ):
         rows = db.connection.execute(
-            "SELECT * FROM files WHERE area_id = ? AND status = 'pending' ORDER BY created_at",
-            (area.id,),
+            f"SELECT * FROM files WHERE area_id = ? AND status = 'pending' ORDER BY {PENDING_ORDER_SQL} LIMIT ?",
+            (area.id, cap),
         ).fetchall()
     else:
         rows = db.connection.execute(
-            """
+            f"""
             SELECT * FROM files WHERE area_id = ? AND status = 'pending' AND uploader_user_id = ?
-            ORDER BY created_at
+            ORDER BY {PENDING_ORDER_SQL} LIMIT ?
             """,
-            (area.id, requesting_user.id),
+            (area.id, requesting_user.id, cap),
         ).fetchall()
+    return [_row_to_file_entry(row) for row in rows]
+
+
+def list_node_pending_files(db: Database, *, requesting_user: User, limit: int) -> list[FileEntry]:
+    """The oldest `limit` held uploads in every area, for the SysOp's
+    node-wide queue -- `netbbs.boards.posts.list_node_pending_posts`'
+    counterpart."""
+    require_level(requesting_user, SYSOP_LEVEL)
+    rows = db.connection.execute(
+        f"""
+        SELECT * FROM files WHERE status = 'pending'
+          AND area_id IN (SELECT id FROM file_areas WHERE link_hidden_at IS NULL)
+        ORDER BY {PENDING_ORDER_SQL} LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
     return [_row_to_file_entry(row) for row in rows]
 
 

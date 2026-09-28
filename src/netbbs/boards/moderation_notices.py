@@ -45,7 +45,7 @@ def record_moderation_outcome(
     reject path, so every way a held post is decided tells its author."""
     if outcome not in OUTCOMES:
         raise ValueError(f"outcome must be one of {OUTCOMES}, got {outcome!r}")
-    recipient_id = _submitter_id(db, post)
+    recipient_id = submitter_id(db, post)
     if recipient_id is None or recipient_id == moderator.id:
         return
     author_row = db.connection.execute("SELECT * FROM users WHERE id = ?", (recipient_id,)).fetchone()
@@ -65,7 +65,7 @@ def record_moderation_outcome(
         _mail_rejection(db, post, author_row, moderator=moderator, reason=reason)
 
 
-def _submitter_id(db: Database, post) -> int | None:
+def submitter_id(db: Database, post) -> int | None:
     """Who submitted what is being decided. A revision keeps its root's
     author, but a moderator may have made it (Claude review on #792): the
     editor is the one whose edit was held, so the one to tell. A revision

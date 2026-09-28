@@ -1206,6 +1206,14 @@ kept with the rejection record (§9.3's `post_rejections`) and goes to the
 author. A carried post's author is on another node and is told nothing here,
 and a moderator deciding on their own post isn't told either.
 
+**The moderator's queue** (issue #678). Each board's and file area's queue
+lists what waits with its kind (`post`, `reply`, `edit` or `file`), its
+author and when it was submitted. A held reply names the post it answers; a
+held edit is shown against the current text it would replace, subject
+included. The SysOp console's content menu has one node-wide
+`[P]ending review` queue of every held post and upload, oldest first, so
+nobody has to open each board and area to find what waits.
+
 **Expiry is a caller-facing boundary, not only a delisting** (issue #639).
 Once a post or a file is `expired`, no keystroke a caller can press reaches
 it: listings, `[F]ind` and the file area's own screens are

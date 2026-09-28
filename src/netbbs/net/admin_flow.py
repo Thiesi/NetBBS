@@ -49,6 +49,7 @@ established independently).
 from __future__ import annotations
 
 import asyncio
+import datetime
 import hashlib
 import json
 import logging
@@ -146,13 +147,17 @@ from netbbs.boards.categories import delete_category as delete_board_category
 from netbbs.boards.categories import get_category_by_id as get_board_category_by_id
 from netbbs.boards.categories import list_subcategories as list_board_subcategories
 from netbbs.boards.categories import list_top_level_categories as list_top_level_board_categories
+from netbbs.boards.moderation_notices import submitter_id
 from netbbs.boards.posts import (
     Post,
     PostError,
     approve_post,
     count_visible_posts,
     delete_post,
+    get_post,
+    list_node_pending_posts,
     list_pending_posts,
+    revision_for_moderation,
     set_post_exempt,
     set_post_pinned,
 )
@@ -245,6 +250,7 @@ from netbbs.files.entries import (
     delete_file,
     expired_file_purge_at,
     list_expired_files,
+    list_node_pending_files,
     list_pending_files,
     set_file_exempt,
     set_file_pinned,
@@ -694,6 +700,7 @@ from netbbs.session_history import previous_callers_enabled, set_previous_caller
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 from netbbs.timeutil import (
+    _parse_stored_timestamp,
     format_for_display,
     resolve_display_preferences,
     set_display_format,
@@ -14415,6 +14422,11 @@ async def _content_menu(
             await _revoke_moderator_screen(session, lane, actor)
             stats = await lane.run(_load_stats)
             await _draw_content_menu(session, stats=stats)
+        elif choice == "p":
+            await session.write_line("")
+            await _pending_review_screen(session, lane, actor, link_context=link_context, transfers=transfers)
+            stats = await lane.run(_load_stats)
+            await _draw_content_menu(session, stats=stats)
         else:
             await session.write(reject_unhandled_key(choice))
 
@@ -14518,6 +14530,7 @@ async def _draw_content_menu(session: Session, *, stats: dict[str, Any]) -> None
         MenuEntry(label=menu_key("O", "mmunities", prefix="C"), brief="Manage Communities"),
         MenuEntry(label=menu_key("G", "rant moderator"), brief="Grant a moderation scope"),
         MenuEntry(label=menu_key("R", "evoke moderator"), brief="Revoke a moderation scope"),
+        MenuEntry(label=menu_key("P", "ending review"), brief="Posts and files awaiting approval"),
         MenuEntry(label=menu_key("B", "ack"), brief="Return to the SysOp console"),
     ]
     effective_desc_level, available_menu_height, desc_degraded = _degrade_description_level(
@@ -16682,27 +16695,234 @@ async def _remove_resource(
     return True
 
 
+@dataclass(frozen=True)
+class _PendingItem:
+    """One row of a moderation queue (issue #678): a held post, reply or
+    edit, or a held upload, with what a moderator scans the queue for."""
+
+    stable_id: int
+    title: str
+    kind: str
+    where: str
+    author: str
+    when: str
+    post: Post | None = None
+    board: Board | None = None
+    entry: FileEntry | None = None
+    area: FileArea | None = None
+
+
+_PENDING_COLUMNS = [
+    ListColumn("kind", 5, VALUE_COLOR),
+    ListColumn("by", 16, AUTHOR_COLOR),
+    ListColumn("submitted", 16, DATE_COLOR),
+]
+# The node-wide queue says where each item waits as well, in narrower
+# columns: at 80 columns the subject still needs room to be read.
+_PENDING_REVIEW_COLUMNS = [
+    ListColumn("where", 12, VALUE_COLOR),
+    ListColumn("kind", 5, VALUE_COLOR),
+    ListColumn("by", 12, AUTHOR_COLOR),
+    ListColumn("submitted", 16, DATE_COLOR),
+]
+
+
+# How many held items a queue screen lists at once, oldest first. Held
+# content can arrive from other nodes without end; the rest is listed as
+# these are decided (Codex review on #795).
+MAX_QUEUE_ITEMS = 200
+
+
+def _when_or_raw(iso_timestamp: str, db: Database | None = None, **overrides) -> str:
+    """A submission time as the node shows times, or the stored text when
+    it cannot be shown: a carried item's time is its origin's, and one bad
+    value must not keep the SysOp from the queue that could reject it
+    (Codex review on #795)."""
+    try:
+        return format_for_display(iso_timestamp, db, **overrides)
+    except ValueError:
+        return sanitize_text(iso_timestamp)
+
+
+def _submitted_instant(iso_timestamp: str) -> datetime.datetime:
+    """Oldest first by instant, not by text: a carried time may carry its
+    own offset (Codex review on #795). An unreadable one sorts last."""
+    try:
+        return _parse_stored_timestamp(iso_timestamp)
+    except ValueError:
+        return datetime.datetime.max.replace(tzinfo=datetime.timezone.utc)
+
+
+def _submitter_label(db: Database, post: Post) -> str:
+    """Who submitted a held post. A revision keeps its root's author, but a
+    moderator may have made the edit (Codex review on #795): the moderation
+    log names the editor."""
+    if post.post_id != post.root_post_id:
+        editor_id = submitter_id(db, post)
+        if editor_id is not None and editor_id != post.author_user_id:
+            row = db.connection.execute("SELECT username FROM users WHERE id = ?", (editor_id,)).fetchone()
+            if row is not None:
+                return row["username"]
+    return post.author_label
+
+
+def _held_or_current(db: Database, post_id: str | None) -> Post | None:
+    """The post `post_id` belongs to as its readers see it -- or, when none
+    of it is approved yet, the exact revision `post_id` names as it waits
+    (Codex review on #795): a carried post can arrive with its replies and
+    edits on a board this node moderates, all of it held."""
+    if post_id is None:
+        return None
+    current = revision_for_moderation(db, post_id)
+    if current is not None:
+        return current
+    try:
+        held = get_post(db, post_id)
+    except PostError:
+        return None
+    return held if held.status == "pending" else None
+
+
+def _reply_parent_for_moderation(db: Database, post: Post) -> Post | None:
+    """The post a held reply answers (see `_held_or_current`)."""
+    return _held_or_current(db, post.parent_post_id)
+
+
+def _edit_base_for_moderation(db: Database, post: Post) -> Post | None:
+    """What a held edit would replace (see `_held_or_current`): the post's
+    current text, or, when nothing of it is approved yet, the held
+    revision this edit amends."""
+    return _held_or_current(db, post.edit_of_post_id or post.root_post_id)
+
+
+def _pending_post_kind(post: Post) -> str:
+    """"edit" for a held revision of an approved post, "reply" for a held
+    answer to another, else "post"."""
+    if post.post_id != post.root_post_id:
+        return "edit"
+    return "reply" if post.parent_post_id is not None else "post"
+
+
+def _load_pending_items(
+    db: Database, actor: User, *, boards: list[Board] | None = None, areas: list[FileArea] | None = None
+) -> tuple[list[_PendingItem], bool]:
+    """Everything `actor` may decide on in `boards` and `areas` (every
+    board and area when both are `None`), oldest first, at most
+    `MAX_QUEUE_ITEMS` of it, and whether more waits. Each item keeps its
+    own id as its `(#N)`; in the node-wide queue, where a post and a file
+    may share an id, a file's is negative, as category pickers do
+    (worklog, "Stable identity and pagination")."""
+    node_wide = boards is None and areas is None
+    cap = MAX_QUEUE_ITEMS + 1
+    posts: list[tuple[Post, Board]] = []
+    entries: list[tuple[FileEntry, FileArea]] = []
+    if node_wide:
+        # One bounded query each, however many boards and areas there are
+        # (Codex review on #795).
+        boards_by_id = {board.id: board for board in list_boards(db)}
+        areas_by_id = {area.id: area for area in list_file_areas(db)}
+        posts = [
+            (post, boards_by_id[post.board_id])
+            for post in list_node_pending_posts(db, requesting_user=actor, limit=cap)
+            if post.board_id in boards_by_id
+        ]
+        entries = [
+            (entry, areas_by_id[entry.area_id])
+            for entry in list_node_pending_files(db, requesting_user=actor, limit=cap)
+            if entry.area_id in areas_by_id
+        ]
+    else:
+        for board in boards or []:
+            posts += [(post, board) for post in list_pending_posts(db, board, requesting_user=actor, limit=cap)]
+        for area in areas or []:
+            entries += [(entry, area) for entry in list_pending_files(db, area, requesting_user=actor, limit=cap)]
+    more = len(posts) > MAX_QUEUE_ITEMS or len(entries) > MAX_QUEUE_ITEMS
+    items: list[_PendingItem] = []
+    for post, board in posts:
+        items.append(_PendingItem(
+            stable_id=post.id, title=post.subject, kind=_pending_post_kind(post), where=board.name,
+            author=_submitter_label(db, post), when=_when_or_raw(post.created_at, db), post=post, board=board,
+        ))
+    for entry, area in entries:
+        items.append(_PendingItem(
+            stable_id=entry.id, title=entry.filename, kind="file", where=area.name,
+            author=entry.uploader_label, when=_when_or_raw(entry.created_at, db), entry=entry, area=area,
+        ))
+    items.sort(key=lambda item: (
+        _submitted_instant((item.post or item.entry).created_at), item.entry is not None, item.stable_id,
+    ))
+    more = more or len(items) > MAX_QUEUE_ITEMS
+    items = items[:MAX_QUEUE_ITEMS]
+    if node_wide:
+        items = [dataclasses.replace(item, stable_id=-item.stable_id) if item.entry else item for item in items]
+    return items, more
+
+
+async def _pick_pending_item(
+    session: Session, lane: DatabaseLane, actor: User, loaded: tuple[list[_PendingItem], bool], *,
+    title: str, empty_message: str, node_wide: bool = False,
+) -> _PendingItem | None:
+    items, more = loaded
+    return await pick_item(
+        session, items,
+        masthead=colored(
+            f"The oldest {MAX_QUEUE_ITEMS} are listed; the rest follow as these are decided.",
+            fg_color=MUTED_COLOR,
+        ) if more else "",
+        name_of=lambda item: item.title,
+        stable_id_of=lambda item: item.stable_id,
+        # What a terminal too narrow for the table shows instead.
+        description_of=lambda item: (
+            f"{item.where}: {item.kind} by {item.author}, {item.when}" if node_wide
+            else f"{item.kind} by {item.author}, {item.when}"
+        ),
+        columns=_PENDING_REVIEW_COLUMNS if node_wide else _PENDING_COLUMNS,
+        column_values_of=lambda item: (
+            [item.where, item.kind, item.author, item.when] if node_wide else [item.kind, item.author, item.when]
+        ),
+        title=title,
+        empty_message=empty_message,
+        redraw_in_place=await lane.run(redraw_in_place_enabled, actor),
+        unicode_style=await lane.run(unicode_style_enabled, actor),
+        collapsed=await lane.run(breadcrumb_collapsed_enabled, actor),
+        accent_color=await lane.run(effective_accent_color_256),
+        header_color=await lane.run(effective_header_color_256),
+    )
+
+
+async def _pending_review_screen(
+    session: Session, lane: DatabaseLane, actor: User, *,
+    link_context: LinkContext | None = None, transfers: Any = None,
+) -> None:
+    """Every held post and upload on the node in one queue (issue #678),
+    so a SysOp need not open each board and area to find what waits."""
+    while True:
+        loaded = await lane.run(_load_pending_items, actor)
+        selected = await _pick_pending_item(
+            session, lane, actor, loaded, title="Pending review", empty_message="Nothing awaits review.",
+            node_wide=True,
+        )
+        if selected is None:
+            return
+        if selected.post is not None:
+            await _post_action_screen(session, lane, actor, selected.post, selected.board, link_context=link_context)
+        else:
+            await _file_action_screen(
+                session, lane, actor, selected.entry, selected.area, link_context=link_context, transfers=transfers,
+            )
+
+
 async def _pending_posts_screen(
     session: Session, lane: DatabaseLane, actor: User, board: Board, *, link_context: LinkContext | None = None
 ) -> None:
     while True:
-        posts = await lane.run(list_pending_posts, board, requesting_user=actor)
-        selected = await pick_item(
-            session, posts,
-            name_of=lambda p: p.subject,
-            stable_id_of=lambda p: p.id,
-            description_of=lambda p: f"by {p.author_label}",
-            title=f"Pending posts in {board.name!r}",
-            empty_message="No pending posts.",
-            redraw_in_place=await lane.run(redraw_in_place_enabled, actor),
-            unicode_style=await lane.run(unicode_style_enabled, actor),
-            collapsed=await lane.run(breadcrumb_collapsed_enabled, actor),
-            accent_color=await lane.run(effective_accent_color_256),
-            header_color=await lane.run(effective_header_color_256),
+        loaded = await lane.run(lambda db: _load_pending_items(db, actor, boards=[board]))
+        selected = await _pick_pending_item(
+            session, lane, actor, loaded, title=f"Pending posts in {board.name!r}", empty_message="No pending posts.",
         )
         if selected is None:
             return
-        await _post_action_screen(session, lane, actor, selected, board, link_context=link_context)
+        await _post_action_screen(session, lane, actor, selected.post, board, link_context=link_context)
 
 
 async def _post_action_screen(
@@ -16724,11 +16944,26 @@ async def _post_action_screen(
     header_color = await lane.run(effective_header_color_256)
     status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
     display_format, display_timezone = await lane.run(resolve_display_preferences)
-    when = format_for_display(post.created_at, override_format=display_format, override_timezone=display_timezone)
+    when = _when_or_raw(post.created_at, override_format=display_format, override_timezone=display_timezone)
     body_mode = post_body_mode(
         board_allows_color=board.allow_color, reader_wants_color=await lane.run(post_colors_enabled, actor)
     )
     truecolor = await lane.run(lambda db: effective_truecolor(session, db, actor))
+    # What the held post changes or answers, as readers see it now (issue
+    # #678): an edit is judged against the text it would replace.
+    kind = _pending_post_kind(post)
+    current, parent, submitter = await lane.run(lambda db: (
+        _edit_base_for_moderation(db, post) if kind == "edit" else None,
+        _reply_parent_for_moderation(db, post) if kind == "reply" else None,
+        _submitter_label(db, post),
+    ))
+    # An edit made before the one readers now see (Codex review on #795):
+    # approving it changes nothing they see, and the screen must say so
+    # rather than offer it as a replacement.
+    superseded = kind == "edit" and await lane.run(lambda db: (db.connection.execute(
+        "SELECT MAX(id) FROM posts WHERE root_post_id = ? AND board_id = ? AND status = 'approved'",
+        (post.root_post_id, post.board_id),
+    ).fetchone()[0] or 0) > post.id)
     actions = [
         ("a", menu_key("A", "pprove")),
         ("r", menu_key("R", "eject")),
@@ -16750,15 +16985,39 @@ async def _post_action_screen(
         )
         # What the moderator is deciding about, then the post itself under its
         # own heading, with the pin and exempt state the toggles change.
-        sections = [
-            Section("Pending post", [
-                Field("By", post.author_label, color=AUTHOR_COLOR),
-                Field("Posted", when, color=DATE_COLOR),
-                Field("Pinned", _yes_no(post.pinned)),
-                Field("Exempt from auto-purge", _yes_no(post.exempt_from_expiry)),
-            ], paired=True),
-            Section("Message", [Styled(body_rows)]),
+        facts = [
+            # Which board it waits on (Codex review on #795): reached from
+            # the node-wide queue, the list that said so is gone.
+            Field("Board", board.name),
+            Field("By", submitter, color=AUTHOR_COLOR),
+            Field("Posted", when, color=DATE_COLOR),
+            Field("Pinned", _yes_no(post.pinned)),
+            Field("Exempt from auto-purge", _yes_no(post.exempt_from_expiry)),
         ]
+        if parent is not None:
+            facts.append(Field("Reply to", sanitize_text(parent.subject) + {
+                "expired": " (expired)", "pending": " (awaiting approval)",
+            }.get(parent.status, "")))
+        if current is not None and current.subject != post.subject:
+            facts.append(Field("Current subject", sanitize_text(current.subject)))
+        if superseded:
+            facts.append(Field(
+                "Superseded", "a later edit is already approved; approving this one changes nothing readers see",
+                color=WARNING_COLOR,
+            ))
+        sections = [
+            Section(f"Pending {kind}", facts, paired=not superseded),
+            Section("Proposed text" if current is not None else "Message", [Styled(body_rows)]),
+        ]
+        if current is not None:
+            sections.append(Section(
+                {"expired": "Current text (expired)", "pending": "Current text (awaiting approval)"}.get(
+                    current.status, "Current text"
+                ),
+                [Styled(post_body_rows(
+                    current.body, session.terminal_width, body_mode, truecolor=truecolor, layout=current.layout
+                ))],
+            ))
         choice, page = await show_detail(
             session, title=title, sections=sections, actions=actions,
             redraw_in_place=redraw_in_place, unicode_style=unicode_style, page=page,
@@ -17452,24 +17711,14 @@ async def _pending_files_screen(
     link_context: LinkContext | None = None, transfers: Any = None,
 ) -> None:
     while True:
-        files = await lane.run(list_pending_files, area, requesting_user=actor)
-        selected = await pick_item(
-            session, files,
-            name_of=lambda f: f.filename,
-            stable_id_of=lambda f: f.id,
-            description_of=lambda f: f"by {f.uploader_label}",
-            title=f"Pending files in {area.name!r}",
-            empty_message="No pending files.",
-            redraw_in_place=await lane.run(redraw_in_place_enabled, actor),
-            unicode_style=await lane.run(unicode_style_enabled, actor),
-            collapsed=await lane.run(breadcrumb_collapsed_enabled, actor),
-            accent_color=await lane.run(effective_accent_color_256),
-            header_color=await lane.run(effective_header_color_256),
+        loaded = await lane.run(lambda db: _load_pending_items(db, actor, areas=[area]))
+        selected = await _pick_pending_item(
+            session, lane, actor, loaded, title=f"Pending files in {area.name!r}", empty_message="No pending files.",
         )
         if selected is None:
             return
         await _file_action_screen(
-            session, lane, actor, selected, area, link_context=link_context, transfers=transfers,
+            session, lane, actor, selected.entry, area, link_context=link_context, transfers=transfers,
         )
 
 
@@ -17516,9 +17765,14 @@ async def _draw_file_action(
     status_line: str,
     when: str,
     can_download: bool = False,
+    area_name: str | None = None,
 ) -> None:
+    # Which area it waits in (Codex review on #795): reached from the
+    # node-wide queue, the list that said so is gone.
+    area_field = [Field("Area", area_name)] if area_name is not None else []
     used_rows = await _write_file_record(
         session, entry, heading="Pending file", fields=[
+            *area_field,
             Field("By", entry.uploader_label, color=AUTHOR_COLOR),
             Field("Uploaded", when, color=DATE_COLOR),
             Field("Size", f"{_format_bytes(entry.size_bytes)} ({entry.size_bytes} bytes)"),
@@ -17586,7 +17840,7 @@ async def _file_action_screen(
     async def _draw() -> None:
         await _draw_file_action(
             session, entry, description_level, redraw_in_place, unicode_style, collapsed, header_color,
-            status_line=status_line, when=when, can_download=can_download,
+            status_line=status_line, when=when, can_download=can_download, area_name=area.name,
         )
 
     await _draw()

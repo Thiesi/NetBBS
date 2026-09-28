@@ -22,7 +22,7 @@ import sqlite3
 from dataclasses import dataclass, replace
 
 from netbbs.attestation import meets_age
-from netbbs.auth.users import User
+from netbbs.auth.users import SYSOP_LEVEL, User
 from netbbs.boards.boards import Board
 from netbbs.boards.content_id import compute_content_id
 from netbbs.boards.limits import MAX_BODY_BYTES, MAX_SUBJECT_BYTES
@@ -1317,7 +1317,16 @@ def set_post_exempt(db: Database, post: Post, exempt: bool, *, changed_by: User)
     return get_post(db, post.post_id)
 
 
-def list_pending_posts(db: Database, board: Board, *, requesting_user: User) -> list[Post]:
+# The moderation queue's order, oldest first by instant (issue #678, Codex
+# review on #795): a carried item's `created_at` is its origin's and may
+# carry an offset, so text order is not time order. `julianday` reads both
+# spellings; an unreadable time sorts last, and `id` breaks ties.
+PENDING_ORDER_SQL = "julianday(created_at) IS NULL, julianday(created_at), id"
+
+
+def list_pending_posts(
+    db: Database, board: Board, *, requesting_user: User, limit: int | None = None
+) -> list[Post]:
     """
     The moderation queue for `board`: every pending post if
     `requesting_user` holds `BoardPermission.APPROVE`, otherwise only
@@ -1328,23 +1337,70 @@ def list_pending_posts(db: Database, board: Board, *, requesting_user: User) -> 
     moderation queues are expected to be much smaller than full board
     history, and this keeps that already-intricate pagination code
     untouched.
+
+    `limit` caps how many are read, oldest first (issue #678): held
+    content can be carried in from other nodes without end, and a screen
+    showing the queue must not read all of it.
     """
+    cap = -1 if limit is None else limit
     if has_permission(
         db, requesting_user, object_type="board", object_id=board.id, permission=BoardPermission.APPROVE
     ):
         rows = db.connection.execute(
-            "SELECT * FROM posts WHERE board_id = ? AND status = 'pending' ORDER BY created_at",
-            (board.id,),
+            f"SELECT * FROM posts WHERE board_id = ? AND status = 'pending' ORDER BY {PENDING_ORDER_SQL} LIMIT ?",
+            (board.id, cap),
         ).fetchall()
     else:
         rows = db.connection.execute(
-            """
+            f"""
             SELECT * FROM posts WHERE board_id = ? AND status = 'pending' AND author_user_id = ?
-            ORDER BY created_at
+            ORDER BY {PENDING_ORDER_SQL} LIMIT ?
             """,
-            (board.id, requesting_user.id),
+            (board.id, requesting_user.id, cap),
         ).fetchall()
     return [_row_to_post(row) for row in rows]
+
+
+def list_node_pending_posts(db: Database, *, requesting_user: User, limit: int) -> list[Post]:
+    """The oldest `limit` held posts on every board, for the SysOp's
+    node-wide queue (issue #678) -- one bounded query however many boards
+    the node carries (Codex review on #795). SysOp only: a SysOp may
+    decide on every board, so no board is left out."""
+    require_level(requesting_user, SYSOP_LEVEL)
+    # A board this node excluded from a carried Link keeps its rows, but no
+    # screen lists it: its held posts must not take the queue's places
+    # (Codex review on #795).
+    rows = db.connection.execute(
+        f"""
+        SELECT * FROM posts WHERE status = 'pending'
+          AND board_id IN (SELECT id FROM boards WHERE link_hidden_at IS NULL)
+        ORDER BY {PENDING_ORDER_SQL} LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+    return [_row_to_post(row) for row in rows]
+
+
+def revision_for_moderation(db: Database, post_id: str) -> Post | None:
+    """The newest approved or expired revision of the post `post_id`
+    belongs to: what its readers see, or last saw. A moderator deciding on
+    a held reply or edit judges it against this (issue #678). Unlike
+    `visible_post`, expiry doesn't hide it (Codex review on #795): a held
+    edit approved after the post expired brings it back, and the moderator
+    must see what it replaces."""
+    row = db.connection.execute(
+        "SELECT root_post_id, board_id FROM posts WHERE post_id = ?", (post_id,)
+    ).fetchone()
+    if row is None:
+        return None
+    latest = db.connection.execute(
+        """
+        SELECT * FROM posts WHERE root_post_id = ? AND board_id = ? AND status IN ('approved', 'expired')
+        ORDER BY id DESC LIMIT 1
+        """,
+        (row["root_post_id"], row["board_id"]),
+    ).fetchone()
+    return _row_to_post(latest) if latest is not None else None
 
 
 # At most this many pinned posts are listed at once. Pins are set by this
