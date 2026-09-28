@@ -16,7 +16,7 @@ import pytest
 
 from netbbs.auth.users import create_user
 from netbbs.boards.boards import create_board
-from netbbs.boards.posts import MAX_SUBJECT_BYTES, create_post
+from netbbs.boards.posts import create_post
 from netbbs.net import board_flow, mail_flow
 from netbbs.net.char_input import EditorKey, EditorKeyKind
 from netbbs.net.notices import announce, pending_notices, take_notices
@@ -127,14 +127,20 @@ def test_a_board_outcome_is_shown_on_the_redrawn_page(db, alice):
     assert pending_notices(session) == []
 
 
-def test_a_refused_post_is_reported_on_the_review_screen_it_returns_to(db, alice):
+def test_a_refused_post_is_reported_on_the_review_screen_it_returns_to(db, alice, monkeypatch):
+    """A post the signature carries over the length limit (issue #812:
+    over-long subjects are refused at their own prompt now, so this is
+    the refusal left for review to report)."""
+    from netbbs.signature import set_signature
+
+    monkeypatch.setattr(board_flow, "MAX_BODY_BYTES", 30)
+    set_signature(db, alice, "A signature of some length")
     board = create_board(db, "general", creator=alice)
-    too_long = "x" * (MAX_SUBJECT_BYTES + 1)
-    session = FakeSession(["p", too_long, "Body", "", "p", "c", "b"])
+    session = FakeSession(["p", "Hello", "Body", "", "p", "c", "b"])
 
     asyncio.run(board_flow._show_board(session, db, board, alice))
 
-    screen = _stays_on_screen_until_the_next_prompt(session, "Could not create post")
+    screen = _stays_on_screen_until_the_next_prompt(session, "characters too long")
     assert "Review composition" in screen
 
 

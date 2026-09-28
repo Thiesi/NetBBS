@@ -25,6 +25,8 @@ forgotten it, ask the SysOp to set a new one; nobody can recover the old one.
 
 Press a highlighted letter such as **[J]** for **Jump to**. Most menus react
 immediately, without Enter. When typing text, use Enter to submit it.
+**Ctrl+U** clears the line you are typing, and at a field that allows it,
+Esc leaves it without changing anything.
 Follow the action bar on the current screen: letters can mean different
 things in different places. **[B]ack** leaves most screens.
 
@@ -54,6 +56,12 @@ keeps a post draft for later; `/cancel` discards it. In the fullscreen
 editor, **Ctrl+G** shows help and **Ctrl+X** opens the exit choices, including
 **Keep draft & exit**. A saved post draft is offered when you return to
 that board. A draft is not a published post.
+
+A post or message needs a subject. Leave it empty and mail asks again;
+press Esc there to cancel the message. A subject that is too long is caught
+as soon as you press Enter, with how many characters to remove, and the
+field stays open so you can shorten it. If your signature pushes a message
+over its length limit, the review screen says so before you can send it.
 
 ## Chat and mail
 
