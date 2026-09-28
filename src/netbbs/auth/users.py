@@ -1013,6 +1013,9 @@ def approve_pending_user(db: Database, target: User, *, approved_by: User) -> Us
     if not target.pending_approval:
         return target
     db.connection.execute("UPDATE users SET pending_approval = 0 WHERE id = ?", (target.id,))
+    # The signup answer was given for this one decision (issue #835); see
+    # `netbbs.auth.signup_answers`.
+    db.connection.execute("DELETE FROM signup_answers WHERE user_id = ?", (target.id,))
     db.connection.commit()
     record_action(db, actor=approved_by, action="approve_registration", target_user_id=target.id)
     return _get_user_by_id(db, target.id)

@@ -349,3 +349,103 @@ def test_ssh_pending_signup_explains_the_wait(db):
 
 async def _noop(session: Session) -> None:
     pass
+
+
+# -- F072: the optional signup question ----------------------------------
+
+
+def test_signup_question_is_asked_and_kept_for_the_approver(db):
+    from netbbs.auth.signup_answers import load_signup_answer, set_registration_question
+
+    set_registration_mode(db, RegistrationMode.APPROVAL_REQUIRED)
+    set_registration_question(db, "What do you write with?")
+    session = FakeSession(["new", "anna_writes", "hunter2pw", "hunter2pw", "A Lamy 2000, mostly.", "", "", ""])
+
+    asyncio.run(_run_login(session, db))
+
+    assert "The SysOp asks: What do you write with?" in _text(session)
+    user = get_user_by_username(db, "anna_writes")
+    answer = load_signup_answer(db, user.id)
+    assert answer is not None
+    assert answer.question == "What do you write with?"
+    assert answer.answer == "A Lamy 2000, mostly."
+
+
+def test_signup_question_can_be_skipped(db):
+    from netbbs.auth.signup_answers import load_signup_answer, set_registration_question
+
+    set_registration_mode(db, RegistrationMode.APPROVAL_REQUIRED)
+    set_registration_question(db, "What do you write with?")
+    session = FakeSession(["new", "anna_writes", "hunter2pw", "hunter2pw", "", "", "", ""])
+
+    asyncio.run(_run_login(session, db))
+
+    user = get_user_by_username(db, "anna_writes")
+    assert user.pending_approval is True
+    assert load_signup_answer(db, user.id) is None
+
+
+def test_signup_question_is_not_asked_on_an_open_node(db):
+    from netbbs.auth.signup_answers import set_registration_question
+
+    set_registration_question(db, "What do you write with?")
+    session = FakeSession(["new", "anna_writes", "hunter2pw", "hunter2pw", "n", "y"], keys=["l"])
+
+    asyncio.run(_run_login(session, db))
+
+    assert "The SysOp asks" not in _text(session)
+
+
+def test_a_long_answer_is_cut_to_the_limit(db):
+    from netbbs.auth.signup_answers import MAX_SIGNUP_ANSWER_LENGTH, load_signup_answer, save_signup_answer
+
+    user = create_user(db, "anna_writes", password="hunter2pw", pending_approval=True)
+    save_signup_answer(db, user.id, question="Why?", answer="x" * 1000)
+
+    assert len(load_signup_answer(db, user.id).answer) == MAX_SIGNUP_ANSWER_LENGTH
+
+
+def test_approval_deletes_the_answer_and_declining_takes_it_with_the_account(db):
+    from netbbs.auth.signup_answers import load_signup_answer, save_signup_answer
+
+    sysop = create_user(db, "InkWell", password="hunter2", user_level=SYSOP_LEVEL)
+    approved = create_user(db, "anna_writes", password="hunter2pw", pending_approval=True)
+    declined = create_user(db, "spammer", password="hunter2pw", pending_approval=True)
+    save_signup_answer(db, approved.id, question="Why?", answer="Pens.")
+    save_signup_answer(db, declined.id, question="Why?", answer="Buy now.")
+
+    approve_pending_user(db, approved, approved_by=sysop)
+    decline_pending_user(db, declined, declined_by=sysop)
+
+    assert load_signup_answer(db, approved.id) is None
+    remaining = db.connection.execute("SELECT COUNT(*) FROM signup_answers").fetchone()[0]
+    assert remaining == 0
+
+
+def test_a_too_long_question_is_refused(db):
+    from netbbs.auth.signup_answers import MAX_REGISTRATION_QUESTION_LENGTH, set_registration_question
+
+    with pytest.raises(ValueError):
+        set_registration_question(db, "q" * (MAX_REGISTRATION_QUESTION_LENGTH + 1))
+
+
+def test_ssh_signup_asks_the_question_too(db):
+    from netbbs.auth.signup_answers import load_signup_answer, set_registration_question
+
+    set_registration_mode(db, RegistrationMode.APPROVAL_REQUIRED)
+    set_registration_question(db, "What do you write with?")
+
+    async def scenario():
+        server = SSHServer(host="127.0.0.1", port=0, db=db, session_handler=_noop, throttle=_throttle())
+        await server.start()
+        try:
+            return await _attempt_kbdint_registration(
+                server.port, responses=["anna_writes", "hunter2pw", "hunter2pw", "Dip pens."]
+            )
+        finally:
+            await server.stop()
+
+    client = asyncio.run(scenario())
+    assert any("The SysOp asks: What do you write with?" in message for message in client.messages)
+    user = get_user_by_username(db, "anna_writes")
+    assert load_signup_answer(db, user.id).answer == "Dip pens."

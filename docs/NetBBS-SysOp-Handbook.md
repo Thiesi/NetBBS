@@ -381,7 +381,9 @@ Choose registration mode under **Users → Registration**:
   or turn it down there with **Decline**, which removes it after a yes/no.
   Until you approve it, the account cannot log in at all, not even to look
   around; when the caller tries, they are told it is waiting for your
-  approval.
+  approval. **Question** sets an optional question new callers answer
+  when they sign up ("What do you write with?"). The answer shows on the
+  pending account and is deleted once you approve it.
 - **Closed:** only SysOps create accounts.
 
 A caller cannot register a reserved name (`sysop`, `admin`, `root`,
