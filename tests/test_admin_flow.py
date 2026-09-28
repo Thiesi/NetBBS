@@ -1036,7 +1036,7 @@ def test_create_user_with_blank_username_is_cancelled(db, lane, sysop):
 
 
 def test_list_users_and_select_shows_detail(db, lane, sysop):
-    session = FakeSession(["u", "d", "0", "1", "b", "b", "b"])
+    session = FakeSession(["u", "l", "0", "1", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "sysop" in _written_text(session)
     assert "Level: 255" in _normalized_visible(_written_text(session))
@@ -1187,7 +1187,7 @@ def test_list_users_defaults_to_alphabetical_ascending_with_no_sort_prompt_neede
     """[L]ist users jumps straight to the listing now -- no separate
     one-shot sort-order prompt to answer first."""
     create_user(db, "alice", password="hunter2", user_level=10)
-    session = FakeSession(["u", "d", "0", "1", "b", "b", "b"])
+    session = FakeSession(["u", "l", "0", "1", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "alice" in _written_text(session)  # item 01 alphabetically
     assert "Sorted by: Alphabetical ↑" in _written_text(session)
@@ -6298,7 +6298,7 @@ def test_list_users_shows_pending_approval_status(db, lane, sysop):
 
     create_user(db, "carol", password="hunter2pw", pending_approval=True)
     # carol sorts before sysop alphabetically -- item 01.
-    session = FakeSession(["u", "d", "0", "1", "b", "b", "b"])
+    session = FakeSession(["u", "l", "0", "1", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "pending approval" in _written_text(session)
 
@@ -6327,7 +6327,7 @@ def test_declining_the_approve_prompt_leaves_it_pending(db, lane, sysop):
 def test_detail_screen_for_a_non_pending_user_has_no_approve_prompt(db, lane, sysop):
     # sysop themselves is the sole (non-pending) user -- picking their
     # own entry must not prompt for approval at all.
-    session = FakeSession(["u", "d", "0", "1", "b", "b", "b"])
+    session = FakeSession(["u", "l", "0", "1", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "Approve this account" not in _written_text(session)
 
