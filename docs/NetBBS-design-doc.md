@@ -1214,6 +1214,11 @@ included. The SysOp console's content menu has one node-wide
 `[P]ending review` queue of every held post and upload, oldest first, so
 nobody has to open each board and area to find what waits.
 
+A board's and a file area's detail screen in the console names its
+moderators: each grant that applies there, its own and blanket ones, with
+its permissions. `[H]istory` lists what moderators did there, newest first,
+from the moderation log (bounded, like the node's audit log).
+
 **Expiry is a caller-facing boundary, not only a delisting** (issue #639).
 Once a post or a file is `expired`, no keystroke a caller can press reaches
 it: listings, `[F]ind` and the file area's own screens are

@@ -120,7 +120,9 @@ def list_actions_for_target_user(db: Database, target_user_id: int) -> list[Mode
     return [_row_to_entry(row) for row in rows]
 
 
-def list_recent_actions(db: Database, *, limit: int = 200) -> list[ModerationLogEntry]:
+def list_recent_actions(
+    db: Database, *, limit: int = 200, object_type: str | None = None, object_id: int | None = None
+) -> list[ModerationLogEntry]:
     """
     The most recent `limit` entries across every user/object -- the
     site-wide audit trail (`netbbs.net.admin_flow`'s Operations
@@ -134,10 +136,21 @@ def list_recent_actions(db: Database, *, limit: int = 200) -> list[ModerationLog
     list_diagnostic_log_entries`'s own reading order and `limit`
     convention -- callers wanting oldest-first reverse this same
     window rather than a separate query.
+
+    With `object_type` and `object_id`, only what was done to that one
+    board, file area or channel -- its moderation history, bounded the
+    same way (issue #678), unlike `list_actions_for_object`, which reads
+    all of it.
     """
-    rows = db.connection.execute(
-        "SELECT * FROM moderation_log ORDER BY id DESC LIMIT ?", (limit,)
-    ).fetchall()
+    if object_type is not None:
+        rows = db.connection.execute(
+            "SELECT * FROM moderation_log WHERE object_type = ? AND object_id = ? ORDER BY id DESC LIMIT ?",
+            (object_type, object_id, limit),
+        ).fetchall()
+    else:
+        rows = db.connection.execute(
+            "SELECT * FROM moderation_log ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
     return [_row_to_entry(row) for row in rows]
 
 
