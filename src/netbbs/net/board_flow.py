@@ -1316,7 +1316,7 @@ async def _show_board(
         # Checked as it is typed, not at Publish (issue #812).
         subject = await read_subject(
             session, max_bytes=MAX_SUBJECT_BYTES, blank_cancels=True,
-            current=reply_subject(reply_to.subject, max_bytes=MAX_SUBJECT_BYTES) if reply_to is not None else "",
+            current=reply_subject(reply_to.subject, max_bytes=MAX_SUBJECT_BYTES) if reply_to is not None else None,
         )
         if not subject:
             announce(session, "Reply cancelled." if reply_to else "Post cancelled.", tone="muted")

@@ -101,14 +101,16 @@ def too_long_message(what: str, over: int) -> str:
 
 
 async def read_subject(
-    session: Session, *, max_bytes: int, current: str = "", blank_cancels: bool = False,
+    session: Session, *, max_bytes: int, current: str | None = None, blank_cancels: bool = False,
 ) -> str | None:
     """The Subject prompt of every composition (issue #812), which checks
     the subject where it is typed rather than after the body is written.
 
     With `current`, the field opens on it and behaves as
     `read_prefilled_field`: Enter keeps what is shown, an emptied line or
-    Esc keeps `current`. Without, it starts empty and Esc returns `None`,
+    Esc keeps `current`, and a string always comes back -- even an empty
+    one, since a stored or carried post may have an empty subject (Codex
+    review). With `current=None` it starts empty and Esc returns `None`,
     cancelling. An empty answer asks again, saying Esc cancels -- unless
     `blank_cancels`, for a prompt that already offers Enter as its way out
     (a board's "Subject (or press Enter to cancel)").
@@ -116,7 +118,8 @@ async def read_subject(
     A subject over `max_bytes` is refused with how many characters to
     remove, and the prompt reopens on it to be shortened (Ctrl-U clears
     it). The storage layer's byte check stays the backstop."""
-    if current:
+    prefilled = current is not None
+    if prefilled:
         prompt = "Subject: "
         escape_does = "keep the previous subject"
     elif blank_cancels:
@@ -127,7 +130,7 @@ async def read_subject(
         escape_does = "cancel"
     # Shown sanitized, and handed back untouched when saved unchanged --
     # the same reasoning as `read_prefilled_field`.
-    shown = sanitize_text(current)
+    shown = sanitize_text(current or "")
     seed = shown
     while True:
         await write_prompt(session, prompt)
@@ -138,9 +141,9 @@ async def read_subject(
             )
         except InputCancelled:
             await session.write_line("")
-            return current or None
+            return current
         value = value.strip()
-        if current and (not value or value == shown.strip()):
+        if prefilled and (not value or value == shown.strip()):
             return current
         if not value:
             if blank_cancels:

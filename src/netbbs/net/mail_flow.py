@@ -497,7 +497,7 @@ async def _compose_mail(
     # Checked here rather than at Send (issue #812): an empty subject is
     # asked for again, one that is too long says by how much, and only
     # Esc on a fresh prompt gives up on the message.
-    subject = await read_subject(session, max_bytes=MAX_MAIL_SUBJECT_BYTES, current=prefill_subject)
+    subject = await read_subject(session, max_bytes=MAX_MAIL_SUBJECT_BYTES, current=prefill_subject or None)
     if subject is None:
         announce(session, "Message cancelled.", tone="muted")
         return

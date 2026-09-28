@@ -117,6 +117,15 @@ def test_a_prefilled_subject_keeps_its_value_on_esc_or_an_emptied_line():
     assert _read(FakeSession([""]), current="Re: hi") == "Re: hi"
 
 
+def test_an_empty_stored_subject_is_still_a_prefilled_one():
+    """A stored or carried post can have an empty subject (Codex review):
+    editing it must hand a string back on Esc, never the fresh prompt's
+    `None`, which review would then try to measure."""
+    assert _read(FakeSession([ESC]), current="") == ""
+    assert _read(FakeSession([""]), current="") == ""
+    assert _read(FakeSession(["New"]), current="") == "New"
+
+
 def test_a_prefilled_subject_refuses_a_long_edit_and_esc_keeps_the_old_one():
     session = FakeSession(["Re: much too long", ESC])
     assert _read(session, current="Re: hi") == "Re: hi"
