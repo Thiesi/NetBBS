@@ -151,9 +151,7 @@ class UsernameRetiredError(AuthError):
     """
 
     def __init__(self, username: str) -> None:
-        super().__init__(
-            f"could not create account {username!r} — username or fingerprint already in use"
-        )
+        super().__init__(username_taken_message(username))
         self.username = username
 
     @property
@@ -165,6 +163,20 @@ class UsernameRetiredError(AuthError):
             "posts, and whatever other nodes recorded about it. Release it first under "
             "Users -> Retired names if that is what you intend."
         )
+
+
+class PendingApprovalError(AuthError):
+    """The credentials were right, but the account still awaits a SysOp's
+    approval (issue #835).
+
+    Raised only once the password or signature has been verified, so the
+    caller has proven the account is theirs. `str()` stays the generic
+    "login failed" for any caller that only knows `AuthError`.
+    """
+
+    def __init__(self, username: str) -> None:
+        super().__init__("login failed")
+        self.username = username
 
 
 @dataclass(frozen=True)
@@ -299,13 +311,17 @@ def _validate_username(username: str) -> None:
     `create_user_async`, and therefore the in-BBS admin screen and the
     standalone CLI alike) already funnels through, so there's no
     separate validator to keep in sync across callers."""
+    # Length first (issue #835): a 300-character paste is "too long",
+    # whatever characters it also happens to contain.
+    if len(username) > _MAX_USERNAME_LENGTH:
+        raise AuthError(f"usernames can be at most {_MAX_USERNAME_LENGTH} characters (that one has {len(username)})")
+    # "ASCII letters", not "letters" (issue #835): a caller who typed
+    # "Tintenfaß" was told only letters were allowed, and ß is a letter.
     if not username or not _USERNAME_PATTERN.match(username):
         raise AuthError(
-            "usernames may only contain letters, digits, '_', '-', and '.' "
-            f"(got {username!r})"
+            "usernames may only contain ASCII letters (A-Z, no accents or umlauts), digits, "
+            f"'_', '-', and '.' (got {username!r})"
         )
-    if len(username) > _MAX_USERNAME_LENGTH:
-        raise AuthError(f"username too long: max {_MAX_USERNAME_LENGTH} characters, got {len(username)}")
     # Case-insensitive, matching the NOCASE uniqueness index below --
     # "New" must be refused exactly as "new" is, or self-service
     # registration's sentinel (design doc) could be shadowed by
@@ -317,6 +333,77 @@ def _validate_username(username: str) -> None:
             f"usernames may not end in {DOOR_LABEL_SUFFIX!r} — that suffix is reserved "
             "for doors which post to a board (issue #520)"
         )
+
+
+def username_taken_message(username: str) -> str:
+    """What a caller is told when `username` belongs to someone -- or
+    once did (see `UsernameRetiredError`, which must read word for word
+    the same)."""
+    return f"the username {username!r} is already taken"
+
+
+#: Names a caller may not register for themselves (issue #835). In Open
+#: mode an account is live the moment it exists, so "sysop" could post
+#: and mail as the node's operator straight away. Self-service only: a
+#: SysOp creating an "admin" account by hand is making that choice on
+#: purpose. Compared by `username_skeleton`, so "Sys0p" and "s.y.s.o.p"
+#: are the same name.
+SELF_SERVICE_RESERVED_USERNAMES = frozenset({
+    "sysop", "cosysop", "admin", "administrator", "root", "moderator", "mod",
+    "staff", "support", "system", "operator", "postmaster", "guest", "netbbs",
+})
+
+# Characters a reader takes for one another at a glance, folded onto one
+# representative. Only what the username grammar allows can occur.
+_SKELETON_FOLD = str.maketrans({
+    "0": "o", "1": "l", "i": "l", "|": "l", "3": "e", "4": "a", "5": "s", "7": "t",
+    "8": "b", "9": "g", "2": "z",
+})
+
+
+def username_skeleton(name: str) -> str:
+    """A form of `name` under which names that read the same compare
+    equal (issue #835): case folded, the separators '_', '-' and '.'
+    dropped, and look-alike characters (0/o, 1/l/i, 5/s, rn/m, vv/w)
+    folded together. "InkWell", "lnk_well" and "1NKWELL" share one."""
+    folded = name.casefold().replace("rn", "m").replace("vv", "w")
+    folded = "".join(ch for ch in folded if ch not in "_-.")
+    return folded.translate(_SKELETON_FOLD)
+
+
+def self_service_username_problem(db: Database, username: str) -> str | None:
+    """Why a caller may not register `username` for themselves, in words
+    for that caller, or `None` if they may (issue #835).
+
+    Checked as soon as the name is typed, before the password prompts,
+    so "Tintenfaß", a name already taken, or a 300-character paste is
+    refused at once instead of after two password entries. Account
+    creation repeats every check that matters; this only moves the
+    refusal earlier.
+
+    Saying a name is taken tells the caller it exists. That was already
+    so -- creation said it, only later -- and both registration paths
+    spend a login-throttle token before calling this, so it is no faster
+    an oracle than it was.
+    """
+    try:
+        _validate_username(username)
+    except AuthError as exc:
+        return str(exc)
+    skeleton = username_skeleton(username)
+    if skeleton in {username_skeleton(word) for word in SELF_SERVICE_RESERVED_USERNAMES} or "sysop" in skeleton:
+        return f"{username!r} is reserved on this node"
+    taken = db.connection.execute(
+        "SELECT 1 FROM users WHERE username = ? COLLATE NOCASE", (username,)
+    ).fetchone()
+    if taken is not None or is_username_retired(db, username):
+        return username_taken_message(username)
+    for row in db.connection.execute(
+        "SELECT username FROM users WHERE user_level >= ?", (SYSOP_LEVEL,)
+    ).fetchall():
+        if username_skeleton(row["username"]) == skeleton:
+            return f"{username!r} is too close to the name of this node's SysOp"
+    return None
 
 
 def _create_user_with_password_hash(
@@ -370,8 +457,16 @@ def _create_user_with_password_hash(
             )
     except sqlite3.IntegrityError as exc:
         db.connection.rollback()
+        # Named for what actually collided (issue #835): "username or
+        # fingerprint already in use" was jargon to a caller who had
+        # only typed a name.
+        name_taken = db.connection.execute(
+            "SELECT 1 FROM users WHERE username = ? COLLATE NOCASE", (username,)
+        ).fetchone() is not None
         raise AuthError(
-            f"could not create account {username!r} — username or fingerprint already in use"
+            username_taken_message(username)
+            if name_taken or verify_key is None
+            else "that key is already registered to another account"
         ) from exc
     except BaseException:
         db.connection.rollback()
@@ -521,16 +616,17 @@ def _finish_password_login(
 ) -> User:
     if row is None or row["password_hash"] is None or not password_matches:
         raise AuthError("login failed")
-    # Same generic failure a wrong password produces -- a disabled or
-    # still-pending-approval account shouldn't be distinguishable from a
-    # wrong credential (see AuthError's own anti-enumeration docstring).
-    # The one place a freshly self-registered account *does* get told
-    # explicitly that it's pending is the registration flow itself,
-    # right after creating it (netbbs.net.login_flow._register_new_
-    # account) -- safe there because the caller has just proven the
-    # account is theirs by creating it, unlike a login attempt here.
-    if row["disabled_at"] is not None or row["pending_approval"]:
+    # Same generic failure a wrong password produces -- a disabled
+    # account shouldn't be distinguishable from a wrong credential (see
+    # AuthError's own anti-enumeration docstring).
+    if row["disabled_at"] is not None:
         raise AuthError("login failed")
+    # A pending one is told so (issue #835): "Login failed" made callers
+    # think they had mistyped the password they had just chosen. Raised
+    # only after the password matched, so it tells nobody anything they
+    # could not already log in to find out.
+    if row["pending_approval"]:
+        raise PendingApprovalError(row["username"])
     return _touch_last_login(db, row)
 
 
@@ -587,8 +683,12 @@ def authenticate_keypair(db: Database, username: str, challenge: bytes, signatur
     ):
         raise AuthError("login failed")
 
-    if row["disabled_at"] is not None or row["pending_approval"]:
+    if row["disabled_at"] is not None:
         raise AuthError("login failed")
+    if row["pending_approval"]:
+        # The signature proved the key, as a matching password does in
+        # `_finish_password_login` (issue #835).
+        raise PendingApprovalError(row["username"])
 
     return _touch_last_login(db, row)
 
@@ -629,6 +729,10 @@ def authorize_public_key(db: Database, username: str, verify_key: nacl.signing.V
     if key_row is None:
         raise AuthError("login failed")
 
+    # Generic even while pending, unlike the password and signature paths
+    # (issue #835): SSH asks this before the client has signed anything,
+    # and a public key is public, so saying "pending" here would tell
+    # anyone holding a copy of the key that the account exists.
     if row["disabled_at"] is not None or row["pending_approval"]:
         raise AuthError("login failed")
 
@@ -1382,7 +1486,19 @@ def deletion_retires_username(db: Database, user: User) -> bool:
     ).fetchone() is not None
 
 
-def delete_user(db: Database, target: User, *, deleted_by: User) -> None:
+def decline_pending_user(db: Database, target: User, *, declined_by: User) -> None:
+    """Turn down a signup that is still awaiting approval (issue #835).
+
+    A deletion underneath -- a declined account has nothing worth keeping
+    -- but without the permanent-delete ritual, which warns about posts,
+    callers history and Link for an account that cannot have any of them.
+    Refused if the account was approved in the meantime, so a second
+    SysOp's approval is never silently undone by a stale screen.
+    """
+    delete_user(db, target, deleted_by=declined_by, declining=True)
+
+
+def delete_user(db: Database, target: User, *, deleted_by: User, declining: bool = False) -> None:
     """
     Permanently remove `target`'s account, refusing to delete the last
     active SysOp.
@@ -1412,6 +1528,10 @@ def delete_user(db: Database, target: User, *, deleted_by: User) -> None:
     db.connection.execute("BEGIN IMMEDIATE")
     try:
         current = _get_user_by_id(db, target.id)
+        if declining and not current.pending_approval:
+            raise UserManagementError(
+                f"{current.username!r} is no longer awaiting approval -- someone approved it meanwhile"
+            )
         _refuse_if_last_sysop(db, current, removes_active_sysop=True)
         # Issue #531, Codex review. Guest login keys its designation on
         # `(id, created_at)`, and neither is unique on its own -- rowids
@@ -1428,10 +1548,16 @@ def delete_user(db: Database, target: User, *, deleted_by: User) -> None:
         # first also means target_user_id naturally goes NULL via the
         # same ON DELETE SET NULL once the row disappears, with detail
         # keeping the username on record either way.
-        record_action_without_commit(
-            db, actor=deleted_by, action="delete_user", target_user_id=current.id,
-            detail=f"deleted user {current.username!r} (id {current.id}, was level {current.user_level})",
-        )
+        if declining:
+            record_action_without_commit(
+                db, actor=deleted_by, action="decline_registration", target_user_id=current.id,
+                detail=f"declined signup {current.username!r} (id {current.id})",
+            )
+        else:
+            record_action_without_commit(
+                db, actor=deleted_by, action="delete_user", target_user_id=current.id,
+                detail=f"deleted user {current.username!r} (id {current.id}, was level {current.user_level})",
+            )
         # Issue #594. On the Link an account *is* its username: mail is
         # addressed to it, a carried post's author label is built from it, the
         # trust subject is derived from it, an attestation names it. Freed, all

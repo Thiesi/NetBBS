@@ -43,15 +43,18 @@ from netbbs.auth.users import (
     MIN_REGISTRATION_PASSWORD_LENGTH,
     NEW_ACCOUNT_SENTINEL,
     AuthError,
+    PendingApprovalError,
     authenticate_password_async,
     authorize_public_key,
     create_user_async,
+    self_service_username_problem,
 )
 from netbbs.config import RegistrationMode, get_registration_mode
 from netbbs.net import char_input
 from netbbs.net.new_account_banner_after import load_new_account_banner_after
 from netbbs.net.new_account_banner_before import load_new_account_banner_before
 from netbbs.net.session import Session, SessionClosedError, clamp_terminal_size, wait_until_drained
+from netbbs.net.signup_text import pending_approval_notice, username_problem_line
 from netbbs.net.throttle import LoginThrottle
 from netbbs.net.welcome_banner import load_welcome_banner
 from netbbs.rendering import strip_ansi
@@ -59,6 +62,11 @@ from netbbs.rendering.pipe_codes import PastedColor
 from netbbs.storage.database import Database
 
 _logger = logging.getLogger(__name__)
+
+# How many names a caller may try at the kbdint "Desired username" prompt
+# before the attempt ends (issue #835) -- the same three tries Telnet/web
+# signup gives (`netbbs.net.login_flow._REGISTRATION_MAX_ATTEMPTS`).
+_REGISTRATION_USERNAME_TRIES = 3
 
 # Bound on `SSHServer.stop()` waiting for already-admitted connections to
 # drop on their own before it aborts them. Same number as
@@ -318,6 +326,7 @@ class _NetBBSSSHServer(asyncssh.SSHServer):
         self._registration_step: str | None = None
         self._registration_username: str = ""
         self._registration_password: str = ""
+        self._registration_username_tries = 0
         # Caps registration to exactly one attempt per connection (see
         # get_kbdint_challenge below). Without this, asyncssh's client-
         # side auth loop re-offers keyboard-interactive again after
@@ -427,6 +436,13 @@ class _NetBBSSSHServer(asyncssh.SSHServer):
             return False
         try:
             await authenticate_password_async(self._db, username, password)
+        except PendingApprovalError as exc:
+            # The password was right (issue #835). A bare "Permission
+            # denied" made the caller think they had mistyped it; an auth
+            # banner is the one thing SSH can show before auth succeeds.
+            if self._conn is not None:
+                self._conn.send_auth_banner(pending_approval_notice(exc.username) + "\r\n")
+            return False
         except AuthError:
             return False
         return True
@@ -542,6 +558,25 @@ class _NetBBSSSHServer(asyncssh.SSHServer):
             candidate = responses[0].strip()
             if not candidate:
                 return await self._finish_registration("Cancelled: no username given.")
+            # Spent here, before the name is checked (issue #835):
+            # saying a name is taken must cost what creating the account
+            # used to. See `login_flow._register_new_account`.
+            if self._throttle is not None and not self._throttle.allow_attempt(
+                source=self._peer_address, username=candidate
+            ):
+                return await self._finish_registration(
+                    "Too many registration attempts. Please try again later."
+                )
+            # Refused before the password prompts (issue #835), and asked
+            # again in place, the way Telnet/web signup retries.
+            problem = self_service_username_problem(self._db, candidate)
+            if problem is not None:
+                self._registration_username_tries += 1
+                if self._registration_username_tries >= _REGISTRATION_USERNAME_TRIES:
+                    return await self._finish_registration(
+                        f"{username_problem_line(problem)} Reconnect to try again."
+                    )
+                return ("", username_problem_line(problem), "", [("Desired username: ", True)])
             self._registration_username = candidate
             self._registration_step = "password"
             return (
@@ -573,12 +608,11 @@ class _NetBBSSSHServer(asyncssh.SSHServer):
             )
         if password != confirm:
             return await self._finish_registration("Passwords did not match. Reconnect to try again.")
-        if self._throttle is not None and not self._throttle.allow_attempt(
-            source=self._peer_address, username=username
-        ):
-            return await self._finish_registration(
-                "Too many registration attempts. Please try again later."
-            )
+        # Asked again: the name may have been taken while the caller typed
+        # passwords. See `login_flow._register_new_account`.
+        problem = self_service_username_problem(self._db, username)
+        if problem is not None:
+            return await self._finish_registration(f"{username_problem_line(problem)} Reconnect to try again.")
 
         require_approval = get_registration_mode(self._db) == RegistrationMode.APPROVAL_REQUIRED
         try:
@@ -601,8 +635,7 @@ class _NetBBSSSHServer(asyncssh.SSHServer):
         after_prefix = f"{after_banner}\r\n" if after_banner else ""
         if require_approval:
             return await self._finish_registration(
-                f"{after_prefix}Account {username!r} created. A SysOp must approve it before you can log "
-                "in. Reconnect once approved."
+                f"{after_prefix}Account {username!r} created. {pending_approval_notice(username)}"
             )
         return await self._finish_registration(
             f"{after_prefix}Account {username!r} created. Reconnect as {username!r} to log in."

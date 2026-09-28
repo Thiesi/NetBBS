@@ -321,8 +321,17 @@ live networking. Its Backup screen is status-only; use the backup CLI there.
 Choose registration mode under **Users → Registration**:
 
 - **Open:** new accounts can log in immediately.
-- **Approval required:** approve a pending account from its detail screen.
+- **Approval required:** approve a pending account from its detail screen,
+  or turn it down there with **Decline**, which removes it after a yes/no.
+  Until you approve it, the account cannot log in at all, not even to look
+  around; when the caller tries, they are told it is waiting for your
+  approval.
 - **Closed:** only SysOps create accounts.
+
+A caller cannot register a reserved name (`sysop`, `admin`, `root`,
+`moderator`, `guest` and a few more), a name containing "sysop", or a name
+that reads like a SysOp's own (`lnkwell` for `InkWell`). You can still create
+such an account yourself under **Users → Create**.
 
 An account's numeric level controls level-based access. Level 255 grants SysOp
 administration; ordinary levels express your local policy. NetBBS refuses an
