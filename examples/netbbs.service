@@ -1,20 +1,19 @@
-# systemd unit for running a NetBBS node under Linux (design doc §2.1
-# Tier 2, issue #82). Install as /etc/systemd/system/netbbs.service,
-# adjust User/Group/WorkingDirectory/ExecStart for your install layout,
-# then:
+# systemd unit for running a NetBBS node under Linux. Install as
+# /etc/systemd/system/netbbs.service, adjust User/Group/WorkingDirectory/
+# ExecStart for your install layout, then:
 #
 #   systemctl daemon-reload
 #   systemctl enable --now netbbs
 #
-# This example assumes a dedicated, unprivileged "netbbs" system user
-# and a virtualenv at /var/lib/netbbs/.venv (created with
-# `python3 -m venv /var/lib/netbbs/.venv && /var/lib/netbbs/.venv/bin/pip
-# install netbbs[ssh,web]`, or a plain `pip install netbbs[ssh,web]`
-# into whatever interpreter you point ExecStart at) -- adjust the path
-# if you installed differently. NetBBS never daemonizes itself (design
-# doc §13.8): it runs in the foreground and expects the service
-# supervisor to manage backgrounding/restart, which is exactly what
-# Type=simple here does.
+# This example assumes the layout of the SysOp handbook's "Installing
+# NetBBS" section: a dedicated, unprivileged "netbbs" system user, and
+# the GitHub-release wheel installed with its [ssh,web] extras into a
+# virtual environment at /var/lib/netbbs/.venv. NetBBS is not published
+# on PyPI, so follow the handbook's commands rather than a plain
+# `pip install netbbs`. Adjust the paths if you installed differently.
+# NetBBS never daemonizes itself: it runs in the foreground and expects
+# the service supervisor to manage backgrounding and restarts, which is
+# what Type=simple here does.
 
 [Unit]
 Description=NetBBS node
@@ -29,8 +28,8 @@ Group=netbbs
 WorkingDirectory=/var/lib/netbbs
 ExecStart=/var/lib/netbbs/.venv/bin/python -m netbbs --config /etc/netbbs/netbbs.toml
 
-# NetBBS treats SIGTERM as "please shut down properly" (design doc
-# §13.8): it warns connected users, waits up to the configured
+# NetBBS treats SIGTERM as "please shut down properly": it warns
+# connected users, waits up to the configured
 # shutdown.graceful_delay_seconds (60s by default), then disconnects
 # and exits cleanly. TimeoutStopSec must stay comfortably above that
 # default -- lower it only if you've also lowered graceful_delay_seconds
@@ -40,7 +39,7 @@ TimeoutStopSec=90
 
 Restart=on-failure
 RestartSec=5
-# Installing a release from Settings -> Update (issue #731) ends with the
+# Installing a release from Settings -> Update ends with the
 # node shutting down gracefully and exiting with status 75, so that it comes
 # back up as the new version. Restart=on-failure alone already restarts on
 # 75; these two lines also restart it under any other Restart= policy and keep
