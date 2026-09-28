@@ -688,7 +688,6 @@ from netbbs.rendering import (
 from netbbs.rendering.detail import Field, Note, Section, Styled, Table, render_sections
 from netbbs.rendering.post_body import post_body_mode, post_body_rows
 from netbbs.rendering.reflow import wrap_terminal_text
-from netbbs.rendering.width import display_width
 from netbbs.net import notices as _notices
 from netbbs.guest import (
     guest_user,
@@ -9823,6 +9822,7 @@ async def _audit_log_screen(
     session: Session, lane: DatabaseLane, actor: User, *,
     object_type: str | None = None, object_id: int | None = None,
     title: str = "Audit log", breadcrumb: tuple[str, ...] = ("SysOp", "Operations"),
+    moderators: list[str] | None = None,
 ) -> None:
     """
     Read-only, node-wide moderation/admin audit trail (dogfood follow-
@@ -9836,16 +9836,23 @@ async def _audit_log_screen(
     been logged lately" screens.
 
     With `object_type`/`object_id`, one board's or file area's moderation
-    history, reached from its detail screen (issue #678).
+    history, reached from its detail screen (issue #678), under
+    `moderators`: who may moderate it.
     """
     chrome = await _load_chrome(lane, actor)
     entries = await lane.run(lambda db: list_recent_actions(db, object_type=object_type, object_id=object_id))
+    moderator_section = (
+        [Section("Moderators", [Note(line) for line in moderators])] if moderators is not None else []
+    )
     if not entries:
         await _show_report(
             session, lane, actor, title, breadcrumb=breadcrumb,
-            sections=[Section(None, [Note("Nothing logged yet.")])],
+            sections=[*moderator_section, Section(None, [Note("Nothing logged yet.")])],
         )
         return
+    masthead = "\r\n".join(
+        [colored("MODERATORS", fg_color=LABEL_COLOR, bold=True), *(f"  {line}" for line in moderators)]
+    ) if moderators is not None else ""
 
     newest_first = list(entries)
     order = {"ascending": False}
@@ -9930,6 +9937,7 @@ async def _audit_log_screen(
             description_of=_row_description,
             name_segments_of=_row_name_segments,
             title=title,
+            masthead=masthead,
             empty_message="Nothing logged yet.",
             start_stable_id=reopen_at,
             on_sort=_flip_order,
@@ -16039,6 +16047,7 @@ async def _board_detail_screen(
             await session.write_line("")
             await _audit_log_screen(
                 session, lane, actor, object_type="board", object_id=board.id,
+                moderators=await lane.run(_moderator_lines, "board", board.id),
                 # A carried board's name is its origin's: sanitized before it
                 # reaches a title, as the detail heading does (Codex review
                 # on #797).
@@ -16538,7 +16547,6 @@ async def _draw_board_detail(
             _description_field(board.description),
             Field("Posts", f"{post_count} ({activity})"),
             Field("Community", await lane.run(_community_label, board.community_id)),
-            await lane.run(lambda db: _moderators_field(db, "board", board.id, width=session.terminal_width)),
         ]),
         Section("Access", [
             Field("Read level", _inheritable(board.min_read_level)),
@@ -16610,7 +16618,7 @@ async def _draw_board_detail(
         MenuEntry(label=menu_key("E", "dit"), brief="Change this board's settings"),
         MenuEntry(label=menu_key("D", "elete"), brief="Permanently remove this board"),
         MenuEntry(label=menu_key("P", "ending posts"), brief="Review posts awaiting approval"),
-        MenuEntry(label=menu_key("H", "istory"), brief="What moderators did here"),
+        MenuEntry(label=menu_key("H", "istory"), brief="Its moderators and what they did"),
     ]
     if link_context is not None and not linked:
         options.append(MenuEntry(label=menu_key("L", "ink this message board"), brief="Share it via NetBBS Link"))
@@ -16630,21 +16638,21 @@ async def _draw_board_detail(
     return is_origin, has_incoming_offer, is_closed
 
 
-# How many moderators a board's or file area's detail screen names; the
-# rest are counted.
-_MODERATORS_SHOWN = 3
-# What the detail screen's label column and indent take from a row.
-_DETAIL_LABEL_COLUMNS = 22
+# How many moderators the moderation screen names; the rest are counted.
+_MODERATORS_SHOWN = 5
 
 
-def _moderators_field(db: Database, object_type: str, object_id: int, *, width: int = 80) -> Field:
+def _moderator_lines(db: Database, object_type: str, object_id: int) -> list[str]:
     """Who may moderate this board or file area, and with what (issue
     #678): every grant that applies to it, its own and blanket ones, as
-    `list_grants_for_object` answers."""
+    `list_grants_for_object` answers, one line each. Shown above its
+    history rather than on its detail screen, which at 80x24 has no row to
+    spare (Codex review on #797). Sanitized: a username is its owner's
+    own text."""
     grants = list_grants_for_object(db, object_type=object_type, object_id=object_id)
     if not grants:
-        return Field("Moderators", "none (SysOps only)", color=MUTED_COLOR)
-    named = []
+        return ["none: only SysOps moderate here"]
+    lines = []
     for grant in grants[:_MODERATORS_SHOWN]:
         user = get_user_by_id(db, grant.user_id)
         name = user.username if user is not None else "(deleted account)"
@@ -16654,21 +16662,13 @@ def _moderators_field(db: Database, object_type: str, object_id: int, *, width: 
         if grant.object_id is not None:
             scope = ""
         elif grant.community_id is not None:
-            scope = ", Community-wide"
+            scope = " (Community-wide)"
         else:
-            scope = ", all local ones"
-        named.append(f"{name} ({permissions}{scope})")
-    # One row of a screen with none to spare (Codex review on #797): long
-    # names are cut rather than wrapped, but how many grants apply always
-    # shows, so a cut never hides that there are more. The names are
-    # sanitized first -- a username is the caller's own text.
-    summary = sanitize_text("; ".join(named))
-    more = f" (+{len(grants) - _MODERATORS_SHOWN} more)" if len(grants) > _MODERATORS_SHOWN else ""
-    if display_width(summary) + len(more) > width - _DETAIL_LABEL_COLUMNS:
-        more = more or f" ({len(grants)} in all)"
-        room = max(10, width - _DETAIL_LABEL_COLUMNS - len(more))
-        summary = cut_to_width(summary, room - 3) + "..."
-    return Field("Moderators", summary + more)
+            scope = " (all local ones)"
+        lines.append(sanitize_text(f"{name}: {permissions}{scope}"))
+    if len(grants) > _MODERATORS_SHOWN:
+        lines.append(f"...and {len(grants) - _MODERATORS_SHOWN} more (see [R]evoke moderator)")
+    return lines
 
 
 async def _delete_board_screen(
@@ -17556,6 +17556,7 @@ async def _area_detail_screen(
             await session.write_line("")
             await _audit_log_screen(
                 session, lane, actor, object_type="file_area", object_id=area.id,
+                moderators=await lane.run(_moderator_lines, "file_area", area.id),
                 title=f"History of {sanitize_text(area.name)}", breadcrumb=("SysOp", "File areas"),
             )
             await _draw_area_detail(session, lane, area, linked=linked, link_context=link_context, description_level=description_level, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed)
@@ -17601,7 +17602,6 @@ async def _draw_area_detail(
             _description_field(area.description),
             Field("Files", f"{file_count} ({activity})"),
             Field("Community", await lane.run(_community_label, area.community_id)),
-            await lane.run(lambda db: _moderators_field(db, "file_area", area.id, width=session.terminal_width)),
         ]),
         Section("Access", [
             Field("Read level", _inheritable(area.min_read_level)),
@@ -17626,7 +17626,7 @@ async def _draw_area_detail(
         MenuEntry(label=menu_key("D", "elete"), brief="Permanently remove this area"),
         MenuEntry(label=menu_key("P", "ending files"), brief="Review uploads awaiting approval"),
         MenuEntry(label=menu_key("x", "pired files", prefix="E"), brief="Recover before they are purged"),
-        MenuEntry(label=menu_key("H", "istory"), brief="What moderators did here"),
+        MenuEntry(label=menu_key("H", "istory"), brief="Its moderators and what they did"),
     ]
     if link_context is not None and not linked:
         options.append(MenuEntry(label=menu_key("L", "ink this file area"), brief="Share it via NetBBS Link"))

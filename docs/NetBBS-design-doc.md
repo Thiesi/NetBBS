@@ -1221,10 +1221,12 @@ pin and exempt keys unless they also hold EDIT. APPROVE covers the whole
 decision: it lets its holder reject a held post or upload as well as publish
 it. Deleting something already published still takes DELETE.
 
-A board's and a file area's detail screen in the console names its
-moderators: each grant that applies there, its own and blanket ones, with
-its permissions. `[H]istory` lists what moderators did there, newest first,
-from the moderation log (bounded, like the node's audit log).
+A board's and a file area's detail screen in the console has `[H]istory`:
+its moderators, meaning each grant that applies there, its own and blanket
+ones, with their permissions, and under them what moderators did there,
+newest first, from the moderation log (bounded, like the node's audit log).
+The moderators are listed there, not on the detail screen itself, which at
+80x24 has no row to spare.
 
 **Expiry is a caller-facing boundary, not only a delisting** (issue #639).
 Once a post or a file is `expired`, no keystroke a caller can press reaches

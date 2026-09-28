@@ -43,24 +43,26 @@ def test_a_boards_history_is_its_own_and_bounded(db, sysop):
     assert len(list_recent_actions(db, object_type="board", object_id=board.id, limit=1)) == 1
 
 
-def test_the_board_detail_names_its_moderators(db, lane, sysop):
+def test_the_board_history_names_its_moderators(db, lane, sysop):
     board, _other = _moderated_board(db, sysop)
 
-    session = FakeSession(["b"])
+    session = FakeSession(["h", "b", "b"])
     asyncio.run(_board_detail_screen(session, lane, sysop, board))
     text = _visible(_written_text(session))
 
-    assert "Moderators:" in text and "mod (delete, approve)" in text
     assert "[H]istory" in text
+    assert "MODERATORS" in text and "mod: delete, approve" in text
 
 
 def test_a_board_without_moderators_says_so(db, lane, sysop):
     board = create_board(db, "quiet", creator=sysop)
 
-    session = FakeSession(["b"])
+    # No history either: the report screen says both.
+    session = FakeSession(["h", "b", "b"])
     asyncio.run(_board_detail_screen(session, lane, sysop, board))
+    text = _visible(_written_text(session))
 
-    assert "none (SysOps only)" in _visible(_written_text(session))
+    assert "only SysOps moderate here" in text
 
 
 def test_a_blanket_grant_is_named_as_one(db, lane, sysop):
@@ -70,10 +72,10 @@ def test_a_blanket_grant_is_named_as_one(db, lane, sysop):
         db, everyone, object_type="board", object_id=None, permissions=BoardPermission.APPROVE, granted_by=sysop,
     )
 
-    session = FakeSession(["b"])
+    session = FakeSession(["h", "b", "b"])
     asyncio.run(_board_detail_screen(session, lane, sysop, board))
 
-    assert "everywhere (approve, all local ones)" in _visible(_written_text(session))
+    assert "everywhere: approve (all local ones)" in _visible(_written_text(session))
 
 
 def test_history_lists_what_moderators_did_on_the_board(db, lane, sysop):
@@ -100,7 +102,7 @@ def test_the_file_area_detail_names_moderators_and_history(db, lane, sysop):
     asyncio.run(_area_detail_screen(session, lane, sysop, area))
     text = _visible(_written_text(session))
 
-    assert "mod (approve)" in text
+    assert "mod: approve" in text
     assert "History of uploads" in text and "approve" in text
 
 
@@ -159,29 +161,11 @@ def test_a_purged_carried_board_is_a_history_boundary_too(db, sysop):
     assert [entry.action for entry in actions] == ["update_board"]
 
 
-def test_a_long_moderator_line_is_cut_to_one_row(db, lane, sysop):
-    """Codex review on #797: the detail screen has no row to spare."""
+def test_every_moderator_is_listed_in_full_and_the_rest_counted(db, lane, sysop):
+    """Codex review on #797: the detail screen has no row to spare, so the
+    moderators are on the history screen, uncut."""
     board = create_board(db, "general", creator=sysop)
-    for i in range(2):
-        long_name = f"a_rather_long_moderator_name_{i:02d}"
-        grant_permissions(
-            db, create_user(db, long_name, password="hunter2", user_level=10), object_type="board",
-            object_id=board.id, permissions=BoardPermission.EDIT | BoardPermission.DELETE | BoardPermission.APPROVE,
-            granted_by=sysop,
-        )
-
-    session = FakeSession(["b"])
-    asyncio.run(_board_detail_screen(session, lane, sysop, board))
-    lines = _visible(_written_text(session)).splitlines()
-    [row] = [line for line in lines if "Moderators:" in line]
-
-    assert row.rstrip().endswith("... (2 in all)") and len(row.rstrip()) <= 80
-
-
-def test_a_cut_moderator_line_still_counts_the_rest(db, lane, sysop):
-    """Codex review on #797: a cut must not hide that more grants apply."""
-    board = create_board(db, "general", creator=sysop)
-    for i in range(5):
+    for i in range(7):
         grant_permissions(
             db, create_user(db, f"a_rather_long_moderator_name_{i:02d}", password="hunter2", user_level=10),
             object_type="board", object_id=board.id,
@@ -190,6 +174,11 @@ def test_a_cut_moderator_line_still_counts_the_rest(db, lane, sysop):
 
     session = FakeSession(["b"])
     asyncio.run(_board_detail_screen(session, lane, sysop, board))
-    [row] = [line for line in _visible(_written_text(session)).splitlines() if "Moderators:" in line]
+    assert "moderator_name" not in _visible(_written_text(session))
 
-    assert row.rstrip().endswith("... (+2 more)") and len(row.rstrip()) <= 80
+    session = FakeSession(["h", "b", "b"])
+    asyncio.run(_board_detail_screen(session, lane, sysop, board))
+    text = _visible(_written_text(session))
+
+    assert "a_rather_long_moderator_name_00: edit, delete, approve" in text
+    assert "...and 2 more" in text
