@@ -473,8 +473,23 @@ class Session(ABC):
 
     async def _send_held_prefix(self) -> None:
         prefix = self._held_raw_prefix()
-        if prefix:
+        if not prefix:
+            return
+        try:
             await self._send_raw(prefix)
+        except NotImplementedError:
+            # The door already ended (a web session has no raw stream
+            # outside door mode): the character will never be completed, so
+            # the copy shows what the terminal would, a replacement.
+            self._drop_held_prefix()
+
+    def _drop_held_prefix(self) -> None:
+        """Give up on a held partial character: the copy shows the
+        replacement a terminal would, and whatever continuation arrives
+        later is equally a stray byte on both sides."""
+        if self._raw_decoder is not None:
+            self._copy_output(self._raw_decoder.decode(b"", final=True))
+            self._raw_decoder = None
 
     async def end_break_in(self) -> None:
         """Repaint the caller's screen as their own program left it,
@@ -495,12 +510,12 @@ class Session(ABC):
                 # Output kept arriving during every repaint (a busy door on a
                 # slow line). Release first, then repaint once more: the
                 # repaint is queued on the wire before anything the caller's
-                # screen writes after the release, so nothing is lost.
-                prefix = self._held_raw_prefix()
+                # screen writes after the release, so nothing is lost. A held
+                # partial character can't be ordered safely against output
+                # released alongside it, so it is given up on both sides.
+                self._drop_held_prefix()
                 self._output_held = False
                 await self.write_through(self.screen_copy().restore_ansi())
-                if prefix:
-                    await self._send_raw(prefix)
         finally:
             self._output_held = False
             self._break_in_input = None

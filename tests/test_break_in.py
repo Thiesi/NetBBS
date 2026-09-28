@@ -634,3 +634,68 @@ def test_no_break_in_at_the_login_prompt(db, lane, sysop):
         await asyncio.gather(viewer_task, stranger_task, return_exceptions=True)
 
     asyncio.run(scenario())
+
+
+def test_a_transfer_screen_refuses_a_break_in():
+    async def scenario():
+        caller, _reader, _wire = _caller()
+        caller.activity = ("Communities", "Files", "Utilities", "Uploading")
+        assert "file transfer" in break_in.refusal(caller)
+
+    asyncio.run(scenario())
+
+
+def test_an_over_long_chat_line_counts_what_it_drops():
+    pane = break_in.Pane()
+    pane.type("x" * 600)
+    assert len(pane.typing) == 500 and pane.dropped == 100
+
+
+def test_a_web_door_gone_before_the_restore_does_not_break_the_chat_end():
+    class _Socket:
+        closed = False
+
+        def __init__(self):
+            self.sent = []
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            await asyncio.Event().wait()
+
+        async def send_json(self, value):
+            self.sent.append(value)
+
+    async def scenario():
+        session = WebSession(_Socket())
+        await session.enter_door_mode(encoding="utf-8")
+        session.begin_break_in()
+        await session.write_raw("é".encode()[:1])  # the door stops mid-character...
+        await session.leave_door_mode()  # ...and exits during the chat
+        await session.end_break_in()  # must not raise NotImplementedError
+        assert not session.in_break_in
+        assert "�" in session.screen_copy().text_rows()[0]
+
+    asyncio.run(scenario())
+
+
+def test_the_bounded_restore_gives_up_a_held_partial_character_on_both_sides():
+    async def scenario():
+        caller, reader, wire = _caller()
+        caller.begin_break_in()
+        await caller.write_raw("é".encode()[:1])
+        real = caller.write_through
+
+        async def busy(text):
+            await real(text)
+            caller._copy_output("more ")
+
+        caller.write_through = busy
+        await caller.end_break_in()
+        # Held retries may send it, each followed by a full repaint; after
+        # the final repaint -- the release -- it is never sent.
+        assert "é".encode()[:1] not in wire.data.rsplit(b"\x1b[2J", 1)[1]
+        assert "�" in caller.screen_copy().text_rows()[0]
+
+    asyncio.run(scenario())

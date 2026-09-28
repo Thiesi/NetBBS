@@ -44,6 +44,9 @@ REFRESH_SECONDS = 0.1
 #: The most either side's scrollback keeps; older lines scroll away.
 _MAX_LINES = 200
 
+#: The longest line either side can type before pressing Enter.
+_MAX_TYPING = 500
+
 _SELECTED_BG = 238
 
 
@@ -53,9 +56,13 @@ class Pane:
 
     lines: list[str] = field(default_factory=list)
     typing: str = ""
+    #: Characters past `_MAX_TYPING` that were not kept; shown to the SysOp.
+    dropped: int = 0
 
     def type(self, text: str) -> None:
-        self.typing = (self.typing + text)[:500]
+        room = _MAX_TYPING - len(self.typing)
+        self.typing += text[:room]
+        self.dropped += max(0, len(text) - room)
 
     def backspace(self) -> None:
         self.typing = self.typing[:-1]
@@ -238,7 +245,7 @@ async def run_break_in(
     def paint(buffer: ScreenBuffer) -> None:
         if not state.caller_gone and not _still_connected(registry, target):
             state.caller_gone = True
-        state.dropped = target.break_in_dropped
+        state.dropped = target.break_in_dropped + state.sysop.dropped + state.caller.dropped
         paint_chat(buffer, state, for_sysop=True)
 
     def on_notice(text: str) -> None:
@@ -280,4 +287,8 @@ def refusal(target: Session) -> str | None:
         return "is already in a break-in chat"
     if target.reading_secret:
         return "is typing a password; try again in a moment"
+    if {"Uploading", "Downloading"} & set(target.activity):
+        # The transfer screen is about to claim the byte stream, and would
+        # wait for the chat on the very task that pumps the caller's keys.
+        return "is starting a file transfer; try again once it is done"
     return None
