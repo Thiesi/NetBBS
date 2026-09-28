@@ -948,6 +948,30 @@ def count_visible_posts(db: Database, board: Board) -> tuple[int, str | None]:
     return count_visible_roots(db, board.id)
 
 
+def count_listed_posts(db: Database, board: Board) -> tuple[int, str | None]:
+    """`count_visible_posts` without the expiry sweep it runs first: what
+    readers are shown, counting a post past the board's age limit as gone
+    whether or not a sweep has marked it yet. Read only, for surfaces
+    drawn often -- the SysOp dashboard and board list -- which must not
+    write and commit on every draw (issue #681). The sweep itself still
+    runs wherever a reader or the detail screen opens the board."""
+    if board.max_post_age_days is None:
+        return count_visible_roots(db, board.id)
+    # The sweep's own rule: a revision expires by its own `created_at`
+    # unless exempt, and a post is listed while any revision is not expired.
+    return count_visible_roots(
+        db, board.id,
+        extra_sql="""
+          AND EXISTS (
+              SELECT 1 FROM posts fresh
+              WHERE fresh.root_post_id = root.root_post_id AND fresh.board_id = root.board_id
+                AND fresh.status = 'approved'
+                AND (fresh.exempt_from_expiry = 1 OR fresh.created_at >= ?)
+          )""",
+        extra_params=(_cutoff_iso(board.max_post_age_days),),
+    )
+
+
 def count_visible_roots(
     db: Database, board_id: int, *, extra_sql: str = "", extra_params: tuple = ()
 ) -> tuple[int, str | None]:

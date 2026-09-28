@@ -154,6 +154,8 @@ from netbbs.boards.posts import (
     Post,
     PostError,
     approve_post,
+    count_listed_posts,
+    count_pending_posts,
     count_visible_posts,
     delete_post,
     get_post,
@@ -252,6 +254,8 @@ from netbbs.files.entries import (
     FileEntry,
     FileEntryError,
     approve_file,
+    count_listed_files,
+    count_pending_files,
     count_visible_files,
     delete_file,
     expired_file_purge_at,
@@ -1460,10 +1464,10 @@ async def _draw_admin_menu(
         all_boards = list_boards(db)
         all_areas = list_file_areas(db)
         pending_users = sum(user.pending_approval for user in all_users)
-        pending_posts = sum(len(list_pending_posts(db, board, requesting_user=actor)) for board in all_boards)
-        pending_files = sum(
-            len(list_pending_files(db, area, requesting_user=actor)) for area in all_areas
-        )
+        # Counted, not listed, and without sweeping expiry: this runs on every
+        # draw of the dashboard (issue #681).
+        pending_posts = sum(count_pending_posts(db, board) for board in all_boards)
+        pending_files = sum(count_pending_files(db, area) for area in all_areas)
         return {
             "pending_users": pending_users,
             "pending_posts": pending_posts,
@@ -1475,9 +1479,9 @@ async def _draw_admin_menu(
             # files actually exist.
             "total_users": len(all_users),
             "total_boards": len(all_boards),
-            "total_posts": sum(count_visible_posts(db, board)[0] for board in all_boards),
+            "total_posts": sum(count_listed_posts(db, board)[0] for board in all_boards),
             "total_areas": len(all_areas),
-            "total_files": sum(count_visible_files(db, area)[0] for area in all_areas),
+            "total_files": sum(count_listed_files(db, area)[0] for area in all_areas),
             **_link_health_snapshot(db, link_context),
             "backup": _get_display_backup_summary(db),
             "next_backup": _get_display_next_backup(db),
@@ -14387,10 +14391,11 @@ async def _content_menu(
         channels = list_channels(db)
         doors = list_doors(db)
         communities = list_communities(db)
-        pending_posts = sum(len(list_pending_posts(db, b, requesting_user=actor)) for b in all_boards)
-        pending_files = sum(len(list_pending_files(db, a, requesting_user=actor)) for a in all_areas)
-        total_posts = sum(count_visible_posts(db, b)[0] for b in all_boards)
-        total_files = sum(count_visible_files(db, a)[0] for a in all_areas)
+        # Read only, as on the dashboard (issue #681).
+        pending_posts = sum(count_pending_posts(db, b) for b in all_boards)
+        pending_files = sum(count_pending_files(db, a) for a in all_areas)
+        total_posts = sum(count_listed_posts(db, b)[0] for b in all_boards)
+        total_files = sum(count_listed_files(db, a)[0] for a in all_areas)
         return {
             "total_boards": len(all_boards),
             "total_posts": total_posts,
@@ -15685,8 +15690,12 @@ def _board_field_specs(
             label="Max post age (days)",
             render=lambda d: _optional_int_label(d.get("max_post_age_days"), none_word="unlimited"),
             prompt=_optional_int_field("max_post_age_days", "Max post age in days"),
-            brief="Auto-purge posts after N days",
-            help="Posts older than this are automatically purged. 'unlimited' keeps every post indefinitely.",
+            brief="Expire posts after N days",
+            help=(
+                "Posts older than this expire: readers no longer see them, and they are deleted once "
+                "the node's grace period (Settings, Limits & retention) has passed too. 'unlimited' "
+                "keeps every post indefinitely."
+            ),
             section="Moderation",
         ),
     ]
@@ -15782,25 +15791,38 @@ async def _list_boards_screen(
 ) -> None:
     def _load_boards(db: Database):
         boards = list_boards(db, order_by="alphabetical")
-        return boards, _effective_by_id(db, boards)
+        counts = {board.id: (count_listed_posts(db, board)[0], count_pending_posts(db, board)) for board in boards}
+        return boards, _effective_by_id(db, boards), counts
 
-    boards, effective = await lane.run(_load_boards)
-    selected = await pick_item(
-        session, boards,
-        name_of=lambda b: b.name,
-        stable_id_of=lambda b: b.id,
-        description_of=lambda b: _board_description(b, effective[b.id]),
-        columns=_BOARD_COLUMNS,
-        column_values_of=lambda b: _board_columns(b, effective[b.id]),
-        title="Message boards",
-        empty_message="No message boards yet.",
-        redraw_in_place=await lane.run(redraw_in_place_enabled, actor),
-        unicode_style=await lane.run(unicode_style_enabled, actor),
-        collapsed=await lane.run(breadcrumb_collapsed_enabled, actor),
-        accent_color=await lane.run(effective_accent_color_256),
-        header_color=await lane.run(effective_header_color_256),
-    )
-    if selected is not None:
+    # A board's [B]ack comes back here, on the board it left, as the detail
+    # screen's action bar says (issue #681); the list is reloaded, since the
+    # detail screen may have changed or deleted what it showed.
+    reopen_at: int | None = None
+    while True:
+        boards, effective, counts = await lane.run(_load_boards)
+        if not boards and reopen_at is not None:
+            # The detail screen deleted the last board: its outcome is the
+            # message, not an empty list's.
+            return
+        selected = await pick_item(
+            session, boards,
+            name_of=lambda b: b.name,
+            stable_id_of=lambda b: b.id,
+            description_of=lambda b: _board_description(b, effective[b.id]),
+            columns=_BOARD_COLUMNS,
+            column_values_of=lambda b: _board_columns(b, effective[b.id], counts[b.id]),
+            title="Message boards",
+            empty_message="No message boards yet.",
+            start_stable_id=reopen_at,
+            redraw_in_place=await lane.run(redraw_in_place_enabled, actor),
+            unicode_style=await lane.run(unicode_style_enabled, actor),
+            collapsed=await lane.run(breadcrumb_collapsed_enabled, actor),
+            accent_color=await lane.run(effective_accent_color_256),
+            header_color=await lane.run(effective_header_color_256),
+        )
+        if selected is None:
+            return
+        reopen_at = selected.id
         await _board_detail_screen(session, lane, actor, selected, link_context=link_context)
 
 
@@ -15860,7 +15882,7 @@ def _board_description(board: Board, effective: _Effective) -> str:
     terminal -- gated and open resources indistinguishable -- while
     design doc §3.6 promises gates appear wherever a resource is
     listed. A promise the docs make is not optional on small screens."""
-    status = "moderated" if board.moderated else "open"
+    status = _listing_status(board.moderated, board.pinned)
     return _describe_resource(effective.read, effective.write, status, effective)
 
 
@@ -15950,8 +15972,12 @@ _STATUS_COLUMN = ListColumn("status", 9, VALUE_COLOR)
 # papered over with a wider column.
 _GATES_COLUMN = ListColumn("gates", 11, GATE_COLOR)
 
-_BOARD_COLUMNS = [*_LEVEL_COLUMNS, _STATUS_COLUMN, _GATES_COLUMN]
-_AREA_COLUMNS = _BOARD_COLUMNS
+# Issue #681: how much is there, and how much waits. "12 +3" is 12 posts
+# readers see and 3 held for a moderator; a pinned resource says so in
+# its status. At 80 columns the name still keeps the table's minimum.
+_BOARD_STATUS_COLUMN = ListColumn("status", 12, VALUE_COLOR)
+_BOARD_COLUMNS = [*_LEVEL_COLUMNS, _BOARD_STATUS_COLUMN, ListColumn("posts", 9, VALUE_COLOR), _GATES_COLUMN]
+_AREA_COLUMNS = [*_LEVEL_COLUMNS, _BOARD_STATUS_COLUMN, ListColumn("files", 9, VALUE_COLOR), _GATES_COLUMN]
 _CHANNEL_COLUMNS = [
     # A channel has one level, not a read/write split, and its own
     # visibility/membership pair in place of moderation.
@@ -15962,20 +15988,38 @@ _CHANNEL_COLUMNS = [
 _COMMUNITY_COLUMNS = [*_LEVEL_COLUMNS, ListColumn("listed", 6, VALUE_COLOR), _GATES_COLUMN]
 
 
-def _board_columns(board: Board, effective: _Effective) -> list[str | tuple[str, SegmentColor]]:
+def _listing_status(moderated: bool, pinned: bool) -> str:
+    """Moderated or open, and pinned to the top of its list."""
+    if pinned:
+        return "mod., pinned" if moderated else "open, pinned"
+    return "moderated" if moderated else "open"
+
+
+def _count_cell(listed: int, pending: int) -> tuple[str, SegmentColor]:
+    """"12 +3": listed, and held for a moderator (in warning color)."""
+    return (f"{listed} +{pending}", WARNING_COLOR) if pending else (str(listed), VALUE_COLOR)
+
+
+def _board_columns(
+    board: Board, effective: _Effective, counts: tuple[int, int] = (0, 0)
+) -> list[str | tuple[str, SegmentColor]]:
     return [
         str(effective.read),
         str(effective.write),
-        "moderated" if board.moderated else "open",
+        _listing_status(board.moderated, board.pinned),
+        _count_cell(*counts),
         _gate_cell(effective.min_age, effective.name_requirement),
     ]
 
 
-def _area_columns(area: FileArea, effective: _Effective) -> list[str | tuple[str, SegmentColor]]:
+def _area_columns(
+    area: FileArea, effective: _Effective, counts: tuple[int, int] = (0, 0)
+) -> list[str | tuple[str, SegmentColor]]:
     return [
         str(effective.read),
         str(effective.write),
-        "moderated" if area.moderated else "open",
+        _listing_status(area.moderated, area.pinned),
+        _count_cell(*counts),
         _gate_cell(effective.min_age, effective.name_requirement),
     ]
 
@@ -17084,7 +17128,7 @@ async def _post_action_screen(
             Field("By", submitter, color=AUTHOR_COLOR),
             Field("Posted", when, color=DATE_COLOR),
             Field("Pinned", _yes_no(post.pinned)),
-            Field("Exempt from auto-purge", _yes_no(post.exempt_from_expiry)),
+            Field("Exempt from expiry", _yes_no(post.exempt_from_expiry)),
         ]
         if parent is not None:
             facts.append(Field("Reply to", sanitize_text(parent.subject) + {
@@ -17413,8 +17457,12 @@ def _area_field_specs(
             label="Max file age (days)",
             render=lambda d: _optional_int_label(d.get("max_file_age_days"), none_word="unlimited"),
             prompt=_optional_int_field("max_file_age_days", "Max file age in days"),
-            brief="Auto-purge files after N days",
-            help="Files older than this are automatically purged. 'unlimited' keeps every file indefinitely.",
+            brief="Expire files after N days",
+            help=(
+                "Files older than this expire: callers no longer see them, and they are deleted once "
+                "the node's grace period (Settings, Limits & retention) has passed too. 'unlimited' "
+                "keeps every file indefinitely."
+            ),
             section="Moderation",
         ),
     ]
@@ -17502,25 +17550,34 @@ async def _list_areas_screen(
 ) -> None:
     def _load_areas(db: Database):
         areas = list_file_areas(db, order_by="alphabetical")
-        return areas, _effective_by_id(db, areas)
+        counts = {area.id: (count_listed_files(db, area)[0], count_pending_files(db, area)) for area in areas}
+        return areas, _effective_by_id(db, areas), counts
 
-    areas, effective = await lane.run(_load_areas)
-    selected = await pick_item(
-        session, areas,
-        name_of=lambda a: a.name,
-        stable_id_of=lambda a: a.id,
-        description_of=lambda a: _area_description(a, effective[a.id]),
-        columns=_AREA_COLUMNS,
-        column_values_of=lambda a: _area_columns(a, effective[a.id]),
-        title="File areas",
-        empty_message="No file areas yet.",
-        redraw_in_place=await lane.run(redraw_in_place_enabled, actor),
-        unicode_style=await lane.run(unicode_style_enabled, actor),
-        collapsed=await lane.run(breadcrumb_collapsed_enabled, actor),
-        accent_color=await lane.run(effective_accent_color_256),
-        header_color=await lane.run(effective_header_color_256),
-    )
-    if selected is not None:
+    # As the board list: an area's [B]ack comes back here (issue #681).
+    reopen_at: int | None = None
+    while True:
+        areas, effective, counts = await lane.run(_load_areas)
+        if not areas and reopen_at is not None:
+            return
+        selected = await pick_item(
+            session, areas,
+            name_of=lambda a: a.name,
+            stable_id_of=lambda a: a.id,
+            description_of=lambda a: _area_description(a, effective[a.id]),
+            columns=_AREA_COLUMNS,
+            column_values_of=lambda a: _area_columns(a, effective[a.id], counts[a.id]),
+            title="File areas",
+            empty_message="No file areas yet.",
+            start_stable_id=reopen_at,
+            redraw_in_place=await lane.run(redraw_in_place_enabled, actor),
+            unicode_style=await lane.run(unicode_style_enabled, actor),
+            collapsed=await lane.run(breadcrumb_collapsed_enabled, actor),
+            accent_color=await lane.run(effective_accent_color_256),
+            header_color=await lane.run(effective_header_color_256),
+        )
+        if selected is None:
+            return
+        reopen_at = selected.id
         await _area_detail_screen(
             session, lane, actor, selected, link_context=link_context, transfers=transfers,
         )
@@ -17528,7 +17585,7 @@ async def _list_areas_screen(
 
 def _area_description(area: FileArea, effective: _Effective) -> str:
     """Narrow-terminal fallback; see `_board_description`."""
-    status = "moderated" if area.moderated else "open"
+    status = _listing_status(area.moderated, area.pinned)
     return _describe_resource(effective.read, effective.write, status, effective)
 
 
@@ -17880,7 +17937,7 @@ async def _draw_file_action(
             Field("Size", f"{_format_bytes(entry.size_bytes)} ({entry.size_bytes} bytes)"),
             Field("SHA-256", entry.sha256, color=METADATA_COLOR),
             Field("Pinned", _yes_no(entry.pinned)),
-            Field("Exempt from auto-purge", _yes_no(entry.exempt_from_expiry)),
+            Field("Exempt from expiry", _yes_no(entry.exempt_from_expiry)),
         ],
         status_line=status_line, redraw_in_place=redraw_in_place, unicode_style=unicode_style,
         collapsed=collapsed, header_color=header_color,
@@ -17902,7 +17959,7 @@ async def _draw_file_action(
     if can_flag:
         entries += [
             MenuEntry(label=menu_key("P", "in toggle"), brief="Toggle showing at the top"),
-            MenuEntry(label=menu_key("X", "empt toggle"), brief="Toggle exempt from auto-purge"),
+            MenuEntry(label=menu_key("X", "empt toggle"), brief="Toggle exempt from expiry"),
         ]
     entries.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to the pending list"))
     options = _fitted_menu(entries, description_level, session=session, used_rows=used_rows)
