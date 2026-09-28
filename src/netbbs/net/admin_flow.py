@@ -16784,10 +16784,15 @@ async def _post_action_screen(
                 continue
             _announce_line(session, "Rejected.")
             return
-        if choice == "p":
-            post = await lane.run(set_post_pinned, post, not post.pinned, changed_by=actor)
-        else:
-            post = await lane.run(set_post_exempt, post, not post.exempt_from_expiry, changed_by=actor)
+        # Refused, not raised, when the post was removed or its board hidden
+        # meanwhile -- the same as approve and reject just above.
+        try:
+            if choice == "p":
+                post = await lane.run(set_post_pinned, post, not post.pinned, changed_by=actor)
+            else:
+                post = await lane.run(set_post_exempt, post, not post.exempt_from_expiry, changed_by=actor)
+        except PostError as exc:
+            _announce(session, f"Error: {exc}", error=True)
 
 
 # -- file areas ----------------------------------------------------------
@@ -17619,13 +17624,17 @@ async def _file_action_screen(
                 continue
             _announce_line(session, "Rejected.")
             return
-        elif choice == "p":
+        elif choice in ("p", "x"):
             await session.write_line("")
-            entry = await lane.run(set_file_pinned, entry, not entry.pinned, changed_by=actor)
-            await _draw()
-        elif choice == "x":
-            await session.write_line("")
-            entry = await lane.run(set_file_exempt, entry, not entry.exempt_from_expiry, changed_by=actor)
+            # Refused, not raised, when the file is gone or its area hidden
+            # meanwhile -- the same as approve and reject just above.
+            try:
+                if choice == "p":
+                    entry = await lane.run(set_file_pinned, entry, not entry.pinned, changed_by=actor)
+                else:
+                    entry = await lane.run(set_file_exempt, entry, not entry.exempt_from_expiry, changed_by=actor)
+            except FileEntryError as exc:
+                _announce(session, f"Error: {exc}", error=True)
             await _draw()
         else:
             await session.write(reject_unhandled_key(choice))

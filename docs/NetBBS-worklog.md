@@ -786,6 +786,22 @@ rows may remain expired indefinitely.
 Ranking queries must account for effective expiry even when lazy sweeping has
 not yet materialized the status change.
 
+A post's `pinned` and `exempt_from_expiry` belong to the post but are stored on
+every revision row (issue #675). The expiry sweep ages rows one at a time, so
+each revision must carry the flag itself. The setters write the whole chain;
+`trg_posts_revision_flags` copies the root's flags onto every revision
+inserted later, local or carried; `trg_posts_tombstone_clears_flags` clears
+both on removal. Anything new that inserts a revision gets this for free.
+Anything that reads the flag may read it from any row, and should read the
+root's.
+
+Pinned posts and files are listed first only on the page a board or area opens
+on (`list_posts_page`/`list_files_page` with `with_pinned=True` and no cursor).
+They also stay in the dated feed, so a pin past the block's half-page share is
+never unreachable. The page's `oldest_cursor`/`newest_cursor` are the feed's
+own (`feed_bounds`), so code that pages must never take a cursor from
+`posts[0]` or `entries[0]`.
+
 ### Files and transfers
 
 File contents are content-addressed filesystem blobs; SQLite stores metadata.

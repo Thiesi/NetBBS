@@ -3246,6 +3246,77 @@ MIGRATIONS = [
     ),
     Migration(
         description=(
+            "Issue #675: a post's pin and expiry exemption belong to the post, not to one "
+            "revision. Both were stored per row, and an edit started unpinned and "
+            "unexempt, so an exempt post's edit expired and the post fell back to its "
+            "pre-edit text. Every revision now carries its root's flags: a flag already "
+            "set on any revision moves to the root, the root's flags are copied to its "
+            "revisions, and a trigger gives every new revision -- local or carried -- its "
+            "root's flags. A removed (tombstoned) post is neither pinned nor kept: removal "
+            "clears both, so the placeholder neither stays at the top of the board nor "
+            "outlives the board's expiry."
+        ),
+        sql="""
+        UPDATE posts SET pinned = 1
+         WHERE post_id = root_post_id AND pinned = 0
+           AND EXISTS (
+               SELECT 1 FROM posts v
+                WHERE v.root_post_id = posts.post_id AND v.board_id = posts.board_id AND v.pinned = 1
+           );
+        UPDATE posts SET exempt_from_expiry = 1
+         WHERE post_id = root_post_id AND exempt_from_expiry = 0
+           AND EXISTS (
+               SELECT 1 FROM posts v
+                WHERE v.root_post_id = posts.post_id AND v.board_id = posts.board_id
+                  AND v.exempt_from_expiry = 1
+           );
+        UPDATE posts SET
+            pinned = (SELECT r.pinned FROM posts r WHERE r.post_id = posts.root_post_id AND r.board_id = posts.board_id),
+            exempt_from_expiry = (
+                SELECT r.exempt_from_expiry FROM posts r
+                 WHERE r.post_id = posts.root_post_id AND r.board_id = posts.board_id
+            )
+         WHERE post_id != root_post_id
+           AND EXISTS (SELECT 1 FROM posts r WHERE r.post_id = posts.root_post_id AND r.board_id = posts.board_id);
+        UPDATE posts SET pinned = 0, exempt_from_expiry = 0
+         WHERE EXISTS (
+             SELECT 1 FROM posts t
+              WHERE t.root_post_id = posts.root_post_id AND t.board_id = posts.board_id
+                AND t.tombstoned_at IS NOT NULL
+         );
+
+        CREATE TRIGGER trg_posts_revision_flags AFTER INSERT ON posts
+        WHEN NEW.post_id != NEW.root_post_id
+        BEGIN
+            UPDATE posts SET
+                pinned = COALESCE(
+                    (SELECT r.pinned FROM posts r WHERE r.post_id = NEW.root_post_id AND r.board_id = NEW.board_id), 0
+                ),
+                exempt_from_expiry = COALESCE(
+                    (SELECT r.exempt_from_expiry FROM posts r
+                      WHERE r.post_id = NEW.root_post_id AND r.board_id = NEW.board_id), 0
+                )
+            WHERE id = NEW.id;
+        END;
+
+        -- The pinned block is looked up on every board and area opening; a
+        -- partial index keeps that from scanning a board's whole history.
+        -- Roots only: every revision carries its root's flag, and a long edit
+        -- history must not cost the lookup a row per revision.
+        CREATE INDEX idx_posts_pinned ON posts(board_id, created_at, post_id)
+            WHERE pinned = 1 AND post_id = root_post_id;
+        CREATE INDEX idx_files_pinned ON files(area_id, status, created_at, file_id) WHERE pinned = 1;
+
+        CREATE TRIGGER trg_posts_tombstone_clears_flags AFTER INSERT ON posts
+        WHEN NEW.tombstoned_at IS NOT NULL
+        BEGIN
+            UPDATE posts SET pinned = 0, exempt_from_expiry = 0
+            WHERE root_post_id = NEW.root_post_id AND board_id = NEW.board_id;
+        END;
+        """,
+    ),
+    Migration(
+        description=(
             "Issue #777: `descriptor_first_stored_at` on link_peers, link_introduced_identities "
             "and link_peer_candidates -- when this node first stored the descriptor the row now "
             "holds, moved only when the descriptor itself changes. The node map (design doc "
