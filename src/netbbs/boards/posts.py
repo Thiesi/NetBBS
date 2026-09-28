@@ -1317,7 +1317,9 @@ def set_post_exempt(db: Database, post: Post, exempt: bool, *, changed_by: User)
     return get_post(db, post.post_id)
 
 
-def list_pending_posts(db: Database, board: Board, *, requesting_user: User) -> list[Post]:
+def list_pending_posts(
+    db: Database, board: Board, *, requesting_user: User, limit: int | None = None
+) -> list[Post]:
     """
     The moderation queue for `board`: every pending post if
     `requesting_user` holds `BoardPermission.APPROVE`, otherwise only
@@ -1328,21 +1330,26 @@ def list_pending_posts(db: Database, board: Board, *, requesting_user: User) -> 
     moderation queues are expected to be much smaller than full board
     history, and this keeps that already-intricate pagination code
     untouched.
+
+    `limit` caps how many are read, oldest first (issue #678): held
+    content can be carried in from other nodes without end, and a screen
+    showing the queue must not read all of it.
     """
+    cap = -1 if limit is None else limit
     if has_permission(
         db, requesting_user, object_type="board", object_id=board.id, permission=BoardPermission.APPROVE
     ):
         rows = db.connection.execute(
-            "SELECT * FROM posts WHERE board_id = ? AND status = 'pending' ORDER BY created_at",
-            (board.id,),
+            "SELECT * FROM posts WHERE board_id = ? AND status = 'pending' ORDER BY created_at LIMIT ?",
+            (board.id, cap),
         ).fetchall()
     else:
         rows = db.connection.execute(
             """
             SELECT * FROM posts WHERE board_id = ? AND status = 'pending' AND author_user_id = ?
-            ORDER BY created_at
+            ORDER BY created_at LIMIT ?
             """,
-            (board.id, requesting_user.id),
+            (board.id, requesting_user.id, cap),
         ).fetchall()
     return [_row_to_post(row) for row in rows]
 

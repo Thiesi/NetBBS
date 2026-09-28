@@ -49,6 +49,7 @@ established independently).
 from __future__ import annotations
 
 import asyncio
+import datetime
 import hashlib
 import json
 import logging
@@ -695,6 +696,7 @@ from netbbs.session_history import previous_callers_enabled, set_previous_caller
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 from netbbs.timeutil import (
+    _parse_stored_timestamp,
     format_for_display,
     resolve_display_preferences,
     set_display_format,
@@ -16721,6 +16723,32 @@ _PENDING_REVIEW_COLUMNS = [
 ]
 
 
+# How many held items a queue screen lists at once, oldest first. Held
+# content can arrive from other nodes without end; the rest is listed as
+# these are decided (Codex review on #795).
+MAX_QUEUE_ITEMS = 200
+
+
+def _when_or_raw(iso_timestamp: str, db: Database | None = None, **overrides) -> str:
+    """A submission time as the node shows times, or the stored text when
+    it cannot be shown: a carried item's time is its origin's, and one bad
+    value must not keep the SysOp from the queue that could reject it
+    (Codex review on #795)."""
+    try:
+        return format_for_display(iso_timestamp, db, **overrides)
+    except ValueError:
+        return sanitize_text(iso_timestamp)
+
+
+def _submitted_instant(iso_timestamp: str) -> datetime.datetime:
+    """Oldest first by instant, not by text: a carried time may carry its
+    own offset (Codex review on #795). An unreadable one sorts last."""
+    try:
+        return _parse_stored_timestamp(iso_timestamp)
+    except ValueError:
+        return datetime.datetime.max.replace(tzinfo=datetime.timezone.utc)
+
+
 def _pending_post_kind(post: Post) -> str:
     """"edit" for a held revision of an approved post, "reply" for a held
     answer to another, else "post"."""
@@ -16731,39 +16759,54 @@ def _pending_post_kind(post: Post) -> str:
 
 def _load_pending_items(
     db: Database, actor: User, *, boards: list[Board] | None = None, areas: list[FileArea] | None = None
-) -> list[_PendingItem]:
+) -> tuple[list[_PendingItem], bool]:
     """Everything `actor` may decide on in `boards` and `areas` (every
-    board and area when both are `None`), oldest first. One board's or
-    area's queue refers to each item by its own id; the node-wide one,
-    where a post and a file may share an id, by its place in the queue."""
+    board and area when both are `None`), oldest first, at most
+    `MAX_QUEUE_ITEMS` of it, and whether more waits. One board's or area's
+    queue refers to each item by its own id; the node-wide one, where a
+    post and a file may share an id, by its place in the queue."""
     node_wide = boards is None and areas is None
     if node_wide:
         boards, areas = list_boards(db), list_file_areas(db)
     items: list[_PendingItem] = []
+    more = False
     for board in boards or []:
-        for post in list_pending_posts(db, board, requesting_user=actor):
+        posts = list_pending_posts(db, board, requesting_user=actor, limit=MAX_QUEUE_ITEMS + 1)
+        more = more or len(posts) > MAX_QUEUE_ITEMS
+        for post in posts[:MAX_QUEUE_ITEMS]:
             items.append(_PendingItem(
                 stable_id=post.id, title=post.subject, kind=_pending_post_kind(post), where=board.name,
-                author=post.author_label, when=format_for_display(post.created_at, db), post=post, board=board,
+                author=post.author_label, when=_when_or_raw(post.created_at, db), post=post, board=board,
             ))
     for area in areas or []:
-        for entry in list_pending_files(db, area, requesting_user=actor):
+        entries = list_pending_files(db, area, requesting_user=actor, limit=MAX_QUEUE_ITEMS + 1)
+        more = more or len(entries) > MAX_QUEUE_ITEMS
+        for entry in entries[:MAX_QUEUE_ITEMS]:
             items.append(_PendingItem(
                 stable_id=entry.id, title=entry.filename, kind="file", where=area.name,
-                author=entry.uploader_label, when=format_for_display(entry.created_at, db), entry=entry, area=area,
+                author=entry.uploader_label, when=_when_or_raw(entry.created_at, db), entry=entry, area=area,
             ))
-    items.sort(key=lambda item: (item.post or item.entry).created_at)
+    items.sort(key=lambda item: (
+        _submitted_instant((item.post or item.entry).created_at), item.entry is not None, item.stable_id,
+    ))
+    more = more or len(items) > MAX_QUEUE_ITEMS
+    items = items[:MAX_QUEUE_ITEMS]
     if node_wide:
         items = [dataclasses.replace(item, stable_id=place) for place, item in enumerate(items, start=1)]
-    return items
+    return items, more
 
 
 async def _pick_pending_item(
-    session: Session, lane: DatabaseLane, actor: User, items: list[_PendingItem], *,
+    session: Session, lane: DatabaseLane, actor: User, loaded: tuple[list[_PendingItem], bool], *,
     title: str, empty_message: str, node_wide: bool = False,
 ) -> _PendingItem | None:
+    items, more = loaded
     return await pick_item(
         session, items,
+        masthead=colored(
+            f"The oldest {MAX_QUEUE_ITEMS} are listed; the rest follow as these are decided.",
+            fg_color=MUTED_COLOR,
+        ) if more else "",
         name_of=lambda item: item.title,
         stable_id_of=lambda item: item.stable_id,
         # What a terminal too narrow for the table shows instead.
@@ -16792,9 +16835,9 @@ async def _pending_review_screen(
     """Every held post and upload on the node in one queue (issue #678),
     so a SysOp need not open each board and area to find what waits."""
     while True:
-        items = await lane.run(_load_pending_items, actor)
+        loaded = await lane.run(_load_pending_items, actor)
         selected = await _pick_pending_item(
-            session, lane, actor, items, title="Pending review", empty_message="Nothing awaits review.",
+            session, lane, actor, loaded, title="Pending review", empty_message="Nothing awaits review.",
             node_wide=True,
         )
         if selected is None:
@@ -16811,9 +16854,9 @@ async def _pending_posts_screen(
     session: Session, lane: DatabaseLane, actor: User, board: Board, *, link_context: LinkContext | None = None
 ) -> None:
     while True:
-        items = await lane.run(lambda db: _load_pending_items(db, actor, boards=[board]))
+        loaded = await lane.run(lambda db: _load_pending_items(db, actor, boards=[board]))
         selected = await _pick_pending_item(
-            session, lane, actor, items, title=f"Pending posts in {board.name!r}", empty_message="No pending posts.",
+            session, lane, actor, loaded, title=f"Pending posts in {board.name!r}", empty_message="No pending posts.",
         )
         if selected is None:
             return
@@ -16839,7 +16882,7 @@ async def _post_action_screen(
     header_color = await lane.run(effective_header_color_256)
     status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
     display_format, display_timezone = await lane.run(resolve_display_preferences)
-    when = format_for_display(post.created_at, override_format=display_format, override_timezone=display_timezone)
+    when = _when_or_raw(post.created_at, override_format=display_format, override_timezone=display_timezone)
     body_mode = post_body_mode(
         board_allows_color=board.allow_color, reader_wants_color=await lane.run(post_colors_enabled, actor)
     )
@@ -16851,6 +16894,13 @@ async def _post_action_screen(
         visible_post(db, post.root_post_id) if kind == "edit" else None,
         visible_post(db, post.parent_post_id) if kind == "reply" else None,
     ))
+    # An edit made before the one readers now see (Codex review on #795):
+    # approving it changes nothing they see, and the screen must say so
+    # rather than offer it as a replacement.
+    superseded = kind == "edit" and await lane.run(lambda db: (db.connection.execute(
+        "SELECT MAX(id) FROM posts WHERE root_post_id = ? AND board_id = ? AND status = 'approved'",
+        (post.root_post_id, post.board_id),
+    ).fetchone()[0] or 0) > post.id)
     actions = [
         ("a", menu_key("A", "pprove")),
         ("r", menu_key("R", "eject")),
@@ -16882,8 +16932,13 @@ async def _post_action_screen(
             facts.append(Field("Reply to", sanitize_text(parent.subject)))
         if current is not None and current.subject != post.subject:
             facts.append(Field("Current subject", sanitize_text(current.subject)))
+        if superseded:
+            facts.append(Field(
+                "Superseded", "a later edit is already approved; approving this one changes nothing readers see",
+                color=WARNING_COLOR,
+            ))
         sections = [
-            Section(f"Pending {kind}", facts, paired=True),
+            Section(f"Pending {kind}", facts, paired=not superseded),
             Section("Proposed text" if current is not None else "Message", [Styled(body_rows)]),
         ]
         if current is not None:
@@ -17583,9 +17638,9 @@ async def _pending_files_screen(
     link_context: LinkContext | None = None, transfers: Any = None,
 ) -> None:
     while True:
-        items = await lane.run(lambda db: _load_pending_items(db, actor, areas=[area]))
+        loaded = await lane.run(lambda db: _load_pending_items(db, actor, areas=[area]))
         selected = await _pick_pending_item(
-            session, lane, actor, items, title=f"Pending files in {area.name!r}", empty_message="No pending files.",
+            session, lane, actor, loaded, title=f"Pending files in {area.name!r}", empty_message="No pending files.",
         )
         if selected is None:
             return

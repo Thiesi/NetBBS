@@ -698,27 +698,30 @@ def set_file_exempt(db: Database, entry: FileEntry, exempt: bool, *, changed_by:
     return get_file(db, entry.file_id)
 
 
-def list_pending_files(db: Database, area: FileArea, *, requesting_user: User) -> list[FileEntry]:
+def list_pending_files(
+    db: Database, area: FileArea, *, requesting_user: User, limit: int | None = None
+) -> list[FileEntry]:
     """
     The moderation queue for `area`: every pending file if
     `requesting_user` holds `BoardPermission.APPROVE`, otherwise only
     their own pending uploads. Not cursor-paginated, same reasoning as
-    `netbbs.boards.posts.list_pending_posts`.
+    `netbbs.boards.posts.list_pending_posts`, whose `limit` this shares.
     """
+    cap = -1 if limit is None else limit
     if has_permission(
         db, requesting_user, object_type="file_area", object_id=area.id, permission=BoardPermission.APPROVE
     ):
         rows = db.connection.execute(
-            "SELECT * FROM files WHERE area_id = ? AND status = 'pending' ORDER BY created_at",
-            (area.id,),
+            "SELECT * FROM files WHERE area_id = ? AND status = 'pending' ORDER BY created_at LIMIT ?",
+            (area.id, cap),
         ).fetchall()
     else:
         rows = db.connection.execute(
             """
             SELECT * FROM files WHERE area_id = ? AND status = 'pending' AND uploader_user_id = ?
-            ORDER BY created_at
+            ORDER BY created_at LIMIT ?
             """,
-            (area.id, requesting_user.id),
+            (area.id, requesting_user.id, cap),
         ).fetchall()
     return [_row_to_file_entry(row) for row in rows]
 
