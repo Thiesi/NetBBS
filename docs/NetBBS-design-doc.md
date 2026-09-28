@@ -4517,9 +4517,12 @@ addresses or relays took the message (the 403 is unsigned, and a stale address
 now answered by another node refuses the same way). Mail picked up from a
 relay mailbox has no synchronous answer, so the refusal becomes a signed
 `link_message_bounced` with reason `blocked_sender`, sent back even to a node
-on probation here since it carries no content; it is decided before the
-message or its sender is kept, so a refused node cannot grow this node's trust
-subjects or retained events by inventing senders. Delivered mail registers its
+on probation here since it carries no content. A node quarantined or blocked
+here gets no bounce by that route, because this node sends it nothing and the
+bounce could only pile up; it learns of a direct push's refusal from the 403.
+The decision is made before the message or its sender is kept, so a refused
+node cannot grow this node's trust subjects or retained events by inventing
+senders. Delivered mail registers its
 sender as a trust subject like any accepted event, so the receiving SysOp can
 find and establish them; a node refused as a whole is already a subject from
 its hello, and establishing that node is what opens its users' mail. A

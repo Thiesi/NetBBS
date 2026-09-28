@@ -594,7 +594,7 @@ async def _compose_mail(
                 announce_styled(session, colored(refusal, fg_color=ERROR_COLOR))
                 continue
             technical_recipient = f"{remote_user}@{resolved}"
-            warning =await _link_mail_identity_warning(lane, technical_recipient)
+            warning = await _link_mail_identity_warning(lane, technical_recipient)
             if warning is not None:
                 await session.write_line(colored(warning, fg_color=MUTED_COLOR, bold=True))
             try:

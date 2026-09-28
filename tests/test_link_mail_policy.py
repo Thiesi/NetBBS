@@ -222,6 +222,30 @@ def test_relayed_mail_from_a_node_on_probation_bounces_and_keeps_nothing(tmp_pat
         recipient.close()
 
 
+def test_relayed_mail_from_a_blocked_node_is_dropped_without_a_bounce_it_could_never_send(tmp_path):
+    sender_identity = bootstrap_node_identity("sender")
+    recipient_identity = bootstrap_node_identity("recipient")
+    node = LinkNode(identity=recipient_identity)
+    recipient = _NodeDb(tmp_path, "recipient")
+    try:
+        create_user(recipient.db, "bob", password="hunter2pw", user_level=10)
+        _set_state(recipient.db, TrustSubject.node(sender_identity.fingerprint), TrustState.BLOCKED)
+        message = _signed_mail(sender_identity, recipient_identity)
+        node.events[message.content_id] = message.to_dict()
+        asyncio.run(persist_accepted_events(
+            recipient.lane, node, [message.content_id],
+            sender_fingerprint=sender_identity.fingerprint, max_carried_boards=None,
+            enforce_trust_policy=True,
+        ))
+        assert recipient.db.connection.execute("SELECT COUNT(*) FROM mail_messages").fetchone()[0] == 0
+        assert recipient.db.connection.execute(
+            "SELECT COUNT(*) FROM link_mail_acknowledgements"
+        ).fetchone()[0] == 0
+        assert list_work_items(recipient.db, kind=KIND_LINK_MAIL_ACK) == []
+    finally:
+        recipient.close()
+
+
 def test_relayed_mail_from_a_probationary_user_is_delivered_and_registers_the_sender(tmp_path):
     recipient, sender = _persist_picked_up(tmp_path, quarantine_user=False)
     try:

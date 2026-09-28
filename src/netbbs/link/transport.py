@@ -123,7 +123,9 @@ from netbbs.link.enforcement import (
     decide_node_action,
     ensure_event_author_subject,
     ensure_node_subject,
+    node_transport_state,
 )
+from netbbs.link.trust import TrustState
 from netbbs.link.file_transfer import (
     FileNoLongerHeldError,
     FileTransferError,
@@ -428,8 +430,12 @@ async def persist_accepted_events(
             # mailbox has no such answer, so the same rule applies here and
             # a refusal becomes a signed bounce (issue #804). Decided before
             # anything is kept: a refused node must not grow this node's
-            # trust subjects or retained events by inventing senders.
-            await lane.run(bounce_link_message, envelope, "blocked_sender", node_identity=node.identity)
+            # trust subjects or retained events by inventing senders. A node
+            # quarantined or blocked here is not answered at all: this node
+            # sends it nothing, so a bounce queued for it could only pile up.
+            home = envelope["envelope"]["payload"]["sender"]["home_node_fingerprint"]
+            if await lane.run(node_transport_state, home) not in {TrustState.BLOCKED, TrustState.QUARANTINED}:
+                await lane.run(bounce_link_message, envelope, "blocked_sender", node_identity=node.identity)
             continue
         if enforce_trust_policy:
             await lane.run(ensure_event_author_subject, envelope)
