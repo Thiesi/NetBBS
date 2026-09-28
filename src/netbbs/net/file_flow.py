@@ -86,6 +86,7 @@ from netbbs.files.categories import (
     list_top_level_categories,
 )
 from netbbs.files.diz import MAX_DESCRIPTION_BYTES, MAX_DESCRIPTION_LINES, read_archive_description
+from netbbs.files.entries import count_pending_files
 from netbbs.files.storage import new_incoming_temp_path
 from netbbs.net.file_transfer import (
     DEFAULT_GRANT_TTL_SECONDS,
@@ -476,6 +477,7 @@ async def _render_area_page(
     collapsed: bool = False,
     truecolor: bool = False,
     highlighted: int | None = None,
+    queue_count: int = 0,
 ) -> None:
     """Renders one page of files plus its navigation options and command
     hints — the unit that should be redrawn on an actual page change
@@ -540,6 +542,8 @@ async def _render_area_page(
                 brief="Browse/fetch this file area's remote catalogue",
             )
         )
+    if queue_count:
+        hints.append(_queue_entry(queue_count))
     if following is not None:
         # Issue #675: a followed area is listed first in [N]ew scan.
         hints.append(
@@ -609,6 +613,12 @@ async def _reject_after_echo(session: Session) -> None:
 _NAV_KEYS = {"b": "back", "o": "older", "n": "newer", "r": "recent"}
 
 
+def _queue_entry(count: int) -> MenuEntry:
+    """[Q]ueue for a caller who may approve uploads here (issue #678), with
+    how many wait."""
+    return MenuEntry(label=menu_key("Q", f"ueue ({count})"), brief="Approve or reject held uploads")
+
+
 def _key_action(
     char: str, page: FileEntryPage, highlighted: int | None
 ) -> tuple[str, FileEntry | None, int | None] | None:
@@ -651,6 +661,8 @@ def _key_action(
         return ("keep", None, highlighted)
     if lowered == "f":
         return ("follow", None, highlighted)
+    if lowered == "q":
+        return ("queue", None, highlighted)
     return None
 
 
@@ -674,6 +686,7 @@ async def _read_file_choice(
       ('pin'|'keep', None, highlighted) - a moderator's pin or expiry
           exemption toggle (issue #675), target still to resolve
       ('follow', None, highlighted) - follow the area or stop (issue #675)
+      ('queue', None, highlighted) - the area's moderation queue (issue #678)
       ('refresh', None, highlighted) - re-query and redraw (Ctrl-L)
       ('highlight', None, new_index) - arrow key highlight change
       ('none', None, highlighted) - no-op / rejected key
@@ -931,6 +944,19 @@ async def _show_area(
 
     show_remote_hint = link_context is not None and area_linked
     follows = {"on": await lane.run(is_following, user, "file_area", area.id)}
+    # Issue #678: a caller who may approve uploads here decides on them
+    # here, not only a SysOp in the console.
+    can_approve = await lane.run(lambda db: has_permission(
+        db, user, object_type="file_area", object_id=area.id, permission=BoardPermission.APPROVE
+    ))
+
+    async def _queue_count() -> int:
+        return await lane.run(count_pending_files, area) if can_approve else 0
+
+    async def _open_queue() -> None:
+        from netbbs.net.admin_flow import _pending_files_screen
+
+        await _pending_files_screen(session, lane, user, area, link_context=link_context, transfers=transfers)
 
     async def _render_and_advance_cursor(current_page: FileEntryPage, highlighted: int | None = None) -> None:
         """The one place every render in this loop funnels through
@@ -945,6 +971,7 @@ async def _show_area(
             can_keep=_keep_offered(area, current_page), following=follows["on"],
             description_level=description_level, redraw_in_place=redraw_in_place,
             unicode_style=unicode_style, collapsed=collapsed, truecolor=truecolor, highlighted=highlighted,
+            queue_count=await _queue_count(),
         )
         if current_page.entries:
             await lane.run(record_file_area_seen, user, area, current_page.entries[-1])
@@ -1090,6 +1117,16 @@ async def _show_area(
                 highlighted = None
                 await _render_and_advance_cursor(page, highlighted=highlighted)
                 continue
+            elif kind == "queue":
+                if not await _queue_count():
+                    await _reject_after_echo(session)
+                    continue
+                await _open_queue()
+                # Approved uploads join the listing; the newest page shows them.
+                page = await lane.run(list_files_page, area, user, with_pinned=True)
+                highlighted = None
+                await _render_and_advance_cursor(page, highlighted=highlighted)
+                continue
             elif kind == "follow":
                 if follows["on"]:
                     await lane.run(unfollow, user, "file_area", area.id)
@@ -1191,6 +1228,9 @@ async def _show_area(
         )
     back = MenuEntry(label=menu_key("B", "ack"), brief="Return to the previous menu")
 
+    # Its callers see no files, but held uploads may wait (issue #678).
+    queued = await _queue_count()
+
     def _empty_hints() -> list[MenuEntry]:
         # An empty area can be followed too, to be told of its first file
         # (Codex review on #788).
@@ -1199,7 +1239,7 @@ async def _show_area(
             if follows["on"]
             else MenuEntry(label=menu_key("F", "ollow"), brief="List this file area first in New scan")
         )
-        return [*hints, follow_entry, back]
+        return [*hints, *([_queue_entry(queued)] if queued else []), follow_entry, back]
 
     # Keystrokes and `[B]ack`, like the listing above it and like every
     # other menu (design doc §3.5) -- this used to be a typed
@@ -1263,6 +1303,12 @@ async def _show_area(
         if choice == "l" and show_remote_hint:
             await session.write_line("")
             await _browse_remote_files(session, lane, area, user, link_context)
+            return
+        if choice == "q" and queued:
+            await session.write_line("")
+            await _open_queue()
+            # Drawn afresh: an approval may have given the area its first file.
+            await _show_area(session, lane, area, user, link_context=link_context, transfers=transfers)
             return
         if choice == "f":
             await session.write_line("")

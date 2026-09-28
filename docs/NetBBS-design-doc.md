@@ -1214,6 +1214,13 @@ included. The SysOp console's content menu has one node-wide
 `[P]ending review` queue of every held post and upload, oldest first, so
 nobody has to open each board and area to find what waits.
 
+A caller granted APPROVE on a board or file area has the same queue on its
+own page: `[Q]ueue (N)` appears there while anything waits, and opens the
+same decision screens without the SysOp's node status line, and without the
+pin and exempt keys unless they also hold EDIT. APPROVE covers the whole
+decision: it lets its holder reject a held post or upload as well as publish
+it. Deleting something already published still takes DELETE.
+
 **Expiry is a caller-facing boundary, not only a delisting** (issue #639).
 Once a post or a file is `expired`, no keystroke a caller can press reaches
 it: listings, `[F]ind` and the file area's own screens are

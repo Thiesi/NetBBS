@@ -55,7 +55,7 @@ from netbbs.boards import (
 )
 from netbbs.boards.categories import Category, list_subcategories, list_top_level_categories
 from netbbs.boards.categories import get_category_by_id as get_board_category_by_id
-from netbbs.boards.posts import sweep_expired_posts
+from netbbs.boards.posts import count_pending_posts, sweep_expired_posts
 from netbbs.communities import (
     get_community,
     get_effective_min_age,
@@ -135,6 +135,7 @@ from netbbs.quoting import quote_body, reply_subject
 from netbbs.signature import append_signature, get_signature
 from netbbs.sort_preferences import get_effective_sort_mode, set_sort_preference
 from netbbs.storage.database import Database
+from netbbs.storage.execution import DatabaseLane
 from netbbs.timeutil import format_for_display
 
 _MAX_PLAIN_POST_LINES = 200
@@ -720,9 +721,15 @@ def _pad(text: str, width: int) -> str:
     return text + " " * max(0, width - display_width(text))
 
 
+def _queue_entry(count: int) -> MenuEntry:
+    """[Q]ueue for a caller who may approve posts here (issue #678), with
+    how many wait."""
+    return MenuEntry(label=menu_key("Q", f"ueue ({count})"), brief="Approve or reject held posts")
+
+
 def _list_options(
     page: PostPage, *, can_post: bool, has_draft: bool, row_count: int, has_unread: bool,
-    can_draw: bool = False, following: bool = False,
+    can_draw: bool = False, following: bool = False, queue_count: int = 0,
 ) -> list[MenuEntry]:
     options = []
     if row_count:
@@ -741,6 +748,8 @@ def _list_options(
         options.append(_DRAFT_MENU_ENTRY)
     if has_unread:
         options.append(MenuEntry(label=menu_key("M", "ark all read"), brief="Count every post here as read"))
+    if queue_count:
+        options.append(_queue_entry(queue_count))
     # Issue #675: a followed board is listed first in [N]ew scan.
     options.append(
         MenuEntry(label=menu_key("f", "ollow", prefix="Un"), brief="Stop following this board") if following
@@ -895,6 +904,26 @@ async def _show_board(
     unread["menu"] = bool(unread["count"])
     separator = " · " if unicode_style else " - "
     follows = {"on": is_following(db, user, "board", board.id)}
+    # Issue #678: a caller who may approve posts here decides on them here,
+    # not only a SysOp in the console.
+    can_approve = has_permission(
+        db, user, object_type="board", object_id=board.id, permission=BoardPermission.APPROVE
+    )
+
+    def _queue_count() -> int:
+        return count_pending_posts(db, board) if can_approve else 0
+
+    async def _open_queue() -> None:
+        """The board's moderation queue, on the console's own screens. The
+        board page reads through `db`; those screens run on a lane, opened
+        for as long as the queue is."""
+        from netbbs.net.admin_flow import _pending_posts_screen
+
+        lane = DatabaseLane(db.path)
+        try:
+            await _pending_posts_screen(session, lane, user, board, link_context=link_context)
+        finally:
+            lane.close()
 
     def _toggle_follow() -> None:
         """[F]ollow (issue #675): a followed board is listed first in
@@ -950,6 +979,7 @@ async def _show_board(
             # The page budget measures the longer Un[f]ollow, so following
             # never changes how many posts fit (Codex review on #788).
             has_unread=unread["menu"], can_draw=can_draw, following=follows["on"] or measuring,
+            queue_count=_queue_count(),
         )
         # Descriptions double the action bar. Where they would leave the
         # list fewer rows than a page worth having, the bar goes compact:
@@ -961,6 +991,7 @@ async def _show_board(
                 PostPage(posts=[], has_older=True, has_newer=True),
                 can_post=can_post, has_draft=has_draft, row_count=9, has_unread=unread["menu"],
                 can_draw=can_draw, following=True,  # the longer label
+                queue_count=999 if can_approve else 0,
             ),
             width=session.terminal_width, height=session.terminal_height,
             description_level=description_level,
@@ -1537,6 +1568,9 @@ async def _show_board(
                 options.append(MenuEntry(label=menu_key("A", "rt post"), brief="Draw the first post"))
             if has_draft:
                 options.append(_DRAFT_MENU_ENTRY)
+            # Its readers see no posts, but held ones may wait (issue #678).
+            if _queue_count():
+                options.append(_queue_entry(_queue_count()))
             # An empty board can be followed too, to be told of its first
             # post (Codex review on #788).
             options.append(
@@ -1569,6 +1603,15 @@ async def _show_board(
             if choice == "f":
                 await session.write_line("")
                 _toggle_follow()
+                has_draft = await _draw_empty_board()
+                continue
+            if choice == "q" and _queue_count():
+                await session.write_line("")
+                await _open_queue()
+                page = list_posts_page(db, board, user, limit=_page_limit(), with_pinned=True, pinned_block_rows=_PINNED_BLOCK_ROWS)
+                if page.posts:
+                    # An approval gave the board its first post.
+                    break
                 has_draft = await _draw_empty_board()
                 continue
             if (choice == "p" and can_post) or (choice == "d" and has_draft) or (choice == "a" and can_draw):
@@ -1683,6 +1726,14 @@ async def _show_board(
             _toggle_follow()
             # Refetched: the notice takes a row the page was not sized for.
             page, highlighted = _refetch_keeping(page, highlighted)
+            await _render_fresh(page, highlighted)
+        elif char == "q" and _queue_count():
+            await _moved_on()
+            await _open_queue()
+            # Approved posts join the list; the newest page shows them.
+            page_anchor = None
+            highlighted = None
+            page = _refetch_current_page()
             await _render_fresh(page, highlighted)
         elif char == "m" and unread["menu"]:
             await _moved_on()
