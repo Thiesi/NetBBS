@@ -936,3 +936,21 @@ def test_the_cursor_is_hidden_again_after_snoop(db, lane, sysop, monkeypatch):
         await asyncio.gather(*tasks, return_exceptions=True)
 
     asyncio.run(scenario())
+
+
+def test_snoop_never_crops_through_a_wide_glyph():
+    async def scenario():
+        controls = _controls()
+        viewer, alice = QueueSession(), CopyingSession(width=100, height=24)
+        tasks = [await _connect(controls.session_registry, viewer, "sysop"),
+                 await _connect(controls.session_registry, alice, "alice")]
+        await alice.write("x" * 79 + "漢")  # the glyph starts in the SysOp's last column
+        entry = next(e for e in controls.session_registry.list_entries() if e.username == "alice")
+        buffer = ScreenBuffer(80, 24)
+        sysop_monitor.paint_snoop(buffer, entry, controls)
+        assert buffer.get_cell(1, 79).char == " "
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    asyncio.run(scenario())

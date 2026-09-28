@@ -29,7 +29,7 @@ import unicodedata
 from dataclasses import replace
 from typing import NamedTuple
 
-from netbbs.rendering.ansi import CSI, ESC, move_cursor, set_scroll_region
+from netbbs.rendering.ansi import CSI, ESC, colored, move_cursor, set_scroll_region
 from netbbs.rendering.screen_buffer import Cell, Snapshot, full_render_ansi
 from netbbs.rendering.width import char_width
 
@@ -45,6 +45,10 @@ _MAX_SEQUENCE = 64
 _GROUND, _ESCAPE, _CSI, _OSC, _OSC_ESCAPE, _CHARSET, _CSI_IGNORE = range(7)
 
 _BLANK = Cell()
+
+#: The most code points one cell keeps: a base plus its combining marks.
+#: A stream of marks after one base must not grow a cell without bound.
+_MAX_CELL_CHARS = 8
 
 #: Printable ASCII: one column each, no lookup needed. Most output is runs
 #: of these between escape sequences, so they take a fast path.
@@ -193,6 +197,16 @@ class TerminalEmulator:
         if (self.top, self.bottom) != (0, self.height - 1):
             parts.append(set_scroll_region(self.top + 1, self.bottom + 1))
         parts.append(move_cursor(self.row + 1, self.col + 1))
+        if self._wrap_pending:
+            # Output ended in the last column. A cursor move clears a real
+            # terminal's pending wrap, so reprint that last cell: the
+            # terminal is then waiting to wrap, as this copy is.
+            cell = self._rows[self.row][self.col]
+            if cell.char:
+                parts.append(colored(
+                    cell.char, fg_color=cell.fg, bg_color=cell.bg, bold=cell.bold,
+                    underline=cell.underline, reverse=cell.reverse,
+                ))
         parts.append(pen_sgr(self.pen))
         parts.append(f"{CSI}?25h" if self.cursor_visible else f"{CSI}?25l")
         return "".join(parts)
@@ -291,7 +305,9 @@ class TerminalEmulator:
         if ch == "[":
             self._state = _CSI
             self._sequence = ""
-        elif ch == "]":
+        elif ch in "]PX^_":
+            # OSC, DCS, SOS, PM, APC: a control string the terminal consumes
+            # whole, up to BEL or ST; its payload is never drawn.
             self._state = _OSC
         elif ch in "()*+":
             self._state = _CHARSET
@@ -326,7 +342,7 @@ class TerminalEmulator:
                 col -= 1  # past a wide glyph's continuation cell
             if 0 <= col < self.width:
                 cell = self._rows[self.row][col]
-                if cell.char:
+                if cell.char and len(cell.char) < _MAX_CELL_CHARS:
                     self._rows[self.row][col] = replace(cell, char=cell.char + ch)
             return
         if self._wrap_pending:
@@ -388,10 +404,13 @@ class TerminalEmulator:
         of any wide glyph they cut through, as a terminal does: a leading
         half left of `start`, a continuation right of `end`."""
         line = self._rows[row]
-        if 0 < start < self.width and not line[start].char:
-            line[start - 1] = self._erased()
-        if 0 < end < self.width and not line[end].char and line[end - 1].char:
-            line[end] = self._erased()
+        blank = self._erased()
+        for edge in (start, end):
+            # A continuation at `edge` with its leading half just left of it
+            # is a pair the edge cuts through: blank both halves.
+            if 0 < edge < self.width and not line[edge].char and line[edge - 1].char:
+                line[edge - 1] = blank
+                line[edge] = blank
 
     def _blank_row(self) -> list[Cell]:
         return [_BLANK] * self.width
@@ -510,6 +529,7 @@ class TerminalEmulator:
             self._delete_chars(arg())
         elif final == "X":
             count = min(arg(), self.width - self.col)
+            self._split_wide(self.row, self.col, self.col + count)
             self._rows[self.row][self.col : self.col + count] = [self._erased()] * count
         elif final == "S":
             self._scroll_up(arg())
@@ -563,8 +583,10 @@ class TerminalEmulator:
         blank = self._erased()
         line = self._rows[self.row]
         if mode == 0:
+            self._split_wide(self.row, self.col, self.width)
             line[self.col :] = [blank] * (self.width - self.col)
         elif mode == 1:
+            self._split_wide(self.row, 0, self.col + 1)
             line[: self.col + 1] = [blank] * (self.col + 1)
         elif mode == 2:
             self._rows[self.row] = [blank] * self.width
@@ -573,11 +595,16 @@ class TerminalEmulator:
     def _insert_chars(self, count: int) -> None:
         line = self._rows[self.row]
         count = min(count, self.width - self.col)
+        # Splitting a pair at the cursor, or pushing one off the edge,
+        # leaves half a glyph: blank it whole first.
+        self._split_wide(self.row, self.col, self.col)
+        self._split_wide(self.row, self.width - count, self.width)
         line[self.col : self.col] = [self._erased()] * count
         del line[self.width :]
 
     def _delete_chars(self, count: int) -> None:
         line = self._rows[self.row]
         count = min(count, self.width - self.col)
+        self._split_wide(self.row, self.col, self.col + count)
         del line[self.col : self.col + count]
         line.extend([self._erased()] * count)

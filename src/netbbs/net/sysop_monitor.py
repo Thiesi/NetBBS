@@ -48,7 +48,7 @@ from netbbs.net.unicode_style_preference import unicode_style_enabled
 from netbbs.rendering import sanitize_text
 from netbbs.rendering.gradient import gradient_color
 from netbbs.rendering.ansi import clear_line, colored, move_cursor, strip_ansi
-from netbbs.rendering.screen_buffer import ScreenBuffer
+from netbbs.rendering.screen_buffer import Cell, ScreenBuffer
 from netbbs.rendering.theme import (
     ACCENT_COLOR,
     ALERT_COLOR,
@@ -523,6 +523,10 @@ def paint_snoop(
         source = snapshot[row]
         for col in range(cols):
             buffer.put_cell(row + 1, col, source[col])
+        if cols < copy.width and cols and source[cols - 1].char and not source[cols].char:
+            # A wide glyph cut by the crop would wrap on the SysOp's
+            # terminal: its visible half is blanked instead.
+            buffer.put_cell(row + 1, cols - 1, Cell())
     if copy.cursor_visible and copy.row < rows and copy.col < cols:
         cell = snapshot[copy.row][copy.col]
         buffer.put_cell(copy.row + 1, copy.col, replace(cell, char=cell.char or " ", reverse=not cell.reverse))

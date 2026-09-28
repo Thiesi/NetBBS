@@ -213,3 +213,38 @@ def test_the_alternate_screen_keeps_the_main_one():
     emulator.feed("\x1b[?1049l")
     assert _rows(emulator)[:2] == ["main menu", "Choice:"]
     assert (emulator.row, emulator.col) == (1, len("Choice: "))
+
+
+def test_a_stream_of_combining_marks_cannot_grow_a_cell():
+    emulator = _emu("e" + "́" * 10_000)
+    assert len(emulator.snapshot()[0][0].char) <= 8
+
+
+@pytest.mark.parametrize(
+    "sequence",
+    ["\x1b[X", "\x1b[K", "\x1b[1K", "\x1b[P", "\x1b[@"],
+    ids=["ECH", "EL0", "EL1", "DCH", "ICH"],
+)
+def test_row_edits_never_leave_half_a_wide_glyph(sequence):
+    emulator = _emu("a漢b", width=10)
+    emulator.feed("\x1b[1;3H" + sequence)  # cursor on 漢's continuation
+    row = emulator.snapshot()[0]
+    for index, cell in enumerate(row):
+        if not cell.char:  # a continuation must follow its own leading half
+            assert index > 0 and row[index - 1].char not in ("", " ")
+
+
+@pytest.mark.parametrize("introducer", ["\x1bP", "\x1b_", "\x1b^", "\x1bX"], ids=["DCS", "APC", "PM", "SOS"])
+def test_control_strings_are_consumed_whole(introducer):
+    emulator = _emu("a" + introducer + "payload never shown\x1b\\b")
+    assert _rows(emulator)[0] == "ab"
+
+
+def test_restore_keeps_a_pending_wrap():
+    source = _emu("x" * 20 + "", width=20, height=3)
+    assert source._wrap_pending
+    replica = TerminalEmulator(20, 3)
+    replica.feed(source.restore_ansi())
+    replica.feed("!")
+    source.feed("!")
+    assert replica.text_rows() == source.text_rows()
