@@ -95,6 +95,7 @@ from netbbs.auth.users import (
 )
 from netbbs.backup import (
     BackupError,
+    running_node_pid,
     create_backup,
     default_backup_destination,
     door_installs_included,
@@ -851,6 +852,19 @@ def _wrap_counts_panel(label: str, pairs: Sequence[tuple[str, int]], *, width: i
     return lines
 
 
+def _offline_console_note(node_running: bool) -> str:
+    """What the health panel says when this console has no live node behind
+    it -- `python -m netbbs.admin`, run on the node's machine (issue #834).
+    "Standalone mode" read as "because I declined Link"; the reason is that
+    this process is not the node, and whether the node is up at all."""
+    if node_running:
+        return (
+            "This console runs outside the node. For live controls, log in to "
+            "the node and open the SysOp menu there."
+        )
+    return "The node isn't running, so there are no live controls. Start the node to get them."
+
+
 def _wrap_panel_sentence(text: str, *, prefix: str, width: int, unicode_style: bool) -> list[str]:
     """Word-wrap a plain-text panel sentence (not a `counts_row` pair --
     see `_wrap_counts_panel` for those, and `_fit` above for the one
@@ -1536,6 +1550,7 @@ async def _draw_admin_menu(
             "unicode_style": unicode_style_enabled(db, actor),
             "collapsed": breadcrumb_collapsed_enabled(db, actor),
             "header_color": effective_header_color_256(db),
+            "node_running": node_controls is None and running_node_pid(db.path) is not None,
         }
 
     if state is None:
@@ -1575,7 +1590,7 @@ async def _draw_admin_menu(
         health.append(f"  {counts_row([('Active sessions', active_sessions)])}")
     else:
         standalone_lines = _wrap_panel_sentence(
-            "Live node controls unavailable in standalone mode.",
+            _offline_console_note(bool(state.get("node_running"))),
             prefix="  ", width=box_inner_width, unicode_style=unicode_style,
         )
         health.extend(colored(f"  {line}", fg_color=MUTED_COLOR) for line in standalone_lines)
@@ -1776,7 +1791,7 @@ def _compact_dashboard_panel(
         panel.extend(
             colored(f"  {line}", fg_color=MUTED_COLOR)
             for line in _wrap_panel_sentence(
-                "Live node controls unavailable in standalone mode.",
+                _offline_console_note(bool(state.get("node_running"))),
                 prefix="  ", width=width, unicode_style=unicode_style,
             )
         )
@@ -2077,6 +2092,7 @@ async def _operations_menu(
     """Operational observation and intervention, separate from durable settings."""
     def _load_ops(db: Database) -> dict[str, Any]:
         return {
+            "node_running": node_controls is None and running_node_pid(db.path) is not None,
             **_link_health_snapshot(db, link_context),
             "backup": _get_display_backup_summary(db),
             "description_level": menu_description_level(db, actor),
@@ -2147,7 +2163,7 @@ async def _operations_menu(
                 else:
                     panel.append(colored("NODE HEALTH: ", fg_color=LABEL_COLOR, bold=True) + node_badge)
                     standalone_lines = _wrap_panel_sentence(
-                        "Live node controls unavailable in standalone mode.",
+                        _offline_console_note(bool(state.get("node_running"))),
                         prefix="  ", width=box_inner_width, unicode_style=unicode_style,
                     )
                     panel.extend(colored(f"  {line}", fg_color=MUTED_COLOR) for line in standalone_lines)
@@ -2208,7 +2224,13 @@ async def _operations_menu(
                 if active_sessions is not None:
                     panel.append(f"  {counts_row([('Active sessions', active_sessions)])}")
                 else:
-                    panel.append(colored("  Live node controls unavailable in standalone mode.", fg_color=MUTED_COLOR))
+                    panel.extend(
+                        colored(f"  {line}", fg_color=MUTED_COLOR)
+                        for line in _wrap_panel_sentence(
+                            _offline_console_note(bool(state.get("node_running"))),
+                            prefix="  ", width=box_inner_width, unicode_style=unicode_style,
+                        )
+                    )
 
                 if link_context is None:
                     link_badge_text = "UNAVAILABLE" if node_controls is None else "DISABLED"
@@ -7149,7 +7171,7 @@ async def _backup_status_screen(
             ]
         else:
             sections.append(Section("Creating a backup", [Note(
-                "Live backup creation is unavailable in standalone admin. "
+                "This console runs outside the node, so it can't make a backup itself. "
                 "Run 'python -m netbbs.backup create --to <path>' instead."
             )]))
             actions = [("s", menu_key("S", "chedule & destination")), _BACK_ACTION]
@@ -8871,7 +8893,7 @@ async def _mrc_status_screen(session: Session, lane: DatabaseLane, actor: User, 
                 session, title=title, actions=[_BACK_ACTION],
                 sections=[Section(None, [
                     Field("State", status_badge("NOT AVAILABLE HERE", tone="neutral", unicode_style=chrome.unicode_style), styled=True),
-                    Note("The MRC bridge lives inside the running node; the standalone admin CLI can't see it."),
+                    Note("The MRC bridge lives inside the running node; this console runs outside the node and can't see it."),
                 ])],
                 redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
             )

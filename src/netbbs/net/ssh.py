@@ -54,7 +54,13 @@ from netbbs.config import RegistrationMode, get_registration_mode
 from netbbs.net import char_input
 from netbbs.net.new_account_banner_after import load_new_account_banner_after
 from netbbs.net.new_account_banner_before import load_new_account_banner_before
-from netbbs.net.session import Session, SessionClosedError, clamp_terminal_size, wait_until_drained
+from netbbs.net.session import (
+    CLIENT_DISCONNECT_ERRORS,
+    Session,
+    SessionClosedError,
+    clamp_terminal_size,
+    wait_until_drained,
+)
 from netbbs.net.signup_text import pending_approval_notice, username_problem_line
 from netbbs.net.throttle import LoginThrottle
 from netbbs.net.welcome_banner import load_welcome_banner
@@ -174,7 +180,7 @@ class SSHSession(Session):
         try:
             self._process.stdout.write(data)
             await self._process.stdout.drain()
-        except (BrokenPipeError, ConnectionResetError) as exc:
+        except (*CLIENT_DISCONNECT_ERRORS, asyncssh.DisconnectError) as exc:
             raise SessionClosedError("client disconnected during write") from exc
 
     async def _send_raw(self, data: bytes) -> None:
@@ -185,7 +191,7 @@ class SSHSession(Session):
         try:
             self._process.stdout.write(data)
             await self._process.stdout.drain()
-        except (BrokenPipeError, ConnectionResetError) as exc:
+        except (*CLIENT_DISCONNECT_ERRORS, asyncssh.DisconnectError) as exc:
             raise SessionClosedError("client disconnected during write") from exc
 
     async def read_line(
@@ -257,7 +263,7 @@ class SSHSession(Session):
             return None
         except asyncssh.BreakReceived:
             return None
-        except asyncssh.ConnectionLost as exc:
+        except (asyncssh.DisconnectError, *CLIENT_DISCONNECT_ERRORS) as exc:
             raise SessionClosedError("client disconnected during read") from exc
 
         if not data:
@@ -272,7 +278,7 @@ class SSHSession(Session):
             data = await asyncio.wait_for(self._process.stdin.read(1), timeout=timeout)
         except asyncio.TimeoutError:
             return None
-        except (asyncssh.TerminalSizeChanged, asyncssh.BreakReceived, asyncssh.ConnectionLost):
+        except (asyncssh.TerminalSizeChanged, asyncssh.BreakReceived, asyncssh.DisconnectError, *CLIENT_DISCONNECT_ERRORS):
             return None
         if not data:
             return None
@@ -799,7 +805,10 @@ class SSHServer:
         try:
             await self._session_handler(session)
         except SessionClosedError:
-            pass  # client disconnected mid-session — expected, not an error
+            # A caller hanging up is routine: one INFO line, no traceback.
+            # Only the session's own boundaries produce this; a raw socket
+            # error from anything else in the session is a real error.
+            _logger.info("SSH caller %s disconnected", session.peer_address or "?")
         except Exception:
             _logger.exception("unhandled error in SSH session handler")
         finally:

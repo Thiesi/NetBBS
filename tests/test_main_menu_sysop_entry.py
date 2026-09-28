@@ -10,6 +10,8 @@ from __future__ import annotations
 import asyncio
 import re
 
+import pytest
+
 from netbbs.auth.users import create_user
 from netbbs.chat.hub import ChatHub
 from netbbs.chat.mailbox import MessageMailbox
@@ -386,7 +388,10 @@ def test_prompt_clock_is_time_only_two_toned_and_has_no_date(tmp_path):
     than one flat color. `CLOCK_COLOR`, not `HEADER_COLOR`: a second
     follow-up request after the first version shared `HEADER_COLOR`
     with the "Main menu" label and read as part of it."""
+    from netbbs.timeutil import set_display_timezone
+
     db = Database(tmp_path / "node.db")
+    set_display_timezone(db, "Europe/Berlin")
     user = create_user(db, "alice", password="hunter2", user_level=10)
     session = FakeSession()
     node_controls = _node_controls()
@@ -400,4 +405,24 @@ def test_prompt_clock_is_time_only_two_toned_and_has_no_date(tmp_path):
     assert not re.search(r"\d{2}\.\d{2}\.\d{4}", stripped)
     assert prompt.count(fg(CLOCK_COLOR)) == 3  # HH, MM, SS
     assert prompt.count(fg(MUTED_COLOR)) == 2  # the two ":" separators
+    db.close()
+
+
+@pytest.mark.parametrize("zone", [None, "UTC", "Etc/UTC"])
+def test_prompt_clock_in_utc_says_so(tmp_path, zone):
+    """Issue #834 (F016): a fresh node's clock is UTC, two hours off the
+    server's own time in Berlin, and with no label the SysOp took it for a
+    wrong clock. A named local zone is shown bare (above)."""
+    from netbbs.timeutil import set_display_timezone
+
+    db = Database(tmp_path / "node.db")
+    if zone is not None:
+        set_display_timezone(db, zone)
+    user = create_user(db, "alice", password="hunter2", user_level=10)
+    session = FakeSession()
+
+    asyncio.run(_draw_main_menu(session, db, MessageMailbox(), user, node_controls=_node_controls()))
+
+    stripped = re.sub(r"\x1b\[[0-9;]*m", "", session.written[-1])
+    assert re.match(r"^\d{2}:\d{2}:\d{2} UTC Choice: $", stripped)
     db.close()

@@ -1124,7 +1124,8 @@ class WebServer:
         try:
             await self._session_handler(session)
         except SessionClosedError:
-            pass  # client disconnected mid-session — expected, not an error
+            # A caller closing the tab is routine: one INFO line, no traceback.
+            _logger.info("web caller %s disconnected", request.remote or "?")
         except Exception:
             _logger.exception("unhandled error in web session handler")
         finally:
