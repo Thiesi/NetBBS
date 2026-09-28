@@ -1730,10 +1730,9 @@ async def _show_board(
         elif char == "q" and _queue_count():
             await _moved_on()
             await _open_queue()
-            # Approved posts join the list; the newest page shows them.
-            page_anchor = None
-            highlighted = None
-            page = _refetch_current_page()
+            # Back on the page the caller was reading (Codex review on
+            # #796): an approved post joins the list in its dated place.
+            page, highlighted = _refetch_keeping(page, highlighted)
             await _render_fresh(page, highlighted)
         elif char == "m" and unread["menu"]:
             await _moved_on()

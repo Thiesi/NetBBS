@@ -1121,10 +1121,20 @@ async def _show_area(
                 if not await _queue_count():
                     await _reject_after_echo(session)
                     continue
+                waiting = await _queue_count()
                 await _open_queue()
-                # Approved uploads join the listing; the newest page shows them.
-                page = await lane.run(list_files_page, area, user, with_pinned=True)
-                highlighted = None
+                # What `[E]` could reach has changed with the decisions
+                # (Codex review on #796): a decided upload is no longer one
+                # of the caller's waiting ones.
+                pending_uploads = await lane.run(lambda db: list_pending_files(db, area, requesting_user=user))
+                describable_pending = [entry for entry in pending_uploads if _may_describe(entry)]
+                if await _queue_count() != waiting:
+                    # A decision changed the listing: the newest page shows
+                    # what was approved.
+                    page = await lane.run(list_files_page, area, user, with_pinned=True)
+                    highlighted = None
+                # Otherwise the caller is back on the page they left
+                # (Codex review on #796).
                 await _render_and_advance_cursor(page, highlighted=highlighted)
                 continue
             elif kind == "follow":

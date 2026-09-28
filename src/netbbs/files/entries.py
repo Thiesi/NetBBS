@@ -530,7 +530,15 @@ def delete_file(db: Database, entry: FileEntry, *, deleted_by: User) -> None:
         _require_area_permission(db, entry, deleted_by, BoardPermission.DELETE)
 
     action = "reject" if entry.status == "pending" else "delete"
-    db.connection.execute("DELETE FROM files WHERE id = ?", (entry.id,))
+    # Only the file as it was decided on (Codex review on #796): a rejection
+    # authorized by APPROVE must never remove an upload approved in between,
+    # and a decision on a stale copy must not be logged as made.
+    deleted = db.connection.execute(
+        "DELETE FROM files WHERE id = ? AND status = ?", (entry.id, entry.status)
+    ).rowcount
+    if not deleted:
+        db.connection.rollback()
+        raise FileEntryError("this file was already decided by another moderator")
     db.connection.commit()
     record_action(
         db,

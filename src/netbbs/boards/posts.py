@@ -1119,6 +1119,15 @@ def delete_post(db: Database, post: Post, *, deleted_by: User, reason: str | Non
         # approved post, nor record a rejection nobody made of it (Codex
         # review on #780).
         raise PostError("this post was already decided by another moderator")
+    # The status the decision was made on is part of the delete itself, not
+    # only of the check above (Codex review on #796): a rejection authorized
+    # by APPROVE must never remove a post approved in between.
+    deleted = db.connection.execute(
+        "DELETE FROM posts WHERE id = ? AND status = ?", (post.id, post.status)
+    ).rowcount
+    if not deleted:
+        db.connection.rollback()
+        raise PostError("this post was already decided by another moderator")
     if action == "reject":
         # A rejection is recorded, not only carried out (issue #692): for a
         # carried post the signed event is kept, and without this record
@@ -1129,7 +1138,6 @@ def delete_post(db: Database, post: Post, *, deleted_by: User, reason: str | Non
             "VALUES (?, ?, ?, ?, ?)",
             (post.post_id, post.board_id, deleted_by.id, utc_now_iso(), reason),
         )
-    db.connection.execute("DELETE FROM posts WHERE id = ?", (post.id,))
     db.connection.commit()
     record_action(
         db,

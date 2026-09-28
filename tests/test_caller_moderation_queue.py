@@ -176,3 +176,58 @@ def test_an_approver_may_reject_a_held_upload_but_not_delete_a_published_one(db,
     delete_file(db, held, deleted_by=mod)
     with pytest.raises(FileEntryError, match="DELETE"):
         delete_file(db, published, deleted_by=mod)
+
+
+# -- Codex review on #796 ----------------------------------------------
+
+
+def test_a_stale_rejection_never_deletes_a_post_approved_meanwhile(db, sysop, alice, mod):
+    from netbbs.boards.posts import PostError, approve_post, delete_post
+
+    board = create_board(db, "general", creator=sysop, moderated=True)
+    _approver_on_board(db, sysop, mod, board)
+    stale = create_post(db, board, alice, "Held", "x")
+    approve_post(db, stale, approved_by=sysop)
+
+    with pytest.raises(PostError, match="already decided"):
+        delete_post(db, stale, deleted_by=mod)
+    assert [post.subject for post in list_posts_page(db, board, mod).posts] == ["Held"]
+    assert db.connection.execute("SELECT COUNT(*) FROM post_rejections").fetchone()[0] == 0
+
+
+def test_a_stale_rejection_never_deletes_an_upload_approved_meanwhile(db, sysop, alice, mod):
+    from netbbs.files.entries import FileEntryError, approve_file, delete_file
+
+    area = create_file_area(db, "uploads", creator=sysop, moderated=True)
+    grant_permissions(
+        db, mod, object_type="file_area", object_id=area.id, permissions=BoardPermission.APPROVE, granted_by=sysop,
+    )
+    stale = upload_file(db, area, alice, "notes.txt", b"data")
+    approve_file(db, stale, approved_by=sysop)
+
+    with pytest.raises(FileEntryError, match="already decided"):
+        delete_file(db, stale, deleted_by=mod)
+    assert [entry.filename for entry in list_files_page(db, area, mod).entries] == ["notes.txt"]
+
+
+def test_leaving_the_queue_keeps_the_board_page_the_caller_was_on(db, sysop, alice, mod, monkeypatch):
+    from netbbs.boards import posts as posts_module
+    from netbbs.boards.posts import approve_post
+
+    seconds = iter(range(1000))
+    monkeypatch.setattr(
+        posts_module, "utc_now_iso", lambda: f"2026-01-01T00:{(s := next(seconds)) // 60:02d}:{s % 60:02d}.000000Z"
+    )
+    board = create_board(db, "general", creator=sysop, moderated=True)
+    _approver_on_board(db, sysop, mod, board)
+    for i in range(30):
+        approve_post(db, create_post(db, board, alice, f"Subject {i:02d}", "x"), approved_by=sysop)
+    create_post(db, board, alice, "Held", "x")
+
+    # o: an older page; q, then b out of the unchanged queue; b out of the board.
+    session = _FakeSession(["o", "q", "b", "b"])
+    asyncio.run(_show_board(session, db, board, mod))
+    after_queue = session.text.rsplit("Pending posts in", 1)[1]
+
+    # Still an older page: the newest has nothing newer to offer.
+    assert "[N]ewer" in after_queue
