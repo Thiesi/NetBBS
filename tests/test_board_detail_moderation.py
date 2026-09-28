@@ -175,4 +175,21 @@ def test_a_long_moderator_line_is_cut_to_one_row(db, lane, sysop):
     lines = _visible(_written_text(session)).splitlines()
     [row] = [line for line in lines if "Moderators:" in line]
 
-    assert row.rstrip().endswith("...") and len(row.rstrip()) <= 80
+    assert row.rstrip().endswith("... (2 in all)") and len(row.rstrip()) <= 80
+
+
+def test_a_cut_moderator_line_still_counts_the_rest(db, lane, sysop):
+    """Codex review on #797: a cut must not hide that more grants apply."""
+    board = create_board(db, "general", creator=sysop)
+    for i in range(5):
+        grant_permissions(
+            db, create_user(db, f"a_rather_long_moderator_name_{i:02d}", password="hunter2", user_level=10),
+            object_type="board", object_id=board.id,
+            permissions=BoardPermission.EDIT | BoardPermission.DELETE | BoardPermission.APPROVE, granted_by=sysop,
+        )
+
+    session = FakeSession(["b"])
+    asyncio.run(_board_detail_screen(session, lane, sysop, board))
+    [row] = [line for line in _visible(_written_text(session)).splitlines() if "Moderators:" in line]
+
+    assert row.rstrip().endswith("... (+2 more)") and len(row.rstrip()) <= 80

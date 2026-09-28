@@ -16657,16 +16657,17 @@ def _moderators_field(db: Database, object_type: str, object_id: int, *, width: 
         else:
             scope = ", all local ones"
         named.append(f"{name} ({permissions}{scope})")
-    if len(grants) > _MODERATORS_SHOWN:
-        named.append(f"+{len(grants) - _MODERATORS_SHOWN} more")
     # One row of a screen with none to spare (Codex review on #797): long
-    # names are cut rather than wrapped. The names are sanitized first --
-    # a username is the caller's own text.
+    # names are cut rather than wrapped, but how many grants apply always
+    # shows, so a cut never hides that there are more. The names are
+    # sanitized first -- a username is the caller's own text.
     summary = sanitize_text("; ".join(named))
-    room = max(10, width - _DETAIL_LABEL_COLUMNS)
-    if display_width(summary) > room:
+    more = f" (+{len(grants) - _MODERATORS_SHOWN} more)" if len(grants) > _MODERATORS_SHOWN else ""
+    if display_width(summary) + len(more) > width - _DETAIL_LABEL_COLUMNS:
+        more = more or f" ({len(grants)} in all)"
+        room = max(10, width - _DETAIL_LABEL_COLUMNS - len(more))
         summary = cut_to_width(summary, room - 3) + "..."
-    return Field("Moderators", summary)
+    return Field("Moderators", summary + more)
 
 
 async def _delete_board_screen(
