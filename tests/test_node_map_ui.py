@@ -292,7 +292,7 @@ def test_rows_sharing_a_friendly_name_are_told_apart(rig):
     listing = text[text.index("Nodes known to NetBBS"):]
     listing = listing[: listing.index("Choice:")]
     assert "Twin BBS · twin.example.org" in listing
-    assert f"Twin BBS {bare.fingerprint[:6]}" in listing
+    assert f"Twin BBS · {bare.fingerprint[:6]}" in listing
     # A name nobody else wears stays alone in its column.
     assert "Only BBS" in listing and "only.example.org" not in listing
 

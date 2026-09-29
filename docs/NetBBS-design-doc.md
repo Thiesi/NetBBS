@@ -1075,6 +1075,17 @@ dropped from a typed reference, which is unambiguous because no friendly name,
 DNS name or fingerprint may contain a double quote. A typed address splits at
 its first `@`, since a user name cannot contain one and a node name can.
 
+A chat line, and each line of a Link private conversation, names a linked
+speaker's node by its friendly name alone (issue #899): the DNS name repeated
+on every line cost more width than it told anyone. Where another node this BBS
+knows of claims the same name -- as its friendly name or its DNS name, the one
+namespace the identity warning uses -- or this BBS claims it now or did
+recently, the name is qualified -- `Name · dns.example`, or `Name · abc123`, the first six characters
+of the technical identity, when the node has no DNS name -- and the node map
+disambiguates a shared name the same way. Both qualified forms resolve when
+typed back. The speaker is styled in parts: the brackets and the `@` muted,
+the user in the speaker color, the node in its own color (`NODE_COLOR`).
+
 The user half of an address follows the local username grammar (ASCII letters,
 digits, `_`, `-`, `.`, at most 32 characters), capitals included: a name is
 addressed exactly as it is displayed, and the recipient node looks it up
@@ -2105,7 +2116,10 @@ the authenticated canonical identity, and permissions, moderation, blocking,
 reputation, and addressing always use canonical identity.
 
 An alias is always shown with the username beside it, as `alias|username`, in
-the live stream as in `/who`, `/whois` and `/names` (issue #843). It may not
+the live stream as in `/who`, `/whois` and `/names` (issue #843). In the live
+stream the alias leads in its own color and `|username` follows muted (issue
+#899): the username is there so no alias stands alone, not to compete with the
+name its owner chose. It may not
 contain `| [ ] < > * ~`: the separator, a status-bar tag's brackets, the angle
 brackets around a speaker, the `*` of actions and notices, and the old alias
 marker. It may not read as another local account's username, or, unless its
@@ -13172,6 +13186,36 @@ answering the invitation from inside every picker, which would spread the
 invite handshake across screens that own their own keys; and writing into a
 door or a Zmodem transfer, which would corrupt what that screen is drawing or
 sending.
+
+### Issue #899 — the speaker label on a chat line — decided
+
+A chat line from a linked node read `<Phase4Ops@OutBound · outbound.netbbs.org>`:
+fine once, a lot of width on every line of a conversation, and one run of one
+color that did not show where the user ended and the node began. Normative
+description: §4.4 and §6.3.
+
+**Decision 1 — the friendly name alone, qualified only when shared.** The DNS
+name stays on the screens that have room for it. On a chat line the friendly
+name is the only thing marking where a caller comes from, which #843 Decision 3
+relies on, so a name another known node or this BBS also uses keeps its
+qualifier, in the form the node map already used. The existing caution for an
+undismissed cryptographic-identity observation stays in front of the line.
+Look-alike names that are not exactly equal are issue #900.
+
+**Decision 2 — `Name · abc123` replaces `Name abc123`.** The node map's form
+without a DNS name could not be typed back; with the reserved `·` it can, and it
+matches the DNS-qualified form. Rejected: a fingerprint prefix alone, which
+drops the name a reader knows the node by.
+
+**Decision 3 — style the parts, not the whole.** Brackets and `@` muted, the user
+in the speaker color, the node in `NODE_COLOR`. The same split fixes the
+alias label: it read `Quill|lena_h` with the username at the alias's weight,
+so readers could not tell which was the alias and the alias no longer read as
+the chosen name. The alias now leads in its color with `|username` muted; the
+text, and so #843's rule that no alias stands alone, is unchanged. Rejected:
+restricting node friendly names to the alias character set, which would make
+this node refuse the hello of any existing peer whose name uses one, and would
+undo #807's quoting of names containing `@`.
 
 ### SFTP over the SSH transport — declined
 
