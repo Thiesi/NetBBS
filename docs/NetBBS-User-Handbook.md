@@ -113,7 +113,13 @@ never sent or posted by itself.
 
 Writing a message or a post opens a screen of its own. Mail asks who it is
 for first: a user name, or `name@TheirBBS` for someone on a linked BBS. An
-empty line or Esc there cancels. The fullscreen editor shows what you are
+empty line or Esc there cancels. Press Tab to complete a name, or, after the
+`@`, the name of a linked BBS; if several fit, they are listed under the
+prompt. Type `?` and press Enter for a list of everyone you can write to:
+people you had mail with lately first, then the linked BBSes, then the
+members of this board. Choose a BBS and you are asked for the person's user
+name there; `name@?` lists just the BBSes for that name. Only people who can
+receive mail from you are offered. The fullscreen editor shows what you are
 writing above the text: the recipient or board, and the subject. Nothing is
 sent or posted until you choose to on the review screen, which keeps To and
 Subject at the top and shows a long message a page at a time. Turn the

@@ -581,6 +581,50 @@ def list_sent(db: Database, user: User) -> list[MailMessage]:
     return [_row_to_message(row) for row in rows]
 
 
+#: How many letters, newest first, `recent_correspondents` looks through.
+#: Bounds the work on a full mailbox; the people named in the newest few
+#: hundred letters are the recent ones.
+RECENT_CORRESPONDENT_SCAN = 1000
+
+
+def recent_correspondents(db: Database, user: User, *, limit: int = 10) -> list[int | str]:
+    """The people `user` last had mail from or sent mail to (issue #826),
+    newest first and each once, from the letters still in their own Inbox
+    and Sent: a local account by its id, a Link correspondent by the stored
+    `user@<home-node-fingerprint>`.
+
+    System mail, mail from an account since deleted, and letters to
+    oneself name no one to write to and are left out. Whether each one
+    still takes mail is the caller's business: this only says who they
+    were."""
+    rows = db.connection.execute(
+        """
+        SELECT id, sender_user_id AS account, sender_label AS address, from_system
+        FROM mail_messages WHERE recipient_user_id = ? AND recipient_deleted_at IS NULL
+        UNION ALL
+        SELECT id, recipient_user_id AS account, recipient_remote_address AS address, 0
+        FROM mail_messages WHERE sender_user_id = ? AND sender_deleted_at IS NULL
+        ORDER BY id DESC LIMIT ?
+        """,
+        (user.id, user.id, RECENT_CORRESPONDENT_SCAN),
+    ).fetchall()
+    found: list[int | str] = []
+    for row in rows:
+        if len(found) >= limit:
+            break
+        if row["account"] is not None:
+            who: int | str = row["account"]
+            if who == user.id:
+                continue
+        elif row["from_system"] or row["address"] is None or split_link_address(row["address"]) is None:
+            continue
+        else:
+            who = row["address"]
+        if who not in found:
+            found.append(who)
+    return found
+
+
 # -- who a letter is from and to, as a reader sees it -----------------------
 #
 # One answer for the mailbox's list and message view and for the main

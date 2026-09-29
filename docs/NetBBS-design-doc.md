@@ -2546,6 +2546,40 @@ A letter started from the Directory, Who's online or Previous callers is the
 caller's new letter, the same slot `[C]ompose` uses: a kept new letter is
 offered first, and resuming it keeps its own recipient.
 
+**Finding a recipient** (issue #826, `netbbs.net.mail_recipients`). The To
+prompt helps without leaving it. Tab completes the field (the line editor's
+completion, as chat's): a member's name, the address of a recent
+correspondent, and after `@` the name of a linked BBS; several matches are
+listed under the prompt, wrapped, and more than 24 are counted instead. `?`
+and Enter opens a list (`pick_item`) of everyone the caller can write to:
+recent correspondents first, then the linked BBSes, then the members. On a
+node with Link on, `name@?` lists just the linked BBSes for that name, and a
+BBS chosen from the full list asks for the user name there. `?` works at the
+review screen's `[T]o` too.
+- Recent correspondents are the last ten people named by letters still in the
+  caller's own Inbox and Sent (`netbbs.mail.recent_correspondents`), local and
+  Link. System mail, a deleted sender and letters to oneself name no one.
+- Only people mail can reach are offered: never the caller, the guest
+  account, a disabled account or a signup awaiting approval
+  (`mail_recipient_refusal`), or someone who blocked the caller
+  (`mail_sender_refusal`); on Link only met nodes this node sends mail to
+  (§12.4), so a node still on probation is not listed. The Directory lists
+  every account; the To prompt's list is narrower on purpose, since offering
+  an address that is then refused helps no one. Leaving a blocker out tells
+  the caller no more than the To prompt's own honest refusal does.
+- A pick is only text in To: the To prompt checks it exactly as a typed
+  address, and Send checks again. Nothing new is checked, so `mail_someone`
+  keeps the same checks as the To prompt.
+- The book is gathered once as the prompt opens: completion runs inside the
+  line editor, which cannot reach the database lane.
+- A Link address is kept by its node's technical identity once the To prompt
+  has resolved it (a pick from the list is one already), so Send and a
+  resumed draft reach the node the caller chose even if another node takes
+  its name meanwhile. `[T]o` opens on the name the caller reads, and
+  leaving it unchanged keeps that identity. Tab types the shortest name that
+  names only that node: its friendly name, else its DNS name, else its
+  fingerprint.
+
 **Forwarding** (issue #822). `[F]orward` on a received letter's view and on a
 sent letter's view starts a new letter titled "Forward": Subject gets `Fwd: `
 unless it already starts with `Fwd:` or `Fw:` (the `Re:` rule, one helper in
@@ -4824,7 +4858,9 @@ checks a local name, and asks again in place with what to type instead: a
 malformed address, a node this BBS is not linked with, a name more than one
 linked node goes by, and a peer this node will not send mail to (§12.4) are
 all refused there, never after the message is written. Send repeats the
-checks, because the review screen's `[T]o` can change the address.
+checks, because the review screen's `[T]o` can change the address. Once
+resolved, the address is kept by the node's technical identity, not the name
+typed (issue #826).
 
 The message is point-to-point to one recipient node, not flood-filled public
 content.
