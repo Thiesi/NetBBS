@@ -356,3 +356,23 @@ def test_a_typed_bbs_name_is_kept_by_technical_identity_and_to_opens_on_the_name
 
     assert "bob@Farpoint · farpoint.example.org" in session.seeded
     assert [row["recipient_remote_address"] for row in _remote_rows(db)] == [f"bob@{farpoint.fingerprint}"]
+
+
+def test_tab_through_the_real_line_editor_types_the_address(db):
+    """Byte for byte, as a Telnet, SSH or local caller types it."""
+    from netbbs.net.char_input import read_line
+    from netbbs.net.mail_recipients import read_to_line_options
+    from tests.test_char_input import FakeByteSource, Writer
+
+    alice = _user(db, "alice")
+    node_identity = bootstrap_node_identity("roanoke")
+    _link_context_with_known_peer(
+        db, node_identity, bootstrap_node_identity("nib"), friendly_name="Nib & Quill",
+    )
+    completer, _ = _completer(db, alice)
+
+    async def scenario(data):
+        return await read_line(FakeByteSource(data), Writer(), **read_to_line_options(completer))
+
+    assert asyncio.run(scenario(b"bob@n\t\r\n")).strip() == "bob@Nib & Quill"
+    assert asyncio.run(scenario(b"bob@Nib & q\t\r\n")).strip() == "bob@Nib & Quill"
