@@ -100,7 +100,7 @@ def test_no_preferences_shows_a_friendly_empty_message(db, lane, alice):
 
 
 def test_global_preference_is_listed_and_can_be_cleared(db, lane, alice):
-    # "board" (default "activity"), not "channel" -- channels default to
+    # "board" (default "sysop"), not "channel" -- channels default to
     # "alphabetical" (DEFAULT_SORT_MODE_BY_KIND), so setting that exact
     # mode wouldn't let clearing be observed against the fallback.
     set_sort_preference(db, alice, "board", "alphabetical")
@@ -109,7 +109,7 @@ def test_global_preference_is_listed_and_can_be_cleared(db, lane, alice):
     text = _written_text(session)
     assert "Message boards" in text
     assert "Global default" in text
-    assert get_effective_sort_mode(db, alice, "board") == "activity"  # cleared, back to default
+    assert get_effective_sort_mode(db, alice, "board") == "sysop"  # cleared, back to default
 
 
 def test_declining_the_clear_confirmation_leaves_the_preference_intact(db, lane, alice):

@@ -119,7 +119,7 @@ from netbbs.net.file_area_banner import load_file_area_banner
 from netbbs.net.node_theme import effective_accent_color_256, effective_header_color_256
 from netbbs.net.notices import announce, announce_styled, write_notices
 from netbbs.net.picker import pick_item
-from netbbs.net.prose_editor import edit_prose
+from netbbs.net.prose_editor import EditorHeader, edit_prose
 from netbbs.net.session import Session
 from netbbs.net.session_activity import records_activity
 from netbbs.net.sort_ui import SORT_MODE_LABELS, prompt_sort_change
@@ -329,7 +329,7 @@ async def _browse_areas_in_category(
         return await prompt_sort_change(
             session, persist=_persist_sort_choice,
             community_id=effective_community_id, community_name=community_name,
-            category_id=category_id, category_name=category_name,
+            category_id=category_id, category_name=category_name, sysop_order=True,
         )
 
     def _sort_label() -> str:
@@ -1826,6 +1826,11 @@ async def _compose_description(
         return await edit_prose(
             session, initial_text=initial_text, draft_path=draft_path,
             max_bytes=MAX_DESCRIPTION_BYTES, unicode_style=await lane.run(unicode_style_enabled, user),
+            # What is being written, above the text (issue #813).
+            header=EditorHeader(
+                "File description", (("File", entry.filename),),
+                color=await lane.run(effective_header_color_256),
+            ),
         )
     return await edit_line_body(
         session, initial_text=initial_text, max_bytes=MAX_DESCRIPTION_BYTES,
