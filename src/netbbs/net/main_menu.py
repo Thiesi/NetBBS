@@ -31,6 +31,7 @@ from netbbs.chat import (
 from netbbs.communities import Community, list_communities
 from netbbs.link.boards import LinkContext
 from netbbs.link.mail import acknowledge_delivery_notices, pending_delivery_notices
+from netbbs.mail import acknowledge_eviction_notice, pending_eviction_notice
 from netbbs.mail import unread_count as unread_mail_count
 from netbbs.net.admin_flow import admin_menu, moderation_queue, staff_list_screen, staff_menu
 from netbbs.boards import list_boards
@@ -615,9 +616,19 @@ async def _main_menu_loop(
                 delivery_lines, delivery_ids = pending_delivery_notices(db, user)
                 for text in delivery_lines:
                     announce(session, text, tone="error")
+                # Read mail the mailbox cap removed to make room, counted
+                # and told once (issue #818) -- never which messages. Held
+                # for a caller mail is closed to, who has no Inbox to see.
+                eviction_line, evicted = (
+                    pending_eviction_notice(db, user)
+                    if caller_mail_refusal(session, db, user) is None else (None, 0)
+                )
+                if eviction_line is not None:
+                    announce(session, eviction_line, color=WARNING_COLOR)
                 await _draw_main_menu(session, db, mailbox, user, node_controls=node_controls, notice=notice)
                 acknowledge_moderation_notices(db, moderation_ids)
                 acknowledge_delivery_notices(db, delivery_ids)
+                acknowledge_eviction_notice(db, user, evicted)
                 notice = None
                 redraw = False
             set_root_activity(session, None)
