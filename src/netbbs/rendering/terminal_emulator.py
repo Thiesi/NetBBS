@@ -29,6 +29,7 @@ import unicodedata
 from dataclasses import replace
 from typing import NamedTuple
 
+from netbbs.digits import is_ascii_number
 from netbbs.rendering.ansi import CSI, ESC, colored, move_cursor, set_scroll_region
 from netbbs.rendering.screen_buffer import Cell, Snapshot, full_render_ansi
 from netbbs.rendering.width import char_width
@@ -143,10 +144,10 @@ def _sgr_params_with_colons(body: str) -> list[int]:
     params: list[int] = []
     for part in body.split(";"):
         if ":" not in part:
-            params.append(int(part) if part.isdigit() else 0)
+            params.append(int(part) if is_ascii_number(part) else 0)
             continue
         fields = part.split(":")
-        numbers = [int(field) if field.isdigit() else 0 for field in fields]
+        numbers = [int(field) if is_ascii_number(field) else 0 for field in fields]
         if numbers[0] in (38, 48) and len(numbers) >= 3 and numbers[1] == 5:
             params.extend([numbers[0], 5, numbers[2]])
         elif numbers[0] in (38, 48) and len(numbers) >= 5 and numbers[1] == 2:
@@ -528,10 +529,10 @@ class TerminalEmulator:
         else:
             params = []
             for part in body.split(";") if body else ():
-                if part.isdigit():
+                if is_ascii_number(part):
                     params.append(int(part))
                 else:
-                    digits = "".join(c for c in part if c.isdigit())
+                    digits = "".join(c for c in part if "0" <= c <= "9")
                     params.append(int(digits) if digits else 0)
         if final == "m" and not private:
             # By far the most frequent sequence: straight to the pen.
