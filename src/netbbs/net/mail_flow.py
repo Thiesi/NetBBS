@@ -58,6 +58,7 @@ from netbbs.link.node_profiles import (
     identity_for_fingerprint, is_node_fingerprint, latest_identity_observation, resolve_stored_peer_reference,
 )
 from netbbs.mail import (
+    GUEST_MAIL_REFUSAL,
     MAX_MAIL_BODY_BYTES,
     MAX_MAIL_SUBJECT_BYTES,
     SYSTEM_SENDER_LABEL,
@@ -68,6 +69,8 @@ from netbbs.mail import (
     delete_for_sender,
     list_inbox,
     list_sent,
+    mail_access_refusal,
+    mail_recipient_refusal,
     mark_read,
     mark_unread,
     send_mail,
@@ -175,10 +178,36 @@ async def browse_mail(
 
     `choice_prompt` draws the list's `Choice: ` prompt; the main menu
     passes its own, so the mailbox shows the same clock and node-status
-    tags. `None` is the bare `Choice: `."""
+    tags. `None` is the bare `Choice: `.
+
+    Refused, with the reason carried to the next screen, for a caller
+    `netbbs.mail.mail_access_refusal` turns away (issue #816): the guest
+    account or a session that signed in as it, or an account below the mail
+    level. The main menu does not
+    offer mail to them either; this is the gate itself, so that no other
+    way in can skip it."""
+    refusal = await lane.run(lambda db: caller_mail_refusal(session, db, user))
+    if refusal is not None:
+        announce(session, refusal, tone="error")
+        return
     _adopt_legacy_mail_draft(lane, user)
     screen = _MailboxScreen(session, lane, user, link_context=link_context, choice_prompt=choice_prompt)
     await screen.run()
+
+
+def caller_mail_refusal(session: Session, db: Database, user: User) -> str | None:
+    """`netbbs.mail.mail_access_refusal` for the caller on `session`.
+
+    A session that came in through guest login keeps the guest's refusal for
+    as long as it lasts (issue #816, review): `mail_access_refusal` reads the
+    node's *current* guest setting, so turning guest login off -- or moving
+    it to another account -- would otherwise hand every guest still
+    connected the old guest account's mail. How the caller got in is the
+    session's to say (`authenticated_without_credential`, set by the guest
+    branch of the login flow), not the account's."""
+    if getattr(session, "authenticated_without_credential", False):
+        return GUEST_MAIL_REFUSAL
+    return mail_access_refusal(db, user)
 
 
 # -- the mailbox list (issue #810) ---------------------------------------------
@@ -1351,7 +1380,7 @@ async def _compose_mail(
                     continue
                 break
             try:
-                await lane.run(get_user_by_username, recipient_text)
+                typed = await lane.run(get_user_by_username, recipient_text)
             except AuthError:
                 # Retry in place rather than discarding the whole compose
                 # attempt on one typo -- the identical error at the final
@@ -1362,6 +1391,12 @@ async def _compose_mail(
                 await session.write_line(
                     colored(f"No such user: {sanitize_text(recipient_text)!r}", fg_color=ERROR_COLOR)
                 )
+                continue
+            # The guest account takes no mail (issue #816): said here, before
+            # anything is written, and asked again.
+            refused = await lane.run(mail_recipient_refusal, typed)
+            if refused is not None:
+                await session.write_line(colored(sanitize_text(refused), fg_color=ERROR_COLOR))
                 continue
             break
         recipient_text, recipient_label = await settle_recipient(recipient_text)

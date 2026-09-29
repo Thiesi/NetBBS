@@ -1008,7 +1008,7 @@ shown in UTC: the main-menu clock says `UTC`, and the node log reminds you at
 every start. The default welcome banner mentions NetBBS Link only when the
 node ran with Link on at its last start.
 
-**Settings → Limits & retention** holds five node-wide values, saved together
+**Settings → Limits & retention** holds six node-wide values, saved together
 and applied without a restart:
 
 | Setting | Default | Effect |
@@ -1018,6 +1018,16 @@ and applied without a restart:
 | Invitation expiry | 7 days | When an unaccepted channel invitation lapses. Clear the field for invitations that never expire. |
 | Chat scrollback | 100 messages | Lines each channel keeps, carried Link channels included. Lowering it trims a channel the next time someone speaks there. |
 | Node map level | 0 | The lowest level that may open **Directory → Node map**. A guest is an ordinary account: set this above the guest account's level to keep the map from guests. |
+| Mail level | 0 | The lowest level that may open **E-mail**: read, write and reply, here and to other BBSes. Below it the main menu offers no E-mail. Mail sent to an account below it still arrives and waits until you raise the account's level. |
+
+The guest account (**Settings → Guest access**) never has mail, whatever its
+level and the mail level: every guest signs in as the same account, so its
+inbox would be shared by strangers and its letters sent under one name. A
+caller who writes to it is told the account has no mailbox; Link mail to it
+bounces, and the sender is told the account takes no mail. If the guest
+account has mail from before this rule, it stays in the database, unreadable
+by guests; turn guest login off and sign in as the account to read or delete
+it.
 
 Under **Operations → Node and sessions**:
 

@@ -48,7 +48,7 @@ up: from a board to the list you picked it from, and from there to the menu.
 | **Communities** (key **O**) | Topics the SysOp set up, each with its own boards, chat channels, file areas and games |
 | **New scan** | See unread activity and resources you have not visited; Back from each one brings you back with the next new one ready for Enter, and **[R]eplies** opens the replies to your posts |
 | **Find** (key **/**) | Search posts, files and retained chat on this node. It does not search mail; the mailbox has its own **[F]ind** |
-| **E-mail** | Read and send persistent NetBBS mail |
+| **E-mail** | Read and send persistent NetBBS mail, from the level the SysOp chose; not offered to the guest account |
 | **Who's online** | See callers and available ways to contact them |
 | **Profile** | Change your public profile and personal preferences |
 | **Moderation** (key **A**) | Posts and uploads waiting for your decision, if the SysOp made you a moderator |
@@ -147,6 +147,12 @@ within a minute to answer.
 Live private messages need the recipient to be online. **E-mail** keeps a
 message for later; it is NetBBS mail, not an Internet email account. If live
 contact fails, send mail explicitly—chat does not silently turn it into mail.
+
+Signed in as the board's guest, you have no mail: every guest shares that
+account, so its mailbox would be everyone's. Register an account of your own
+to send and receive mail. Mail sent to the guest account is refused. A SysOp
+can also open mail only from a certain access level; below it, the main menu
+offers no **E-mail**.
 
 **E-mail** opens on your Inbox, with how many messages are unread at the top.
 Each row shows who a message is from, its subject and its date, with `new`

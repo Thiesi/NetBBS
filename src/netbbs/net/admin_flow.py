@@ -216,6 +216,9 @@ from netbbs.config import (
     get_node_map_min_level,
     MAX_NODE_MAP_MIN_LEVEL,
     NODE_MAP_MIN_LEVEL_CONFIG_KEY,
+    get_mail_min_level,
+    MAIL_MIN_LEVEL_CONFIG_KEY,
+    MAX_MAIL_MIN_LEVEL,
     get_registration_mode,
     is_node_display_name_placeholder,
     set_config_without_commit,
@@ -2947,7 +2950,7 @@ async def _draw_system_menu(
         MenuEntry(label=menu_key("T", "imestamp format"), brief="Node-wide date/time display"),
         MenuEntry(
             label=menu_key("S", " & retention", prefix="Limit"),
-            brief="Uploads, expiry, invites, history",
+            brief="Uploads, expiry, chat, mail level",
         ),
         MenuEntry(
             label=menu_key("w", "ork & login limits", prefix="Net"),
@@ -3313,8 +3316,9 @@ async def _guest_access_screen(session: Session, lane: DatabaseLane, actor: User
             help=(
                 "An existing account callers may sign in as without a password. It stays an "
                 "ordinary account: its level and per-object permissions decide what a guest can "
-                "reach, and it keeps its own password for normal sign-in. Clear this field to "
-                "turn guest login off. A SysOp account cannot be used."
+                "reach, and it keeps its own password for normal sign-in. One thing is closed to it "
+                "whatever its level: mail, because every guest would share its mailbox. Clear this "
+                "field to turn guest login off. A SysOp account cannot be used."
             ),
         ),
         FieldSpec(
@@ -8516,6 +8520,7 @@ async def _limits_settings_screen(session: Session, lane: DatabaseLane, actor: U
             "invite_days": get_invitation_expiry_days(db),
             "scrollback": get_scrollback_limit(db),
             "map_level": get_node_map_min_level(db),
+            "mail_level": get_mail_min_level(db),
         }
 
     current = await lane.run(_load)
@@ -8606,6 +8611,19 @@ async def _limits_settings_screen(session: Session, lane: DatabaseLane, actor: U
                 "from guests, set this above the guest account's level. Only offered while Link is on."
             ),
         ),
+        FieldSpec(
+            key="mail_level", hotkey="m", menu_text=menu_key("M", "ail level"),
+            label="Mail level",
+            render=lambda d: f"level {d['mail_level']} and up",
+            prompt=_int_field("mail_level", "Lowest level"),
+            brief="Who may read and send mail", section="Mail",
+            help=(
+                f"The lowest level that may open E-mail, to read and to send, here and to other BBSes "
+                f"(0-{MAX_MAIL_MIN_LEVEL}; 0 is everyone). Mail to an account below it still arrives and "
+                "waits until its level is raised. The guest account never has mail, whatever its level: "
+                "every guest shares its mailbox."
+            ),
+        ),
     ]
 
     async def save(draft: dict) -> list[str]:
@@ -8616,6 +8634,7 @@ async def _limits_settings_screen(session: Session, lane: DatabaseLane, actor: U
             "invite_days": draft["invite_days"],
             "scrollback": draft["scrollback"],
             "map_level": draft["map_level"],
+            "mail_level": draft["mail_level"],
         }
         # Checked here, before anything is written, so one bad value
         # cannot leave the others half saved; the setters check again.
@@ -8629,6 +8648,8 @@ async def _limits_settings_screen(session: Session, lane: DatabaseLane, actor: U
             raise _LimitsError(f"Chat scrollback must be 1-{MAX_SCROLLBACK_LIMIT} messages.")
         if not 0 <= values["map_level"] <= MAX_NODE_MAP_MIN_LEVEL:
             raise _LimitsError(f"Node map level must be 0-{MAX_NODE_MAP_MIN_LEVEL}.")
+        if not 0 <= values["mail_level"] <= MAX_MAIL_MIN_LEVEL:
+            raise _LimitsError(f"Mail level must be 0-{MAX_MAIL_MIN_LEVEL}.")
         changed = [key for key in values if values[key] != current[key]]
 
         config_keys = {
@@ -8637,6 +8658,7 @@ async def _limits_settings_screen(session: Session, lane: DatabaseLane, actor: U
             "invite_days": INVITATION_EXPIRY_DAYS_CONFIG_KEY,
             "scrollback": SCROLLBACK_LIMIT_CONFIG_KEY,
             "map_level": NODE_MAP_MIN_LEVEL_CONFIG_KEY,
+            "mail_level": MAIL_MIN_LEVEL_CONFIG_KEY,
         }
 
         def _persist(db: Database) -> None:

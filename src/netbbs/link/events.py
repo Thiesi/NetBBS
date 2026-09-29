@@ -182,10 +182,13 @@ _TIER2_PERSONAL_KEY = "tier2_personal_key"
 _VALID_CONFIDENTIALITY_TIERS = (_TIER1_HOME_NODE_KEY, _TIER2_PERSONAL_KEY)
 
 # Design doc's named bounce reasons. `undecryptable` and `malformed` came
-# with issue #808; a receiver keeps a reason it does not know as an opaque
-# code (every release so far ignores it or shows a generic refusal), so a
-# new code costs an older sender nothing but the wording.
-_VALID_BOUNCE_REASONS = ("mailbox_full", "blocked_sender", "unknown_recipient", "undecryptable", "malformed")
+# with issue #808, `no_mailbox` (an account that takes no mail: the shared
+# guest account) with #816; a receiver keeps a reason it does not know as an
+# opaque code (every release so far ignores it or shows a generic refusal),
+# so a new code costs an older sender nothing but the wording.
+_VALID_BOUNCE_REASONS = (
+    "mailbox_full", "blocked_sender", "unknown_recipient", "undecryptable", "malformed", "no_mailbox",
+)
 
 
 class EventError(Exception):
