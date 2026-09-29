@@ -10169,8 +10169,8 @@ def test_a_trust_decision_about_a_node_stops_holding_back_what_it_sent(db, lane,
     register_subject(db, subject, first_accepted_at="2026-08-01T00:00:00.000000Z")
     link_context = _link_context()
     held = link_context.link_node.deferred_events
-    held.entries["c" * 64] = ("boards", "a" * 64, "remote-node", 9e12)
-    held.entries["d" * 64] = ("boards", "a" * 64, "some-other-node", 9e12)
+    held.entries["c" * 64] = ("boards", "a" * 64, "remote-node", 9e12, None, None)
+    held.entries["d" * 64] = ("boards", "a" * 64, "some-other-node", 9e12, None, None)
     session = FakeSession(
         [
             "s", "p", "s", "0", "1",

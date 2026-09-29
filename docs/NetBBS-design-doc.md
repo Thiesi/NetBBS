@@ -5209,6 +5209,15 @@ no trust-signal weight and is not selected to serve as a relay. A probationary
 user's posts/uploads enter applicable local approval flow. Private operators may
 establish a known node manually instead of waiting for automatic graduation.
 
+Probation is shown to the SysOp in both directions (issue #844), because a
+new node otherwise cannot tell "working, just new" from "broken". Held-back
+content is counted and named per node from the running node's set-aside list.
+Whether a peer holds this node on probation is learned from the policy 403 on
+this node's own push, and whether it holds a linked resource from that push or
+from an inventory exchange that declared the resource and did not ask for it.
+Both are kept in memory and known only for peers this node dials; a peer that
+only dials this node reads as unknown rather than guessed.
+
 **Node trust covers Link mail (issue #804).** A `link_message` is private mail
 to one recipient, not publication, so user probation does not gate it: a
 message from a user whose home node is established here is delivered even
