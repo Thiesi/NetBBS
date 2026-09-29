@@ -210,6 +210,13 @@ async def edit_prose(
         if offer_recovery and draft_path.exists():
             draft_path.unlink()
         loaded_text = initial_text
+        if not offer_recovery and initial_text is not None and draft_path.exists():
+            # The caller handed in the draft itself (a resumed letter, issue
+            # #814): it is the caller's own words, kept line for line below.
+            try:
+                recovered = draft_path.read_text(encoding="utf-8") == initial_text
+            except (OSError, UnicodeDecodeError):
+                pass
 
     state = _EditorState(buffer=ProseBuffer.from_text(loaded_text or ""), max_bytes=max_bytes, header=header_rows)
     if cursor_at_end:

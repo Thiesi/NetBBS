@@ -16,7 +16,7 @@ from netbbs.auth.users import create_user
 from netbbs.mail import list_inbox, list_sent, send_mail
 from netbbs.net import mail_flow
 from netbbs.net.editor_preference import set_fullscreen_editor_enabled
-from netbbs.net.mail_flow import _compose_mail, _letter_draft_path, browse_mail
+from netbbs.net.mail_flow import _compose_mail, _letter_draft_path, _reply_key, browse_mail
 from netbbs.net.notices import take_notices
 from netbbs.quoting import quote_body
 from netbbs.storage.database import Database
@@ -203,7 +203,7 @@ def test_a_kept_reply_never_replaces_another_replys_quote(node):
         session = FullscreenSession(inputs)
         asyncio.run(_compose_mail(
             session, lane, alice, prefill_recipient=author, prefill_subject=f"Re: {message.subject}",
-            prefill_body=quote_body(message.body, author=author.username), reply_to_id=message.id,
+            prefill_body=quote_body(message.body, author=author.username), reply_key=_reply_key(message),
         ))
         return session
 
@@ -222,7 +222,7 @@ def test_a_kept_reply_never_replaces_another_replys_quote(node):
     assert "You have an unfinished letter to bob: Re: From Bob" in "".join(resumed.written)
     [to_bob_sent] = [m for m in list_sent(db, alice) if m.recipient_user_id == bob.id]
     assert to_bob_sent.body.startswith("bob wrote:\n> Bob's question\n\nFor Bob!")
-    assert not _letter_draft_path(lane, alice, to_bob.id).exists()
+    assert not _letter_draft_path(lane, alice, _reply_key(to_bob)).exists()
 
 
 def test_a_kept_letter_keeps_the_to_and_subject_review_changed(node):
@@ -253,10 +253,25 @@ def test_a_link_reply_keeps_the_address_it_goes_to(node, monkeypatch):
     session = FakeSession(lines=["", "Back at you", "/exit"])
     asyncio.run(_compose_mail(
         session, lane, alice, prefill_link_address=address, prefill_subject="Re: Hi",
-        prefill_body="bob wrote:\n> Hi\n", reply_to_id=7, link_context=object(),
+        prefill_body="bob wrote:\n> Hi\n", reply_key="7", link_context=object(),
     ))
 
-    path = _letter_draft_path(lane, alice, 7)
+    path = _letter_draft_path(lane, alice, "7")
     assert _fields(path) == {"to": "bob@Farpoint", "reply_address": address, "subject": "Re: Hi"}
     draft = mail_flow._load_letter_draft(path)
     assert draft.reply_address == address
+
+
+def test_a_reply_slot_is_not_shared_with_a_message_that_reuses_an_id():
+    """Mail ids are rowids: once the newest message is gone, the next one can
+    get its id. The slot also names when and from whom it came."""
+    from netbbs.mail import MailMessage
+
+    fields = dict(
+        sender_user_id=2, recipient_user_id=1, subject="Hi", body="x", read_at=None,
+        sender_deleted_at=None, recipient_deleted_at=None,
+    )
+    first = MailMessage(id=5, sender_label="bob", created_at="2026-01-01T00:00:00+00:00", **fields)
+    reused = MailMessage(id=5, sender_label="carol", created_at="2026-02-01T00:00:00+00:00", **fields)
+    assert _reply_key(first) != _reply_key(reused)
+    assert _reply_key(first).startswith("5_")

@@ -39,6 +39,7 @@ directly anymore):
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -488,7 +489,7 @@ async def _show_inbox_message(
                 session, lane, user, prefill_link_address=message.sender_label,
                 prefill_subject=subject,
                 prefill_body=quote_body(message.body, author=shown) or None,
-                link_context=link_context, reply_to_id=message.id,
+                link_context=link_context, reply_key=_reply_key(message),
             )
             continue
         sender = (
@@ -503,7 +504,7 @@ async def _show_inbox_message(
             session, lane, user, prefill_recipient=sender,
             prefill_subject=subject,
             prefill_body=quote_body(message.body, author=message.sender_label) or None,
-            reply_to_id=message.id,
+            reply_key=_reply_key(message),
         )
 
 
@@ -532,7 +533,7 @@ async def _compose_mail(
     prefill_subject: str = "",
     prefill_body: str | None = None,
     link_context: LinkContext | None = None,
-    reply_to_id: int | None = None,
+    reply_key: str | None = None,
     resume: bool = False,
 ) -> None:
     """
@@ -554,7 +555,7 @@ async def _compose_mail(
     is for and under what subject.
 
     Each letter has its own draft slot (issue #814): the new letter, and a
-    reply to message `reply_to_id`. Either editor keeps the text there as
+    reply to one message (`reply_key`, see `_reply_key`). Either editor keeps the text there as
     it is typed, with its To and Subject beside it, and "Keep draft &
     exit" or `/exit` leaves it for later. A letter found in its slot is
     offered before anything is asked -- resume it, delete it and start
@@ -582,10 +583,10 @@ async def _compose_mail(
     accent_color = await lane.run(effective_accent_color_256)
     header_color = await lane.run(effective_header_color_256)
     truecolor = await lane.run(lambda db: effective_truecolor(session, db, user))
-    title = "Reply" if reply_to_id is not None else "New message"
+    title = "Reply" if reply_key is not None else "New message"
     link_enabled = link_context is not None
 
-    draft_path = _letter_draft_path(lane, user, reply_to_id)
+    draft_path = _letter_draft_path(lane, user, reply_key)
     resumed = _load_letter_draft(draft_path)
     if resumed is not None and not resume:
         outcome = await _letter_draft_choice(session, lane, user, resumed, starting_new=True)
@@ -603,7 +604,7 @@ async def _compose_mail(
             prefill_subject = resumed.subject
     kept_notice = (
         "Draft saved -- you'll be offered it when you reply to this message again."
-        if reply_to_id is not None
+        if reply_key is not None
         else "Draft saved -- it is under [D]raft on the mail screen."
     )
 
@@ -846,15 +847,24 @@ class _LetterDraft:
     subject: str | None
 
 
-def _letter_draft_path(lane: DatabaseLane, user: User, reply_to_id: int | None = None) -> Path:
+def _reply_key(message: MailMessage) -> str:
+    """The message a reply answers, for its draft slot's name: its id, and
+    a digest of when and from whom it came -- a mail id can be handed out
+    again once the newest message is gone, and a kept reply must not be
+    offered for a different message that got the same id."""
+    digest = hashlib.sha256(f"{message.created_at}|{message.sender_label}".encode("utf-8")).hexdigest()[:12]
+    return f"{message.id}_{digest}"
+
+
+def _letter_draft_path(lane: DatabaseLane, user: User, reply_key: str | None = None) -> Path:
     """One slot per letter (issue #814): the caller's new letter, and one
     per message they are replying to. Before #814 every letter shared one
     body-only file, so a kept letter was offered in place of the next
     one's text -- a reply to someone else lost its quote to it."""
     directory = lane.path.parent / f"{lane.path.name}_drafts"
     directory.mkdir(parents=True, exist_ok=True)
-    if reply_to_id is not None:
-        return directory / f"mail_reply_{user.id}_{reply_to_id}.draft"
+    if reply_key is not None:
+        return directory / f"mail_reply_{user.id}_{reply_key}.draft"
     return directory / f"mail_new_{user.id}.draft"
 
 
