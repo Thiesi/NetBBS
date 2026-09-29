@@ -43,6 +43,7 @@ from pathlib import Path
 
 import nacl.signing
 
+from netbbs.net.redraw_preference import start_new_account_redrawing_in_place
 from netbbs.backup import running_node_pid
 from netbbs.link.key_rotation import KeyRotationError, rotate_offline
 from netbbs.net.confirm import prompt_yes_no
@@ -299,6 +300,8 @@ async def _bootstrap_first_sysop(session: Session, lane: DatabaseLane) -> User:
     # dispatches this whole call to a worker thread.
     def _create(db: Database) -> User:
         user = create_user(db, username, password=password, verify_key=verify_key, user_level=SYSOP_LEVEL)
+        # As a signed-up account starts (issue #840).
+        start_new_account_redrawing_in_place(db, user)
         # Chicken-and-egg: no actor exists yet to attribute this to, so
         # the audit entry self-attributes to the account it just created.
         record_action(

@@ -544,6 +544,7 @@ from netbbs.auth.signup_answers import (
 )
 from netbbs.net.menu_description_preference import menu_description_level
 from netbbs.net.redraw_preference import (
+    start_new_account_redrawing_in_place,
     redraw_in_place_enabled,
     redraw_in_place_ever_set,
     set_redraw_in_place_enabled,
@@ -1358,10 +1359,16 @@ def _degrade_description_level(
     degraded = False
     if effective_desc_level != "off":
         columns = 2 if terminal_width >= 72 else 1
-        needed_rows = -(-entry_count // columns) * 2
-        if needed_rows > available_menu_height:
-            effective_desc_level = "off"
-            degraded = True
+        rows_per_entry_row = -(-entry_count // columns)
+        if rows_per_entry_row * 2 > available_menu_height:
+            # Each description on its entry's own line before none at all
+            # (issue #840): at 80x24 a first-time SysOp lost them exactly
+            # where one-word entries needed them.
+            if rows_per_entry_row <= available_menu_height:
+                effective_desc_level = "inline"
+            else:
+                effective_desc_level = "off"
+                degraded = True
     return effective_desc_level, available_menu_height, degraded
 
 
@@ -1877,13 +1884,15 @@ async def _draw_admin_menu(
         node_controls=node_controls, unicode_style=unicode_style, width=box_inner_width,
     )
     level = state["description_level"]
-    for panel, menu_level in ((health, level), (compact, level), (compact, "off")):
+    # Before hiding the descriptions, each on its entry's own line (issue #840).
+    fallbacks = ((health, level), (compact, level), (compact, "inline"), (compact, "off"))
+    for panel, menu_level in fallbacks if level != "off" else ((health, level), (compact, level)):
         menu = _menu(menu_level)
         if _rows(panel, menu) <= session.terminal_height:
             break
     await _write_panel(session, panel, unicode_style=unicode_style, header_color=state["header_color"])
     await session.write_line("\r\n" + menu)
-    if menu_level != level and "Descriptions hidden" not in menu:
+    if menu_level == "off" and level != "off" and "Descriptions hidden" not in menu:
         await session.write_line(
             colored("Descriptions hidden -- terminal too short to show them.", fg_color=MUTED_COLOR)
         )
@@ -5526,6 +5535,7 @@ async def _create_user_screen(session: Session, lane: DatabaseLane, actor: User)
                 create_user, draft["username"], password=draft["password"],
                 verify_key=draft["verify_key"], user_level=draft["level"],
             )
+            await lane.run(start_new_account_redrawing_in_place, new_user)
         except UsernameRetiredError as exc:
             # Issue #594. The exception's own text is what a remote caller is
             # shown, and deliberately reads as "taken". A SysOp is owed the

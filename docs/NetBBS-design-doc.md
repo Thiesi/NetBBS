@@ -587,6 +587,17 @@ area, channel or user's detail, the Settings overview, a banner menu, the
 landing page) can still be taller than the terminal. Paged screens are not
 affected.
 
+A menu too short for a description under each entry puts each one on its
+entry's own line, cut to fit, before it hides them (issue #840): at 80x24 the
+first field test's SysOp read "Descriptions hidden" on the console landing,
+exactly where one-word entries such as Content and Operations needed them.
+Only when even one line per entry does not fit are they hidden, with the note.
+
+Every new account starts with redraw-in-place on, however it was made:
+signed up, created in the console, or the first SysOp created at install
+(issue #840). Only signup did, so a node's own SysOp saw screens scroll that
+every one of her callers saw redrawn.
+
 The outcome of an action is carried into the next redraw; it is never written
 somewhere that redraw erases, and the console never asks for a keypress just to
 keep a result on screen. With redraw-in-place on, a line printed just before
