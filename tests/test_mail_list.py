@@ -494,3 +494,33 @@ def test_unread_mail_stays_unread_until_opened(node):
     _run(session, lane, bob)
 
     assert list_inbox(db, bob)[0].is_read is False
+
+
+def test_an_outcome_notice_does_not_shift_the_page(node):
+    """Review on #877: a notice takes a row from one render's budget; the
+    page must stay where it was, and [N]ext page must go on from the rows
+    on screen rather than land on the same page again."""
+    db, lane, bob, alice, _ = node
+    for i in range(60):
+        send_mail(db, alice, bob, f"Subject {i}", "body")
+    session = FakeSession(["n", "u", "n", "b"])
+
+    _run(session, lane, bob)
+
+    first, second, marked, third = (re.findall(r"Subject (\d+)\b", s) for s in session.screens())
+    page = len(first)
+    assert second[0] == str(59 - page)
+    assert "Marked read." in session.screens()[2]
+    assert marked[0] == second[0]
+    # The next page starts right after the last row that was on screen.
+    assert third[0] == str(int(marked[-1]) - 1)
+
+
+def test_a_draft_that_cannot_be_read_is_not_offered(node):
+    db, lane, bob, alice, _ = node
+    mail_flow._letter_draft_path(lane, bob).write_bytes(b"\xff\xfe\xfa not utf-8")
+    session = FakeSession(["b"])
+
+    _run(session, lane, bob)
+
+    assert "[D]raft" not in session.screens()[0]

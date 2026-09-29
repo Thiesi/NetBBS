@@ -507,6 +507,11 @@ class _MailboxScreen:
         self.shown_top = 0
         self.shown_count = 0
         self.shown_limit = _MIN_LIST_ROWS
+        # The first row of the page, kept rather than derived from the
+        # highlight: an outcome notice takes a row from one render's
+        # budget, and a page worked out as `highlighted // limit` would
+        # then shift under the caller (review on #877).
+        self.top = 0
         self.has_draft = False
 
     async def _settings(self) -> None:
@@ -636,7 +641,9 @@ class _MailboxScreen:
         if self.query:
             rows = [row for row in rows if _matches(row, self.query)]
         self.rows = rows
-        self.has_draft = _letter_draft_path(self.lane, self.user).exists()
+        # Offered only for a letter that loads: [D]raft on one that does
+        # not would do nothing (review on #877).
+        self.has_draft = _load_letter_draft(_letter_draft_path(self.lane, self.user)) is not None
         if not rows:
             self.highlighted = None
             return
@@ -649,6 +656,7 @@ class _MailboxScreen:
         self.sent = sent
         self.query = None
         self.highlighted = None
+        self.top = 0
         await self._reload()
         await self._render()
 
@@ -657,16 +665,28 @@ class _MailboxScreen:
         the one on screen; `False` when there is none."""
         if not self.rows:
             return False
-        target = self.shown_top + self.shown_limit if forward else self.shown_top - self.shown_limit
-        if target >= len(self.rows) or target < 0:
-            return False
-        self.highlighted = target
+        if forward:
+            target = self.shown_top + self.shown_limit
+            if target >= len(self.rows):
+                return False
+        else:
+            if self.shown_top == 0:
+                return False
+            target = max(0, self.shown_top - self.shown_limit)
+        self.top = self.highlighted = target
         return True
 
     def _top(self, limit: int) -> int:
-        if self.highlighted is None:
-            return 0
-        return (self.highlighted // limit) * limit
+        """The page's first row, moved only as far as keeps the highlight
+        on screen: up to it, or down until it is the last row."""
+        top = min(self.top, max(0, len(self.rows) - 1))
+        if self.highlighted is not None:
+            if self.highlighted < top:
+                top = self.highlighted
+            elif self.highlighted >= top + limit:
+                top = self.highlighted - limit + 1
+        self.top = top
+        return top
 
     async def _open(self, index: int) -> None:
         if index >= len(self.rows):
@@ -709,6 +729,7 @@ class _MailboxScreen:
             return
         self.query = text or None
         self.highlighted = 0
+        self.top = 0
         await self._reload(keep=-1)
 
     # -- drawing ------------------------------------------------------------
@@ -1041,15 +1062,6 @@ _DELIVERY_COLORS = {
     "bounced": ERROR_COLOR,
     "expired": ERROR_COLOR,
 }
-
-
-def _delivery_tag(message: MailMessage) -> str:
-    """Where a sent Link message stands, as a tag for its Sent list row
-    (issue #806); empty for local mail. The reason is on the message."""
-    status = message.link_delivery_status
-    if status not in DELIVERY_STATUS_LABELS:
-        return ""
-    return f"[{DELIVERY_STATUS_LABELS[status].upper()}] "
 
 
 async def _link_mail_identity_warning(
