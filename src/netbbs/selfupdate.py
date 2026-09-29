@@ -188,7 +188,8 @@ def _normalize_version(version: str) -> tuple[int, ...]:
     for component in stripped.split("."):
         digits = ""
         for char in component:
-            if char.isdigit():
+            # ASCII only: `int()` refuses "²", which `isdigit()` takes (#928).
+            if "0" <= char <= "9":
                 digits += char
             else:
                 break
