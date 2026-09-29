@@ -60,6 +60,7 @@ from netbbs.link.node_profiles import (
 from netbbs.mail import (
     MAX_MAIL_BODY_BYTES,
     MAX_MAIL_SUBJECT_BYTES,
+    SYSTEM_SENDER_LABEL,
     MailboxFullError,
     MailError,
     MailMessage,
@@ -237,6 +238,7 @@ _LIST_HELP = [
     "\"new\" marks mail you have not opened. Opening a message marks",
     "it read; [U]nread in the message or on the list takes that back.",
     "Sent shows where mail to another BBS stands under Delivery.",
+    "Mail from System is a notice from this BBS; it has no Reply.",
 ]
 
 
@@ -435,6 +437,11 @@ async def _load_mail_rows(lane: DatabaseLane, user: User, *, sent: bool) -> list
             key = (message.recipient_remote_address, message.recipient_user_id)
             if key not in names:
                 names[key] = await _display_recipient_label(lane, message)
+        elif message.from_system:
+            # Keyed apart from any account's name (issue #819): a SysOp
+            # can still create an account called "System".
+            key = (SYSTEM_SENDER_LABEL, 0)
+            names[key] = SYSTEM_SENDER_LABEL
         else:
             key = (message.sender_label, None)
             if key not in names:
@@ -957,9 +964,13 @@ async def _message_view(
         preamble.append(
             colored("From: ", fg_color=LABEL_COLOR) + colored(sanitize_text(sender_label), fg_color=accent)
         )
-        warning = await _link_mail_identity_warning(lane, message.sender_label)
+        warning = (
+            None if message.from_system else await _link_mail_identity_warning(lane, message.sender_label)
+        )
         if warning is not None:
             preamble.append(colored(warning, fg_color=MUTED_COLOR, bold=True))
+        if message.from_system:
+            preamble.append(colored(_system_mail_note(session), fg_color=MUTED_COLOR))
         # Received mail names its recipient too (issue #810): the reader,
         # as a letter's envelope would.
         preamble.append(colored("To: ", fg_color=LABEL_COLOR) + colored(sanitize_text(user.username), fg_color=accent))
@@ -1040,7 +1051,19 @@ async def _display_link_address(lane: DatabaseLane, technical_address: str) -> s
 
 
 async def _display_sender_label(lane: DatabaseLane, message: MailMessage) -> str:
+    """Who a received message is from: `SYSTEM_SENDER_LABEL` for mail the
+    BBS sent (issue #819) -- by its flag, never by the stored name -- else
+    the sender's name or Link address."""
+    if message.from_system:
+        return SYSTEM_SENDER_LABEL
     return await _display_link_address(lane, message.sender_label)
+
+
+def _system_mail_note(session: Session) -> str:
+    """What a system message's view says about its sender (issue #819),
+    in place of the Reply key it does not offer."""
+    name = sanitize_text(session.node_display_name)
+    return f"A notice from {name} itself. There is no one to reply to."
 
 
 async def _display_recipient_label(lane: DatabaseLane, message: MailMessage) -> str:
@@ -1085,8 +1108,10 @@ async def _show_inbox_message(
     *, link_context: LinkContext | None = None,
 ) -> None:
     message = await lane.run(mark_read, user, message)
-    actions = [
-        ("r", menu_key("R", "eply")),
+    # Mail the BBS sent has nobody to answer (issue #819): no Reply key,
+    # and the view says why.
+    actions = [] if message.from_system else [("r", menu_key("R", "eply"))]
+    actions += [
         ("u", menu_key("U", "nread")),
         ("d", menu_key("D", "elete")),
         ("b", menu_key("B", "ack")),
@@ -1108,6 +1133,9 @@ async def _show_inbox_message(
             await lane.run(delete_for_recipient, user, message)
             announce(session, "Message deleted.")
             return
+        if message.from_system:
+            announce(session, _system_mail_note(session), tone="error")
+            continue
         # The same subject rule and quote a board reply uses (issue #675).
         subject = reply_subject(message.subject, max_bytes=MAX_MAIL_SUBJECT_BYTES)
         link_sender = (

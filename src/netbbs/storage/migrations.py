@@ -3567,4 +3567,17 @@ MIGRATIONS = [
             WHERE link_delivery_notice_pending = 1;
         """,
     ),
+    Migration(
+        description=(
+            "Issue #819: `mail_messages.from_system` -- 1 for mail the BBS itself sent (a "
+            "moderation rejection), which has no sender account (`sender_user_id` NULL). The "
+            "flag, not the stored label, is what the mailbox shows as the system and what "
+            "refuses a reply, so no account name can pass for it. 0 for every existing row: "
+            "rejection mail sent before this came from the moderator's account and stays so."
+        ),
+        sql="""
+        ALTER TABLE mail_messages ADD COLUMN from_system INTEGER NOT NULL DEFAULT 0
+            CHECK (from_system IN (0, 1));
+        """,
+    ),
 ]

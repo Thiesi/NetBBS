@@ -1095,7 +1095,18 @@ messages.
 - Mutators re-fetch current deletion state rather than trusting stale message
   objects.
 - Recipient quotas evict the oldest read mail; if all retained mail is unread,
-  sending fails clearly rather than silently dropping unread content.
+  sending fails clearly rather than silently dropping unread content. Local
+  and Link delivery share one rule, `netbbs.mail.make_room`; a read system
+  message goes before any read letter.
+- `sender_user_id IS NULL` means three different things, told apart by other
+  columns: a Link letter (`link_source_event_id` set), mail from the system
+  (`from_system = 1`, issue #819), or a local sender whose account was deleted
+  (neither). Code that treats "no sender account" as one case -- Reply did --
+  must check the flags first. What makes mail the system's is the flag, never
+  `sender_label`: a SysOp may create an account named "System".
+- System mail is written with `sender_deleted_at` already set: nobody's Sent
+  holds it, so the recipient's delete must hard-delete the row, not leave it
+  behind with no one able to remove it.
 - Read receipts are not part of the current model.
 - `created_at` is when a letter was written, not when it arrived: received
   Link mail keeps its sender's signed time (issue #808). Anything ordering a
