@@ -2205,13 +2205,37 @@ caught by the session itself the next time it sends, with the same result.
 
 Local asynchronous mail is a persistent domain distinct from chat `/msg`.
 Messages have sender/recipient views, subject, body, read state, and independent
-delete state. The row is removed when neither side retains it.
+delete state. The row is removed when neither side retains it. A side with no
+local account behind it -- mail received over Link, mail from the system --
+is deleted from the start, so the other side's delete removes the row.
 
-Recipient mailboxes are bounded. When full:
+**Deleting an account** (issue #818) deletes that account's view of each of
+its letters, as if its owner had deleted them: a letter nobody else can see
+goes at once, and a letter the other side still has stays theirs. A sender's
+Sent copy survives its recipient's deletion (`recipient_user_id` is ON DELETE
+SET NULL, like `sender_user_id`), and the Sent list names the recipient as it
+was then, "bob (deleted account)", from `recipient_label`, which the deletion
+writes. Link mail always names its remote address instead. Outbound Link mail
+of a deleted sender keeps its row, so its delivery is still tracked. Before
+#818 the recipient's deletion cascaded and took the sender's copy, and a
+deleted sender (or a Link sender) left rows its recipient could delete from
+view but never remove. The table's CHECK still refuses a row with neither a
+local nor a remote recipient unless its recipient side is deleted.
+
+Recipient mailboxes are bounded (`MAX_MAIL_PER_RECIPIENT`, 500). When full:
 
 - the oldest already-read message may be evicted to make room;
 - unread mail is never silently discarded;
 - if no safe eviction exists, delivery fails explicitly.
+
+The owner can see the cap coming (issue #818): the Inbox header counts
+"N of 500", and from 450 (nine in ten) the Inbox says what happens at the
+cap; a mailbox full of unread mail says new mail is turned away. Each
+eviction is counted (`mail_eviction_notices`), and the owner is told once,
+at their next main menu, how many old read messages were removed -- a count,
+never which ones, since the notice outlives them. A warning at the main menu
+before anything is removed was considered and left out: the Inbox is where
+the owner can act on it.
 
 Local mail is the domain extended by Link messages; Link mail does not create a
 parallel mailbox UI.
@@ -2225,6 +2249,19 @@ offers no `[E]-mail` and its header no mail count. It gates the caller, not
 the recipient: mail to an account below the level still arrives, and waits
 until the SysOp raises the account's level, as a board's posts wait for a
 caller who cannot read them yet.
+
+**Accounts that take no mail** (issues #816, #818). Three accounts are sent
+nothing: the guest account, a disabled account and a signup still awaiting
+approval. Neither of the last two can sign in to read mail, and its sender
+would never learn it went unread. Local mail to one is refused at the To
+prompt and at Send, in plain words ("bob's account is disabled, so it can't
+receive mail."); Link mail bounces `recipient_unavailable` (§10.3), whose
+wording, "that account is not taking mail at the moment", says neither which
+state nor why: whether an account is disabled is this node's business, and
+both states can end. The refusing node's SysOp sees the plain reason in
+Refused Link mail. Mail already in an account when it is disabled stays
+there for the day it is enabled again. A retired username (#594) has no
+account and bounces `unknown_recipient` like any unknown name.
 
 The guest account (§4.6) never has mail, whatever its level and whatever the
 mail level says, and nothing is delivered to it. Local mail to it is refused
@@ -4626,8 +4663,10 @@ Separate signed events represent:
 - accepted into the recipient mailbox;
 - bounced because of unknown recipient, full mailbox, blocking, a letter the
   recipient node cannot decrypt, a malformed letter, a recipient that takes no
-  mail (`no_mailbox`: the node's shared guest account, issue #816, §6.4), or
-  another defined terminal failure. Blocking has two codes:
+  mail (`no_mailbox`: the node's shared guest account, issue #816, §6.4), an
+  account that takes none at the moment (`recipient_unavailable`: disabled or
+  awaiting approval, not saying which, issue #818, §6.4), or another defined
+  terminal failure. Blocking has two codes:
   `blocked_sender` is the recipient *node's* trust policy refusing the
   sender or its node (§12.4), and `blocked_by_recipient` is the recipient
   *person* having blocked this sender (issue #817, §6.4). The sender is told
@@ -4675,8 +4714,8 @@ signed bounce rather than an exception that would lose the letter in silence:
   or not base64 at all, bounces `undecryptable`. It used to bounce
   `unknown_recipient`, which sent the sender looking for a typo.
 
-`undecryptable`, `malformed`, `no_mailbox` and `blocked_by_recipient` are
-bounce reasons added after v7.13.0. Every
+`undecryptable`, `malformed`, `no_mailbox`, `blocked_by_recipient` and
+`recipient_unavailable` are bounce reasons added after v7.13.0. Every
 earlier release keeps a received bounce's reason without checking it (v7.13
 and older ignore it entirely and just mark the message bounced), so a new code
 reaches an older sender as a plain bounce and costs it nothing but the
