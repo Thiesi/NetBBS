@@ -1539,6 +1539,12 @@ class EditorKeyKind(Enum):
     PAGE_UP = auto()
     PAGE_DOWN = auto()
     CTRL = auto()
+    # Alt+Backspace: ESC followed by 0x7F or 0x08 (issue #815). The prose
+    # editor deletes the word before the cursor with it -- the same as its
+    # Ctrl-W, which a browser keeps for closing the tab. Ctrl+Backspace
+    # cannot be told apart: most terminals send it as 0x08, the byte many
+    # BBS clients send for a plain Backspace.
+    WORD_BACKSPACE = auto()
 
 
 @dataclass(frozen=True)
@@ -1632,6 +1638,8 @@ async def read_editor_key(
             peek = await _read_byte_with_timeout(source, _FOLLOWUP_BYTE_TIMEOUT)
             if peek is None:
                 return EditorKey(EditorKeyKind.ESCAPE)
+            if peek in (_BS, _DEL):
+                return EditorKey(EditorKeyKind.WORD_BACKSPACE)
             _push_back(source, peek)
             key = await _read_escape_sequence(source)
             if isinstance(key, ColorCode):

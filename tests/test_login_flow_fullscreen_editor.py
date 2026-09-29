@@ -224,8 +224,8 @@ def test_profile_toggle_switches_the_preference_on_and_off(db, lane, alice):
     # First "f" turns it on, second turns it back off.
     assert fullscreen_editor_enabled(db, alice) is False
     text = _visible(session)
-    assert "Fullscreen editor for posts/bio: on" in squeezed(text)
-    assert "Fullscreen editor for posts/bio: off" in squeezed(text)
+    assert "Fullscreen editor (all writing): on" in squeezed(text)
+    assert "Fullscreen editor (all writing): off" in squeezed(text)
 
 
 def test_profile_color_depth_toggle_cycles_auto_truecolor_256(db, lane, alice):

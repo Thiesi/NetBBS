@@ -997,6 +997,10 @@ class WebSession(Session):
                         self._typed_pipe_codes.extend(pasted_color.translate(item.params))
                     continue
                 if isinstance(item, _AltKey):
+                    if item.char in (_BS, _DEL):
+                        # Alt+Backspace (issue #815): the prose editor's word
+                        # delete here, where the browser keeps Ctrl+W.
+                        return EditorKey(EditorKeyKind.WORD_BACKSPACE)
                     continue  # not a key this editor surfaces, same as INSERT below
                 if isinstance(item, _SpecialKey):
                     kind = _SPECIAL_TO_EDITOR_KIND.get(item.name)
