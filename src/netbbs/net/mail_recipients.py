@@ -9,17 +9,22 @@ leave it:
   of a linked BBS. Several matches are listed under the prompt, as chat's
   completion lists them.
 - **`?`** and Enter opens a list of everyone the caller can write to --
-  recent correspondents first, then the linked BBSes, then the members.
+  recent correspondents first, then the members, then the linked BBSes.
   `name@?` lists just the linked BBSes, for that name. Choosing a BBS
   without a name asks for the name there.
 
 What either offers is an `AddressBook`, gathered once as the prompt opens
 (the completer runs inside the line editor and cannot reach the
-database). It lists only people mail can reach from this caller: not the
-caller, not the guest account, a disabled account or a signup waiting for
-approval (`mail_recipient_refusal`), not someone who blocked the caller
-(`mail_sender_refusal`), and on Link only nodes this BBS has met and will
-send mail to. Nobody is revealed who could not be written to anyway.
+database). It never holds the caller or the guest account. The list also
+shows, muted, with `-` for a number and the reason beside it, the people
+and BBSes the caller cannot write to right now (issue #920): someone who
+blocked the caller (`mail_sender_refusal`), a disabled account or a signup
+waiting for approval (`mail_recipient_refusal`), and a met BBS still on
+probation (`link_mail_refusal`). Each reason is the `tag` of the same
+`MailRefusal` whose sentence the To prompt answers with when the address
+is typed. A BBS whose mail the SysOp closed (quarantined or blocked) is
+left out. Tab offers only what can be picked: completion types an address
+the To prompt will take.
 
 Whatever is completed or chosen is only text in the To field: the To
 prompt checks it exactly as it checks a typed address, and Send checks
@@ -44,12 +49,20 @@ from netbbs.link.enforcement import LinkPolicyAction, decide_node_action
 from netbbs.link.node_profiles import (
     UNKNOWN_NODE_NAME,
     UNNAMED_NODE_NAME,
+    identity_for_fingerprint,
     link_address_label,
     met_peer_identities,
     name_key,
     resolve_stored_peer_reference,
 )
-from netbbs.mail import mail_recipient_refusal, mail_sender_refusal, recent_correspondents, split_link_address
+from netbbs.link.trust import TrustState
+from netbbs.mail import (
+    MailRefusal,
+    mail_recipient_refusal_detail,
+    mail_sender_refusal_detail,
+    recent_correspondents,
+    split_link_address,
+)
 from netbbs.net.char_input import CandidateListPrinter, Completer, InputCancelled, move_cursor
 from netbbs.net.picker import pick_item
 from netbbs.net.session import Session, write_prompt
@@ -125,6 +138,10 @@ class RecipientChoice:
     linked: bool = False
     #: A BBS's DNS name, which Tab also matches.
     dns_name: str | None = None
+    #: Why this one can't be written to right now (a `MailRefusal.tag`), or
+    #: `None` when it can (issue #920). The list shows it and does not let
+    #: it be picked; Tab does not offer it.
+    refusal: str | None = None
 
 
 @dataclass(frozen=True)
@@ -145,54 +162,88 @@ def _node_reference(db: Database, fingerprint: str, identity) -> str:
     return fingerprint
 
 
-def _mail_open_nodes(db: Database) -> dict[str, tuple[object, str]]:
-    """Met nodes this BBS will send mail to (issue #804), by fingerprint:
-    their identity and the reference Tab types for them."""
+#: The list's words for a BBS still on probation (issue #920).
+NOT_LINKED_TAG = "not linked yet"
+
+
+def link_mail_refusal(db: Database, fingerprint: str) -> MailRefusal | None:
+    """Why this node will not send mail to `fingerprint`, or `None` when it
+    will (issue #804): the To prompt's sentence for a typed address, and
+    the list's words for it (issue #920). A node on probation is listed,
+    as not linked yet; one whose mail is closed (quarantined or blocked) is
+    not, so its `tag` is `None`."""
+    decision = decide_node_action(db, fingerprint, LinkPolicyAction.LINK_MAIL)
+    if decision.allowed:
+        return None
+    label = sanitize_text(identity_for_fingerprint(db, fingerprint).label)
+    if decision.state == TrustState.PROBATIONARY:
+        return MailRefusal(f"{label} is not linked yet; mail opens once the SysOp establishes it.", NOT_LINKED_TAG)
+    return MailRefusal(f"Mail to {label} is closed on this BBS.", None)
+
+
+def _listed_nodes(db: Database) -> dict[str, tuple[object, str, str | None]]:
+    """Met nodes the list shows, by fingerprint: their identity, the
+    reference Tab types for them, and why mail can't go there yet, if it
+    can't (see `link_mail_refusal`)."""
     nodes = {}
     for identity in met_peer_identities(db):
-        if not decide_node_action(db, identity.fingerprint, LinkPolicyAction.LINK_MAIL).allowed:
+        refusal = link_mail_refusal(db, identity.fingerprint)
+        if refusal is not None and refusal.tag is None:
             continue
-        nodes[identity.fingerprint] = (identity, _node_reference(db, identity.fingerprint, identity))
+        nodes[identity.fingerprint] = (
+            identity,
+            _node_reference(db, identity.fingerprint, identity),
+            None if refusal is None else refusal.tag,
+        )
     return nodes
 
 
+def _member_refusal(db: Database, account: User, sender: User) -> MailRefusal | None:
+    """The To prompt's own checks of a member, in its order: whether the
+    account takes mail at all, then whether it takes it from `sender`."""
+    return mail_recipient_refusal_detail(db, account) or mail_sender_refusal_detail(db, account, sender=sender)
+
+
 def gather_address_book(db: Database, user: User, *, link_enabled: bool) -> AddressBook:
-    """Who `user` can write to from here, for the To prompt's completion
-    and list (see the module docstring for who is left out)."""
-    members = {
-        account.id: account
-        for account in list_users(db)
-        if account.id != user.id
-        and mail_recipient_refusal(db, account) is None
-        and mail_sender_refusal(db, account, sender=user) is None
-    }
-    nodes = _mail_open_nodes(db) if link_enabled else {}
+    """Who `user` can write to from here, and who not and why, for the To
+    prompt's completion and list (see the module docstring)."""
+    members: dict[int, tuple[User, str | None]] = {}
+    for account in list_users(db):
+        if account.id == user.id:
+            continue
+        refusal = _member_refusal(db, account, user)
+        if refusal is not None and refusal.tag is None:
+            continue
+        members[account.id] = (account, None if refusal is None else refusal.tag)
+    nodes = _listed_nodes(db) if link_enabled else {}
 
     recent: list[RecipientChoice] = []
     for who in recent_correspondents(db, user, limit=RECENT_LIMIT):
         if isinstance(who, int):
-            account = members.get(who)
-            if account is None:
+            if who not in members:
                 continue
+            account, refusal = members[who]
             name = sanitize_text(account.username)
-            recent.append(RecipientChoice("person", name, name, name, recent=True))
+            recent.append(RecipientChoice("person", name, name, name, recent=True, refusal=refusal))
             continue
         split = split_link_address(who)
         if split is None or split[1] not in nodes or not is_valid_user_part(split[0]):
             continue
         user_part, fingerprint = split
-        identity, reference = nodes[fingerprint]
+        identity, reference, refusal = nodes[fingerprint]
         recent.append(RecipientChoice(
             "person",
             f"{user_part}@{fingerprint}",
             sanitize_text(link_address_label(user_part, reference)),
             sanitize_text(link_address_label(user_part, identity.label)),
-            recent=True, linked=True,
+            recent=True, linked=True, refusal=refusal,
         ))
     recent_ids = {choice.text for choice in recent}
     everyone = [
-        RecipientChoice("person", name, name, name)
-        for name in (sanitize_text(account.username) for account in members.values())
+        RecipientChoice("person", name, name, name, refusal=refusal)
+        for name, refusal in (
+            (sanitize_text(account.username), refusal) for account, refusal in members.values()
+        )
         if name not in recent_ids
     ]
     everyone.sort(key=lambda choice: choice.text.casefold())
@@ -200,9 +251,9 @@ def gather_address_book(db: Database, user: User, *, link_enabled: bool) -> Addr
         (
             RecipientChoice(
                 "node", fingerprint, sanitize_text(reference), sanitize_text(identity.label), linked=True,
-                dns_name=identity.dns_name,
+                dns_name=identity.dns_name, refusal=refusal,
             )
-            for fingerprint, (identity, reference) in nodes.items()
+            for fingerprint, (identity, reference, refusal) in nodes.items()
         ),
         key=lambda choice: choice.label.casefold(),
     )
@@ -220,7 +271,11 @@ class RecipientCompleter:
     BBS for the name before it. The line editor replaces only the word
     since the last space, and a BBS's name can hold spaces, so each match
     is handed back from that word on. `last_matches` keeps the matched
-    addresses whole, for `print_matches` to list."""
+    addresses whole, for `print_matches` to list.
+
+    Only what can be written to is offered (issue #920): the list shows
+    the rest with the reason, but a completion is an address the To
+    prompt would take."""
 
     def __init__(self, book: AddressBook, session: Session, prompt: str) -> None:
         self._book = book
@@ -237,15 +292,18 @@ class RecipientCompleter:
             found = [
                 link_address_label(user_part, node.completion)
                 for node in self._book.nodes
-                if name_key(node.completion).startswith(needle)
+                if node.refusal is None
+                and (
+                    name_key(node.completion).startswith(needle)
                 or name_key(node.label).startswith(needle)
-                or (node.dns_name is not None and node.dns_name.startswith(needle))
+                    or (node.dns_name is not None and node.dns_name.startswith(needle))
+                )
             ]
         else:
             needle = typed.casefold()
             found = [
                 person.completion for person in self._book.people
-                if person.completion.casefold().startswith(needle)
+                if person.refusal is None and person.completion.casefold().startswith(needle)
             ]
         return list(dict.fromkeys(found))
 
@@ -316,7 +374,9 @@ async def choose_recipient(
     """The list `picker_request` asked for; returns the To text chosen, or
     `None` when the caller went back. A BBS chosen without a name asks for
     the name there; the address then names the BBS by its technical
-    identity (see the module docstring)."""
+    identity (see the module docstring). A row that can't be written to
+    shows its reason in place of its description and can't be picked
+    (issue #920)."""
     scope, name = request
     choices = list(book.nodes) if scope == "nodes" else [*book.people, *book.nodes]
     if scope == "nodes":
@@ -327,6 +387,8 @@ async def choose_recipient(
     positions = {id(choice): index for index, choice in enumerate(choices)}
 
     def describe(choice: RecipientChoice) -> str | None:
+        if choice.refusal is not None:
+            return choice.refusal
         if choice.kind == "node":
             return "linked BBS"
         if choice.recent:
@@ -338,6 +400,7 @@ async def choose_recipient(
         name_of=lambda choice: choice.label,
         stable_id_of=lambda choice: positions[id(choice)],
         description_of=describe,
+        selectable_of=lambda choice: choice.refusal is None,
         title=title, breadcrumb=("Mail",), empty_message=empty,
         **picker_style,
     )

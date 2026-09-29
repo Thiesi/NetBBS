@@ -131,10 +131,13 @@ for first: a user name, or `name@TheirBBS` for someone on a linked BBS. An
 empty line or Esc there cancels. Press Tab to complete a name, or, after the
 `@`, the name of a linked BBS; if several fit, they are listed under the
 prompt. Type `?` and press Enter for a list of everyone you can write to:
-people you had mail with lately first, then the linked BBSes, then the
-members of this board. Choose a BBS and you are asked for the person's user
-name there; `name@?` lists just the BBSes for that name. Only people who can
-receive mail from you are offered.
+people you had mail with lately first, then the members of this board, then
+the linked BBSes. Choose a BBS and you are asked for the person's user
+name there; `name@?` lists just the BBSes for that name. The list also shows
+who you can't write to right now, dimmed, with `-` instead of a number and
+the reason beside the name: they don't accept your mail, their account is
+disabled or awaiting approval, or their BBS is not linked yet (this board's
+SysOp hasn't finished linking it). Tab only completes names you can write to.
 
 A letter can go to several people, up to 20, here and on linked BBSes
 alike: separate them with commas, as in `bob, carol@Farpoint`. Tab completes
