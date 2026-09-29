@@ -255,6 +255,11 @@ class Session(ABC):
     #: Set through `binary_transfer()`.
     binary_transfer_active: bool = False
 
+    #: True while a door owns the terminal (`netbbs.doors.runtime`), so a
+    #: notice from another caller -- a direct-chat invitation (issue #843)
+    #: -- is not written into the door's screen.
+    door_active: bool = False
+
     #: The server-side copy of this caller's screen (issue #764), created
     #: on the first write. See `screen_copy`.
     _screen_copy: TerminalEmulator | None = None

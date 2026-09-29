@@ -185,6 +185,7 @@ from netbbs.net.sort_ui import SORT_MODE_LABELS, prompt_sort_change
 from netbbs.permissions import meets_level
 from netbbs.rendering import (
     ACCENT_COLOR,
+    ALERT_COLOR,
     CHAT_BODY_COLOR,
     CHANNEL_TYPE_COLOR,
     GATE_COLOR,
@@ -1384,13 +1385,11 @@ def _chat_author_label(db: Database, channel: Channel, user: User) -> str:
     rather than either duplicating the coloring or trying
     to parse a fully-composed string back apart.
 
-    Composition confirmed with Thiesi (issue #64): `~nick~ (=Real
-    Name=)` when a nick is set, `display-name-or-username (=Real
-    Name=)` otherwise — deliberately not a three-name `~nick~
-    display-name (=Real Name=)` form, which would put three
-    simultaneous names on every line of live chat and reverse the
-    plain alias's deliberate clutter reduction; `/whois` still supplies
-    canonical/display identity on demand.
+    Composition confirmed with Thiesi (issue #64): `nick|username
+    (=Real Name=)` when a nick is set (the username beside the alias
+    since issue #843), `display-name-or-username (=Real Name=)`
+    otherwise — deliberately not a form that adds the display name as
+    well; `/whois` still supplies it on demand.
     """
     ordinary = chat_stream_label(db, user)
     verified_unit = format_verified_name_unit(
@@ -3796,7 +3795,7 @@ _COMMAND_INFO: dict[str, tuple[str, str]] = {
     "dm": ("/dm <user>", "Invite an online user to a live, fullscreen direct chat."),
     "help": ("/help [command]", "List available commands, or show detail for one."),
     "me": ("/me <action>", 'Send an action message (e.g. "* alice waves").'),
-    "nick": ("/nick [name]", "Set your display alias; a bare /nick clears it."),
+    "nick": ("/nick [name]", "Set a display alias, shown as alias|username; a bare /nick clears it."),
     "clear": ("/clear", "Clear your own screen (alias: /cls). Cosmetic only, nothing else changes."),
     "away": ("/away [message]", "Mark yourself away, or clear away status."),
     "timestamps": ("/timestamps [on|off]", "Toggle chat timestamps, or set them on/off explicitly."),
@@ -6114,7 +6113,7 @@ async def run_direct_chat_invite_flow(
     session_registry: ActiveSessionRegistry,
     user: User,
     target: User,
-) -> None:
+) -> bool:
     """
     Send a mutual direct-chat invite to `target` and run the whole
     handshake to its conclusion, on `session`'s own behalf (design doc
@@ -6135,17 +6134,26 @@ async def run_direct_chat_invite_flow(
     didn't resolve first the moment any one of them does, so accepting
     (or declining) from one of an account's several simultaneous
     sessions can never leave the others in limbo.
+
+    An invitation opens only on the target's main menu. A target session
+    that is anywhere else is told about it in a one-line notice, unless
+    a door or a file transfer owns its terminal, and the waiting screen
+    says where the invitation will open (issue #843).
+
+    Returns whether a direct chat ran. It clears the screen on its way
+    out, so a caller that would otherwise hold an outcome on a "Press
+    any key" pause has nothing left to show.
     """
     if not await lane.run(accepts_direct_messages, target):
         await session.write_line(
             colored(f"{sanitize_text(target.username)} has opted out of direct messages.", fg_color=MUTED_COLOR)
         )
-        return
+        return False
     if not presence.is_online(target.username):
         await session.write_line(
             colored(f"{sanitize_text(target.username)} is not currently online.", fg_color=MUTED_COLOR)
         )
-        return
+        return False
 
     invites: dict[object, DirectChatInvite] = {}
     for target_session in session_registry.sessions_for_username(target.username):
@@ -6160,7 +6168,21 @@ async def run_direct_chat_invite_flow(
                 fg_color=MUTED_COLOR,
             )
         )
-        return
+        return False
+
+    away = [target_session for target_session in invites if not direct_invites.is_watching(target_session)]
+    told = 0
+    for target_session in away:
+        if getattr(target_session, "door_active", False) or getattr(target_session, "binary_transfer_active", False):
+            continue
+        told += await session_registry.notify_one(
+            target_session,
+            colored(
+                f"\r\n*** {sanitize_text(user.username)} invites you to a direct chat. "
+                "Go back to the main menu within a minute to answer. ***",
+                fg_color=ALERT_COLOR, bold=True,
+            ),
+        )
 
     future_to_session = {invite.outcome: target_session for target_session, invite in invites.items()}
 
@@ -6175,6 +6197,16 @@ async def run_direct_chat_invite_flow(
         header_color=await lane.run(effective_header_color_256),
     node_name_gradient=session.node_name_gradient)
     await session.write_line(f"\r\n{heading}")
+    if len(away) == len(invites):
+        # Every one of the target's sessions is away from its main menu.
+        where = "They have been told, and the" if told else "The"
+        await session.write_line(
+            colored(
+                f"{sanitize_text(target.username)} is not at the main menu. {where} invitation "
+                "opens when they get there.",
+                fg_color=MUTED_COLOR,
+            )
+        )
     await session.write(f"{menu_key('C', 'ancel')}: ")
 
     # Issue #121: this is a real key-dispatch loop, not "any completed
@@ -6222,7 +6254,7 @@ async def run_direct_chat_invite_flow(
             for target_session in invites:
                 direct_invites.cancel(target_session)
             await session.write_line(colored("\r\nInvitation cancelled.", fg_color=MUTED_COLOR))
-            return
+            return False
 
         if resolved:
             if cancel_key_task not in done:
@@ -6253,9 +6285,11 @@ async def run_direct_chat_invite_flow(
             accent_color=await lane.run(effective_accent_color_256),
             header_color=await lane.run(effective_header_color_256),
         )
+        return True
     elif outcome == "declined":
         await session.write_line(colored(f"\r\n{sanitize_text(target.username)} declined.", fg_color=MUTED_COLOR))
     else:  # "timed_out" -- "cancelled" never reaches here (that's only ever this same inviter's own cancel_key_task path above)
         await session.write_line(
             colored(f"\r\n{sanitize_text(target.username)} didn't respond in time.", fg_color=MUTED_COLOR)
         )
+    return False
