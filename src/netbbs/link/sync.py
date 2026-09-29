@@ -198,7 +198,11 @@ from netbbs.link.mail import (
 from netbbs.link.protocol import (
     DEFERRED_EVENT_RETRY_SECONDS, MAX_EVENTS_PER_REQUEST, HelloMessage, LinkNode, LinkProtocolError,
 )
-from netbbs.link.relay_mailbox import RelayableEnvelope
+from netbbs.link.relay_mailbox import (
+    RELAY_MAILBOX_RETENTION_DAYS,
+    RelayableEnvelope,
+    prune_expired_relay_mailbox_envelopes,
+)
 from netbbs.link.relay_selection import TARGET_RELAY_COUNT, relays_needing_replacement, select_relay_candidates
 from netbbs.link.reliability import record_dial_outcome
 from netbbs.link.onboarding import participation_accepted
@@ -508,6 +512,10 @@ async def run_link_sync(
             node, session, lane, enforce_trust_policy=enforce_trust_policy
         )
         await _forget_retired_attestations(lane)
+        # Issue #891: mail held here as a relay that its recipient never
+        # came back for. Every pass, whatever this node's own mode: a node
+        # that stopped serving relays still holds what it took before.
+        await _prune_relay_mailbox(lane)
         # Issue #58: relay selection/pickup only makes sense
         # for an outgoing-only node -- a full peer is directly dialable
         # by definition, so it has nothing to gain from seeking relays
@@ -1594,6 +1602,27 @@ async def _reconcile_own_attestations(node: LinkNode, lane: DatabaseLane) -> Non
         _logger.info(
             "Link attestations: %s %s attestation (%s)",
             change.action, change.attribute, change.reason,
+        )
+
+
+async def _prune_relay_mailbox(lane: DatabaseLane) -> None:
+    """Drop relay-mailbox envelopes older than `RELAY_MAILBOX_RETENTION_DAYS`
+    (issue #891) and say what went. A WARNING, so it reaches the SysOp's
+    bounded diagnostic log (design doc §13.11): the mail is gone for good,
+    and neither end hears it from this node."""
+    try:
+        dropped = await lane.run(prune_expired_relay_mailbox_envelopes)
+    except sqlite3.Error as exc:
+        _logger.warning("Link relay mailbox: could not drop expired envelopes: %s", exc)
+        return
+    if dropped:
+        _logger.warning(
+            "Link relay mailbox: dropped %d envelope(s) held longer than %d days for %d "
+            "recipient(s) that never collected them: %s",
+            sum(dropped.values()),
+            RELAY_MAILBOX_RETENTION_DAYS,
+            len(dropped),
+            ", ".join(f"{fingerprint} ({count})" for fingerprint, count in sorted(dropped.items())),
         )
 
 

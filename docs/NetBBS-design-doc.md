@@ -3204,13 +3204,35 @@ reliability degrades.
 The relay mailbox currently supports opaque encrypted Link-message envelopes:
 
 - relays see routing metadata and size, not message content;
-- storage is bounded;
+- storage is bounded in number and in time (below);
 - pickup authenticates the intended recipient;
 - the recipient re-runs normal event verification rather than trusting the
   relay’s claim;
 - relaying does not introduce strangers or weaken the rule that sender and
   recipient identities must already be known sufficiently to verify and
   encrypt.
+
+A relay holds at most `MAX_MAILBOX_ENVELOPES_PER_RECIPIENT` (50) envelopes
+per recipient, refusing a further deposit with HTTP 507, and keeps each for
+at most `RELAY_MAILBOX_RETENTION_DAYS` (30 days) from its deposit (issue
+#891). Every sync pass drops what has waited longer, acknowledgements
+(`link_message_accepted`/`_bounced`) as well as letters, and logs a WARNING
+naming each recipient and how many went. Without the time limit, a recipient
+that never came back -- retired, reinstalled under a new key, gone -- kept
+its 50 slots forever and every later letter for it was refused.
+
+Dropping is silent toward both ends. The relay can neither read nor sign
+anything for the recipient, so it cannot bounce, and nothing announces the
+retention on the wire. The sender learns of the loss from its own timeout on
+relay handoffs: a letter handed to a relay expires on the sending side 14
+days after the handoff (issue #874), with a notice saying no answer came
+back. The relay's retention must therefore stay comfortably longer than that
+timeout, so that a letter the sender is still waiting on is never the one
+dropped. For that reason it is a constant rather than a SysOp setting: a
+relay configured to keep mail a week would turn the sender's "may not have
+arrived" into "certainly did not". The SysOp's **Link status** relay section
+lists each recipient held for, with its count and the age of its oldest
+deposit, oldest first.
 
 Reliability scoring is direct-observation operational data, not Phase-4 social
 reputation.
@@ -6405,7 +6427,8 @@ descriptors (`_MAX_CANDIDATE_DESCRIPTORS = 500`, new-fingerprint admission
 capped but refreshing an already-tracked candidate is always allowed),
 relay-serving slots (`max_relay_clients`, decline-not-error), relay mailbox
 envelopes per recipient (`MAX_MAILBOX_ENVELOPES_PER_RECIPIENT = 50`, HTTP 507
-on overflow, no eviction), Link mail delivery/acknowledgement retry
+on overflow, no eviction; since issue #891 each envelope is also dropped after
+`RELAY_MAILBOX_RETENTION_DAYS`, §8.5), Link mail delivery/acknowledgement retry
 (§13.7's backoff-then-dead-letter), local mailbox size (`MAX_MAIL_PER_
 RECIPIENT`, evict-oldest-read/refuse-if-all-unread — already applied to
 incoming Link mail too, bouncing rather than silently dropping), and Zmodem
