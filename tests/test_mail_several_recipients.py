@@ -295,6 +295,46 @@ def test_mixed_local_and_link_recipients_from_the_to_prompt(db, lane):
     assert rows[0]["mail_group_id"] == rows[1]["mail_group_id"] is not None
 
 
+_KEEP = object()
+
+
+class _KeepsWhatIsShown(FakeSession):
+    """Answers `_KEEP` with what the prompt opened on: Enter on a
+    prefilled field."""
+
+    async def read_line(self, echo=True, history=None, completer=None, **kwargs):
+        line = next(self._lines, "")
+        if line is _KEEP:
+            self.seeded.append(kwargs.get("initial", ""))
+            return kwargs.get("initial", "")
+        self._lines = iter([line, *self._lines])
+        return await super().read_line(echo, history, completer, **kwargs)
+
+
+def test_a_node_name_with_a_comma_is_quoted_and_survives_the_to_field(db, lane):
+    from netbbs.link.node_profiles import link_address_label
+
+    assert link_address_label("carol", "Cats, Dogs") == 'carol@"Cats, Dogs"'
+    alice, _bob = _user(db, "alice"), _user(db, "bob")
+    node_identity, farpoint = bootstrap_node_identity("roanoke"), bootstrap_node_identity("farpoint")
+    link_context = _link_context_with_known_peer(db, node_identity, farpoint, friendly_name="Cats, Dogs")
+    # Sent after [T]o is opened and left as it reads: the label splits back
+    # into the same two addresses.
+    session = _KeepsWhatIsShown(
+        keys=["c", "t", "s", "b"], lines=['bob, carol@"Cats, Dogs"', "Hi", "x", "/done", _KEEP],
+    )
+    session.terminal_width = 200
+
+    asyncio.run(browse_mail(session, lane, alice, link_context=link_context))
+
+    assert "Message sent to 2 people." in _written_text(session)
+    assert any(seed.startswith('bob, carol@"Cats, Dogs') for seed in session.seeded)
+    remote = db.connection.execute(
+        "SELECT recipient_remote_address FROM mail_messages WHERE recipient_remote_address IS NOT NULL"
+    ).fetchone()
+    assert remote["recipient_remote_address"] == f"carol@{farpoint.fingerprint}"
+
+
 # -- reading ------------------------------------------------------------------
 
 
