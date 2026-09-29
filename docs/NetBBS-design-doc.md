@@ -2385,6 +2385,38 @@ text, without codes, as a board reply does. Stripping codes on display was the
 alternative. It was rejected because boards already show them safely, and a
 writer who typed `|12` meant color.
 
+**Mail from where callers meet** (issue #821). A caller writes to someone from
+the screen where they found them, without typing an address:
+- the Directory's member card, `[M]ail`;
+- Who's online, `[E]-mail` on a selected caller (`[M]` there is the live
+  message), for a local caller and for one on a linked node;
+- Previous callers, `[M]ail a caller`, which asks for the row's number;
+- the board reader, `[M]ail author`: a private reply to the post's author, with
+  the post's `Re:` subject and quote, as a board reply has (§6.1). It is offered
+  to anyone who may read the post, whether or not they may post there, and has
+  a draft slot of its own per post, apart from mail replies.
+
+All four open the compose screen (§3.5, issue #813) with To filled in, through
+one entry point (`netbbs.net.mail_flow.mail_someone`) that makes the mailbox's
+own checks: `caller_mail_refusal` for the caller, `mail_recipient_refusal` for
+a local recipient, and for someone on another node the check a Link reply's
+address gets (issue #805) -- the address is their stable
+`user@<home-node-fingerprint>` (Who's online's presence, a carried post's
+author label), shown by the node's current name. The action is not offered
+while mail is closed to the caller, on the caller's own card, post or call,
+for a deleted account, or for a carried post's author while Link is off; a
+recipient-side refusal (the guest account, a peer on probation, a node this one
+is not linked with) is said when the key is pressed. Opting out of direct
+messages (§6.3) does not close mail: Who's online still offers `[E]-mail` for
+such a caller. A Previous callers row whose name the roll hides is not
+mailable, since To would show the name; a SysOp, who sees every name there,
+may write to any. After the letter is sent, kept or given up, the caller is
+back on the screen they came from with the outcome above its prompt.
+
+A letter started from the Directory, Who's online or Previous callers is the
+caller's new letter, the same slot `[C]ompose` uses: a kept new letter is
+offered first, and resuming it keeps its own recipient.
+
 ### 6.5 Communities
 
 A Community is a topic-oriented coordination/container object above boards,

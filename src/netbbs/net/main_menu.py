@@ -863,7 +863,8 @@ async def _main_menu_loop(
             elif choice == "r":
                 await session.write_line("")
                 await _previous_callers_screen(
-                    session, db, user, current_history_id=current_history_id
+                    session, db, user, current_history_id=current_history_id,
+                    lane=lane, link_context=link_context,
                 )
                 redraw = True
             elif choice == "w" and node_controls is not None:
