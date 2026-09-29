@@ -59,6 +59,7 @@ _REASON_TEXT = {
     "mailbox_full": "the recipient's mailbox was full of unread mail",
     "malformed": "it was not a valid letter (sender name, subject or body)",
     "undecryptable": "it could not be decrypted with this node's key",
+    "no_mailbox": "it was addressed to the guest account, which takes no mail",
 }
 
 #: Reasons a SysOp answers with trust: establishing, or lifting a block.

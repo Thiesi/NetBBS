@@ -128,6 +128,17 @@ def test_a_push_names_the_node_that_made_it_and_not_a_sender_it_merely_claims(db
     assert refusal.sender_user is None
 
 
+def test_every_reason_a_sender_can_be_told_has_words_for_the_sysop_too():
+    """The two sides of one refusal: whatever code the sender's bounce can
+    carry, the refusing node's SysOp reads in words of their own."""
+    from netbbs.link.events import _VALID_BOUNCE_REASONS
+    from netbbs.link.mail import _BOUNCE_REASON_TEXT
+    from netbbs.link.mail_refusals import _REASON_TEXT
+
+    assert set(_VALID_BOUNCE_REASONS) - {"blocked_sender"} <= set(_REASON_TEXT)
+    assert set(_BOUNCE_REASON_TEXT) - {"blocked_sender"} <= set(_REASON_TEXT)
+
+
 def test_an_unreadable_letter_is_not_recorded_and_does_not_raise(db):
     record_link_mail_refusal(db, {"envelope": {"payload": {}}}, "malformed", via=VIA_DIRECT)
     record_link_mail_refusal(db, {}, "malformed", via=VIA_DIRECT)
