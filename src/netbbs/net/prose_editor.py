@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from netbbs.net.char_input import EditorKey, EditorKeyKind
@@ -38,7 +38,11 @@ from netbbs.net.help_overlay import show_help
 from netbbs.net.session import Session, SessionClosedError, write_prompt
 from netbbs.net.session_activity import records_activity
 from netbbs.rendering import (
+    HEADER_COLOR,
+    LABEL_COLOR,
     MUTED_COLOR,
+    RULE_COLOR,
+    VALUE_COLOR,
     ScreenBuffer,
     Snapshot,
     clear_line,
@@ -47,6 +51,7 @@ from netbbs.rendering import (
     diff_ansi,
     full_render_ansi,
     move_cursor,
+    sanitize_text,
     truncate,
 )
 from netbbs.rendering.pipe_codes import PastedColor
@@ -67,6 +72,26 @@ _STATUS_ROW_OFFSET = 2
 _MIN_WIDTH = 40
 _MIN_HEIGHT = 10
 
+# A header gives up its rows before the text drops below this many.
+_MIN_TEXT_ROWS = 4
+
+_Color = int | tuple[int, int, int]
+# One styled run of a header row: text, color, bold.
+_Run = tuple[str, _Color | None, bool]
+
+
+@dataclass(frozen=True)
+class EditorHeader:
+    """What is being written, drawn above the text (issue #813): a title
+    and the facts that belong with it -- a letter's To and Subject, a post's
+    board and subject. Plain text: the editor sanitizes it and cuts each row
+    to the terminal. Without one, the editor was a blank page with a status
+    line, and nothing on it said whom the letter was for."""
+
+    title: str
+    fields: tuple[tuple[str, str], ...] = ()
+    color: _Color = HEADER_COLOR
+
 
 @dataclass
 class _EditorState:
@@ -74,6 +99,32 @@ class _EditorState:
     max_bytes: int
     scroll_row: int = 0  # index into the current wrap_lines() result
     dirty: bool = False
+    # Rows drawn above the text, fixed for the whole session (issue #813).
+    header: list[list[_Run]] = field(default_factory=list)
+
+
+def _header_rows(header: EditorHeader | None, *, width: int, rows: int, unicode_style: bool) -> list[list[_Run]]:
+    """`header` as rows of styled runs, trimmed so the text keeps at least
+    `_MIN_TEXT_ROWS` of the `rows` the editor has: the rule goes first, then
+    the title, then fields from the last -- whom a letter is for is what a
+    writer most needs to keep in sight."""
+    if header is None:
+        return []
+    title: list[_Run] = [(sanitize_text(header.title), header.color, True)]
+    fields: list[list[_Run]] = [
+        [(f"{sanitize_text(label)}: ", LABEL_COLOR, False), (sanitize_text(value), VALUE_COLOR, False)]
+        for label, value in header.fields
+    ]
+    rule: list[_Run] = [(("\u2500" if unicode_style else "-") * width, RULE_COLOR, False)]
+    keep_title = keep_rule = True
+    while rows - (len(fields) + keep_title + keep_rule) < _MIN_TEXT_ROWS and (fields or keep_title or keep_rule):
+        if keep_rule:
+            keep_rule = False
+        elif keep_title:
+            keep_title = False
+        else:
+            fields.pop()
+    return ([title] if keep_title else []) + fields + ([rule] if keep_rule else [])
 
 
 def _byte_length(text: str) -> int:
@@ -91,6 +142,7 @@ async def edit_prose(
     unicode_style: bool = False,
     keep_pasted_color: bool = False,
     cursor_at_end: bool = False,
+    header: EditorHeader | None = None,
 ) -> str | None:
     """
     Run a fullscreen prose editing session against `session`, returning
@@ -130,9 +182,15 @@ async def edit_prose(
     `keep_pasted_color` (issue #754): pasted SGR color is typed into the
     text as pipe codes, which the caller will show as color -- a post on
     a board that allows it. Without it a pasted SGR is dropped.
+
+    `header` (issue #813) is drawn above the text on every repaint: what is
+    being written and, for a letter, to whom and under what subject. Its
+    rows come out of the text's own, never the status line's.
     """
     width = max(_MIN_WIDTH, session.terminal_width)
-    height = max(_MIN_HEIGHT, session.terminal_height) - _STATUS_ROW_OFFSET - 1
+    rows = max(_MIN_HEIGHT, session.terminal_height) - _STATUS_ROW_OFFSET - 1
+    header_rows = _header_rows(header, width=width, rows=rows, unicode_style=unicode_style)
+    height = rows - len(header_rows)
 
     loaded_text: str | None
     recovered = False
@@ -144,7 +202,7 @@ async def edit_prose(
             draft_path.unlink()
         loaded_text = initial_text
 
-    state = _EditorState(buffer=ProseBuffer.from_text(loaded_text or ""), max_bytes=max_bytes)
+    state = _EditorState(buffer=ProseBuffer.from_text(loaded_text or ""), max_bytes=max_bytes, header=header_rows)
     if cursor_at_end:
         # The separator is for fresh text; a recovered draft is the caller's
         # own words, kept line for line (Codex review on #786).
@@ -385,34 +443,50 @@ def _render(state: _EditorState, width: int, height: int) -> Snapshot:
     into the previous cell's own glyph rather than claiming a column of
     its own. `wrap_lines` already bounds every row to `width` display
     columns, so the `col + w > width` guard below is defensive, not
-    something normal wrapped text should ever hit."""
-    canvas = ScreenBuffer(width, height)
+    something normal wrapped text should ever hit.
+
+    `state.header` (issue #813) takes the top rows and the text the rows
+    under it; `height` is the text's own share."""
+    top = len(state.header)
+    canvas = ScreenBuffer(width, top + height)
+    for header_row, runs in enumerate(state.header):
+        col = 0
+        for text, fg, bold in runs:
+            col = _paint(canvas, header_row, col, text, width=width, fg=fg, bold=bold)
     rows = wrap_lines(state.buffer.lines, width)
     for viewport_row in range(height):
         row_index = state.scroll_row + viewport_row
         if row_index >= len(rows):
             break
-        col = 0
-        last_col: int | None = None
-        for char in rows[row_index].text:
-            w = char_width(char)
-            if w == 0:
-                if last_col is not None:
-                    existing = canvas.get_cell(viewport_row, last_col)
-                    canvas.write_cell(
-                        viewport_row, last_col, existing.char + char,
-                        fg=existing.fg, bg=existing.bg, bold=existing.bold,
-                    )
-                continue
-            if col + w > width:
-                break
-            if w == 2:
-                canvas.write_wide_cell(viewport_row, col, char, fg=None, bg=None, bold=False)
-            else:
-                canvas.write_cell(viewport_row, col, char, fg=None, bg=None, bold=False)
-            last_col = col
-            col += w
+        _paint(canvas, top + viewport_row, 0, rows[row_index].text, width=width)
     return canvas.snapshot()
+
+
+def _paint(
+    canvas: ScreenBuffer, row: int, col: int, text: str, *, width: int, fg: _Color | None = None, bold: bool = False
+) -> int:
+    """Write `text` into `row` from `col` by display width, stopping at
+    `width`; returns the column after it."""
+    last_col: int | None = None
+    for char in text:
+        w = char_width(char)
+        if w == 0:
+            if last_col is not None:
+                existing = canvas.get_cell(row, last_col)
+                canvas.write_cell(
+                    row, last_col, existing.char + char,
+                    fg=existing.fg, bg=existing.bg, bold=existing.bold,
+                )
+            continue
+        if col + w > width:
+            break
+        if w == 2:
+            canvas.write_wide_cell(row, col, char, fg=fg, bg=None, bold=bold)
+        else:
+            canvas.write_cell(row, col, char, fg=fg, bg=None, bold=bold)
+        last_col = col
+        col += w
+    return col
 
 
 async def _redraw(session: Session, state: _EditorState, previous: Snapshot, width: int, height: int) -> Snapshot:
@@ -438,6 +512,7 @@ async def _flush(session: Session, state: _EditorState, width: int, height: int)
     pos = visual_position(state.buffer.lines, width, state.buffer.cursor_line, state.buffer.cursor_col)
     row_text = rows[pos.row_index].text if rows else ""
     display_col = display_width(row_text[: pos.col])
+    top = len(state.header)
     screen_row = pos.row_index - state.scroll_row
     status = (
         f"Line {state.buffer.cursor_line + 1}  Col {state.buffer.cursor_col + 1}  "
@@ -450,10 +525,10 @@ async def _flush(session: Session, state: _EditorState, width: int, height: int)
     if _byte_length(state.buffer.to_text()) >= state.max_bytes:
         status += "  AT LENGTH LIMIT"
     status = truncate(status, width)
-    await session.write(move_cursor(height + _STATUS_ROW_OFFSET, 1))
+    await session.write(move_cursor(top + height + _STATUS_ROW_OFFSET, 1))
     await session.write(clear_line())
     await session.write(colored(status, fg_color=MUTED_COLOR))
-    await session.write(move_cursor(max(1, screen_row + 1), display_col + 1))
+    await session.write(move_cursor(top + max(1, screen_row + 1), display_col + 1))
 
 
 async def _confirm_quit(session: Session) -> str:

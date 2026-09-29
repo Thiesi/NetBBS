@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 
 from netbbs.net.char_input import CANCEL_KEY, EditorKey, EditorKeyKind
 from netbbs.net.composition import ReviewAction, edit_line_body, review_composition
@@ -409,3 +410,100 @@ def test_a_prefilled_fields_viewport_is_the_width_left_after_its_label():
     session = _Session(lines=["x"])
     asyncio.run(read_prefilled_field(session, "Subject", "old"))
     assert seen["viewport"] == 80 - len("Subject: ")
+
+
+# -- issue #813: review pages a long body under its To and Subject ------------
+
+
+def _visible(session: FakeSession) -> str:
+    return re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", _text(session))
+
+
+def _long_body(count: int = 40) -> str:
+    return "\n".join(f"line {n}" for n in range(1, count + 1))
+
+
+def test_review_pages_a_long_body_and_turns_with_page_keys():
+    session = NavigableFakeSession(keys=("n", "n", "p", "c"))
+    action = asyncio.run(
+        review_composition(
+            session, recipient="Alice", subject="Long", body=_long_body(), commit_key="s", commit_label="end",
+            redraw_in_place=True,
+        )
+    )
+    assert action is ReviewAction.CANCEL
+    from netbbs.rendering import clear_screen
+
+    screens = [s for s in _text(session).split(clear_screen()) if s]
+    assert [s.count("(Page ") for s in screens] == [1, 1, 1, 1]
+    assert "(Page 1 of" in screens[0] and "(Page 3 of" in screens[2] and "(Page 2 of" in screens[3]
+    for screen in screens:
+        assert "To: " in screen and "Alice" in screen
+        assert "Subject: " in screen and "Long" in screen
+        assert screen[: screen.index("Choice: ")].count("\n") < session.terminal_height
+    assert "line 1\n" in screens[0] and "line 40" not in screens[0]
+
+
+def test_review_pages_with_arrows_when_the_commit_key_is_p():
+    """A board's `[P]ost` holds `P`: the page keys are `[>]`/`[<]`, as on
+    `show_detail`, and `P` still publishes."""
+    session = NavigableFakeSession(keys=(">", "p"))
+    action = asyncio.run(
+        review_composition(
+            session, recipient=None, subject="Long", body=_long_body(), commit_key="p", commit_label="ost",
+            redraw_in_place=True,
+        )
+    )
+    assert action is ReviewAction.COMMIT
+    text = _visible(session)
+    assert "[>] Next page" in text and "[<] Prev page" in text
+    assert "(Page 2 of" in text
+
+
+def test_review_page_down_turns_the_page():
+    class PagingSession(NavigableFakeSession):
+        async def read_editor_key(self, *, distinguish_ctrl_h: bool = False) -> EditorKey:
+            raw = next(self._keys)
+            if raw == "PAGE_DOWN":
+                return EditorKey(EditorKeyKind.PAGE_DOWN)
+            return EditorKey(EditorKeyKind.CHAR, char=raw)
+
+    session = PagingSession(keys=("PAGE_DOWN", "c"))
+    asyncio.run(
+        review_composition(
+            session, recipient=None, subject="Long", body=_long_body(), commit_key="p", commit_label="ost",
+        )
+    )
+    assert "(Page 2 of" in _text(session)
+
+
+def test_a_carried_error_is_wrapped_and_kept_above_the_prompt():
+    """A long refusal (an ambiguous Link address lists full fingerprints)
+    is wrapped to the terminal and counted against the body's rows, so the
+    screen still fits."""
+    from netbbs.net.notices import announce
+
+    session = NavigableFakeSession(keys=("c",), width=40)
+    announce(session, "More than one linked node goes by that name. " * 4, tone="error")
+    asyncio.run(
+        review_composition(
+            session, recipient="bob", subject="Hi", body=_long_body(), commit_key="s", commit_label="end",
+        )
+    )
+    text = _visible(session)
+    before_prompt = text[: text.index("Choice: ")]
+    assert " ".join(before_prompt.split()).count("More than one linked node goes by that name.") == 4
+    rows = before_prompt.split("\n")
+    assert all(len(row) <= 40 for row in rows)
+    assert len(rows) - 1 < session.terminal_height
+
+
+def test_review_breadcrumb_says_what_is_being_reviewed():
+    session = FakeSession(keys=("c",))
+    asyncio.run(
+        review_composition(
+            session, recipient="bob", subject="Hi", body="Body", commit_key="s", commit_label="end",
+            breadcrumb=("Mail", "New message"),
+        )
+    )
+    assert re.search(r"NetBBS \W Mail \W New message \W Review composition", _visible(session))

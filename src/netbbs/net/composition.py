@@ -9,18 +9,21 @@ for validation and persistence; finishing an editor only returns a draft.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from enum import Enum, auto
 from pathlib import Path
 
 from netbbs.net.char_input import CANCEL_KEY, HELP_KEY, EditorKey, EditorKeyKind, InputCancelled, reject_unhandled_key
 from netbbs.net.draft_storage import delete_draft, load_draft, offer_draft_recovery, save_draft
 from netbbs.net.help_overlay import show_help
-from netbbs.net.notices import write_notices
+from netbbs.net.notices import take_notices, write_notices
 from netbbs.net.session import Session, write_prompt
 from netbbs.net.session_activity import records_activity
 from netbbs.rendering.width import display_width
 from netbbs.rendering.pipe_codes import PastedColor
 from netbbs.rendering.post_body import post_body_rows
+from netbbs.rendering.detail import Section, Styled, paginate, render_sections
+from netbbs.rendering.reflow import wrap_terminal_text
 from netbbs.rendering import (
     ACCENT_COLOR,
     ERROR_COLOR,
@@ -30,6 +33,7 @@ from netbbs.rendering import (
     RULE_COLOR,
     MenuEntry,
     action_bar,
+    clear_screen,
     colored,
     menu_grid,
     menu_key,
@@ -48,6 +52,47 @@ def _menu_row(entries: list[MenuEntry], *, width: int, height: int, description_
     if description_level == "off":
         return action_bar([e.label for e in entries], width=width)
     return menu_grid([("", entries)], width=width, height=height, description_level=description_level)
+
+
+async def show_compose_screen(
+    session: Session,
+    *,
+    title: str,
+    breadcrumb: Sequence[str],
+    fields: Sequence[tuple[str, str]] = (),
+    hint: str | None = None,
+    redraw_in_place: bool = False,
+    unicode_style: bool = False,
+    collapsed: bool = False,
+    header_color: int | tuple[int, int, int] = HEADER_COLOR,
+    accent_color: int = ACCENT_COLOR,
+) -> None:
+    """The screen a composition's first prompts are asked on (issue #813):
+    its own title -- "New message", "Reply", "New post" -- over the facts
+    already settled (a reply's To) and a muted `hint` saying what to type.
+    The To and Subject prompts used to appear under the menu they were
+    chosen from, with nothing saying what was being written.
+
+    `breadcrumb` is the path after the node's name. `fields` are plain
+    `(label, value)` pairs, sanitized here. Pending outcomes are written
+    last, directly above the prompt the caller asks next."""
+    heading = screen_title(
+        title,
+        breadcrumb=(session.node_display_name, *breadcrumb),
+        width=session.terminal_width,
+        clear=redraw_in_place,
+        unicode_style=unicode_style, collapsed=collapsed,
+        header_color=header_color,
+        node_name_gradient=session.node_name_gradient,
+    )
+    await session.write_line(f"\r\n{heading}")
+    for label, value in fields:
+        await session.write_line(
+            colored(f"  {label}: ", fg_color=LABEL_COLOR) + colored(sanitize_text(value), fg_color=accent_color)
+        )
+    if hint:
+        await session.write_line(colored(hint, fg_color=MUTED_COLOR))
+    await write_notices(session)
 
 
 async def read_prefilled_field(session: Session, label: str, current: str) -> str:
@@ -381,6 +426,15 @@ async def edit_line_body(
         await apply([*lines, raw])
 
 
+# As on `show_detail`: a body squeezed below this many rows a page is no
+# longer a page worth turning.
+_MIN_PAGE_ROWS = 4
+
+
+def _rows(text: str, width: int) -> list[str]:
+    return wrap_terminal_text(text, width).split("\r\n")
+
+
 def _preview_body(body: str, width: int) -> str:
     safe = sanitize_text(body, allow_newlines=True)
     return "\n".join(reflow(line, width=max(1, width)) if line else "" for line in safe.split("\n"))
@@ -491,6 +545,7 @@ async def review_composition(
     truecolor: bool = False,
     body_mode: str | None = None,
     body_layout: str = "prose",
+    breadcrumb: Sequence[str] = ("Compose",),
 ) -> ReviewAction:
     """Render a complete draft and return one explicit review action.
 
@@ -520,7 +575,15 @@ async def review_composition(
     activating the highlighted one with Space or Enter -- purely
     additive, every hotkey letter keeps working exactly as before. The
     commit action and `[C]ancel` are never arrow-selectable, the same
-    "always hotkey-only" treatment `edit_resource_draft` gives Save/Back."""
+    "always hotkey-only" treatment `edit_resource_draft` gives Save/Back.
+
+    The body is paged the way `netbbs.net.detail_view.show_detail` pages a
+    message in the reader (issue #813), with the same pieces: the title,
+    To and Subject stay on every page, and a body taller than the rows left
+    over turns with `PgUp`/`PgDn` and `[N]ext`/`[P]rev page` -- `[>]`/`[<]`
+    where the commit key already is `P` (a board's `[P]ost`). Printed whole,
+    a long letter scrolled its own To and Subject off the screen before the
+    menu appeared. `breadcrumb` is the path after the node's name."""
     field_order = (("t",) if recipient is not None else ()) + ("u", "b")
     actions = {
         commit_key.lower(): ReviewAction.COMMIT,
@@ -534,69 +597,120 @@ async def review_composition(
         actions["t"] = ReviewAction.EDIT_RECIPIENT
 
     selected: str | None = None
+    width = max(1, session.terminal_width)
+    next_key, prev_key = (">", "<") if {"n", "p"} & set(actions) else ("n", "p")
+    if body_mode is None:
+        body_rows = _preview_body(body, width).split("\n")
+    else:
+        body_rows = list(post_body_rows(body, width, body_mode, truecolor=truecolor, layout=body_layout))
+    blocks = render_sections([Section(None, [Styled(body_rows)])], width=width, unicode_style=unicode_style)
+    # An outcome carried in from the step before (a refused Send, a subject
+    # too long) stays above the prompt until a page is turned, as on
+    # `show_detail`; measured here, since it takes rows from the body.
+    message_rows = [row for line in take_notices(session) for row in _rows(line, width)]
+    rule_char = "─" if unicode_style else "-"
+    divider_color = 238 if truecolor else RULE_COLOR
+    preview_rule = colored(rule_char * min(width, 78), fg_color=divider_color)
 
-    async def draw() -> None:
-        heading = screen_title(
-            "Review composition",
-            breadcrumb=(session.node_display_name, "Compose"),
-            subtitle="Check the draft before continuing",
-            width=session.terminal_width,
-            clear=redraw_in_place,
-            unicode_style=unicode_style, collapsed=collapsed,
-            header_color=header_color,
-        node_name_gradient=session.node_name_gradient)
-        await session.write_line(f"\r\n{heading}")
-        if recipient is not None:
-            await session.write_line(
-                _review_field_line(
-                    "t", "To: ", sanitize_text(recipient), selected=selected, bold_value=False, accent=accent_color
-                )
-            )
-        await session.write_line(
-            _review_field_line(
-                "u", "Subject: ", sanitize_text(subject), selected=selected, bold_value=True, accent=accent_color
-            )
-        )
-        body_prefix = (
-            colored("> Body", fg_color=accent_color, bold=True)
-            if selected == "b"
-            else colored("  Body", fg_color=MUTED_COLOR, bold=True)
-        )
-        await session.write_line(body_prefix)
-        rule_char = "─" if unicode_style else "-"
-        divider_color = 238 if truecolor else RULE_COLOR
-        preview_rule = colored(rule_char * min(session.terminal_width, 78), fg_color=divider_color)
-        await session.write_line(preview_rule)
-        if body_mode is None:
-            await session.write_line(_preview_body(body, session.terminal_width))
-        else:
-            for row in post_body_rows(
-                body, session.terminal_width, body_mode, truecolor=truecolor, layout=body_layout
-            ):
-                await session.write_line(row)
-        await session.write_line(preview_rule)
-
+    def _menu(paged: bool) -> list[str]:
         options = [MenuEntry(label=menu_key(commit_key.upper(), commit_label), brief=commit_brief)]
         if recipient is not None:
             options.append(MenuEntry(label=menu_key("T", "o"), brief="Change the recipient"))
         options.extend([
             MenuEntry(label=menu_key("U", "pdate subject"), brief="Change the subject"),
             MenuEntry(label=menu_key("B", "ody"), brief="Edit the body text"),
-            MenuEntry(label=menu_key("C", "ancel"), brief="Discard this draft"),
         ])
-        await session.write_line(
-            f"\r\n{_menu_row(options, width=session.terminal_width, height=session.terminal_height, description_level=description_level)}"
+        if paged:
+            options.extend([
+                MenuEntry(
+                    label=menu_key(next_key.upper(), "ext page" if next_key == "n" else " Next page"),
+                    brief="Show the next page of the body",
+                ),
+                MenuEntry(
+                    label=menu_key(prev_key.upper(), "rev page" if prev_key == "p" else " Prev page"),
+                    brief="Show the previous page of the body",
+                ),
+            ])
+        options.append(MenuEntry(label=menu_key("C", "ancel"), brief="Discard this draft"))
+        # A described menu takes the rows a long body needs: once the body
+        # has to be paged, the packed bar gives them back (design doc §3.5's
+        # rule for a detail screen with its own described menu).
+        level = "off" if paged else description_level
+        row = _menu_row(options, width=width, height=session.terminal_height, description_level=level)
+        return _rows(row, width)
+
+    def _head() -> list[str]:
+        heading = screen_title(
+            "Review composition",
+            breadcrumb=(session.node_display_name, *breadcrumb),
+            subtitle="Check the draft before continuing",
+            width=width,
+            clear=False,
+            unicode_style=unicode_style, collapsed=collapsed,
+            header_color=header_color,
+            node_name_gradient=session.node_name_gradient,
         )
-        await session.write_line(colored("(Ctrl-H for help on these fields)", fg_color=MUTED_COLOR))
+        rows = _rows(heading, width)
+        if recipient is not None:
+            rows.extend(_rows(
+                _review_field_line(
+                    "t", "To: ", sanitize_text(recipient), selected=selected, bold_value=False, accent=accent_color
+                ),
+                width,
+            ))
+        rows.extend(_rows(
+            _review_field_line(
+                "u", "Subject: ", sanitize_text(subject), selected=selected, bold_value=True, accent=accent_color
+            ),
+            width,
+        ))
+        rows.append(
+            colored("> Body", fg_color=accent_color, bold=True)
+            if selected == "b"
+            else colored("  Body", fg_color=MUTED_COLOR, bold=True)
+        )
+        return rows
+
+    def _budget(paged: bool) -> int:
+        # Lead-in, heading and fields, two rules, the blank row and menu,
+        # the page line, the help hint, carried outcomes, the prompt.
+        fixed = (
+            (0 if redraw_in_place else 1) + len(_head()) + 2 + 1 + len(_menu(paged))
+            + (1 if paged else 0) + 1 + len(message_rows) + 1
+        )
+        return max(_MIN_PAGE_ROWS, session.terminal_height - fixed)
+
+    pages = paginate(blocks, budget=_budget(False)) or [[]]
+    if len(pages) > 1:
+        pages = paginate(blocks, budget=_budget(True))
+    paged = len(pages) > 1
+    page = 0
+
+    async def draw() -> None:
+        rows = [*_head(), preview_rule, *pages[page], preview_rule, "", *_menu(paged)]
+        if paged:
+            rows.append(colored(f"(Page {page + 1} of {len(pages)} -- PgUp/PgDn to switch)", fg_color=MUTED_COLOR))
+        rows.append(colored("(Ctrl-H for help on these fields)", fg_color=MUTED_COLOR))
         # A refused commit ("Could not create post: ...") returns here, and
         # this redraw would erase a line written before it (issue #680).
-        await write_notices(session)
+        rows.extend(message_rows)
+        lead = clear_screen() if redraw_in_place else "\r\n"
+        for index, row in enumerate(rows):
+            await session.write_line((lead if index == 0 else "") + row)
         await session.write("Choice: ")
 
     await draw()
     while True:
         key = await _read_review_key(session)
 
+        char = key.char.lower() if key.kind == EditorKeyKind.CHAR and key.char else ""
+        if paged and (key.kind in (EditorKeyKind.PAGE_DOWN, EditorKeyKind.PAGE_UP) or char in (next_key, prev_key)):
+            step = 1 if key.kind == EditorKeyKind.PAGE_DOWN or char == next_key else -1
+            page = (page + step) % len(pages)
+            # A one-off result belongs to the render that produced it.
+            message_rows = []
+            await draw()
+            continue
         if key.kind == EditorKeyKind.UP:
             index = field_order.index(selected) if selected in field_order else 0
             selected = field_order[(index - 1) % len(field_order)]

@@ -66,7 +66,7 @@ from netbbs.mail import (
     send_mail,
     unread_count,
 )
-from netbbs.net.char_input import reject_unhandled_key
+from netbbs.net.char_input import InputCancelled, reject_unhandled_key
 from netbbs.net.color_depth_preference import effective_truecolor
 from netbbs.net.composition import (
     ReviewAction,
@@ -75,6 +75,7 @@ from netbbs.net.composition import (
     read_prefilled_field,
     read_subject,
     review_composition,
+    show_compose_screen,
     too_long_message,
 )
 from netbbs.net.confirm import prompt_yes_no
@@ -85,7 +86,7 @@ from netbbs.net.breadcrumb_preference import breadcrumb_collapsed_enabled
 from netbbs.net.unicode_style_preference import unicode_style_enabled
 from netbbs.net.node_theme import effective_accent_color_256, effective_header_color_256
 from netbbs.net.picker import pick_item
-from netbbs.net.prose_editor import edit_prose
+from netbbs.net.prose_editor import EditorHeader, edit_prose
 from netbbs.net.detail_view import show_detail
 from netbbs.net.notices import announce, announce_styled, take_notices, write_notices
 from netbbs.net.session import Session, write_prompt
@@ -139,7 +140,7 @@ async def browse_mail(
     """Entry point from the main menu's `[E]-mail` option.
 
     `link_context` (design doc), if given, lets `_compose_mail`
-    recognize a `user@node-name-or-dns` address and send a Link message
+    recognize a `user@node` address and send a Link message
     instead of ordinary local mail -- `None` whenever this node has Link
     disabled, the same convention `netbbs.link.boards.LinkContext`
     itself already establishes for boards."""
@@ -450,12 +451,17 @@ async def _compose_mail(
     link_context: LinkContext | None = None,
 ) -> None:
     """
-    `link_context`, if given, lets the "To:" prompt accept a `user@
-    node-name-or-dns` address (design doc) in addition to a
+    `link_context`, if given, lets the "To:" prompt accept a `user@node`
+    address (design doc) in addition to a
     plain local username -- routed to `netbbs.link.mail.compose_link_
     message` instead of `netbbs.mail.send_mail`. Only checked on the
     fresh-compose path: a reply always targets an already-resolved
     local `User` (`prefill_recipient`), never a typed address.
+
+    Composing is a screen of its own (issue #813): "New message" or
+    "Reply", with the To and Subject prompts under its title, and the
+    fullscreen editor and the review screen both showing whom the letter
+    is for and under what subject.
     """
     # Both entry points here are a hotkey (`[C]ompose`/`[R]eply`)
     # immediately followed by a `read_line()` prompt -- an Enter that
@@ -471,18 +477,52 @@ async def _compose_mail(
     if discard_buffered_enter is not None:
         await discard_buffered_enter()
 
+    description_level = await lane.run(menu_description_level, user)
+    redraw_in_place = await lane.run(redraw_in_place_enabled, user)
+    unicode_style = await lane.run(unicode_style_enabled, user)
+    collapsed = await lane.run(breadcrumb_collapsed_enabled, user)
+    accent_color = await lane.run(effective_accent_color_256)
+    header_color = await lane.run(effective_header_color_256)
+    truecolor = await lane.run(lambda db: effective_truecolor(session, db, user))
+    title = "Reply" if prefill_recipient is not None else "New message"
+    link_enabled = link_context is not None
+
+    async def compose_screen(fields: list[tuple[str, str]], hint: str | None = None) -> None:
+        await show_compose_screen(
+            session, title=title, breadcrumb=("Mail",), fields=fields, hint=hint,
+            redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
+            header_color=header_color, accent_color=accent_color,
+        )
+
+    async def settle_recipient(text: str) -> tuple[str, str]:
+        """What to keep as the address, and how to show it (issue #813). A
+        local name is kept as the account spells it, so `[T]o` opens on
+        that too; a Link address is kept as typed, for Send to check again."""
+        label = await lane.run(_recipient_label, text, link_enabled)
+        return (text if link_enabled and "@" in text else label), label
+
     if prefill_recipient is not None:
         recipient_text = prefill_recipient.username
-        await session.write_line(f"To: {sanitize_text(recipient_text)}")
+        recipient_label = recipient_text
+        await compose_screen([("To", recipient_label)])
     else:
-        prompt = "username or user@node-name-or-dns" if link_context is not None else "username"
+        await compose_screen(
+            [],
+            hint=(
+                "Who is it for? Type their user name, or name@TheirBBS for someone on a linked BBS. "
+                if link_enabled else "Who is it for? Type their user name. "
+            ) + "An empty line or Esc cancels.",
+        )
         while True:
-            await write_prompt(session, f"\r\nTo ({prompt}): ")
-            recipient_text = (await session.read_line()).strip()
+            await write_prompt(session, "To: ")
+            try:
+                recipient_text = (await session.read_line(cancellable=True)).strip()
+            except InputCancelled:
+                recipient_text = ""
             if not recipient_text:
                 announce(session, "Cancelled.", tone="muted")
                 return
-            if link_context is not None and "@" in recipient_text:
+            if link_enabled and "@" in recipient_text:
                 # Checked as it is typed, like a local name (issue #807):
                 # a bad address is asked for again here, not after the
                 # message is written.
@@ -505,6 +545,7 @@ async def _compose_mail(
                 )
                 continue
             break
+        recipient_text, recipient_label = await settle_recipient(recipient_text)
 
     # Checked here rather than at Send (issue #812): an empty subject is
     # asked for again, one that is too long says by how much, and only
@@ -514,9 +555,13 @@ async def _compose_mail(
         announce(session, "Message cancelled.", tone="muted")
         return
 
+    def editor_header() -> EditorHeader:
+        return EditorHeader(title, (("To", recipient_label), ("Subject", subject)), color=header_color)
+
     # A reply starts on the quote, with the cursor under it (issue #675).
     body = await _compose_mail_body(
-        session, lane, user, initial_text=prefill_body, cursor_at_end=prefill_body is not None
+        session, lane, user, initial_text=prefill_body, cursor_at_end=prefill_body is not None,
+        header=editor_header(),
     )
     if body is None or not body.strip():
         announce(session, "Message cancelled.", tone="muted")
@@ -530,13 +575,6 @@ async def _compose_mail(
     if signature:
         body = append_signature(body, signature)
 
-    review_description_level = await lane.run(menu_description_level, user)
-    review_redraw_in_place = await lane.run(redraw_in_place_enabled, user)
-    review_unicode_style = await lane.run(unicode_style_enabled, user)
-    review_collapsed = await lane.run(breadcrumb_collapsed_enabled, user)
-    review_accent_color = await lane.run(effective_accent_color_256)
-    review_header_color = await lane.run(effective_header_color_256)
-    review_truecolor = await lane.run(lambda db: effective_truecolor(session, db, user))
     while True:
         # Before Review, not at Send (issue #812): an editor stops the
         # body at the limit, but the signature is added afterwards and can
@@ -547,31 +585,34 @@ async def _compose_mail(
             announce(session, too_long, tone="error")
         action = await review_composition(
             session,
-            recipient=recipient_text,
+            # The account's own name, not the text as typed (issue #813).
+            recipient=recipient_label,
             subject=subject,
             body=body,
             commit_key="s",
             commit_label="end",
             commit_brief="Send this message",
-            description_level=review_description_level,
-            redraw_in_place=review_redraw_in_place,
-            unicode_style=review_unicode_style,
-            collapsed=review_collapsed,
-            accent_color=review_accent_color,
-            header_color=review_header_color,
-            truecolor=review_truecolor,
+            description_level=description_level,
+            redraw_in_place=redraw_in_place,
+            unicode_style=unicode_style,
+            collapsed=collapsed,
+            accent_color=accent_color,
+            header_color=header_color,
+            truecolor=truecolor,
+            breadcrumb=("Mail", title),
         )
         if action is ReviewAction.CANCEL:
             announce(session, "Message cancelled.", tone="muted")
             return
         if action is ReviewAction.EDIT_RECIPIENT:
             recipient_text = await read_prefilled_field(session, "To", recipient_text)
+            recipient_text, recipient_label = await settle_recipient(recipient_text)
             continue
         if action is ReviewAction.EDIT_SUBJECT:
             subject = await read_subject(session, max_bytes=MAX_MAIL_SUBJECT_BYTES, current=subject)
             continue
         if action is ReviewAction.EDIT_BODY:
-            revised = await _compose_mail_body(session, lane, user, initial_text=body)
+            revised = await _compose_mail_body(session, lane, user, initial_text=body, header=editor_header())
             if revised is not None:
                 body = revised
             else:
@@ -580,7 +621,7 @@ async def _compose_mail(
         if too_long is not None:
             continue
 
-        if link_context is not None and "@" in recipient_text:
+        if link_enabled and "@" in recipient_text:
             # The To prompt checks this too; the address may have been
             # edited from the review screen since, and a peer's standing
             # can change while the message is written.
@@ -676,6 +717,22 @@ def _check_link_recipient(db, recipient_text: str) -> _LinkRecipient | str:
     return _LinkRecipient(user=user, fingerprint=resolved)
 
 
+def _recipient_label(db, recipient_text: str, link_enabled: bool) -> str:
+    """The recipient as the review screen and the editor show it (issue
+    #813): a local account by its own name -- `Alice`, however it was
+    typed -- and a Link address by the name its node goes by. Text that
+    names no one yet (a `[T]o` edit Send will refuse) is shown as typed."""
+    if link_enabled and "@" in recipient_text:
+        checked = _check_link_recipient(db, recipient_text)
+        if isinstance(checked, str):
+            return recipient_text
+        return link_address_label(checked.user, identity_for_fingerprint(db, checked.fingerprint).label)
+    try:
+        return get_user_by_username(db, recipient_text).username
+    except AuthError:
+        return recipient_text
+
+
 def _too_long_to_send(subject: str, body: str) -> str | None:
     """Why this message cannot be sent as it stands, in characters -- or
     `None`. The same limits `netbbs.mail.send_mail` and
@@ -690,17 +747,21 @@ def _too_long_to_send(subject: str, body: str) -> str | None:
 
 
 async def _compose_mail_body(
-    session: Session, lane: DatabaseLane, user: User, *, initial_text: str | None, cursor_at_end: bool = False
+    session: Session, lane: DatabaseLane, user: User, *, initial_text: str | None, cursor_at_end: bool = False,
+    header: EditorHeader | None = None,
 ) -> str | None:
     """Enter or revise one mail body through the user's chosen editor.
 
     Both paths accept the current draft and only return text/explicit cancel;
-    the caller owns review and persistence.
+    the caller owns review and persistence. `header` is what the fullscreen
+    editor shows above the text; the line editor writes under the compose
+    or review screen, which already shows it.
     """
     if await lane.run(fullscreen_editor_enabled, user):
         return await edit_prose(
             session, initial_text=initial_text, draft_path=_mail_draft_path(lane, user), max_bytes=MAX_MAIL_BODY_BYTES,
             unicode_style=await lane.run(unicode_style_enabled, user), cursor_at_end=cursor_at_end,
+            header=header,
         )
     return await edit_line_body(
         session,

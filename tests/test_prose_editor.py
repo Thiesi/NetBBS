@@ -615,3 +615,69 @@ def test_a_cancelled_edit_keeps_what_was_typed_since_the_last_autosave(tmp_path)
     task = asyncio.run(scenario())
     assert task.cancelled()
     assert draft.read_text(encoding="utf-8") == "hi"
+
+
+# -- issue #813: a header says what is being written ---------------------------
+
+
+def _screen_before_exit(session: FakeSession, width: int, height: int) -> list[str]:
+    """The terminal as the editor last painted it -- before the clear its
+    exit writes."""
+    from netbbs.rendering.terminal_emulator import TerminalEmulator
+
+    emulator = TerminalEmulator(width, height)
+    emulator.feed("".join(session.written[:-1]))
+    return [row.rstrip() for row in emulator.text_rows()]
+
+
+def test_a_header_is_drawn_above_the_text(tmp_path):
+    from netbbs.net.prose_editor import EditorHeader
+
+    session = FakeSession(["H", "i", "CTRL+O"], width=40, height=12)
+    header = EditorHeader("New message", (("To", "Alice"), ("Subject", "Plans")))
+    result = asyncio.run(
+        edit_prose(session, initial_text=None, draft_path=tmp_path / "d.draft", max_bytes=1000, header=header)
+    )
+    assert result == "Hi"
+    rows = _screen_before_exit(session, 40, 12)
+    assert rows[:5] == ["New message", "To: Alice", "Subject: Plans", "-" * 40, "Hi"]
+    # The status line keeps its place, the header taking the text's rows.
+    assert "Ctrl+O save" in rows[10]
+
+
+def test_without_a_header_the_text_starts_on_the_first_row(tmp_path):
+    session = FakeSession(["H", "i", "CTRL+O"], width=40, height=12)
+    asyncio.run(edit_prose(session, initial_text=None, draft_path=tmp_path / "d.draft", max_bytes=1000))
+    rows = _screen_before_exit(session, 40, 12)
+    assert rows[0] == "Hi"
+    assert "Ctrl+O save" in rows[10]
+
+
+def test_a_header_gives_up_rows_before_the_text_gets_too_short():
+    from netbbs.net.prose_editor import EditorHeader, _header_rows
+
+    header = EditorHeader("New message", (("To", "Alice"), ("Subject", "Plans")))
+
+    def texts(rows: int) -> list[str]:
+        return ["".join(text for text, _fg, _bold in row) for row in _header_rows(header, width=10, rows=rows, unicode_style=False)]
+
+    assert [row.split(":")[0] for row in texts(21)] == ["New message", "To", "Subject", "-" * 10]
+    # The rule goes first, then the title, then the last fields.
+    assert [row.split(":")[0] for row in texts(7)] == ["New message", "To", "Subject"]
+    assert [row.split(":")[0] for row in texts(6)] == ["To", "Subject"]
+    assert [row.split(":")[0] for row in texts(5)] == ["To"]
+    assert texts(4) == []
+
+
+def test_a_header_is_sanitized_and_cut_to_the_width(tmp_path):
+    from netbbs.net.prose_editor import EditorHeader
+
+    session = FakeSession(["CTRL+O"], width=40, height=12)
+    header = EditorHeader("Reply", (("Subject", "\x1b[31mred\x1b[0m " + "x" * 60),))
+    asyncio.run(
+        edit_prose(session, initial_text=None, draft_path=tmp_path / "d.draft", max_bytes=1000, header=header)
+    )
+    rows = _screen_before_exit(session, 40, 12)
+    assert rows[1].startswith("Subject: ") and "red" in rows[1]
+    assert "\x1b[31m" not in "".join(session.written)
+    assert len(rows[1]) == 40
