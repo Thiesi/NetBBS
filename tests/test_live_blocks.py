@@ -1,4 +1,5 @@
-"""One block list for mail and live messages (issue #925).
+"""One block list for mail and live messages (issue #925), and for chat
+channel invitations (issue #948).
 
 A block made for mail (issue #817) also refuses the blocked person's live
 messages -- `/msg`, `/private`, `/dm`, Who's online, and inbound Link direct
@@ -6,6 +7,11 @@ messages -- and `/msg` respects the direct-message opt-out as `/dm` and
 Who's online always did. A blocked local sender is told, as a blocked
 letter's sender is; an inbound Link direct message is dropped, since its
 frame has no answer on the wire. This BBS's SysOp cannot be blocked.
+
+Issue #948: `/invite` to someone who has blocked the inviter is refused in
+`/msg`'s words, with no invitation row and no live notice; the opt-out
+does not stop invitations. Who's online no longer offers `[E]-mail` to
+someone who has blocked the caller.
 """
 
 from __future__ import annotations
@@ -17,12 +23,16 @@ import pytest
 from netbbs.auth.users import SYSOP_LEVEL, create_user
 from netbbs.chat import ChatHub, DirectChatInvites, MessageMailbox, PresenceRegistry
 from netbbs.chat.channels import create_channel
+from netbbs.chat.membership import has_pending_invitation
 from netbbs.link.realtime_direct import IncomingDirectMessage
 from netbbs.mail import block_link_sender, block_local_sender, blocks_link_sender, blocks_local_sender
 from netbbs.messaging_preferences import (
+    invitation_refusal,
     live_message_refusal,
     set_accepts_direct_messages,
 )
+from netbbs.moderation import ChannelPermission, grant_permissions
+from netbbs.moderation.log import list_actions_for_object
 from netbbs.net import chat_flow
 from netbbs.net.char_input import InputHistory
 from netbbs.net.link_direct import build_direct_message_deliverer
@@ -219,18 +229,121 @@ def test_a_chat_invite_to_someone_who_blocks_you_is_refused(db, lane, alice, bob
     assert "bob does not accept messages from you." in "\n".join(session.written)
 
 
+# -- /invite (issue #948) ---------------------------------------------------------
+
+
+def _invite_channel(db, alice):
+    channel = create_channel(db, "den", creator=alice, members_only=True)
+    grant_permissions(
+        db, alice, object_type="channel", object_id=channel.id,
+        permissions=ChannelPermission.MANAGE_MEMBERS, granted_by=alice,
+    )
+    return channel
+
+
+def test_invitation_refusal_is_the_block_alone(db, alice, bob):
+    assert invitation_refusal(db, bob, inviter=alice) is None
+    set_accepts_direct_messages(db, bob, False)
+    assert invitation_refusal(db, bob, inviter=alice) is None
+    block_local_sender(db, bob, alice)
+    assert invitation_refusal(db, bob, inviter=alice) == "bob does not accept messages from you."
+    assert invitation_refusal(db, alice, inviter=bob) is None
+
+
+def test_invite_to_someone_who_blocks_you_is_refused_with_no_row_and_no_notice(db, lane, alice, bob):
+    block_local_sender(db, bob, alice)
+    channel = _invite_channel(db, alice)
+    presence = PresenceRegistry()
+    registry, bob_session = _online_bob(presence)
+    mailbox = MessageMailbox()
+
+    async def scenario():
+        registry.enter(bob_session)
+        registry.mark_authenticated(bob_session, "bob")
+        return await _chat(lane, presence, channel, alice, ["/invite bob", "/quit"], registry=registry, mailbox=mailbox)
+
+    text = asyncio.run(scenario())
+    assert "bob does not accept messages from you." in text
+    assert "Invited bob." not in text and "(sent to bob)" not in text
+    assert not has_pending_invitation(db, channel, bob)
+    assert db.connection.execute("SELECT COUNT(*) FROM channel_invitations").fetchone()[0] == 0
+    assert mailbox.flush(bob_session) == []
+    assert not any(a.action == "invite" for a in list_actions_for_object(db, "channel", channel.id))
+
+
+def test_invite_ignores_the_direct_message_opt_out_as_before(db, lane, alice, bob):
+    set_accepts_direct_messages(db, bob, False)
+    channel = _invite_channel(db, alice)
+
+    text = asyncio.run(_chat(lane, PresenceRegistry(), channel, alice, ["/invite bob", "/quit"]))
+
+    assert "Invited bob." in text
+    assert has_pending_invitation(db, channel, bob)
+
+
+def test_the_sysop_cannot_be_blocked_from_inviting(db, lane, alice, bob):
+    block_local_sender(db, bob, alice)
+    db.connection.execute("UPDATE users SET user_level = ? WHERE id = ?", (SYSOP_LEVEL, alice.id))
+    db.connection.commit()
+    from netbbs.auth.users import get_user_by_id
+    sysop = get_user_by_id(db, alice.id)
+    channel = _invite_channel(db, sysop)
+
+    text = asyncio.run(_chat(lane, PresenceRegistry(), channel, sysop, ["/invite bob", "/quit"]))
+
+    assert "Invited bob." in text
+    assert has_pending_invitation(db, channel, bob)
+
+
+def test_invite_without_the_right_says_so_before_any_block(db, lane, alice, bob):
+    block_local_sender(db, bob, alice)
+    channel = create_channel(db, "den", creator=bob, members_only=True)
+
+    text = asyncio.run(_chat(lane, PresenceRegistry(), channel, alice, ["/invite bob", "/quit"]))
+
+    assert "You do not have permission to invite users to this channel." in text
+    assert "does not accept" not in text
+    assert not has_pending_invitation(db, channel, bob)
+
+
 # -- Who's online -----------------------------------------------------------------
 
 
-def test_who_is_online_refuses_messages_to_someone_who_blocks_you(db, lane, alice, bob):
+def test_who_is_online_offers_nothing_but_a_block_to_someone_who_blocks_you(db, lane, alice, bob):
+    """Issue #948: `[E]-mail` goes too -- the letter would be refused."""
     block_local_sender(db, bob, alice)
     session = KeySession(keys=["0", "1", "b", "b"])
 
     _run_who(db, lane, alice, session)
 
-    text = _visible(session)
-    assert "bob does not accept messages from you." in text
+    text = " ".join(_visible(session).split())
+    assert "bob does not accept messages or mail from you." in text
     assert "[M]essage" not in text and "[I]nvite" not in text
+    assert "[E]-mail" not in text
+    # Blocking them back stays on offer: their block does not stop their mail to you.
+    assert "Bloc[k]" in text
+
+
+def test_who_is_online_still_offers_mail_when_no_one_is_blocked(db, lane, alice, bob):
+    session = KeySession(keys=["0", "1", "b", "b"])
+
+    _run_who(db, lane, alice, session)
+
+    assert "[E]-mail" in _visible(session)
+
+
+def test_who_is_online_shows_a_sysop_who_blocks_you_with_only_back(db, lane, alice):
+    """The mockup: nothing to offer, but the screen still says why."""
+    sysop = create_user(db, "sysop", password="hunter2pw", user_level=SYSOP_LEVEL)
+    block_local_sender(db, sysop, alice)
+    session = KeySession(keys=["0", "1", "b", "b"])
+
+    _run_who(db, lane, alice, session, online=("sysop",))
+
+    text = " ".join(_visible(session).split())
+    assert "sysop does not accept messages or mail from you." in text
+    assert "[B]ack" in text
+    assert "[E]-mail" not in text and "Bloc[k]" not in text and "[M]essage" not in text
 
 
 def test_who_is_online_does_not_promise_mail_to_someone_who_opted_out_and_blocks_you(db, lane, alice, bob):
@@ -242,7 +355,8 @@ def test_who_is_online_does_not_promise_mail_to_someone_who_opted_out_and_blocks
 
     text = " ".join(_visible(session).split())
     assert "e-mail still reaches them" not in text
-    assert "bob does not accept messages from you." in text
+    assert "bob does not accept messages or mail from you." in text
+    assert "[E]-mail" not in text
 
 
 def test_who_is_online_blocks_and_unblocks_a_local_caller(db, lane, alice, bob):

@@ -19,7 +19,10 @@ direct message (`netbbs.net.link_direct.build_direct_message_deliverer`).
 It combines the opt-out with the same block list mail uses
 (`netbbs.mail`'s `mail_blocks`, issue #817): one list, so blocking someone
 stops their mail and their live messages alike. Public chat channels are
-not covered -- a block does not hide someone's lines in a shared room.
+not covered -- a block does not hide someone's lines in a shared room --
+but an invitation to one is: `invitation_refusal` (issue #948) turns away
+`/invite` from someone the invitee has blocked. The opt-out does not stop
+channel invitations, as it never has.
 """
 
 from __future__ import annotations
@@ -35,6 +38,9 @@ OPTED_OUT_REFUSAL = "{name} has opted out of direct messages."
 # The live counterpart of `netbbs.mail.SENDER_BLOCK_REFUSAL`: a blocked
 # sender is told, as a blocked letter's sender is (issue #817's choice).
 LIVE_BLOCK_REFUSAL = "{name} does not accept messages from you."
+# Who's online, for someone who has blocked the caller: neither a live
+# message nor a letter would reach them, so neither is offered (issue #948).
+MESSAGES_AND_MAIL_BLOCK_REFUSAL = "{name} does not accept messages or mail from you."
 
 
 def accepts_direct_messages(db: Database, user: User) -> bool:
@@ -66,3 +72,15 @@ def live_message_refusal(
     else:
         blocked = sender_address is not None and blocks_link_sender(db, recipient, sender_address)
     return LIVE_BLOCK_REFUSAL.format(name=recipient.username) if blocked else None
+
+
+def invitation_refusal(db: Database, invitee: User, *, inviter: User) -> str | None:
+    """Why `invitee` takes no chat-channel invitation from local `inviter`,
+    as the line to show the inviter, or `None` (issue #948).
+
+    Only a block refuses one, with `/msg`'s words; the direct-message
+    opt-out never has covered channel invitations and still does not. A
+    SysOp of this node cannot be blocked, as with mail and live messages."""
+    if is_usable_sysop(inviter) or not blocks_local_sender(db, invitee, inviter):
+        return None
+    return LIVE_BLOCK_REFUSAL.format(name=invitee.username)
