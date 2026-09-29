@@ -16,6 +16,7 @@ from dataclasses import dataclass
 
 from netbbs.auth.users import User
 from netbbs.boards.content_id import compute_content_id
+from netbbs.file_refs import forget_orphaned_post_refs_without_commit
 from netbbs.moderation.log import record_action
 from netbbs.storage.database import Database
 from netbbs.timeutil import utc_now_iso
@@ -493,6 +494,7 @@ def delete_board(db: Database, board: Board, *, deleted_by: User) -> None:
         detail=f"deleted board {board.name!r} (id {board.id})",
     )
     db.connection.execute("DELETE FROM posts WHERE board_id = ?", (board.id,))
+    forget_orphaned_post_refs_without_commit(db)
     db.connection.execute(
         "DELETE FROM moderator_grants WHERE object_type = 'board' AND object_id = ?", (board.id,)
     )

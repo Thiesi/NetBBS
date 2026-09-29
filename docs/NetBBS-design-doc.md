@@ -1939,6 +1939,39 @@ parent, listed on the board like any other post. There is no threaded view.
   editor (the reader cannot tell the editors apart, and a carried post has
   no editor at all) and a per-post "keep lines" flag (a second layout for
   the same text).
+- **Files in a post** (issue #842, F086): a post points at files in this
+  node's file areas exactly as a letter does (**Files in a letter**, issue
+  #830), reusing `netbbs.file_refs` and `netbbs.net.file_ref_view`.
+  - *Stored per revision:* `post_file_refs` rows keyed by the revision's
+    content-addressed `posts.post_id`, so an edit can attach or remove a file
+    and a held edit's files wait with it. `edit_post` keeps the current
+    revision's files unless it is given a list: a moderator's edit keeps
+    them, a withdrawal and a tombstone drop them. A file newly attached must
+    be one the writer can open; one already on the post stays, shown as no
+    longer available if it has gone. The reader and the edit take the files
+    of the newest approved revision (`shown_post_refs`), a held post its own.
+  - *Readers:* the reader lists them under the byline and `[G]et file`
+    downloads one after `open_ref` checks again. A reader who may not read
+    the file's area sees "A file in a file area you can't open", no names.
+    Unlike a letter, nothing is refused at Publish when some of the board's
+    readers cannot open the area -- a board has no recipient list to check.
+    The review screen says so instead (`refs_some_readers_cannot_open`:
+    the area's effective read level or age is stricter than the board's).
+    The moderation queue shows a held post's files, and a held edit's
+    proposed and current files where they differ.
+  - *Over Link:* no reference crosses. `board_post`, `board_post_edit` and
+    `board_post_moderator_edit` events carry `carried_post_body`: the body
+    with one `link_text_line` per file after a blank line, the same line as
+    mail's. The review screen counts those lines toward the length limit on
+    a Linked board. A carried post never gets rows, so a remote moderator's
+    edit of a local post leaves the new revision with its files as text only.
+  - *Removal:* no foreign keys, for mail's reason (`posts` is rebuilt by
+    migrations too). Every hard delete of posts rows -- `delete_post`, the
+    expiry sweep, `delete_board` and purging a hidden carried board -- calls
+    `forget_orphaned_post_refs_without_commit`, which removes rows whose
+    revision is gone.
+  - A post draft keeps its text, not its files: board drafts are plain text
+    files, unlike a letter's.
 - **Quote limits:** a quote is at most 40 lines and 8 KB, and a cut quote
   ends with `> [...]`, so a reply to a long post stays writable in the line
   editor.

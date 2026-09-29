@@ -1160,6 +1160,7 @@ async def _browse_kind(
             session, db, user,
             community_id=community_id, community_scoped=community_scoped, title_prefix=title_prefix,
             link_context=link_context,
+            transfers=node_controls.transfers if node_controls is not None else None,
         )
     elif kind == "c":
         # design doc: chat is one of the features migrated onto the

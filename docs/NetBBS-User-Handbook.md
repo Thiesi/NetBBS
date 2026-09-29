@@ -75,6 +75,21 @@ also arrives as mail from **System**, with the reason and what you wrote.
 A post keeps the lines you write: a list, a short line or your sign-off stays
 as you typed it, and only a line too wide for the reader's screen wraps.
 
+A post can point at files that are already in a file area here, up to five --
+the practice page you want an opinion on, say. On the review screen press
+**[A]ttach file**, choose the file area and then the file; **[R]emove file**
+takes one off again. Nothing is copied: the post names the file, and whoever
+reads it downloads it from its file area. The files are listed under the
+post's byline, and **[G]et file** downloads one -- with several, you choose
+which -- by Zmodem, or with a browser link where your terminal has no Zmodem.
+A reader who may not open that file area sees only that a file is there, not
+its name; the review screen tells you when a file's area is closed to some of
+the board's readers. A file deleted or expired since shows as no longer
+available. When you edit a post, its files come along and can be changed on
+the review screen. On a board shared with other BBSes, readers there get a
+line naming each file, its size, its file area and this BBS at the end of the
+post, not a download. A draft keeps the text, not the files.
+
 The text editor shows its commands. In the line editor, a blank line starts
 a new paragraph; press Enter on an empty line twice, or type `/done`, to
 finish. `/insert N` writes the next lines before line N until you type

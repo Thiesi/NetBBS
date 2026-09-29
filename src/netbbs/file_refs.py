@@ -12,7 +12,8 @@ in for it where the file cannot follow, and which files an account may
 point at. Mail stores its references in `mail_file_refs`
 (`write_mail_refs_without_commit`, `mail_refs`); the rendering and the
 download are `netbbs.net.file_ref_view`. A board post referencing a file
-(issue #842 F086) is meant to reuse all of it with a table of its own.
+(issue #842 F086) reuses all of it with a table of its own,
+`post_file_refs` (`write_post_refs_without_commit`, `post_refs`).
 
 The rules:
 
@@ -45,7 +46,7 @@ from typing import TYPE_CHECKING
 
 from netbbs.attestation import meets_age
 from netbbs.auth.users import User
-from netbbs.communities import get_effective_min_age, meets_read_gate
+from netbbs.communities import get_effective_min_age, get_effective_min_read_level, meets_read_gate
 from netbbs.config import get_node_display_name
 from netbbs.rendering.sanitize import sanitize_text
 from netbbs.storage.database import Database
@@ -174,17 +175,21 @@ def attachable_files(db: Database, user: User, area: FileArea) -> list[FileEntry
     return [entry for entry in entries if not _past_its_age(entry, area)]
 
 
-def sender_ref_problem(db: Database, sender: User, refs: list[FileRef]) -> str | None:
+def sender_ref_problem(
+    db: Database, sender: User, refs: list[FileRef], *, noun: str = "letter", verb: str = "send",
+) -> str | None:
     """Why `sender` cannot send a letter pointing at `refs`, or `None`: too
     many, or one they cannot open (any more) themselves. Sanitized, like
-    `recipient_ref_problem`: a name can come from another BBS."""
+    `recipient_ref_problem`: a name can come from another BBS. `noun` and
+    `verb` name what is written and what finishes it -- "post" and
+    "publish" for a board post (issue #842)."""
     if len(refs) > MAX_FILE_REFS:
-        return f"A letter can point at {MAX_FILE_REFS} files at most; this one has {len(refs)}."
+        return f"A {noun} can point at {MAX_FILE_REFS} files at most; this one has {len(refs)}."
     for ref in refs:
         if open_ref(db, sender, ref).state != AVAILABLE:
             return (
                 f"{sanitize_text(ref.filename)} is no longer available to you. "
-                "[R]emove it from the letter, then send it."
+                f"[R]emove it from the {noun}, then {verb} it."
             )
     return None
 
@@ -271,3 +276,80 @@ def _row_to_ref(row: sqlite3.Row) -> FileRef:
     return FileRef(
         file_id=row["file_id"], filename=row["filename"], area_name=row["area_name"], size_bytes=row["size_bytes"],
     )
+
+
+# -- a board post's references (issue #842) ---------------------------------
+#
+# The same rows as mail's, keyed by the revision's content-addressed
+# `posts.post_id`: every revision of a post has its own set, so an edit can
+# attach or remove a file and a held edit's files wait with it. No foreign
+# keys, for mail's reason -- `posts` is rebuilt by migrations too -- and
+# rows go when their revision does through `netbbs.boards.posts`' one
+# cleanup, `forget_orphaned_post_refs_without_commit`, called by every hard
+# delete of posts rows. A post carried from another node never has rows
+# here: it names its files in its body.
+
+
+def _has_post_refs_table(db: Database) -> bool:
+    """Whether this schema has `post_file_refs`: posts are written and
+    deleted by migrations older than the one that adds it."""
+    return db.connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'post_file_refs'"
+    ).fetchone() is not None
+
+
+def write_post_refs_without_commit(db: Database, post_id: str, refs: list[FileRef]) -> None:
+    """Record that revision `post_id` points at `refs`, in order. Called in
+    the transaction that writes the revision."""
+    if not refs:
+        return
+    db.connection.executemany(
+        """
+        INSERT INTO post_file_refs (post_id, position, file_id, filename, area_name, size_bytes)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (post_id, position, ref.file_id, ref.filename, ref.area_name, ref.size_bytes)
+            for position, ref in enumerate(refs)
+        ],
+    )
+
+
+def post_refs(db: Database, post_id: str) -> list[FileRef]:
+    """The files revision `post_id` points at, in the order they were
+    attached."""
+    if not _has_post_refs_table(db):
+        return []
+    rows = db.connection.execute(
+        "SELECT * FROM post_file_refs WHERE post_id = ? ORDER BY position", (post_id,)
+    ).fetchall()
+    return [_row_to_ref(row) for row in rows]
+
+
+def forget_orphaned_post_refs_without_commit(db: Database) -> None:
+    """Remove the references of post revisions no longer in `posts`: the one
+    cleanup every hard delete of posts rows calls before it commits."""
+    if not _has_post_refs_table(db):
+        return
+    db.connection.execute(
+        "DELETE FROM post_file_refs WHERE post_id NOT IN (SELECT post_id FROM posts)"
+    )
+
+
+def refs_some_readers_cannot_open(db: Database, refs: list[FileRef], resource) -> list[FileRef]:
+    """Those of `refs` in a file area with a stricter read gate than
+    `resource` -- a board a post is written to (issue #842): its effective
+    read level is higher, or it asks an age the board does not. Some who
+    can read the post will see only that a file is there. A file gone
+    already is left out; its row says so."""
+    read_level = get_effective_min_read_level(db, resource)
+    min_age = get_effective_min_age(db, resource) or 0
+    narrower = []
+    for ref in refs:
+        row = db.connection.execute("SELECT area_id FROM files WHERE file_id = ?", (ref.file_id,)).fetchone()
+        area = _visible_area(db, row["area_id"]) if row is not None else None
+        if area is None:
+            continue
+        if get_effective_min_read_level(db, area) > read_level or (get_effective_min_age(db, area) or 0) > min_age:
+            narrower.append(ref)
+    return narrower

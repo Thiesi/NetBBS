@@ -175,6 +175,7 @@ from netbbs.boards.posts import (
     revision_for_moderation,
     set_post_exempt,
     set_post_pinned,
+    shown_post_refs,
 )
 from netbbs.chat.moderation import ChannelRestriction, list_active_channel_restrictions, unban_user, unmute_user
 from netbbs.chat.categories import CategoryError as ChannelCategoryError
@@ -759,6 +760,8 @@ from netbbs.rendering import (
     wrap_to_width,
 )
 from netbbs.rendering.detail import Field, Note, Section, Styled, Table, render_sections
+from netbbs.file_refs import open_ref, post_refs
+from netbbs.net.file_ref_view import ref_rows
 from netbbs.rendering.post_body import post_body_mode, post_body_rows
 from netbbs.rendering.reflow import wrap_terminal_text
 from netbbs.net import notices as _notices
@@ -18580,6 +18583,13 @@ async def _post_action_screen(
         "SELECT MAX(id) FROM posts WHERE root_post_id = ? AND board_id = ? AND status = 'approved'",
         (post.root_post_id, post.board_id),
     ).fetchone()[0] or 0) > post.id)
+    # The files the held post or edit points at (issue #842), as the
+    # moderator finds them, and an edit's current ones where it changes them.
+    accent = await lane.run(effective_accent_color_256)
+    proposed_files, current_files = await lane.run(lambda db: (
+        [open_ref(db, actor, ref) for ref in post_refs(db, post.post_id)],
+        [open_ref(db, actor, ref) for ref in shown_post_refs(db, current)] if current is not None else [],
+    ))
     # Pinning and keeping take EDIT, which an approver need not hold.
     can_flag = await lane.run(lambda db: has_permission(
         db, actor, object_type="board", object_id=board.id, permission=BoardPermission.EDIT
@@ -18628,6 +18638,17 @@ async def _post_action_screen(
             Section(f"Pending {kind}", facts, paired=not superseded),
             Section("Proposed text" if current is not None else "Message", [Styled(body_rows)]),
         ]
+        files_changed = [item.ref for item in proposed_files] != [item.ref for item in current_files]
+        if proposed_files and (current is None or files_changed):
+            sections.append(Section(
+                "Proposed files" if current is not None else "Files",
+                [Styled(ref_rows(proposed_files, accent=accent)[1:])],
+            ))
+        if current is not None and files_changed:
+            sections.append(Section(
+                "Current files",
+                [Styled(ref_rows(current_files, accent=accent)[1:] or ["none"])],
+            ))
         if current is not None:
             sections.append(Section(
                 {"expired": "Current text (expired)", "pending": "Current text (awaiting approval)"}.get(

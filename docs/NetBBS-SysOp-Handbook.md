@@ -605,6 +605,10 @@ draft and save it explicitly.
 - **File areas:** set access, upload policy, size/retention rules, and moderation.
   Uploads may include a description extracted from `FILE_ID.DIZ`. A remote
   catalogue entry is metadata; fetching its bytes is a separate action.
+  Posts and letters can point at files in your areas, and readers download
+  them from here: deleting or expiring a file turns those into "no longer
+  available", and raising an area's read level hides the file's and area's
+  names from readers it now shuts out.
 - **Order of boards and file areas:** callers' lists follow your order, not
   the latest activity, so the number a caller remembers keeps its board. A
   new board or area goes last. **Up** and **Down** on its screen move it among

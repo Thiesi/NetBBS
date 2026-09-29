@@ -37,6 +37,7 @@ from netbbs.auth.users import User, get_user_by_id
 from netbbs.boards.boards import Board, usable_max_age_days
 from netbbs.boards.posts import WITHDRAWN_PLACEHOLDER, Post
 from netbbs.communities import get_effective_min_age, get_effective_name_requirement
+from netbbs.file_refs import body_with_link_text, post_refs
 from netbbs.link.enforcement import decide_event_authorship, ensure_event_author_subject
 from netbbs.link.events import (
     BOARD_CLOSURE_OBJECT_TYPE,
@@ -1421,7 +1422,9 @@ def queue_board_post_if_linked(
         local_user_id=post.author_label,
         board_id=board.board_id,
         subject=post.subject,
-        body=post.body,
+        # Files the post points at go as text (issue #842): no reference
+        # crosses Link.
+        body=carried_post_body(db, post),
         created_at=post.created_at,
         parent_post_id=link_parent_post_id,
         layout=post.layout if post.layout != "prose" else None,
@@ -1434,6 +1437,15 @@ def queue_board_post_if_linked(
     db.connection.commit()
 
     return board_post
+
+
+def carried_post_body(db: Database, revision: Post) -> str:
+    """`revision`'s body as it goes over Link (issue #842): one
+    `netbbs.file_refs.link_text_line` per file it points at, at its end,
+    after a blank line -- a node that receives it gets no reference, only
+    the file's name, size, area and this node's name in words. Unchanged
+    for a revision without files."""
+    return body_with_link_text(db, revision.body, post_refs(db, revision.post_id))
 
 
 def is_carried_post(db: Database, post: Post) -> bool:
@@ -1578,7 +1590,7 @@ def queue_board_post_edit_if_linked(
         root_post_id=root_post.content_id,
         previous_event_id=previous_event_id,
         subject=edited_post.subject,
-        body=edited_post.body,
+        body=carried_post_body(db, edited_post),
         created_at=edited_post.created_at,
         withdrawn=edited_post.withdrawn,
     )
@@ -1710,7 +1722,7 @@ def queue_board_post_moderator_edit_if_linked(
         root_post_id=root_post.content_id,
         previous_event_id=previous_event_id,
         subject=edited_post.subject,
-        body=edited_post.body,
+        body=carried_post_body(db, edited_post),
         created_at=edited_post.created_at,
     )
 

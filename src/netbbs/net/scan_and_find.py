@@ -390,7 +390,10 @@ async def _new_scan_screen(
     async def _open(item: _ScanItem) -> None:
         if item.kind == "board":
             cursor = await lane.run(board_read_cursor, user, item.board)
-            await _show_board(session, db, item.board, user, link_context=link_context, initial_cursor=cursor)
+            await _show_board(
+                session, db, item.board, user, link_context=link_context, initial_cursor=cursor,
+                transfers=transfers,
+            )
         elif item.kind == "channel":
             await browse_channels(
                 session, lane, hub, presence, mailbox, history, user,
@@ -445,7 +448,10 @@ async def _new_scan_screen(
             reply_board = boards.get(reply.board_id)
             if reply_board is not None:
                 cursor = await lane.run(post_jump_cursor, reply_board.id, reply.root_post_id)
-                await _show_board(session, db, reply_board, user, link_context=link_context, initial_cursor=cursor)
+                await _show_board(
+                    session, db, reply_board, user, link_context=link_context, initial_cursor=cursor,
+                    transfers=transfers,
+                )
         return await _reload_in_place()
 
     # Back from a row comes back here (issue #839, F045): the scan used to
@@ -756,7 +762,8 @@ async def _find_screen(
         if selected.kind == "post":
             cursor = await lane.run(post_jump_cursor, selected.post.board.id, selected.post.root_post_id)
             await _show_board(
-                session, db, selected.post.board, user, link_context=link_context, initial_cursor=cursor
+                session, db, selected.post.board, user, link_context=link_context, initial_cursor=cursor,
+                transfers=transfers,
             )
         elif selected.kind == "file":
             cursor = await lane.run(file_jump_cursor, selected.file.area.id, selected.file.file_id)

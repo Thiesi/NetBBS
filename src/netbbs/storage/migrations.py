@@ -3809,4 +3809,27 @@ MIGRATIONS = [
         );
         """,
     ),
+    Migration(
+        description=(
+            "Issue #842 (F086): `post_file_refs` -- the files in this node's file areas a board "
+            "post points at, one row per file per post revision (`posts.post_id`), in the order "
+            "attached. The same columns as `mail_file_refs` and for the same reasons: a file is "
+            "named by its content-addressed `file_id`, with its name, area and size as they were "
+            "when attached. No foreign keys, deliberately, as for mail: rows go with their "
+            "revision through `netbbs.file_refs.forget_orphaned_post_refs_without_commit`, which "
+            "every hard delete of posts rows calls. Empty on upgrade. A post carried from another "
+            "node never has rows here: it names its files in its body."
+        ),
+        sql="""
+        CREATE TABLE post_file_refs (
+            post_id     TEXT NOT NULL,
+            position    INTEGER NOT NULL,
+            file_id     TEXT NOT NULL,
+            filename    TEXT NOT NULL,
+            area_name   TEXT NOT NULL,
+            size_bytes  INTEGER NOT NULL,
+            PRIMARY KEY (post_id, position)
+        );
+        """,
+    ),
 ]
