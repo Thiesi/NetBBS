@@ -3537,6 +3537,21 @@ MIGRATIONS = [
     ),
     Migration(
         description=(
+            "Issue #836: `staff_away` -- a SysOp's or staff member's away notice (design doc "
+            "§5.6): one line of plain text, when it was set, and an optional node-local return "
+            "date after which it stops showing. One per person; goes with the account."
+        ),
+        sql="""
+        CREATE TABLE staff_away (
+            user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+            message TEXT NOT NULL,
+            since   TEXT NOT NULL,
+            until   TEXT
+        );
+        """,
+    ),
+    Migration(
+        description=(
             "Issue #806: why Link mail was not delivered, and whether its sender has been told. "
             "`link_delivery_reason` keeps the recipient node's bounce reason (a signed bounce's "
             "reason, or the `link_policy_*` code of its trust-policy refusal); "
