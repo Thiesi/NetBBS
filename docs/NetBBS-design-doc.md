@@ -9136,7 +9136,9 @@ Compatibility extension (issues #296/#297):
   disposable node directories, exact CRLF classic drop files, native stdio,
   controlling PTYs, private inherited DOOR32 sockets, DOSBox-X COM1 sockets,
   and allowlisted outbound RLogin services. Never pass the caller's socket.
-- CP437 doors are transcoded to/from NetBBS's UTF-8 terminals. Browser door
+- A door's stream is transcoded to and from the caller's character set (§3.2):
+  a CP437 door reaches a CP437 terminal unchanged, and is transcoded for UTF-8
+  and ASCII ones; a UTF-8 door is mapped for CP437 and ASCII. Browser door
   mode uses bounded base64 output frames and stream-scoped raw key events;
   stale door input cannot become menu actions. Resize stays out of band;
   fixed geometry is restored to browser-fit geometry on exit. This does not
