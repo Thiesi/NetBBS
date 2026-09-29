@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from ipaddress import ip_address
 import json
 import unicodedata
+import weakref
 
 from netbbs.managed_dns.state import (
     RegistrationStatus, get_node_fingerprint, get_previous_name, get_previous_published, get_previous_status,
@@ -304,20 +305,62 @@ def qualified_node_name(identity: NodeDisplayIdentity) -> str:
     return f"{identity.friendly_name}{NAME_QUALIFIER_SEPARATOR}{prefix}"
 
 
+#: Stands for this BBS among the owners of a claimed name.
+_OWN_NODE = ""
+#: Per database: which nodes claim each name, and the state it was read at.
+_NAME_CLAIM_INDEX: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+
+def _own_claimed_names(db: Database) -> list[str]:
+    """This BBS's current friendly and DNS claims, and the bounded history
+    of the ones it retired -- what another node must not wear unnoticed."""
+    try:
+        history = json.loads(get_config(db, _OWN_IDENTITY_HISTORY_CONFIG_KEY) or "[]")
+    except (TypeError, ValueError):
+        history = []
+    if not isinstance(history, list):
+        history = []
+    return [
+        value for value in (
+            get_node_display_name(db),
+            get_config(db, _OWN_FRIENDLY_NAME_CONFIG_KEY),
+            get_config(db, _OWN_CANONICAL_DNS_CONFIG_KEY),
+            *history,
+        ) if isinstance(value, str) and value
+    ]
+
+
+def _name_claim_owners(db: Database) -> dict[str, set[str]]:
+    """Every friendly and DNS name a known node claims, and this BBS's own
+    claims, keyed by `name_key` to the fingerprints claiming it.
+
+    Friendly and DNS names are one namespace here, as in the identity
+    collision check: a node whose friendly name is another node's DNS name
+    shares it. A chat line asks this once per line, so the index is kept
+    until the database changes -- this connection's own writes
+    (`total_changes`) or another connection's commits (`data_version`)."""
+    connection = db.connection
+    stamp = (connection.total_changes, connection.execute("PRAGMA data_version").fetchone()[0])
+    cached = _NAME_CLAIM_INDEX.get(db)
+    if cached is not None and cached[0] == stamp:
+        return cached[1]
+    owners: dict[str, set[str]] = {}
+    for value in _own_claimed_names(db):
+        owners.setdefault(name_key(value), set()).add(_OWN_NODE)
+    for row in connection.execute("SELECT fingerprint, descriptor_json FROM link_known_identities"):
+        known = _identity_from_descriptor_json(row["fingerprint"], row["descriptor_json"])
+        for value in (known.friendly_name, known.dns_name):
+            if value:
+                owners.setdefault(name_key(value), set()).add(known.fingerprint)
+    _NAME_CLAIM_INDEX[db] = (stamp, owners)
+    return owners
+
+
 def friendly_name_is_shared(db: Database, identity: NodeDisplayIdentity) -> bool:
-    """Whether another node this BBS knows of, or this BBS itself, goes by
-    the same friendly name as `identity`."""
-    key = name_key(identity.friendly_name)
-    own_name = get_node_display_name(db)
-    if own_name and name_key(own_name) == key:
-        return True
-    for row in db.connection.execute(
-        "SELECT fingerprint, descriptor_json FROM link_known_identities WHERE fingerprint <> ?",
-        (identity.fingerprint,),
-    ):
-        if name_key(_identity_from_descriptor_json(row["fingerprint"], row["descriptor_json"]).friendly_name) == key:
-            return True
-    return False
+    """Whether another node this BBS knows of, or this BBS itself, claims
+    `identity`'s friendly name, as a friendly name or as a DNS name."""
+    owners = _name_claim_owners(db).get(name_key(identity.friendly_name), set())
+    return bool(owners - {identity.fingerprint})
 
 
 def short_node_name(db: Database, fingerprint: str) -> str:

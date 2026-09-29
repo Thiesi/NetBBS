@@ -155,3 +155,48 @@ def test_own_alias_takes_the_self_color(db, lobby, alice):
     assert (
         colored("Quill", fg_color=SELF_COLOR, bold=True) + colored("|alice", fg_color=MUTED_COLOR)
     ) in rendered
+
+
+def test_a_friendly_name_that_is_another_nodes_dns_name_is_qualified(db, tmp_path):
+    # Friendly and DNS names are one namespace (design doc §4.4): a node
+    # calling itself by another node's hostname must not read as that node.
+    _peer(db, tmp_path, "real", friendly_name="OutBound", dns_name="outbound.netbbs.org")
+    wearer = _peer(db, tmp_path, "wearer", friendly_name="outbound.netbbs.org", dns_name="evil.example")
+
+    assert short_node_name(db, wearer.fingerprint) == "outbound.netbbs.org · evil.example"
+    assert resolve_stored_peer_reference(db, "outbound.netbbs.org · evil.example") == wearer.fingerprint
+
+
+def test_a_node_wearing_a_retired_name_of_this_bbs_is_qualified(db, tmp_path):
+    from netbbs.link.node_profiles import remember_own_identity_claims
+
+    set_node_display_name(db, "Old Quill")
+    remember_own_identity_claims(db, canonical_dns_name="quill.example.org")
+    set_node_display_name(db, "Nib & Quill")
+    remember_own_identity_claims(db, canonical_dns_name="quill.example.org")
+    peer = _peer(db, tmp_path, "other", friendly_name="Old Quill", dns_name="other.example.org")
+
+    assert short_node_name(db, peer.fingerprint) == "Old Quill · other.example.org"
+
+
+def test_the_shared_name_index_follows_new_peers(db, tmp_path):
+    first = _peer(db, tmp_path, "first", friendly_name="Twin BBS", dns_name="first.example.org")
+    assert short_node_name(db, first.fingerprint) == "Twin BBS"
+
+    _peer(db, tmp_path, "second", friendly_name="Twin BBS", dns_name="second.example.org")
+
+    assert short_node_name(db, first.fingerprint) == "Twin BBS · first.example.org"
+
+
+def test_a_linked_line_reads_the_known_identities_once(db, lobby, alice, tmp_path, monkeypatch):
+    from netbbs.link import node_profiles
+
+    peer = _peer(db, tmp_path, "outbound", friendly_name="OutBound", dns_name="outbound.netbbs.org")
+    message = _live_line(db, lobby, peer)
+    calls = []
+    original = node_profiles._name_claim_owners
+    monkeypatch.setattr(node_profiles, "_name_claim_owners", lambda db: calls.append(1) or original(db))
+
+    chat_flow._render_channel_message(db, lobby, alice, message)
+
+    assert len(calls) == 1

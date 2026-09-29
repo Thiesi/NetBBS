@@ -1434,7 +1434,9 @@ def _durable_link_author(db: Database, message: ChannelMessage) -> tuple[str, st
         return None
 
 
-def _message_author_label(db: Database, channel: Channel, message: ChannelMessage) -> str:
+def _message_author_label(
+    db: Database, channel: Channel, message: ChannelMessage, link_speaker: tuple[str, str] | None
+) -> str:
     """
     The author label to show for one `ChannelMessage` of kind
     `"message"`/`"action"`/`"join"`/`"leave"` — resolves the *current*
@@ -1450,11 +1452,12 @@ def _message_author_label(db: Database, channel: Channel, message: ChannelMessag
     styling at all, if the account can no longer be resolved — a stored
     string, even one that once came from a verified user, must never
     itself be treated as proof.
+
+    `link_speaker` is `_link_speaker`'s answer for `message`, worked out
+    once per line by the caller.
     """
-    link_author = _link_author(db, message)
-    if link_author is not None:
-        local_user_id, fingerprint = link_author
-        return sanitize_text(link_address_label(local_user_id, short_node_name(db, fingerprint)))
+    if link_speaker is not None:
+        return sanitize_text(link_address_label(*link_speaker))
     author = _resolve_message_author(db, message.author_label)
     if author is None:
         return sanitize_text(message.author_label)
@@ -1483,8 +1486,19 @@ def _link_author(db: Database, message: ChannelMessage) -> tuple[str, str] | Non
     return (user, message.author_fingerprint) if at else None
 
 
+def _link_speaker(db: Database, message: ChannelMessage) -> tuple[str, str] | None:
+    """`(user, node name)` for a linked author (`_link_author`), the node
+    named as a chat line names it (`short_node_name`); `None` otherwise."""
+    link_author = _link_author(db, message)
+    if link_author is None:
+        return None
+    user_id, fingerprint = link_author
+    return user_id, short_node_name(db, fingerprint)
+
+
 def _speaker_label(
-    db: Database, channel: Channel, message: ChannelMessage, *, color: int, self_message: bool
+    db: Database, channel: Channel, message: ChannelMessage, link_speaker: tuple[str, str] | None,
+    *, color: int, self_message: bool,
 ) -> str:
     """The `<speaker>` in front of a `"message"` line, each part in its
     own color (issue #899): brackets muted, the name to address someone by
@@ -1493,12 +1507,9 @@ def _speaker_label(
 
     Every span is its own open-content-reset unit placed beside the next,
     never nested, for the reason `_colored_around` gives."""
-    link_author = _link_author(db, message)
-    if link_author is not None:
-        user_id, fingerprint = link_author
-        user, node = link_address_parts(
-            sanitize_text(user_id), sanitize_text(short_node_name(db, fingerprint))
-        )
+    if link_speaker is not None:
+        user_id, node_name = link_speaker
+        user, node = link_address_parts(sanitize_text(user_id), sanitize_text(node_name))
         middle = (
             colored(user, fg_color=color, bold=self_message)
             + colored("@", fg_color=MUTED_COLOR)
@@ -1618,7 +1629,8 @@ def _render_channel_message(
     `_message_author_label`'s output, which may or may not already
     carry its own embedded color.
     """
-    author_label = _message_author_label(db, channel, message)
+    link_speaker = _link_speaker(db, message)
+    author_label = _message_author_label(db, channel, message, link_speaker)
     mrc_nick_color = (
         message.mrc_nick_color
         if message.external_source == "mrc" and mrc_colors_enabled(db, viewer) else None
@@ -1644,7 +1656,7 @@ def _render_channel_message(
             )
     else:  # "message"
         color = SELF_COLOR if self_message else effective_accent_color_256(db)
-        label = _speaker_label(db, channel, message, color=color, self_message=self_message)
+        label = _speaker_label(db, channel, message, link_speaker, color=color, self_message=self_message)
         if message.external_source == "mrc":
             if mrc_nick_color is not None:
                 label = (

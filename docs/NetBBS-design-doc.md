@@ -1078,8 +1078,9 @@ its first `@`, since a user name cannot contain one and a node name can.
 A chat line, and each line of a Link private conversation, names a linked
 speaker's node by its friendly name alone (issue #899): the DNS name repeated
 on every line cost more width than it told anyone. Where another node this BBS
-knows of, or this BBS itself, goes by the same friendly name, the name is
-qualified -- `Name · dns.example`, or `Name · abc123`, the first six characters
+knows of claims the same name -- as its friendly name or its DNS name, the one
+namespace the identity warning uses -- or this BBS claims it now or did
+recently, the name is qualified -- `Name · dns.example`, or `Name · abc123`, the first six characters
 of the technical identity, when the node has no DNS name -- and the node map
 disambiguates a shared name the same way. Both qualified forms resolve when
 typed back. The speaker is styled in parts: the brackets and the `@` muted,

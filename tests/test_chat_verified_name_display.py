@@ -163,7 +163,7 @@ def test_gated_channel_verified_with_nick_is_alias_username_and_real_name(db, ga
 def test_unresolvable_author_never_gets_verified_styling(db, gated_channel):
     record_message(db, gated_channel, kind="message", author_label="ghost", body="hello")
     message = get_scrollback(db, gated_channel)[0]
-    label = chat_flow._message_author_label(db, gated_channel, message)
+    label = chat_flow._message_author_label(db, gated_channel, message, None)
     assert label == "ghost"
     assert "\x1b[" not in label
 
