@@ -35,6 +35,7 @@ from netbbs.net.unicode_style_preference import unicode_style_enabled
 from netbbs.net.session import SessionClosedError
 from netbbs.net.session_activity import records_activity
 from netbbs.moderation.log import record_action
+from netbbs.rendering.charset import CP437, UTF8, encode_text
 
 _logger = logging.getLogger(__name__)
 DOOR_CPU_LIMIT_SECONDS = 300
@@ -409,24 +410,46 @@ def _door_environment(info_path, war_dialer_path=None, voidrunner_dir=None):
 
 
 class DoorTerminal:
-    """NetBBS terminals speak UTF-8; legacy door streams can speak CP437."""
+    """A door's byte stream, transcoded between the door's encoding (UTF-8,
+    CP437, or raw bytes passed through untouched) and the caller's
+    terminal (`Session.output_charset`: UTF-8, CP437 or ASCII, issue
+    #929). A CP437 door on a CP437 terminal needs nothing at all."""
     def __init__(self, session, encoding):
         self.session, self.encoding = session, encoding
-        self.decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        self.charset = getattr(session, "output_charset", UTF8)
+        # Caller keystrokes, decoded before re-encoding for the door.
+        self.decoder = codecs.getincrementaldecoder(
+            "cp437" if self.charset == CP437 else "utf-8")("replace")
+        # A UTF-8 door's output, decoded before mapping for a narrower terminal.
+        self.output_decoder = codecs.getincrementaldecoder("utf-8")("replace")
         self.pending = deque()
 
+    def _input_passes_through(self) -> bool:
+        # What the terminal *types* is CP437 on a CP437 terminal and UTF-8
+        # on every other one, an ASCII one included (review on #940).
+        if self.encoding == "raw":
+            return True
+        door = "cp437" if self.encoding == "cp437" else "utf-8"
+        return door == ("cp437" if self.charset == CP437 else "utf-8")
+
     async def read_byte(self):
-        if self.encoding != "cp437":
+        if self._input_passes_through():
             return await self.session.read_byte()
+        door = "cp437" if self.encoding == "cp437" else "utf-8"
         while not self.pending:
             value = await self.session.read_byte()
             if value is not None:
-                self.pending.extend(self.decoder.decode(bytes([value])).encode("cp437", errors="replace"))
+                self.pending.extend(self.decoder.decode(bytes([value])).encode(door, errors="replace"))
         return self.pending.popleft()
 
     async def write_raw(self, data):
-        if self.encoding == "cp437":
-            data = data.decode("cp437").encode("utf-8")
+        if self.encoding == "raw":
+            pass
+        elif self.encoding == "cp437":
+            if self.charset != CP437:
+                data = encode_text(data.decode("cp437"), self.charset)
+        elif self.charset != UTF8:
+            data = encode_text(self.output_decoder.decode(data), self.charset)
         await self.session.write_raw(data)
 
 
