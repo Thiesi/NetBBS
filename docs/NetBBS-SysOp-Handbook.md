@@ -721,6 +721,15 @@ that has *your* node quarantined or blocked. That node sends yours nothing,
 and the relay took the message, so it stays pending. Replaying an expired
 delivery from the **Outbox** puts it back to pending.
 
+Mail arriving here is checked the way your own callers' mail is: a sender
+name that is not a valid address, a blank or oversized subject, or an
+oversized body is bounced as malformed, and a letter this node cannot decrypt
+is bounced as such rather than as "no such user". A received letter shows the
+date its sender wrote it, unless that date is more than five minutes ahead of
+your clock, when it shows the arrival time instead. The inbox lists mail in
+the order it arrived, so a letter that took days to get here is still at the
+top.
+
 ### Behind an HTTP proxy
 
 If your node's only way out is an HTTP proxy, set the standard variables in

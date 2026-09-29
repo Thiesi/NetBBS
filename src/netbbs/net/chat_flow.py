@@ -1470,7 +1470,9 @@ def _is_door_line(db: Database, message: ChannelMessage) -> bool:
     durable_author = _durable_link_author(db, message)
     if durable_author is not None:
         return durable_author[0].lower().endswith(DOOR_LABEL_SUFFIX)
-    local_part, at, _node = message.author_label.rpartition("@")
+    # The first `@`: a live label's user half cannot hold one
+    # (`link_address_label`), but its node name can (issue #808).
+    local_part, at, _node = message.author_label.partition("@")
     if at:
         return local_part.lower().endswith(DOOR_LABEL_SUFFIX)
     return (message.author_label.lower().endswith(DOOR_LABEL_SUFFIX)

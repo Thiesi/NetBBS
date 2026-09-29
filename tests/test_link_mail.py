@@ -226,18 +226,23 @@ def test_compose_link_message_to_an_unlinked_node_says_what_to_do(db, alice, nod
 # -- deliver_link_message ------------------------------------------------------
 
 
-def _incoming_message(node_identity, remote_node_identity, *, recipient="bob", subject="hello", body="world"):
-    plaintext = json.dumps({"subject": subject, "body": body}).encode("utf-8")
-    ciphertext = encrypt_for(node_identity.signing_key.verify_key, plaintext)
+def _incoming_message(
+    node_identity, remote_node_identity, *, recipient="bob", subject="hello", body="world",
+    sender="alice", created_at="2026-01-01T00:00:00Z", plaintext=None, ciphertext=None,
+):
+    if plaintext is None:
+        plaintext = json.dumps({"subject": subject, "body": body}).encode("utf-8")
+    if ciphertext is None:
+        ciphertext = encrypt_for(node_identity.signing_key.verify_key, plaintext)
     return build_link_message(
         signing_identity=remote_node_identity.signing_key,
         home_node_fingerprint=remote_node_identity.fingerprint,
-        local_user_id="alice",
+        local_user_id=sender,
         recipient_home_node_fingerprint=node_identity.fingerprint,
         recipient_local_user_id=recipient,
         confidentiality_tier="tier1_home_node_key",
         ciphertext=ciphertext,
-        created_at="2026-01-01T00:00:00Z",
+        created_at=created_at,
     )
 
 
@@ -672,3 +677,151 @@ def test_every_reason_a_node_can_give_has_plain_words():
 )
 def test_delivery_explanation(status, reason, expected):
     assert delivery_explanation(status, reason) == expected
+
+
+# -- what a received letter is checked against (issue #808) ------------------
+
+
+def _bounce_reason(db):
+    row = db.connection.execute("SELECT ack_event_json FROM link_mail_acknowledgements").fetchone()
+    envelope = json.loads(row["ack_event_json"])["envelope"]
+    assert envelope["object_type"] == "link_message_bounced"
+    return envelope["payload"]["reason"]
+
+
+def _mail_count(db):
+    return db.connection.execute("SELECT COUNT(*) FROM mail_messages").fetchone()[0]
+
+
+def test_a_received_letter_is_dated_when_its_sender_wrote_it(db, bob, node_identity, remote_node_identity):
+    message = _incoming_message(node_identity, remote_node_identity, created_at="2026-01-01T09:30:00+02:00")
+
+    deliver_link_message(db, message.to_dict(), node_identity=node_identity)
+
+    row = db.connection.execute("SELECT created_at FROM mail_messages").fetchone()
+    assert row["created_at"] == "2026-01-01T07:30:00.000000Z"
+
+
+def test_a_letter_dated_in_the_future_is_dated_by_its_arrival(db, bob, node_identity, remote_node_identity):
+    import datetime
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    within = (now + datetime.timedelta(minutes=2)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    beyond = (now + datetime.timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    for created_at in (within, beyond, "yesterday-ish"):
+        message = _incoming_message(
+            node_identity, remote_node_identity, created_at=created_at, subject=created_at,
+        )
+        deliver_link_message(db, message.to_dict(), node_identity=node_identity)
+
+    rows = db.connection.execute("SELECT created_at FROM mail_messages ORDER BY id").fetchall()
+    assert rows[0]["created_at"] == within
+    for row in rows[1:]:
+        stored = datetime.datetime.fromisoformat(row["created_at"].replace("Z", "+00:00"))
+        assert now - datetime.timedelta(seconds=5) <= stored <= now + datetime.timedelta(minutes=1)
+
+
+def test_a_late_letter_is_listed_by_its_arrival_not_buried_by_its_date(db, alice, bob, node_identity, remote_node_identity):
+    from netbbs.mail import list_inbox, send_mail
+
+    send_mail(db, alice, bob, "local, sent today", "body")
+    late = _incoming_message(
+        node_identity, remote_node_identity, subject="written last year", created_at="2025-06-01T00:00:00Z",
+    )
+    deliver_link_message(db, late.to_dict(), node_identity=node_identity)
+
+    assert [message.subject for message in list_inbox(db, bob)] == ["written last year", "local, sent today"]
+
+
+@pytest.mark.parametrize(
+    "sender", ['alice@"Trusted Node"', "bad name", "x" * 33, "alice\n", "", "Böb"],
+)
+def test_a_sender_name_outside_the_address_grammar_bounces_malformed(
+    db, bob, node_identity, remote_node_identity, sender
+):
+    message = _incoming_message(node_identity, remote_node_identity, sender=sender)
+
+    deliver_link_message(db, message.to_dict(), node_identity=node_identity)
+
+    assert _mail_count(db) == 0
+    assert _bounce_reason(db) == "malformed"
+
+
+def test_a_sender_name_the_grammar_allows_is_delivered_as_written(db, bob, node_identity, remote_node_identity):
+    message = _incoming_message(node_identity, remote_node_identity, sender="Old.Nib_2-x")
+
+    deliver_link_message(db, message.to_dict(), node_identity=node_identity)
+
+    row = db.connection.execute("SELECT sender_label FROM mail_messages").fetchone()
+    assert row["sender_label"] == f"Old.Nib_2-x@{remote_node_identity.fingerprint}"
+
+
+@pytest.mark.parametrize(
+    "plaintext",
+    [
+        json.dumps({"subject": "   ", "body": "world"}).encode("utf-8"),
+        json.dumps({"subject": "s" * 201, "body": "world"}).encode("utf-8"),
+        json.dumps({"subject": "hello", "body": "b" * 20_001}).encode("utf-8"),
+        json.dumps({"subject": "hello", "body": 42}).encode("utf-8"),
+        json.dumps({"subject": ["hello"], "body": "world"}).encode("utf-8"),
+        json.dumps({"body": "world"}).encode("utf-8"),
+        json.dumps({"subject": "hello"}).encode("utf-8"),
+        json.dumps(["hello", "world"]).encode("utf-8"),
+        b'{"subject": "\\ud800", "body": "world"}',
+        b"not json at all",
+        b"\xff\xfe",
+    ],
+    ids=[
+        "blank-subject", "long-subject", "long-body", "body-not-text", "subject-not-text",
+        "no-subject", "no-body", "not-an-object", "lone-surrogate", "not-json", "not-utf8",
+    ],
+)
+def test_a_letter_local_mail_would_refuse_bounces_malformed(db, bob, node_identity, remote_node_identity, plaintext):
+    message = _incoming_message(node_identity, remote_node_identity, plaintext=plaintext)
+
+    deliver_link_message(db, message.to_dict(), node_identity=node_identity)
+
+    assert _mail_count(db) == 0
+    assert _bounce_reason(db) == "malformed"
+
+
+def test_a_letter_at_the_limits_is_delivered_with_its_subject_trimmed(db, bob, node_identity, remote_node_identity):
+    message = _incoming_message(
+        node_identity, remote_node_identity, subject="  " + "s" * 200 + " ", body="b" * 20_000,
+    )
+
+    deliver_link_message(db, message.to_dict(), node_identity=node_identity)
+
+    row = db.connection.execute("SELECT subject, body FROM mail_messages").fetchone()
+    assert (row["subject"], len(row["body"])) == ("s" * 200, 20_000)
+
+
+def test_a_letter_this_node_cannot_decrypt_bounces_undecryptable(db, bob, node_identity, remote_node_identity):
+    stranger = bootstrap_node_identity("stranger")
+    sealed_elsewhere = encrypt_for(stranger.signing_key.verify_key, b'{"subject": "hi", "body": "x"}')
+    message = _incoming_message(node_identity, remote_node_identity, ciphertext=sealed_elsewhere)
+
+    deliver_link_message(db, message.to_dict(), node_identity=node_identity)
+
+    assert _mail_count(db) == 0
+    assert _bounce_reason(db) == "undecryptable"
+
+
+def test_a_ciphertext_that_is_not_base64_bounces_undecryptable(db, bob, node_identity, remote_node_identity):
+    raw = _incoming_message(node_identity, remote_node_identity).to_dict()
+    raw["envelope"]["payload"]["ciphertext"] = "!!! not base64 !!!"
+
+    deliver_link_message(db, raw, node_identity=node_identity)
+
+    assert _mail_count(db) == 0
+    assert _bounce_reason(db) == "undecryptable"
+
+
+def test_a_new_bounce_reason_reaches_the_sender_in_words(db, alice, node_identity, remote_node_identity):
+    message = _sent(db, alice, remote_node_identity, node_identity)
+
+    apply_link_message_bounced(db, _bounce(remote_node_identity, message, reason="undecryptable"))
+
+    row = _delivery_row(db)
+    assert (row["link_delivery_status"], row["link_delivery_reason"]) == ("bounced", "undecryptable")
+    assert "could not decrypt it" in delivery_explanation("bounced", "undecryptable")

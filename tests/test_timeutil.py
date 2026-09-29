@@ -250,3 +250,13 @@ def test_malformed_timezone_config_falls_back_to_utc(tmp_path):
     stamp = "2026-07-09T14:32:07.123456Z"
     assert format_for_display(stamp, db) == "09.07.2026 14:32"
     db.close()
+
+
+def test_utc_iso_keeps_the_storage_shape_for_any_year_and_offset():
+    """Issue #808: a received letter's date is re-written in storage shape."""
+    import datetime
+
+    from netbbs.timeutil import parse_utc_iso, utc_iso
+
+    assert utc_iso(parse_utc_iso("2026-01-01T09:30:00+02:00")) == "2026-01-01T07:30:00.000000Z"
+    assert utc_iso(datetime.datetime(5, 1, 2, tzinfo=datetime.timezone.utc)) == "0005-01-02T00:00:00.000000Z"
