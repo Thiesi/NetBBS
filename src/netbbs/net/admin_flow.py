@@ -323,7 +323,7 @@ from netbbs.link.node_profiles import (
     UNKNOWN_NODE_NAME, dismiss_identity_observation, identity_for_fingerprint, identity_for_peer,
     link_address_label,
     is_node_fingerprint, latest_identity_observation, list_identity_observations,
-    name_key, own_canonical_dns_name, resolve_stored_peer_reference,
+    known_nodes_named_like, own_canonical_dns_name, presentations_confusable, resolve_stored_peer_reference,
 )
 from netbbs.link.relay_mailbox import (
     MAX_MAILBOX_ENVELOPES_PER_RECIPIENT, RELAY_MAILBOX_RETENTION_DAYS, mailbox_holdings,
@@ -3418,14 +3418,26 @@ async def _rename_node_screen(session: Session, lane: DatabaseLane, actor: User)
         _announce_line(session, "No change.")
         return
 
-    def _apply(db: Database) -> None:
+    def _apply(db: Database) -> list[str]:
         set_node_display_name(db, new_name)
         record_action(db, actor=actor, action="set_node_display_name", detail=f"{current!r} -> {new_name!r}")
+        return [identity.label for identity in known_nodes_named_like(db, get_node_display_name(db))]
 
     try:
-        await lane.run(_apply)
+        look_alikes = await lane.run(_apply)
     except ValueError as exc:
         _announce_line(session, colored(str(exc), fg_color=ERROR_COLOR))
+        return
+    if look_alikes:
+        # Issue #900: warned, not refused. Two hobbyists picking one name is
+        # harmless, and every other node already flags the newcomer.
+        _announce_line(session, colored(
+            f"Node name set to {new_name!r}, which reads like "
+            + ", ".join(sanitize_text(label) for label in look_alikes)
+            + ". A node that knows both may warn its callers about this one, and chat will add "
+            "each node's address to the name.",
+            fg_color=WARNING_COLOR,
+        ))
         return
     _announce_line(session, f"Node name set to {new_name!r}.")
 
@@ -17831,14 +17843,17 @@ async def _transfer_board_origin_screen(
         link_context.link_node.peers.values(), key=lambda peer: identity_for_peer(peer).label.lower()
     )
     identities = {peer.fingerprint: identity_for_peer(peer) for peer in peers}
-    label_counts: dict[str, int] = {}
-    for identity in identities.values():
-        key = name_key(identity.label)
-        label_counts[key] = label_counts.get(key, 0) + 1
+    confusable = {
+        fingerprint for fingerprint, identity in identities.items()
+        if any(
+            presentations_confusable(identity, other)
+            for other_fingerprint, other in identities.items() if other_fingerprint != fingerprint
+        )
+    }
 
     def _candidate_label(peer) -> str:
         identity = identities[peer.fingerprint]
-        if label_counts[name_key(identity.label)] > 1:
+        if peer.fingerprint in confusable:
             # Put the full technical identity first so a narrow picker
             # cannot truncate away the only distinguishing value.
             return f"{peer.fingerprint} ({identity.label})"

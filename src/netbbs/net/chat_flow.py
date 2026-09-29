@@ -104,6 +104,7 @@ from netbbs.chat import (
     DurationError,
     MembershipError,
     MessageMailbox,
+    NICK_SEPARATOR,
     NickError,
     ParticipantId,
     PresenceRegistry,
@@ -145,10 +146,12 @@ from netbbs.directory import VCard, get_vcard
 from netbbs.link.boards import LinkContext
 from netbbs.link.channels import get_channel_by_channel_id, queue_channel_message_if_linked
 from netbbs.link.node_profiles import (
-    identity_for_fingerprint,
     identity_for_peer,
+    is_node_fingerprint,
     latest_identity_observation,
     link_address_label,
+    link_address_parts,
+    short_node_name,
 )
 from netbbs.chat.channels import OPEN_ROOM_NAME_PREFIX
 from netbbs.rendering.pipe_codes import cga_to_xterm
@@ -195,6 +198,7 @@ from netbbs.rendering import (
     MUTED_COLOR,
     RULE_COLOR,
     NICK_COLOR,
+    NODE_COLOR,
     PRIVILEGE_COLOR,
     SELF_COLOR,
     SegmentColor,
@@ -1430,7 +1434,9 @@ def _durable_link_author(db: Database, message: ChannelMessage) -> tuple[str, st
         return None
 
 
-def _message_author_label(db: Database, channel: Channel, message: ChannelMessage) -> str:
+def _message_author_label(
+    db: Database, channel: Channel, message: ChannelMessage, link_speaker: tuple[str, str] | None
+) -> str:
     """
     The author label to show for one `ChannelMessage` of kind
     `"message"`/`"action"`/`"join"`/`"leave"` — resolves the *current*
@@ -1446,16 +1452,100 @@ def _message_author_label(db: Database, channel: Channel, message: ChannelMessag
     styling at all, if the account can no longer be resolved — a stored
     string, even one that once came from a verified user, must never
     itself be treated as proof.
+
+    `link_speaker` is `_link_speaker`'s answer for `message`, worked out
+    once per line by the caller.
     """
-    durable_author = _durable_link_author(db, message)
-    if durable_author is not None:
-        local_user_id, fingerprint = durable_author
-        node_label = identity_for_fingerprint(db, fingerprint).label
-        return sanitize_text(link_address_label(local_user_id, node_label))
+    if link_speaker is not None:
+        return sanitize_text(link_address_label(*link_speaker))
     author = _resolve_message_author(db, message.author_label)
     if author is None:
         return sanitize_text(message.author_label)
     return _chat_author_label(db, channel, author)
+
+
+def _link_author(db: Database, message: ChannelMessage) -> tuple[str, str] | None:
+    """A linked node's author behind `message`, as `(user, home node
+    fingerprint)`, or `None` for a local or MRC line.
+
+    A materialized line has its authenticated author on the stored event.
+    A live line, or one from an origin's scrollback snapshot, carries the
+    sending node's fingerprint and a label already rendered as `user@<node
+    as named on arrival>`; only its user half is kept (the first `@`: the
+    user half cannot hold one, `link_address_label`), and the node is named
+    again from the fingerprint, so every chat line names a node the same
+    way (issue #899)."""
+    durable_author = _durable_link_author(db, message)
+    if durable_author is not None:
+        return durable_author
+    if message.external_source is not None or not message.author_fingerprint:
+        return None
+    if not is_node_fingerprint(message.author_fingerprint):
+        return None
+    user, at, _node = message.author_label.partition("@")
+    return (user, message.author_fingerprint) if at else None
+
+
+def _link_speaker(db: Database, message: ChannelMessage) -> tuple[str, str] | None:
+    """`(user, node name)` for a linked author (`_link_author`), the node
+    named as a chat line names it (`short_node_name`); `None` otherwise."""
+    link_author = _link_author(db, message)
+    if link_author is None:
+        return None
+    user_id, fingerprint = link_author
+    return user_id, short_node_name(db, fingerprint)
+
+
+def _speaker_label(
+    db: Database, channel: Channel, message: ChannelMessage, link_speaker: tuple[str, str] | None,
+    *, color: int, self_message: bool,
+) -> str:
+    """The `<speaker>` in front of a `"message"` line, each part in its
+    own color (issue #899): brackets muted, the name to address someone by
+    in `color`, and what qualifies it quieter or apart -- the `@` muted and
+    a linked node in `NODE_COLOR`, the username beside an alias muted.
+
+    Every span is its own open-content-reset unit placed beside the next,
+    never nested, for the reason `_colored_around` gives."""
+    if link_speaker is not None:
+        user_id, node_name = link_speaker
+        user, node = link_address_parts(sanitize_text(user_id), sanitize_text(node_name))
+        middle = (
+            colored(user, fg_color=color, bold=self_message)
+            + colored("@", fg_color=MUTED_COLOR)
+            + colored(node, fg_color=NODE_COLOR)
+        )
+    else:
+        author = _resolve_message_author(db, message.author_label)
+        if author is None:
+            middle = colored(sanitize_text(message.author_label), fg_color=color, bold=self_message)
+        else:
+            middle = _local_speaker_name(db, channel, author, color=color, self_message=self_message)
+    return colored("<", fg_color=MUTED_COLOR) + middle + colored(">", fg_color=MUTED_COLOR)
+
+
+def _local_speaker_name(
+    db: Database, channel: Channel, author: User, *, color: int, self_message: bool
+) -> str:
+    """`_chat_author_label`'s composition, styled for `_speaker_label`.
+
+    An alias leads in `NICK_COLOR` (`color` on the caller's own line), and
+    the username after it is muted: it is there so no alias can stand
+    alone (issue #843), not to compete with the name its owner chose. Given
+    the same weight, readers could not tell which of the two was the alias
+    (issue #899)."""
+    nick = get_nick(db, author)
+    verified_unit = format_verified_name_unit(
+        db, author, name_requirement=get_effective_name_requirement(db, channel)
+    )
+    if nick is not None:
+        name = colored(
+            sanitize_text(nick), fg_color=color if self_message else NICK_COLOR, bold=self_message
+        ) + colored(f"{NICK_SEPARATOR}{sanitize_text(author.username)}", fg_color=MUTED_COLOR)
+    else:
+        primary = (get_display_name(db, author) or author.username) if verified_unit else author.username
+        name = colored(sanitize_text(primary), fg_color=color, bold=self_message)
+    return name if verified_unit is None else f"{name} {verified_unit}"
 
 
 def _is_door_line(db: Database, message: ChannelMessage) -> bool:
@@ -1539,7 +1629,8 @@ def _render_channel_message(
     `_message_author_label`'s output, which may or may not already
     carry its own embedded color.
     """
-    author_label = _message_author_label(db, channel, message)
+    link_speaker = _link_speaker(db, message)
+    author_label = _message_author_label(db, channel, message, link_speaker)
     mrc_nick_color = (
         message.mrc_nick_color
         if message.external_source == "mrc" and mrc_colors_enabled(db, viewer) else None
@@ -1565,7 +1656,7 @@ def _render_channel_message(
             )
     else:  # "message"
         color = SELF_COLOR if self_message else effective_accent_color_256(db)
-        label = _colored_around("<", author_label, ">", fg_color=color, bold=self_message)
+        label = _speaker_label(db, channel, message, link_speaker, color=color, self_message=self_message)
         if message.external_source == "mrc":
             if mrc_nick_color is not None:
                 label = (
