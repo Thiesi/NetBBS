@@ -76,6 +76,7 @@ _SESSION_HISTORY_PRUNE_SLACK = 100
 
 _NAME_VISIBLE_KEY = "session_history_name_visible"
 _PREVIOUS_CALLERS_ENABLED_KEY = "previous_callers_enabled"
+_PREVIOUS_CALLERS_PLAIN_KEY = "previous_callers_plain"
 
 
 @dataclass(frozen=True)
@@ -259,6 +260,18 @@ def previous_callers_enabled(db: Database) -> bool:
 def set_previous_callers_enabled(db: Database, enabled: bool) -> None:
     """Enable or disable the post-login previous-callers splash node-wide."""
     set_config(db, _PREVIOUS_CALLERS_ENABLED_KEY, "1" if enabled else "0")
+
+
+def previous_callers_plain(db: Database) -> bool:
+    """Whether the previous-callers panel is drawn plain: the node's
+    header colour and a quiet heading, rather than the default neon
+    gradient and "signals received" wording (issue #841, F057: a pen
+    club's SysOp found the neon box clashed and could only hide it)."""
+    return get_config(db, _PREVIOUS_CALLERS_PLAIN_KEY, default="0") == "1"
+
+
+def set_previous_callers_plain(db: Database, plain: bool) -> None:
+    set_config(db, _PREVIOUS_CALLERS_PLAIN_KEY, "1" if plain else "0")
 
 
 def _backfill_name_visibility_fallbacks(db: Database) -> None:

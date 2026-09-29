@@ -212,6 +212,32 @@ WELCOME_BANNER_PRESETS: tuple[BannerPreset, ...] = (
         ),
         resource="cathedral_of_signals.ans",
     ),
+    # Issue #841 (F038): every preset above is neon, synthwave, cyber or
+    # CRT. These three are quiet ones for a hobby club.
+    BannerPreset(
+        key="paper_ink_letterhead", name="Paper & Ink / Sepia Letterhead", depth="256-color extended ANSI",
+        description=(
+            "A calm letterhead in sepia and cream: tilde rules, a spaced title, one line of "
+            "sections and a welcoming quote. No frame, no neon."
+        ),
+        resource="paper_ink_letterhead.ans",
+    ),
+    BannerPreset(
+        key="library_card_oak", name="Library Card / Oak & Linen", depth="256-color extended ANSI",
+        description=(
+            "An oak-framed index card with dotted leaders to fill in: club name, when it "
+            "meets, what members may borrow."
+        ),
+        resource="library_card_oak.ans",
+    ),
+    BannerPreset(
+        key="garden_gate_sage", name="Garden Gate / Sage & Stone", depth="256-color extended ANSI",
+        description=(
+            "Sage vines and small flowers above and below a plain, friendly greeting in "
+            "soft stone grey."
+        ),
+        resource="garden_gate_sage.ans",
+    ),
 )
 
 MAIN_MENU_BANNER_PRESETS: tuple[BannerPreset, ...] = (

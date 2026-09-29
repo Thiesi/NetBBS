@@ -277,6 +277,7 @@ async def edit_line_body(
     draft_path: Path | None = None,
     keep_pasted_color: bool = False,
     offer_recovery: bool = True,
+    start_at: int | None = None,
 ) -> str | None:
     """Edit a logical-line body without cursor-addressed terminal UI.
 
@@ -315,6 +316,10 @@ async def edit_line_body(
     `netbbs.net.prose_editor.edit_prose`: pasted SGR color is typed in
     as pipe codes. One translator serves the whole body, so a color
     pasted on one line still counts on the next.
+
+    `start_at` starts the caller writing before that line (0-based), as
+    `/insert` would -- a forward's note goes above the letter it carries
+    (issue #822). The listing marks the place, and `/end` leaves it.
     """
     if offer_recovery and draft_path is not None and draft_path.exists():
         if await offer_draft_recovery(session):
@@ -323,8 +328,8 @@ async def edit_line_body(
             delete_draft(draft_path)
     lines = initial_text.split("\n") if initial_text is not None else []
     # Where the next typed line goes: the end, or before a line `/insert`
-    # named (issue #814).
-    point = len(lines)
+    # named (issue #814), or where the caller asked to start.
+    point = len(lines) if start_at is None else max(0, min(start_at, len(lines)))
     # The line just typed was blank: another one finishes.
     blank_pending = False
     # ...and whether that blank went into the text (the cap may refuse it).
@@ -339,7 +344,7 @@ async def edit_line_body(
         f"review the draft;{exit_hint} /help or /? shows editing commands."
     )
     if lines:
-        await _show_lines(session, lines)
+        await _show_lines(session, lines, point=point if point < len(lines) else None)
 
     async def apply(candidate: list[str]) -> bool:
         # A cap refuses growth past it, not every change to a body that is

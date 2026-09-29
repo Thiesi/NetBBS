@@ -424,9 +424,10 @@ editor on every change -- so a dropped connection keeps the text too.
 Every draft slot belongs to one composition, and a draft is only ever
 offered for the composition it belongs to (issue #814): a board's new post
 (one per caller and board), a reply to one post, an edit of one post, a
-caller's new letter (one per caller), a reply to one message. A caller that
-offers its draft itself -- a board's `[D]raft`, mail's `[D]raft`, `[C]ompose`
-or `[R]eply` -- passes the draft in as the text with `offer_recovery` off, so
+caller's new letter (one per caller), a reply to one message, a forward of one
+message (issue #822). A caller that
+offers its draft itself -- a board's `[D]raft`, mail's `[D]raft`, `[C]ompose`,
+`[R]eply` or `[F]orward` -- passes the draft in as the text with `offer_recovery` off, so
 the editor neither asks again nor deletes the draft before something replaces
 it. Before #814 mail had one body-only draft per user, which the fullscreen
 editor offered in place of any later letter's text: a reply to someone else
@@ -573,7 +574,11 @@ all 10 rows together with its title, frame, and pause; an empty history skips
 the splash rather than stopping the first caller at an empty screen. Confirmed
 truecolor is a progressive visual enhancement with a deliberately polished
 256-color fallback. The SysOp can toggle the splash node-wide from Settings;
-new and upgraded nodes default to showing it.
+new and upgraded nodes default to showing it. The same setting also offers a
+plain style (issue #841): the node's header colour, no gradient, and the
+heading "Previous callers" / "Who has called in lately" instead of the neon
+"signals received" wording, for a node whose tone the neon clashes with. It
+applies to the splash and the menu screen alike.
 
 The same roll is a home-menu screen of its own, `P[r]evious callers`, rendered
 by the one renderer the splash uses so the two can never disagree about who is
@@ -613,19 +618,16 @@ not advertised when their runtime context is unavailable. The dashboard can be
 refreshed explicitly, and action screens return to the console without losing
 the operator's place.
 
-Status context in the console is deliberately two-tier (issue #206). The five
-top-level consoles — Users, Content, Operations, Settings, Node — each show a
-full panel of what's actually relevant there: live counts, health badges, or
-current configuration values. Every nested screen beneath them that has no
-such panel of its own instead shows one condensed line carrying the last-backup
-status obtainable without live node/session/Link state. Update-check outcomes
-remain on the SysOp landing dashboard, Settings overview, and dedicated Update
-screen; repeating them on unrelated user, content, presentation, and policy
-screens makes a global result look like a context-specific warning. This keeps
-recovery-relevant backup context visible while an operator is deep in a nested
-screen without re-deriving a richer panel those screens have no room to show.
-A screen that already has its own full panel does not also show the condensed
-line.
+Status context in the console lives where it is relevant. The landing
+dashboard and the five top-level consoles — Users, Content, Operations,
+Settings, Node — each show a full panel of what's actually relevant there: live
+counts, health badges, or current configuration values. Backup state appears
+on the dashboard, the Operations panel and the Backup screen; update-check
+outcomes on the dashboard, the Settings overview and the Update screen. Nested
+screens repeat neither. Issue #206 once put a condensed "Backup:" line on every
+nested screen; the 2026-09-28 field test (issue #845) found that a first-day
+SysOp read "Backup: never" under Communities, boards and banners as an error
+about those screens, so it was removed.
 
 A console screen that shows facts shows them as a *detail panel*
 (`netbbs.rendering.detail`), the read-only counterpart of the draft editor's
@@ -1451,8 +1453,8 @@ nobody has to open each board and area to find what waits.
 
 A caller granted APPROVE on a board or file area has the same queue on its
 own page: `[Q]ueue (N)` appears there while anything waits, and opens the
-same decision screens without the SysOp's node status line, and without the
-pin and exempt keys unless they also hold EDIT. APPROVE covers the whole
+same decision screens without the pin and exempt keys unless they also hold
+EDIT. APPROVE covers the whole
 decision: it lets its holder reject a held post or upload as well as publish
 it. Deleting something already published still takes DELETE.
 
@@ -2453,6 +2455,34 @@ back on the screen they came from with the outcome above its prompt.
 A letter started from the Directory, Who's online or Previous callers is the
 caller's new letter, the same slot `[C]ompose` uses: a kept new letter is
 offered first, and resuming it keeps its own recipient.
+
+**Forwarding** (issue #822). `[F]orward` on a received letter's view and on a
+sent letter's view starts a new letter titled "Forward": Subject gets `Fwd: `
+unless it already starts with `Fwd:` or `Fw:` (the `Re:` rule, one helper in
+`netbbs.quoting`), and the body is the letter under a header --
+`---------- Forwarded message ----------`, then `From:`, `To:`, `Date:` and
+`Subject:` as the view names them (a Link address by its node's current name,
+system mail as **System**, the date in the forwarder's format), a blank line,
+and the body. The caller types the recipient at the To prompt, which makes
+every check a new letter's does, so any letter goes to a local account or a
+Link address alike. Both editors start above the letter, where a note goes
+(the line editor as after `/insert 1`; `/end` leaves it), and the forwarder's
+signature closes that note, above the rule (`netbbs.quoting.sign_forward`):
+appended at the end, it would read as the forwarded letter's writer's. A
+reply to a forward quotes it without that signature, so the quote still stops
+only at the forwarded letter's own.
+- The body is carried verbatim, not quoted. A forward passes a letter on for
+  someone else to read: `>` would mark it as text being answered, and the
+  quote's bounds (40 lines, 8,000 bytes, stop at the signature) would cut what
+  the forward exists to carry. Escape sequences are removed; color pipe codes
+  stay, so it reads as the original did.
+- Nothing extra bounds it: a letter at the body limit is over it once the
+  header is added, and the review screen says so in characters and refuses
+  Send until `[B]ody` shortens it (issue #812), as for any over-limit letter.
+- System mail can be forwarded. Passing a moderation notice on -- to the SysOp,
+  say -- harms no one, and the header says it came from System.
+- `caller_mail_refusal` is checked when the key is pressed. Each letter's
+  forward has its own draft slot, apart from a reply to it.
 
 ### 6.5 Communities
 
@@ -7128,9 +7158,13 @@ Completed product work informed by dogfood includes:
   values, metadata, success, and failure through shared theme roles; colored
   narrow output is truncated by visible width rather than raw ANSI length.
   The default web login banner visibly exercises truecolor while the
-  256-color rendering remains equivalent and readable. Profile and banner-
-  preview diagnostics state the transport's detected capability or limitation;
-  a custom SysOp banner explicitly bypasses the generated showcase. Both
+  256-color rendering remains equivalent and readable. Profile diagnostics
+  state the transport's detected capability or limitation; the banner preview
+  no longer does, since a SysOp read it as developer output (issue #841). A
+  custom SysOp banner bypasses the generated showcase. Before sign-in the
+  node's own chrome is plain ASCII over Telnet, where CP437 terminals such as
+  SyncTERM call from, and Unicode on the web and SSH; a custom banner is sent
+  as authored either way (issue #841). Both
   Telnet's and SSH's initial banners are shown before capability negotiation
   completes -- Telnet's can precede NEW-ENVIRON, and SSH's own pre-auth
   banner (asyncssh's `send_auth_banner`, sent from `begin_auth` before any

@@ -34,7 +34,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from netbbs.config import get_config, set_config
-from netbbs.rendering import RESET, decode_ansi_bytes
+from netbbs.rendering import RESET, decode_banner_bytes
 from netbbs.storage.database import Database
 
 _logger = logging.getLogger(__name__)
@@ -124,4 +124,4 @@ def load_new_account_banner_after(db: Database) -> str:
     # the end matters here specifically, unlike a truly final screen --
     # the real success/pending-approval message follows immediately and
     # must never inherit color state left open by the banner's own art.
-    return decode_ansi_bytes(data) + RESET
+    return decode_banner_bytes(data) + RESET

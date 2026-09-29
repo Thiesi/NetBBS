@@ -420,7 +420,7 @@ def test_door_upload_confirms_replacing_an_existing_file(db, lane, sysop):
 def test_menus_offer_upload(db, lane, sysop):
     session = FakeSession([])
     asyncio.run(admin_flow._draw_welcome_banner_menu(session, lane, "off", False, False, False))
-    asyncio.run(admin_flow._draw_door_menu(session, "off", False, False, False, status_line=""))
+    asyncio.run(admin_flow._draw_door_menu(session, "off", False, False, False))
     assert _visible(_written_text(session)).count("[U]pload") == 2
 
 
