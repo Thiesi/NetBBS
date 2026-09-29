@@ -1511,8 +1511,8 @@ secret stable; changing it breaks existing provider accounts. A caller with
 the wrong secret still connects, then DoorParty prints `Invalid password.
 Inform the sysop of your BBS!` and closes, so NetBBS records a door that ended,
 not one that failed to start. `netbbs.backup` does not include the credential
-file, and the preset's default path is outside the NetBBS state directory:
-**back it up yourself**. Losing it orphans every caller's DoorParty account.
+file, even when it sits in the state directory as the preset's default path
+does: **back it up yourself**. Losing it orphans every caller's DoorParty account.
 It is **not** the provider SSH password or a caller's NetBBS password.
 Use chmod 600. Do not grant guest accounts access; initially restrict the
 door to SysOp, then regular approved callers after a successful test.
