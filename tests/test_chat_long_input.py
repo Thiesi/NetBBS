@@ -144,8 +144,22 @@ def _narrow() -> _LiveTypingSession:
     return session
 
 
-async def _settle() -> None:
-    await asyncio.sleep(0.05)
+def _repainted_after(session: _LiveTypingSession, text: str) -> bool:
+    """Whether `text` has arrived and the input row has been redrawn since:
+    the window's erase-to-end follows the prompt on every repaint."""
+    output = session.output
+    return text in output and output.rfind("\x1b[K") > output.rfind(text)
+
+
+async def _until(condition, what: str, timeout: float = 5.0) -> None:
+    """Poll `condition` with a generous bound rather than sleeping a fixed
+    time, which a loaded machine (the suite under `-n auto`) outruns."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not condition():
+        if loop.time() > deadline:
+            raise AssertionError(f"timed out waiting for {what}")
+        await asyncio.sleep(0.01)
 
 
 def test_a_long_channel_line_scrolls_within_the_row_and_survives_a_message(db, lane, alice, bob, channel):
@@ -156,26 +170,27 @@ def test_a_long_channel_line_scrolls_within_the_row_and_survives_a_message(db, l
         task = asyncio.create_task(
             chat_flow._chat_loop(session, lane, hub, presence, mailbox, InputHistory(), channel, alice)
         )
-        await _settle()
         session.feed(_LINE)
-        await _settle()
+        await _until(lambda: _screen_of(session).input_row.endswith(_LINE[-10:]), "the typed line")
         typed = _screen_of(session)
 
         await asyncio.wait_for(
             chat_flow._chat_loop(
                 FakeSession(["hello there", "/quit"]), lane, hub, presence, mailbox, InputHistory(), channel, bob,
             ),
-            timeout=2,
+            timeout=5,
         )
-        await _settle()
+        await _until(lambda: _repainted_after(session, "has left the channel"), "the repaint after bob's lines")
         after_message = _screen_of(session)
 
         session.feed("\x1b[H")  # Home
-        await _settle()
+        await _until(lambda: _LINE[:10] in _screen_of(session).input_row, "Home to scroll back")
         at_home = _screen_of(session)
 
         session.feed_enter()
-        await _settle()
+        await _until(
+            lambda: _LINE in [message.body for message in get_scrollback(db, channel)], "the line to be sent",
+        )
         task.cancel()
         try:
             await task
@@ -199,8 +214,6 @@ def test_a_long_channel_line_scrolls_within_the_row_and_survives_a_message(db, l
     # Home scrolls back to the start, the caret on the first character.
     assert _LINE[:30] in at_home.input_row
     assert at_home.col == chat_flow._INPUT_PROMPT_WIDTH + 1  # after the prompt and the " " marker
-    # And the whole line was sent.
-    assert f"> {_LINE}" in session.output.replace("\x1b[0m", "") or _LINE in session.output
 
 
 def test_a_long_direct_chat_line_scrolls_within_the_row(db, alice, bob):
@@ -212,24 +225,21 @@ def test_a_long_direct_chat_line_scrolls_within_the_row(db, alice, bob):
         peer_queue = hub.join(room, peer_id)
         session = _narrow()
         task = asyncio.create_task(chat_flow.run_direct_chat_loop(session, hub, presence, alice, bob, room_token))
-        for _ in range(100):
-            if hub.participant_count(room) == 2:
-                break
-            await asyncio.sleep(0.01)
+        await _until(lambda: hub.participant_count(room) == 2, "alice to join the direct chat")
         session.feed(_LINE)
-        await _settle()
+        await _until(lambda: _screen_of(session).input_row.endswith(_LINE[-10:]), "the typed line")
         typed = _screen_of(session)
         await hub.broadcast(
             room, chat_flow._render_direct_chat_message(bob.username, "incoming", self_message=False),
             exclude={peer_id},
         )
-        await _settle()
+        await _until(lambda: _repainted_after(session, "incoming"), "the repaint after bob's message")
         after_message = _screen_of(session)
         session.feed_enter()
-        sent = await asyncio.wait_for(peer_queue.get(), timeout=2)
+        sent = await asyncio.wait_for(peer_queue.get(), timeout=5)
         session.feed("/close")
         session.feed_enter()
-        await asyncio.wait_for(task, timeout=2)
+        await asyncio.wait_for(task, timeout=5)
         return typed, after_message, sent
 
     typed, after_message, sent = asyncio.run(scenario())
@@ -251,9 +261,8 @@ def test_tab_completion_in_a_long_line_stays_on_the_row(lane, alice, channel):
         task = asyncio.create_task(
             chat_flow._chat_loop(session, lane, hub, presence, mailbox, InputHistory(), channel, alice)
         )
-        await _settle()
         session.feed(_LINE + "\x1b[H" + "/wh\t")
-        await _settle()
+        await _until(lambda: _repainted_after(session, "/whois"), "the repaint after the candidates")
         screen = _screen_of(session)
         task.cancel()
         try:
