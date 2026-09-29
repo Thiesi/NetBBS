@@ -70,6 +70,7 @@ class FakeSession(Session):
         self.node_display_name = "NetBBS"
         self.terminal_height = 24
         self.peer_address = None
+        self.pasted_color_offered = False
 
     async def write(self, text: str) -> None:
         self.written.append(text)
@@ -84,7 +85,10 @@ class FakeSession(Session):
             raise AssertionError("FakeSession ran out of scripted input (read_key)")
         return self._inputs.pop(0)
 
-    async def read_editor_key(self, *, distinguish_ctrl_h: bool = False) -> EditorKey:
+    async def read_editor_key(self, *, distinguish_ctrl_h: bool = False, pasted_color=None) -> EditorKey:
+        # Recorded so a caller can prove it asked for pasted color (issue #809).
+        if pasted_color is not None:
+            self.pasted_color_offered = True
         if not self._inputs:
             await asyncio.Event().wait()
             raise AssertionError("unreachable")
@@ -220,8 +224,8 @@ def test_profile_toggle_switches_the_preference_on_and_off(db, lane, alice):
     # First "f" turns it on, second turns it back off.
     assert fullscreen_editor_enabled(db, alice) is False
     text = _visible(session)
-    assert "Fullscreen editor for posts/bio: on" in squeezed(text)
-    assert "Fullscreen editor for posts/bio: off" in squeezed(text)
+    assert "Fullscreen editor (all writing): on" in squeezed(text)
+    assert "Fullscreen editor (all writing): off" in squeezed(text)
 
 
 def test_profile_color_depth_toggle_cycles_auto_truecolor_256(db, lane, alice):
@@ -295,7 +299,7 @@ def test_profile_ssh_public_key_self_service_adds_a_key(db, lane, alice):
     verify_key = nacl.signing.SigningKey.generate().verify_key
     raw_b64 = base64.b64encode(bytes(verify_key)).decode()
 
-    session = FakeSession(["k", "a", "phone", raw_b64, "b", "b"])
+    session = FakeSession(["k", "a", raw_b64, "phone", "b", "b"])
     asyncio.run(profile_flow._edit_profile(session, lane, alice))
 
     updated = login_flow.get_user_by_username(db, "alice")
@@ -304,7 +308,7 @@ def test_profile_ssh_public_key_self_service_adds_a_key(db, lane, alice):
 
 
 def test_profile_ssh_public_key_self_service_rejects_an_unparseable_key(db, lane, alice):
-    session = FakeSession(["k", "a", "phone", "not a real key", "b", "b"])
+    session = FakeSession(["k", "a", "not a real key", "b", "b"])
     asyncio.run(profile_flow._edit_profile(session, lane, alice))
 
     updated = login_flow.get_user_by_username(db, "alice")
@@ -323,7 +327,7 @@ def test_profile_ssh_public_key_self_service_refuses_a_key_already_in_use(db, la
     raw_b64 = base64.b64encode(bytes(verify_key)).decode()
     create_user(db, "bob", verify_key=verify_key, user_level=10)
 
-    session = FakeSession(["k", "a", "phone", raw_b64, "b", "b"])
+    session = FakeSession(["k", "a", raw_b64, "phone", "b", "b"])
     asyncio.run(profile_flow._edit_profile(session, lane, alice))
 
     updated = login_flow.get_user_by_username(db, "alice")
@@ -410,7 +414,7 @@ def test_main_menu_refreshes_the_session_user_after_a_profile_key_change(db, lan
 
     session = FakeSession(
         [
-            "p", "PAGE_DOWN", "PAGE_DOWN", "PAGE_DOWN", "k", "a", "phone", raw_b64, "b", "b",
+            "p", "PAGE_DOWN", "PAGE_DOWN", "PAGE_DOWN", "k", "a", raw_b64, "phone", "b", "b",
             "p", "PAGE_DOWN", "PAGE_DOWN", "PAGE_DOWN", "b", "l", "y",
         ]
     )
@@ -440,7 +444,7 @@ def test_compose_post_uses_plain_read_line_by_default(db, alice):
     # (same post-then-refresh behavior the non-empty case's own [P]ost
     # option already has), so a trailing "b" exits that navigation loop.
     board = create_board(db, "general", creator=alice)
-    session = FakeSession(["p", "Hello there", "A plain single-line body", "", "p", "b"])
+    session = FakeSession(["p", "Hello there", "A plain single-line body", "/done", "p", "b"])
     asyncio.run(board_flow._show_board(session, db, board, alice))
     assert "Posted" in _written_text(session)
 
@@ -463,8 +467,8 @@ def test_compose_post_review_can_revise_subject_and_submitted_body_line(db, alic
     session = FakeSession(
         [
             "p",
-            "Original subject", "first", "second", "",
-            "u", "Revised subject", "b", "/edit 2", "SECOND", "", "p", "b",
+            "Original subject", "first", "second", "/done",
+            "u", "Revised subject", "b", "/edit 2", "SECOND", "/done", "p", "b",
         ]
     )
 
@@ -480,7 +484,7 @@ def test_compose_post_review_cancel_persists_nothing(db, alice):
     board = create_board(db, "general", creator=alice)
     # A cancelled compose leaves the board still empty, so the [P]ost/
     # [B]ack choice reprompts -- trailing "b" exits it.
-    session = FakeSession(["p", "Subject", "Body", "", "c", "b"])
+    session = FakeSession(["p", "Subject", "Body", "/done", "c", "b"])
 
     asyncio.run(board_flow._show_board(session, db, board, alice))
 
@@ -513,18 +517,17 @@ def test_compose_post_with_oversized_subject_shows_a_friendly_error(db, alice):
     """Regression test for GitHub issue #32 (reopened): the plain
     single-line prompt has no length cap of its own (only the 4,096-
     char line editor ceiling), so a subject can clear that and still
-    exceed create_post()'s own MAX_SUBJECT_BYTES domain limit. Before
-    this fix, the resulting PostError propagated straight out of
-    _compose_new_post() and terminated the session instead of being
-    shown as a normal rejection."""
+    exceed create_post()'s own MAX_SUBJECT_BYTES domain limit. Issue
+    #812 moved the refusal to the Subject prompt itself, before a body
+    is written, in characters, with the prompt reopened to shorten it."""
     board = create_board(db, "general", creator=alice)
     oversized_subject = "x" * (MAX_SUBJECT_BYTES + 1)
-    session = FakeSession(["p", oversized_subject, "A normal body", "", "p", "c", "b"])
+    session = FakeSession(["p", oversized_subject, "Short", "A normal body", "/done", "p", "b"])
     asyncio.run(board_flow._show_board(session, db, board, alice))
-    text = _written_text(session)
-    assert "Posted" not in text
-    assert "Could not create post" in text
-    assert list_posts_page(db, board, alice).posts == []
+    text = _visible(session)
+    assert "That subject is 1 character too long" in text
+    assert "bytes" not in text
+    assert [post.subject for post in list_posts_page(db, board, alice).posts] == ["Short"]
 
 
 def test_compose_post_with_oversized_multibyte_subject_shows_a_friendly_error(db, alice):
@@ -536,18 +539,19 @@ def test_compose_post_with_oversized_multibyte_subject_shows_a_friendly_error(db
     oversized_subject = "€" * 150  # each euro sign is 3 UTF-8 bytes
     assert len(oversized_subject) < MAX_SUBJECT_BYTES
     assert len(oversized_subject.encode("utf-8")) > MAX_SUBJECT_BYTES
-    session = FakeSession(["p", oversized_subject, "A normal body", "", "p", "c", "b"])
+    session = FakeSession(["p", oversized_subject, "Short", "A normal body", "/done", "p", "b"])
     asyncio.run(board_flow._show_board(session, db, board, alice))
-    text = _written_text(session)
-    assert "Posted" not in text
-    assert "Could not create post" in text
-    assert list_posts_page(db, board, alice).posts == []
+    text = _visible(session)
+    # 450 bytes of 300: 50 of the 150 characters have to go.
+    assert "That subject is 50 characters too long" in text
+    assert "bytes" not in text
+    assert [post.subject for post in list_posts_page(db, board, alice).posts] == ["Short"]
 
 
 def test_compose_post_with_subject_exactly_at_the_byte_boundary_succeeds(db, alice):
     board = create_board(db, "general", creator=alice)
     subject = "x" * MAX_SUBJECT_BYTES
-    session = FakeSession(["p", subject, "A normal body", "", "p", "b"])
+    session = FakeSession(["p", subject, "A normal body", "/done", "p", "b"])
     asyncio.run(board_flow._show_board(session, db, board, alice))
     assert "Posted" in _written_text(session)
     assert list_posts_page(db, board, alice).posts[0].subject == subject
@@ -569,7 +573,7 @@ def test_edit_existing_post_via_plain_line_flow(db, alice):
     board = create_board(db, "general", creator=alice)
     create_post(db, board, alice, "Original subject", "Original body")
     # e -> pick post 1 -> keep subject -> replace body line 1 -> finish -> [S]ave in review -> back
-    session = FakeSession(["1", "e", "", "/edit 1", "Edited body", "", "s", "b", "b"])
+    session = FakeSession(["1", "e", "", "/edit 1", "Edited body", "/done", "s", "b", "b"])
     asyncio.run(board_flow._show_board(session, db, board, alice))
     assert "Post updated" in _written_text(session)
     saved = list_posts_page(db, board, alice).posts[0]
@@ -621,7 +625,7 @@ def test_editing_a_post_does_not_reset_to_the_newest_page(db, alice):
     # page, edit the post shown there, and confirm the view stays on
     # that same older page rather than jumping back to page one.
     posts = [create_post(db, board, alice, f"Subject {i}", f"Body {i}") for i in range(6)]
-    session = FakeSession(["o", "1", "e", "", "/edit 1", "Edited", "", "s", "b", "b"])
+    session = FakeSession(["o", "1", "e", "", "/edit 1", "Edited", "/done", "s", "b", "b"])
     asyncio.run(board_flow._show_board(session, db, board, alice))
     text = _written_text(session)
     assert "Post updated" in text
@@ -725,7 +729,7 @@ def test_posting_to_a_moderated_board_says_the_post_awaits_approval(db, alice):
     """Only its author sees a held post, so "Posted" would describe a post
     nobody else can find."""
     board = create_board(db, "general", creator=alice, moderated=True)
-    session = FakeSession(["p", "Hello", "Body", "", "p", "b"])
+    session = FakeSession(["p", "Hello", "Body", "/done", "p", "b"])
     asyncio.run(board_flow._show_board(session, db, board, alice))
     text = _visible(session)
     assert "Submitted. Others will see it once a moderator approves it." in text
@@ -734,7 +738,7 @@ def test_posting_to_a_moderated_board_says_the_post_awaits_approval(db, alice):
 
 def test_posting_to_an_unmoderated_board_says_posted_without_the_content_hash(db, alice):
     board = create_board(db, "general", creator=alice)
-    session = FakeSession(["p", "Hello", "Body", "", "p", "b"])
+    session = FakeSession(["p", "Hello", "Body", "/done", "p", "b"])
     asyncio.run(board_flow._show_board(session, db, board, alice))
     text = _visible(session)
     assert "Posted." in text
@@ -746,7 +750,7 @@ def test_editing_on_a_moderated_board_says_the_edit_awaits_approval(db, alice):
 
     board = create_board(db, "general", creator=alice, moderated=True)
     approve_post(db, create_post(db, board, alice, "Subject", "Original body"), approved_by=_sysop(db))
-    session = FakeSession(["1", "e", "", "/edit 1", "Revised body", "", "s", "b", "b"])
+    session = FakeSession(["1", "e", "", "/edit 1", "Revised body", "/done", "s", "b", "b"])
     asyncio.run(board_flow._show_board(session, db, board, alice))
     text = _visible(session)
     assert "Edit submitted. The post keeps its current text until a moderator approves it." in text
@@ -757,8 +761,8 @@ def test_editing_on_a_moderated_board_says_the_edit_awaits_approval(db, alice):
 def test_saving_an_unchanged_edit_says_nothing_changed(db, alice):
     board = create_board(db, "general", creator=alice)
     create_post(db, board, alice, "Subject", "Body")
-    # Keep the subject, finish the body untouched, save in review.
-    session = FakeSession(["1", "e", "", "", "s", "b", "b"])
+    # Keep the subject, finish the body untouched (two blank lines), save in review.
+    session = FakeSession(["1", "e", "", "", "", "s", "b", "b"])
     asyncio.run(board_flow._show_board(session, db, board, alice))
     text = _visible(session)
     assert "No changes to save." in text
@@ -769,7 +773,7 @@ def test_saving_an_unchanged_edit_says_nothing_changed(db, alice):
 def test_an_edit_is_reviewed_before_it_is_saved(db, alice):
     board = create_board(db, "general", creator=alice)
     create_post(db, board, alice, "Subject", "Body")
-    session = FakeSession(["1", "e", "", "/edit 1", "Revised", "", "c", "b", "b"])
+    session = FakeSession(["1", "e", "", "/edit 1", "Revised", "/done", "c", "b", "b"])
     asyncio.run(board_flow._show_board(session, db, board, alice))
     text = _visible(session)
     assert "Review composition" in text
@@ -780,16 +784,19 @@ def test_an_edit_is_reviewed_before_it_is_saved(db, alice):
 
 def test_a_refused_edit_stays_in_review_with_the_revision_intact(db, alice):
     """The editor deletes its draft when it hands the body back, so a
-    refusal that returned to the board would lose the revision."""
+    refusal that returned to the board would lose the revision. An
+    over-long subject is refused at its prompt (issue #812), and one
+    typed in review under [U]pdate subject leaves review and the revised
+    body as they were."""
     board = create_board(db, "general", creator=alice)
     create_post(db, board, alice, "Subject", "Body")
     too_long = "x" * (MAX_SUBJECT_BYTES + 1)
     session = FakeSession(
-        ["1", "e", too_long, "/edit 1", "Revised body", "", "s", "u", "Short subject", "s", "b", "b"]
+        ["1", "e", "", "/edit 1", "Revised body", "/done", "u", too_long, "Short subject", "s", "b", "b"]
     )
     asyncio.run(board_flow._show_board(session, db, board, alice))
     text = _visible(session)
-    assert "Could not save edit" in text
+    assert "That subject is 1 character too long" in text
     assert "Post updated." in text
     saved = list_posts_page(db, board, alice).posts[0]
     assert saved.subject == "Short subject"
@@ -821,8 +828,50 @@ class _TypeAheadSession(FakeSession):
 
 def test_an_enter_typed_right_behind_post_does_not_cancel_the_post(db, alice):
     board = create_board(db, "general", creator=alice)
-    session = _TypeAheadSession(["p", "", "Hello", "Body", "", "p", "b"])
+    session = _TypeAheadSession(["p", "", "Hello", "Body", "/done", "p", "b"])
     asyncio.run(board_flow._show_board(session, db, board, alice))
     text = _visible(session)
     assert "Post cancelled" not in text
     assert list_posts_page(db, board, alice).posts[0].subject == "Hello"
+
+
+# -- issue #813: composing is a screen of its own ----------------------------
+
+
+def _first_editor_screen(session: FakeSession) -> list[str]:
+    """The fullscreen editor's first paint, as a terminal shows it."""
+    from netbbs.rendering.terminal_emulator import TerminalEmulator
+
+    written = _written_text(session)
+    status = written.index("Ctrl+O save")
+    start = written.rindex("\x1b[2J", 0, status)
+    emulator = TerminalEmulator(session.terminal_width, session.terminal_height)
+    emulator.feed(written[start:status])
+    return [row.rstrip() for row in emulator.text_rows()]
+
+
+def test_a_new_post_opens_on_its_own_screen_and_the_editor_names_it(db, alice):
+    set_fullscreen_editor_enabled(db, alice, True)
+    board = create_board(db, "general", creator=alice)
+    session = FakeSession(["p", "Hello"] + _type("Body") + ["CTRL+O", "p", "b"])
+    asyncio.run(board_flow._show_board(session, db, board, alice, breadcrumb=("Message boards",)))
+
+    text = _visible(session)
+    assert re.search(r"Message boards \W general \W New post", text)
+    assert text.index("New post") < text.index("Subject (or press Enter to cancel)")
+    rows = _first_editor_screen(session)
+    assert rows[:3] == ["New post", "Board: general", "Subject: Hello"]
+    assert re.search(r"general \W New post \W Review composition", text)
+    assert list_posts_page(db, board, alice).posts[0].body == "Body"
+
+
+def test_editing_a_post_names_it_in_the_editor(db, alice):
+    set_fullscreen_editor_enabled(db, alice, True)
+    board = create_board(db, "general", creator=alice)
+    create_post(db, board, alice, "Original subject", "Original body")
+    session = FakeSession(["1", "e", "", "CTRL+O", "c", "b", "b"])
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+
+    assert "Edit post" in _visible(session)
+    rows = _first_editor_screen(session)
+    assert rows[:3] == ["Edit post", "Board: general", "Subject: Original subject"]

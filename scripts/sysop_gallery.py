@@ -68,6 +68,10 @@ WALKS: dict[str, tuple[list[str], str]] = {
     "operations > repair": (["o", "r"], "Repair carried posts"),
     "operations > diagnostics": (["o", "d"], "Diagnostic log"),
     "operations > an audit entry": (["o", "a", "0", "1"], "Audit entry"),
+    "operations > mail": (["o", "m"], "Mail"),
+    "operations > mail > mailboxes": (["o", "m", "m"], "Mailboxes"),
+    "operations > mail > refused": (["o", "m", "r"], "Refused Link mail"),
+    "operations > mail > a refused letter": (["o", "m", "r", "o", "0", "1"], "Refused letter"),
     "settings": (["s"], "Settings"),
     "settings > node name": (["s", "n"], "Node name"),
     "settings > join link": (["s", "j"], "Join NetBBS Link"),
@@ -97,12 +101,22 @@ def seed(db):
     from netbbs.communities import create_community
     from netbbs.doors.registry import create_door
     from netbbs.files.areas import create_file_area
+    from netbbs.mail import send_mail, send_system_mail
     from netbbs.net.redraw_preference import set_redraw_in_place_enabled
 
     sysop = create_user(db, "sysop", password="hunter2", user_level=SYSOP_LEVEL)
     set_redraw_in_place_enabled(db, sysop, True)
-    for name in ("alice", "bob", "carol"):
-        create_user(db, name, password="hunter2")
+    users = {name: create_user(db, name, password="hunter2") for name in ("alice", "bob", "carol")}
+    send_mail(db, users["alice"], users["bob"], "Lunch?", "Thursday at noon.")
+    send_system_mail(db, users["carol"], "Your post was not approved", "It was off topic.")
+    # A letter this node refused (issue #820), as the Link would have recorded it.
+    db.connection.execute(
+        "INSERT INTO link_mail_refusals (message_content_id, sender_node_fingerprint, sender_user, reason, "
+        "via, first_refused_at, last_refused_at, attempts) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        ("gallery-letter", "ab" * 32, "dave", "link_policy_node_probationary_read_only", "direct",
+         "2026-09-28T10:00:00.000000Z", "2026-09-28T16:00:00.000000Z", 3),
+    )
+    db.connection.commit()
     create_board(
         db, "General", description="General discussion for everyone on the node " * 3,
         moderated=True, min_age=18, name_requirement="verified", creator=sysop,

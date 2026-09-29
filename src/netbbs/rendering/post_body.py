@@ -471,6 +471,33 @@ def _ends_in_default_foreground(params: list[int]) -> bool:
     return bool(default)
 
 
+def lined_body_rows(rendered: str, width: int) -> list[str]:
+    """A rendered body (`render_post_body`'s result, colored or not) as
+    reader rows at `width`, every line the author wrote kept as a line:
+    only a line wider than `width` wraps, at a word, its continuation
+    indented by nothing. What mail shows (issue #809): a letter's
+    greeting, list and signature are lines, not a paragraph to rewrap.
+
+    ``>`` quote lines are muted and, when they wrap, keep their marker
+    on every row -- the same quote shape `colored_body_rows` gives a
+    post -- and every row stands alone, as in the board reader."""
+    # (is a quote row, content): the quote marker is added after the color
+    # state is settled, since its own reset would cancel the state a row
+    # restates.
+    rows: list[tuple[bool, str]] = []
+    for raw_line in rendered.replace("\r\n", "\n").split("\n"):
+        if _visible(raw_line).strip().startswith(">"):
+            wrapped = wrap_terminal_text(_strip_quote_marker(raw_line), max(1, width - 2))
+            rows.extend((True, row) for row in wrapped.split("\r\n"))
+        else:
+            rows.extend((False, row) for row in wrap_terminal_text(raw_line, max(1, width)).split("\r\n"))
+    contents = self_contained_rows([content for _quote, content in rows])
+    return [
+        colored("> ", fg_color=MUTED_COLOR) + _muted_quote(content) if quote else content
+        for (quote, _raw), content in zip(rows, contents)
+    ]
+
+
 def post_body_rows(body: str, width: int, mode: str, *, truecolor: bool, layout: str = "prose") -> list[str]:
     """A post body as reader rows at `width`, in `mode`
     (`netbbs.rendering.post_body.post_body_mode`): colored, or text laid
@@ -478,7 +505,11 @@ def post_body_rows(body: str, width: int, mode: str, *, truecolor: bool, layout:
     preview and the pending-post screen share (issue #711).
 
     A post written in the ANSI art editor (`layout` ``art``) keeps its
-    lines in every mode: `art_body_rows`."""
+    lines in every mode: `art_body_rows`. `layout` ``lines`` is a mail
+    body's (issue #809): filtered like a post, its lines kept by
+    `lined_body_rows`."""
+    if layout == "lines":
+        return lined_body_rows(render_post_body(body, mode, truecolor=truecolor), width)
     if layout == "art":
         # Its color is the SGR the editor wrote; a pipe code in it is painted
         # text, so it is never read as color or removed as a code. The

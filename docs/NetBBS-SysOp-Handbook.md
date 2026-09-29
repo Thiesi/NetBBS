@@ -45,8 +45,15 @@ consistently if you choose a different layout.
 A virtual environment is a private installation directory for NetBBS and its
 libraries; it keeps them separate from other programs on your server.
 
-On Debian/Ubuntu, install `python3-venv` for the Python version you use. On
-NetBSD, use pkgsrc packages such as `python312` and `py312-pip`. The SSH extra
+Check the version with `python3 --version`: it must say 3.11 or newer. On
+Debian/Ubuntu, `python3 -m venv` fails until the matching `venv` package is
+installed:
+
+```sh
+sudo apt install python3 python3-venv
+```
+
+On NetBSD, use pkgsrc packages such as `python312` and `py312-pip`. The SSH extra
 uses AsyncSSH and `cryptography`; a source build on NetBSD also needs Rust,
 a C compiler, Python headers, OpenSSL, libffi, and pkgconf. A typical pkgin
 package set is:
@@ -84,17 +91,26 @@ Run the application and games as this account, never root.
 
 ### Install a release
 
-**MANUAL — on the host:** download the desired wheel asset from GitHub Releases
-and make it readable by the service account. Replace the example wheel path
-and `VERSION` with the actual downloaded filename. On NetBSD, use `python3.12`
-in place of `python3` if that is your installed interpreter's name.
+**MANUAL — on the host:** download the wheel (the `.whl` file) from GitHub
+Releases. The service account usually cannot read files in your home directory, so
+copy the wheel somewhere it can, such as `/tmp`, first; pip reports a wheel
+it cannot read as "does not exist". In the commands below, replace `VERSION`
+with the version number only, for example `7.13.0`, and `~/Downloads` with
+the directory you downloaded to. On NetBSD, use `python3.12` in place of
+`python3` if that is your installed interpreter's name.
 
 ```sh
+sudo install -m 644 ~/Downloads/netbbs-VERSION-py3-none-any.whl /tmp/
 sudo -u netbbs python3 -m venv /var/lib/netbbs/.venv
 sudo -u netbbs /var/lib/netbbs/.venv/bin/python -m pip install --upgrade pip
-sudo -u netbbs /var/lib/netbbs/.venv/bin/python -m pip install "/path/to/netbbs-VERSION-py3-none-any.whl[ssh,web]"
-/var/lib/netbbs/.venv/bin/python -m netbbs --version
+sudo -u netbbs /var/lib/netbbs/.venv/bin/python -m pip install "/tmp/netbbs-VERSION-py3-none-any.whl[ssh,web]"
+sudo -u netbbs /var/lib/netbbs/.venv/bin/python -m netbbs --version
 ```
+
+Tried NetBBS with the website's local trial first? That trial database is
+unrelated to this installation and can simply be deleted with its directory.
+This installation starts with a fresh database, and you create your SysOp
+account again below.
 
 `--version` prints the package and database-schema versions without starting
 listeners. Choose extras according to what you enable:
@@ -125,6 +141,11 @@ Do not substitute the base system's differently versioned OpenSSL library.
 
 **MANUAL — on the host:** save this as `/etc/netbbs/netbbs.toml`, readable by
 the service account. This starts with SSH; browser access is covered below.
+Telnet and the web listener are off here, and both listen on loopback
+(`127.0.0.1`), which only this host can reach. To offer Telnet, set
+`enabled = true` **and** `host = "0.0.0.0"`, as `[ssh]` has; with
+`enabled = true` alone, outside callers cannot connect. The web
+listener stays on loopback behind an HTTPS proxy, as described below.
 
 ```toml
 [node]
@@ -141,9 +162,13 @@ port = 2222
 
 [telnet]
 enabled = false
+host = "127.0.0.1"
+port = 2323
 
 [web]
 enabled = false
+host = "127.0.0.1"
+port = 8080
 ```
 
 Create your first SysOp before starting a public listener:
@@ -235,7 +260,11 @@ need that behavior, arrange an external health check or supervisor yourself.
 NetBBS runs in the foreground. The service manager handles backgrounding.
 `systemctl stop netbbs` or `service netbbs stop` requests a graceful shutdown:
 callers are warned, then disconnected after the configured delay (60 seconds
-by default). Cleanup takes additional time. Increase the service stop timeout
+by default). With nobody connected, or once the last caller leaves, it stops
+without waiting out the delay. A shutdown you schedule from the console keeps
+the delay you chose. Change the delay under **Settings → Network &
+login limits**, or as `[shutdown] graceful_delay_seconds`. Cleanup takes
+additional time. Increase the service stop timeout
 if you raise that delay or configure slow-stopping door services.
 
 The Linux unit restricts writable paths to `/var/lib/netbbs`. **MANUAL:** extend
@@ -253,7 +282,9 @@ its `ReadWritePaths` if you put games or state elsewhere. NetBSD's example sets
 **MANUAL — outside NetBBS:** configure firewall rules, router forwarding,
 DNS, and the reverse proxy for the connection methods you offer. A bind
 address of `0.0.0.0` means all IPv4 interfaces; it is not an address to give
-callers. A loopback listener is reachable only from the same host.
+callers. A loopback listener is reachable only from the same host. Enabling
+Telnet or web with `enabled = true` alone leaves it on loopback; the node log
+says so at every start, naming the `host` line to add.
 
 For a browser terminal and transfer links behind a proxy, replace the existing
 `[web]` table with:
@@ -273,10 +304,43 @@ a browser upload carries form framing on top of the file.
 Use a real hostname and certificate;
 `bbs.example.org` is a placeholder. Restart after changing listener settings.
 
+If you don't run a web server yet, [Caddy](https://caddyserver.com/) is the
+shortest route: it obtains and renews the certificate itself, forwards
+WebSocket upgrades, and sets no upload limit of its own. The hostname must
+already point at this host, with ports 80 and 443 reachable from outside.
+Its whole `Caddyfile` is below. Debian and Ubuntu packages read
+`/etc/caddy/Caddyfile`; on NetBSD, pkgsrc's Caddy reads
+`/usr/pkg/etc/caddy/Caddyfile`.
+
+```
+bbs.example.org {
+    reverse_proxy 127.0.0.1:8080
+}
+```
+
+With nginx, inside the `server` block that already holds your certificate:
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:8080;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_set_header Host $host;
+    proxy_read_timeout 1h;
+    client_max_body_size 101m;
+}
+```
+
+`proxy_read_timeout` keeps nginx from cutting off a browser caller who sits
+idle for a minute, and `client_max_body_size` follows the upload cap.
+
 `public_url` supplies the externally reachable base address for transfer links.
 Without it, a node bound to a wildcard or loopback address cannot give remote
 terminal callers a usable link. A specific reachable bind address may be used
-as a fallback, but explicit configuration is preferable behind a proxy.
+as a fallback, but explicit configuration is preferable behind a proxy. When
+the web listener is on and SSH or Telnet callers would get no link, the node
+log warns at every start.
 
 File transfers work through the browser, through short-lived browser links
 shown to terminal callers, or through Zmodem in a capable terminal client.
@@ -321,8 +385,19 @@ live networking. Its Backup screen is status-only; use the backup CLI there.
 Choose registration mode under **Users → Registration**:
 
 - **Open:** new accounts can log in immediately.
-- **Approval required:** approve a pending account from its detail screen.
+- **Approval required:** approve a pending account from its detail screen,
+  or turn it down there with **Decline**, which removes it after a yes/no.
+  Until you approve it, the account cannot log in at all, not even to look
+  around; when the caller tries, they are told it is waiting for your
+  approval. **Question** sets an optional question new callers answer
+  when they sign up ("What do you write with?"). The answer shows on the
+  pending account and is deleted once you approve it.
 - **Closed:** only SysOps create accounts.
+
+A caller cannot register a reserved name (`sysop`, `admin`, `root`,
+`moderator`, `guest` and a few more), a name containing "sysop", or a name
+that reads like a SysOp's own (`lnkwell` for `InkWell`). You can still create
+such an account yourself under **Users → Create**.
 
 An account's numeric level controls level-based access. Level 255 grants SysOp
 administration; ordinary levels express your local policy. NetBBS refuses an
@@ -330,9 +405,18 @@ account change that would leave no enabled, approved SysOp. Disabling an account
 revokes its access; deletion is permanent and requires its exact name. Existing
 content retains its recorded author label.
 
-A level change, or a granted or revoked identity-verifier permission, reaches
-a caller who is already logged in without them reconnecting. This also applies
-to a change made with `python -m netbbs.admin`, within a few seconds. A raised
+A disabled account, and a signup still awaiting approval, receive no mail:
+callers here are told so at the To prompt, and Link mail bounces with "that
+account is not taking mail at the moment", which does not tell the other node
+the account is disabled. Mail already in a disabled account stays there until
+you enable it again. Deleting an account removes its own mail, but letters it
+sent or received stay in the other person's Sent or Inbox; their Sent shows
+the deleted recipient as, for example, `bob (deleted account)`.
+
+A level change, a granted or revoked identity-verifier permission, or a change
+to staff permissions reaches a caller who is already logged in without them
+reconnecting. This also applies to a change made with `python -m
+netbbs.admin`, within a few seconds. A raised
 level shows on their main menu. A lowered one takes them out of whatever they
 were doing, a door game included, and back to the main menu with a line naming
 their new level. Text they were composing is kept as a draft.
@@ -362,6 +446,62 @@ Access can also depend on resource-specific grants, verified age, and verified
 name. Raising a level does not replace identity verification. When access looks
 wrong, inspect both the account and the resource's effective settings, including
 Community defaults.
+
+### Sharing the work: staff permissions
+
+To hand someone the node's routine work without making them a second SysOp,
+give them **staff permissions** instead of level 255. Open their account
+under **Users** and choose **Staff**:
+
+| Permission | What it allows |
+| --- | --- |
+| Approve accounts | Approve or decline signups waiting under approval-required registration |
+| Manage accounts | Disable and re-enable accounts, reset passwords, set levels from 0 to 254 |
+| Moderate everything | Act as moderator on every board, file area and chat channel, local and carried |
+
+**Co-SysOp** on the same screen sets all three in one step. Every change asks
+for confirmation first and is audit-logged, and you can remove any permission
+on its own later. The account's level stays whatever it was.
+
+A staff member never acts on a level-255 account or on another staff member,
+so they cannot demote, disable or lock out you or each other, and they cannot
+widen their own permissions. They cannot raise anyone to 255, delete an
+account, grant staff permissions or moderator grants, or reach Settings, Link,
+Node, DNS or backups.
+
+The **Privileges** group on an account's detail screen shows its staff
+permissions, the identity-verifier permission, and every moderator grant it
+holds, such as `board "News": approve`.
+
+A staff member sees **[S]taff** on their main menu instead of [S]ysOp. It
+opens a reduced console that counts what waits for them and offers only what
+their permissions reach: **Accounts waiting** with approve accounts,
+**Users** with manage accounts, and **Moderation** when they moderate
+anything. These are your own screens with fewer actions: a staff member can
+open your account or another staff member's, but only to look.
+
+Whoever can approve accounts, you included, is told on the main menu when
+signups are waiting ("2 accounts awaiting approval"). A moderator who may
+approve posts or uploads anywhere sees **Moderation (n)** on the main menu,
+with how many wait, and it opens one queue across every board and file area
+their grants cover. To make someone a moderator of everything local in one
+step, grant a moderator with the scope **blanket across everything**: it
+writes the board, file area and channel grants together.
+
+Members find everyone who runs the node under **Staff list** on their main
+menu: SysOps, staff members, and moderators with what they look after, each
+with the date of their last session. Being listed is the point, so a
+member's choice to stay off Previous callers does not hide them here. Guests
+don't see the list.
+
+Going away for a while? Choose **Away** on your console's landing screen (it
+is on the Staff console too) and leave one short line, such as "At a pen
+show", with the date you expect to be back, or none if you don't know. The
+Staff list shows it beside your name. When everyone who can approve accounts
+is away, a caller waiting for approval is told who is expected back first.
+A notice with a date ends by itself after that day; one without a date stays
+until you end it, reads "away since" the day you set it, and your landing
+screen reminds you of it each time. Being away changes nobody's permissions.
 
 ### Verified age and names
 
@@ -394,17 +534,55 @@ draft and save it explicitly.
 - **File areas:** set access, upload policy, size/retention rules, and moderation.
   Uploads may include a description extracted from `FILE_ID.DIZ`. A remote
   catalogue entry is metadata; fetching its bytes is a separate action.
+- **Order of boards and file areas:** callers' lists follow your order, not
+  the latest activity, so the number a caller remembers keeps its board. A
+  new board or area goes last. **Up** and **Down** on its screen move it among
+  the others in the same category and Community; pinned ones stay first and
+  move among themselves. **Remove** deletes it. A caller can still sort a list by
+  activity with **[O]rder**.
 - **Chat channels:** set join gates, visibility, invitations, and moderation.
   Hidden or invite-only channels need more than a sufficient account level.
 - **Communities:** group related resources and provide inherited defaults.
   Inspect effective gates on child resources before changing a shared default.
   A Community is not an automatic grant to every resource inside it.
-- **Doors:** attach registered games to a Community or leave them uncategorized.
+  Callers see Communities in your order: a new one goes last, and **Up** and
+  **Down** on its screen move it. **Remove** deletes it; its resources stay,
+  without a Community.
+- **Doors:** attach registered games to a Community, or to none.
+
+**Where callers find it.** The main menu's **Message boards**, **Chat** and
+**Files** list everything of that kind on the node, whichever Community it
+belongs to; a resource with no Community is simply listed there, so you do
+not need a Community to make a board easy to find. **Games** appears for a
+caller once a registered door is open to their level. **Communities** (key **O**) appears once one exists and
+shows each Community's description and what it holds; give each a
+description, because that is what callers read first.
+
+**Categories and Communities are different things.** A category groups the
+list of one kind (board categories group boards) and shows up as a folder in
+that list. A Community is a topic that holds every kind at once. A resource
+can have both. Ctrl-H on the Categories screen says the same.
+
+Until the node has a board, chat channel or file area, your own main menu
+shows where to create one.
 
 Moderator grants belong to a resource or Community. Membership alone does not
 make someone a moderator. Grant only the scope required; use approval queues
-and the audit log to review actions. Chat moderation commands are used inside
+and the audit log to review actions. When a moderator rejects a post, its
+author gets a mail from **System** -- the BBS, not the moderator's own
+account -- with the reason, who decided, and the text; it cannot be
+replied to. Such a notice counts toward the author's mailbox limit but is
+the first read mail removed to make room. Chat moderation commands are used inside
 the channel by someone with the appropriate authority.
+
+A read or write grant on a board or file area lets its holder past that
+resource's minimum read or write level. To let a helper post on an
+announcements board whose write level is 255, grant them the **Read and post**
+preset on that board rather than raising their level (**Read only** opens
+reading alone). A grant opens only what its scope covers: one board or area,
+or, with a blanket scope, every board or area of that kind on the node or in
+one Community, so pick the scope with care. The minimum age and
+verified-name requirements still apply.
 
 The [user handbook](NetBBS-User-Handbook.md) covers posting, drafts, follows,
 search, mail, and everyday chat. **New scan** and **Find** only show content the
@@ -414,8 +592,8 @@ caller can access on this node, including carried linked content.
 
 Open **Content → Doors → Gallery** to register Retro Trivia, Voidrunner, or
 War Dialer. Gallery entries fill a draft with the installed interpreter and
-sensible defaults; review and Save. Callers reach games through Jump to or a
-Community.
+sensible defaults; review and Save. Callers reach games through **Games** on
+the main menu or a Community's page.
 
 Third-party native programs, DOS games through DOSBox-X, doors built only for
 another platform (in a per-caller qemu VM you provision), and remote RLogin
@@ -527,15 +705,97 @@ other. Deleting a board, channel or file area this node originated is still a
 real delete. Link status shows `carried/cap` for all three kinds and how many are
 offered and excluded.
 
-To carry a remote resource, use its Link browsing/carry actions. Carrying a message board
-creates a local browsable copy; file catalogues do not automatically download
-all file contents. Ask the other SysOp to verify both sides when first testing
+There is nothing to subscribe to: what an established peer shares arrives on
+its own, within the caps. A node's screen under **Link status → Peers** lists
+what this node already carries from it and, while it is on probation here,
+what it offers that is being held back. Carrying a message board creates a
+local browsable copy; file catalogues do not automatically download all file
+contents. Carried boards, channels and file areas appear in callers' **Message
+boards**, **Chat** and **Files** lists, outside any Community, because Link
+Communities do not exist; edit one and set its **Community** to put it in one
+of yours. Ask the other SysOp to verify both sides when first testing
 publication. Hello/discovery alone does not prove content arrived.
+
+Linking one of your own boards, channels or file areas sends it to the peers
+you have established, on a later sync pass. Its **NetBBS Link** rows then show,
+for each peer, whether it holds it, refused it because your node is on
+probation there, or is not sent it while it is on probation here. A node
+learns this only from peers it dials itself, so a peer that only dials yours
+reads "not known". **Fork of** is for a board that carries on another node's
+board under yours, for example after that one was closed; leave it empty for
+a board of your own.
 
 Asynchronous delivery can continue after a peer reconnects. Live chat and
 private messages require a working live session; a failed live message is not
 silently converted to mail. Link mail is encrypted to the recipient's home
 node for ordinary accounts; the home-node operator can read it.
+
+Link mail follows node trust. Once you establish a node -- **Establish** on
+its screen under **Link status → Peers**, or under **Settings → Policy trust →
+Subjects** -- mail from all its callers is delivered here, even from callers still on probation;
+their posts still wait in the approval queue. Mail from a node you have not
+established yet, or from a caller or node you quarantined or blocked, is
+refused and bounced back to its sender. The same holds the other way: your
+callers cannot address mail to a node you have not established, and are told
+so as they type the address. An address is written as its name is displayed,
+capitals included. An account from before the username rules whose name has
+a space or other punctuation cannot send Link mail, because no reply could
+reach it; rename it if its owner needs to. Mail already waiting in the **Outbox** for a
+node goes out on the next Link pass after you establish it, and expires if
+the node is not established before its retries run out.
+
+**Operations → Mail** shows the other side: mail other nodes sent here that
+this node refused, and how full your callers' mailboxes are.
+
+- **Refused Link mail** lists each refused letter with its sender, the reason
+  in plain words (its node is still on probation here, the sender or node is
+  blocked, no such account, a mailbox full of unread mail, ...), when it was
+  last refused and how many times its sender tried. **Open** one to see its
+  node's and its sender's trust here, and **Node trust** or **User trust**
+  takes you to that subject's trust screen to establish or block it. A letter
+  refused because its node is on probation is the common case: establish the
+  node, and the sender's next attempt is delivered. The list keeps the 500 most
+  recent refusals, and no more than 50 from any one node.
+- **Mailboxes** lists every account with mail, fullest first (**Order**
+  switches to by name): letters, unread, read, notices from the BBS itself, and
+  how much of the 500-letter cap that is. A full inbox makes room by dropping
+  its oldest read letter; an inbox full of unread mail refuses new mail, and a
+  Link sender gets a "mailbox full" bounce. Callers see the same count in their
+  own Inbox header, a warning from 450, and a main-menu line when old read
+  mail was removed to make room.
+- In **Refused Link mail**, "the recipient's account is disabled or still
+  awaiting approval" is mail for an account that takes none at the moment.
+
+These screens never show what a letter says. Mail is private: you see counts,
+account names, senders and reasons, never a subject or a body, and a refused
+letter does not even record whom it was for. Keep in mind that Link mail is
+encrypted to the recipient's *node*, not to the person, so a SysOp with access
+to the database could read it there; NetBBS gives you no screen for doing so.
+
+Your callers see each Link message's state in their **Sent** mail: pending,
+with relay, delivered, bounced (with the other node's reason in plain words)
+or expired. A caller whose mail bounces or expires is told once at their next
+main menu.
+
+"With relay" is mail your node left at a relay because the recipient's node
+cannot be dialed directly. The relay is not the recipient, and one refusal
+never comes back as a bounce: mail for a node that has *your* node
+quarantined or blocked, which sends yours nothing. So if no answer comes back
+within 14 days of the handoff, the letter expires and its sender is told that
+no answer came back, so it may not have arrived. An answer that arrives later
+still counts: the letter turns delivered, or bounced. A relay keeps a letter
+well past those 14 days, so a recipient that is only slow to collect still
+answers in time. Replaying an expired delivery from the **Outbox** puts it
+back to pending.
+
+Mail arriving here is checked the way your own callers' mail is: a sender
+name that is not a valid address, a blank or oversized subject, or an
+oversized body is bounced as malformed, and a letter this node cannot decrypt
+is bounced as such rather than as "no such user". A received letter shows the
+date its sender wrote it, unless that date is before 2000 or more than five minutes ahead of
+your clock, when it shows the arrival time instead. The inbox lists mail in
+the order it arrived, so a letter that took days to get here is still at the
+top.
 
 ### Behind an HTTP proxy
 
@@ -590,15 +850,49 @@ use a second address, or a protocol demultiplexer in front of both.
 Use **Link status** for peers and relay state, **Outbox** for pending or failed
 work, and **Diagnostics / Follow log** for explanations.
 
+Every node starts on probation with every other, in both directions. A peer
+on probation here sends nothing this node accepts, and this node sends it
+nothing of yours; your node is on probation at each peer the same way until
+that peer's SysOp establishes it. Automatic graduation takes at least 30 days,
+three days of contact and vouches from two trust domains, so on a node with no
+trusted reporters only **Establish** ends it. Establish a peer once you know who
+runs it, and ask its SysOp to establish yours. **Link status** counts the peers
+on probation here and says whether the peers your node dials still hold yours
+on probation; the SysOp console's LINK line counts them too.
+
 **Link status → Peers** is the node map: every node this one knows, as callers
 see it under **Directory → Node map** ("Nodes known to" your board), plus what
-callers do not see. Peer-list candidates are marked unverified and "never heard
+callers do not see. A node on probation here says when probation could end
+by itself and what is still missing; its **Exchange** rows say what is held
+back from it and whether it takes what yours sends. Peer-list candidates are marked unverified and "never heard
 from"; nodes you quarantine or block in any trust dimension are marked, with
 each dimension's state, because callers do not see them at all. Each node's
 screen adds its Link addresses, relay roles and reliability. Last heard is your
 own last contact with the node, or the time its newest descriptor says it was
 signed, never later than when you first stored it; a node not heard of for 30
 days is marked stale, not removed.
+
+**Link status** also shows what your node holds as a relay. When it relays
+for outgoing-only nodes, mail and delivery answers for them wait here until
+they dial in and collect them. The **Relay mailbox** line counts what is held,
+and a table below it lists each node held for, with how many envelopes it has
+(at most 50) and how long the oldest has waited, oldest first. Anything left
+uncollected for 30 days is dropped on the next sync pass, and the diagnostic
+log gets a warning naming the node and how many went. Neither end is told by
+your node, which cannot read or sign that mail; the sender's own node gives up
+on a letter handed to a relay after 14 days and tells its writer that no
+answer came back. A node whose count stays at 50 for weeks is most likely not
+coming back; the time limit clears it without you doing anything.
+
+A node's screen also acts on its trust, when it is a trust subject here (every
+node that has exchanged a hello with yours, or been introduced to it; not a
+peer-list candidate): **Establish** and **Block** open the override editor with
+all three dimensions and the state already chosen, so you only give a reason
+and save; **Clear override** removes one override, or all of them at once;
+**Trust details** opens the node's full trust screen from Policy trust. The same
+**Establish** and **Block** are on every subject's screen under **Settings →
+Policy trust → Subjects**, and **Override**'s **Dimension** offers **All
+three**.
 
 **Link status → Dial-in** sets the addresses other nodes show callers on their
 node maps: up to four, each `telnet://host:port`, `ssh://host:port` or an
@@ -772,8 +1066,12 @@ Check pending registrations/posts/files, backup recency, free disk space,
 and recent errors. Choose welcome/masthead/banner presets through Settings;
 preview before applying, or place your own files as described under
 [Custom banners and mastheads](#custom-banners-and-mastheads). Timestamp format and display timezone are node-wide.
+Until you choose a timezone under **Settings → Timestamp format**, times are
+shown in UTC: the main-menu clock says `UTC`, and the node log reminds you at
+every start. The default welcome banner mentions NetBBS Link only when the
+node ran with Link on at its last start.
 
-**Settings → Limits & retention** holds five node-wide values, saved together
+**Settings → Limits & retention** holds six node-wide values, saved together
 and applied without a restart:
 
 | Setting | Default | Effect |
@@ -783,6 +1081,16 @@ and applied without a restart:
 | Invitation expiry | 7 days | When an unaccepted channel invitation lapses. Clear the field for invitations that never expire. |
 | Chat scrollback | 100 messages | Lines each channel keeps, carried Link channels included. Lowering it trims a channel the next time someone speaks there. |
 | Node map level | 0 | The lowest level that may open **Directory → Node map**. A guest is an ordinary account: set this above the guest account's level to keep the map from guests. |
+| Mail level | 0 | The lowest level that may open **E-mail**: read, write and reply, here and to other BBSes. Below it the main menu offers no E-mail. Mail sent to an account below it still arrives and waits until you raise the account's level. |
+
+The guest account (**Settings → Guest access**) never has mail, whatever its
+level and the mail level: every guest signs in as the same account, so its
+inbox would be shared by strangers and its letters sent under one name. A
+caller who writes to it is told the account has no mailbox; Link mail to it
+bounces, and the sender is told the account takes no mail. If the guest
+account has mail from before this rule, it stays in the database, unreadable
+by guests; turn guest login off and sign in as the account to read or delete
+it.
 
 Under **Operations → Node and sessions**:
 
@@ -870,10 +1178,38 @@ For the `netbbs.db` in this handbook's examples, the prefix is `netbbs_`. Press
 Placing the file does not turn it on. Each piece has its own switch, off by
 default, and callers keep seeing the built-in default until you open that
 piece's screen under **Settings → Mastheads & banners** and choose **Enable**.
-Its status line shows `disabled -- file: <name> (N bytes)` until you do, and
-**Preview** shows what callers will see. Enable refuses a missing file or one
-over 256 KiB. If a file that was enabled later goes missing or grows past that
-limit, callers get the default silently and the node logs a warning.
+Its status line shows `disabled -- file: <name> (N bytes)` until you do.
+**Preview** shows your saved art even while it is switched off, and says under
+it what callers see meanwhile; with nothing saved it says that too. Enable
+refuses a missing file or one over 256 KiB. If a file that was enabled later
+goes missing or grows past that limit, callers get the default silently and the
+node logs a warning.
+
+Empty rows at the bottom of a piece are not sent, so a banner drawn in the top
+seven rows of the 24-row editor takes seven rows on a caller's screen. Empty
+rows between parts of the art are kept.
+
+**Edit** opens the art editor on an 80x24 canvas. Typing (a space too) paints
+over whatever is at the cursor. At the end of a row the cursor stays put, so
+press **Enter** for the next row; **End** goes to just after the row's last
+character. Retyping a shorter line leaves the end of the old one in place:
+**Ctrl+K** clears from the cursor to the end of the row. **Ctrl+T** picks a
+block or line glyph, **Ctrl+P** and **Ctrl+B** the foreground and background
+colour, **Ctrl+L** repaints the screen, **Ctrl+G** lists every key, **Ctrl+O**
+saves, and **Ctrl+X** quits.
+
+The welcome gallery ends with three quiet designs for clubs that don't want
+neon: **Paper & Ink**, **Library Card** and **Garden Gate**.
+
+Before sign-in, a Telnet caller gets the node's own lines, arrows and default
+banner in plain ASCII, because classic BBS terminals such as SyncTERM read
+CP437 and would show Unicode as noise. A banner of your own is sent as you drew
+it, so one drawn with box or block characters still looks wrong in such a
+terminal. After sign-in, each caller's own Unicode or ASCII choice applies.
+
+**Settings → Previous callers** cycles through three states: the panel after
+login in its default neon style, the same panel plain (your header colour and
+a quiet heading), and hidden.
 
 ## State, backup, and recovery
 
@@ -962,7 +1298,8 @@ magically reappear during restore.
 
 War Dialer has separate world capture and restore rules; see the
 [door guide](NetBBS-door-guide.md). Third-party installation directories are
-excluded unless **Backup → Door installations** is enabled. That option copies
+excluded unless **Backup → Door installations** is enabled. The Backup screen
+shows the door sections, and that option, only once a door is set up. That option copies
 them without stopping their writers and does not automatically restore them.
 Stop games/services first. A missing or unreadable requested installation fails
 the backup. Symlinks are copied as links, not followed to external data.
@@ -1112,8 +1449,18 @@ self-rotating, so arrange rotation or an appropriate output policy yourself.
 The application's `netbbs.log` rotates at 10 MiB with five retained backups
 (up to about 60 MiB including the active file).
 
+Some lines are routine and need nothing from you. A caller who hangs up is one
+`INFO` line naming their address. Every node yours meets on NetBBS Link starts
+on probation here, and the log says once per node, since the node started,
+that its content is held back. Your node is on probation at each peer in the
+same way, and the log says once per peer when one does not take what yours
+sends yet. A relay candidate that cannot be reached is also mentioned once. A `WARNING` or `ERROR` line, and any traceback, is worth
+reading.
+
 **Operations → Node log** reads that file from inside NetBBS, including from
-`python -m netbbs.admin` while the node is stopped. It shows the newest 512 KiB,
+`python -m netbbs.admin` while the node is stopped. That console runs outside
+the node, so its health panel has no live controls; it says whether the node
+is running. It shows the newest 512 KiB,
 topped up from `netbbs.log.1` after a rotation, and says when older lines exist
 that it does not show. It cannot show failures from before the log opened; for
 those, use the service manager's output above.

@@ -107,6 +107,14 @@ class SessionClosedError(Exception):
     """
 
 
+#: The socket errors a caller's hang-up surfaces as (issue #834). A reset
+#: can reach a *read* as well as a write: asyncio hands the transport's
+#: error to the stream reader, so `readexactly` raises it directly rather
+#: than `IncompleteReadError`. Every transport maps these to
+#: `SessionClosedError` at its read and write boundaries.
+CLIENT_DISCONNECT_ERRORS = (ConnectionResetError, ConnectionAbortedError, BrokenPipeError)
+
+
 class Session(ABC):
     """A single connected user's read/write channel, transport-agnostic."""
 
@@ -246,6 +254,11 @@ class Session(ABC):
     #: frames are not terminal output and must not reach the screen copy.
     #: Set through `binary_transfer()`.
     binary_transfer_active: bool = False
+
+    #: True while a door owns the terminal (`netbbs.doors.runtime`), so a
+    #: notice from another caller -- a direct-chat invitation (issue #843)
+    #: -- is not written into the door's screen.
+    door_active: bool = False
 
     #: The server-side copy of this caller's screen (issue #764), created
     #: on the first write. See `screen_copy`.
@@ -687,6 +700,12 @@ class Session(ABC):
         bounded, pushback-safe peek. The no-op default preserves compatibility
         for non-interactive and lightweight Session adapters.
         """
+
+    def arm_word_guard(self) -> None:
+        """After a one-key answer, drop the rest of a word typed after it
+        and the Enter that ends it (issue #840, F114; see
+        `netbbs.net.char_input.WORD_GUARD_SECONDS`). Interactive transports
+        override it; the no-op default suits every other adapter."""
 
     async def discard_buffered_input(self) -> None:
         """Discard *every* byte/keystroke currently buffered ahead of the

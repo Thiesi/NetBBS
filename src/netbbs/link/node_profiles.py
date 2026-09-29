@@ -214,22 +214,94 @@ def _recheck_stored_peers_against_local_claims(db: Database) -> None:
         )
 
 
+#: Shortest typed reference read as the start of a node's technical
+#: identity (issue #807). Below it a one- or two-letter friendly name would
+#: collide with every peer whose fingerprint happens to start with the same
+#: letters -- one in 32 per peer for a single letter -- and could never be
+#: used. Six is what the node map shows after an unnamed node.
+MIN_FINGERPRINT_PREFIX = 6
+
+
+def unquote_reference(reference: str) -> str:
+    """A typed node reference without one pair of enclosing double quotes:
+    `link_address_label` quotes a node name that contains `@`, and what a
+    caller reads must be what they can type back. No friendly name, DNS name
+    or fingerprint can contain a double quote, so the quotes are never part
+    of a name. An unmatched quote is kept, so that a message about the
+    reference shows what was actually looked up."""
+    value = reference.strip()
+    if len(value) >= 2 and value[0] == value[-1] == '"':
+        value = value[1:-1].strip()
+    return value
+
+
+def reference_needle(reference: str) -> str:
+    """The comparison key for a typed node reference."""
+    return name_key(unquote_reference(reference))
+
+
+def fingerprint_prefix_matches(fingerprint: str, needle: str) -> bool:
+    """Whether a typed `needle` names `fingerprint` by its first characters."""
+    return len(needle) >= MIN_FINGERPRINT_PREFIX and fingerprint.lower().startswith(needle)
+
+
+def _identity_matches(identity: NodeDisplayIdentity, needle: str) -> bool:
+    """A reference names a node by its DNS name, its friendly name, the full
+    label a screen shows for it (`Name · dns.example`), or the start of its
+    technical identity. The `·` in a label is reserved (a friendly name may
+    not contain it), so a label can never be mistaken for another node's
+    name."""
+    return (
+        identity.dns_name == needle.rstrip(".")
+        or name_key(identity.friendly_name) == needle
+        or name_key(identity.label) == needle
+        or fingerprint_prefix_matches(identity.fingerprint, needle)
+    )
+
+
+def link_address_label(user: str, node_label: str) -> str:
+    """`user@node` as a caller reads it (issue #807). A node name that itself
+    contains `@` is quoted -- `bob@"Cats @ Night"` -- so a reader can tell
+    where the user name ends; the To prompt accepts the quoted form back.
+
+    The user half comes from a peer's signed payload and nothing on the way
+    in holds it to the username grammar, so a peer could otherwise name its
+    user `alice@"Trusted Node"` and have its own posts read as another
+    node's. `@` and `"` in it are shown as `?`: no real user name contains
+    either, and the address a reader sees then has one `@`, the real one."""
+    user = user.replace("@", "?").replace('"', "?")
+    if "@" in node_label:
+        return f'{user}@"{node_label}"'
+    return f"{user}@{node_label}"
+
+
+def unknown_node_guidance(reference: str) -> str:
+    """What to do when `reference` names no node this BBS is linked with.
+    The caller sanitizes `reference`."""
+    return (
+        f"No BBS linked with this one goes by \"{reference}\". Check the name after the @: "
+        "it is the one shown after the @ on their mail, posts and in Who's online."
+    )
+
+
+def ambiguous_node_guidance(reference: str, user: str, candidates: list[tuple[str, str]]) -> str:
+    """What to type when `reference` names more than one node: each
+    candidate's address by technical identity, with the name it goes by.
+    `candidates` is `(fingerprint, label)` pairs; the caller sanitizes."""
+    shown = "; ".join(f"{user}@{fingerprint} for {label}" for fingerprint, label in candidates)
+    return f"More than one linked node goes by \"{reference}\". Type one of these instead: {shown}."
+
+
 def resolve_peer_reference(peers, reference: str):
     """Resolve DNS, a unique friendly name, or a fingerprint prefix."""
-    name_needle = name_key(reference.strip())
+    name_needle = reference_needle(reference)
     if not name_needle:
         return []
-    dns_needle = name_needle.rstrip(".")
     values = [peer for peer in peers if peer is not None]
     exact_fingerprint = [peer for peer in values if peer.fingerprint.lower() == name_needle]
     if exact_fingerprint:
         return exact_fingerprint[0]
-    matches = [
-        peer for peer in values
-        if identity_for_peer(peer).dns_name == dns_needle
-        or name_key(identity_for_peer(peer).friendly_name) == name_needle
-        or peer.fingerprint.lower().startswith(name_needle)
-    ]
+    matches = [peer for peer in values if _identity_matches(identity_for_peer(peer), name_needle)]
     return matches[0] if len(matches) == 1 else matches
 
 
@@ -261,7 +333,7 @@ def present_link_author_label(db: Database, label: str) -> str:
     user_id, separator, node = label.rpartition("@")
     if not separator or not is_node_fingerprint(node):
         return label
-    rendered = f"{user_id}@{identity_for_fingerprint(db, node).label}"
+    rendered = link_address_label(user_id, identity_for_fingerprint(db, node).label)
     observation = latest_identity_observation(db, node)
     if observation is not None and observation.severity == "security":
         return (
@@ -282,10 +354,9 @@ def resolve_stored_peer_reference(
     ambiguous by wearing it. Trust administration does not, since a node
     learned from a carrier is exactly what a SysOp goes there to look up.
     """
-    name_needle = name_key(reference.strip())
+    name_needle = reference_needle(reference)
     if not name_needle:
         return []
-    dns_needle = name_needle.rstrip(".")
     source = "link_peers" if met_only else "link_known_identities"
     identities = [
         _identity_from_descriptor_json(row["fingerprint"], row["descriptor_json"])
@@ -294,11 +365,7 @@ def resolve_stored_peer_reference(
     exact_fingerprint = [item.fingerprint for item in identities if item.fingerprint.lower() == name_needle]
     if exact_fingerprint:
         return exact_fingerprint[0]
-    matches = [
-        item.fingerprint for item in identities
-        if item.dns_name == dns_needle or name_key(item.friendly_name) == name_needle
-        or item.fingerprint.lower().startswith(name_needle)
-    ]
+    matches = [item.fingerprint for item in identities if _identity_matches(item, name_needle)]
     return matches[0] if len(matches) == 1 else matches
 
 

@@ -54,6 +54,7 @@ class _Entry:
     # with -- see `record_account`.
     user_level: int | None = None
     can_verify_identity: bool = False
+    staff_permissions: int = 0
     recheck: asyncio.Event = field(default_factory=asyncio.Event)
     account_changed: asyncio.Event = field(default_factory=asyncio.Event)
     unwind_armed: bool = False
@@ -68,8 +69,8 @@ class SessionSummary:
     needs.
 
     `session_id` (issue #113): a compact, NetBBS-owned, node-lifetime
-    identifier -- what the shared picker's `(#N)`/`Go to #` should
-    display and accept for a Who screen, replacing `id(session)`
+    identifier -- what the shared picker identifies a Who screen's row
+    by (reopening the list on it), replacing `id(session)`
     (Python's own process-local object identity, memory-address-like on
     CPython and entirely accidental as a *stable* value -- it only
     happens to stay fixed for as long as nothing else reuses that
@@ -203,22 +204,26 @@ class ActiveSessionRegistry:
     # between unwinds through the same `finally` cleanup a disconnect
     # already relies on.
 
-    def record_account(self, session: Session, *, user_level: int, can_verify_identity: bool) -> None:
+    def record_account(
+        self, session: Session, *, user_level: int, can_verify_identity: bool, staff_permissions: int = 0
+    ) -> None:
         """Record the access `session`'s screens are now running with,
         and keep `is_sysop` (drain's `exclude_sysops`) in step with it."""
         entry = self._sessions.get(session)
         if entry is not None:
             entry.user_level = user_level
             entry.can_verify_identity = can_verify_identity
+            entry.staff_permissions = staff_permissions
             entry.is_sysop = user_level >= SYSOP_LEVEL
 
-    def account_baseline(self, session: Session) -> tuple[int, bool] | None:
-        """`(user_level, can_verify_identity)` as last recorded, or `None`
-        for a session that is unregistered or has no account recorded."""
+    def account_baseline(self, session: Session) -> tuple[int, bool, int] | None:
+        """`(user_level, can_verify_identity, staff_permissions)` as last
+        recorded, or `None` for a session that is unregistered or has no
+        account recorded."""
         entry = self._sessions.get(session)
         if entry is None or entry.user_level is None:
             return None
-        return entry.user_level, entry.can_verify_identity
+        return entry.user_level, entry.can_verify_identity, entry.staff_permissions
 
     def recheck_event(self, session: Session) -> asyncio.Event | None:
         """Set to wake `session`'s account watcher before its next poll."""

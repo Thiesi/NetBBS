@@ -58,6 +58,9 @@ class Community:
     default_min_age: int | None
     default_name_requirement: str | None  # None | "verified" | "verified_and_displayed"
     created_at: str
+    # The SysOp's order among Communities (issue #838); `list_communities`
+    # follows it.
+    position: int = 0
 
 
 def create_community(
@@ -100,8 +103,8 @@ def create_community(
             """
             INSERT INTO communities
                 (name, description, hidden, default_min_read_level, default_min_write_level,
-                 default_min_age, default_name_requirement, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                 default_min_age, default_name_requirement, created_at, position)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(position) + 1, 0) FROM communities))
             """,
             (
                 name,
@@ -145,11 +148,37 @@ def get_community_by_name(db: Database, name: str) -> Community:
 
 
 def list_communities(db: Database) -> list[Community]:
-    """Every Community, alphabetical -- no activity/volume sort the way
-    `list_boards`/`list_file_areas` have, since a Community has no
-    content or timestamped activity of its own to rank by."""
-    rows = db.connection.execute("SELECT * FROM communities ORDER BY name COLLATE NOCASE ASC").fetchall()
+    """Every Community, in the SysOp's order (issue #838) -- a new one
+    goes last, and `move_community` changes the order. No activity/volume
+    sort the way `list_boards`/`list_file_areas` have, since a Community
+    has no content or timestamped activity of its own to rank by."""
+    rows = db.connection.execute(
+        "SELECT * FROM communities ORDER BY position ASC, name COLLATE NOCASE ASC"
+    ).fetchall()
     return [_row_to_community(row) for row in rows]
+
+
+def move_community(db: Database, community: Community, offset: int, *, moved_by: User) -> bool:
+    """Move `community` `offset` places in the list (-1 up, +1 down), and
+    renumber them all (issue #838), the same way a category moves among its
+    siblings. Returns whether it moved: the first cannot go up, nor the last
+    down."""
+    ids = [c.id for c in list_communities(db)]
+    if community.id not in ids:
+        raise CommunityError(f"no such Community: {community.name!r}")
+    index = ids.index(community.id)
+    target = index + offset
+    if not 0 <= target < len(ids):
+        return False
+    ids.insert(target, ids.pop(index))
+    for place, community_id in enumerate(ids):
+        db.connection.execute("UPDATE communities SET position = ? WHERE id = ?", (place, community_id))
+    db.connection.commit()
+    record_action(
+        db, actor=moved_by, action="move_community", object_type="community", object_id=community.id,
+        detail=f"moved Community {community.name!r} to place {target + 1}",
+    )
+    return True
 
 
 def update_community(
@@ -270,6 +299,57 @@ def get_effective_min_write_level(db: Database, resource) -> int:
     return 0
 
 
+# -- a read or write grant passes the level gate (design doc §5.2, issue #836) --
+
+_GRANT_OBJECT_TYPES = {"Board": "board", "FileArea": "file_area"}
+
+
+def passes_level_gate(db: Database, user: User, minimum_level: int, resource, permission) -> bool:
+    """
+    Whether `user` gets past `resource`'s `minimum_level`: by level, or by
+    holding `permission` (`BoardPermission.READ` or `.WRITE`) on it
+    (design doc §5.2). A board or file area's read or write grant lets its
+    holder past that one resource's level, never another's -- how a SysOp
+    opens a level-255 announcements board to a helper. The age and
+    verified-name gates are separate checks and still apply.
+
+    `resource` is a board or a file area. The grant is only looked up when
+    the level falls short, so the common case costs no query.
+    """
+    if user.user_level >= minimum_level:
+        return True
+    # Deferred: netbbs.moderation's package imports reach back here.
+    from netbbs.moderation.roles import has_permission
+
+    return has_permission(
+        db, user, object_type=_GRANT_OBJECT_TYPES[type(resource).__name__], object_id=resource.id,
+        permission=permission,
+    )
+
+
+def require_level_gate(db: Database, user: User, minimum_level: int, resource, permission) -> None:
+    """`passes_level_gate`, raising `InsufficientLevelError` as
+    `require_level` does when it fails."""
+    from netbbs.permissions import InsufficientLevelError
+
+    if not passes_level_gate(db, user, minimum_level, resource, permission):
+        raise InsufficientLevelError(minimum_level, user.user_level)
+
+
+def meets_read_gate(db: Database, user: User, resource) -> bool:
+    """`resource`'s effective read level, or a read grant on it."""
+    from netbbs.moderation.roles import BoardPermission
+
+    return passes_level_gate(db, user, get_effective_min_read_level(db, resource), resource, BoardPermission.READ)
+
+
+def meets_write_gate(db: Database, user: User, resource) -> bool:
+    """`resource`'s effective write level, or a write grant on it."""
+    from netbbs.moderation.roles import BoardPermission
+
+    return passes_level_gate(db, user, get_effective_min_write_level(db, resource), resource, BoardPermission.WRITE)
+
+
 def get_effective_min_age(db: Database, resource) -> int | None:
     """`resource`'s own `min_age` if explicitly set, else its
     Community's `default_min_age` if it belongs to one (which may
@@ -306,4 +386,5 @@ def _row_to_community(row: sqlite3.Row) -> Community:
         default_min_age=row["default_min_age"],
         default_name_requirement=row["default_name_requirement"],
         created_at=row["created_at"],
+        position=row["position"],
     )

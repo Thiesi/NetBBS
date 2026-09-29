@@ -39,6 +39,24 @@ def utc_now_iso() -> str:
     return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
+def utc_iso(moment: datetime.datetime) -> str:
+    """`moment` in `utc_now_iso()`'s storage shape. Spelled out rather than
+    `strftime`, whose `%Y` gives a year before 1000 fewer than four digits
+    on some C libraries -- and a timestamp from another node can be any
+    year at all."""
+    moment = moment.astimezone(datetime.timezone.utc)
+    return (
+        f"{moment.year:04d}-{moment.month:02d}-{moment.day:02d}T"
+        f"{moment.hour:02d}:{moment.minute:02d}:{moment.second:02d}.{moment.microsecond:06d}Z"
+    )
+
+
+def parse_utc_iso(iso_timestamp: str) -> datetime.datetime:
+    """A stored or received ISO 8601 timestamp as an aware UTC datetime;
+    `ValueError` if it is not one. See `_parse_stored_timestamp`."""
+    return _parse_stored_timestamp(iso_timestamp)
+
+
 # Config key for the node-wide default display format, stored via
 # netbbs.config.
 DISPLAY_FORMAT_CONFIG_KEY = "display_timestamp_format"
@@ -138,6 +156,27 @@ def set_display_timezone(db: Database, tz_name: str) -> None:
     if not is_valid_timezone(tz_name):
         raise ValueError(f"invalid timezone: {tz_name!r}")
     set_config(db, DISPLAY_TIMEZONE_CONFIG_KEY, tz_name)
+
+
+# The spellings of UTC itself in the IANA database, compared case-blind.
+_UTC_ZONE_NAMES = frozenset({
+    "utc", "etc/utc", "uct", "etc/uct", "gmt", "etc/gmt", "zulu", "etc/zulu",
+    "universal", "etc/universal", "gmt0", "etc/gmt0", "etc/gmt+0", "etc/gmt-0",
+    "greenwich", "etc/greenwich",
+})
+
+
+def is_utc_zone_name(tz_name: str) -> bool:
+    """Whether `tz_name` names UTC itself, not a zone that happens to be at
+    offset zero today (issue #834: a clock in UTC gets a "UTC" label, one in
+    Europe/London in winter does not)."""
+    return tz_name.lower() in _UTC_ZONE_NAMES
+
+
+def display_timezone_is_set(db: Database) -> bool:
+    """Whether a SysOp has chosen a node display timezone, rather than the
+    node falling back to UTC (issue #834)."""
+    return get_config(db, DISPLAY_TIMEZONE_CONFIG_KEY) is not None
 
 
 def get_node_timezone(db: Database) -> ZoneInfo:

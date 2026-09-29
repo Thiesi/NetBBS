@@ -144,7 +144,7 @@ def test_a_caller_replies_from_the_reader(db, alice, bob):
     original = create_post(db, board, alice, "Lunch?", "Anyone for lunch?\n-- \nAlice")
     # Open post 1, [R]eply, keep the subject (Enter), write one line and
     # finish, [P]ost from review, then back out of the list.
-    session = FakeSession(["1", "r", "", "Count me in.", "", "p", "b"])
+    session = FakeSession(["1", "r", "", "Count me in.", "/done", "p", "b"])
     asyncio.run(board_flow._show_board(session, db, board, bob))
 
     posts = list_posts_page(db, board, bob).posts
@@ -182,7 +182,7 @@ def test_reply_is_not_offered_where_the_caller_cannot_post(db, alice):
 def test_an_art_post_is_answered_without_a_quote(db, alice, bob):
     board = create_board(db, "art", creator=alice, allow_color=True)
     create_post(db, board, alice, "Sunset", "\x1b[33m###\x1b[0m", layout="art")
-    session = FakeSession(["1", "r", "", "Lovely.", "", "p", "b"])
+    session = FakeSession(["1", "r", "", "Lovely.", "/done", "p", "b"])
     asyncio.run(board_flow._show_board(session, db, board, bob))
     reply = next(p for p in list_posts_page(db, board, bob).posts if p.subject.startswith("Re:"))
     assert reply.body == "Lovely."
@@ -191,7 +191,7 @@ def test_an_art_post_is_answered_without_a_quote(db, alice, bob):
 def test_a_color_board_quotes_the_text_without_its_codes(db, alice, bob):
     board = create_board(db, "general", creator=alice, allow_color=True)
     create_post(db, board, alice, "Hi", "|12red\x1b[1m bold")
-    session = FakeSession(["1", "r", "", "ok", "", "p", "b"])
+    session = FakeSession(["1", "r", "", "ok", "/done", "p", "b"])
     asyncio.run(board_flow._show_board(session, db, board, bob))
     reply = next(p for p in list_posts_page(db, board, bob).posts if p.subject.startswith("Re:"))
     assert reply.body.startswith("alice wrote:\n> red bold\n")
@@ -211,7 +211,7 @@ def test_mail_reply_quotes_the_message(tmp_path):
     alice = create_user(db, "alice", password="hunter2pw", user_level=10)
     bob = create_user(db, "bob", password="hunter2pw", user_level=10)
     send_mail(db, alice, bob, "Hello", "How are you?\n-- \nAlice")
-    session = MailSession(keys=["i", "0", "1", "r", "s", "b", "b", "b"], lines=["", "Fine, thanks.", ""])
+    session = MailSession(keys=["1", "r", "s", "b", "b"], lines=["", "Fine, thanks.", "/done"])
     lane = DatabaseLane(path)
     try:
         asyncio.run(browse_mail(session, lane, bob))

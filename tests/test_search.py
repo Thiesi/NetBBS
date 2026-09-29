@@ -2,7 +2,7 @@
 Tests for netbbs.search (design doc §6.6, issue #56's last piece) --
 FTS5-backed local search over board posts, files, and retained channel
 scrollback, its index-maintenance sync from every write path, and the
-`[F]ind` main-menu screen.
+`[/] Find` main-menu screen.
 """
 
 from __future__ import annotations
@@ -300,7 +300,7 @@ def test_file_jump_cursor_lands_on_the_predecessor_of_the_hit(db, alice, monkeyp
     assert page.entries[0].filename == "b.txt"
 
 
-# -- [F]ind screen --------------------------------------------------------
+# -- [/] Find screen ------------------------------------------------------
 
 
 class FakeSession:
@@ -349,16 +349,16 @@ def _run_main_menu(db, lane, user, keys):
 
 def test_find_is_always_shown_on_the_main_menu(db, alice):
     session = _run_main_menu(db, None, alice, ["l", "y"])
-    assert "[F]ind" in _visible_text(session)
+    assert "[/] Find" in _visible_text(session)
 
 
 def test_find_is_not_available_without_a_lane(db, alice):
-    session = _run_main_menu(db, None, alice, ["f", "l", "y"])
+    session = _run_main_menu(db, None, alice, ["/", "l", "y"])
     assert "not available in this context" in _visible_text(session)
 
 
 def test_find_cancels_on_an_empty_query(db, lane, alice):
-    session = _run_main_menu(db, lane, alice, ["f", "", "l", "y"])
+    session = _run_main_menu(db, lane, alice, ["/", "", "l", "y"])
     assert "Search cancelled." in _visible_text(session)
 
 
@@ -369,7 +369,7 @@ def test_find_selecting_a_post_jumps_to_it(db, lane, alice):
     # Trailing "b": viewing a hit now loops back to the results list
     # (dogfood follow-up) instead of returning straight to the caller,
     # so a second "back" is needed to actually leave.
-    session = _run_main_menu(db, lane, alice, ["f", "hello", "0", "1", "b", "b", "l", "y"])
+    session = _run_main_menu(db, lane, alice, ["/", "hello", "0", "1", "b", "b", "l", "y"])
 
     text = _visible_text(session)
     assert "hello world" in text
@@ -380,14 +380,14 @@ def test_find_selecting_a_file_jumps_to_it(db, lane, alice):
     upload_file(db, area, alice, "readme.txt", b"data", description="a helpful guide")
 
     # Trailing "b": see the loop-back comment in the sibling test above.
-    session = _run_main_menu(db, lane, alice, ["f", "helpful", "0", "1", "b", "b", "l", "y"])
+    session = _run_main_menu(db, lane, alice, ["/", "helpful", "0", "1", "b", "b", "l", "y"])
 
     text = _visible_text(session)
     assert "readme.txt" in text
 
 
 def test_find_no_matches(db, lane, alice):
-    session = _run_main_menu(db, lane, alice, ["f", "nonexistentterm", "l", "y"])
+    session = _run_main_menu(db, lane, alice, ["/", "nonexistentterm", "l", "y"])
     assert "No matches." in _visible_text(session)
 
 
@@ -401,7 +401,7 @@ def test_find_shows_a_boolean_syntax_hint_when_the_query_uses_or_and_not(db, lan
     board = create_board(db, "general", creator=alice)
     create_post(db, board, alice, "quokkatown update", "body")
 
-    session = _run_main_menu(db, lane, alice, ["f", "quokkatown OR aardvark", "l", "y"])
+    session = _run_main_menu(db, lane, alice, ["/", "quokkatown OR aardvark", "l", "y"])
 
     text = _visible_text(session)
     assert "No matches." in text
@@ -409,7 +409,7 @@ def test_find_shows_a_boolean_syntax_hint_when_the_query_uses_or_and_not(db, lan
 
 
 def test_find_does_not_show_the_boolean_syntax_hint_for_an_ordinary_query(db, lane, alice):
-    session = _run_main_menu(db, lane, alice, ["f", "nonexistentterm", "l", "y"])
+    session = _run_main_menu(db, lane, alice, ["/", "nonexistentterm", "l", "y"])
     assert "not search operators" not in _visible_text(session)
 
 
@@ -425,7 +425,7 @@ def test_find_shows_a_body_snippet_for_a_matching_post(db, lane, alice):
     board = create_board(db, "general", creator=alice)
     create_post(db, board, alice, "weekly digest", "bodymarker quokkatown is buried in this post")
 
-    session = _run_main_menu(db, lane, alice, ["f", "quokkatown", "b", "l", "y"])
+    session = _run_main_menu(db, lane, alice, ["/", "quokkatown", "b", "l", "y"])
 
     assert "bodymarker" in _visible_text(session)
 
@@ -436,7 +436,7 @@ def test_find_shows_a_description_snippet_for_a_matching_file(db, lane, alice):
     area = create_file_area(db, "downloads", creator=alice)
     upload_file(db, area, alice, "readme.txt", b"data", description="descmarker zephyr notes")
 
-    session = _run_main_menu(db, lane, alice, ["f", "zephyr", "b", "l", "y"])
+    session = _run_main_menu(db, lane, alice, ["/", "zephyr", "b", "l", "y"])
 
     assert "descmarker" in _visible_text(session)
 
@@ -454,13 +454,13 @@ def test_find_channel_message_result_row_fits_within_terminal_width(db, lane, al
         body="a moderately long message about quokkatown migration patterns and behavior",
     )
 
-    session = _run_main_menu(db, lane, alice, ["f", "quokkatown", "b", "l", "y"])
+    session = _run_main_menu(db, lane, alice, ["/", "quokkatown", "b", "l", "y"])
 
     text = _visible_text(session)
-    # "(#" only ever appears on an actual result row (the goto
-    # reference) -- scoped to just those, not the screen's own nav/help
-    # line, which legitimately runs longer than one result row.
-    result_rows = [line for line in text.splitlines() if "(#" in line]
+    # Scoped to the result rows (they start with their 2-digit number),
+    # not the screen's own nav/help line, which legitimately runs longer
+    # than one result row.
+    result_rows = [line for line in text.splitlines() if re.match(r"^(> |  )\d\d\. ", line)]
     assert result_rows, "no result row found at all"
     for line in result_rows:
         assert len(line) <= 80, f"a result row exceeded 80 columns: {line!r}"
@@ -473,7 +473,7 @@ def test_find_shows_a_notice_when_results_are_truncated(db, lane, alice):
     for i in range(25):
         create_post(db, board, alice, f"quokkatown update {i}", "body")
 
-    session = _run_main_menu(db, lane, alice, ["f", "quokkatown", "b", "l", "y"])
+    session = _run_main_menu(db, lane, alice, ["/", "quokkatown", "b", "l", "y"])
 
     assert "Showing the top 20 matches" in _visible_text(session)
 
@@ -482,7 +482,7 @@ def test_find_does_not_show_a_truncation_notice_when_nothing_was_cut(db, lane, a
     board = create_board(db, "general", creator=alice)
     create_post(db, board, alice, "quokkatown update", "body")
 
-    session = _run_main_menu(db, lane, alice, ["f", "quokkatown", "b", "l", "y"])
+    session = _run_main_menu(db, lane, alice, ["/", "quokkatown", "b", "l", "y"])
 
     assert "Showing the top" not in _visible_text(session)
 
@@ -491,7 +491,7 @@ def test_find_loops_back_to_results_after_viewing_a_hit(db, lane, alice):
     # Dogfood follow-up: viewing one hit used to return straight to the
     # caller (dumped to the main menu), so checking a second hit meant
     # retyping the identical query from scratch. Proven here by viewing
-    # a *second* hit in the same visit, with no second `[F]ind` in
+    # a *second* hit in the same visit, with no second `[/] Find` in
     # between.
     #
     # Asserting each post's own *marker*, not its subject -- both
@@ -510,33 +510,12 @@ def test_find_loops_back_to_results_after_viewing_a_hit(db, lane, alice):
     # Enter reads it, and [B]ack twice returns to the results.
     session = _run_main_menu(
         db, lane, alice,
-        ["f", "quokkatown", "0", "1", "\r", "b", "b", "0", "2", "\r", "b", "b", "b", "l", "y"],
+        ["/", "quokkatown", "0", "1", "\r", "b", "b", "0", "2", "\r", "b", "b", "b", "l", "y"],
     )
 
     text = _visible_text(session)
     assert "firstviewmarker" in text
     assert "secondviewmarker" in text
-
-
-def test_find_goto_jumps_directly_to_a_result_by_its_shown_number(db, lane, alice):
-    # Dogfood follow-up: [G]oto # used to key off `id(item)` -- a raw
-    # Python object address no caller could ever type back correctly.
-    # Now a plain per-query sequential number, the same one shown as
-    # "(#N)" next to each row.
-    board = create_board(db, "general", creator=alice)
-    create_post(db, board, alice, "quokkatown first", "body")
-    create_post(db, board, alice, "quokkatown second", "body")
-
-    session = _run_main_menu(db, lane, alice, ["f", "quokkatown", "g", "2", "b", "b", "l", "y"])
-
-    text = _visible_text(session)
-    assert "Out of range" not in text
-    assert "Not a number" not in text
-    # Whichever of the two posts is actually result #2 (bm25 relevance
-    # order, not creation order) is the one that must have opened --
-    # not asserting a specific title, just that goto genuinely
-    # navigated rather than silently failing.
-    assert "quokkatown first" in text or "quokkatown second" in text
 
 
 # -- check_index_integrity / rebuild_indexes (issue #74) -------------------

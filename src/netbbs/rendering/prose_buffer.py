@@ -19,9 +19,17 @@ rewrap at *display* time, same as it always has for any post body.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
-from netbbs.rendering.width import wrap_to_width
+from netbbs.rendering.width import display_width, wrap_to_width
+
+# A quoted line's marker: one or more ">", each maybe followed by a space --
+# "> ", "> > " and ">> " as `netbbs.quoting.quote_body` and other mail
+# programs write them.
+_QUOTE_PREFIX = re.compile(r"(?:>[ \t]?)+")
+# What `netbbs.quoting.quote_body` puts where it cut a long quote short.
+_ELISION = "[...]"
 
 
 @dataclass(frozen=True)
@@ -116,6 +124,52 @@ def visual_position(lines: list[str], width: int, cursor_line: int, cursor_col: 
     return VisualPosition(row_index=last_row_index, col=cursor_col - last_row.start_col)
 
 
+def _quote_parts(line: str) -> tuple[str, int, str] | None:
+    """`(prefix, depth, content)` of a quoted line, or None for a line that
+    is not quoted. `depth` counts the `>`s, so "> > " and ">> " match."""
+    match = _QUOTE_PREFIX.match(line)
+    if match is None:
+        return None
+    prefix = match.group(0)
+    return prefix, prefix.count(">"), line[match.end():]
+
+
+def rewrap_quote(lines: list[str], line_index: int, width: int) -> tuple[int, int, list[str]] | None:
+    """The quoted paragraph around `lines[line_index]` rewrapped to `width`
+    display columns, every line keeping the quote's prefix (issue #815).
+
+    Returns `(start, end, new_lines)`: `lines[start:end]` is the paragraph
+    and `new_lines` replaces it. None when the line is not quoted, or is a
+    quote's empty separator line (`>`), which has no paragraph to rewrap.
+
+    The paragraph is the run of quoted lines at the same depth that have
+    text; a line at another depth, an empty quote line, or an unquoted
+    line ends it, and so does the `[...]` that marks a cut quote. The editor itself never hard-wraps -- a long line is
+    wrapped only on screen -- but a quote is different: a quoted line
+    longer than the screen shows its continuation without a `>`, and a
+    quote trimmed in place is left ragged. Long words are kept whole: a
+    URL cut in two would no longer work."""
+    parts = _quote_parts(lines[line_index])
+    if parts is None or parts[2].strip() in ("", _ELISION):
+        return None
+    prefix, depth, _ = parts
+
+    def in_paragraph(index: int) -> bool:
+        other = _quote_parts(lines[index])
+        return other is not None and other[1] == depth and other[2].strip() not in ("", _ELISION)
+
+    start = line_index
+    while start > 0 and in_paragraph(start - 1):
+        start -= 1
+    end = line_index + 1
+    while end < len(lines) and in_paragraph(end):
+        end += 1
+    prefix = prefix.rstrip() + " "
+    text = " ".join(_quote_parts(lines[i])[2].strip() for i in range(start, end))  # type: ignore[index]
+    body_width = max(1, width - display_width(prefix))
+    return start, end, [prefix + segment for segment in wrap_to_width(text, body_width, break_long_words=False)]
+
+
 def logical_position(rows: list[VisualRow], row_index: int, col: int) -> tuple[int, int]:
     """The inverse of `visual_position`: given a row from an already-
     computed `wrap_lines()` result plus a column within it, the logical
@@ -205,6 +259,51 @@ class ProseBuffer:
 
     def move_end(self) -> None:
         self.cursor_col = len(self.lines[self.cursor_line])
+
+    def insert_text(self, text: str) -> None:
+        """Insert `text`, which may hold `\\n`s, at the cursor, leaving the
+        cursor after it -- a paste."""
+        pieces = text.split("\n")
+        line = self.lines[self.cursor_line]
+        before, after = line[: self.cursor_col], line[self.cursor_col :]
+        if len(pieces) == 1:
+            self.lines[self.cursor_line] = before + text + after
+            self.cursor_col += len(text)
+            return
+        new_lines = [before + pieces[0], *pieces[1:-1], pieces[-1] + after]
+        self.lines[self.cursor_line : self.cursor_line + 1] = new_lines
+        self.cursor_line += len(new_lines) - 1
+        self.cursor_col = len(pieces[-1])
+
+    def cut_line(self) -> str:
+        """Remove the cursor's whole logical line and return it (issue
+        #815, nano's Ctrl-K). The cursor lands at the start of the line
+        that took its place. The last line has no line after it to take
+        its place, so it is emptied instead; the text still ends where
+        it did."""
+        cut = self.lines[self.cursor_line]
+        if self.cursor_line == len(self.lines) - 1:
+            self.lines[self.cursor_line] = ""
+        else:
+            del self.lines[self.cursor_line]
+        self.cursor_col = 0
+        return cut
+
+    def delete_word_before(self) -> None:
+        """Delete the word before the cursor, and the spaces between it and
+        the cursor (issue #815; readline's Ctrl-W). At the start of a line
+        it joins the line to the one above, as Backspace does."""
+        if self.cursor_col == 0:
+            self.backspace()
+            return
+        line = self.lines[self.cursor_line]
+        start = self.cursor_col
+        while start > 0 and line[start - 1].isspace():
+            start -= 1
+        while start > 0 and not line[start - 1].isspace():
+            start -= 1
+        self.lines[self.cursor_line] = line[:start] + line[self.cursor_col :]
+        self.cursor_col = start
 
     def clamp_cursor(self) -> None:
         """Keeps the cursor in bounds after any operation that could

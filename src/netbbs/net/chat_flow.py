@@ -14,7 +14,7 @@ status line (`_render_chat_status_line`, repainted after nearly every
 message) and the tab-completer (`_build_completer`, rebuilt fresh on
 every `read_line()` call) are both hot, read-only, cosmetic paths that
 still move fully onto the lane, same as everything else, rather than
-staying on a lingering `db` the way `file_flow.has_visible_areas` did —
+staying on a lingering `db` the way `file_flow.visible_areas` did —
 real added per-message overhead, accepted as consistent with the
 "defer benchmarking to #59's harness" stance rather than guessed at
 now.
@@ -70,6 +70,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 import json
+import re
 import sqlite3
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Awaitable, Callable, Sequence
@@ -147,6 +148,7 @@ from netbbs.link.node_profiles import (
     identity_for_fingerprint,
     identity_for_peer,
     latest_identity_observation,
+    link_address_label,
 )
 from netbbs.chat.channels import OPEN_ROOM_NAME_PREFIX
 from netbbs.rendering.pipe_codes import cga_to_xterm
@@ -183,6 +185,7 @@ from netbbs.net.sort_ui import SORT_MODE_LABELS, prompt_sort_change
 from netbbs.permissions import meets_level
 from netbbs.rendering import (
     ACCENT_COLOR,
+    ALERT_COLOR,
     CHAT_BODY_COLOR,
     CHANNEL_TYPE_COLOR,
     GATE_COLOR,
@@ -429,21 +432,18 @@ def _visible_channels_for(db: Database, user: User, *, order_by: str = "alphabet
     return visible
 
 
-def has_visible_channels(
+def visible_channels(
     db: Database, user: User, *, community_id: int | None = None, community_scoped: bool = False
-) -> bool:
-    """Whether `user` can see at least one channel under the given
-    Community filter -- public (unlike `_visible_channels_for`)
-    specifically so `netbbs.net.login_flow`'s shared resource-type
-    sub-menu can use it for the same "only offer what currently
-    applies" conditional visibility `_has_visible_boards` provides for
-    boards (design doc §16). Deliberately still `db`-based --
-    a menu-gating check called from still-unmigrated `login_flow.py`
-    code, same category as `netbbs.net.file_flow.has_visible_areas`."""
+) -> list[Channel]:
+    """Every channel `user` can see under the given Community filter --
+    what a Community's page offers and counts (design doc §16, issue
+    #838). Deliberately still `db`-based -- a menu-gating check called
+    from `netbbs.net.main_menu`'s unmigrated drawing code, same category
+    as `netbbs.net.file_flow.visible_areas`."""
     channels = _visible_channels_for(db, user)
     if community_scoped:
         channels = [c for c in channels if c.community_id == community_id]
-    return bool(channels)
+    return channels
 
 
 def list_visible_channels_for(db: Database, user: User) -> list[Channel]:
@@ -451,8 +451,8 @@ def list_visible_channels_for(db: Database, user: User) -> list[Channel]:
     public (unlike `_visible_channels_for`) so issue #56's `[N]ew scan`
     screen (`netbbs.net.login_flow`) can reuse this module's own
     hidden/members_only/permission visibility logic instead of
-    duplicating it, the same reasoning `has_visible_channels` already
-    applies for its own boolean-only callers."""
+    duplicating it, the same reasoning `visible_channels` already
+    applies for a Community's page."""
     return _visible_channels_for(db, user)
 
 
@@ -609,7 +609,7 @@ async def _pick_channel(
     # GitHub issue #176: resolved once, reused for both pick_item calls
     # below (flat and mixed-with-categories) -- shows at every level of
     # channel browsing this recursive function reaches (top level, a
-    # category, a Community/Uncategorized scope), matching
+    # category, a Community's scope), matching
     # `board_flow._browse_boards_in_category`'s own identical wiring.
     # Never the inside of a live channel -- see chat_channel_picker_
     # banner's own module docstring for why that's a categorically
@@ -1385,13 +1385,11 @@ def _chat_author_label(db: Database, channel: Channel, user: User) -> str:
     rather than either duplicating the coloring or trying
     to parse a fully-composed string back apart.
 
-    Composition confirmed with Thiesi (issue #64): `~nick~ (=Real
-    Name=)` when a nick is set, `display-name-or-username (=Real
-    Name=)` otherwise — deliberately not a three-name `~nick~
-    display-name (=Real Name=)` form, which would put three
-    simultaneous names on every line of live chat and reverse the
-    plain alias's deliberate clutter reduction; `/whois` still supplies
-    canonical/display identity on demand.
+    Composition confirmed with Thiesi (issue #64): `nick|username
+    (=Real Name=)` when a nick is set (the username beside the alias
+    since issue #843), `display-name-or-username (=Real Name=)`
+    otherwise — deliberately not a form that adds the display name as
+    well; `/whois` still supplies it on demand.
     """
     ordinary = chat_stream_label(db, user)
     verified_unit = format_verified_name_unit(
@@ -1453,7 +1451,7 @@ def _message_author_label(db: Database, channel: Channel, message: ChannelMessag
     if durable_author is not None:
         local_user_id, fingerprint = durable_author
         node_label = identity_for_fingerprint(db, fingerprint).label
-        return sanitize_text(f"{local_user_id}@{node_label}")
+        return sanitize_text(link_address_label(local_user_id, node_label))
     author = _resolve_message_author(db, message.author_label)
     if author is None:
         return sanitize_text(message.author_label)
@@ -1472,7 +1470,9 @@ def _is_door_line(db: Database, message: ChannelMessage) -> bool:
     durable_author = _durable_link_author(db, message)
     if durable_author is not None:
         return durable_author[0].lower().endswith(DOOR_LABEL_SUFFIX)
-    local_part, at, _node = message.author_label.rpartition("@")
+    # The first `@`: a live label's user half cannot hold one
+    # (`link_address_label`), but its node name can (issue #808).
+    local_part, at, _node = message.author_label.partition("@")
     if at:
         return local_part.lower().endswith(DOOR_LABEL_SUFFIX)
     return (message.author_label.lower().endswith(DOOR_LABEL_SUFFIX)
@@ -1811,7 +1811,7 @@ class RemotePrivateTarget:
 
     @property
     def label(self) -> str:
-        return f"{self.username}@{self.node_label}"
+        return link_address_label(self.username, self.node_label)
 
 
 @dataclass(frozen=True)
@@ -2064,6 +2064,12 @@ async def _deliver_private_message(ctx: ChatCommandContext, target: User, body: 
     )
 
 
+#: `/msg bob@"Cats @ Night" text`: the quoted-node address form
+#: `link_address_label` shows for a node name containing `@` (issue #807),
+#: typed back as it is read.
+_QUOTED_NODE_TARGET = re.compile(r'([^\s"@]+@"[^"]+")\s+(\S.*)', re.DOTALL)
+
+
 async def _handle_msg(ctx: ChatCommandContext, args: str) -> None:
     """
     `/msg <user> <text>` (design doc): a one-off,
@@ -2071,7 +2077,10 @@ async def _handle_msg(ctx: ChatCommandContext, args: str) -> None:
     matching every other chat command — no parallel main-menu entry point.
     """
     args = args.lstrip()
-    if args.startswith('"'):
+    quoted_node = _QUOTED_NODE_TARGET.fullmatch(args)
+    if quoted_node is not None:
+        parts = [quoted_node.group(1), quoted_node.group(2).strip()]
+    elif args.startswith('"'):
         closing_quote = args.find('"', 1)
         parts = (
             [args[1:closing_quote], args[closing_quote + 1:].strip()]
@@ -2129,7 +2138,7 @@ async def _handle_private(ctx: ChatCommandContext, args: str) -> ChatAction | No
         parsed = parse_remote_address(target_name)
         if parsed is None or ctx.link_context is None or ctx.link_context.direct_chat is None:
             await ctx.session.write_line(
-                colored("Address a linked node's user as user@node-name-or-dns (this node must be on NetBBS Link).", fg_color=MUTED_COLOR)
+                colored("Address someone on a linked BBS as name@TheirBBS (this node must be on NetBBS Link).", fg_color=MUTED_COLOR)
             )
             return None
         remote_user, _node_prefix = parsed
@@ -3783,12 +3792,12 @@ _COMMAND_INFO: dict[str, tuple[str, str]] = {
     "rooms": ("/rooms", "List the rooms on the MRC network (the hub's reply is shown to you alone)."),
     "topic": ("/topic [text]", "Set the chat channel topic; a bare /topic clears it (requires edit permission)."),
     "msg": ("/msg <user> <text>", "Send a one-off private message; quote a user@node name containing spaces."),
-    "private": ("/private <user>", "Enter a private conversation with an online user (user@node-name-or-dns for a linked node)."),
+    "private": ("/private <user>", "Enter a private conversation with an online user (name@TheirBBS for someone on a linked BBS)."),
     "close": ("/close", "Leave the current private conversation."),
     "dm": ("/dm <user>", "Invite an online user to a live, fullscreen direct chat."),
     "help": ("/help [command]", "List available commands, or show detail for one."),
     "me": ("/me <action>", 'Send an action message (e.g. "* alice waves").'),
-    "nick": ("/nick [name]", "Set your display alias; a bare /nick clears it."),
+    "nick": ("/nick [name]", "Set a display alias, shown as alias|username; a bare /nick clears it."),
     "clear": ("/clear", "Clear your own screen (alias: /cls). Cosmetic only, nothing else changes."),
     "away": ("/away [message]", "Mark yourself away, or clear away status."),
     "timestamps": ("/timestamps [on|off]", "Toggle chat timestamps, or set them on/off explicitly."),
@@ -6106,7 +6115,7 @@ async def run_direct_chat_invite_flow(
     session_registry: ActiveSessionRegistry,
     user: User,
     target: User,
-) -> None:
+) -> bool:
     """
     Send a mutual direct-chat invite to `target` and run the whole
     handshake to its conclusion, on `session`'s own behalf (design doc
@@ -6127,17 +6136,26 @@ async def run_direct_chat_invite_flow(
     didn't resolve first the moment any one of them does, so accepting
     (or declining) from one of an account's several simultaneous
     sessions can never leave the others in limbo.
+
+    An invitation opens only on the target's main menu. A target session
+    that is anywhere else is told about it in a one-line notice, unless
+    a door or a file transfer owns its terminal, and the waiting screen
+    says where the invitation will open (issue #843).
+
+    Returns whether a direct chat ran. It clears the screen on its way
+    out, so a caller that would otherwise hold an outcome on a "Press
+    any key" pause has nothing left to show.
     """
     if not await lane.run(accepts_direct_messages, target):
         await session.write_line(
             colored(f"{sanitize_text(target.username)} has opted out of direct messages.", fg_color=MUTED_COLOR)
         )
-        return
+        return False
     if not presence.is_online(target.username):
         await session.write_line(
             colored(f"{sanitize_text(target.username)} is not currently online.", fg_color=MUTED_COLOR)
         )
-        return
+        return False
 
     invites: dict[object, DirectChatInvite] = {}
     for target_session in session_registry.sessions_for_username(target.username):
@@ -6152,7 +6170,21 @@ async def run_direct_chat_invite_flow(
                 fg_color=MUTED_COLOR,
             )
         )
-        return
+        return False
+
+    away = [target_session for target_session in invites if not direct_invites.is_watching(target_session)]
+    told = 0
+    for target_session in away:
+        if getattr(target_session, "door_active", False) or getattr(target_session, "binary_transfer_active", False):
+            continue
+        told += await session_registry.notify_one(
+            target_session,
+            colored(
+                f"\r\n*** {sanitize_text(user.username)} invites you to a direct chat. "
+                "Go back to the main menu within a minute to answer. ***",
+                fg_color=ALERT_COLOR, bold=True,
+            ),
+        )
 
     future_to_session = {invite.outcome: target_session for target_session, invite in invites.items()}
 
@@ -6167,6 +6199,16 @@ async def run_direct_chat_invite_flow(
         header_color=await lane.run(effective_header_color_256),
     node_name_gradient=session.node_name_gradient)
     await session.write_line(f"\r\n{heading}")
+    if len(away) == len(invites):
+        # Every one of the target's sessions is away from its main menu.
+        where = "They have been told, and the" if told else "The"
+        await session.write_line(
+            colored(
+                f"{sanitize_text(target.username)} is not at the main menu. {where} invitation "
+                "opens when they get there.",
+                fg_color=MUTED_COLOR,
+            )
+        )
     await session.write(f"{menu_key('C', 'ancel')}: ")
 
     # Issue #121: this is a real key-dispatch loop, not "any completed
@@ -6214,7 +6256,7 @@ async def run_direct_chat_invite_flow(
             for target_session in invites:
                 direct_invites.cancel(target_session)
             await session.write_line(colored("\r\nInvitation cancelled.", fg_color=MUTED_COLOR))
-            return
+            return False
 
         if resolved:
             if cancel_key_task not in done:
@@ -6245,9 +6287,11 @@ async def run_direct_chat_invite_flow(
             accent_color=await lane.run(effective_accent_color_256),
             header_color=await lane.run(effective_header_color_256),
         )
+        return True
     elif outcome == "declined":
         await session.write_line(colored(f"\r\n{sanitize_text(target.username)} declined.", fg_color=MUTED_COLOR))
     else:  # "timed_out" -- "cancelled" never reaches here (that's only ever this same inviter's own cancel_key_task path above)
         await session.write_line(
             colored(f"\r\n{sanitize_text(target.username)} didn't respond in time.", fg_color=MUTED_COLOR)
         )
+    return False

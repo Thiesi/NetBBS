@@ -1,14 +1,12 @@
 """
 The main menu: its own draw/dispatch loop, the direct-chat-invite race
-(design doc §6.3), and the `[C]ommunities`/`[U]ncategorized`/`[J]ump
-to...` shared resource-type sub-menu (design doc §16) everything else
-routes browsing through.
+(design doc §6.3), and the `C[o]mmunities` path -- the Communities list
+and each Community's own page (design doc §16, issue #838).
 
 Split out of `netbbs.net.login_flow` (that module's own maintenance
 split -- see its module docstring), the last piece and the one every
 other extracted screen module is reached from. Two non-adjacent ranges
-of the original file (the menu loop itself; the resource-type sub-menu
-and its Communities/Uncategorized/Jump entry points), with `_login`/
+of the original file (the menu loop itself; the Communities path), with `_login`/
 `_register_new_account` sitting between them in the original file --
 those stay in `login_flow` as session-entry logic, so this module is
 assembled from both pieces rather than one contiguous cut.
@@ -18,7 +16,10 @@ from __future__ import annotations
 
 import asyncio
 
-from netbbs.auth.users import SYSOP_LEVEL, User, current_account
+from netbbs.auth.users import (
+    SYSOP_LEVEL, User, current_account, describe_staff_permissions, is_usable_sysop, list_users,
+)
+from netbbs.net.help_overlay import show_help
 from netbbs.chat import (
     ChatHub,
     DirectChatInvites,
@@ -29,19 +30,24 @@ from netbbs.chat import (
 )
 from netbbs.communities import Community, list_communities
 from netbbs.link.boards import LinkContext
+from netbbs.link.mail import acknowledge_delivery_notices, pending_delivery_notices
+from netbbs.mail import acknowledge_eviction_notice, pending_eviction_notice
 from netbbs.mail import unread_count as unread_mail_count
-from netbbs.net.admin_flow import admin_menu
-from netbbs.net.board_flow import _browse_boards, _has_visible_boards
+from netbbs.net.admin_flow import admin_menu, moderation_queue, staff_list_screen, staff_menu
+from netbbs.boards import list_boards
+from netbbs.chat.channels import list_channels
+from netbbs.files import list_file_areas
+from netbbs.net.board_flow import _browse_boards, visible_boards
 from netbbs.net.breadcrumb_preference import breadcrumb_collapsed_enabled
 from netbbs.boards.moderation_notices import acknowledge_moderation_notices, pending_moderation_notices
 from netbbs.net.notices import announce, write_notices
-from netbbs.net.char_input import REDRAW_KEY, InputHistory, reject_unhandled_key
-from netbbs.net.chat_flow import browse_channels, has_visible_channels, run_direct_chat_loop
+from netbbs.net.char_input import HELP_KEY, REDRAW_KEY, InputHistory, reject_unhandled_key
+from netbbs.net.chat_flow import browse_channels, run_direct_chat_loop, visible_channels
 from netbbs.net.confirm import prompt_yes_no
 from netbbs.net.directory_flow import _browse_directory, _caller_who_screen
-from netbbs.net.door_flow import browse_doors, has_visible_doors
-from netbbs.net.file_flow import browse_file_areas, has_visible_areas
-from netbbs.net.mail_flow import browse_mail
+from netbbs.net.door_flow import _visible_doors, browse_doors, has_visible_doors
+from netbbs.net.file_flow import browse_file_areas, visible_areas
+from netbbs.net.mail_flow import browse_mail, caller_mail_refusal
 from netbbs.net.main_menu_banner import load_main_menu_banner
 from netbbs.net.menu_description_preference import menu_description_level
 from netbbs.net.node_theme import (
@@ -82,19 +88,29 @@ from netbbs.rendering import (
     sanitize_text,
     screen_title,
 )
+from netbbs.staff import (
+    count_moderation_items,
+    count_pending_accounts,
+    has_moderation_scope,
+    is_staff,
+    sees_staff_list,
+    told_of_pending_accounts,
+)
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
-from netbbs.timeutil import format_for_display, utc_now_iso
+from netbbs.timeutil import format_for_display, is_utc_zone_name, resolve_display_preferences, utc_now_iso
 
 #: What the SysOp monitor shows for a caller who took each main-menu branch
 #: (issue #762), named as the menu names it. Every key `_main_menu_loop`
 #: dispatches on needs an entry; a test holds the two in step.
 _MENU_ACTIVITY = {
-    "c": "Communities",
-    "u": "Uncategorized",
-    "j": "Jump to",
+    "m": "Message boards",
+    "c": "Chat",
+    "f": "Files",
+    "g": "Games",
+    "o": "Communities",
     "n": "New scan",
-    "f": "Find",
+    "/": "Find",
     "d": "Directory",
     "p": "Profile",
     "e": "Mail",
@@ -104,6 +120,8 @@ _MENU_ACTIVITY = {
     "i": "Invitations",
     "v": "Verify",
     "s": "SysOp",
+    "a": "Moderation",
+    "t": "Staff list",
     "l": "Logging off",
 }
 
@@ -167,41 +185,42 @@ async def _draw_main_menu(
     current truth on every redraw.
 
     `[E]-mail` (design doc, `netbbs.mail`/
-    `netbbs.net.mail_flow`) is always shown, unlike `[I]nvitations` --
-    it's a core always-available feature, not a transient notification --
-    but grows an "(N unread)" suffix the same "re-query on every redraw,
-    no separate seen-tracking" way. Deliberately a different letter and a
+    `netbbs.net.mail_flow`) is shown to every caller mail is open to,
+    unlike `[I]nvitations` -- it's a core feature, not a transient
+    notification -- and grows an "(N unread)" suffix the same "re-query on
+    every redraw, no separate seen-tracking" way. Mail is open to everyone
+    but the guest account and callers below the SysOp's mail level (issue
+    #816, `netbbs.net.mail_flow.caller_mail_refusal`); for them neither the entry
+    nor the header's mail count is shown. Deliberately a different letter and a
     different persistence model from `/msg`: `E` (for "E-mail") is the
     closest thing to a ready-made convention BBS users already have
     muscle memory for.
 
-    `[C]ommunities`/`[U]ncategorized`/`[J]ump to...` (design doc §16)
-    replace the old flat `[M]essage Boards`/`[C]hat`/
-    `[F]ile areas` split -- `[C]` is reused here specifically because
-    Chat moving one level into the shared resource-type sub-menu frees
-    it back up (confirmed directly with Thiesi: the design's original
-    spec assumed `[E]nter a Community`, but mail later claimed
-    `E`). `[C]ommunities`/`[U]ncategorized` are conditionally
-    visible -- hidden when there are zero (visible) Communities, or
-    zero visible Uncategorized resources, respectively -- same "only
-    offer what currently applies" convention as `[I]nvitations`;
-    `[J]ump to...` is always shown, matching the old flat menu's own
-    unconditional `[M]/[C]/[F]` behavior exactly. On a freshly upgraded
-    node with no Communities created yet, this reduces the menu to
-    `[U]ncategorized  [J]ump to...` (assuming at least one board/
-    channel/area already exists), functionally identical to today's
-    flat menu -- migration is a non-event.
+    `[M]essage boards`, `[C]hat` and `[F]iles` (issue #838) are the
+    first thing on the menu and always shown: they open the whole list
+    of that kind, whichever Community each item belongs to, which is
+    where callers who know other BBSes look. A board outside every
+    Community is simply a board there; "Uncategorized" is an internal
+    term and never a menu entry. `[G]ames` is shown only while at least
+    one door is visible, and `C[o]mmunities` only while at least one
+    Community is -- the topic-first path, next to the flat one. `[?]`
+    is kept free for the help entry (issue #840).
 
-    `[N]ew scan` (issue #56) is always shown too, right next to `[J]ump
-    to...` -- an activity summary across every accessible board/channel/
-    file area, not gated on anything currently existing (a brand-new
-    account with nothing yet visited still gets a useful "not yet
-    visited" summary, matching classic BBS new-scan semantics).
+    `[N]ew scan` (issue #56) is always shown too -- an activity summary
+    across every accessible board/channel/file area, not gated on
+    anything currently existing (a brand-new account with nothing yet
+    visited still gets a useful "not yet visited" summary, matching
+    classic BBS new-scan semantics).
 
-    `[F]ind` (issue #56's local search) is always shown alongside it --
+    `[/] Find` (issue #56's local search) is always shown alongside it --
     unlike `[N]ew scan`, this doesn't summarize *everything* accessible;
     it only runs once a query is actually typed, so there's no "brand-new
-    account" empty-list concern to gate on either.
+    account" empty-list concern to gate on either. `/` rather than `F`,
+    which `[F]iles` holds (issue #838).
+
+    A SysOp on a node with no boards, chat channels or file areas at all
+    is told where to create one, just above the prompt (issue #838); no
+    one else is, since nobody else can act on it.
 
     `netbbs.net.main_menu_banner.load_main_menu_banner` (issue #161,
     skinning part two) optionally prepends a SysOp-authored masthead
@@ -215,34 +234,44 @@ async def _draw_main_menu(
     for text, created_at in mailbox.flush(session):
         await session.write_line(format_with_preference(db, user, text, created_at))
 
-    unread = unread_mail_count(db, user)
+    has_mail = caller_mail_refusal(session, db, user) is None
+    unread = unread_mail_count(db, user) if has_mail else 0
     mail_label = f"-mail ({unread} unread)" if unread else "-mail"
     # Brief descriptions are kept to roughly 34 characters or less --
     # the actual available width once this renders in two columns at
     # the classic 80-column terminal (menu_grid's own column_width
     # minus its description indent). Longer, fuller text belongs in
     # `detailed`, shown only when a caller opts into that verbosity.
-    explore_options = []
+    explore_options = [
+        MenuEntry(label=menu_key("M", "essage boards"), brief="Read and post messages"),
+        MenuEntry(label=menu_key("C", "hat"), brief="Talk live with other callers"),
+        MenuEntry(label=menu_key("F", "iles"), brief="Download and upload files"),
+    ]
+    if has_visible_doors(db, user):
+        explore_options.append(MenuEntry(label=menu_key("G", "ames"), brief="Play a door game"))
     if _has_visible_communities(db, user):
         explore_options.append(MenuEntry(
-            label=menu_key("C", "ommunities"),
-            brief="Spaces shared by other callers",
-            detailed="Browse Communities -- groups of message boards/chat channels/file areas organized by topic.",
-        ))
-    if _has_uncategorized_resources(db, user):
-        explore_options.append(MenuEntry(
-            label=menu_key("U", "ncategorized"),
-            brief="Boards/areas outside a Community",
+            label=menu_key("o", "mmunities", prefix="C"),
+            brief="This node's topic spaces",
+            detailed="Browse Communities -- the SysOp's topics, each with its own boards, chat and files.",
         ))
     explore_options.extend(
         [
-            MenuEntry(label=menu_key("J", "ump to..."), brief="Go straight to a name you know"),
             MenuEntry(
                 label=menu_key("N", "ew scan"),
                 brief="Activity since your last visit",
                 detailed="Scan every accessible message board/chat channel/file area for activity since your last visit.",
             ),
-            MenuEntry(label=menu_key("F", "ind"), brief="Search boards, files, and mail"),
+            # Issue #811: Find searches posts, files and retained chat --
+            # not mail, which only the mailbox's own folder-local [F]ind
+            # filters. Say so rather than promise a mail search.
+            MenuEntry(
+                label=menu_key("/", " Find"),
+                brief="Search posts, files, and chat",
+                detailed="Find posts, files, and retained chat on this node.",
+            ),
+            # Issue #840 (F116): the main menu had no help at all.
+            MenuEntry(label=menu_key("?", " Help"), brief="How this board works"),
         ]
     )
     personal_options = [
@@ -252,7 +281,7 @@ async def _draw_main_menu(
                 brief="Your bio and preferences",
                 detailed="Edit your bio, visibility, and preferences -- including these menu descriptions.",
             ),
-            MenuEntry(label=menu_key("E", mail_label), brief="Read and send private mail"),
+            *([MenuEntry(label=menu_key("E", mail_label), brief="Read and send private mail")] if has_mail else []),
             MenuEntry(label=menu_key("H", "istory"), brief="Your recent sessions"),
             MenuEntry(
                 label=menu_key("R", "evious callers", prefix="P"),
@@ -267,6 +296,9 @@ async def _draw_main_menu(
         personal_options.append(
             MenuEntry(label=menu_key("W", "ho's online"), brief="See who's connected now")
         )
+    if sees_staff_list(db, user):
+        # Issue #836 (design doc §5.6): who runs the node, and who is away.
+        personal_options.append(MenuEntry(label=menu_key("t", "aff list", prefix="S"), brief="Who runs this node"))
     if list_pending_invitations_for_user(db, user):
         personal_options.append(
             MenuEntry(label=menu_key("I", "nvitations"), brief="Pending invitations for you")
@@ -280,12 +312,22 @@ async def _draw_main_menu(
         system_options.append(
             MenuEntry(label=menu_key("S", "ysOp"), brief="Node administration console")
         )
+    else:
+        # Issue #836 (design doc §5.2, §5.6): a moderator is told what waits
+        # for them, and a staff member reaches their own console.
+        if has_moderation_scope(db, user):
+            system_options.append(MenuEntry(
+                label=menu_key("a", f"tion ({count_moderation_items(db, user)})", prefix="Moder"),
+                brief="Held posts and uploads to decide",
+            ))
+        if is_staff(user):
+            system_options.append(MenuEntry(label=menu_key("S", "taff"), brief="Your staff console"))
     system_options.append(MenuEntry(label=menu_key("L", "ogoff"), brief="Disconnect from this node"))
 
     unicode_style = unicode_style_enabled(db, user)
     collapsed = breadcrumb_collapsed_enabled(db, user)
     # "mail" pluralized is "mails," which reads oddly -- the Mail submenu's
-    # own header (`_render_mail_menu`) already settled this exact wording as
+    # own header (now the mailbox's, `_MailboxScreen`) settled this wording as
     # "message(s)"; matching it here fixes both the missing pluralization
     # and a term the app wasn't even using consistently with itself.
     mail_status = (
@@ -293,19 +335,17 @@ async def _draw_main_menu(
         if unread
         else ("mail caught up", SUCCESS_COLOR)
     )
+    header_fields = [
+        (sanitize_text(user.username), effective_accent_color(session, db)),
+        (f"level {user.user_level}", VALUE_COLOR),
+        *([mail_status] if has_mail else []),
+    ]
     masthead = load_main_menu_banner(db)
     redraw = redraw_in_place_enabled(db, user)
     title = screen_title(
         "Main menu",
         breadcrumb=(session.node_display_name,),
-        subtitle=field_row(
-            [
-                (sanitize_text(user.username), effective_accent_color(session, db)),
-                (f"level {user.user_level}", VALUE_COLOR),
-                mail_status,
-            ],
-            unicode_style=unicode_style,
-        ),
+        subtitle=field_row(header_fields, unicode_style=unicode_style),
         width=session.terminal_width,
         # `clear` stays False here whenever a masthead is shown -- it
         # must land *after* any clear-screen sequence but *before* this
@@ -330,6 +370,22 @@ async def _draw_main_menu(
         # issue #161, unconditionally -- no existing node's output
         # changes just because this module now exists.
         await session.write_line(f"\r\n{title}\r\n{options}\r\n")
+    if meets_level(user, SYSOP_LEVEL) and not (list_boards(db) or list_channels(db) or list_file_areas(db)):
+        arrow = "\u2192" if unicode_style else "->"
+        await session.write_line(
+            colored(f"No boards yet: create one under SysOp {arrow} Content.", fg_color=MUTED_COLOR)
+        )
+    if told_of_pending_accounts(user):
+        # Issue #835 (F071): only the console dashboard used to say that
+        # signups were waiting. Told to whoever can approve them (§5.6).
+        waiting = count_pending_accounts(db)
+        if waiting:
+            arrow = "\u2192" if unicode_style else "->"
+            where = f"SysOp {arrow} Users" if meets_level(user, SYSOP_LEVEL) else f"Staff {arrow} Accounts waiting"
+            await session.write_line(colored(
+                f"{waiting} account{'' if waiting == 1 else 's'} awaiting approval: {where}.",
+                fg_color=WARNING_COLOR,
+            ))
     if notice:
         await session.write_line(notice)
     # An outcome from a flow that unwound all the way back here (a download
@@ -368,13 +424,18 @@ def _main_menu_prompt(db: Database, user: User, node_controls: NodeControls | No
     if node_controls is None:
         return "Choice: "
 
-    time_only = format_for_display(utc_now_iso(), db, override_format="%H:%M:%S")
+    _fmt, tz_name = resolve_display_preferences(db)
+    time_only = format_for_display(utc_now_iso(), override_format="%H:%M:%S", override_timezone=tz_name)
     hours, minutes, seconds = time_only.split(":")
     separator = colored(":", fg_color=MUTED_COLOR)
     clock_color = effective_clock_color_256(db)
     time_str = separator.join(
         colored(part, fg_color=clock_color) for part in (hours, minutes, seconds)
     )
+    if is_utc_zone_name(tz_name):
+        # Issue #834: a fresh node's clock is UTC, and unlabelled it read as
+        # a wrong local time. A named local zone needs no label.
+        time_str += colored(" UTC", fg_color=MUTED_COLOR)
     tags: list[str] = []
     if node_controls.shutdown_scheduler.is_scheduled():
         remaining = node_controls.shutdown_scheduler.remaining_seconds()
@@ -549,8 +610,25 @@ async def _main_menu_loop(
                 moderation_lines, moderation_ids = pending_moderation_notices(db, user)
                 for outcome, text in moderation_lines:
                     announce(session, text, tone="success" if outcome == "approved" else "error")
+                # Link mail of this caller's that bounced or expired, told
+                # once the same way, even if it happened while they were
+                # offline (issue #806).
+                delivery_lines, delivery_ids = pending_delivery_notices(db, user)
+                for text in delivery_lines:
+                    announce(session, text, tone="error")
+                # Read mail the mailbox cap removed to make room, counted
+                # and told once (issue #818) -- never which messages. Held
+                # for a caller mail is closed to, who has no Inbox to see.
+                eviction_line, evicted = (
+                    pending_eviction_notice(db, user)
+                    if caller_mail_refusal(session, db, user) is None else (None, 0)
+                )
+                if eviction_line is not None:
+                    announce(session, eviction_line, color=WARNING_COLOR)
                 await _draw_main_menu(session, db, mailbox, user, node_controls=node_controls, notice=notice)
                 acknowledge_moderation_notices(db, moderation_ids)
+                acknowledge_delivery_notices(db, delivery_ids)
+                acknowledge_eviction_notice(db, user, evicted)
                 notice = None
                 redraw = False
             set_root_activity(session, None)
@@ -565,7 +643,7 @@ async def _main_menu_loop(
                 # flight (idle, nothing racing it yet) would only be noticed
                 # on the *next* keystroke instead of interrupting immediately
                 # -- see that method's own docstring.
-                side_tasks["invite"] = asyncio.create_task(direct_invites.arrival_event(session).wait())
+                side_tasks["invite"] = asyncio.create_task(direct_invites.wait_for_arrival(session))
             if changed is not None:
                 # Issue #659: a promotion redraws an idle menu at once, so
                 # the new options appear without a keypress.
@@ -605,6 +683,10 @@ async def _main_menu_loop(
                     # Issue #762: "Invitation", never whose.
                     with activity(session, "Invitation"):
                         await _handle_incoming_invite(session, db, direct_invites, hub, presence, user)
+                    # Issue #843: a direct chat clears the screen on its
+                    # way out, so the menu is drawn again, carrying a
+                    # decline or a lapsed invitation above its prompt.
+                    redraw = True
                     continue
                 if access_task is not None and access_task in done and key_task not in done:
                     for task in (key_task, *side_tasks.values()):
@@ -616,6 +698,13 @@ async def _main_menu_loop(
                     task.cancel()
                 await asyncio.gather(*side_tasks.values(), return_exceptions=True)
             choice = (await key_task).lower()
+            if len(choice) == 1 and choice.isalpha():
+                # A whole word typed at this one-key menu ("Communities",
+                # "help"): its first letter acts, the rest must not act on
+                # the next screen (issue #840, F114).
+                arm_word_guard = getattr(session, "arm_word_guard", None)
+                if arm_word_guard is not None:
+                    arm_word_guard()
 
             fresh = current_account(db, user)
             if fresh is None:
@@ -659,25 +748,18 @@ async def _main_menu_loop(
                     redraw = True
                     continue
                 return True
-            elif choice == "c" and _has_visible_communities(db, user):
+            elif choice in ("m", "c", "f") or (choice == "g" and has_visible_doors(db, user)):
+                await session.write_line("")
+                await _browse_kind(
+                    session, db, hub, presence, mailbox, history, user, choice,
+                    node_controls=node_controls, lane=lane, link_context=link_context,
+                    direct_invites=direct_invites,
+                    community_id=None, community_scoped=False, title_prefix=None,
+                )
+                redraw = True
+            elif choice == "o" and _has_visible_communities(db, user):
                 await session.write_line("")
                 await _enter_communities(
-                    session, db, hub, presence, mailbox, history, user,
-                    node_controls=node_controls, lane=lane, link_context=link_context,
-                    direct_invites=direct_invites,
-                )
-                redraw = True
-            elif choice == "u" and _has_uncategorized_resources(db, user):
-                await session.write_line("")
-                await _enter_uncategorized(
-                    session, db, hub, presence, mailbox, history, user,
-                    node_controls=node_controls, lane=lane, link_context=link_context,
-                    direct_invites=direct_invites,
-                )
-                redraw = True
-            elif choice == "j":
-                await session.write_line("")
-                await _jump_to(
                     session, db, hub, presence, mailbox, history, user,
                     node_controls=node_controls, lane=lane, link_context=link_context,
                     direct_invites=direct_invites,
@@ -700,7 +782,11 @@ async def _main_menu_loop(
                         colored("New scan is not available in this context.", fg_color=MUTED_COLOR)
                     )
                 redraw = True
-            elif choice == "f":
+            elif choice in ("?", HELP_KEY):
+                await session.write_line("")
+                await _how_this_board_works(session, db, user)
+                redraw = True
+            elif choice == "/":
                 await session.write_line("")
                 if lane is not None:
                     await _find_screen(
@@ -758,6 +844,9 @@ async def _main_menu_loop(
                     )
                 redraw = True
             elif choice == "e":
+                # Not gated here: `browse_mail` refuses a caller mail is
+                # closed to (issue #816) and says why, which a menu drawn
+                # before the SysOp changed the mail level still needs.
                 await session.write_line("")
                 # design doc, issue #57: mail is one of the features
                 # migrated onto the two-lane database execution model --
@@ -767,7 +856,12 @@ async def _main_menu_loop(
                 # real connection, since netbbs.__main__.run() always
                 # passes a real foreground lane.
                 if lane is not None:
-                    await browse_mail(session, lane, user, link_context=link_context)
+                    # The mailbox's prompt is this menu's, clock and node
+                    # tags included (issue #810).
+                    await browse_mail(
+                        session, lane, user, link_context=link_context,
+                        choice_prompt=lambda: _main_menu_prompt(db, user, node_controls),
+                    )
                 else:
                     await session.write_line(
                         colored("Mail is not available in this context.", fg_color=MUTED_COLOR)
@@ -780,7 +874,8 @@ async def _main_menu_loop(
             elif choice == "r":
                 await session.write_line("")
                 await _previous_callers_screen(
-                    session, db, user, current_history_id=current_history_id
+                    session, db, user, current_history_id=current_history_id,
+                    lane=lane, link_context=link_context,
                 )
                 redraw = True
             elif choice == "w" and node_controls is not None:
@@ -813,6 +908,37 @@ async def _main_menu_loop(
                         colored("SysOp menu is not available in this context.", fg_color=MUTED_COLOR)
                     )
                 redraw = True
+            elif choice == "t" and sees_staff_list(db, user):
+                await session.write_line("")
+                if lane is not None:
+                    await staff_list_screen(session, lane, user)
+                else:
+                    await session.write_line(
+                        colored("The Staff list is not available in this context.", fg_color=MUTED_COLOR)
+                    )
+                redraw = True
+            elif choice == "s" and is_staff(user):
+                await session.write_line("")
+                set_root_activity(session, "Staff console")
+                if lane is not None:
+                    await staff_menu(session, lane, user, node_controls=node_controls, link_context=link_context)
+                else:
+                    await session.write_line(
+                        colored("The staff console is not available in this context.", fg_color=MUTED_COLOR)
+                    )
+                redraw = True
+            elif choice == "a" and not meets_level(user, SYSOP_LEVEL) and has_moderation_scope(db, user):
+                await session.write_line("")
+                if lane is not None:
+                    await moderation_queue(
+                        session, lane, user, link_context=link_context,
+                        transfers=node_controls.transfers if node_controls is not None else None,
+                    )
+                else:
+                    await session.write_line(
+                        colored("Moderation is not available in this context.", fg_color=MUTED_COLOR)
+                    )
+                redraw = True
             else:
                 await session.write(reject_unhandled_key(choice))
         except asyncio.CancelledError:
@@ -830,8 +956,8 @@ async def _main_menu_loop(
 
 def _access_change_notice(before: User, after: User) -> str | None:
     """The line shown above the redrawn menu when a SysOp changed this
-    account's level or verify-identity permission (issue #659), or `None`
-    when neither changed."""
+    account's level, verify-identity permission (issue #659) or staff
+    permissions (issue #836), or `None` when none of them changed."""
     lines = []
     if after.user_level != before.user_level:
         color = SUCCESS_COLOR if after.user_level > before.user_level else ALERT_COLOR
@@ -841,6 +967,16 @@ def _access_change_notice(before: User, after: User) -> str | None:
             lines.append(colored("You can now verify callers' identities.", fg_color=SUCCESS_COLOR))
         else:
             lines.append(colored("You can no longer verify callers' identities.", fg_color=ALERT_COLOR))
+    gained = after.staff_permissions & ~before.staff_permissions
+    lost = before.staff_permissions & ~after.staff_permissions
+    if gained:
+        lines.append(colored(
+            f"Staff permissions granted: {describe_staff_permissions(gained)}.", fg_color=SUCCESS_COLOR
+        ))
+    if lost:
+        lines.append(colored(
+            f"Staff permissions removed: {describe_staff_permissions(lost)}.", fg_color=ALERT_COLOR
+        ))
     return "\r\n".join(lines) if lines else None
 
 
@@ -850,7 +986,8 @@ def _adopt_account(session: Session, registry: ActiveSessionRegistry | None, fre
     on a change the menu has already applied (issue #659)."""
     if registry is not None:
         registry.record_account(
-            session, user_level=fresh.user_level, can_verify_identity=fresh.can_verify_identity
+            session, user_level=fresh.user_level, can_verify_identity=fresh.can_verify_identity,
+            staff_permissions=fresh.staff_permissions,
         )
     return fresh
 
@@ -877,6 +1014,9 @@ async def _handle_incoming_invite(
     function got a chance to run, e.g. because this session was busy
     elsewhere the whole time and only just returned to the main menu.
     That's a safe no-op, not an error: there is nothing left to show.
+
+    A decline or an invitation that lapsed meanwhile is announced for
+    the redrawn menu (issue #843) rather than written here.
     """
     invite = direct_invites.pending_for(session)
     if invite is None:
@@ -893,7 +1033,7 @@ async def _handle_incoming_invite(
         # Expired/cancelled between the prompt being shown and this
         # answer -- same "no longer valid" tolerance as everywhere else
         # in this feature (netbbs.chat.direct_invites's own docstrings).
-        await session.write_line(colored("That invitation is no longer valid.", fg_color=MUTED_COLOR))
+        announce(session, "That invitation is no longer valid.", tone="muted")
         return
     if accepted:
         await run_direct_chat_loop(
@@ -905,7 +1045,7 @@ async def _handle_incoming_invite(
             header_color=effective_header_color_256(db),
         )
     else:
-        await session.write_line(colored("Declined.", fg_color=MUTED_COLOR))
+        announce(session, f"Declined {invite.inviter.username}'s invitation.", tone="muted")
 
 
 # -- Communities navigation (design doc §16) ------------
@@ -924,30 +1064,50 @@ def _visible_communities_for(db: Database, user: User) -> list[Community]:
     return [c for c in communities if not c.hidden]
 
 
+_USER_HANDBOOK_URL = "https://github.com/Thiesi/NetBBS/blob/main/docs/NetBBS-User-Handbook.md"
+
+
+async def _how_this_board_works(session: Session, db: Database, user: User) -> None:
+    """`[?] Help` (issue #840, F116): the few things a first-time caller
+    needs, and who runs the node. The field test's newcomer got by only
+    because the SysOp answered her within a minute."""
+    sysops = sorted(
+        (account.username for account in list_users(db) if is_usable_sysop(account)), key=str.lower
+    )
+    web = getattr(session, "transport_name", None) == "web"
+    lines = [
+        "Menus take one key: press the letter in [brackets], no Enter needed."
+        + (" Clicking a [letter] works too." if web else ""),
+        "Lists number their rows: type the number (03, or 3 and Enter), or move with the arrow keys and press Enter.",
+        "[B]ack goes one level up. [N]ew scan shows what is new since your last visit, one place after another.",
+        "Ctrl-H or ? shows help on most screens.",
+        "",
+        _contact_line(sysops, caller_mail_refusal(session, db, user)),
+        "",
+        "The User Handbook explains the rest: " + _USER_HANDBOOK_URL,
+    ]
+    await show_help(
+        session, "How this board works", lines,
+        header_color=effective_header_color_256(db), unicode_style=unicode_style_enabled(db, user),
+    )
+
+
+def _contact_line(sysops: list[str], mail_refusal: str | None) -> str:
+    """Who runs the board, and how to reach them: by mail, or -- for a
+    caller mail is closed to (issue #816) -- why not."""
+    if mail_refusal is None:
+        return (
+            "This board is run by " + ", ".join(sysops) + ". Send them E-mail (To: sysop reaches them)."
+            if sysops else "Send the SysOp E-mail: To: sysop reaches them."
+        )
+    return ("This board is run by " + ", ".join(sysops) + ". " if sysops else "") + mail_refusal
+
+
 def _has_visible_communities(db: Database, user: User) -> bool:
     return bool(_visible_communities_for(db, user))
 
 
-def _has_uncategorized_resources(db: Database, user: User) -> bool:
-    """Whether `user` can currently see at least one Uncategorized
-    board, channel, file area, or door -- gates the main menu's
-    `[U]ncategorized` entry the same "only offer what currently applies"
-    way `[I]nvitations` already does. `community_id=None,
-    community_scoped=True` filters each resource type to exactly its
-    Uncategorized members -- see `_browse_boards_in_category`'s docstring
-    for why `None` needs no special-casing here. Must stay in sync with
-    `_resource_type_menu`'s own `show_doors` check below (dogfood-reported
-    bug, GitHub issue #204: a lone uncategorized door game didn't surface
-    this entry at all, even though the door was reachable once inside)."""
-    return (
-        _has_visible_boards(db, user, community_id=None, community_scoped=True)
-        or has_visible_channels(db, user, community_id=None, community_scoped=True)
-        or has_visible_areas(db, user, community_id=None, community_scoped=True)
-        or has_visible_doors(db, user, community_id=None, community_scoped=True)
-    )
-
-
-async def _resource_type_menu(
+async def _browse_kind(
     session: Session,
     db: Database,
     hub: ChatHub,
@@ -955,76 +1115,146 @@ async def _resource_type_menu(
     mailbox: MessageMailbox,
     history: InputHistory,
     user: User,
+    kind: str,
     *,
     node_controls: NodeControls | None,
+    lane: DatabaseLane | None,
+    link_context: LinkContext | None,
+    direct_invites: DirectChatInvites | None,
     community_id: int | None,
     community_scoped: bool,
-    menu_header: str,
     title_prefix: str | None,
+) -> None:
+    """One kind of resource -- `kind` is its key, `m`/`c`/`f`/`g` --
+    either the whole node's list (the main menu's own entries,
+    `community_scoped=False`) or one Community's (its page). Both lead to
+    the same browsers, so the two paths cannot drift apart (design doc
+    §16, issue #838)."""
+    if kind == "m":
+        await _browse_boards(
+            session, db, user,
+            community_id=community_id, community_scoped=community_scoped, title_prefix=title_prefix,
+            link_context=link_context,
+        )
+    elif kind == "c":
+        # design doc: chat is one of the features migrated onto the
+        # two-lane database execution model -- `lane` is None only for a
+        # direct test call site that doesn't supply one, never for a real
+        # connection (see the "e" (mail) branch of the main menu).
+        if lane is not None:
+            session_registry = node_controls.session_registry if node_controls is not None else None
+            await browse_channels(
+                session, lane, hub, presence, mailbox, history, user, session_registry=session_registry,
+                community_id=community_id, community_scoped=community_scoped, title_prefix=title_prefix,
+                link_context=link_context, direct_invites=direct_invites,
+                mrc_bridge=node_controls.mrc_bridge if node_controls is not None else None,
+            )
+        else:
+            await session.write_line(colored("Chat is not available in this context.", fg_color=MUTED_COLOR))
+    elif kind == "f":
+        # Same lane-is-None reasoning as chat, above.
+        if lane is not None:
+            await browse_file_areas(
+                session, lane, user,
+                community_id=community_id, community_scoped=community_scoped, title_prefix=title_prefix,
+                link_context=link_context,
+                # Issue #475: the node's transfer-grant table, so a
+                # caller whose terminal has no Zmodem can be handed
+                # a browser link instead. `None` on a node with no
+                # web listener -- there would be nowhere for the
+                # link to point.
+                transfers=node_controls.transfers if node_controls is not None else None,
+            )
+        else:
+            await session.write_line(
+                colored("File areas are not available in this context.", fg_color=MUTED_COLOR)
+            )
+    elif kind == "g":
+        # design doc: doors are one of the features migrated onto the
+        # two-lane database execution model from the start (see
+        # netbbs.net.door_flow's own docstring) -- same lane-is-None
+        # reasoning as chat, above.
+        if lane is not None:
+            await browse_doors(
+                session, lane, user,
+                community_id=community_id, community_scoped=community_scoped, title_prefix=title_prefix,
+                door_services=node_controls.door_services if node_controls is not None else None,
+                presence=presence,
+                link_context=link_context,
+                chat_hub=hub,
+            )
+        else:
+            await session.write_line(colored("Doors are not available in this context.", fg_color=MUTED_COLOR))
+
+
+def _plural(count: int, noun: str) -> str:
+    return f"{count} {noun}{'' if count == 1 else 's'}"
+
+
+async def _community_page(
+    session: Session,
+    db: Database,
+    hub: ChatHub,
+    presence: PresenceRegistry,
+    mailbox: MessageMailbox,
+    history: InputHistory,
+    user: User,
+    community: Community,
+    *,
+    node_controls: NodeControls | None,
     lane: DatabaseLane | None = None,
     link_context: LinkContext | None = None,
     direct_invites: DirectChatInvites | None = None,
 ) -> None:
     """
-    Shared sub-menu for `[C]ommunities`/`[U]ncategorized`/`[J]ump to...`
-    (design doc §16) -- all three main-menu entry points lead
-    here, differing only in what Community filter they apply. Reuses the
-    *original* `[M]/[C]/[F]` letters one level in rather than inventing
-    new ones -- caught during design: `[B]oards` collides with `[B]ack`
-    -- so existing muscle memory is relocated one screen deeper, not
-    lost.
+    One Community's page (design doc §16): its description, and an entry
+    per kind of resource it holds, each with how many there are (issue
+    #838 -- a bare menu told a caller nothing about what was inside).
+    Reuses the main menu's own `[M]/[C]/[F]/[G]` letters, so muscle
+    memory carries over; `[B]oards` would collide with `[B]ack`.
 
-    Offers only resource types with at least one currently-visible
-    match when `community_scoped` (same "only offer what currently
-    applies" convention as `[I]nvitations`); the unfiltered Jump case
-    (`community_scoped=False`) always offers all three, matching the
-    flat main menu's own former unconditional `[M]/[C]/[F]` behavior
-    exactly -- Jump is meant to feel identical to how browsing used to
-    work before Communities existed.
-
-    Loops rather than a one-shot dispatch, same shape as `_main_menu`
-    itself -- staying within one Community's (or Uncategorized's, or
-    Jump's) context across several resource-type visits without
-    re-entering the Community picker each time.
+    Offers only the kinds with at least one visible member, same "only
+    offer what currently applies" convention as `[I]nvitations`, and
+    re-counts on every redraw. Loops, so a caller stays inside the
+    Community across several visits; `[B]ack` returns to the
+    Communities list it was picked from.
     """
     description_level = menu_description_level(db, user)
     redraw_in_place = redraw_in_place_enabled(db, user)
     unicode_style = unicode_style_enabled(db, user)
     collapsed = breadcrumb_collapsed_enabled(db, user)
+    scope = {"community_id": community.id, "community_scoped": True}
     while True:
-        show_boards = not community_scoped or _has_visible_boards(
-            db, user, community_id=community_id, community_scoped=community_scoped
-        )
-        show_channels = not community_scoped or has_visible_channels(
-            db, user, community_id=community_id, community_scoped=community_scoped
-        )
-        show_areas = not community_scoped or has_visible_areas(
-            db, user, community_id=community_id, community_scoped=community_scoped
-        )
-        show_doors = not community_scoped or has_visible_doors(
-            db, user, community_id=community_id, community_scoped=community_scoped
-        )
-
+        counts = {
+            "m": len(visible_boards(db, user, **scope)),
+            "c": len(visible_channels(db, user, **scope)),
+            "f": len(visible_areas(db, user, **scope)),
+            "g": len(_visible_doors(db, user, **scope)),
+        }
         option_list = []
-        if show_boards:
-            option_list.append(MenuEntry(label=menu_key("M", "essage Boards"), brief="Browse message boards"))
-        if show_channels:
-            option_list.append(MenuEntry(label=menu_key("C", "hat"), brief="Browse chat channels"))
-        if show_areas:
-            option_list.append(MenuEntry(label=menu_key("F", "ile areas"), brief="Browse file areas"))
-        if show_doors:
-            option_list.append(MenuEntry(label=menu_key("G", "ames"), brief="Play a door game"))
-        option_list.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to the previous menu"))
+        if counts["m"]:
+            option_list.append(MenuEntry(label=menu_key("M", "essage boards"), brief=_plural(counts["m"], "board")))
+        if counts["c"]:
+            option_list.append(MenuEntry(label=menu_key("C", "hat"), brief=_plural(counts["c"], "channel")))
+        if counts["f"]:
+            option_list.append(MenuEntry(label=menu_key("F", "iles"), brief=_plural(counts["f"], "file area")))
+        if counts["g"]:
+            option_list.append(MenuEntry(label=menu_key("G", "ames"), brief=_plural(counts["g"], "door game")))
+        option_list.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to Communities"))
         heading = screen_title(
-            menu_header,
-            breadcrumb=(session.node_display_name, "Communities") if community_scoped else ("NetBBS",),
-            subtitle="Choose a space to explore",
+            sanitize_text(community.name),
+            breadcrumb=(session.node_display_name, "Communities"),
+            subtitle=sanitize_text(community.description) if community.description else "Choose what to explore",
             width=session.terminal_width,
             clear=redraw_in_place,
             unicode_style=unicode_style, collapsed=collapsed,
             header_color=effective_header_color_256(db),
-        node_name_gradient=session.node_name_gradient)
+            node_name_gradient=session.node_name_gradient)
         await session.write_line(f"\r\n{heading}")
+        if not any(counts.values()):
+            await session.write_line(
+                colored("\r\nNothing here is open to you yet.", fg_color=MUTED_COLOR)
+            )
         await session.write_line(
             f"\r\n{menu_row(option_list, width=session.terminal_width, height=session.terminal_height, description_level=description_level)}"
         )
@@ -1035,73 +1265,14 @@ async def _resource_type_menu(
         if choice == "b":
             await session.write_line("")
             return
-        elif choice == "m" and show_boards:
+        if counts.get(choice):
             await session.write_line("")
-            await _browse_boards(
-                session, db, user,
-                community_id=community_id, community_scoped=community_scoped, title_prefix=title_prefix,
-                link_context=link_context,
+            await _browse_kind(
+                session, db, hub, presence, mailbox, history, user, choice,
+                node_controls=node_controls, lane=lane, link_context=link_context,
+                direct_invites=direct_invites,
+                title_prefix=community.name, **scope,
             )
-        elif choice == "c" and show_channels:
-            await session.write_line("")
-            # design doc: chat is one of the features migrated
-            # onto the two-lane database execution model -- see the "e"
-            # (mail) branch above for the identical lane-is-None
-            # degrade-gracefully reasoning.
-            if lane is not None:
-                session_registry = node_controls.session_registry if node_controls is not None else None
-                await browse_channels(
-                    session, lane, hub, presence, mailbox, history, user, session_registry=session_registry,
-                    community_id=community_id, community_scoped=community_scoped, title_prefix=title_prefix,
-                    link_context=link_context, direct_invites=direct_invites,
-                    mrc_bridge=node_controls.mrc_bridge if node_controls is not None else None,
-                )
-            else:
-                await session.write_line(
-                    colored("Chat is not available in this context.", fg_color=MUTED_COLOR)
-                )
-        elif choice == "f" and show_areas:
-            await session.write_line("")
-            # design doc: file areas are one of the features
-            # migrated onto the two-lane database execution model -- see
-            # the "e" (mail) branch above for the identical lane-is-None
-            # degrade-gracefully reasoning.
-            if lane is not None:
-                await browse_file_areas(
-                    session, lane, user,
-                    community_id=community_id, community_scoped=community_scoped, title_prefix=title_prefix,
-                    link_context=link_context,
-                    # Issue #475: the node's transfer-grant table, so a
-                    # caller whose terminal has no Zmodem can be handed
-                    # a browser link instead. `None` on a node with no
-                    # web listener -- there would be nowhere for the
-                    # link to point.
-                    transfers=node_controls.transfers if node_controls is not None else None,
-                )
-            else:
-                await session.write_line(
-                    colored("File areas are not available in this context.", fg_color=MUTED_COLOR)
-                )
-        elif choice == "g" and show_doors:
-            await session.write_line("")
-            # design doc: doors are one of the features migrated onto
-            # the two-lane database execution model from the start (see
-            # netbbs.net.door_flow's own docstring) -- see the "e" (mail)
-            # branch above for the identical lane-is-None
-            # degrade-gracefully reasoning.
-            if lane is not None:
-                await browse_doors(
-                    session, lane, user,
-                    community_id=community_id, community_scoped=community_scoped, title_prefix=title_prefix,
-                    door_services=node_controls.door_services if node_controls is not None else None,
-                    presence=presence,
-                    link_context=link_context,
-                    chat_hub=hub,
-                )
-            else:
-                await session.write_line(
-                    colored("Doors are not available in this context.", fg_color=MUTED_COLOR)
-                )
         else:
             await session.write(reject_unhandled_key(choice))
 
@@ -1120,81 +1291,32 @@ async def _enter_communities(
     link_context: LinkContext | None = None,
     direct_invites: DirectChatInvites | None = None,
 ) -> None:
-    """`[C]ommunities` entry point -- pick one via the shared picker,
-    then the shared resource-type sub-menu scoped to it."""
-    communities = _visible_communities_for(db, user)
-    selected = await pick_item(
-        session, communities,
-        name_of=lambda c: c.name,
-        stable_id_of=lambda c: c.id,
-        description_of=lambda c: c.description,
-        title="Communities",
-        empty_message="No Communities exist yet.",
-        redraw_in_place=redraw_in_place_enabled(db, user),
-        unicode_style=unicode_style_enabled(db, user),
-        collapsed=breadcrumb_collapsed_enabled(db, user),
-        accent_color=effective_accent_color(session, db),
-        header_color=effective_header_color(session, db),
-    )
-    if selected is None:
-        return
-    await _resource_type_menu(
-        session, db, hub, presence, mailbox, history, user, node_controls=node_controls,
-        community_id=selected.id, community_scoped=True,
-        menu_header=selected.name, title_prefix=selected.name, lane=lane, link_context=link_context,
-        direct_invites=direct_invites,
-    )
-
-
-async def _enter_uncategorized(
-    session: Session,
-    db: Database,
-    hub: ChatHub,
-    presence: PresenceRegistry,
-    mailbox: MessageMailbox,
-    history: InputHistory,
-    user: User,
-    *,
-    node_controls: NodeControls | None,
-    lane: DatabaseLane | None = None,
-    link_context: LinkContext | None = None,
-    direct_invites: DirectChatInvites | None = None,
-) -> None:
-    """`[U]ncategorized` entry point -- straight into the shared
-    resource-type sub-menu, no picker needed (there's only one
-    Uncategorized "bucket")."""
-    await _resource_type_menu(
-        session, db, hub, presence, mailbox, history, user, node_controls=node_controls,
-        community_id=None, community_scoped=True,
-        menu_header="Uncategorized", title_prefix="Uncategorized", lane=lane, link_context=link_context,
-        direct_invites=direct_invites,
-    )
-
-
-async def _jump_to(
-    session: Session,
-    db: Database,
-    hub: ChatHub,
-    presence: PresenceRegistry,
-    mailbox: MessageMailbox,
-    history: InputHistory,
-    user: User,
-    *,
-    node_controls: NodeControls | None,
-    lane: DatabaseLane | None = None,
-    link_context: LinkContext | None = None,
-    direct_invites: DirectChatInvites | None = None,
-) -> None:
-    """`[J]ump to...` entry point -- the shared resource-type sub-menu
-    with no Community filter at all (`community_scoped=False`), reusing
-    the existing search/goto commands against the full,
-    unfiltered list exactly as browsing worked before Communities
-    existed (design doc §16). `title_prefix=None` keeps every
-    browse function's title exactly as it always was ("Available
-    message boards", etc.) rather than prefixing it."""
-    await _resource_type_menu(
-        session, db, hub, presence, mailbox, history, user, node_controls=node_controls,
-        community_id=None, community_scoped=False,
-        menu_header="Jump to...", title_prefix=None, lane=lane, link_context=link_context,
-        direct_invites=direct_invites,
-    )
+    """`C[o]mmunities` entry point -- pick one via the shared picker,
+    then that Community's page. Leaving the page comes back to this
+    list, on the Community just left (issue #838): the caller went one
+    level down, so Back goes one level up, not to the main menu."""
+    last_id: int | None = None
+    while True:
+        communities = _visible_communities_for(db, user)
+        selected = await pick_item(
+            session, communities,
+            name_of=lambda c: c.name,
+            stable_id_of=lambda c: c.id,
+            description_of=lambda c: c.description,
+            title="Communities",
+            empty_message="No Communities exist yet.",
+            start_stable_id=last_id,
+            redraw_in_place=redraw_in_place_enabled(db, user),
+            unicode_style=unicode_style_enabled(db, user),
+            collapsed=breadcrumb_collapsed_enabled(db, user),
+            accent_color=effective_accent_color(session, db),
+            header_color=effective_header_color(session, db),
+        )
+        if selected is None:
+            return
+        last_id = selected.id
+        await _community_page(
+            session, db, hub, presence, mailbox, history, user, selected,
+            node_controls=node_controls, lane=lane, link_context=link_context,
+            direct_invites=direct_invites,
+        )

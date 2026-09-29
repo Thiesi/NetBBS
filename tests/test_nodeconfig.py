@@ -94,6 +94,65 @@ def test_disabled_insecure_transport_produces_no_warning():
     assert config.describe_insecure_bindings() == []
 
 
+# -- loopback-only listeners and missing public_url (issue #834) --------------
+
+
+def test_telnet_enabled_on_its_loopback_default_is_explained():
+    """F022: `enabled = true` alone leaves Telnet on 127.0.0.1, and callers
+    from elsewhere are disconnected with no word in the log."""
+    config = NodeConfig(telnet=TransportConfig(True, "127.0.0.1", 2323))
+    assert config.describe_loopback_listeners() == [
+        'Telnet listens on 127.0.0.1:2323, which only this machine can reach. To let callers '
+        'in from elsewhere, set host = "0.0.0.0" under [telnet] and restart.'
+    ]
+
+
+def test_loopback_web_behind_a_proxy_is_not_explained():
+    """127.0.0.1 plus a public_url is the recommended reverse-proxy setup."""
+    proxied = NodeConfig(web=TransportConfig(True, "127.0.0.1", 8080, public_url="https://bbs.example.org"))
+    assert proxied.describe_loopback_listeners() == []
+    bare = NodeConfig(web=TransportConfig(True, "127.0.0.1", 8080))
+    assert [note.split(" listens")[0] for note in bare.describe_loopback_listeners()] == ["The web transport"]
+
+
+def test_reachable_or_disabled_listeners_are_not_explained():
+    config = NodeConfig(
+        telnet=TransportConfig(False, "127.0.0.1", 2323),
+        ssh=TransportConfig(True, "0.0.0.0", 2222),
+        web=TransportConfig(True, "0.0.0.0", 8080),
+    )
+    assert config.describe_loopback_listeners() == []
+
+
+def test_web_without_public_url_warns_that_ssh_callers_get_no_transfer_links():
+    """F082: SSH callers could not download at all until the SysOp set
+    public_url, and nothing said so until a caller tried."""
+    from netbbs.__main__ import _transfer_link_gap
+
+    config = NodeConfig(web=TransportConfig(True, "0.0.0.0", 8080))
+    gap = _transfer_link_gap(config)
+    assert gap is not None
+    assert gap.startswith("[web] public_url is not set, so SSH callers cannot download")
+    both = NodeConfig(telnet=TransportConfig(True, "0.0.0.0", 2323), web=TransportConfig(True, "0.0.0.0", 8080))
+    assert "SSH and Telnet callers" in _transfer_link_gap(both)
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        NodeConfig(web=TransportConfig(True, "0.0.0.0", 8080, public_url="https://bbs.example.org")),
+        # A named bind is taken at its word as the address callers use.
+        NodeConfig(web=TransportConfig(True, "bbs.example.org", 8080)),
+        NodeConfig(web=TransportConfig(False, "0.0.0.0", 8080)),
+        NodeConfig(ssh=TransportConfig(False, "0.0.0.0", 2222), web=TransportConfig(True, "0.0.0.0", 8080)),
+    ],
+)
+def test_no_transfer_link_warning_when_links_work_or_nobody_needs_them(config):
+    from netbbs.__main__ import _transfer_link_gap
+
+    assert _transfer_link_gap(config) is None
+
+
 # -- validation ----------------------------------------------------------------
 
 

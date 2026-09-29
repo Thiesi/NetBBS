@@ -196,9 +196,9 @@ def test_send_refuses_when_presence_says_the_user_is_not_online_there(tmp_path):
 def test_send_explains_unknown_and_ambiguous_nodes_and_off_link_nodes(tmp_path):
     rig = _Rig(tmp_path)
     ok, text = _send(rig, "bob@nope", "hi")
-    assert not ok and "No linked node this board knows as 'nope'" in text
+    assert not ok and 'No BBS linked with this one goes by "nope".' in text
     ok, text = _send(rig, "bob", "hi")
-    assert not ok and "user@node-name-or-dns" in text
+    assert not ok and "name@TheirBBS" in text
     ok, text = _send(rig, "bob@abc", "hi", context=LinkContext(link_node=rig.link_node))
     assert not ok and "isn't on NetBBS Link" in text
     rig.close()
@@ -222,9 +222,10 @@ def test_ambiguous_live_node_guidance_shows_usable_technical_identities(tmp_path
     ok, text = _send(rig, "bob@shared.example.org", "hi")
 
     assert not ok
-    assert "Candidate technical identities" in text
-    assert "user@technical-identity" in text
-    assert all(fingerprint in text for fingerprint in candidates)
+    text = " ".join(text.split())  # the guidance wraps at the terminal width
+    assert 'More than one linked node goes by "shared.example.org". Type one of these instead' in text
+    assert "technical-identity" not in text
+    assert all(f"bob@{fingerprint} for Shared Node" in text for fingerprint in candidates)
     rig.close()
 
 

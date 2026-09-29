@@ -11,6 +11,7 @@ import pytest
 from netbbs.auth.users import create_user
 from netbbs.mail import (
     MAX_MAIL_PER_RECIPIENT,
+    SYSTEM_SENDER_LABEL,
     MailboxFullError,
     MailError,
     delete_for_recipient,
@@ -19,7 +20,9 @@ from netbbs.mail import (
     list_inbox,
     list_sent,
     mark_read,
+    mark_unread,
     send_mail,
+    send_system_mail,
     unread_count,
 )
 from netbbs.storage.database import Database
@@ -121,6 +124,25 @@ def test_mark_read_is_idempotent(db, alice, bob):
     first = mark_read(db, bob, message)
     second = mark_read(db, bob, first)
     assert second.read_at == first.read_at
+
+
+def test_mark_unread_takes_the_read_back(db, alice, bob):
+    """Issue #810: a message opened by mistake, or kept to answer later,
+    counts as unread again."""
+    message = mark_read(db, bob, send_mail(db, alice, bob, "Hello", "body"))
+
+    updated = mark_unread(db, bob, message)
+
+    assert updated.is_read is False
+    assert unread_count(db, bob) == 1
+
+
+def test_mark_unread_is_a_no_op_for_the_sender_and_for_unread_mail(db, alice, bob):
+    message = mark_read(db, bob, send_mail(db, alice, bob, "Hello", "body"))
+    assert mark_unread(db, alice, message).is_read is True
+    assert get_mail(db, bob, message.id).is_read is True
+    unread = send_mail(db, alice, bob, "Again", "body")
+    assert mark_unread(db, bob, unread) == unread
 
 
 # -- access control ---------------------------------------------------------
@@ -242,3 +264,67 @@ def test_deleted_messages_do_not_count_toward_the_quota(db, alice, bob, monkeypa
     # a new message should send cleanly rather than bouncing.
     send_mail(db, alice, bob, "Second", "body")
     assert [m.subject for m in list_inbox(db, bob)] == ["Second"]
+
+
+# -- system sender (issue #819) -----------------------------------------------
+
+
+def test_system_mail_has_no_sender_account_and_is_flagged(db, alice):
+    message = send_system_mail(db, alice, "Notice", "body")
+
+    assert message.from_system is True
+    assert message.sender_user_id is None
+    assert message.sender_label == SYSTEM_SENDER_LABEL
+    assert message.recipient_user_id == alice.id
+    assert message.recipient_remote_address is None and message.link_delivery_status is None
+    assert [m.id for m in list_inbox(db, alice)] == [message.id]
+    assert unread_count(db, alice) == 1
+
+
+def test_ordinary_mail_is_not_from_the_system(db, alice, bob):
+    assert send_mail(db, alice, bob, "Hello", "body").from_system is False
+
+
+def test_system_mail_is_in_nobodys_sent_folder(db, alice, bob):
+    send_system_mail(db, alice, "Notice", "body")
+
+    assert list_sent(db, alice) == [] and list_sent(db, bob) == []
+
+
+def test_deleting_system_mail_removes_the_row(db, alice):
+    """Nobody holds a sender's copy, so the recipient's delete is the last."""
+    message = send_system_mail(db, alice, "Notice", "body")
+
+    delete_for_recipient(db, alice, message)
+
+    assert db.connection.execute("SELECT COUNT(*) FROM mail_messages").fetchone()[0] == 0
+
+
+def test_system_mail_keeps_the_mail_limits(db, alice):
+    with pytest.raises(MailError):
+        send_system_mail(db, alice, "   ", "body")
+
+
+def test_a_read_system_notice_is_evicted_before_an_older_read_letter(db, alice, bob, monkeypatch):
+    import netbbs.mail as mail_module
+
+    monkeypatch.setattr(mail_module, "MAX_MAIL_PER_RECIPIENT", 2)
+    letter = send_mail(db, alice, bob, "Letter", "body")
+    mark_read(db, bob, letter)
+    notice = send_system_mail(db, bob, "Notice", "body")
+    mark_read(db, bob, notice)
+
+    send_mail(db, alice, bob, "Another letter", "body")
+
+    assert [m.subject for m in list_inbox(db, bob)] == ["Another letter", "Letter"]
+
+
+def test_system_mail_to_a_mailbox_full_of_unread_mail_is_refused(db, alice, bob, monkeypatch):
+    import netbbs.mail as mail_module
+
+    monkeypatch.setattr(mail_module, "MAX_MAIL_PER_RECIPIENT", 1)
+    send_mail(db, alice, bob, "Letter", "body")
+
+    with pytest.raises(MailboxFullError):
+        send_system_mail(db, bob, "Notice", "body")
+    assert [m.subject for m in list_inbox(db, bob)] == ["Letter"]

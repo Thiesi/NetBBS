@@ -43,7 +43,7 @@ from netbbs.rendering import (
     HEADER_COLOR,
     RESET,
     colored,
-    decode_ansi_bytes,
+    decode_banner_bytes,
     gradient_color,
     gradient_text,
     nearest_256,
@@ -71,9 +71,9 @@ _logger = logging.getLogger(__name__)
 # configured, and the exact value many existing tests still compare
 # against.
 def _build_default_banner_256(
-    accent: int | tuple[int, int, int], header: int | tuple[int, int, int] = HEADER_COLOR
+    accent: int | tuple[int, int, int], header: int | tuple[int, int, int] = HEADER_COLOR, *, link: bool = False
 ) -> str:
-    return (
+    banner = (
         double_frame(
             [
                 "",
@@ -84,13 +84,39 @@ def _build_default_banner_256(
             width=58,
             header_color=header,
         )
-        + "\r\n"
-        + colored("  NetBBS Link", fg_color=accent, bold=True)
+    )
+    if link:
+        banner += "\r\n" + _link_subtitle(accent, header)
+    return banner
+
+
+def _link_subtitle(accent: int | tuple[int, int, int], header: int | tuple[int, int, int]) -> str:
+    return (
+        colored("  NetBBS Link", fg_color=accent, bold=True)
         + colored("  ›  private experimental federation", fg_color=header, bold=True)
     )
 
 
+def _link_is_on(db: Database) -> bool:
+    """Whether the node ran with Link on at its last start (issue #834).
+
+    The banner advertised NetBBS Link on every node, including one whose
+    SysOp had declined it, who then wondered whether declining had taken.
+    Read from what the last startup recorded, since the banner has a
+    database and no node configuration; a node that has never started
+    says nothing about Link.
+    """
+    from netbbs.link.onboarding import get_configured_link_enabled, resolve_link_enabled
+
+    configured = get_configured_link_enabled(db)
+    if configured == "unknown":
+        return False
+    return resolve_link_enabled(configured, db)
+
+
 DEFAULT_WELCOME_BANNER = _build_default_banner_256(ACCENT_COLOR)
+# The same, on a node that runs NetBBS Link.
+DEFAULT_LINK_WELCOME_BANNER = _build_default_banner_256(ACCENT_COLOR, link=True)
 
 # The truecolor variant's own subtitle/header used hand-picked RGB
 # approximations of ACCENT_COLOR/HEADER_COLOR (xterm 220 gold, xterm 51
@@ -123,12 +149,13 @@ def _default_welcome_banner(db: Database, *, truecolor: bool) -> str:
     segment list."""
     accent_override = accent_color_override(db)
     header_override = header_color_override(db)
+    link = _link_is_on(db)
     if not truecolor:
         if accent_override is None and header_override is None:
-            return DEFAULT_WELCOME_BANNER
+            return DEFAULT_LINK_WELCOME_BANNER if link else DEFAULT_WELCOME_BANNER
         accent = nearest_256(accent_override) if accent_override is not None else ACCENT_COLOR
         header = nearest_256(header_override) if header_override is not None else HEADER_COLOR
-        return _build_default_banner_256(accent, header)
+        return _build_default_banner_256(accent, header, link=link)
     # The full-width border makes negotiated truecolor unmistakable at a
     # glance instead of confining the showcase to six subtly shaded letters.
     header = header_override or _DEFAULT_HEADER_RGB
@@ -172,11 +199,10 @@ def _default_welcome_banner(db: Database, *, truecolor: bool) -> str:
         + right_bar
     )
     blank_bottom = left_bar + colored(" " * 54, fg_color=header, bold=True) + right_bar
-    subtitle = (
-        colored("  NetBBS Link", fg_color=accent_override or _DEFAULT_ACCENT_RGB, bold=True)
-        + colored("  ›  private experimental federation", fg_color=header, bold=True)
-    )
-    return "\r\n".join([border, blank_top, welcome_line, tagline, blank_bottom, bottom_border, subtitle])
+    rows = [border, blank_top, welcome_line, tagline, blank_bottom, bottom_border]
+    if link:
+        rows.append(_link_subtitle(accent_override or _DEFAULT_ACCENT_RGB, header))
+    return "\r\n".join(rows)
 
 # Comfortably covers realistic ANSI art (typically a few KB, rarely
 # above ~150 KB even for elaborate multi-panel pieces) while bounding a
@@ -230,7 +256,24 @@ def welcome_banner_status(db: Database) -> WelcomeBannerStatus:
     )
 
 
-def load_welcome_banner(db: Database, *, truecolor: bool = False) -> str:
+# The default banner's box and arrow characters, as plain ASCII.
+_ASCII_BANNER = str.maketrans({"╔": "+", "╗": "+", "╚": "+", "╝": "+", "═": "=", "║": "|", "›": ">"})
+
+
+def pre_login_unicode_style(session: object) -> bool:
+    """Whether the screens a caller sees before signing in may use
+    Unicode box, rule and arrow characters (issue #841, F073).
+
+    Not over Telnet: that is where classic BBS terminals such as SyncTERM
+    call from, and they read bytes as CP437, so a UTF-8 rule arrived as
+    three characters of noise, before the caller had any chance to ask
+    for plain ASCII (that question comes after login, per account). The
+    browser and SSH clients read UTF-8. After login the caller's own
+    preference applies everywhere."""
+    return getattr(session, "transport_name", None) != "telnet"
+
+
+def load_welcome_banner(db: Database, *, truecolor: bool = False, unicode_style: bool = True) -> str:
     """
     Resolve the banner to show at login: the SysOp's custom file if
     enabled and usable, the default banner otherwise. Synchronous
@@ -238,6 +281,9 @@ def load_welcome_banner(db: Database, *, truecolor: bool = False) -> str:
     `netbbs.net.ssh.ensure_host_key`) of plain blocking local disk/DB
     calls made directly from async functions; a sub-256KB read isn't
     worth `asyncio.to_thread`.
+
+    `unicode_style` False draws the *default* banner's box in plain ASCII
+    (`pre_login_unicode_style`); a SysOp's own file is shown as authored.
 
     `truecolor` (default `False`, the safe universal choice) selects
     whether the *default* banner's "NetBBS" name is rendered with a
@@ -258,13 +304,17 @@ def load_welcome_banner(db: Database, *, truecolor: bool = False) -> str:
     against them independently anyway, since it runs unattended on
     every login regardless of how the flag got set.
     """
+    def default() -> str:
+        text = _default_welcome_banner(db, truecolor=truecolor)
+        return text if unicode_style else text.translate(_ASCII_BANNER)
+
     if not is_welcome_banner_enabled(db):
-        return _default_welcome_banner(db, truecolor=truecolor)
+        return default()
 
     path = banner_path(db)
     if not path.exists():
         _logger.warning("welcome banner enabled but missing at %s -- using default", path)
-        return _default_welcome_banner(db, truecolor=truecolor)
+        return default()
 
     try:
         size = path.stat().st_size
@@ -273,12 +323,12 @@ def load_welcome_banner(db: Database, *, truecolor: bool = False) -> str:
                 "welcome banner at %s is %d bytes, over the %d byte limit -- using default",
                 path, size, MAX_BANNER_SIZE_BYTES,
             )
-            return _default_welcome_banner(db, truecolor=truecolor)
+            return default()
         data = path.read_bytes()
     except OSError:
         _logger.warning("could not read welcome banner at %s -- using default", path, exc_info=True)
-        return _default_welcome_banner(db, truecolor=truecolor)
+        return default()
 
     # decode_ansi_bytes cannot raise (see its own docstring) -- no
     # decode-failure fallback is needed here, by construction.
-    return decode_ansi_bytes(data) + RESET
+    return decode_banner_bytes(data) + RESET

@@ -13,10 +13,10 @@ entire interactive experience -- login, the main menu, and every screen
 reachable from it. Split apart for maintainability (each extraction is
 its own commit in the project history) into `netbbs.net.board_flow`
 (message-board browsing/posting), `netbbs.net.scan_and_find` (`[N]ew
-scan`/`[F]ind`), `netbbs.net.directory_flow` (the user directory and
+scan`/`[/] Find`), `netbbs.net.directory_flow` (the user directory and
 `[W]ho's online`), `netbbs.net.profile_flow` (profile/identity editing,
 session history), and `netbbs.net.main_menu` (the menu loop itself and
-the shared Communities/Uncategorized/Jump-to resource-type sub-menu) --
+the Communities path) --
 this module now owns only session entry and authentication, the one
 piece every other screen module is ultimately reached through.
 """
@@ -32,13 +32,16 @@ from netbbs.auth.users import (
     NEW_ACCOUNT_SENTINEL,
     SYSOP_LEVEL,
     AuthError,
+    PendingApprovalError,
     User,
     authenticate_password_async,
     create_user_async,
     current_account,
     get_user_by_username,
+    self_service_username_problem,
     touch_last_login,
 )
+from netbbs.auth.signup_answers import get_registration_question, save_signup_answer
 from netbbs.chat import ChatHub, DirectChatInvites, MessageMailbox, PresenceRegistry, list_pending_invitations_for_user
 from netbbs.config import RegistrationMode, get_node_display_name, get_registration_mode
 from netbbs.link.boards import LinkContext
@@ -55,8 +58,10 @@ from netbbs.net.new_account_banner_after import load_new_account_banner_after
 from netbbs.net.new_account_banner_before import load_new_account_banner_before
 from netbbs.net.node_theme import effective_accent_color, effective_header_color_256, effective_node_name_gradient
 from netbbs.net.nodeconfig import ThrottleConfig
-from netbbs.net.redraw_preference import set_redraw_in_place_enabled
+from netbbs.net.redraw_preference import start_new_account_redrawing_in_place
 from netbbs.net.session import Session, SessionClosedError, write_preformatted_line, write_prompt
+from netbbs.net.signup_text import pending_approval_notice, username_problem_line
+from netbbs.staff import approvers_away_line
 from netbbs.net.session_activity import set_root_activity
 from netbbs.net.session_registry import ActiveSessionRegistry
 from netbbs.net.shutdown import NodeControls, SequenceScheduler, format_remaining_seconds
@@ -76,7 +81,7 @@ from netbbs.net.unicode_style_preference import (
     unicode_style_ever_set,
 )
 from netbbs.guest import guest_is_eligible, guest_login_for, pre_login_notice
-from netbbs.net.welcome_banner import load_welcome_banner
+from netbbs.net.welcome_banner import load_welcome_banner, pre_login_unicode_style
 from netbbs.permissions import meets_level
 from netbbs.rendering import (
     ACCENT_COLOR,
@@ -125,6 +130,7 @@ class LoginOutcome(Enum):
     BLOCKED = auto()
     THROTTLED = auto()
     IDLE_TIMEOUT = auto()
+    PENDING_APPROVAL = auto()
 
 
 async def _write_connection_notice(
@@ -137,12 +143,10 @@ async def _write_connection_notice(
 ) -> None:
     """Render a terminal connection state without changing its outcome.
 
-    Unconditionally `unicode_style=True` (no `clear=`/ASCII-fallback
-    split like most other screens): this fires pre-authentication, with
-    no account/preference to look up yet, and NetBBS's Telnet transport
-    already sends every screen as UTF-8 regardless of any preference
-    (see `unicode_style_preference`'s own docstring) -- the same
-    reasoning `welcome_banner`'s default banner already uses. `db` is
+    This fires pre-authentication, with no account/preference to look
+    up yet, so its style follows the transport instead
+    (`welcome_banner.pre_login_unicode_style`, issue #841): plain ASCII
+    over Telnet, where CP437 terminals call from, Unicode elsewhere. `db` is
     read directly and synchronously here rather than via `lane.run`
     (issue #162's header-color sweep) -- every call site is a
     connection-lifecycle notice that fires before or around login, the
@@ -175,11 +179,11 @@ async def _write_connection_notice(
             title,
             breadcrumb=(),
             width=width,
-            unicode_style=True,
+            unicode_style=pre_login_unicode_style(session),
             header_color=header_color,
         )
     )
-    await session.write_line(status_badge(title.upper(), tone=tone, unicode_style=True))
+    await session.write_line(status_badge(title.upper(), tone=tone, unicode_style=pre_login_unicode_style(session)))
     await session.write_line(
         colored(reflow(detail, width=width), fg_color=METADATA_COLOR)
     )
@@ -376,7 +380,10 @@ async def _run_authenticated_session(
 
     try:
         await write_preformatted_line(
-            session, load_welcome_banner(db, truecolor=session.supports_truecolor)
+            session,
+            load_welcome_banner(
+                db, truecolor=session.supports_truecolor, unicode_style=pre_login_unicode_style(session)
+            ),
         )
         # Design doc -- node management, Thiesi's own request: shown to
         # *every* connecting client, SysOp-to-be or not -- account level
@@ -426,6 +433,8 @@ async def _run_authenticated_session(
         )
         return
     if login_result is LoginOutcome.BLOCKED:
+        return
+    if login_result is LoginOutcome.PENDING_APPROVAL:
         return
 
     await run_authenticated_session(
@@ -478,11 +487,11 @@ async def _watch_for_account_revocation(
     `cancel_one` runs from a `finally`, guaranteed to fire whether the
     write finishes, fails, or times out.
 
-    Issue #659: the same poll carries a SysOp's level or verify-identity
-    change into the live session -- see `_apply_access_change`. The
-    registry's `recheck` event wakes it early when the change was made
-    in this process, so an in-node demotion applies at once rather than
-    at the next tick.
+    Issue #659: the same poll carries a SysOp's level, verify-identity or
+    staff-permission change (issue #836) into the live session -- see
+    `_apply_access_change`. The registry's `recheck` event wakes it early
+    when the change was made in this process, so an in-node demotion
+    applies at once rather than at the next tick.
     """
     recheck = session_registry.recheck_event(session)
     while True:
@@ -516,8 +525,8 @@ async def _watch_for_account_revocation(
 
 def _apply_access_change(session: Session, current: User, session_registry: ActiveSessionRegistry) -> None:
     """
-    Carry a changed level or verify-identity permission into `session`
-    (issue #659). A gain only signals the main menu, which re-reads the
+    Carry a changed level, verify-identity permission or staff permission
+    into `session` (issues #659, #836). A gain only signals the main menu, which re-reads the
     account when it is next shown. A loss also unwinds the session back
     to the main menu, because whatever screen it is on was entered with
     the old access -- the SysOp console above all.
@@ -530,12 +539,19 @@ def _apply_access_change(session: Session, current: User, session_registry: Acti
     baseline = session_registry.account_baseline(session)
     if baseline is None:
         return
-    level, can_verify = baseline
-    if (current.user_level, current.can_verify_identity) == (level, can_verify):
+    level, can_verify, staff = baseline
+    if (current.user_level, current.can_verify_identity, current.staff_permissions) == (level, can_verify, staff):
         return
-    lost = current.user_level < level or (can_verify and not current.can_verify_identity)
+    lost = (
+        current.user_level < level
+        or (can_verify and not current.can_verify_identity)
+        # Any staff permission taken away (design doc §5.6): the Staff
+        # console was entered with it.
+        or bool(staff & ~current.staff_permissions)
+    )
     session_registry.record_account(
-        session, user_level=current.user_level, can_verify_identity=current.can_verify_identity
+        session, user_level=current.user_level, can_verify_identity=current.can_verify_identity,
+        staff_permissions=current.staff_permissions,
     )
     if lost:
         session_registry.request_level_unwind(session)
@@ -560,6 +576,12 @@ async def _confirm_unicode_style(session: Session, db: Database, user: User) -> 
     again (`netbbs.net.unicode_style_preference`'s own established
     contract, shared with `redraw_preference`)."""
     if unicode_style_ever_set(db, user):
+        return
+    if getattr(session, "transport_name", None) == "web":
+        # The browser terminal always draws them, so the question only
+        # puzzled callers there (issue #840, F090/F112). Nothing is saved:
+        # the same account dialling in with an ASCII-only client later is
+        # still asked (review on #871).
         return
     await session.write_line(
         colored("\r\nNetBBS can use a few Unicode characters for a cleaner look, like this:", fg_color=METADATA_COLOR)
@@ -758,7 +780,8 @@ async def run_authenticated_session(
             session, user.username, is_sysop=meets_level(user, SYSOP_LEVEL)
         )
         node_controls.session_registry.record_account(
-            session, user_level=user.user_level, can_verify_identity=user.can_verify_identity
+            session, user_level=user.user_level, can_verify_identity=user.can_verify_identity,
+            staff_permissions=user.staff_permissions,
         )
         watcher_task = asyncio.create_task(
             _watch_for_account_revocation(session, db, user, node_controls.session_registry)
@@ -1129,16 +1152,20 @@ async def _login(
             ),
             width=session.terminal_width,
             # Pre-authentication -- no account/preference to look up yet,
-            # and every screen is already sent as UTF-8 regardless (see
-            # `unicode_style_preference`'s own docstring), same reasoning
-            # `_write_connection_notice` and the welcome banner both use.
-            unicode_style=True,
+            # so the transport decides (see `_write_connection_notice`).
+            unicode_style=pre_login_unicode_style(session),
             header_color=effective_header_color_256(db),
         )
     )
     prompt = colored("Username: ", fg_color=LABEL_COLOR, bold=True)
 
-    for attempt in range(max_attempts):
+    # Counted by hand rather than by `range` (issue #835): a signup that
+    # created an account awaiting approval is not a failed attempt, and
+    # the "N attempt(s) remaining" a caller saw on their first real login
+    # used to count it as one.
+    attempt = -1
+    while attempt + 1 < max_attempts:
+        attempt += 1
         try:
             await write_prompt(session, prompt)
             username = (await asyncio.wait_for(session.read_line(), timeout=idle_timeout)).strip()
@@ -1165,8 +1192,10 @@ async def _login(
             new_user = await _register_new_account(
                 session, db, throttle, idle_timeout=idle_timeout, registration_mode=registration_mode
             )
-            if new_user is not None:
+            if isinstance(new_user, User):
                 return new_user
+            if new_user is _SIGNUP_PENDING:
+                attempt -= 1
             continue
 
         # Issue #531: an authentication shortcut, and nothing more.
@@ -1271,6 +1300,15 @@ async def _login(
 
         try:
             user = await authenticate_password_async(db, username, password)
+        except PendingApprovalError as exc:
+            # The password was right; the account just is not usable yet
+            # (issue #835). Ends the connection like any other outcome a
+            # retry cannot change.
+            await _write_connection_notice(
+                session, db, "Waiting for approval",
+                pending_approval_notice(exc.username, approvers_away_line(db)),
+            )
+            return LoginOutcome.PENDING_APPROVAL
         except AuthError:
             remaining = max_attempts - attempt - 1
             if remaining > 0:
@@ -1308,6 +1346,15 @@ async def _login(
 _REGISTRATION_MAX_ATTEMPTS = 3
 
 
+class _SignupPending:
+    """`_register_new_account`'s result when it created an account that
+    must wait for approval -- a success, which `_login` must not count as
+    a failed attempt (issue #835), yet no `User` to log in as."""
+
+
+_SIGNUP_PENDING = _SignupPending()
+
+
 async def _offer_signup_retry(session: Session, attempt: int, max_attempts: int) -> bool:
     """After a fixable signup validation failure, either announce another
     attempt is starting (returns `True`, caller should loop) or, once
@@ -1333,7 +1380,7 @@ async def _register_new_account(
     *,
     idle_timeout: float,
     registration_mode: RegistrationMode,
-) -> User | None:
+) -> User | _SignupPending | None:
     """
     Self-service account registration (design doc), entered by
     typing the reserved username `new` (`netbbs.auth.users.
@@ -1345,9 +1392,10 @@ async def _register_new_account(
     this function only ever runs for `OPEN`/`APPROVAL_REQUIRED`.
 
     Returns the freshly created `User` only when the account can log in
-    immediately (`registration_mode` is `OPEN`); `None` for every other
-    outcome -- cancelled, a validation
-    failure, throttled, or created-but-pending-approval. `_login`
+    immediately (`registration_mode` is `OPEN`); `_SIGNUP_PENDING` when
+    it was created but awaits approval (issue #835: not a failure, so
+    `_login` does not charge it an attempt); `None` for every other
+    outcome -- cancelled, a validation failure, or throttled. `_login`
     treats `None` as "go back to the username prompt", consuming one of
     the connection's `max_attempts` the same way a failed login would.
     That's a deliberate simplification rather than plumbing a separate
@@ -1399,7 +1447,7 @@ async def _register_new_account(
                     f"(Attempt {attempt} of {_REGISTRATION_MAX_ATTEMPTS})"
                 ),
                 width=session.terminal_width,
-                unicode_style=True,  # pre-authentication -- see _write_connection_notice
+                unicode_style=pre_login_unicode_style(session),  # pre-authentication -- see _write_connection_notice
                 header_color=effective_header_color_256(db),
             )
         )
@@ -1410,6 +1458,33 @@ async def _register_new_account(
             username = (await asyncio.wait_for(session.read_line(), timeout=idle_timeout)).strip()
             if not username:
                 return None
+
+            # Same node-wide budget _login's own password attempts
+            # consume (issue #3) -- keyed by the *desired* username
+            # rather than an authenticating one. Spent here, before the
+            # name is checked, rather than just before the Argon2 hash
+            # as it used to be (issue #835): checking the name now says
+            # whether it is taken, and that answer must cost what
+            # creating the account used to. Not one of the fixable
+            # checks: retrying *immediately* against a throttle that
+            # just rejected this source/username wouldn't help, so this
+            # drops straight back to login rather than consuming another
+            # of this signup's own three attempts.
+            if not throttle.allow_attempt(source=session.peer_address, username=username):
+                await session.write_line(
+                    colored("Too many registration attempts. Please try again later.", fg_color=ERROR_COLOR)
+                )
+                return None
+            # Issue #835: refused before the password prompts, not after
+            # them -- a name with an umlaut, a taken name and a
+            # 300-character paste all used to cost the caller two
+            # password entries first.
+            problem = self_service_username_problem(db, username)
+            if problem is not None:
+                await session.write_line(colored(username_problem_line(problem), fg_color=ERROR_COLOR))
+                if not await _offer_signup_retry(session, attempt, _REGISTRATION_MAX_ATTEMPTS):
+                    return None
+                continue
 
             await write_prompt(
                 session,
@@ -1443,23 +1518,38 @@ async def _register_new_account(
                 return None
             continue
 
-        # Same node-wide budget _login's own password attempts consume
-        # (issue #3) -- keyed by the *desired* username rather than an
-        # authenticating one, but the same per-source/per-username/global
-        # token buckets, checked before the expensive Argon2 hash below runs
-        # (create_user_async), for the identical reason _login checks it
-        # before authenticate_password_async. Not one of the fixable
-        # checks above: retrying *immediately* against a throttle that
-        # just rejected this source/username wouldn't help, so this
-        # drops straight back to login rather than consuming another of
-        # this signup's own three attempts.
-        if not throttle.allow_attempt(source=session.peer_address, username=username):
-            await session.write_line(
-                colored("Too many registration attempts. Please try again later.", fg_color=ERROR_COLOR)
-            )
-            return None
+        # Asked again: the name may have been registered, or a SysOp
+        # renamed to look like it, while this caller typed passwords.
+        # The reserved and look-alike rules live only here, not in
+        # account creation, which a SysOp also uses.
+        problem = self_service_username_problem(db, username)
+        if problem is not None:
+            await session.write_line(colored(username_problem_line(problem), fg_color=ERROR_COLOR))
+            if not await _offer_signup_retry(session, attempt, _REGISTRATION_MAX_ATTEMPTS):
+                return None
+            continue
 
         require_approval = registration_mode == RegistrationMode.APPROVAL_REQUIRED
+        # Issue #835 (F072): the SysOp's optional question, so whoever
+        # approves has something to judge by besides a username. Asked
+        # only when someone will read the answer before the account is
+        # usable, and optional: Enter skips it.
+        signup_question = get_registration_question(db) if require_approval else None
+        signup_answer = ""
+        if signup_question is not None:
+            await session.write_line(
+                colored(
+                    reflow(f"The SysOp asks: {sanitize_text(signup_question)}", width=session.terminal_width),
+                    fg_color=ACCENT_COLOR,
+                )
+            )
+            try:
+                await write_prompt(
+                    session, colored("Your answer (optional, Enter to skip): ", fg_color=LABEL_COLOR, bold=True)
+                )
+                signup_answer = await asyncio.wait_for(session.read_line(), timeout=idle_timeout)
+            except asyncio.TimeoutError:
+                return None
         try:
             new_user = await create_user_async(db, username, password=password, pending_approval=require_approval)
         except AuthError as exc:
@@ -1467,6 +1557,8 @@ async def _register_new_account(
             if not await _offer_signup_retry(session, attempt, _REGISTRATION_MAX_ATTEMPTS):
                 return None
             continue
+        if signup_question is not None:
+            save_signup_answer(db, new_user.id, question=signup_question, answer=signup_answer)
 
         # Dogfood report: three testers on modern (ANSI-capable) clients
         # never discovered in-place redraw existed, so never turned it
@@ -1474,11 +1566,7 @@ async def _register_new_account(
         # flipping `redraw_in_place_enabled`'s own resolve default,
         # which would silently change behavior for every existing
         # account with an unset preference too, not just new ones.
-        set_redraw_in_place_enabled(db, new_user, True)
-        redraw_notice = colored(
-            "In-place redraw is on by default -- turn it off anytime in Your profile if you'd rather scroll.",
-            fg_color=MUTED_COLOR,
-        )
+        start_new_account_redrawing_in_place(db, new_user)
 
         # GitHub issue #177: covers both successful outcomes below (an
         # account created and immediately usable, or created but pending
@@ -1493,19 +1581,31 @@ async def _register_new_account(
             await write_preformatted_line(session, after_banner)
 
         if require_approval:
+            # Issue #835: in words a newcomer follows, with when to come
+            # back, and without the redraw hint, which is noise to
+            # someone who cannot log in yet.
+            await session.write_line(
+                colored(f"Account {new_user.username!r} created.", fg_color=SUCCESS_COLOR, bold=True)
+            )
             await session.write_line(
                 colored(
-                    f"Account {new_user.username!r} created. A SysOp must approve it before you can log in.",
+                    reflow(
+                        pending_approval_notice(new_user.username, approvers_away_line(db)),
+                        width=session.terminal_width,
+                    ),
                     fg_color=WARNING_COLOR,
-                    bold=True,
                 )
             )
-            await session.write_line(redraw_notice)
-            return None
+            return _SIGNUP_PENDING
 
         await session.write_line(
             colored(f"Account {new_user.username!r} created.", fg_color=SUCCESS_COLOR, bold=True)
         )
-        await session.write_line(redraw_notice)
+        await session.write_line(
+            colored(
+                "In-place redraw is on by default -- turn it off anytime in Your profile if you'd rather scroll.",
+                fg_color=MUTED_COLOR,
+            )
+        )
         return new_user
     return None  # unreachable: the loop's last iteration always returns via _offer_signup_retry

@@ -33,7 +33,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 
-from netbbs.auth.users import SYSOP_LEVEL, User
+from netbbs.auth.users import SYSOP_LEVEL, User, presentation_name_problem
 from netbbs.moderation.log import record_action
 from netbbs.rendering import VERIFIED_COLOR, colored, sanitize_text
 from netbbs.storage.database import Database
@@ -58,8 +58,7 @@ MAX_LOCATION_BYTES = 100
 # Reserved so the attested-real-name marker in the display
 # format ("(={name}=)") can never appear inside a self-chosen display
 # name -- see format_name_for_resource's docstring for the anti-forgery
-# reasoning this protects. Deliberately distinct from /nick's own "~"
-# marker.
+# reasoning this protects.
 RESERVED_DISPLAY_NAME_MARKER = "="
 
 
@@ -88,15 +87,25 @@ def set_display_name(db: Database, user: User, name: str) -> None:
     about which part is user-chosen versus system-appended. See
     `format_name_for_resource`'s docstring for the full anti-forgery
     reasoning this protects.
+
+    Issue #843: a display name stands in for the username wherever a
+    resource shows verified names, so, like a chat alias, it may not
+    read as a staff title or as a SysOp's username
+    (`presentation_name_problem`). Other callers' usernames are not
+    protected here, unlike aliases: a display name is meant to be a
+    person's own name, and two people can share one.
     """
     if RESERVED_DISPLAY_NAME_MARKER in name:
         raise ProfileFieldError(
             f"display name cannot contain {RESERVED_DISPLAY_NAME_MARKER!r} "
-            "(reserved for verified real-name display, design doc)"
+            "(reserved for verified real names)"
         )
     byte_count = len(name.encode("utf-8"))
     if byte_count > MAX_DISPLAY_NAME_BYTES:
         raise ProfileFieldError(f"display name cannot exceed {MAX_DISPLAY_NAME_BYTES} bytes, got {byte_count}")
+    problem = presentation_name_problem(db, name, owner=user, protect_every_username=False)
+    if problem is not None:
+        raise ProfileFieldError(problem)
     set_user_preference(db, user, _DISPLAY_NAME_KEY, name)
 
 

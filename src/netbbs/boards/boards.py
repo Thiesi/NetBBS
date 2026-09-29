@@ -20,13 +20,13 @@ from netbbs.moderation.log import record_action
 from netbbs.storage.database import Database
 from netbbs.timeutil import utc_now_iso
 
-# Supported list_boards() sort orders. "activity" is the current default
-# -- creation-order was judged a pure implementation convenience that
-# doesn't match how anyone would actually want to browse boards
-# (example: a single politics
-# board created between two batches of unrelated vintage-computing boards
-# ends up sitting in the middle of them under creation-order, satisfying
-# nobody). "volume" (total post count) is a genuinely different signal
+# Supported list_boards() sort orders. "sysop" -- the SysOp's own order,
+# `position` -- is the default (issue #839): under "activity", the default
+# before it, a list re-sorted itself between two visits, so the "03" a
+# caller remembered meant a different board a minute later. The SysOp's
+# order is also what fixes the problem creation order had (a politics
+# board created between two batches of vintage-computing boards sat in
+# the middle of them): the SysOp moves it. "volume" (total post count) is a genuinely different signal
 # from "activity" (most recent post) -- a board with one post today but
 # otherwise dead ranks high under activity but low under volume; a board
 # with huge historical traffic but nothing new today is the reverse.
@@ -35,7 +35,7 @@ from netbbs.timeutil import utc_now_iso
 # remains the node-wide default a caller falls back to before any
 # per-user resolution, and what a caller passes when it has none to
 # resolve against (e.g. an admin listing with no requesting user).
-_VALID_SORT_ORDERS = ("activity", "alphabetical", "recent", "volume")
+_VALID_SORT_ORDERS = ("sysop", "activity", "alphabetical", "recent", "volume")
 
 
 def _check_max_post_age(max_post_age_days: int | None) -> None:
@@ -100,6 +100,10 @@ class Board:
     # `netbbs.rendering.post_body`). This node's own choice, carried
     # boards included.
     allow_color: bool = False
+    # The SysOp's order (issue #839): `list_boards`' default "sysop" sort
+    # follows it, and `move_board` changes it. A new board goes last (a
+    # trigger sets it, for carried boards too).
+    position: int = 0
 
 
 def create_board(
@@ -248,12 +252,14 @@ def get_board_by_name(db: Database, name: str) -> Board:
     return _row_to_board(row)
 
 
-def list_boards(db: Database, *, order_by: str = "activity") -> list[Board]:
+def list_boards(db: Database, *, order_by: str = "sysop") -> list[Board]:
     """
     List all boards. Pinned boards always sort first, then the rest in
     the chosen `order_by`:
 
-      - "activity" (default): most recent *approved* post first (a
+      - "sysop" (default, issue #839): the SysOp's order, `position`,
+        which `move_board` changes. A new board goes last.
+      - "activity": most recent *approved* post first (a
         board with no approved posts yet falls back to its own creation
         time). Pending and expired posts don't count -- ranking a board
         as active from content ordinary readers can't even see would
@@ -307,7 +313,11 @@ def list_boards(db: Database, *, order_by: str = "activity") -> list[Board]:
     if order_by not in _VALID_SORT_ORDERS:
         raise ValueError(f"order_by must be one of {_VALID_SORT_ORDERS}, got {order_by!r}")
 
-    if order_by == "alphabetical":
+    if order_by == "sysop":
+        rows = db.connection.execute(
+            "SELECT * FROM boards ORDER BY pinned DESC, position ASC, id ASC"
+        ).fetchall()
+    elif order_by == "alphabetical":
         rows = db.connection.execute(
             "SELECT * FROM boards ORDER BY pinned DESC, name COLLATE NOCASE ASC"
         ).fetchall()
@@ -421,6 +431,44 @@ def update_board(
     return updated
 
 
+def board_siblings(db: Database, board: Board) -> list[Board]:
+    """The boards `board` is ordered among, in order, itself included:
+    those in the same category and the same Community, with the same
+    pinned flag. A caller's list shows one category at a time, pinned
+    boards first, and a Community's list only its own boards, so swapping
+    with one of these changes what every list holding both shows."""
+    return [
+        b for b in list_boards(db, order_by="sysop")
+        if b.category_id == board.category_id
+        and b.community_id == board.community_id
+        and b.pinned == board.pinned
+    ]
+
+
+def move_board(db: Database, board: Board, offset: int, *, moved_by: User) -> bool:
+    """Move `board` one place earlier (`offset` -1) or later (+1) among
+    `board_siblings` (issue #839), by swapping `position` with the
+    neighbour. Returns whether it moved: the first cannot go up, nor the
+    last down."""
+    siblings = board_siblings(db, board)
+    ids = [b.id for b in siblings]
+    if board.id not in ids:
+        raise BoardError(f"no such board: {board.name!r}")
+    index = ids.index(board.id)
+    target = index + offset
+    if offset not in (-1, 1) or not 0 <= target < len(ids):
+        return False
+    here, there = siblings[index], siblings[target]
+    db.connection.execute("UPDATE boards SET position = ? WHERE id = ?", (there.position, here.id))
+    db.connection.execute("UPDATE boards SET position = ? WHERE id = ?", (here.position, there.id))
+    db.connection.commit()
+    record_action(
+        db, actor=moved_by, action="move_board", object_type="board", object_id=board.id,
+        detail=f"moved board {board.name!r} to place {target + 1} of {len(ids)}",
+    )
+    return True
+
+
 def delete_board(db: Database, board: Board, *, deleted_by: User) -> None:
     """
     Permanently remove `board`, along with its posts, any moderator
@@ -476,4 +524,6 @@ def _row_to_board(row: sqlite3.Row) -> Board:
         community_id=row["community_id"],
         # Absent on a schema older than issue #711's migration.
         allow_color=bool(row["allow_color"]) if "allow_color" in row.keys() else False,
+        # Absent on a schema older than issue #839's migration.
+        position=row["position"] if "position" in row.keys() else 0,
     )

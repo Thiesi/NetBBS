@@ -9,8 +9,10 @@ import asyncio
 import base64
 import re
 import sqlite3
+import unicodedata
 import weakref
 from dataclasses import dataclass
+from enum import IntFlag, auto
 from typing import Callable, TypeVar
 
 import nacl.signing
@@ -138,6 +140,43 @@ class User:
     # verifying a real-world fact about a person isn't authority over
     # any specific board/area/channel. See netbbs.attestation.
     can_verify_identity: bool = False
+    # `StaffPermission` bits (design doc §5.6, issue #836): day-to-day node
+    # work a SysOp hands to an account below 255. 0 for everyone else.
+    staff_permissions: int = 0
+
+    def has_staff(self, permission: "StaffPermission") -> bool:
+        return bool(self.staff_permissions & int(permission))
+
+
+class StaffPermission(IntFlag):
+    """Account-wide staff permissions (design doc §5.6, issue #836).
+
+    Granted by a SysOp to an account below level 255, independent of its
+    level. A holder acts only on accounts below 255 that hold none of
+    these bits (`_require_account_authority`), so no staff member can
+    reach the SysOp, another staff member, or themselves.
+    """
+
+    APPROVE_ACCOUNTS = auto()
+    MANAGE_ACCOUNTS = auto()
+    MODERATE_ALL = auto()
+
+
+#: The Co-SysOp preset (design doc §5.6): every staff permission. A preset,
+#: not a role -- the account then holds exactly these bits.
+CO_SYSOP_PRESET = StaffPermission.APPROVE_ACCOUNTS | StaffPermission.MANAGE_ACCOUNTS | StaffPermission.MODERATE_ALL
+
+STAFF_PERMISSION_LABELS: dict[StaffPermission, str] = {
+    StaffPermission.APPROVE_ACCOUNTS: "approve accounts",
+    StaffPermission.MANAGE_ACCOUNTS: "manage accounts",
+    StaffPermission.MODERATE_ALL: "moderate everything",
+}
+
+
+def describe_staff_permissions(mask: int) -> str:
+    """`mask` in words, in the fixed order above; `"none"` for 0."""
+    names = [label for flag, label in STAFF_PERMISSION_LABELS.items() if mask & int(flag)]
+    return ", ".join(names) if names else "none"
 
 
 class UsernameRetiredError(AuthError):
@@ -151,9 +190,7 @@ class UsernameRetiredError(AuthError):
     """
 
     def __init__(self, username: str) -> None:
-        super().__init__(
-            f"could not create account {username!r} — username or fingerprint already in use"
-        )
+        super().__init__(username_taken_message(username))
         self.username = username
 
     @property
@@ -165,6 +202,20 @@ class UsernameRetiredError(AuthError):
             "posts, and whatever other nodes recorded about it. Release it first under "
             "Users -> Retired names if that is what you intend."
         )
+
+
+class PendingApprovalError(AuthError):
+    """The credentials were right, but the account still awaits a SysOp's
+    approval (issue #835).
+
+    Raised only once the password or signature has been verified, so the
+    caller has proven the account is theirs. `str()` stays the generic
+    "login failed" for any caller that only knows `AuthError`.
+    """
+
+    def __init__(self, username: str) -> None:
+        super().__init__("login failed")
+        self.username = username
 
 
 @dataclass(frozen=True)
@@ -299,13 +350,17 @@ def _validate_username(username: str) -> None:
     `create_user_async`, and therefore the in-BBS admin screen and the
     standalone CLI alike) already funnels through, so there's no
     separate validator to keep in sync across callers."""
+    # Length first (issue #835): a 300-character paste is "too long",
+    # whatever characters it also happens to contain.
+    if len(username) > _MAX_USERNAME_LENGTH:
+        raise AuthError(f"usernames can be at most {_MAX_USERNAME_LENGTH} characters (that one has {len(username)})")
+    # "ASCII letters", not "letters" (issue #835): a caller who typed
+    # "Tintenfaß" was told only letters were allowed, and ß is a letter.
     if not username or not _USERNAME_PATTERN.match(username):
         raise AuthError(
-            "usernames may only contain letters, digits, '_', '-', and '.' "
-            f"(got {username!r})"
+            "usernames may only contain ASCII letters (A-Z, no accents or umlauts), digits, "
+            f"'_', '-', and '.' (got {username!r})"
         )
-    if len(username) > _MAX_USERNAME_LENGTH:
-        raise AuthError(f"username too long: max {_MAX_USERNAME_LENGTH} characters, got {len(username)}")
     # Case-insensitive, matching the NOCASE uniqueness index below --
     # "New" must be refused exactly as "new" is, or self-service
     # registration's sentinel (design doc) could be shadowed by
@@ -315,8 +370,157 @@ def _validate_username(username: str) -> None:
     if username.lower().endswith(DOOR_LABEL_SUFFIX):
         raise AuthError(
             f"usernames may not end in {DOOR_LABEL_SUFFIX!r} — that suffix is reserved "
-            "for doors which post to a board (issue #520)"
+            "for doors which post to a board"
         )
+
+
+def username_taken_message(username: str) -> str:
+    """What a caller is told when `username` belongs to someone -- or
+    once did (see `UsernameRetiredError`, which must read word for word
+    the same)."""
+    return f"the username {username!r} is already taken"
+
+
+#: Names a caller may not register for themselves (issue #835). In Open
+#: mode an account is live the moment it exists, so "sysop" could post
+#: and mail as the node's operator straight away. Self-service only: a
+#: SysOp creating an "admin" account by hand is making that choice on
+#: purpose. Compared by `username_skeleton`, so "Sys0p" and "s.y.s.o.p"
+#: are the same name.
+SELF_SERVICE_RESERVED_USERNAMES = frozenset({
+    "sysop", "cosysop", "admin", "administrator", "root", "moderator", "mod",
+    "staff", "support", "system", "operator", "postmaster", "guest", "netbbs",
+})
+
+# Characters a reader takes for one another at a glance, folded onto one
+# representative. Only what the username grammar allows can occur.
+_SKELETON_FOLD = str.maketrans({
+    "0": "o", "1": "l", "i": "l", "|": "l", "3": "e", "4": "a", "5": "s", "7": "t",
+    "8": "b", "9": "g", "2": "z",
+})
+
+
+def username_skeleton(name: str) -> str:
+    """A form of `name` under which names that read the same compare
+    equal (issue #835): case folded, the separators '_', '-' and '.'
+    dropped, and look-alike characters (0/o, 1/l/i, 5/s, rn/m, vv/w)
+    folded together. "InkWell", "lnk_well" and "1NKWELL" share one."""
+    # Separators first (Claude review): "r.nod" must fold to "mod" too, and
+    # would not if the digraphs were matched before the dot came out.
+    folded = "".join(ch for ch in name.casefold() if ch not in "_-.")
+    folded = folded.replace("rn", "m").replace("vv", "w")
+    return folded.translate(_SKELETON_FOLD)
+
+
+_RESERVED_SKELETONS = frozenset(username_skeleton(word) for word in SELF_SERVICE_RESERVED_USERNAMES)
+
+
+# Cyrillic and Greek letters that render like Latin ones, folded onto the
+# Latin letter they look like. Free text can contain them, usernames cannot,
+# so only `presentation_skeleton` needs this. Capitals are folded before
+# casefolding and small letters after it, because a capital and its small
+# letter can look like different Latin letters (Claude review): Greek "Η"
+# reads as H, its small "η" as n.
+_SCRIPT_CAPITAL_FOLD = str.maketrans({
+    "А": "A", "В": "B", "Е": "E", "Ё": "E", "З": "3", "І": "I", "Ї": "I", "Ј": "J", "К": "K",
+    "М": "M", "Н": "H", "О": "O", "Р": "P", "С": "C", "Т": "T", "У": "Y", "Х": "X", "Ѕ": "S",
+    "Ԁ": "D", "Ԛ": "Q", "Ԝ": "W",
+    "Α": "A", "Β": "B", "Ε": "E", "Ζ": "Z", "Η": "H", "Ι": "I", "Κ": "K", "Μ": "M", "Ν": "N",
+    "Ο": "O", "Ρ": "P", "Τ": "T", "Υ": "Y", "Χ": "X",
+})
+_SCRIPT_FOLD = str.maketrans({
+    "а": "a", "в": "b", "е": "e", "ё": "e", "з": "3", "і": "i", "ї": "i", "ј": "j", "к": "k",
+    "м": "m", "н": "h", "о": "o", "п": "n", "р": "p", "с": "c", "т": "t", "у": "y", "х": "x",
+    "ѕ": "s", "ԁ": "d", "ԛ": "q", "ԝ": "w",
+    "α": "a", "β": "b", "ε": "e", "η": "n", "ι": "i", "κ": "k", "ν": "v", "ο": "o", "ρ": "p",
+    "τ": "t", "υ": "u", "χ": "x",
+})
+
+
+def presentation_skeleton(text: str) -> str:
+    """`username_skeleton` for free text a caller chooses to be shown as
+    -- a chat alias, a display name (issue #843). Accents are dropped,
+    Cyrillic and Greek look-alikes become Latin, and everything but
+    letters and digits goes, spaces and brackets included, before the
+    username folding runs. "Ink Well", "InkWeII" and "Іnkwell" (a
+    Cyrillic І) all read as "InkWell"."""
+    decomposed = unicodedata.normalize("NFKD", text)
+    bare = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+    latin = bare.translate(_SCRIPT_CAPITAL_FOLD).casefold().translate(_SCRIPT_FOLD)
+    return username_skeleton("".join(ch for ch in latin if ch.isalnum()))
+
+
+def _reads_as_staff_title(skeleton: str) -> bool:
+    """Whether a name, already reduced to its skeleton, reads as one of
+    the staff titles in `SELF_SERVICE_RESERVED_USERNAMES` or contains
+    "sysop" anywhere."""
+    return skeleton in _RESERVED_SKELETONS or "sysop" in skeleton
+
+
+def presentation_name_problem(
+    db: Database, name: str, *, owner: User, protect_every_username: bool
+) -> str | None:
+    """Why `owner` may not present themselves as `name`, in words for
+    that caller, or `None` if they may (issue #843).
+
+    A name that reads as a staff title ("SysOp", "Admin", "InkWell
+    sysop") is refused unless `owner` is a SysOp. So is one that reads
+    as a SysOp's username, and, with `protect_every_username`, one that
+    reads as any other account's username. `owner`'s own username never
+    counts against them. Local accounts only: a Link or MRC name is
+    shown with its node or network beside it, and is not an alias this
+    node grants."""
+    skeleton = presentation_skeleton(name)
+    if not skeleton:
+        return None
+    if owner.user_level < SYSOP_LEVEL and _reads_as_staff_title(skeleton):
+        return f"{name!r} reads as a staff title"
+    for row in db.connection.execute("SELECT id, username, user_level FROM users"):
+        if row["id"] == owner.id:
+            continue
+        is_sysop = row["user_level"] >= SYSOP_LEVEL
+        if not (protect_every_username or is_sysop):
+            continue
+        if username_skeleton(row["username"]) == skeleton:
+            if is_sysop:
+                return f"{name!r} is too close to the name of this node's SysOp"
+            return f"{name!r} is too close to another caller's username"
+    return None
+
+
+def self_service_username_problem(db: Database, username: str) -> str | None:
+    """Why a caller may not register `username` for themselves, in words
+    for that caller, or `None` if they may (issue #835).
+
+    Checked as soon as the name is typed, before the password prompts,
+    so "Tintenfaß", a name already taken, or a 300-character paste is
+    refused at once instead of after two password entries. Account
+    creation repeats every check that matters; this only moves the
+    refusal earlier.
+
+    Saying a name is taken tells the caller it exists. That was already
+    so -- creation said it, only later -- and both registration paths
+    spend a login-throttle token before calling this, so it is no faster
+    an oracle than it was.
+    """
+    try:
+        _validate_username(username)
+    except AuthError as exc:
+        return str(exc)
+    skeleton = username_skeleton(username)
+    if _reads_as_staff_title(skeleton):
+        return f"{username!r} is reserved on this node"
+    taken = db.connection.execute(
+        "SELECT 1 FROM users WHERE username = ? COLLATE NOCASE", (username,)
+    ).fetchone()
+    if taken is not None or is_username_retired(db, username):
+        return username_taken_message(username)
+    for row in db.connection.execute(
+        "SELECT username FROM users WHERE user_level >= ?", (SYSOP_LEVEL,)
+    ).fetchall():
+        if username_skeleton(row["username"]) == skeleton:
+            return f"{username!r} is too close to the name of this node's SysOp"
+    return None
 
 
 def _create_user_with_password_hash(
@@ -370,8 +574,16 @@ def _create_user_with_password_hash(
             )
     except sqlite3.IntegrityError as exc:
         db.connection.rollback()
+        # Named for what actually collided (issue #835): "username or
+        # fingerprint already in use" was jargon to a caller who had
+        # only typed a name.
+        name_taken = db.connection.execute(
+            "SELECT 1 FROM users WHERE username = ? COLLATE NOCASE", (username,)
+        ).fetchone() is not None
         raise AuthError(
-            f"could not create account {username!r} — username or fingerprint already in use"
+            username_taken_message(username)
+            if name_taken or verify_key is None
+            else "that key is already registered to another account"
         ) from exc
     except BaseException:
         db.connection.rollback()
@@ -521,16 +733,17 @@ def _finish_password_login(
 ) -> User:
     if row is None or row["password_hash"] is None or not password_matches:
         raise AuthError("login failed")
-    # Same generic failure a wrong password produces -- a disabled or
-    # still-pending-approval account shouldn't be distinguishable from a
-    # wrong credential (see AuthError's own anti-enumeration docstring).
-    # The one place a freshly self-registered account *does* get told
-    # explicitly that it's pending is the registration flow itself,
-    # right after creating it (netbbs.net.login_flow._register_new_
-    # account) -- safe there because the caller has just proven the
-    # account is theirs by creating it, unlike a login attempt here.
-    if row["disabled_at"] is not None or row["pending_approval"]:
+    # Same generic failure a wrong password produces -- a disabled
+    # account shouldn't be distinguishable from a wrong credential (see
+    # AuthError's own anti-enumeration docstring).
+    if row["disabled_at"] is not None:
         raise AuthError("login failed")
+    # A pending one is told so (issue #835): "Login failed" made callers
+    # think they had mistyped the password they had just chosen. Raised
+    # only after the password matched, so it tells nobody anything they
+    # could not already log in to find out.
+    if row["pending_approval"]:
+        raise PendingApprovalError(row["username"])
     return _touch_last_login(db, row)
 
 
@@ -587,8 +800,12 @@ def authenticate_keypair(db: Database, username: str, challenge: bytes, signatur
     ):
         raise AuthError("login failed")
 
-    if row["disabled_at"] is not None or row["pending_approval"]:
+    if row["disabled_at"] is not None:
         raise AuthError("login failed")
+    if row["pending_approval"]:
+        # The signature proved the key, as a matching password does in
+        # `_finish_password_login` (issue #835).
+        raise PendingApprovalError(row["username"])
 
     return _touch_last_login(db, row)
 
@@ -629,6 +846,10 @@ def authorize_public_key(db: Database, username: str, verify_key: nacl.signing.V
     if key_row is None:
         raise AuthError("login failed")
 
+    # Generic even while pending, unlike the password and signature paths
+    # (issue #835): SSH asks this before the client has signed anything,
+    # and a public key is public, so saying "pending" here would tell
+    # anyone holding a copy of the key that the account exists.
     if row["disabled_at"] is not None or row["pending_approval"]:
         raise AuthError("login failed")
 
@@ -738,6 +959,9 @@ def _row_to_user(row: sqlite3.Row) -> User:
         disabled_at=row["disabled_at"],
         pending_approval=bool(row["pending_approval"]),
         can_verify_identity=bool(row["can_verify_identity"]),
+        # Absent only while an upgrade test builds its fixture on an older
+        # schema; every running node has the column (issue #836).
+        staff_permissions=row["staff_permissions"] if "staff_permissions" in row.keys() else 0,
     )
 
 
@@ -795,6 +1019,50 @@ def _refuse_if_last_sysop(db: Database, target: User, *, removes_active_sysop: b
         )
 
 
+def is_usable_sysop(user: User) -> bool:
+    """Level 255, not disabled, not pending (design doc §4.3) -- the same
+    test `count_sysops` counts by."""
+    return user.user_level >= SYSOP_LEVEL and user.disabled_at is None and not user.pending_approval
+
+
+def _require_sysop(db: Database, actor: User) -> None:
+    """Refuse unless `actor`, read fresh, is a usable SysOp. For what staff
+    can never do (design doc §5.6): grant permissions, delete accounts,
+    raise anyone to 255."""
+    fresh = get_user_by_id(db, actor.id)
+    if fresh is None or not is_usable_sysop(fresh):
+        raise UserManagementError("only a SysOp can do that")
+
+
+def _require_account_authority(db: Database, actor: User, target: User, permission: StaffPermission) -> None:
+    """
+    Refuse an account action unless `actor` may take it on `target`
+    (design doc §5.6, issue #836).
+
+    A usable SysOp may. Otherwise `actor` must hold `permission`, and
+    `target` must be below 255 and hold no staff permission: that is what
+    keeps a helper from demoting, disabling or locking out the SysOp,
+    another staff member, or -- since they hold a staff permission
+    themselves -- widening their own account.
+
+    `actor` is read fresh, inside the caller's transaction, so a
+    permission revoked a moment ago stops the next action even from a
+    screen opened before. `target` must already be the caller's fresh
+    row. Every other account is refused: which screen reached these
+    functions used to be the only check, and a plain account reaching
+    one is a bug to stop here, not an action to audit.
+    """
+    fresh = get_user_by_id(db, actor.id)
+    if fresh is not None and is_usable_sysop(fresh):
+        return
+    if fresh is None or fresh.disabled_at is not None or fresh.pending_approval or not fresh.has_staff(permission):
+        raise UserManagementError("only a SysOp can do that")
+    if target.user_level >= SYSOP_LEVEL or target.staff_permissions:
+        raise UserManagementError(
+            f"{target.username!r} is a SysOp or holds staff permissions -- only a SysOp can change that account"
+        )
+
+
 def set_user_level(db: Database, target: User, new_level: int, *, changed_by: User) -> User:
     """
     Promote or demote `target` to `new_level`, refusing a demotion
@@ -828,6 +1096,10 @@ def set_user_level(db: Database, target: User, new_level: int, *, changed_by: Us
         if new_level == current.user_level:
             db.connection.rollback()
             return current
+        _require_account_authority(db, changed_by, current, StaffPermission.MANAGE_ACCOUNTS)
+        if new_level >= SYSOP_LEVEL:
+            # Design doc §5.6: 255 is given only by a SysOp.
+            _require_sysop(db, changed_by)
         if new_level >= SYSOP_LEVEL and current.pending_approval:
             # GitHub issue #44: a pending account promoted straight to
             # SysOp level would satisfy the "last SysOp" check below
@@ -878,6 +1150,7 @@ def set_user_disabled(db: Database, target: User, disabled: bool, *, changed_by:
         if disabled == currently_disabled:
             db.connection.rollback()
             return current
+        _require_account_authority(db, changed_by, current, StaffPermission.MANAGE_ACCOUNTS)
         _refuse_if_last_sysop(db, current, removes_active_sysop=disabled)
         new_value = utc_now_iso() if disabled else None
         db.connection.execute("UPDATE users SET disabled_at = ? WHERE id = ?", (new_value, current.id))
@@ -902,13 +1175,29 @@ def approve_pending_user(db: Database, target: User, *, approved_by: User) -> Us
     `set_user_level`'s own no-op-if-unchanged shape rather than logging
     a meaningless audit row.
     """
-    from netbbs.moderation.log import record_action
+    from netbbs.moderation.log import record_action_without_commit
 
     if not target.pending_approval:
         return target
-    db.connection.execute("UPDATE users SET pending_approval = 0 WHERE id = ?", (target.id,))
-    db.connection.commit()
-    record_action(db, actor=approved_by, action="approve_registration", target_user_id=target.id)
+    db.connection.execute("BEGIN IMMEDIATE")
+    try:
+        current = _get_user_by_id(db, target.id)
+        if not current.pending_approval:
+            db.connection.rollback()
+            return current
+        _require_account_authority(db, approved_by, current, StaffPermission.APPROVE_ACCOUNTS)
+        db.connection.execute("UPDATE users SET pending_approval = 0 WHERE id = ?", (current.id,))
+        # The signup answer was given for this one decision (issue #835); see
+        # `netbbs.auth.signup_answers`.
+        db.connection.execute("DELETE FROM signup_answers WHERE user_id = ?", (current.id,))
+        record_action_without_commit(
+            db, actor=approved_by, action="approve_registration", target_user_id=current.id
+        )
+    except BaseException:
+        db.connection.rollback()
+        raise
+    else:
+        db.connection.commit()
     return _get_user_by_id(db, target.id)
 
 
@@ -1003,18 +1292,18 @@ def set_password_hash(db: Database, target: User, password_hash: str | None, *, 
     Persist an already-computed hash as `target`'s password, or `None`
     to clear it.
 
-    Whoever is allowed to call this has already been decided by the
-    caller: the account itself after proving its current password
-    (`netbbs.net.password_screen`), a SysOp from the user detail screen,
-    or the local admin CLI, for which filesystem access to the database
-    is the trust boundary. This function only enforces what must hold
-    regardless of who asks: clearing is refused while the account has no
-    SSH/public key, the same "never leave an account with no way back
-    in" rule `remove_ssh_key` applies from the other direction. The
-    check runs inside `BEGIN IMMEDIATE`, against the current row, for
-    the same reason that function's docstring gives: two concurrent
-    removals each reading "the other credential still exists" is how a
-    CHECK constraint gets defeated without ever firing.
+    The account itself may call it after proving its current password
+    (`netbbs.net.password_screen`); that proof is the caller's job. Anyone
+    else -- a SysOp from the user detail screen or the local admin CLI, a
+    staff member with manage accounts -- is checked here by
+    `_require_account_authority` (issue #836). Beyond who asks, clearing
+    is refused while the account has no SSH/public key, the same "never
+    leave an account with no way back in" rule `remove_ssh_key` applies
+    from the other direction. Both checks run inside `BEGIN IMMEDIATE`,
+    against the current row, for the same reason that function's
+    docstring gives: two concurrent removals each reading "the other
+    credential still exists" is how a CHECK constraint gets defeated
+    without ever firing.
 
     Re-fetches by `target.id`, as every setter in this module does. A
     deleted-and-recreated account can in principle inherit a SQLite
@@ -1033,6 +1322,10 @@ def set_password_hash(db: Database, target: User, password_hash: str | None, *, 
     db.connection.execute("BEGIN IMMEDIATE")
     try:
         current = _get_user_by_id(db, target.id)
+        if changed_by.id != current.id:
+            # The account itself has already proven its current password
+            # (`netbbs.net.password_screen`); anyone else is resetting it.
+            _require_account_authority(db, changed_by, current, StaffPermission.MANAGE_ACCOUNTS)
         if new_hash is None:
             key_count = db.connection.execute(
                 "SELECT COUNT(*) FROM user_ssh_keys WHERE user_id = ?", (current.id,)
@@ -1279,6 +1572,8 @@ def set_can_verify_identity(db: Database, target: User, can_verify: bool, *, cha
 
     if target.can_verify_identity == can_verify:
         return target
+    # Design doc §5.6: staff cannot grant anything.
+    _require_sysop(db, changed_by)
     db.connection.execute(
         "UPDATE users SET can_verify_identity = ? WHERE id = ?", (int(can_verify), target.id)
     )
@@ -1287,6 +1582,56 @@ def set_can_verify_identity(db: Database, target: User, can_verify: bool, *, cha
         db, actor=changed_by, action="set_can_verify_identity", target_user_id=target.id,
         detail=f"can_verify_identity={can_verify}",
     )
+    return _get_user_by_id(db, target.id)
+
+
+def set_staff_permissions(
+    db: Database, target: User, permissions: StaffPermission | int, *, changed_by: User
+) -> User:
+    """
+    Replace `target`'s staff permissions (design doc §5.6, issue #836) --
+    the whole set, so the Co-SysOp preset and a single toggle are the same
+    call. Only a usable SysOp may, and only on an account below 255 that is
+    not awaiting approval; clearing is always allowed, so a SysOp can tidy
+    an account that has since been raised to 255.
+
+    Read and written inside one `BEGIN IMMEDIATE`, like the level and
+    disable setters: the staff checks in `_require_account_authority` read
+    this column, and a grant racing a staff action must not interleave.
+    """
+    from netbbs.moderation.log import record_action_without_commit
+
+    new_mask = int(permissions)
+    if new_mask & ~int(CO_SYSOP_PRESET):
+        raise ValueError(f"unknown staff permission bits in {permissions!r}")
+    db.connection.execute("BEGIN IMMEDIATE")
+    try:
+        current = _get_user_by_id(db, target.id)
+        if new_mask == current.staff_permissions:
+            db.connection.rollback()
+            return current
+        _require_sysop(db, changed_by)
+        if new_mask and current.user_level >= SYSOP_LEVEL:
+            raise UserManagementError(
+                f"{current.username!r} is a SysOp already -- staff permissions are for accounts below 255"
+            )
+        if new_mask and current.pending_approval:
+            raise UserManagementError(
+                f"{current.username!r} is still awaiting approval -- approve the account first"
+            )
+        db.connection.execute("UPDATE users SET staff_permissions = ? WHERE id = ?", (new_mask, current.id))
+        record_action_without_commit(
+            db, actor=changed_by, action="set_staff_permissions", target_user_id=current.id,
+            detail=(
+                f"{describe_staff_permissions(current.staff_permissions)} -> "
+                f"{describe_staff_permissions(new_mask)}"
+            ),
+        )
+    except BaseException:
+        db.connection.rollback()
+        raise
+    else:
+        db.connection.commit()
     return _get_user_by_id(db, target.id)
 
 
@@ -1363,8 +1708,10 @@ def deletion_retires_username(db: Database, user: User) -> bool:
 
     Link mail is checked because it reaches an account *by name* without the
     account doing anything: `deliver_link_message` resolves the recipient by
-    username alone, stores the mail and acknowledges it, pending approval or
-    not, so a remote sender has been told the name is live.
+    username alone, stores the mail and acknowledges it, so a remote sender
+    has been told the name is live. Since issue #818 a pending signup's
+    Link mail bounces instead (`recipient_unavailable`), so only mail that
+    arrived before that release can make a pending name held.
 
     Reads only, so it is safe inside `delete_user`'s open transaction.
     Imported here: the Link package imports from this module.
@@ -1382,7 +1729,19 @@ def deletion_retires_username(db: Database, user: User) -> bool:
     ).fetchone() is not None
 
 
-def delete_user(db: Database, target: User, *, deleted_by: User) -> None:
+def decline_pending_user(db: Database, target: User, *, declined_by: User) -> None:
+    """Turn down a signup that is still awaiting approval (issue #835).
+
+    A deletion underneath -- a declined account has nothing worth keeping
+    -- but without the permanent-delete ritual, which warns about posts,
+    callers history and Link for an account that cannot have any of them.
+    Refused if the account was approved in the meantime, so a second
+    SysOp's approval is never silently undone by a stale screen.
+    """
+    delete_user(db, target, deleted_by=declined_by, declining=True)
+
+
+def delete_user(db: Database, target: User, *, deleted_by: User, declining: bool = False) -> None:
     """
     Permanently remove `target`'s account, refusing to delete the last
     active SysOp.
@@ -1412,6 +1771,16 @@ def delete_user(db: Database, target: User, *, deleted_by: User) -> None:
     db.connection.execute("BEGIN IMMEDIATE")
     try:
         current = _get_user_by_id(db, target.id)
+        if declining and not current.pending_approval:
+            raise UserManagementError(
+                f"{current.username!r} is no longer awaiting approval -- someone approved it meanwhile"
+            )
+        if declining:
+            _require_account_authority(db, deleted_by, current, StaffPermission.APPROVE_ACCOUNTS)
+        elif deleted_by.id != current.id:
+            # Design doc §5.6: deleting, and so retiring a name, stays with
+            # the SysOp. Deleting one's own account is not staff work.
+            _require_sysop(db, deleted_by)
         _refuse_if_last_sysop(db, current, removes_active_sysop=True)
         # Issue #531, Codex review. Guest login keys its designation on
         # `(id, created_at)`, and neither is unique on its own -- rowids
@@ -1428,10 +1797,16 @@ def delete_user(db: Database, target: User, *, deleted_by: User) -> None:
         # first also means target_user_id naturally goes NULL via the
         # same ON DELETE SET NULL once the row disappears, with detail
         # keeping the username on record either way.
-        record_action_without_commit(
-            db, actor=deleted_by, action="delete_user", target_user_id=current.id,
-            detail=f"deleted user {current.username!r} (id {current.id}, was level {current.user_level})",
-        )
+        if declining:
+            record_action_without_commit(
+                db, actor=deleted_by, action="decline_registration", target_user_id=current.id,
+                detail=f"declined signup {current.username!r} (id {current.id})",
+            )
+        else:
+            record_action_without_commit(
+                db, actor=deleted_by, action="delete_user", target_user_id=current.id,
+                detail=f"deleted user {current.username!r} (id {current.id}, was level {current.user_level})",
+            )
         # Issue #594. On the Link an account *is* its username: mail is
         # addressed to it, a carried post's author label is built from it, the
         # trust subject is derived from it, an attestation names it. Freed, all
@@ -1446,6 +1821,12 @@ def delete_user(db: Database, target: User, *, deleted_by: User) -> None:
                 "INSERT OR REPLACE INTO retired_usernames (username, retired_at) VALUES (?, ?)",
                 (current.username, utc_now_iso()),
             )
+        # Issue #818: each letter's other side keeps its copy, and a letter
+        # nobody can see any more goes. Imported inside the function:
+        # `netbbs.mail` imports from this module.
+        from netbbs.mail import release_mail_of_deleted_account_without_commit
+
+        release_mail_of_deleted_account_without_commit(db, current)
         db.connection.execute("DELETE FROM users WHERE id = ?", (current.id,))
     except BaseException:
         db.connection.rollback()

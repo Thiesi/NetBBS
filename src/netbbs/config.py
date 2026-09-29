@@ -304,3 +304,29 @@ def set_node_map_min_level(db: Database, level: int) -> None:
     if not 0 <= level <= MAX_NODE_MAP_MIN_LEVEL:
         raise ValueError(f"node map level must be 0-{MAX_NODE_MAP_MIN_LEVEL}, got {level!r}")
     set_config(db, NODE_MAP_MIN_LEVEL_CONFIG_KEY, str(level))
+
+
+# Issue #816 (design doc §6.4): the lowest level that may open mail, read
+# and send alike, local and Link. One level rather than one per direction: a
+# caller who could read but not send could not answer, and one who could
+# send but not read would never see the reply. 0 keeps mail open to every
+# account, as it always was. The guest account's mail is closed whatever
+# this says (`netbbs.mail.mail_access_refusal`).
+MAIL_MIN_LEVEL_CONFIG_KEY = "mail_min_level"
+_DEFAULT_MAIL_MIN_LEVEL = 0
+MAX_MAIL_MIN_LEVEL = 255
+
+
+def get_mail_min_level(db: Database) -> int:
+    value = get_config(db, MAIL_MIN_LEVEL_CONFIG_KEY)
+    try:
+        level = int(value) if value is not None else _DEFAULT_MAIL_MIN_LEVEL
+    except ValueError:
+        return _DEFAULT_MAIL_MIN_LEVEL
+    return min(max(level, 0), MAX_MAIL_MIN_LEVEL)
+
+
+def set_mail_min_level(db: Database, level: int) -> None:
+    if not 0 <= level <= MAX_MAIL_MIN_LEVEL:
+        raise ValueError(f"mail level must be 0-{MAX_MAIL_MIN_LEVEL}, got {level!r}")
+    set_config(db, MAIL_MIN_LEVEL_CONFIG_KEY, str(level))

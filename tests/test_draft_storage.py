@@ -124,3 +124,58 @@ def test_non_draft_files_in_the_directory_are_ignored(db):
 
     assert report.stale_files == 0
     assert stray.exists()
+
+
+# -- a draft's fields (issue #814) ---------------------------------------------
+
+
+def test_fields_are_kept_beside_a_draft_and_read_back(db):
+    from netbbs.net.draft_storage import delete_draft_fields, load_draft_fields, save_draft_fields
+
+    draft = drafts_directory(db) / "mail_new_1.draft"
+    assert load_draft_fields(draft) == {}
+    save_draft_fields(draft, {"to": "bob", "reply_address": None, "subject": "Lunch?"})
+    assert load_draft_fields(draft) == {"to": "bob", "reply_address": None, "subject": "Lunch?"}
+    delete_draft_fields(draft)
+    assert load_draft_fields(draft) == {}
+
+
+def test_unreadable_fields_read_as_none(db):
+    from netbbs.net.draft_storage import load_draft_fields
+
+    draft = drafts_directory(db) / "mail_new_1.draft"
+    draft.with_suffix(".fields").write_text("not json", encoding="utf-8")
+    assert load_draft_fields(draft) == {}
+    draft.with_suffix(".fields").write_text('{"to": 5, "subject": "ok"}', encoding="utf-8")
+    assert load_draft_fields(draft) == {"subject": "ok"}
+
+
+def test_pruning_a_stale_draft_takes_its_fields_with_it(db):
+    from netbbs.net.draft_storage import save_draft_fields
+
+    draft = drafts_directory(db) / "mail_new_1.draft"
+    draft.write_text("old letter", encoding="utf-8")
+    save_draft_fields(draft, {"to": "bob", "subject": "Lunch?"})
+    _age_file(draft, seconds_old=40 * 24 * 3600)
+    # Fields rewritten more recently than the text are still the draft's.
+    report = prune_stale_drafts(db, dry_run=False, min_age_seconds=30 * 24 * 3600)
+
+    assert report.stale_files == 1
+    assert not draft.exists()
+    assert not draft.with_suffix(".fields").exists()
+
+
+def test_stale_fields_left_without_a_draft_are_pruned(db):
+    from netbbs.net.draft_storage import save_draft_fields
+
+    orphan = drafts_directory(db) / "mail_new_2.draft"
+    save_draft_fields(orphan, {"to": "bob", "subject": "Lunch?"})
+    _age_file(orphan.with_suffix(".fields"), seconds_old=40 * 24 * 3600)
+    fresh = drafts_directory(db) / "mail_new_3.draft"
+    save_draft_fields(fresh, {"to": "carol", "subject": "Hi"})
+
+    report = prune_stale_drafts(db, dry_run=False, min_age_seconds=30 * 24 * 3600)
+
+    assert report.stale_files == 1
+    assert not orphan.with_suffix(".fields").exists()
+    assert fresh.with_suffix(".fields").exists()

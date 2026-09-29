@@ -56,6 +56,7 @@ _BS = 0x08  # Backspace
 _DEL = 0x7F  # Delete — many terminals send this for the Backspace key
 _ESC = 0x1B
 _TAB = 0x09
+_KILL = 0x15  # Ctrl-U, see KILL_LINE_KEY
 
 # Issue #102: the control bytes `read_key()` recognizes and returns as
 # their own distinct keys, rather than the generic "no meaning as a
@@ -98,6 +99,14 @@ HELP_KEY = "\x08"  # Ctrl-H
 # wrong for that caller). Extending real-text-entry cancellation is
 # left for a later, separately-scoped increment.
 CANCEL_KEY = "\x03"  # Ctrl-C
+# Issue #812: Ctrl-U empties the line being typed, at every `read_line`
+# prompt on every transport -- the POSIX terminal's own "kill" character,
+# and the readline binding most callers' fingers already know. A long
+# value opened for editing (a subject, a description) otherwise took one
+# Backspace per character to clear. Unlike Ctrl-C there is no competing
+# meaning to weigh: no caller gives 0x15 one, and it was discarded before.
+# Masked (password) reads honor it too.
+KILL_LINE_KEY = "\x15"  # Ctrl-U
 
 
 class InputCancelled(Exception):
@@ -584,6 +593,33 @@ class LineViewport:
         self.drawn = 0
 
 
+async def kill_line(
+    write: WriteFunc,
+    window: LineViewport | None,
+    line: list[str],
+    cursor: int,
+    show: Callable[[], Awaitable[None]],
+) -> int:
+    """Ctrl-U (issue #812): empty `line` in place and return the new
+    cursor, 0. Shared by both line editors -- `_read_line_editable` here
+    and `netbbs.net.web.WebSession`'s copy -- so the two cannot drift.
+
+    Without a viewport the text sits on the row from the prompt onward,
+    so moving back to where it starts and erasing from there clears it,
+    through the same primitive every other edit uses. With one, the
+    window redraws itself empty; `show` is the caller's own renderer,
+    which re-reads a live terminal width first."""
+    if not line:
+        return 0
+    move_back = display_width("".join(line[:cursor]))
+    line.clear()
+    if window is not None:
+        await show()
+    else:
+        await redraw_tail(write, move_back=move_back, edit_pos=0, line=line, new_cursor=0)
+    return 0
+
+
 async def redraw_tail(
     write: WriteFunc, *, move_back: int, edit_pos: int, line: list[str], new_cursor: int
 ) -> None:
@@ -876,11 +912,53 @@ def _pop_pushed_back(source: ByteSource) -> int | None:
     return pending.pop()
 
 
+# The typed-word guard (issue #840, F114): a first-time caller types a
+# whole word ("Communities", "no") at a prompt that takes one key. The first
+# letter acts; the rest used to reach the next screen as keys of its own.
+# After such a key, letters that follow it closely, and the Enter that ends
+# them, are dropped. A pause longer than this, or any other key, ends it.
+WORD_GUARD_SECONDS = 0.6
+_WORD_GUARD_ATTR = "_netbbs_word_guard_until"
+
+
+def arm_word_guard(source: object) -> None:
+    """Drop the rest of a word typed after a one-key answer (see
+    `WORD_GUARD_SECONDS`). For any transport: it only stores a deadline."""
+    setattr(source, _WORD_GUARD_ATTR, time.monotonic() + WORD_GUARD_SECONDS)
+
+
+def word_guard_drops(source: object, char: str) -> bool:
+    """Whether `char`, just read, is the tail of a guarded word -- dropped,
+    extending the guard -- or ends the guard and is delivered. Enter ends
+    the word and is dropped with it."""
+    until = getattr(source, _WORD_GUARD_ATTR, None)
+    if until is None:
+        return False
+    now = time.monotonic()
+    if now > until:
+        setattr(source, _WORD_GUARD_ATTR, None)
+        return False
+    if char in ("\r", "\n"):
+        setattr(source, _WORD_GUARD_ATTR, None)
+        return True
+    if len(char) == 1 and (char.isalpha() or char in " -'" or ord(char) >= 0x80):
+        setattr(source, _WORD_GUARD_ATTR, now + WORD_GUARD_SECONDS)
+        return True
+    setattr(source, _WORD_GUARD_ATTR, None)
+    return False
+
+
 async def _read_byte(source: ByteSource) -> int | None:
-    pushed = _pop_pushed_back(source)
-    if pushed is not None:
-        return pushed
-    return await source.read_byte()
+    while True:
+        # A byte pushed back by a peek counts too: "no" typed fast has its
+        # "o" peeked by the Enter check behind the "n" (review on #871).
+        pushed = _pop_pushed_back(source)
+        byte = pushed if pushed is not None else await source.read_byte()
+        # Bytes of a non-ASCII letter (an umlaut) count as letters.
+        if byte is None or not word_guard_drops(source, chr(byte)):
+            return byte
+        if byte == _CR:
+            await _consume_optional_lf_or_nul(source)
 
 
 async def _read_byte_with_timeout(source: ByteSource, timeout: float) -> int | None:
@@ -973,6 +1051,11 @@ async def _read_line_masked(source: ByteSource, write: WriteFunc) -> str:
             if line:
                 line.pop()
                 await write("\b \b")
+            continue
+
+        if b == _KILL:
+            await write("\b \b" * len(line))
+            line.clear()
             continue
 
         if b == _ESC:
@@ -1132,6 +1215,10 @@ async def _read_line_editable(
                             await redraw_tail(
                                 write, move_back=move_back, edit_pos=cursor, line=line, new_cursor=cursor
                             )
+                    continue
+
+                if b == _KILL:
+                    cursor = await kill_line(write, window, line, cursor, show)
                     continue
 
                 if b == _TAB:
@@ -1452,6 +1539,12 @@ class EditorKeyKind(Enum):
     PAGE_UP = auto()
     PAGE_DOWN = auto()
     CTRL = auto()
+    # Alt+Backspace: ESC followed by 0x7F or 0x08 (issue #815). The prose
+    # editor deletes the word before the cursor with it -- the same as its
+    # Ctrl-W, which a browser keeps for closing the tab. Ctrl+Backspace
+    # cannot be told apart: most terminals send it as 0x08, the byte many
+    # BBS clients send for a plain Backspace.
+    WORD_BACKSPACE = auto()
 
 
 @dataclass(frozen=True)
@@ -1545,6 +1638,8 @@ async def read_editor_key(
             peek = await _read_byte_with_timeout(source, _FOLLOWUP_BYTE_TIMEOUT)
             if peek is None:
                 return EditorKey(EditorKeyKind.ESCAPE)
+            if peek in (_BS, _DEL):
+                return EditorKey(EditorKeyKind.WORD_BACKSPACE)
             _push_back(source, peek)
             key = await _read_escape_sequence(source)
             if isinstance(key, ColorCode):
@@ -1578,6 +1673,9 @@ async def discard_buffered_enter(source: ByteSource) -> None:
     pairs are consumed as one line ending through the existing helper.
     """
     peek = await _read_byte_with_timeout(source, _FOLLOWUP_BYTE_TIMEOUT)
+    if peek in (_CR, _LF):
+        # The Enter ends any word the answer was part of (issue #840).
+        setattr(source, _WORD_GUARD_ATTR, None)
     if peek == _CR:
         await _consume_optional_lf_or_nul(source)
     elif peek is not None and peek != _LF:

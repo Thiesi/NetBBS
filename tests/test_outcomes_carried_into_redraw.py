@@ -16,7 +16,7 @@ import pytest
 
 from netbbs.auth.users import create_user
 from netbbs.boards.boards import create_board
-from netbbs.boards.posts import MAX_SUBJECT_BYTES, create_post
+from netbbs.boards.posts import create_post
 from netbbs.net import board_flow, mail_flow
 from netbbs.net.char_input import EditorKey, EditorKeyKind
 from netbbs.net.notices import announce, pending_notices, take_notices
@@ -115,7 +115,7 @@ def _stays_on_screen_until_the_next_prompt(session, marker):
 def test_a_board_outcome_is_shown_on_the_redrawn_page(db, alice):
     board = create_board(db, "general", creator=alice)
     create_post(db, board, alice, "Subject", "Body")
-    session = FakeSession(["1", "e", "", "/edit 1", "Revised", "", "s", "b", "b"])
+    session = FakeSession(["1", "e", "", "/edit 1", "Revised", "/done", "s", "b", "b"])
 
     asyncio.run(board_flow._show_board(session, db, board, alice))
 
@@ -127,14 +127,20 @@ def test_a_board_outcome_is_shown_on_the_redrawn_page(db, alice):
     assert pending_notices(session) == []
 
 
-def test_a_refused_post_is_reported_on_the_review_screen_it_returns_to(db, alice):
+def test_a_refused_post_is_reported_on_the_review_screen_it_returns_to(db, alice, monkeypatch):
+    """A post the signature carries over the length limit (issue #812:
+    over-long subjects are refused at their own prompt now, so this is
+    the refusal left for review to report)."""
+    from netbbs.signature import set_signature
+
+    monkeypatch.setattr(board_flow, "MAX_BODY_BYTES", 30)
+    set_signature(db, alice, "A signature of some length")
     board = create_board(db, "general", creator=alice)
-    too_long = "x" * (MAX_SUBJECT_BYTES + 1)
-    session = FakeSession(["p", too_long, "Body", "", "p", "c", "b"])
+    session = FakeSession(["p", "Hello", "Body", "/done", "p", "c", "b"])
 
     asyncio.run(board_flow._show_board(session, db, board, alice))
 
-    screen = _stays_on_screen_until_the_next_prompt(session, "Could not create post")
+    screen = _stays_on_screen_until_the_next_prompt(session, "characters too long")
     assert "Review composition" in screen
 
 
@@ -207,7 +213,7 @@ def test_a_refused_mail_is_reported_on_the_review_screen_it_returns_to(db, alice
     monkeypatch.setattr(netbbs.mail, "MAX_MAIL_PER_RECIPIENT", 0)
     lane = DatabaseLane(db.path)
     try:
-        session = FakeSession(["bob", "Subject", "Body", "", "s", "c"])
+        session = FakeSession(["bob", "Subject", "Body", "/done", "s", "c"])
         asyncio.run(mail_flow._compose_mail(session, lane, alice))
     finally:
         lane.close()
@@ -272,11 +278,11 @@ def test_the_main_menu_shows_an_outcome_a_flow_unwound_back_to_it(db, alice):
     assert pending_notices(session) == []
 
 
-def test_message_sent_is_shown_on_the_mail_menu_it_returns_to(db, alice):
+def test_message_sent_is_shown_on_the_mailbox_it_returns_to(db, alice):
     create_user(db, "bob", password="hunter2", user_level=10)
     lane = DatabaseLane(db.path)
     try:
-        session = FakeSession(["c", "bob", "Subject", "Body", "", "s", "b"])
+        session = FakeSession(["c", "bob", "Subject", "Body", "/done", "s", "b"])
         asyncio.run(mail_flow.browse_mail(session, lane, alice))
     finally:
         lane.close()
@@ -284,12 +290,12 @@ def test_message_sent_is_shown_on_the_mail_menu_it_returns_to(db, alice):
     _stays_on_screen_until_the_next_prompt(session, "Message sent.")
 
 
-def test_an_empty_inbox_says_so_on_the_mail_menu(db, alice):
-    """The picker has nothing to pick and returns at once; its message goes
-    to the menu it returns to rather than under that menu's clear."""
+def test_an_empty_inbox_says_so_on_the_mailbox(db, alice):
+    """The mailbox opens on the Inbox (issue #810): an empty one says so in
+    place of the list, on the screen the prompt is on."""
     lane = DatabaseLane(db.path)
     try:
-        session = FakeSession(["i", "b"])
+        session = FakeSession(["b"])
         asyncio.run(mail_flow.browse_mail(session, lane, alice))
     finally:
         lane.close()

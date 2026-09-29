@@ -4,7 +4,8 @@ Per-user "show the color authors put in board posts" preference (issue
 per-user key-value store, the same shape `netbbs.net.mrc_color_
 preference` established.
 
-Only matters on a board whose SysOp allows color in posts. Defaults to
+Matters on a board whose SysOp allows color in posts, and in mail,
+which always allows it (issue #809). Defaults to
 on, the codebase's "rich default, easy opt-out" posture: a colored body
 is filtered before it is drawn (`netbbs.rendering.post_body`), so the
 downside of the default is taste, not safety. Off shows those posts as

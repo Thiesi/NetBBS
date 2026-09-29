@@ -7,9 +7,11 @@ or rejects it -- or an edit of it -- its local author is told:
 
 - **a notice** the next time they reach the main menu, shown once and
   then deleted (`moderation_notices`);
-- **a mail** for a rejection, from the moderator who made it, with the
-  reason and the rejected text: a rejection deletes the post, and the
-  author would otherwise have lost what they wrote.
+- **a mail** for a rejection, from the BBS itself (`send_system_mail`,
+  issue #819), with the reason and the rejected text: a rejection deletes
+  the post, and the author would otherwise have lost what they wrote. It
+  used to come from the moderator's own account, so Reply went to the
+  moderator personally.
 
 A carried post's author is on another node and gets neither; neither does
 a moderator deciding on their own post.
@@ -20,7 +22,10 @@ from __future__ import annotations
 import logging
 
 from netbbs.auth.users import User, get_user_by_username
-from netbbs.mail import MAX_MAIL_BODY_BYTES, MAX_MAIL_SUBJECT_BYTES, MailboxFullError, MailError, send_mail
+from netbbs.mail import (
+    MAX_MAIL_BODY_BYTES, MAX_MAIL_SUBJECT_BYTES, MailboxFullError, MailError, mail_recipient_refusal,
+    send_system_mail,
+)
 from netbbs.rendering.post_body import plain_post_body
 from netbbs.rendering.width import cut_to_width
 from netbbs.storage.database import Database
@@ -138,9 +143,15 @@ def _short(subject: str) -> str:
 
 def _mail_rejection(db: Database, post, author_row, *, moderator: User, reason: str | None) -> None:
     """The rejection as a mail the author can reread, with what they
-    wrote. A full mailbox or an oversized subject is not a reason to undo
-    the rejection: the notice still tells them."""
+    wrote, sent by the system rather than by `moderator` (issue #819),
+    though its text still names who decided. A full mailbox or an
+    oversized subject is not a reason to undo the rejection: the notice
+    still tells them."""
     author = get_user_by_username(db, author_row["username"])
+    if mail_recipient_refusal(db, author) is not None:
+        # The shared guest account has no mailbox (issue #816); the notice
+        # on its next main menu is all it gets, and that is not a failure.
+        return
     board_name = db.connection.execute("SELECT name FROM boards WHERE id = ?", (post.board_id,)).fetchone()["name"]
     what = "edit" if post.post_id != post.root_post_id else "post"
     subject = f'Your {what} "{_short(post.subject)}" was rejected'
@@ -159,7 +170,7 @@ def _mail_rejection(db: Database, post, author_row, *, moderator: User, reason: 
     if len(text.encode("utf-8")) > room:
         text = text.encode("utf-8")[:room].decode("utf-8", errors="ignore") + "\n[...]"
     try:
-        send_mail(db, moderator, author, subject, head + text)
+        send_system_mail(db, author, subject, head + text)
     except (MailboxFullError, MailError) as exc:
         # The notice still tells them; the SysOp should know the text went
         # undelivered (Claude review on #792).

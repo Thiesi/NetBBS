@@ -21,9 +21,9 @@ mail_flow`'s proof-of-pattern exactly: every function reachable from
 `browse_file_areas` takes `lane: DatabaseLane` instead of `db:
 Database`. Two exceptions, deliberately unmigrated:
 
-- `has_visible_areas` stays on `db: Database`, synchronous — it's a
-  menu-*gating* check called from `netbbs.net.login_flow`'s still-
-  unmigrated menu-drawing code (`_resource_type_menu`'s `show_areas`),
+- `visible_areas` stays on `db: Database`, synchronous — it's a
+  menu-*gating* check called from `netbbs.net.main_menu`'s still-
+  unmigrated menu-drawing code (a Community's page),
   not part of the file-areas feature itself.
 - `_uploader_display_name` keeps `db: Database` as its own first
   parameter, unchanged — it's dispatched *through* the lane
@@ -60,9 +60,9 @@ from netbbs.auth.users import User, get_user_by_id
 from netbbs.communities import (
     get_community,
     get_effective_min_age,
-    get_effective_min_read_level,
-    get_effective_min_write_level,
     get_effective_name_requirement,
+    meets_read_gate,
+    meets_write_gate,
 )
 from netbbs.config import get_max_upload_bytes
 from netbbs.files import (
@@ -119,12 +119,11 @@ from netbbs.net.file_area_banner import load_file_area_banner
 from netbbs.net.node_theme import effective_accent_color_256, effective_header_color_256
 from netbbs.net.notices import announce, announce_styled, write_notices
 from netbbs.net.picker import pick_item
-from netbbs.net.prose_editor import edit_prose
+from netbbs.net.prose_editor import EditorHeader, edit_prose
 from netbbs.net.session import Session
 from netbbs.net.session_activity import records_activity
 from netbbs.net.sort_ui import SORT_MODE_LABELS, prompt_sort_change
 from netbbs.moderation import BoardPermission, has_permission
-from netbbs.permissions import meets_level
 from netbbs.net.menu_description_preference import menu_description_level
 from netbbs.net.redraw_preference import redraw_in_place_enabled
 from netbbs.net.breadcrumb_preference import breadcrumb_collapsed_enabled
@@ -221,22 +220,20 @@ async def browse_file_areas(
     )
 
 
-def has_visible_areas(
+def visible_areas(
     db: Database, user: User, *, community_id: int | None = None, community_scoped: bool = False
-) -> bool:
-    """Whether `user` can see at least one file area under the given
-    Community filter -- backs `netbbs.net.login_flow`'s shared
-    resource-type sub-menu, same convention as `_has_visible_boards`/
-    `netbbs.net.chat_flow.has_visible_channels` (design doc §16).
-    Deliberately still `db`-based, not `lane`-based -- see this
+) -> list[FileArea]:
+    """Every file area `user` can see under the given Community filter --
+    what a Community's page offers and counts (design doc §16, issue
+    #838). Deliberately still `db`-based, not `lane`-based -- see this
     module's own docstring for why."""
     areas = [
         a for a in list_file_areas(db)
-        if meets_level(user, get_effective_min_read_level(db, a)) and meets_age(db, user, get_effective_min_age(db, a))
+        if meets_read_gate(db, user, a) and meets_age(db, user, get_effective_min_age(db, a))
     ]
     if community_scoped:
         areas = [a for a in areas if a.community_id == community_id]
-    return bool(areas)
+    return areas
 
 
 async def _browse_areas_in_category(
@@ -282,7 +279,7 @@ async def _browse_areas_in_category(
         # event loop.
         all_areas = [
             a for a in list_file_areas(db, order_by=order_by)
-            if meets_level(user, get_effective_min_read_level(db, a))
+            if meets_read_gate(db, user, a)
             and meets_age(db, user, get_effective_min_age(db, a))
         ]
         if community_scoped:
@@ -311,7 +308,7 @@ async def _browse_areas_in_category(
     current_mode = await lane.run(
         get_effective_sort_mode, user, "file_area", community_id=effective_community_id, category_id=category_id
     )
-    areas_here, categories_here, category_name, community_name = await lane.run(_load, current_mode)
+    _, _, category_name, community_name = await lane.run(_load, current_mode)
     description_level = await lane.run(menu_description_level, user)
     redraw_in_place = await lane.run(redraw_in_place_enabled, user)
     unicode_style = await lane.run(unicode_style_enabled, user)
@@ -319,7 +316,7 @@ async def _browse_areas_in_category(
     # GitHub issue #176: resolved once, reused for both pick_item calls
     # below (flat and mixed-with-categories) -- shows at every level of
     # file-area browsing this recursive function reaches (top level, a
-    # category, a Community/Uncategorized scope), matching
+    # category, a Community's scope), matching
     # `board_flow._browse_boards_in_category`'s own identical wiring.
     area_masthead = await lane.run(load_file_area_banner)
     mode_box = {"mode": current_mode}
@@ -331,7 +328,7 @@ async def _browse_areas_in_category(
         return await prompt_sort_change(
             session, persist=_persist_sort_choice,
             community_id=effective_community_id, community_name=community_name,
-            category_id=category_id, category_name=category_name,
+            category_id=category_id, category_name=category_name, sysop_order=True,
         )
 
     def _sort_label() -> str:
@@ -340,26 +337,78 @@ async def _browse_areas_in_category(
     title = "File areas" if title_prefix is not None else "Available file areas"
     picker_breadcrumb = (title_prefix,) if title_prefix is not None else ()
 
-    if not categories_here:
-        async def on_sort_flat() -> list[FileArea] | None:
+    # Back from an area or a category comes back to this list, on the row
+    # left (issue #839), as the board list does.
+    reopen_at: int | None = None
+    while True:
+        areas_here, categories_here, _, _ = await lane.run(_load, mode_box["mode"])
+        if not categories_here:
+            async def on_sort_flat() -> list[FileArea] | None:
+                new_mode = await _run_sort_prompt()
+                if new_mode is None:
+                    return None
+                mode_box["mode"] = new_mode
+                new_areas, _, _, _ = await lane.run(_load, new_mode)
+                return new_areas
+
+            area = await pick_item(
+                session,
+                areas_here,
+                name_of=lambda a: a.name,
+                stable_id_of=lambda a: a.id,
+                description_of=lambda a: a.description,
+                title=title,
+                breadcrumb=picker_breadcrumb,
+                empty_message="No file areas are available to you yet.",
+                on_sort=on_sort_flat,
+                sort_label=_sort_label,
+                description_level=description_level,
+                redraw_in_place=redraw_in_place,
+                unicode_style=unicode_style,
+                collapsed=collapsed,
+                accent_color=await lane.run(effective_accent_color_256),
+                header_color=await lane.run(effective_header_color_256),
+                masthead=area_masthead,
+                start_stable_id=reopen_at,
+            )
+            if area is None:
+                return
+            reopen_at = area.id
+            await _show_area(session, lane, area, user, link_context=link_context, transfers=transfers)
+            continue
+
+        mixed: list[FileAreaCategory | FileArea] = [*categories_here, *areas_here]
+
+        def render_name(item: FileAreaCategory | FileArea) -> str:
+            return f"[{item.name}]" if isinstance(item, FileAreaCategory) else item.name
+
+        def render_description(item: FileAreaCategory | FileArea) -> str | None:
+            if isinstance(item, FileAreaCategory):
+                return item.description or "(category)"
+            return item.description
+
+        def stable_id(item: FileAreaCategory | FileArea) -> int:
+            return item.id if isinstance(item, FileArea) else -item.id
+
+        async def on_sort_mixed() -> list[FileAreaCategory | FileArea] | None:
             new_mode = await _run_sort_prompt()
             if new_mode is None:
                 return None
             mode_box["mode"] = new_mode
             new_areas, _, _, _ = await lane.run(_load, new_mode)
-            return new_areas
+            return [*categories_here, *new_areas]
 
-        area = await pick_item(
+        selected = await pick_item(
             session,
-            areas_here,
-            name_of=lambda a: a.name,
-            stable_id_of=lambda a: a.id,
-            description_of=lambda a: a.description,
+            mixed,
+            name_of=render_name,
+            stable_id_of=stable_id,
+            on_sort=on_sort_mixed,
+            sort_label=_sort_label,
+            description_of=render_description,
             title=title,
             breadcrumb=picker_breadcrumb,
             empty_message="No file areas are available to you yet.",
-            on_sort=on_sort_flat,
-            sort_label=_sort_label,
             description_level=description_level,
             redraw_in_place=redraw_in_place,
             unicode_style=unicode_style,
@@ -367,62 +416,20 @@ async def _browse_areas_in_category(
             accent_color=await lane.run(effective_accent_color_256),
             header_color=await lane.run(effective_header_color_256),
             masthead=area_masthead,
+            start_stable_id=reopen_at,
         )
-        if area is not None:
-            await _show_area(session, lane, area, user, link_context=link_context, transfers=transfers)
-        return
+        if selected is None:
+            return
+        reopen_at = stable_id(selected)
 
-    mixed: list[FileAreaCategory | FileArea] = [*categories_here, *areas_here]
-
-    def render_name(item: FileAreaCategory | FileArea) -> str:
-        return f"[{item.name}]" if isinstance(item, FileAreaCategory) else item.name
-
-    def render_description(item: FileAreaCategory | FileArea) -> str | None:
-        if isinstance(item, FileAreaCategory):
-            return item.description or "(category)"
-        return item.description
-
-    def stable_id(item: FileAreaCategory | FileArea) -> int:
-        return item.id if isinstance(item, FileArea) else -item.id
-
-    async def on_sort_mixed() -> list[FileAreaCategory | FileArea] | None:
-        new_mode = await _run_sort_prompt()
-        if new_mode is None:
-            return None
-        mode_box["mode"] = new_mode
-        new_areas, _, _, _ = await lane.run(_load, new_mode)
-        return [*categories_here, *new_areas]
-
-    selected = await pick_item(
-        session,
-        mixed,
-        name_of=render_name,
-        stable_id_of=stable_id,
-        on_sort=on_sort_mixed,
-        sort_label=_sort_label,
-        description_of=render_description,
-        title=title,
-        breadcrumb=picker_breadcrumb,
-        empty_message="No file areas are available to you yet.",
-        description_level=description_level,
-        redraw_in_place=redraw_in_place,
-        unicode_style=unicode_style,
-        collapsed=collapsed,
-        accent_color=await lane.run(effective_accent_color_256),
-        header_color=await lane.run(effective_header_color_256),
-        masthead=area_masthead,
-    )
-    if selected is None:
-        return
-
-    if isinstance(selected, FileAreaCategory):
-        await _browse_areas_in_category(
-            session, lane, user, category_id=selected.id,
-            community_id=community_id, community_scoped=community_scoped, title_prefix=title_prefix,
-            link_context=link_context, transfers=transfers,
-        )
-    else:
-        await _show_area(session, lane, selected, user, link_context=link_context, transfers=transfers)
+        if isinstance(selected, FileAreaCategory):
+            await _browse_areas_in_category(
+                session, lane, user, category_id=selected.id,
+                community_id=community_id, community_scoped=community_scoped, title_prefix=title_prefix,
+                link_context=link_context, transfers=transfers,
+            )
+        else:
+            await _show_area(session, lane, selected, user, link_context=link_context, transfers=transfers)
 
 
 def _format_size(size_bytes: int) -> str:
@@ -698,7 +705,7 @@ async def _read_file_choice(
     editor-key support (issue #184's numbered download shortcuts), and
     when keys arrived only navigation and download were given them.
     `/download <name>` was the one form that reached a file on another
-    page; `[F]ind` reaches it instead, landing in this area with that
+    page; `[/] Find` reaches it instead, landing in this area with that
     file at the top of its page (as row 1, not as a preselected cursor
     -- this screen always starts with no highlight).
 
@@ -826,7 +833,7 @@ async def _show_area(
     `[D]ownload` (like `[E]`) acts on the file under the cursor, on the
     only file on the page, or on whichever one `pick_item` returns — a
     number key `1`-`5` names one directly. A file on *another* page is
-    reached through `[F]ind` (`netbbs.net.scan_and_find`), which enters
+    reached through `[/] Find` (`netbbs.net.scan_and_find`), which enters
     this area positioned on that file; `/download <filename>`'s
     area-wide by-name lookup is what that replaced.
 
@@ -853,6 +860,8 @@ async def _show_area(
     own to re-check.
     """
     area_name = sanitize_text(area.name)
+    # Where a jump's cursor starts, set by `_load` (issue #839).
+    jump: dict[str, int | None] = {"highlight": None}
 
     def _load(
         db: Database,
@@ -869,9 +878,28 @@ async def _show_area(
             # Nothing newer than the cursor -- caught up, not a
             # genuinely empty area; fall back to the newest page.
             page = list_files_page(db, area, user, with_pinned=True)
+        elif initial_cursor:
+            # The jump's target on the newest page, when it is there: that
+            # page, the one an ordinary visit shows, with the cursor on it,
+            # as a board does (issue #839, F095).
+            newest = list_files_page(db, area, user, with_pinned=True)
+            target = page.entries[0].file_id
+            # In the dated rows only, as a board does: a match in the
+            # pinned block would record the files between it and the newest
+            # rows as seen without ever showing them (review on #869).
+            on_newest = next(
+                (
+                    i for i, listed in enumerate(newest.entries)
+                    if i >= newest.pinned_count and listed.file_id == target
+                ),
+                None,
+            )
+            jump["highlight"] = 0 if on_newest is None else on_newest
+            if on_newest is not None:
+                page = newest
         effective_name_requirement = get_effective_name_requirement(db, area)
         can_write = (
-            meets_level(user, get_effective_min_write_level(db, area))
+            meets_write_gate(db, user, area)
             and meets_age(db, user, get_effective_min_age(db, area))
             and meets_name_requirement(db, user, effective_name_requirement)
         )
@@ -991,7 +1019,8 @@ async def _show_area(
         )
         await session.write_line(f"\r\n{state}")
     else:
-        highlighted: int | None = None
+        # A [N]ew scan or [/] Find jump starts with the cursor on its target.
+        highlighted: int | None = jump["highlight"]
         await _render_and_advance_cursor(page, highlighted=highlighted)
         while True:
             kind, target, new_h = await _read_file_choice(session, page, highlighted)
@@ -1828,6 +1857,11 @@ async def _compose_description(
         return await edit_prose(
             session, initial_text=initial_text, draft_path=draft_path,
             max_bytes=MAX_DESCRIPTION_BYTES, unicode_style=await lane.run(unicode_style_enabled, user),
+            # What is being written, above the text (issue #813).
+            header=EditorHeader(
+                "File description", (("File", entry.filename),),
+                color=await lane.run(effective_header_color_256),
+            ),
         )
     return await edit_line_body(
         session, initial_text=initial_text, max_bytes=MAX_DESCRIPTION_BYTES,
@@ -1913,7 +1947,7 @@ async def _choose_entry(
     Shared by `[D]ownload` and `[E]dit description` so one hotkey cannot
     drift into resolving its target differently from the other; it is
     also what `/download <filename>`'s area-wide name lookup was
-    replaced with, `[F]ind` being how a file on another page is reached.
+    replaced with, `[/] Find` being how a file on another page is reached.
     """
     if highlighted is not None and 0 <= highlighted < len(page.entries):
         return page.entries[highlighted]

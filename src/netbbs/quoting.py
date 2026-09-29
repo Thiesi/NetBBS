@@ -1,11 +1,12 @@
 """
 Replying with a quote (issue #675): the subject a reply starts with and
 the quoted text its body starts with. Shared by a board post's `[R]eply`
-and mail's Reply, so the two read the same.
+and mail's Reply, so the two read the same. Mail's Forward (issue #822)
+takes its subject rule and its forwarded-message header from here too.
 
-A board caller hands `quote_body` the body a reader with color off sees
-(`netbbs.rendering.post_body.plain_post_body`), mail its body as stored;
-either way it is sanitized again here, since it can come from another
+Both callers hand `quote_body` the body a reader with color off sees
+(`netbbs.rendering.post_body.plain_post_body`) -- mail too, since it
+shows color (issue #809); either way it is sanitized again here, since it can come from another
 node. Both return text for an editor, never anything rendered.
 """
 
@@ -37,8 +38,19 @@ def reply_subject(subject: str, *, max_bytes: int) -> str:
     """`subject` with "Re: " in front, unless it already starts with one,
     cut to `max_bytes` of UTF-8 so the prefix cannot push a subject at the
     limit over it."""
+    return _prefixed_subject(subject, "Re:", ("re:",), max_bytes=max_bytes)
+
+
+def forward_subject(subject: str, *, max_bytes: int) -> str:
+    """`subject` with "Fwd: " in front, unless it already starts with one
+    (or with the "Fw:" some mail programs write), cut to `max_bytes` as
+    `reply_subject` is (issue #822)."""
+    return _prefixed_subject(subject, "Fwd:", ("fwd:", "fw:"), max_bytes=max_bytes)
+
+
+def _prefixed_subject(subject: str, prefix: str, already: tuple[str, ...], *, max_bytes: int) -> str:
     stripped = subject.strip()
-    text = stripped if stripped.lower().startswith("re:") else f"Re: {stripped}"
+    text = stripped if stripped.lower().startswith(already) else f"{prefix} {stripped}"
     encoded = text.encode("utf-8")
     if len(encoded) <= max_bytes:
         return text
@@ -72,6 +84,7 @@ def quote_body(body: str, *, author: str) -> str:
     replier sends, and a control sequence in it would reach both."""
     text = sanitize_text(body.replace("\r\n", "\n").replace("\r", "\n"), allow_newlines=True)
     author = sanitize_text(author)
+    text = _drop_forwarders_signature(text)
     if _SIGNATURE_DELIMITER in text:
         text = text.rsplit(_SIGNATURE_DELIMITER, 1)[0]
     lines = text.split("\n")
@@ -94,3 +107,77 @@ def quote_body(body: str, *, author: str) -> str:
         quoted.append(row)
     header = f"{cut_to_width(author, 60)}{ATTRIBUTION_SUFFIX}"
     return "\n".join([header, *quoted, ""])
+
+
+FORWARD_RULE = "---------- Forwarded message ----------"
+
+
+def forward_body(body: str, *, sender: str, recipient: str, date: str, subject: str) -> str:
+    """`body` as a forward carries it (issue #822): an empty line for the
+    forwarder's note, then a header naming whom it was from and to, when
+    and under what subject, then a blank line and the body itself, whole.
+    `sign_forward` tidies the note line away when nothing was written on it.
+
+    Verbatim, not quoted: a forward passes a letter on for someone else to
+    read, so it is not marked as text being answered, and nothing is cut --
+    `quote_body` stops at `MAX_QUOTED_LINES` and at the signature, which a
+    forward must keep. What the forwarder may send is bounded by the mail
+    body limit instead, checked before the letter is reviewed.
+
+    `body` keeps its color pipe codes, so the forward reads as the original
+    did; it and every header value may come from another node and are
+    sanitized here. Text for an editor, never anything rendered."""
+    text = sanitize_text(body.replace("\r\n", "\n").replace("\r", "\n"), allow_newlines=True).strip("\n")
+    header = [
+        FORWARD_RULE,
+        f"From: {sanitize_text(sender)}",
+        f"To: {sanitize_text(recipient)}",
+        f"Date: {sanitize_text(date)}",
+        f"Subject: {sanitize_text(subject)}",
+    ]
+    return "\n".join(["", *header, "", text])
+
+
+def _drop_forwarders_signature(text: str) -> str:
+    """A forward's note without the signature `sign_forward` put under it,
+    so `quote_body` quotes a reply to a forward as it quotes any letter:
+    up to one signature, the forwarded letter's writer's, found last. Left
+    in, the forwarder's signature would be the one found when the letter
+    passed on is unsigned, and the quote would stop at the note."""
+    at = text.find(FORWARD_RULE)
+    if at < 0:
+        return text
+    note = text[:at]
+    if note.startswith(_SIGNATURE_DELIMITER[1:]):
+        note = ""
+    elif _SIGNATURE_DELIMITER in note:
+        note = note.split(_SIGNATURE_DELIMITER, 1)[0]
+    else:
+        return text
+    note = note.strip("\n")
+    return f"{note}\n\n{text[at:]}" if note else text[at:]
+
+
+def sign_forward(body: str, signature: str | None) -> str:
+    """A written forward, ready to send (issue #822): the forwarder's note,
+    signed with `signature` if they have one, a blank line, then the
+    forwarded letter from its `FORWARD_RULE` on. The signature closes the
+    note -- appended at the end it would read as the forwarded letter's
+    writer's. Blank lines around the note go, so a forward with none
+    starts at its rule.
+
+    Idempotent, as `netbbs.signature.append_signature` is: a resumed
+    forward that already carries the signature does not get it twice. A
+    body whose rule the forwarder deleted is signed at its end."""
+    sig = (signature or "").strip("\n")
+    block = f"-- \n{sig}" if sig.strip() else ""
+    at = body.find(FORWARD_RULE)
+    if at < 0:
+        text = body.strip("\n")
+        if block and not text.endswith(block):
+            text = f"{text}\n{block}"
+        return text
+    note, rest = body[:at].strip("\n"), body[at:]
+    if block and not note.endswith(block):
+        note = f"{note}\n{block}" if note else block
+    return f"{note}\n\n{rest}" if note else rest

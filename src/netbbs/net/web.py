@@ -41,6 +41,7 @@ import asyncio
 import base64
 import contextlib
 import json
+import re
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -49,7 +50,10 @@ from urllib.parse import urlsplit
 
 from aiohttp import WSCloseCode, web
 
+from netbbs.net import char_input
 from netbbs.net.char_input import (
+    HELP_KEY,
+    KILL_LINE_KEY,
     REDRAW_KEY,
     REFRESH_KEY,
     CandidateListPrinter,
@@ -65,6 +69,7 @@ from netbbs.net.char_input import (
     _grapheme_start,
     LiveInputBuffer,
     apply_tab_completion,
+    kill_line,
     move_cursor,
     redraw_tail,
 )
@@ -98,6 +103,8 @@ _MAX_LINE_LENGTH = 4096
 # unbounded buffer into aiohttp or the application task.
 _MAX_WS_MESSAGE_SIZE = 16 * 1024
 _MAX_KEY_EVENT_LENGTH = 4096
+# What a click may send (issue #840): one menu key or a two-digit row number.
+_CLICK_KEY = re.compile(r"[a-z0-9?/]|[0-9]{2}")
 _MAX_QUEUED_CHARS = 8192
 
 # Recognized escape sequences, mirroring netbbs.net.char_input's
@@ -141,6 +148,13 @@ class _AltKey:
     """
 
     char: str
+
+
+class _Click(str):
+    """A key sent by a click on the screen (issue #840): the bracketed key
+    of a menu entry, or a list row's number. It is read as typed wherever
+    a single key is wanted and dropped where text is being typed, so a
+    click to focus the terminal types nothing into a field or a post."""
 
 
 @dataclass(frozen=True)
@@ -232,6 +246,8 @@ class WebSession(Session):
             maxsize=_MAX_QUEUED_CHARS
         )
         self._pushed_back_item: str | _SpecialKey | None = None
+        # Raised while text is being typed: clicks are dropped (issue #840).
+        self._clicks_blocked = 0
         # Pipe codes a pasted SGR became (issue #754), read as if typed
         # next -- after a pushed-back item, which was read before them.
         self._typed_pipe_codes: list[str] = []
@@ -341,6 +357,14 @@ class WebSession(Session):
                         self._char_queue.put_nowait(item)
                     except asyncio.QueueFull:
                         await self._reject_input("web terminal input queue is full")
+        elif event_type == "click" and not self._door_active:
+            data = event.get("data")
+            if isinstance(data, str) and _CLICK_KEY.fullmatch(data):
+                self.note_input()
+                try:
+                    self._char_queue.put_nowait(_Click(data))
+                except asyncio.QueueFull:
+                    await self._reject_input("web terminal input queue is full")
         elif event_type == "resize":
             # GitHub issue #33: unlike Telnet NAWS (16-bit) or SSH's PTY
             # window-size channel, this transport accepts any JSON
@@ -372,18 +396,33 @@ class WebSession(Session):
         key alike — used by `read_line`'s cursor-aware path, which
         needs to tell them apart. `_read_char` (below) is the
         char-only view `read_key` and masked reads still want."""
-        if self._input_closed:
-            raise SessionClosedError(self._input_error)
-        if self._pushed_back_item is not None:
-            item = self._pushed_back_item
-            self._pushed_back_item = None
-        elif self._typed_pipe_codes:
-            item = self._typed_pipe_codes.pop(0)
-        else:
-            item = await self._char_queue.get()
-        if item is None:
-            raise SessionClosedError(self._input_error)
-        return item
+        # A loop, not recursion: a queue full of dropped clicks or a long
+        # guarded word must not exhaust the stack (review on #871).
+        while True:
+            if self._input_closed:
+                raise SessionClosedError(self._input_error)
+            if self._pushed_back_item is not None:
+                item = self._pushed_back_item
+                self._pushed_back_item = None
+            elif self._typed_pipe_codes:
+                item = self._typed_pipe_codes.pop(0)
+            else:
+                item = await self._char_queue.get()
+            if item is None:
+                raise SessionClosedError(self._input_error)
+            if isinstance(item, _Click):
+                if self._clicks_blocked:
+                    continue
+                if len(item) > 1:
+                    self._pushed_back_item = _Click(item[1:])
+                item = str(item[0])
+            if isinstance(item, str) and char_input.word_guard_drops(self, item):
+                # The tail of a word typed after a one-key answer (issue #840).
+                continue
+            return item
+
+    def arm_word_guard(self) -> None:
+        char_input.arm_word_guard(self)
 
     async def _read_char(self) -> str:
         """Plain characters only -- a recognized special key has no
@@ -551,14 +590,19 @@ class WebSession(Session):
         reading), so the same pinned-input hooks need mirroring here too
         for chat's pinned input row to behave identically over web.
         """
-        if not echo:
-            with secret_input(self):
-                return await self._read_line_masked()
-        return await self._read_line_editable(
-            history, completer, live_buffer=live_buffer, lock=lock,
-            list_candidates=list_candidates, initial=initial, cancellable=cancellable,
-            viewport=viewport, viewport_owns_row=viewport_owns_row, pasted_color=pasted_color,
-        )
+        blocked = 1
+        self._clicks_blocked += blocked
+        try:
+            if not echo:
+                with secret_input(self):
+                    return await self._read_line_masked()
+            return await self._read_line_editable(
+                history, completer, live_buffer=live_buffer, lock=lock,
+                list_candidates=list_candidates, initial=initial, cancellable=cancellable,
+                viewport=viewport, viewport_owns_row=viewport_owns_row, pasted_color=pasted_color,
+            )
+        finally:
+            self._clicks_blocked -= blocked
 
     async def _read_line_masked(self) -> str:
         line: list[str] = []
@@ -570,6 +614,10 @@ class WebSession(Session):
                 if line:
                     line.pop()
                     await self.write("\b \b")
+                continue
+            if char == KILL_LINE_KEY:
+                await self.write("\b \b" * len(line))
+                line.clear()
                 continue
             if ord(char) < 0x20:
                 continue
@@ -801,6 +849,12 @@ class WebSession(Session):
                                 )
                         continue
 
+                    if char == KILL_LINE_KEY:
+                        # Ctrl-U (issue #812), through the one helper both
+                        # line editors share.
+                        cursor = await kill_line(self.write, window, line, cursor, show)
+                        continue
+
                     if char == _TAB:
                         if completer is not None:
                             cursor = await apply_tab_completion(
@@ -869,7 +923,11 @@ class WebSession(Session):
         # for the same reason (see that function's own docstring).
         while True:
             char = await self._read_char()
-            if char in (_CR, _LF, _BS, _DEL):
+            if char == _BS:
+                # Ctrl-H: xterm.js sends DEL for Backspace, so 0x08 here is
+                # the help key, as `char_input.read_key` returns it (#840).
+                return HELP_KEY
+            if char in (_CR, _LF, _DEL):
                 continue
             if char == REDRAW_KEY:
                 return REDRAW_KEY
@@ -926,38 +984,47 @@ class WebSession(Session):
         becomes `EditorKeyKind.CTRL, char="h"` instead of BACKSPACE
         when set, `_DEL` (0x7F) is unaffected either way.
         """
-        # A loop, not recursion (Codex review on #779): one permitted key
-        # event can hold over a thousand `ESC[m`, and skipping each by
-        # calling this method again ran out of call stack.
-        while True:
-            item = await self._read_item()
-            if isinstance(item, ColorCode):
-                if pasted_color is not None:
-                    self._typed_pipe_codes.extend(pasted_color.translate(item.params))
-                continue
-            if isinstance(item, _AltKey):
-                continue  # not a key this editor surfaces, same as INSERT below
-            if isinstance(item, _SpecialKey):
-                kind = _SPECIAL_TO_EDITOR_KIND.get(item.name)
-                if kind is not None:
-                    return EditorKey(kind)
-                continue  # e.g. INSERT -- not surfaced, keep reading
-            break
+        blocked = 0 if distinguish_ctrl_h else 1
+        self._clicks_blocked += blocked
+        try:
+            # A loop, not recursion (Codex review on #779): one permitted key
+            # event can hold over a thousand `ESC[m`, and skipping each by
+            # calling this method again ran out of call stack.
+            while True:
+                item = await self._read_item()
+                if isinstance(item, ColorCode):
+                    if pasted_color is not None:
+                        self._typed_pipe_codes.extend(pasted_color.translate(item.params))
+                    continue
+                if isinstance(item, _AltKey):
+                    if item.char in (_BS, _DEL):
+                        # Alt+Backspace (issue #815): the prose editor's word
+                        # delete here, where the browser keeps Ctrl+W.
+                        return EditorKey(EditorKeyKind.WORD_BACKSPACE)
+                    continue  # not a key this editor surfaces, same as INSERT below
+                if isinstance(item, _SpecialKey):
+                    kind = _SPECIAL_TO_EDITOR_KIND.get(item.name)
+                    if kind is not None:
+                        return EditorKey(kind)
+                    continue  # e.g. INSERT -- not surfaced, keep reading
+                break
 
-        char = item
-        if char in (_CR, _LF):
-            return EditorKey(EditorKeyKind.ENTER)
-        if char == _BS and distinguish_ctrl_h:
-            return EditorKey(EditorKeyKind.CTRL, char="h")
-        if char in (_BS, _DEL):
-            return EditorKey(EditorKeyKind.BACKSPACE)
-        if char == _TAB:
-            return EditorKey(EditorKeyKind.TAB)
-        if char == _ESC:
-            return EditorKey(EditorKeyKind.ESCAPE)
-        if len(char) == 1 and ord(char) < 0x20:
-            return EditorKey(EditorKeyKind.CTRL, char=chr(ord(char) + 0x60))
-        return EditorKey(EditorKeyKind.CHAR, char=char)
+            char = item
+            if char in (_CR, _LF):
+                return EditorKey(EditorKeyKind.ENTER)
+            if char == _BS and distinguish_ctrl_h:
+                return EditorKey(EditorKeyKind.CTRL, char="h")
+            if char in (_BS, _DEL):
+                return EditorKey(EditorKeyKind.BACKSPACE)
+            if char == _TAB:
+                return EditorKey(EditorKeyKind.TAB)
+            if char == _ESC:
+                return EditorKey(EditorKeyKind.ESCAPE)
+            if len(char) == 1 and ord(char) < 0x20:
+                return EditorKey(EditorKeyKind.CTRL, char=chr(ord(char) + 0x60))
+            return EditorKey(EditorKeyKind.CHAR, char=char)
+        finally:
+            self._clicks_blocked -= blocked
 
     async def discard_buffered_enter(self) -> None:
         """Web counterpart to ``char_input.discard_buffered_enter``.
@@ -1005,6 +1072,13 @@ class WebSession(Session):
 
 
 SessionHandler = Callable[[Session], Awaitable[None]]
+
+
+async def _set_server_header(request: web.Request, response: web.StreamResponse) -> None:
+    """Name the server without its Python and aiohttp versions (issue #845,
+    F102): the default `Server: Python/3.13 aiohttp/3.14.3` tells a scanner
+    exactly what to look up."""
+    response.headers["Server"] = "NetBBS"
 
 
 class WebServer:
@@ -1060,6 +1134,7 @@ class WebServer:
 
     async def start(self) -> None:
         app = web.Application()
+        app.on_response_prepare.append(_set_server_header)
         app.router.add_get("/", self._handle_index)
         app.router.add_get("/ws", self._handle_websocket)
         app.router.add_static("/static/", _STATIC_DIR)
@@ -1107,12 +1182,18 @@ class WebServer:
             raise web.HTTPForbidden(text="WebSocket Origin is not allowed")
 
         ws = web.WebSocketResponse(max_msg_size=_MAX_WS_MESSAGE_SIZE)
+        if not ws.can_prepare(request).ok:
+            # A plain GET (a browser, a scanner) gets one plain sentence
+            # instead of aiohttp's own handshake diagnostics (issue #845,
+            # F102).
+            raise web.HTTPBadRequest(text="This address is for the NetBBS browser terminal.")
         await ws.prepare(request)
         session = WebSession(ws, request.remote)
         try:
             await self._session_handler(session)
         except SessionClosedError:
-            pass  # client disconnected mid-session — expected, not an error
+            # A caller closing the tab is routine: one INFO line, no traceback.
+            _logger.info("web caller %s disconnected", request.remote or "?")
         except Exception:
             _logger.exception("unhandled error in web session handler")
         finally:

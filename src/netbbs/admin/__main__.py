@@ -43,6 +43,7 @@ from pathlib import Path
 
 import nacl.signing
 
+from netbbs.net.redraw_preference import start_new_account_redrawing_in_place
 from netbbs.backup import running_node_pid
 from netbbs.link.key_rotation import KeyRotationError, rotate_offline
 from netbbs.net.confirm import prompt_yes_no
@@ -50,6 +51,7 @@ from netbbs.auth.users import (
     SYSOP_LEVEL,
     AuthError,
     User,
+    UserManagementError,
     create_user,
     get_user_by_username,
     hash_password_off_loop,
@@ -144,7 +146,7 @@ async def run_reset_password(session: Session, db: Database, as_username: str | 
         new_hash = await hash_password_off_loop(first)
         try:
             await lane.run(set_password_hash, target, new_hash, changed_by=actor)
-        except AuthError as exc:
+        except (AuthError, UserManagementError) as exc:
             await session.write_line(str(exc))
             return 1
         await session.write_line(f"Password set for {target.username!r}. It applies to their next sign-in.")
@@ -298,6 +300,8 @@ async def _bootstrap_first_sysop(session: Session, lane: DatabaseLane) -> User:
     # dispatches this whole call to a worker thread.
     def _create(db: Database) -> User:
         user = create_user(db, username, password=password, verify_key=verify_key, user_level=SYSOP_LEVEL)
+        # As a signed-up account starts (issue #840).
+        start_new_account_redrawing_in_place(db, user)
         # Chicken-and-egg: no actor exists yet to attribute this to, so
         # the audit entry self-attributes to the account it just created.
         record_action(
@@ -321,7 +325,7 @@ async def _bootstrap_first_sysop(session: Session, lane: DatabaseLane) -> User:
 
 
 async def _prompt_password(session: Session) -> str | None:
-    await session.write("Password (leave blank to skip): ")
+    await session.write("Password: ")
     first = await session.read_line(echo=False)
     if not first:
         return None
@@ -334,7 +338,7 @@ async def _prompt_password(session: Session) -> str | None:
 
 
 async def _prompt_pubkey(session: Session) -> nacl.signing.VerifyKey | None:
-    await write_prompt(session, "Public key, base64 or ssh-ed25519 line (leave blank to skip): ")
+    await write_prompt(session, "Public key (base64, or an ssh-ed25519 line): ")
     text = (await session.read_line()).strip()
     if not text:
         return None

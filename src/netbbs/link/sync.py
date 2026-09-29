@@ -146,7 +146,10 @@ first place; the *only* way such a sender ever learns that recipient's
 someone who has met them directly (see that function's own docstring
 for why this is safe: a wrong/stale candidate address costs a failed
 deposit, never a confidentiality issue, since the payload is already
-sealed to the real recipient's own key). Only `link_message` gets this
+sealed to the real recipient's own key). A deposit ends the delivery
+work item but not the letter: it stays pending with its handoff time
+recorded, and expires as `no_answer` if no answer comes back within
+`RELAY_NO_ANSWER_TIMEOUT` (issue #874). Only `link_message` gets this
 fallback, never an acknowledgement -- `netbbs.link.relay_mailbox`'s own
 documented boundary.
 """
@@ -170,27 +173,45 @@ from netbbs.link.events import (
     INVENTORY_NOT_CARRIED_CAPABILITY,
     INVENTORY_PAGES_CAPABILITY,
     LINK_MESSAGE_OBJECT_TYPE,
+    BoardGenesis,
+    ChannelGenesis,
     EndpointDescriptor,
+    FileAreaGenesis,
+    LinkMessage,
+    LinkMessageBounced,
     canonical_bytes,
     descriptor_has_capability,
     event_content_id,
 )
 from netbbs.link.enforcement import (
+    REASON_NODE_PROBATIONARY,
+    REASON_USER_PROBATIONARY,
     decide_event_authorship,
     decide_node_action,
     ensure_node_subject,
+    event_author,
     node_transport_state,
     LinkPolicyAction,
 )
+from netbbs.link.mail_refusals import VIA_RELAY
 from netbbs.link.mail import (
+    EXPIRED_BY_OWN_POLICY,
     expire_link_message_delivery,
+    expire_unanswered_relay_mail,
+    record_relay_handoff,
     get_link_mail_acknowledgement,
     get_link_message_for_delivery,
+    record_link_message_refused,
 )
 from netbbs.link.protocol import (
     DEFERRED_EVENT_RETRY_SECONDS, MAX_EVENTS_PER_REQUEST, HelloMessage, LinkNode, LinkProtocolError,
+    PeerExchange,
 )
-from netbbs.link.relay_mailbox import RelayableEnvelope
+from netbbs.link.relay_mailbox import (
+    RELAY_MAILBOX_RETENTION_DAYS,
+    RelayableEnvelope,
+    prune_expired_relay_mailbox_envelopes,
+)
 from netbbs.link.relay_selection import TARGET_RELAY_COUNT, relays_needing_replacement, select_relay_candidates
 from netbbs.link.reliability import record_dial_outcome
 from netbbs.link.onboarding import participation_accepted
@@ -224,6 +245,7 @@ from netbbs.link.trust_issuance import reconcile_issued_vouches
 from netbbs.link.transport import (
     request_identities,
     AttestationRecipientRefused,
+    LinkPolicyRefused,
     LinkTransportError,
     PullCursorUnknown,
     deposit_into_relay_mailbox,
@@ -265,9 +287,12 @@ from netbbs.link.trust import TrustState
 from netbbs.link.work_items import (
     KIND_LINK_MAIL_ACK,
     KIND_LINK_MAIL_DELIVERY,
+    POLICY_REFUSED_TARGET_ERROR,
     load_due_work_items,
     record_failure,
     record_success,
+    targets_held_by,
+    wake_work_items_for_target,
 )
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
@@ -496,6 +521,10 @@ async def run_link_sync(
             node, session, lane, enforce_trust_policy=enforce_trust_policy
         )
         await _forget_retired_attestations(lane)
+        # Issue #891: mail held here as a relay that its recipient never
+        # came back for. Every pass, whatever this node's own mode: a node
+        # that stopped serving relays still holds what it took before.
+        await _prune_relay_mailbox(lane)
         # Issue #58: relay selection/pickup only makes sense
         # for an outgoing-only node -- a full peer is directly dialable
         # by definition, so it has nothing to gain from seeking relays
@@ -582,6 +611,7 @@ async def _push_own_events(
     wanted: list[str] | None,
     peer_fingerprint: str,
     fallback_offsets: dict[str, int],
+    declared: frozenset[str] = frozenset(),
 ) -> None:
     """
     Push this node's own originated events to one seed -- design doc
@@ -679,17 +709,51 @@ async def _push_own_events(
     resource_budget = max(MAX_EVENTS_PER_REQUEST - len(transitions), MAX_EVENTS_PER_REQUEST // 2)
     sending = selected[:resource_budget]
     to_push = transitions + sending
+    # Issue #844: what the SysOp is shown about this peer taking this node's
+    # boards, channels and file areas. A genesis this exchange declared and
+    # the peer did not ask for is one it holds.
+    own_genesis = {event.content_id for event in resource_events if isinstance(event, _GENESIS_TYPES)}
+    exchange = node.peer_exchange.setdefault(peer_fingerprint, PeerExchange())
+    exchange.at = time.time()
+    exchange.holds &= own_genesis
+    if wanted is not None:
+        exchange.holds |= (own_genesis & declared) - set(wanted)
+    if own_genesis and own_genesis <= exchange.holds:
+        # It holds everything of this node's: whatever it refused before,
+        # it takes this node's content now, pushed or pulled.
+        exchange.refused_reason = None
     if not to_push:
         return
     for index in range(0, len(to_push), MAX_EVENTS_PER_REQUEST):
         try:
             await push_events(node, session, seed_url, to_push[index:index + MAX_EVENTS_PER_REQUEST])
+        except LinkPolicyRefused as exc:
+            # The peer's own text, kept for the SysOp's screens: bounded.
+            exchange.refused_reason = exc.reason_code[:80]
+            if exc.reason_code == REASON_NODE_PROBATIONARY:
+                # The peer's ordinary state for a node it has just met, not a
+                # fault: said once, like probation here (issue #834).
+                _log_once(
+                    node, f"probation-there:{peer_fingerprint}",
+                    "Link: node %s holds this node on probation, so it does not take what this "
+                    "node sends yet. Its SysOp has to establish this node; see Link status.",
+                    peer_fingerprint,
+                )
+            else:
+                _logger.warning("Link sync: could not push events to seed %s: %s", seed_url, exc)
+            return
         except LinkTransportError as exc:
             _logger.warning("Link sync: could not push events to seed %s: %s", seed_url, exc)
             # Deliberately without advancing the offset: the seed
             # received nothing, so the next pass owes it this same
             # stretch, not the one after it.
             return
+    # Only content answers whether the peer takes this node's content: key
+    # transitions pass even a peer's probation, so a push of those alone
+    # leaves the last answer standing.
+    if sending:
+        exchange.refused_reason = None
+        exchange.holds |= own_genesis & {event.content_id for event in sending}
     if wanted is None and resource_events:
         fallback_offsets[peer_fingerprint] = (start + len(sending)) % len(resource_events)
 
@@ -783,6 +847,7 @@ async def _sync_one_seed(
     # leave it unset, and the push below treats that differently from
     # an answered "I need nothing from you."
     wanted: list[str] | None = None
+    declared: frozenset[str] = frozenset()
     # Issue #685: which page of a declaration too large for one request this
     # pass sends, counted per seed so each one is walked through every page.
     page_cursor = node.inventory_page_cursors.get(seed_peer.fingerprint, 0)
@@ -800,6 +865,12 @@ async def _sync_one_seed(
             ),
             paged=descriptor_has_capability(seed_peer.descriptor, INVENTORY_PAGES_CAPABILITY),
             page_cursor=page_cursor,
+        )
+        declared = frozenset(
+            content_id
+            for resources in (inventory_request.boards, inventory_request.channels, inventory_request.file_areas)
+            for content_ids in resources.values()
+            for content_id in content_ids
         )
         events, _more_available, wanted = await request_inventory(
             node, session, seed_url, inventory_request
@@ -823,17 +894,15 @@ async def _sync_one_seed(
                         transport_peer_fingerprint=seed_peer.fingerprint,
                     )
                     if not decision.allowed:
-                        _logger.warning(
-                            "Link sync: rejected inventory event with reason_code=%s",
-                            decision.reason_code,
-                        )
+                        _log_withheld_event(node, event, decision.reason_code)
                         # Set aside rather than downloaded and refused again on
                         # every pass; asked for once more after the retry
                         # interval, which is how an author the SysOp has since
                         # established starts to arrive.
                         waiting_for = referenced_identities(event)
                         node.deferred_events.defer(
-                            event, waiting_for=waiting_for[0] if waiting_for else None, now=time.time()
+                            event, waiting_for=waiting_for[0] if waiting_for else None, now=time.time(),
+                            held_from=_held_from(event),
                         )
                         continue
                 allowed_events.append(event)
@@ -900,7 +969,7 @@ async def _sync_one_seed(
     if peer_state == TrustState.ESTABLISHED:
         await _push_own_events(
             node, session, seed_url, lane, wanted=wanted,
-            peer_fingerprint=seed_peer.fingerprint,
+            peer_fingerprint=seed_peer.fingerprint, declared=declared,
             # A caller with no loop of its own gets a throwaway: a single
             # pass has nothing to rotate against.
             fallback_offsets=fallback_offsets if fallback_offsets is not None else {},
@@ -1588,6 +1657,27 @@ async def _reconcile_own_attestations(node: LinkNode, lane: DatabaseLane) -> Non
         )
 
 
+async def _prune_relay_mailbox(lane: DatabaseLane) -> None:
+    """Drop relay-mailbox envelopes older than `RELAY_MAILBOX_RETENTION_DAYS`
+    (issue #891) and say what went. A WARNING, so it reaches the SysOp's
+    bounded diagnostic log (design doc §13.11): the mail is gone for good,
+    and neither end hears it from this node."""
+    try:
+        dropped = await lane.run(prune_expired_relay_mailbox_envelopes)
+    except sqlite3.Error as exc:
+        _logger.warning("Link relay mailbox: could not drop expired envelopes: %s", exc)
+        return
+    if dropped:
+        _logger.warning(
+            "Link relay mailbox: dropped %d envelope(s) held longer than %d days for %d "
+            "recipient(s) that never collected them: %s",
+            sum(dropped.values()),
+            RELAY_MAILBOX_RETENTION_DAYS,
+            len(dropped),
+            ", ".join(f"{fingerprint} ({count})" for fingerprint, count in sorted(dropped.items())),
+        )
+
+
 async def _forget_retired_attestations(lane: DatabaseLane) -> None:
     """Blank the values of received attestations that have expired (issue #596).
 
@@ -1849,6 +1939,73 @@ def _relay_base_urls_for_peer(node: LinkNode, target_fingerprint: str) -> list[s
     return urls
 
 
+_MAX_EXPLAINED_IN_LOG = 4096
+
+
+def _log_once(node: LinkNode, key: str, message: str, *args: object) -> None:
+    """Log a routine Link state at INFO the first time this process sees it.
+
+    Issue #834: a new node holds every node it meets on probation, and the
+    same held-back content or unreachable relay candidate comes round on every
+    sync pass. Said once, in plain words, it informs the SysOp; repeated, it
+    reads as a fault.
+    """
+    if key in node.explained_in_log:
+        return
+    # Keys name remote subjects, so the set is bounded: past the cap it starts
+    # over, and a subject is at worst explained a second time.
+    if len(node.explained_in_log) >= _MAX_EXPLAINED_IN_LOG:
+        node.explained_in_log.clear()
+    node.explained_in_log.add(key)
+    _logger.info(message, *args)
+
+
+_GENESIS_TYPES = (BoardGenesis, ChannelGenesis, FileAreaGenesis)
+
+
+def _held_from(event: dict) -> str | None:
+    """The node an event refused by trust policy is held back from, for its
+    SysOp's screens (issue #844): its author's node. Unvalidated input, so a
+    shape `event_author` cannot read names nobody."""
+    try:
+        author = event_author(event)
+    except (AttributeError, TypeError):
+        return None
+    return author.node_fingerprint if author is not None else None
+
+
+def _log_withheld_event(node: LinkNode, event: dict, reason_code: str | None) -> None:
+    """Explain an inventory event this node's trust policy held back.
+
+    Probation is the normal state of every identity this node has just met,
+    so it is explained once per subject at INFO. Anything else -- a block or a
+    quarantine the SysOp set -- stays a WARNING naming the reason. Each event
+    is also noted at DEBUG, once per download.
+    """
+    _logger.debug("Link sync: withheld inventory event with reason_code=%s", reason_code)
+    author = event_author(event)
+    if reason_code == REASON_NODE_PROBATIONARY and author is not None:
+        _log_once(
+            node,
+            f"probation:{author.node_fingerprint}",
+            "Link: holding back content from node %s while it is on probation here. "
+            "This is normal for a node yours has just met; see Settings -> Policy trust -> Subjects.",
+            author.node_fingerprint,
+        )
+        return
+    if reason_code == REASON_USER_PROBATIONARY and author is not None:
+        _log_once(
+            node,
+            f"probation:{author.subject_id}",
+            "Link: holding back content from a caller of node %s while that caller is on "
+            "probation here. This is normal for a caller yours has just met; see "
+            "Settings -> Policy trust -> Subjects.",
+            author.node_fingerprint,
+        )
+        return
+    _logger.warning("Link sync: rejected inventory event with reason_code=%s", reason_code)
+
+
 async def _try_addresses_via(base_urls: list[str], attempt: Callable[[str], Awaitable[bool]]) -> bool:
     """Try `attempt(base_url)` for each of `base_urls` in order,
     stopping at the first that returns `True` (design doc §12: "peers
@@ -2009,14 +2166,30 @@ async def _request_one_relay_consent(
                 decide_node_action, relay_fingerprint, LinkPolicyAction.RELAY
             )
             if not decision.allowed:
-                _logger.info(
-                    "Link sync: relay candidate %s rejected by policy (%s)",
-                    relay_fingerprint,
-                    decision.reason_code,
-                )
+                if decision.reason_code == REASON_NODE_PROBATIONARY:
+                    _log_once(
+                        node,
+                        f"relay-probation:{relay_fingerprint}",
+                        "Link: not asking node %s to relay for yours while it is on probation here",
+                        relay_fingerprint,
+                    )
+                else:
+                    _logger.info(
+                        "Link sync: relay candidate %s rejected by policy (%s)",
+                        relay_fingerprint,
+                        decision.reason_code,
+                    )
                 return False
         response = await request_relay_consent(node, session, base_url, relay_fingerprint, lane)
-    except (LinkTransportError, LinkProtocolError) as exc:
+    except LinkTransportError as exc:
+        # Issue #834: one address of several failing is routine, and the
+        # candidate as a whole is summarised by `_maintain_relay_selection`.
+        _logger.debug(
+            "Link sync: relay consent request to %s (%s) failed: %s", relay_fingerprint, base_url, exc
+        )
+        return False
+    except LinkProtocolError as exc:
+        # A reply that fails verification is not a network hiccup.
         _logger.warning(
             "Link sync: relay consent request to %s (%s) failed: %s", relay_fingerprint, base_url, exc
         )
@@ -2116,6 +2289,15 @@ async def _maintain_relay_selection(
         # candidate kept the neutral score of one never tried, and an
         # unreachable one was asked every pass ahead of a relay that works.
         await lane.run(record_dial_outcome, candidate_fingerprint, succeeded=candidate_fingerprint in reached)
+        if candidate_fingerprint not in reached:
+            _log_once(
+                node,
+                f"relay-unreached:{candidate_fingerprint}",
+                "Link: could not reach relay candidate %s at %d address(es); "
+                "other candidates are tried, and it is asked again later",
+                candidate_fingerprint,
+                len(base_urls),
+            )
         if granted:
             needed -= 1
             declines.pop(candidate_fingerprint, None)
@@ -2235,7 +2417,7 @@ async def _pickup_relay_mail(
                     lane, node, accepted, sender_fingerprint=claimed_sender,
                     max_carried_boards=None, max_carried_channels=None,
                     max_carried_file_areas=None, max_remote_files_per_area=None,
-                    enforce_trust_policy=enforce_trust_policy,
+                    enforce_trust_policy=enforce_trust_policy, mail_via=VIA_RELAY,
                 )
                 # Mail a relay held for us, possibly for days: the sender's
                 # record grows, but this node has not heard from it (#766).
@@ -2272,6 +2454,36 @@ async def _push_one(node: LinkNode, session: ClientSession, base_url: str, event
         return False
 
 
+async def _push_mail_one(
+    node: LinkNode, session: ClientSession, base_url: str, message: LinkMessage, refusals: list[str],
+) -> bool:
+    """`_push_one` for one outbound `link_message`, except that a
+    trust-policy refusal's reason code lands in `refusals` (issue #804).
+
+    The refusal still counts as a failed attempt here, so the next address
+    and the relays are tried: the 403 is unsigned, and a stale address now
+    answered by some other node would refuse this node the same way. Only
+    when no route took the message is the refusal recorded as a bounce."""
+    try:
+        await push_events(node, session, base_url, [message])
+        return True
+    except LinkPolicyRefused as exc:
+        refusals.append(exc.reason_code)
+        return False
+    except LinkTransportError:
+        return False
+
+
+def _wake_mail_for_established_targets(db: Database) -> None:
+    """Make mail held back by this node's own trust policy due now for
+    every target the policy allows again -- a peer the SysOp established,
+    or one that graduated -- rather than leaving it to a back-off that can
+    be six hours long (issue #804)."""
+    for target in targets_held_by(db, error=POLICY_REFUSED_TARGET_ERROR):
+        if decide_node_action(db, target, LinkPolicyAction.LINK_MAIL).allowed:
+            wake_work_items_for_target(db, target, error=POLICY_REFUSED_TARGET_ERROR)
+
+
 async def _push_pending_link_mail(
     node: LinkNode, session: ClientSession, lane: DatabaseLane,
     *, enforce_trust_policy: bool = False,
@@ -2284,7 +2496,18 @@ async def _push_pending_link_mail(
     yet due (still backing off after an earlier failure) is simply not
     returned by `load_due_work_items` this pass; it'll be picked up
     again once `next_attempt_at` has passed.
+
+    First, mail left at a relay that has gone unanswered too long expires
+    (issue #874): a relay deposit ends the delivery work item, so nothing
+    else would ever give up on it.
     """
+    expired = await lane.run(expire_unanswered_relay_mail)
+    if expired:
+        _logger.info(
+            "Link sync: %d letter(s) left at a relay got no answer in time; their senders are told", expired
+        )
+    if enforce_trust_policy:
+        await lane.run(_wake_mail_for_established_targets)
     for work_item in await lane.run(load_due_work_items, kind=KIND_LINK_MAIL_DELIVERY):
         result = await lane.run(get_link_message_for_delivery, work_item.reference_id)
         if result is None:
@@ -2326,12 +2549,27 @@ async def _push_pending_link_mail(
         if enforce_trust_policy and not (await lane.run(
             decide_node_action, target_fingerprint, LinkPolicyAction.LINK_MAIL
         )).allowed:
-            await lane.run(record_failure, work_item, error="link policy refused target")
+            # The compose screen refuses such a target at its To prompt
+            # (issue #804); mail still gets here when it was queued before
+            # the peer lost standing. It expires like undeliverable mail.
+            updated = await lane.run(record_failure, work_item, error=POLICY_REFUSED_TARGET_ERROR)
+            if updated.status == "dead_lettered":
+                await lane.run(
+                    expire_link_message_delivery, work_item.reference_id, reason=EXPIRED_BY_OWN_POLICY
+                )
+                _logger.warning(
+                    "Link sync: dead-lettered mail to %s, which this node's trust policy still refuses",
+                    target_fingerprint,
+                )
             continue
         base_urls = _dialable_addresses_for_peer(node, target_fingerprint)
         delivered = False
+        via_relay = False
+        refusals: list[str] = []
         if base_urls:
-            delivered = await _try_addresses_via(base_urls, lambda url: _push_one(node, session, url, [message]))
+            delivered = await _try_addresses_via(
+                base_urls, lambda url: _push_mail_one(node, session, url, message, refusals)
+            )
         if not delivered:
             # Issue #58 (issue #94: the acknowledgement loop below now
             # gets the identical fallback, no longer only this one):
@@ -2339,12 +2577,28 @@ async def _push_pending_link_mail(
             # directly-dialable or genuinely outgoing-only.
             relay_urls = _relay_base_urls_for_peer(node, target_fingerprint)
             if relay_urls:
-                delivered = await _try_addresses_via(
+                delivered = via_relay = await _try_addresses_via(
                     relay_urls, lambda url: _deposit_one(session, url, target_fingerprint, message)
                 )
 
         if delivered:
+            if via_relay:
+                # The relay is not the recipient: the letter stays pending,
+                # shown as with a relay, until an answer comes or it times
+                # out (issue #874).
+                await lane.run(record_relay_handoff, work_item.reference_id)
             await lane.run(record_success, work_item)
+        elif refusals:
+            # The recipient's node heard the message and its trust policy
+            # refused it, and no other route took it (issue #804): a final
+            # answer, recorded as a bounce rather than retried until the
+            # item dead-letters.
+            await lane.run(record_link_message_refused, work_item.reference_id, refusals[0])
+            await lane.run(record_success, work_item)
+            _logger.info(
+                "Link sync: %s refused mail from this node (%s); recorded as bounced",
+                target_fingerprint, refusals[0],
+            )
         else:
             updated = await lane.run(
                 record_failure, work_item, error="could not push on any known or relayed address"
@@ -2363,11 +2617,17 @@ async def _push_pending_link_mail(
             continue
 
         target_fingerprint = work_item.target_fingerprint
-        if enforce_trust_policy and not (await lane.run(
-            decide_node_action, target_fingerprint, LinkPolicyAction.LINK_MAIL
-        )).allowed:
-            await lane.run(record_failure, work_item, error="link policy refused target")
-            continue
+        if enforce_trust_policy:
+            decision = await lane.run(decide_node_action, target_fingerprint, LinkPolicyAction.LINK_MAIL)
+            # A bounce answers mail a peer on probation here sent by way of
+            # a relay (issue #804); it carries no content, so it goes back
+            # even though mail to that peer does not.
+            answers_probation = (
+                isinstance(ack, LinkMessageBounced) and decision.state == TrustState.PROBATIONARY
+            )
+            if not decision.allowed and not answers_probation:
+                await lane.run(record_failure, work_item, error=POLICY_REFUSED_TARGET_ERROR)
+                continue
         base_urls = _dialable_addresses_for_peer(node, target_fingerprint)
         delivered = False
         if base_urls:

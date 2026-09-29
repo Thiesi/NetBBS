@@ -15,6 +15,7 @@ writing, deleting, and (issue #158) pruning stale ones in bulk.
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from dataclasses import dataclass, field
@@ -75,7 +76,9 @@ def prune_stale_drafts(
     db: Database, *, dry_run: bool = True, min_age_seconds: float = _DEFAULT_MIN_AGE_SECONDS
 ) -> DraftPruneReport:
     """Deletes every `*.draft` file in `drafts_directory(db)` older
-    than `min_age_seconds` (by mtime), unless `dry_run` (the default).
+    than `min_age_seconds` (by mtime), unless `dry_run` (the default),
+    with the fields file kept beside it (issue #814); a fields file left
+    without its draft is judged and counted on its own.
 
     Deliberately does not distinguish which caller wrote a given draft
     (a new-post draft, an edit-in-progress draft, a bio draft) -- every
@@ -93,7 +96,10 @@ def prune_stale_drafts(
     stale_bytes = 0
     skipped_recent = 0
     errors: list[str] = []
-    for path in directory.glob("*.draft"):
+    # A draft's fields (issue #814) go with it; only a fields file whose
+    # draft is gone is judged on its own.
+    orphan_fields = [path for path in directory.glob(f"*{_FIELDS_SUFFIX}") if not path.with_suffix(".draft").exists()]
+    for path in [*directory.glob("*.draft"), *orphan_fields]:
         try:
             stat = path.stat()
         except OSError as exc:
@@ -111,6 +117,9 @@ def prune_stale_drafts(
                 errors.append(f"{path}: {exc}")
                 stale_files -= 1
                 stale_bytes -= stat.st_size
+                continue
+            if path.suffix == ".draft":
+                delete_draft_fields(path)
     return DraftPruneReport(
         dry_run=dry_run, stale_files=stale_files, stale_bytes=stale_bytes,
         skipped_recent=skipped_recent, errors=errors,
@@ -133,6 +142,44 @@ def delete_draft(path: Path) -> None:
         path.unlink(missing_ok=True)
     except OSError:
         _logger.warning("could not delete draft at %s", path, exc_info=True)
+
+
+# Beside a draft, what it is for (issue #814): a letter's To and Subject.
+# The editors only ever write the text, so the rest lives next to it.
+_FIELDS_SUFFIX = ".fields"
+
+
+def _fields_path(draft_path: Path) -> Path:
+    return draft_path.with_suffix(_FIELDS_SUFFIX)
+
+
+def save_draft_fields(draft_path: Path, fields: dict[str, str | None]) -> None:
+    """Keep `fields` beside the draft at `draft_path` -- what the text is
+    for, which an editor's autosave cannot know. Permission-tolerant like
+    `save_draft`."""
+    try:
+        _fields_path(draft_path).write_text(json.dumps(fields), encoding="utf-8")
+    except OSError:
+        _logger.warning("could not write draft fields beside %s", draft_path, exc_info=True)
+
+
+def load_draft_fields(draft_path: Path) -> dict[str, str | None]:
+    """The fields kept beside `draft_path`, or `{}` when there are none or
+    they cannot be read -- a draft from before #814 has only its text."""
+    try:
+        loaded = json.loads(_fields_path(draft_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(loaded, dict):
+        return {}
+    return {str(key): value for key, value in loaded.items() if value is None or isinstance(value, str)}
+
+
+def delete_draft_fields(draft_path: Path) -> None:
+    try:
+        _fields_path(draft_path).unlink(missing_ok=True)
+    except OSError:
+        _logger.warning("could not delete draft fields beside %s", draft_path, exc_info=True)
 
 
 async def offer_draft_recovery(session: Session) -> bool:

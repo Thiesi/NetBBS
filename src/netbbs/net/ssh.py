@@ -43,15 +43,26 @@ from netbbs.auth.users import (
     MIN_REGISTRATION_PASSWORD_LENGTH,
     NEW_ACCOUNT_SENTINEL,
     AuthError,
+    PendingApprovalError,
     authenticate_password_async,
     authorize_public_key,
     create_user_async,
+    self_service_username_problem,
 )
+from netbbs.auth.signup_answers import get_registration_question, save_signup_answer
 from netbbs.config import RegistrationMode, get_registration_mode
 from netbbs.net import char_input
 from netbbs.net.new_account_banner_after import load_new_account_banner_after
 from netbbs.net.new_account_banner_before import load_new_account_banner_before
-from netbbs.net.session import Session, SessionClosedError, clamp_terminal_size, wait_until_drained
+from netbbs.net.session import (
+    CLIENT_DISCONNECT_ERRORS,
+    Session,
+    SessionClosedError,
+    clamp_terminal_size,
+    wait_until_drained,
+)
+from netbbs.net.signup_text import pending_approval_notice, username_problem_line
+from netbbs.staff import approvers_away_line
 from netbbs.net.throttle import LoginThrottle
 from netbbs.net.welcome_banner import load_welcome_banner
 from netbbs.rendering import strip_ansi
@@ -59,6 +70,11 @@ from netbbs.rendering.pipe_codes import PastedColor
 from netbbs.storage.database import Database
 
 _logger = logging.getLogger(__name__)
+
+# How many names a caller may try at the kbdint "Desired username" prompt
+# before the attempt ends (issue #835) -- the same three tries Telnet/web
+# signup gives (`netbbs.net.login_flow._REGISTRATION_MAX_ATTEMPTS`).
+_REGISTRATION_USERNAME_TRIES = 3
 
 # Bound on `SSHServer.stop()` waiting for already-admitted connections to
 # drop on their own before it aborts them. Same number as
@@ -165,7 +181,7 @@ class SSHSession(Session):
         try:
             self._process.stdout.write(data)
             await self._process.stdout.drain()
-        except (BrokenPipeError, ConnectionResetError) as exc:
+        except (*CLIENT_DISCONNECT_ERRORS, asyncssh.DisconnectError) as exc:
             raise SessionClosedError("client disconnected during write") from exc
 
     async def _send_raw(self, data: bytes) -> None:
@@ -176,7 +192,7 @@ class SSHSession(Session):
         try:
             self._process.stdout.write(data)
             await self._process.stdout.drain()
-        except (BrokenPipeError, ConnectionResetError) as exc:
+        except (*CLIENT_DISCONNECT_ERRORS, asyncssh.DisconnectError) as exc:
             raise SessionClosedError("client disconnected during write") from exc
 
     async def read_line(
@@ -225,6 +241,9 @@ class SSHSession(Session):
     async def discard_buffered_input(self) -> None:
         await char_input.discard_buffered_input(self)
 
+    def arm_word_guard(self) -> None:
+        char_input.arm_word_guard(self)
+
     async def close(self) -> None:
         self._process.exit(0)
 
@@ -248,7 +267,7 @@ class SSHSession(Session):
             return None
         except asyncssh.BreakReceived:
             return None
-        except asyncssh.ConnectionLost as exc:
+        except (asyncssh.DisconnectError, *CLIENT_DISCONNECT_ERRORS) as exc:
             raise SessionClosedError("client disconnected during read") from exc
 
         if not data:
@@ -263,7 +282,7 @@ class SSHSession(Session):
             data = await asyncio.wait_for(self._process.stdin.read(1), timeout=timeout)
         except asyncio.TimeoutError:
             return None
-        except (asyncssh.TerminalSizeChanged, asyncssh.BreakReceived, asyncssh.ConnectionLost):
+        except (asyncssh.TerminalSizeChanged, asyncssh.BreakReceived, asyncssh.DisconnectError, *CLIENT_DISCONNECT_ERRORS):
             return None
         if not data:
             return None
@@ -318,6 +337,8 @@ class _NetBBSSSHServer(asyncssh.SSHServer):
         self._registration_step: str | None = None
         self._registration_username: str = ""
         self._registration_password: str = ""
+        self._registration_username_tries = 0
+        self._registration_question: str | None = None
         # Caps registration to exactly one attempt per connection (see
         # get_kbdint_challenge below). Without this, asyncssh's client-
         # side auth loop re-offers keyboard-interactive again after
@@ -427,6 +448,15 @@ class _NetBBSSSHServer(asyncssh.SSHServer):
             return False
         try:
             await authenticate_password_async(self._db, username, password)
+        except PendingApprovalError as exc:
+            # The password was right (issue #835). A bare "Permission
+            # denied" made the caller think they had mistyped it; an auth
+            # banner is the one thing SSH can show before auth succeeds.
+            if self._conn is not None:
+                self._conn.send_auth_banner(
+                    pending_approval_notice(exc.username, approvers_away_line(self._db)) + "\r\n"
+                )
+            return False
         except AuthError:
             return False
         return True
@@ -542,6 +572,25 @@ class _NetBBSSSHServer(asyncssh.SSHServer):
             candidate = responses[0].strip()
             if not candidate:
                 return await self._finish_registration("Cancelled: no username given.")
+            # Spent here, before the name is checked (issue #835):
+            # saying a name is taken must cost what creating the account
+            # used to. See `login_flow._register_new_account`.
+            if self._throttle is not None and not self._throttle.allow_attempt(
+                source=self._peer_address, username=candidate
+            ):
+                return await self._finish_registration(
+                    "Too many registration attempts. Please try again later."
+                )
+            # Refused before the password prompts (issue #835), and asked
+            # again in place, the way Telnet/web signup retries.
+            problem = self_service_username_problem(self._db, candidate)
+            if problem is not None:
+                self._registration_username_tries += 1
+                if self._registration_username_tries >= _REGISTRATION_USERNAME_TRIES:
+                    return await self._finish_registration(
+                        f"{username_problem_line(problem)} Reconnect to try again."
+                    )
+                return ("", username_problem_line(problem), "", [("Desired username: ", True)])
             self._registration_username = candidate
             self._registration_step = "password"
             return (
@@ -554,6 +603,8 @@ class _NetBBSSSHServer(asyncssh.SSHServer):
             return ("", "", "", [("Confirm password: ", False)])
         if step == "confirm":
             return await self._complete_registration(responses[0])
+        if step == "answer":
+            return await self._create_registered_account(responses[0] if responses else "")
         # step in (None, "done"): no registration in progress, or the
         # message-only round from _finish_registration already ran --
         # either way, fail the auth attempt outright.
@@ -573,18 +624,44 @@ class _NetBBSSSHServer(asyncssh.SSHServer):
             )
         if password != confirm:
             return await self._finish_registration("Passwords did not match. Reconnect to try again.")
-        if self._throttle is not None and not self._throttle.allow_attempt(
-            source=self._peer_address, username=username
-        ):
-            return await self._finish_registration(
-                "Too many registration attempts. Please try again later."
-            )
+        # Asked again: the name may have been taken while the caller typed
+        # passwords. See `login_flow._register_new_account`.
+        problem = self_service_username_problem(self._db, username)
+        if problem is not None:
+            return await self._finish_registration(f"{username_problem_line(problem)} Reconnect to try again.")
+
+        # Issue #835 (F072): the SysOp's optional question, one more kbdint
+        # round, asked only when an approver will read the answer. See
+        # `login_flow._register_new_account`.
+        if get_registration_mode(self._db) == RegistrationMode.APPROVAL_REQUIRED:
+            question = get_registration_question(self._db)
+            if question is not None:
+                self._registration_question = question
+                self._registration_step = "answer"
+                return (
+                    "", f"The SysOp asks: {strip_ansi(question)}", "",
+                    [("Your answer (optional, Enter to skip): ", True)],
+                )
+        return await self._create_registered_account("")
+
+    async def _create_registered_account(
+        self, answer: str
+    ) -> tuple[str, str, str, list[tuple[str, bool]]]:
+        username = self._registration_username
+        password = self._registration_password
+        question = self._registration_question
+        self._registration_step = None
+        self._registration_question = None
 
         require_approval = get_registration_mode(self._db) == RegistrationMode.APPROVAL_REQUIRED
         try:
-            await create_user_async(self._db, username, password=password, pending_approval=require_approval)
+            new_user = await create_user_async(
+                self._db, username, password=password, pending_approval=require_approval
+            )
         except AuthError as exc:
             return await self._finish_registration(f"Could not create account: {exc}")
+        if question is not None:
+            save_signup_answer(self._db, new_user.id, question=question, answer=answer)
 
         # GitHub issue #177's own "after" banner -- covers both successful
         # outcomes below (immediate vs. pending-approval), matching
@@ -601,8 +678,8 @@ class _NetBBSSSHServer(asyncssh.SSHServer):
         after_prefix = f"{after_banner}\r\n" if after_banner else ""
         if require_approval:
             return await self._finish_registration(
-                f"{after_prefix}Account {username!r} created. A SysOp must approve it before you can log "
-                "in. Reconnect once approved."
+                f"{after_prefix}Account {username!r} created. "
+                f"{pending_approval_notice(username, approvers_away_line(self._db))}"
             )
         return await self._finish_registration(
             f"{after_prefix}Account {username!r} created. Reconnect as {username!r} to log in."
@@ -735,7 +812,10 @@ class SSHServer:
         try:
             await self._session_handler(session)
         except SessionClosedError:
-            pass  # client disconnected mid-session — expected, not an error
+            # A caller hanging up is routine: one INFO line, no traceback.
+            # Only the session's own boundaries produce this; a raw socket
+            # error from anything else in the session is a real error.
+            _logger.info("SSH caller %s disconnected", session.peer_address or "?")
         except Exception:
             _logger.exception("unhandled error in SSH session handler")
         finally:

@@ -35,6 +35,11 @@ where that happens). `deposit_relay_mailbox_envelope` only checks the
 can't validate, but a payload whose fields it can at least parse), so
 it isn't storing arbitrary non-Link garbage.
 
+Held envelopes are bounded in time as well as in number (issue #891):
+anything not collected within `RELAY_MAILBOX_RETENTION_DAYS` is dropped by
+`prune_expired_relay_mailbox_envelopes`, which `netbbs.link.sync` runs once
+per pass.
+
 Plain, synchronous, `db`-first functions dispatched via `DatabaseLane.
 run`, same convention as `netbbs.link.store`/`netbbs.link.reliability`.
 """
@@ -42,6 +47,8 @@ run`, same convention as `netbbs.link.store`/`netbbs.link.reliability`.
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 
 from netbbs.link.events import (
     LINK_MESSAGE_ACCEPTED_OBJECT_TYPE,
@@ -52,7 +59,7 @@ from netbbs.link.events import (
     LinkMessageBounced,
 )
 from netbbs.storage.database import Database
-from netbbs.timeutil import utc_now_iso
+from netbbs.timeutil import utc_iso, utc_now_iso
 
 RelayableEnvelope = LinkMessage | LinkMessageAccepted | LinkMessageBounced
 
@@ -66,6 +73,20 @@ _ENVELOPE_TYPES_BY_OBJECT_TYPE: dict[str, type[RelayableEnvelope]] = {
 # per-recipient, so one recipient's abandoned/never-collected mail can't
 # starve every other recipient this node also relays for.
 MAX_MAILBOX_ENVELOPES_PER_RECIPIENT = 50
+
+# Issue #891 (design doc §8.5): how long an envelope may wait here for its
+# recipient to collect it. Without a limit, a recipient node that never
+# comes back -- retired, reinstalled under a new key, gone -- held its
+# `MAX_MAILBOX_ENVELOPES_PER_RECIPIENT` slots forever and every later
+# deposit for it was refused. Dropping an expired envelope is silent toward
+# both ends: the relay can neither read nor sign anything for the recipient,
+# and the sender learns of the loss from its own timeout on relay handoffs
+# (issue #874, 14 days after the handoff). This has to stay comfortably
+# longer than that timeout, so a letter the sender has not yet given up on
+# is never the one dropped here -- which is why it is a constant, not a
+# SysOp setting like `max_relay_clients`: a relay set to a week would turn
+# the sender's "may not have arrived" into "certainly did not".
+RELAY_MAILBOX_RETENTION_DAYS = 30
 
 
 class RelayMailboxFullError(Exception):
@@ -111,7 +132,7 @@ def deposit_relay_mailbox_envelope(
     # node identified by `payload.recipient_node_fingerprint` (the
     # original message's recipient, now acknowledging it). Diagnostic
     # bookkeeping only (this module never verifies either), but worth
-    # getting right for the same reason `mailbox_sizes` exists at all:
+    # getting right for the same reason `mailbox_holdings` exists at all:
     # a SysOp reading this later shouldn't see "unknown" for every ack.
     if object_type == LINK_MESSAGE_OBJECT_TYPE:
         sender_fingerprint = message.payload.get("sender", {}).get("home_node_fingerprint", "unknown")
@@ -136,21 +157,62 @@ def deposit_relay_mailbox_envelope(
     db.connection.commit()
 
 
-def mailbox_sizes(db: Database) -> dict[str, int]:
+@dataclass(frozen=True)
+class RelayMailboxHolding:
+    """What this relay holds for one recipient: how many envelopes, and when
+    the oldest of them was deposited (`utc_now_iso` form)."""
+
+    recipient_fingerprint: str
+    count: int
+    oldest_received_at: str
+
+
+def mailbox_holdings(db: Database) -> list[RelayMailboxHolding]:
     """
-    recipient_fingerprint -> count of envelopes currently held for them,
-    across every recipient this relay is holding mail for. A
-    non-destructive peek, unlike `pickup_relay_mailbox_envelopes` below
-    (which reads *and deletes*) -- issue #60's SysOp Link-status screen
-    is the only caller, and status visibility must never itself empty
-    the mailbox it's reporting on.
+    Every recipient this relay is holding mail for, with its count and
+    oldest deposit, oldest first -- the recipient closest to losing mail to
+    `RELAY_MAILBOX_RETENTION_DAYS` leads. A non-destructive peek, unlike
+    `pickup_relay_mailbox_envelopes` below (which reads *and deletes*) --
+    the SysOp Link-status screen (issues #60, #891) is the only caller, and
+    status visibility must never itself empty the mailbox it's reporting on.
     """
-    return {
+    return [
+        RelayMailboxHolding(row["recipient_fingerprint"], row["n"], row["oldest"])
+        for row in db.connection.execute(
+            "SELECT recipient_fingerprint, COUNT(*) AS n, MIN(received_at) AS oldest "
+            "FROM link_relay_mailbox GROUP BY recipient_fingerprint ORDER BY oldest, recipient_fingerprint"
+        )
+    ]
+
+
+def prune_expired_relay_mailbox_envelopes(db: Database, *, now: datetime | None = None) -> dict[str, int]:
+    """
+    Delete every envelope deposited more than `RELAY_MAILBOX_RETENTION_DAYS`
+    ago, whatever its type -- an acknowledgement (`link_message_accepted`/
+    `_bounced`) left for a node that never collects it is as abandoned as a
+    letter. Returns recipient_fingerprint -> how many were dropped for it,
+    empty when nothing had expired, so the caller can say what went.
+
+    Cheap enough to run every sync pass: the table is bounded by
+    `MAX_MAILBOX_ENVELOPES_PER_RECIPIENT` per recipient, and on the usual
+    pass nothing has expired and nothing is written. `received_at` is always
+    this node's own `utc_now_iso()`, so comparing it as text against a
+    cutoff in the same form orders correctly.
+    """
+    moment = now or datetime.now(timezone.utc)
+    cutoff = utc_iso(moment - timedelta(days=RELAY_MAILBOX_RETENTION_DAYS))
+    dropped = {
         row["recipient_fingerprint"]: row["n"]
         for row in db.connection.execute(
-            "SELECT recipient_fingerprint, COUNT(*) AS n FROM link_relay_mailbox GROUP BY recipient_fingerprint"
+            "SELECT recipient_fingerprint, COUNT(*) AS n FROM link_relay_mailbox "
+            "WHERE received_at < ? GROUP BY recipient_fingerprint",
+            (cutoff,),
         )
     }
+    if dropped:
+        db.connection.execute("DELETE FROM link_relay_mailbox WHERE received_at < ?", (cutoff,))
+        db.connection.commit()
+    return dropped
 
 
 def pickup_relay_mailbox_envelopes(db: Database, recipient_fingerprint: str) -> list[RelayableEnvelope]:

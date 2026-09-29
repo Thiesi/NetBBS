@@ -3443,4 +3443,290 @@ MIGRATIONS = [
         );
         """,
     ),
+    Migration(
+        description=(
+            "Issue #835: `signup_answers` -- a caller's answer to the SysOp's optional signup "
+            "question, kept on the pending account for the approver and deleted on approval. "
+            "The question is stored beside it, since the SysOp may reword it later. Goes "
+            "with the account (ON DELETE CASCADE), so declining a signup removes it too."
+        ),
+        sql="""
+        CREATE TABLE signup_answers (
+            user_id     INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+            question    TEXT NOT NULL,
+            answer      TEXT NOT NULL,
+            answered_at TEXT NOT NULL
+        );
+        """,
+    ),
+    Migration(
+        description=(
+            "Issue #838: `position` on communities -- the SysOp's order, which the Communities "
+            "list follows. Existing Communities keep today's alphabetical (case-insensitive) order."
+        ),
+        sql="""
+        ALTER TABLE communities ADD COLUMN position INTEGER NOT NULL DEFAULT 0;
+        UPDATE communities SET position = (
+            SELECT COUNT(*) FROM communities other
+            WHERE other.name COLLATE NOCASE < communities.name COLLATE NOCASE
+               OR (other.name COLLATE NOCASE = communities.name COLLATE NOCASE AND other.name < communities.name)
+        );
+        """,
+    ),
+    Migration(
+        description=(
+            "Issue #839: `position` on boards and file_areas -- the SysOp's order, which caller "
+            "lists now follow by default instead of re-sorting by activity on every visit. "
+            "Existing rows keep the order they were created in; a trigger puts every new row, "
+            "local or carried over the Link, last. user_sort_preferences is rebuilt so its "
+            "CHECK accepts the new 'sysop' sort mode (nothing references that table)."
+        ),
+        sql="""
+        ALTER TABLE boards ADD COLUMN position INTEGER NOT NULL DEFAULT 0;
+        UPDATE boards SET position = (SELECT COUNT(*) FROM boards other WHERE other.id <= boards.id);
+        CREATE TRIGGER boards_position_last AFTER INSERT ON boards
+        BEGIN
+            UPDATE boards SET position = (SELECT COALESCE(MAX(position), 0) + 1 FROM boards WHERE id != NEW.id)
+            WHERE id = NEW.id;
+        END;
+
+        ALTER TABLE file_areas ADD COLUMN position INTEGER NOT NULL DEFAULT 0;
+        UPDATE file_areas SET position = (SELECT COUNT(*) FROM file_areas other WHERE other.id <= file_areas.id);
+        CREATE TRIGGER file_areas_position_last AFTER INSERT ON file_areas
+        BEGIN
+            UPDATE file_areas SET position = (SELECT COALESCE(MAX(position), 0) + 1 FROM file_areas WHERE id != NEW.id)
+            WHERE id = NEW.id;
+        END;
+
+        CREATE TABLE user_sort_preferences_new (
+            id             INTEGER PRIMARY KEY,
+            user_id        INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            resource_kind  TEXT NOT NULL CHECK (resource_kind IN ('channel', 'board', 'file_area')),
+            community_id   INTEGER REFERENCES communities(id),
+            category_id    INTEGER,
+            sort_mode      TEXT NOT NULL CHECK (sort_mode IN ('sysop', 'activity', 'alphabetical', 'recent', 'volume')),
+            created_at     TEXT NOT NULL,
+            CHECK (community_id IS NULL OR category_id IS NULL)
+        );
+        INSERT INTO user_sort_preferences_new
+            (id, user_id, resource_kind, community_id, category_id, sort_mode, created_at)
+        SELECT id, user_id, resource_kind, community_id, category_id, sort_mode, created_at
+        FROM user_sort_preferences;
+        DROP TABLE user_sort_preferences;
+        ALTER TABLE user_sort_preferences_new RENAME TO user_sort_preferences;
+        CREATE UNIQUE INDEX idx_user_sort_preferences_global
+            ON user_sort_preferences(user_id, resource_kind)
+            WHERE community_id IS NULL AND category_id IS NULL;
+        CREATE UNIQUE INDEX idx_user_sort_preferences_community
+            ON user_sort_preferences(user_id, resource_kind, community_id)
+            WHERE community_id IS NOT NULL;
+        CREATE UNIQUE INDEX idx_user_sort_preferences_category
+            ON user_sort_preferences(user_id, resource_kind, category_id)
+            WHERE category_id IS NOT NULL;
+        """,
+    ),
+    Migration(
+        description=(
+            "Issue #836: `users.staff_permissions` -- the staff permissions a SysOp gives an "
+            "account below 255 (approve accounts, manage accounts, moderate everything; design "
+            "doc §5.6), as a bitmask. 0 for every existing account, so nothing changes on upgrade."
+        ),
+        sql="""
+        ALTER TABLE users ADD COLUMN staff_permissions INTEGER NOT NULL DEFAULT 0;
+        """,
+    ),
+    Migration(
+        description=(
+            "Issue #836: `staff_away` -- a SysOp's or staff member's away notice (design doc "
+            "§5.6): one line of plain text, when it was set, and an optional node-local return "
+            "date after which it stops showing. One per person; goes with the account."
+        ),
+        sql="""
+        CREATE TABLE staff_away (
+            user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+            message TEXT NOT NULL,
+            since   TEXT NOT NULL,
+            until   TEXT
+        );
+        """,
+    ),
+    Migration(
+        description=(
+            "Issue #806: why Link mail was not delivered, and whether its sender has been told. "
+            "`link_delivery_reason` keeps the recipient node's bounce reason (a signed bounce's "
+            "reason, or the `link_policy_*` code of its trust-policy refusal); "
+            "`link_delivery_notice_pending` is 1 from the moment a sent message bounces or expires "
+            "until its sender has been told, at the main menu or in Sent. Mail that bounced "
+            "before this migration is not flagged."
+        ),
+        sql="""
+        ALTER TABLE mail_messages ADD COLUMN link_delivery_reason TEXT;
+        ALTER TABLE mail_messages ADD COLUMN link_delivery_notice_pending INTEGER NOT NULL DEFAULT 0;
+        CREATE INDEX idx_mail_messages_link_delivery_notice
+            ON mail_messages(sender_user_id)
+            WHERE link_delivery_notice_pending = 1;
+        """,
+    ),
+    Migration(
+        description=(
+            "Issue #819: `mail_messages.from_system` -- 1 for mail the BBS itself sent (a "
+            "moderation rejection), which has no sender account (`sender_user_id` NULL). The "
+            "flag, not the stored label, is what the mailbox shows as the system and what "
+            "refuses a reply, so no account name can pass for it. 0 for every existing row: "
+            "rejection mail sent before this came from the moderator's account and stays so."
+        ),
+        sql="""
+        ALTER TABLE mail_messages ADD COLUMN from_system INTEGER NOT NULL DEFAULT 0
+            CHECK (from_system IN (0, 1));
+        """,
+    ),
+    Migration(
+        description=(
+            "Issue #820: `link_mail_refusals` -- the Link mail this node refused (trust policy, "
+            "or a delivery bounce), for the SysOp console: the sender's home node and user name, "
+            "the reason, how it arrived, when, and how often. One row per letter "
+            "(`message_content_id`), bounded by `netbbs.link.mail_refusals`. Never the recipient, "
+            "subject or body. Empty on upgrade: refusals before it were not kept."
+        ),
+        sql="""
+        CREATE TABLE link_mail_refusals (
+            id                      INTEGER PRIMARY KEY,
+            message_content_id      TEXT NOT NULL UNIQUE,
+            sender_node_fingerprint TEXT NOT NULL,
+            sender_user             TEXT,
+            reason                  TEXT NOT NULL,
+            via                     TEXT NOT NULL CHECK (via IN ('direct', 'relay')),
+            first_refused_at        TEXT NOT NULL,
+            last_refused_at         TEXT NOT NULL,
+            attempts                INTEGER NOT NULL DEFAULT 1
+        );
+        CREATE INDEX idx_link_mail_refusals_last ON link_mail_refusals(last_refused_at);
+        """,
+    ),
+    Migration(
+        description=(
+            "Issue #817: `mail_blocks` -- the senders an account refuses mail from. A row names "
+            "either a local account (`blocked_user_id`, so the block survives a rename) or a "
+            "Link sender by its `user@<home-node-fingerprint>` address (never by the node's "
+            "display name, which can change). Both sides go with their account: deleting the "
+            "blocker or the blocked local account removes the row."
+        ),
+        sql="""
+        CREATE TABLE mail_blocks (
+            id               INTEGER PRIMARY KEY,
+            user_id          INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            blocked_user_id  INTEGER REFERENCES users(id) ON DELETE CASCADE,
+            blocked_address  TEXT COLLATE NOCASE,
+            created_at       TEXT NOT NULL,
+            CHECK ((blocked_user_id IS NULL) != (blocked_address IS NULL))
+        );
+        CREATE UNIQUE INDEX idx_mail_blocks_local
+            ON mail_blocks(user_id, blocked_user_id) WHERE blocked_user_id IS NOT NULL;
+        CREATE UNIQUE INDEX idx_mail_blocks_link
+            ON mail_blocks(user_id, blocked_address) WHERE blocked_address IS NOT NULL;
+        CREATE INDEX idx_mail_blocks_blocked_user ON mail_blocks(blocked_user_id);
+        """,
+    ),
+    Migration(
+        description=(
+            "Issue #818: deleting an account no longer deletes the Sent copies of the mail it "
+            "received. `mail_messages` is rebuilt (SQLite cannot change a foreign key in place; "
+            "the same child-table rebuild as the 'Link messages' migration, safe because no "
+            "table references mail_messages) with `recipient_user_id` ON DELETE SET NULL, like "
+            "`sender_user_id`, and a new `recipient_label`: the deleted recipient's name, which "
+            "the sender's Sent copy shows. `netbbs.mail.release_mail_of_deleted_account_"
+            "without_commit` marks the deleted account's side first, so the relaxed CHECK still "
+            "refuses a row with no recipient of either kind unless its recipient side is "
+            "deleted. Every column and index migrations 93-94 added is carried over. "
+            "Rows no one could see any more are cleaned up: mail with no local sender "
+            "(received over Link, or from an account already deleted) gets its sender side "
+            "marked deleted, so the recipient's delete removes it, and such rows the recipient "
+            "already deleted are removed now. Also `mail_eviction_notices`: how many read "
+            "messages the mailbox cap removed from an account since its owner was last told."
+        ),
+        sql="""
+        CREATE TABLE mail_messages_new (
+            id                            INTEGER PRIMARY KEY,
+            sender_user_id                INTEGER REFERENCES users(id) ON DELETE SET NULL,
+            sender_label                  TEXT NOT NULL,
+            recipient_user_id             INTEGER REFERENCES users(id) ON DELETE SET NULL,
+            recipient_remote_address      TEXT,
+            subject                       TEXT NOT NULL,
+            body                          TEXT NOT NULL,
+            created_at                    TEXT NOT NULL,
+            read_at                       TEXT,
+            sender_deleted_at             TEXT,
+            recipient_deleted_at          TEXT,
+            link_event_json               TEXT,
+            link_event_content_id         TEXT,
+            link_delivery_status          TEXT CHECK (
+                link_delivery_status IN ('pending', 'delivered', 'bounced', 'expired')
+                OR link_delivery_status IS NULL
+            ),
+            link_source_event_id          TEXT,
+            link_delivery_reason          TEXT,
+            link_delivery_notice_pending  INTEGER NOT NULL DEFAULT 0,
+            from_system                   INTEGER NOT NULL DEFAULT 0 CHECK (from_system IN (0, 1)),
+            recipient_label               TEXT,
+            CHECK (recipient_user_id IS NULL OR recipient_remote_address IS NULL),
+            CHECK (
+                recipient_user_id IS NOT NULL
+                OR recipient_remote_address IS NOT NULL
+                OR recipient_deleted_at IS NOT NULL
+            )
+        );
+        INSERT INTO mail_messages_new
+            (id, sender_user_id, sender_label, recipient_user_id, recipient_remote_address,
+             subject, body, created_at, read_at, sender_deleted_at, recipient_deleted_at,
+             link_event_json, link_event_content_id, link_delivery_status, link_source_event_id,
+             link_delivery_reason, link_delivery_notice_pending, from_system)
+            SELECT id, sender_user_id, sender_label, recipient_user_id, recipient_remote_address,
+                subject, body, created_at, read_at, sender_deleted_at, recipient_deleted_at,
+                link_event_json, link_event_content_id, link_delivery_status, link_source_event_id,
+                link_delivery_reason, link_delivery_notice_pending, from_system
+            FROM mail_messages;
+        DROP TABLE mail_messages;
+        ALTER TABLE mail_messages_new RENAME TO mail_messages;
+        CREATE INDEX idx_mail_messages_recipient
+            ON mail_messages(recipient_user_id, recipient_deleted_at, created_at);
+        CREATE INDEX idx_mail_messages_sender
+            ON mail_messages(sender_user_id, sender_deleted_at, created_at);
+        CREATE INDEX idx_mail_messages_link_event_content_id
+            ON mail_messages(link_event_content_id)
+            WHERE link_event_content_id IS NOT NULL;
+        CREATE INDEX idx_mail_messages_link_pending
+            ON mail_messages(link_delivery_status)
+            WHERE link_delivery_status = 'pending';
+        CREATE INDEX idx_mail_messages_link_delivery_notice
+            ON mail_messages(sender_user_id)
+            WHERE link_delivery_notice_pending = 1;
+
+        UPDATE mail_messages
+           SET sender_deleted_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+         WHERE sender_user_id IS NULL AND recipient_remote_address IS NULL AND sender_deleted_at IS NULL;
+        DELETE FROM mail_messages
+         WHERE sender_deleted_at IS NOT NULL AND recipient_deleted_at IS NOT NULL;
+
+        CREATE TABLE mail_eviction_notices (
+            user_id  INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+            evicted  INTEGER NOT NULL
+        );
+        """,
+    ),
+    Migration(
+        description=(
+            "Issue #874: `mail_messages.link_relay_handoff_at` -- when this node left a "
+            "still-pending Link letter in a relay mailbox for its recipient's node to collect. "
+            "The letter stays `pending`; Sent shows it as with a relay, and the sync pass "
+            "expires it with reason `no_answer` once 14 days pass with no answer. NULL for "
+            "every existing row: a pending letter cannot be told apart from one pushed "
+            "directly, so mail handed to a relay before this migration keeps waiting as before."
+        ),
+        sql="""
+        ALTER TABLE mail_messages ADD COLUMN link_relay_handoff_at TEXT;
+        CREATE INDEX idx_mail_messages_link_relay_handoff
+            ON mail_messages(link_relay_handoff_at)
+            WHERE link_delivery_status = 'pending' AND link_relay_handoff_at IS NOT NULL;
+        """,
+    ),
 ]

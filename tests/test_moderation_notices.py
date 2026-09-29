@@ -64,7 +64,9 @@ def test_a_rejection_is_told_with_its_reason_and_mailed_with_the_text(db, sysop,
         ("rejected", 'Your post "Hello there" on general was rejected: off topic')
     ]
     [mail] = list_inbox(db, alice)
-    assert mail.sender_user_id == sysop.id
+    # From the BBS, not the moderator's own account (issue #819).
+    assert mail.from_system and mail.sender_user_id is None
+    assert "rejected by sysop" in mail.body
     assert "Reason: off topic" in mail.body and "what I wrote" in mail.body
 
 
@@ -128,7 +130,7 @@ def test_an_undelivered_rejection_mail_is_logged(db, sysop, alice, board, monkey
     def full(*args, **kwargs):
         raise MailboxFullError("full")
 
-    monkeypatch.setattr(moderation_notices, "send_mail", full)
+    monkeypatch.setattr(moderation_notices, "send_system_mail", full)
 
     with caplog.at_level("WARNING", logger="netbbs.boards.moderation_notices"):
         delete_post(db, create_post(db, board, alice, "Hello", "x"), deleted_by=sysop)

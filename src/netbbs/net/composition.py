@@ -9,26 +9,31 @@ for validation and persistence; finishing an editor only returns a draft.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from enum import Enum, auto
 from pathlib import Path
 
 from netbbs.net.char_input import CANCEL_KEY, HELP_KEY, EditorKey, EditorKeyKind, InputCancelled, reject_unhandled_key
 from netbbs.net.draft_storage import delete_draft, load_draft, offer_draft_recovery, save_draft
 from netbbs.net.help_overlay import show_help
-from netbbs.net.notices import write_notices
+from netbbs.net.notices import take_notices, write_notices
 from netbbs.net.session import Session, write_prompt
 from netbbs.net.session_activity import records_activity
 from netbbs.rendering.width import display_width
 from netbbs.rendering.pipe_codes import PastedColor
 from netbbs.rendering.post_body import post_body_rows
+from netbbs.rendering.detail import Section, Styled, paginate, render_sections
+from netbbs.rendering.reflow import wrap_terminal_text
 from netbbs.rendering import (
     ACCENT_COLOR,
+    ERROR_COLOR,
     HEADER_COLOR,
     LABEL_COLOR,
     MUTED_COLOR,
     RULE_COLOR,
     MenuEntry,
     action_bar,
+    clear_screen,
     colored,
     menu_grid,
     menu_key,
@@ -47,6 +52,47 @@ def _menu_row(entries: list[MenuEntry], *, width: int, height: int, description_
     if description_level == "off":
         return action_bar([e.label for e in entries], width=width)
     return menu_grid([("", entries)], width=width, height=height, description_level=description_level)
+
+
+async def show_compose_screen(
+    session: Session,
+    *,
+    title: str,
+    breadcrumb: Sequence[str],
+    fields: Sequence[tuple[str, str]] = (),
+    hint: str | None = None,
+    redraw_in_place: bool = False,
+    unicode_style: bool = False,
+    collapsed: bool = False,
+    header_color: int | tuple[int, int, int] = HEADER_COLOR,
+    accent_color: int = ACCENT_COLOR,
+) -> None:
+    """The screen a composition's first prompts are asked on (issue #813):
+    its own title -- "New message", "Reply", "New post" -- over the facts
+    already settled (a reply's To) and a muted `hint` saying what to type.
+    The To and Subject prompts used to appear under the menu they were
+    chosen from, with nothing saying what was being written.
+
+    `breadcrumb` is the path after the node's name. `fields` are plain
+    `(label, value)` pairs, sanitized here. Pending outcomes are written
+    last, directly above the prompt the caller asks next."""
+    heading = screen_title(
+        title,
+        breadcrumb=(session.node_display_name, *breadcrumb),
+        width=session.terminal_width,
+        clear=redraw_in_place,
+        unicode_style=unicode_style, collapsed=collapsed,
+        header_color=header_color,
+        node_name_gradient=session.node_name_gradient,
+    )
+    await session.write_line(f"\r\n{heading}")
+    for label, value in fields:
+        await session.write_line(
+            colored(f"  {label}: ", fg_color=LABEL_COLOR) + colored(sanitize_text(value), fg_color=accent_color)
+        )
+    if hint:
+        await session.write_line(colored(hint, fg_color=MUTED_COLOR))
+    await write_notices(session)
 
 
 async def read_prefilled_field(session: Session, label: str, current: str) -> str:
@@ -78,6 +124,93 @@ async def read_prefilled_field(session: Session, label: str, current: str) -> st
     return value
 
 
+def characters_over(text: str, max_bytes: int) -> int:
+    """How many characters `text` has to lose from its end to fit
+    `max_bytes` of UTF-8; 0 when it already fits (issue #812).
+
+    Storage limits are counted in bytes, which mean nothing to a caller:
+    200 bytes is 200 plain letters but as few as 100 accented ones. A
+    refusal says how much to remove instead, in the unit the caller is
+    typing in, and this is exact for the usual fix -- shortening the end."""
+    encoded = text.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return 0
+    kept = encoded[:max_bytes].decode("utf-8", errors="ignore")
+    return len(text) - len(kept)
+
+
+def too_long_message(what: str, over: int) -> str:
+    """"<what> N characters too long" -- the one wording every
+    composition refusal uses (issue #812), never a byte count."""
+    return f"{what} {over} character{'' if over == 1 else 's'} too long"
+
+
+async def read_subject(
+    session: Session, *, max_bytes: int, current: str | None = None, blank_cancels: bool = False,
+) -> str | None:
+    """The Subject prompt of every composition (issue #812), which checks
+    the subject where it is typed rather than after the body is written.
+
+    With `current`, the field opens on it and behaves as
+    `read_prefilled_field`: Enter keeps what is shown, an emptied line or
+    Esc keeps `current`, and a string always comes back -- even an empty
+    one, since a stored or carried post may have an empty subject (Codex
+    review). With `current=None` it starts empty and Esc returns `None`,
+    cancelling. An empty answer asks again, saying Esc cancels -- unless
+    `blank_cancels`, for a prompt that already offers Enter as its way out
+    (a board's "Subject (or press Enter to cancel)").
+
+    A subject over `max_bytes` is refused with how many characters to
+    remove, and the prompt reopens on it to be shortened (Ctrl-U clears
+    it). The storage layer's byte check stays the backstop."""
+    prefilled = current is not None
+    if prefilled:
+        prompt = "Subject: "
+        escape_does = "keep the previous subject"
+    elif blank_cancels:
+        prompt = "Subject (or press Enter to cancel): "
+        escape_does = "cancel"
+    else:
+        prompt = "Subject: "
+        escape_does = "cancel"
+    # Shown sanitized, and handed back untouched when saved unchanged --
+    # the same reasoning as `read_prefilled_field`.
+    shown = sanitize_text(current or "")
+    seed = shown
+    while True:
+        await write_prompt(session, prompt)
+        try:
+            value = await session.read_line(
+                initial=seed, cancellable=True,
+                viewport=lambda: max(1, session.terminal_width - display_width(prompt)),
+            )
+        except InputCancelled:
+            await session.write_line("")
+            return current
+        value = value.strip()
+        if prefilled and (not value or value == shown.strip()):
+            return current
+        if not value:
+            if blank_cancels:
+                return None
+            await session.write_line(
+                colored(f"A subject is required -- type one, or press Esc to {escape_does}.", fg_color=ERROR_COLOR)
+            )
+            seed = ""
+            continue
+        over = characters_over(value, max_bytes)
+        if over:
+            await session.write_line(
+                colored(
+                    f"{too_long_message('That subject is', over)} -- shorten it, or press Esc to {escape_does}.",
+                    fg_color=ERROR_COLOR,
+                )
+            )
+            seed = value
+            continue
+        return value
+
+
 class ReviewAction(Enum):
     COMMIT = auto()
     EDIT_RECIPIENT = auto()
@@ -92,27 +225,32 @@ def _body_bytes(lines: list[str]) -> int:
 
 async def _show_line_editor_help(session: Session, *, can_save_draft: bool) -> None:
     await session.write_line(colored("Line editor commands:", fg_color=HEADER_COLOR, bold=True))
-    await session.write_line("  /done       finish editing and review the draft")
-    await session.write_line("  /list       show all submitted lines")
-    await session.write_line("  /insert N   insert a new line before line N")
+    await session.write_line("  /done       finish editing and review the draft (so do two blank lines)")
+    await session.write_line("  /list       show all lines")
+    await session.write_line("  /insert N   write the next lines before line N")
+    await session.write_line("  /end        write the next lines at the end again")
     await session.write_line("  /edit N     replace line N")
     await session.write_line("  /delete N   delete line N")
     await session.write_line("  /cancel     discard the composition")
     if can_save_draft:
         # Dogfood feature request, issue #149: distinct from /cancel --
-        # only offered when the caller passed a `draft_path` (persisted
-        # posts, not e.g. mail, which has no resume mechanism to offer).
+        # only offered when the caller passed a `draft_path`.
         await session.write_line("  /exit, /quit  save as a draft and leave -- resume it later")
     await session.write_line("  /help, /?   show these commands")
     await session.write_line("  //text      add a line beginning with /")
+    await session.write_line("  A blank line starts a new paragraph.")
 
 
-async def _show_lines(session: Session, lines: list[str]) -> None:
+async def _show_lines(session: Session, lines: list[str], *, point: int | None = None) -> None:
+    """Every line, numbered; `point` (issue #814) marks where the next typed
+    line goes when that is not the end."""
     if not lines:
         await session.write_line(colored("(body is empty)", fg_color=MUTED_COLOR))
         return
     width = max(1, session.terminal_width - 6)
     for number, line in enumerate(lines, start=1):
+        if point is not None and number - 1 == point:
+            await session.write_line(colored("     (new lines go here -- /end to write at the end)", fg_color=MUTED_COLOR))
         safe = sanitize_text(line)
         wrapped = reflow(safe, width=width).splitlines() or [""]
         await session.write_line(f"{number:>3}: {wrapped[0]}")
@@ -138,52 +276,75 @@ async def edit_line_body(
     max_lines: int,
     draft_path: Path | None = None,
     keep_pasted_color: bool = False,
+    offer_recovery: bool = True,
+    start_at: int | None = None,
 ) -> str | None:
     """Edit a logical-line body without cursor-addressed terminal UI.
 
-    Ordinary non-empty input appends one line; a blank line (or ``/done``)
-    finishes into review. Blank paragraph lines remain expressible through
-    ``/insert N``. Slash commands operate on the retained buffer; command
-    follow-up prompts use ordinary ``read_line`` too, so behavior is identical
-    on Telnet, SSH, and web sessions. ``None`` means either ``/cancel``
-    (draft discarded) or ``/exit``/``/quit`` (draft saved) -- callers that
-    need to tell the two apart check whether `draft_path` still exists.
+    Ordinary input adds one line where the caller is writing: at the end,
+    or before line N after ``/insert N`` until ``/end`` (issue #814). A
+    blank line is a paragraph break; a second blank line in a row, or
+    ``/done``, finishes into review, and that closing blank is not kept.
+    Before #814 the first blank line finished, so a paragraph needed
+    ``/insert N`` and so did every answer written between a reply's quoted
+    lines, one line per command. Slash commands operate on the retained
+    buffer; command follow-up prompts use ordinary ``read_line`` too, so
+    behavior is identical on Telnet, SSH, and web sessions. ``None`` means
+    either ``/cancel`` (draft discarded) or ``/exit``/``/quit`` (draft
+    saved) -- callers that need to tell the two apart check whether
+    `draft_path` still exists.
 
     `draft_path` (dogfood feature request, issue #149), if given, is the
     same kind of caller-owned persistence target
     `netbbs.net.prose_editor.edit_prose` already uses for its own
-    crash-recovery autosave -- see `netbbs.net.draft_storage`. A
-    pre-existing draft there is offered for recovery on entry, same
-    wording as the fullscreen editor; declining deletes it. `/cancel`
+    crash-recovery autosave -- see `netbbs.net.draft_storage`. Every change
+    to the text is written there (issue #814), so a dropped connection
+    keeps what was typed. A pre-existing draft there is offered for
+    recovery on entry, same wording as the fullscreen editor; declining
+    deletes it. `offer_recovery` False leaves that decision to a caller
+    that made it with its own Resume/Discard choice (a letter, issue
+    #814): nothing is asked, `initial_text` is loaded, and the draft on
+    disk stays until this session's first change replaces it. `/cancel`
     always deletes it (nothing to keep). `/exit`/`/quit` are only
-    recognized as commands at all when `draft_path` is given -- a
-    caller with no resume mechanism to offer (e.g. mail composition)
-    simply doesn't gain these two commands, same as before this
-    parameter existed. Finishing normally (`/done`/blank line) deletes
-    the draft too: the body is being handed back for real persistence,
-    so the temporary autosave has nothing left to recover.
+    recognized as commands at all when `draft_path` is given -- a caller
+    with no resume mechanism to offer simply doesn't gain these two
+    commands. Finishing normally (`/done`/two blank lines) deletes the
+    draft too: the body is being handed back for real persistence, so the
+    temporary autosave has nothing left to recover.
 
     `keep_pasted_color` (issue #754) -- as for
     `netbbs.net.prose_editor.edit_prose`: pasted SGR color is typed in
     as pipe codes. One translator serves the whole body, so a color
     pasted on one line still counts on the next.
+
+    `start_at` starts the caller writing before that line (0-based), as
+    `/insert` would -- a forward's note goes above the letter it carries
+    (issue #822). The listing marks the place, and `/end` leaves it.
     """
-    if draft_path is not None and draft_path.exists():
+    if offer_recovery and draft_path is not None and draft_path.exists():
         if await offer_draft_recovery(session):
             initial_text = load_draft(draft_path)
         else:
             delete_draft(draft_path)
     lines = initial_text.split("\n") if initial_text is not None else []
+    # Where the next typed line goes: the end, or before a line `/insert`
+    # named (issue #814), or where the caller asked to start.
+    point = len(lines) if start_at is None else max(0, min(start_at, len(lines)))
+    # The line just typed was blank: another one finishes.
+    blank_pending = False
+    # ...and whether that blank went into the text (the cap may refuse it).
+    blank_added = False
+    paragraph_hint_shown = False
     # Passed only when asked for, so a Session that predates the option
     # still reads lines here.
     read_options = {"pasted_color": PastedColor()} if keep_pasted_color else {}
     exit_hint = " /exit or /quit saves it as a draft;" if draft_path is not None else ""
     await session.write_line(
-        f"Enter message text. Blank line or /done reviews the draft;{exit_hint} "
-        "/help or /? shows editing commands."
+        "Enter message text. A blank line starts a new paragraph; two blank lines or /done "
+        f"review the draft;{exit_hint} /help or /? shows editing commands."
     )
     if lines:
-        await _show_lines(session, lines)
+        await _show_lines(session, lines, point=point if point < len(lines) else None)
 
     async def apply(candidate: list[str]) -> bool:
         # A cap refuses growth past it, not every change to a body that is
@@ -197,20 +358,55 @@ async def edit_line_body(
             return False
         size = _body_bytes(candidate)
         if size > max_bytes and size > _body_bytes(lines):
+            # In characters, not bytes (issue #812).
+            over = characters_over("\n".join(candidate), max_bytes)
             await session.write_line(
-                colored(f"Body cannot exceed {max_bytes} bytes (would be {size}).", fg_color=MUTED_COLOR)
+                colored(f"{too_long_message('That would make the text', over)}.", fg_color=MUTED_COLOR)
             )
             return False
         lines[:] = candidate
+        if draft_path is not None:
+            # Kept as it is typed (issue #814): a dropped connection loses
+            # nothing, as the fullscreen editor's autosave already did.
+            save_draft(draft_path, "\n".join(lines))
+        return True
+
+    async def add_line(text: str) -> bool:
+        nonlocal point
+        candidate = list(lines)
+        candidate.insert(point, text)
+        if not await apply(candidate):
+            return False
+        point += 1
         return True
 
     while True:
-        await session.write(f"{len(lines) + 1}> ")
+        await session.write(f"{point + 1}> ")
         raw = await session.read_line(**read_options)
         command = raw.strip()
         lowered = command.lower()
 
+        if raw == "" and not blank_pending and "\n".join(lines).strip():
+            # A paragraph break; the next blank line finishes. At the line or
+            # size cap the break is refused, said by `apply`, and the next
+            # blank line still finishes (review on #873): the refusal is not
+            # followed straight by review.
+            blank_added = await add_line("")
+            blank_pending = True
+            if not paragraph_hint_shown:
+                paragraph_hint_shown = True
+                await session.write_line(
+                    colored("(New paragraph. A second blank line, or /done, finishes.)", fg_color=MUTED_COLOR)
+                )
+            continue
         if raw == "" or lowered == "/done":
+            if blank_pending and blank_added and (raw == "" or point == len(lines)):
+                # The blank that asked to finish is not part of the text --
+                # unless /done follows a blank typed mid-text, which is a
+                # paragraph break the caller meant (review on #873).
+                del lines[point - 1]
+                point -= 1
+                blank_pending = False
             body = "\n".join(lines)
             if not body.strip():
                 await session.write_line(colored("Body cannot be blank.", fg_color=MUTED_COLOR))
@@ -218,6 +414,7 @@ async def edit_line_body(
             if draft_path is not None:
                 delete_draft(draft_path)
             return body
+        blank_pending = False
         if lowered == "/cancel":
             if draft_path is not None:
                 delete_draft(draft_path)
@@ -235,18 +432,28 @@ async def edit_line_body(
             await _show_line_editor_help(session, can_save_draft=draft_path is not None)
             continue
         if lowered == "/list":
-            await _show_lines(session, lines)
+            await _show_lines(session, lines, point=point if point < len(lines) else None)
+            continue
+        if lowered == "/end":
+            point = len(lines)
             continue
         if lowered.startswith("/insert"):
             number = _parse_line_number(command, len(lines), allow_end=True)
             if number is None:
                 await session.write_line(colored(f"Usage: /insert N (1-{len(lines) + 1})", fg_color=MUTED_COLOR))
                 continue
-            await session.write(f"New line {number}: ")
-            text = await session.read_line(**read_options)
-            candidate = list(lines)
-            candidate.insert(number - 1, text)
-            await apply(candidate)
+            # Stays there for the lines after it too (issue #814): answering
+            # between a reply's quoted lines is one command per answer, not
+            # one per line.
+            point = number - 1
+            if point < len(lines):
+                await session.write_line(
+                    colored(
+                        f"Writing before line {number}: {sanitize_text(lines[point])} "
+                        "-- /end goes back to the end.",
+                        fg_color=MUTED_COLOR,
+                    )
+                )
             continue
         if lowered.startswith("/edit"):
             number = _parse_line_number(command, len(lines))
@@ -273,6 +480,8 @@ async def edit_line_body(
             candidate = list(lines)
             deleted = candidate.pop(number - 1)
             if await apply(candidate):
+                if number - 1 < point:
+                    point -= 1
                 await session.write_line(
                     colored(f"Deleted line {number}: {sanitize_text(deleted)}", fg_color=MUTED_COLOR)
                 )
@@ -288,7 +497,16 @@ async def edit_line_body(
             )
             continue
 
-        await apply([*lines, raw])
+        await add_line(raw)
+
+
+# As on `show_detail`: a body squeezed below this many rows a page is no
+# longer a page worth turning.
+_MIN_PAGE_ROWS = 4
+
+
+def _rows(text: str, width: int) -> list[str]:
+    return wrap_terminal_text(text, width).split("\r\n")
 
 
 def _preview_body(body: str, width: int) -> str:
@@ -401,6 +619,7 @@ async def review_composition(
     truecolor: bool = False,
     body_mode: str | None = None,
     body_layout: str = "prose",
+    breadcrumb: Sequence[str] = ("Compose",),
 ) -> ReviewAction:
     """Render a complete draft and return one explicit review action.
 
@@ -421,8 +640,9 @@ async def review_composition(
 
     `body_mode` (issue #711) previews a board post as its readers will see
     it -- `netbbs.rendering.post_body.post_body_mode`'s ``color``,
-    ``plain`` or ``text``. `None`, for mail, keeps the plain preview.
-    `body_layout` is the post's layout, ``art`` keeping its lines.
+    ``plain`` or ``text``. Mail passes it too (issue #809). `None` keeps
+    the plain preview. `body_layout` is the post's layout: ``art``
+    keeping its lines, or ``lines`` for mail, wrapped at words.
 
     Dogfood feature request, issue #160's cursor-navigation follow-up
     (item 2 of the prioritized list): `[T]o`/`[U]pdate subject`/`[B]ody`
@@ -430,7 +650,15 @@ async def review_composition(
     activating the highlighted one with Space or Enter -- purely
     additive, every hotkey letter keeps working exactly as before. The
     commit action and `[C]ancel` are never arrow-selectable, the same
-    "always hotkey-only" treatment `edit_resource_draft` gives Save/Back."""
+    "always hotkey-only" treatment `edit_resource_draft` gives Save/Back.
+
+    The body is paged the way `netbbs.net.detail_view.show_detail` pages a
+    message in the reader (issue #813), with the same pieces: the title,
+    To and Subject stay on every page, and a body taller than the rows left
+    over turns with `PgUp`/`PgDn` and `[N]ext`/`[P]rev page` -- `[>]`/`[<]`
+    where the commit key already is `P` (a board's `[P]ost`). Printed whole,
+    a long letter scrolled its own To and Subject off the screen before the
+    menu appeared. `breadcrumb` is the path after the node's name."""
     field_order = (("t",) if recipient is not None else ()) + ("u", "b")
     actions = {
         commit_key.lower(): ReviewAction.COMMIT,
@@ -444,69 +672,129 @@ async def review_composition(
         actions["t"] = ReviewAction.EDIT_RECIPIENT
 
     selected: str | None = None
+    width = max(1, session.terminal_width)
+    next_key, prev_key = (">", "<") if {"n", "p"} & set(actions) else ("n", "p")
+    if body_mode is None:
+        body_rows = _preview_body(body, width).split("\n")
+    else:
+        body_rows = list(post_body_rows(body, width, body_mode, truecolor=truecolor, layout=body_layout))
+    blocks = render_sections([Section(None, [Styled(body_rows)])], width=width, unicode_style=unicode_style)
+    # An outcome carried in from the step before (a refused Send, a subject
+    # too long) stays above the prompt until a page is turned, as on
+    # `show_detail`; measured here, since it takes rows from the body.
+    message_rows = [row for line in take_notices(session) for row in _rows(line, width)]
+    rule_char = "─" if unicode_style else "-"
+    divider_color = 238 if truecolor else RULE_COLOR
+    preview_rule = colored(rule_char * min(width, 78), fg_color=divider_color)
 
-    async def draw() -> None:
-        heading = screen_title(
-            "Review composition",
-            breadcrumb=(session.node_display_name, "Compose"),
-            subtitle="Check the draft before continuing",
-            width=session.terminal_width,
-            clear=redraw_in_place,
-            unicode_style=unicode_style, collapsed=collapsed,
-            header_color=header_color,
-        node_name_gradient=session.node_name_gradient)
-        await session.write_line(f"\r\n{heading}")
-        if recipient is not None:
-            await session.write_line(
-                _review_field_line(
-                    "t", "To: ", sanitize_text(recipient), selected=selected, bold_value=False, accent=accent_color
-                )
-            )
-        await session.write_line(
-            _review_field_line(
-                "u", "Subject: ", sanitize_text(subject), selected=selected, bold_value=True, accent=accent_color
-            )
-        )
-        body_prefix = (
-            colored("> Body", fg_color=accent_color, bold=True)
-            if selected == "b"
-            else colored("  Body", fg_color=MUTED_COLOR, bold=True)
-        )
-        await session.write_line(body_prefix)
-        rule_char = "─" if unicode_style else "-"
-        divider_color = 238 if truecolor else RULE_COLOR
-        preview_rule = colored(rule_char * min(session.terminal_width, 78), fg_color=divider_color)
-        await session.write_line(preview_rule)
-        if body_mode is None:
-            await session.write_line(_preview_body(body, session.terminal_width))
-        else:
-            for row in post_body_rows(
-                body, session.terminal_width, body_mode, truecolor=truecolor, layout=body_layout
-            ):
-                await session.write_line(row)
-        await session.write_line(preview_rule)
-
+    def _menu(paged: bool, packed: bool) -> list[str]:
         options = [MenuEntry(label=menu_key(commit_key.upper(), commit_label), brief=commit_brief)]
         if recipient is not None:
             options.append(MenuEntry(label=menu_key("T", "o"), brief="Change the recipient"))
         options.extend([
             MenuEntry(label=menu_key("U", "pdate subject"), brief="Change the subject"),
             MenuEntry(label=menu_key("B", "ody"), brief="Edit the body text"),
-            MenuEntry(label=menu_key("C", "ancel"), brief="Discard this draft"),
         ])
-        await session.write_line(
-            f"\r\n{_menu_row(options, width=session.terminal_width, height=session.terminal_height, description_level=description_level)}"
+        if paged:
+            options.extend([
+                MenuEntry(
+                    label=menu_key(next_key.upper(), "ext page" if next_key == "n" else " Next page"),
+                    brief="Show the next page of the body",
+                ),
+                MenuEntry(
+                    label=menu_key(prev_key.upper(), "rev page" if prev_key == "p" else " Prev page"),
+                    brief="Show the previous page of the body",
+                ),
+            ])
+        options.append(MenuEntry(label=menu_key("C", "ancel"), brief="Discard this draft"))
+        # A described menu takes the rows a long body needs: a body it does
+        # not leave room for gets the packed bar instead, before any paging
+        # (design doc §3.5's rule for a detail screen with a described menu).
+        level = "off" if packed else description_level
+        row = _menu_row(options, width=width, height=session.terminal_height, description_level=level)
+        return _rows(row, width)
+
+    def _head() -> list[str]:
+        heading = screen_title(
+            "Review composition",
+            breadcrumb=(session.node_display_name, *breadcrumb),
+            subtitle="Check the draft before continuing",
+            width=width,
+            clear=False,
+            unicode_style=unicode_style, collapsed=collapsed,
+            header_color=header_color,
+            node_name_gradient=session.node_name_gradient,
         )
-        await session.write_line(colored("(Ctrl-H for help on these fields)", fg_color=MUTED_COLOR))
+        rows = _rows(heading, width)
+        if recipient is not None:
+            rows.extend(_rows(
+                _review_field_line(
+                    "t", "To: ", sanitize_text(recipient), selected=selected, bold_value=False, accent=accent_color
+                ),
+                width,
+            ))
+        rows.extend(_rows(
+            _review_field_line(
+                "u", "Subject: ", sanitize_text(subject), selected=selected, bold_value=True, accent=accent_color
+            ),
+            width,
+        ))
+        rows.append(
+            colored("> Body", fg_color=accent_color, bold=True)
+            if selected == "b"
+            else colored("  Body", fg_color=MUTED_COLOR, bold=True)
+        )
+        return rows
+
+    def _budget(paged: bool, packed: bool) -> int:
+        # Lead-in, heading and fields, two rules, the blank row and menu,
+        # the page line, the help hint, carried outcomes, the prompt.
+        fixed = (
+            (0 if redraw_in_place else 1) + len(_head()) + 2 + 1 + len(_menu(paged, packed))
+            + (1 if paged else 0) + 1 + len(message_rows) + 1
+        )
+        return max(_MIN_PAGE_ROWS, session.terminal_height - fixed)
+
+    # Each step is tried only when the one before does not fit, and the
+    # screen is drawn with the layout its pages were cut for: the described
+    # menu, then the packed bar, then the packed bar with pages (review on
+    # #861: a body fitting only the packed bar was drawn under the
+    # described menu, overflowing the terminal).
+    paged = packed = False
+    pages = paginate(blocks, budget=_budget(paged, packed)) or [[]]
+    if len(pages) > 1 and description_level != "off":
+        packed = True
+        pages = paginate(blocks, budget=_budget(paged, packed))
+    if len(pages) > 1:
+        packed = paged = True
+        pages = paginate(blocks, budget=_budget(paged, packed))
+    page = 0
+
+    async def draw() -> None:
+        rows = [*_head(), preview_rule, *pages[page], preview_rule, "", *_menu(paged, packed)]
+        if paged:
+            rows.append(colored(f"(Page {page + 1} of {len(pages)} -- PgUp/PgDn to switch)", fg_color=MUTED_COLOR))
+        rows.append(colored("(Ctrl-H for help on these fields)", fg_color=MUTED_COLOR))
         # A refused commit ("Could not create post: ...") returns here, and
         # this redraw would erase a line written before it (issue #680).
-        await write_notices(session)
+        rows.extend(message_rows)
+        lead = clear_screen() if redraw_in_place else "\r\n"
+        for index, row in enumerate(rows):
+            await session.write_line((lead if index == 0 else "") + row)
         await session.write("Choice: ")
 
     await draw()
     while True:
         key = await _read_review_key(session)
 
+        char = key.char.lower() if key.kind == EditorKeyKind.CHAR and key.char else ""
+        if paged and (key.kind in (EditorKeyKind.PAGE_DOWN, EditorKeyKind.PAGE_UP) or char in (next_key, prev_key)):
+            step = 1 if key.kind == EditorKeyKind.PAGE_DOWN or char == next_key else -1
+            page = (page + step) % len(pages)
+            # A one-off result belongs to the render that produced it.
+            message_rows = []
+            await draw()
+            continue
         if key.kind == EditorKeyKind.UP:
             index = field_order.index(selected) if selected in field_order else 0
             selected = field_order[(index - 1) % len(field_order)]

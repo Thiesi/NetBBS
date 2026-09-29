@@ -597,6 +597,21 @@ The node refuses to start with zero usable SysOps. Pending accounts cannot be
 promoted directly to SysOp. Demotion, disable, and deletion share the atomic
 last-SysOp guard described above.
 
+### Who may change an account (issue #836)
+
+The account mutators in `netbbs.auth.users` check their actor themselves,
+inside their own `BEGIN IMMEDIATE`, against a fresh read of the actor:
+`_require_account_authority` for level, disable/enable, password reset,
+approval and decline, `_require_sysop` for deletion, raising to 255, and
+granting staff or verify-identity permissions. A usable SysOp always passes; a
+staff member passes only with the matching `StaffPermission` and only on a
+target below 255 that holds no staff bit, which also rules out their own
+account. Everyone else is refused, with two exceptions: an account changing
+its own password (the password screen proved the old one) and deleting
+itself. Tests that disabled or promoted an account "as itself" to set up a
+scenario now need a real level-255 actor. `moderator_grants` setters still
+trust their caller; only the SysOp console reaches them.
+
 ### Registration
 
 Registration mode is one of:
@@ -694,8 +709,10 @@ Numeric user levels and moderator grants solve different problems:
 - levels are broad eligibility gates;
 - grants convey scoped capabilities.
 
-SysOps pass `has_permission` without stored grant rows. Functions which list
-literal grants must remain literal and must not synthesize SysOp grants.
+SysOps pass `has_permission` without stored grant rows, and so does an account
+holding the moderate-everything staff permission (issue #836). Functions which
+list literal grants must remain literal and must not synthesize SysOp or staff
+grants.
 
 Board/file permissions and channel permissions are separate enums. Validate
 the object type and permission combination before applying any SysOp bypass.
@@ -1078,8 +1095,51 @@ messages.
 - Mutators re-fetch current deletion state rather than trusting stale message
   objects.
 - Recipient quotas evict the oldest read mail; if all retained mail is unread,
-  sending fails clearly rather than silently dropping unread content.
+  sending fails clearly rather than silently dropping unread content. Local
+  and Link delivery share one rule, `netbbs.mail.make_room`; a read system
+  message goes before any read letter.
+- `sender_user_id IS NULL` means three different things, told apart by other
+  columns: a Link letter (`link_source_event_id` set), mail from the system
+  (`from_system = 1`, issue #819), or a local sender whose account was deleted
+  (neither). Code that treats "no sender account" as one case -- Reply did --
+  must check the flags first. What makes mail the system's is the flag, never
+  `sender_label`: a SysOp may create an account named "System".
+- System mail is written with `sender_deleted_at` already set: nobody's Sent
+  holds it, so the recipient's delete must hard-delete the row, not leave it
+  behind with no one able to remove it. Received Link mail is written the
+  same way (issue #818).
+- `recipient_user_id IS NULL` means Link mail this node sent
+  (`recipient_remote_address` set) or local mail whose recipient's account
+  was deleted (neither; `recipient_label` keeps the name). Both user FKs are
+  ON DELETE SET NULL since migration 97, and the table's CHECK refuses a row
+  with neither recipient unless `recipient_deleted_at` is set. So any code
+  that removes a `users` row must first run
+  `netbbs.mail.release_mail_of_deleted_account_without_commit` in the same
+  transaction, as `delete_user` does; skipping it fails the DELETE with a
+  CHECK error rather than orphaning mail.
 - Read receipts are not part of the current model.
+- `created_at` is when a letter was written, not when it arrived: received
+  Link mail keeps its sender's signed time (issue #808). Anything ordering a
+  mailbox -- the lists, quota eviction -- orders by row id (arrival), never by
+  `created_at`, or late Link mail sinks below mail already read.
+- `netbbs.mail.validate_mail_fields` is the one subject/body check; local
+  sends, Link composition and Link receipt all go through it.
+- Link bounce reasons are an open vocabulary on receipt: no release checks a
+  received `link_message_bounced`'s `reason` (v7.13.0 and older ignore it), so
+  a new code is wire-safe as long as `_BOUNCE_REASON_TEXT` gains its words.
+  Only `build_link_message_bounced` restricts what this node *sends*.
+- `deliver_link_message` runs after the envelope is saved and marked known,
+  so an exception there loses the letter with no answer to anyone; every
+  failure must end in a bounce.
+- A relay deposit ends a letter's `link_mail_delivery` work item
+  (`record_success`), so no dead-letter will ever expire it. What gives up on
+  it is `link_relay_handoff_at` (issue #874): set when the deposit succeeds,
+  checked every sync pass by `expire_unanswered_relay_mail`, which expires
+  the letter as `no_answer` 14 days later. "With a relay" is a display state
+  derived from `pending` plus that column, not a stored status, so every
+  guard written against `'pending'` still covers it. The relay's own
+  retention (issue #891) must stay longer than that timeout, or a slow
+  recipient loses the letter while its sender still reads "no answer yet".
 
 ### Signature auto-append: idempotency, not a "first compose only" flag
 
@@ -1093,11 +1153,8 @@ signature (saved before compose ever completed) or already has it
 cheaply tell which apart from string inspection, so `append_signature`
 itself is idempotent (a `body` already ending in the exact signature
 block is returned unchanged) and is simply called unconditionally
-every time. Mail has no equivalent draft-resume entry point (its own
-draft file is crash-recovery only, never offered back to the caller as
-a resumable draft the way `_show_board` does for posts), so this
-edge case is specific to board posts, but the idempotent design is
-applied uniformly rather than special-cased per caller.
+every time. A resumed letter (issue #814) hits the same case, which the
+idempotent design already covers.
 
 ### Chat state and rendering
 
@@ -2285,9 +2342,17 @@ model. Both editor paths must return a draft to a review/commit boundary; they
 must not persist or dispatch merely because editing ended.
 
 The shared line composer owns logical lines and uses explicit `/list`,
-`/insert N`, `/edit N`, `/delete N`, `/done`, and `/cancel` operations; a blank
-line retains the familiar finish gesture but now enters review rather than
-committing. `//` escapes a literal leading slash. Enforce domain byte and line
+`/insert N`, `/end`, `/edit N`, `/delete N`, `/done`, and `/cancel`
+operations. It keeps an insertion point (issue #814): `/insert N` moves it and
+it stays until `/end`; `/delete` above it moves it up with the text. A blank
+line is a paragraph break and a second one in a row finishes into review,
+removing that closing blank -- scripted tests that ended a body with one `""`
+followed by more input now need `/done` (a `FakeSession` that returns `""` when
+exhausted still ends it, with two). With a `draft_path` every accepted change
+is written to the draft, and `offer_recovery=False` (also on `edit_prose`)
+loads the caller's text without asking about or deleting a draft already
+there: a caller that offered the draft itself must pass it, or the editor
+asks a second time and deletes it on "no". `//` escapes a literal leading slash. Enforce domain byte and line
 limits against each candidate buffer mutation so an invalid edit never
 destroys the last valid draft.
 

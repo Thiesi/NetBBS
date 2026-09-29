@@ -90,25 +90,22 @@ def test_picker_shows_the_current_sort_mode_by_default(db, alice):
     create_board(db, "general", creator=alice)
     session = FakeSession(["b"])
     asyncio.run(board_flow._browse_boards(session, db, alice))
-    # Boards default to "activity" -- unlike channels, this is safe:
-    # real, persisted, Link-synced post/creation timestamps every node
-    # agrees on (see DEFAULT_SORT_MODE_BY_KIND's own comment).
-    assert "Sort: Activity" in _written_text(session)
+    # Boards default to the SysOp's order (issue #839): a list that holds
+    # still between visits, so a remembered number keeps its board.
+    assert "Sort: SysOp's order" in _written_text(session)
 
 
 def test_order_command_resorts_the_flat_board_list_and_persists_globally(db, alice):
-    create_board(db, "apple", creator=alice)
     create_board(db, "zebra", creator=alice)
-    _set_created_at(db, "apple", "2026-01-01T00:00:00.000000Z")
-    _set_created_at(db, "zebra", "2026-01-02T00:00:00.000000Z")
+    create_board(db, "apple", creator=alice)
 
-    # Default ("activity", falling back to created_at with no posts):
-    # zebra first. Switch to alphabetical: apple first instead.
+    # Default: the SysOp's order, creation order here, so zebra first.
+    # Switch to alphabetical: apple first instead.
     session = FakeSession(["o", "l", "g", "b"])
     asyncio.run(board_flow._browse_boards(session, db, alice))
     text = _visible_text(session)
     assert "Sort: Alphabetical" in text
-    assert re.search(r"01\.\s*(?:\(#\d+\)|\d+)\s*apple", text)
+    assert re.search(r"01\.\s*apple", text)
     assert get_effective_sort_mode(db, alice, "board") == "alphabetical"
 
 
@@ -120,7 +117,7 @@ def test_order_command_choosing_just_this_time_does_not_persist(db, alice):
 
     session = FakeSession(["o", "l", "j", "b"])
     asyncio.run(board_flow._browse_boards(session, db, alice))
-    assert get_effective_sort_mode(db, alice, "board") == "activity"  # unchanged
+    assert get_effective_sort_mode(db, alice, "board") == "sysop"  # unchanged
 
 
 def test_order_command_in_the_mixed_categories_view_only_reorders_boards(db, alice):
@@ -133,7 +130,7 @@ def test_order_command_in_the_mixed_categories_view_only_reorders_boards(db, ali
     session = FakeSession(["o", "l", "j", "b"])
     asyncio.run(board_flow._browse_boards(session, db, alice))
     text = _visible_text(session)
-    assert re.search(r"01\.\s*(?:\(#-?\d+\)|-?\d+)\s*\[Vintage\]", text)
+    assert re.search(r"01\.\s*\[Vintage\]", text)
 
 
 def test_community_scoped_order_offers_a_whole_community_save_option(db, alice):
@@ -155,4 +152,4 @@ def test_community_scoped_order_offers_a_whole_community_save_option(db, alice):
     text = _written_text(session)
     assert "hole Community (Retro Computing)" in text
     assert get_effective_sort_mode(db, alice, "board", community_id=community.id) == "alphabetical"
-    assert get_effective_sort_mode(db, alice, "board") == "activity"  # global untouched
+    assert get_effective_sort_mode(db, alice, "board") == "sysop"  # global untouched

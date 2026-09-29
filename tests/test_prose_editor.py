@@ -615,3 +615,105 @@ def test_a_cancelled_edit_keeps_what_was_typed_since_the_last_autosave(tmp_path)
     task = asyncio.run(scenario())
     assert task.cancelled()
     assert draft.read_text(encoding="utf-8") == "hi"
+
+
+# -- issue #813: a header says what is being written ---------------------------
+
+
+def _screen_before_exit(session: FakeSession, width: int, height: int) -> list[str]:
+    """The terminal as the editor last painted it -- before the clear its
+    exit writes."""
+    from netbbs.rendering.terminal_emulator import TerminalEmulator
+
+    emulator = TerminalEmulator(width, height)
+    emulator.feed("".join(session.written[:-1]))
+    return [row.rstrip() for row in emulator.text_rows()]
+
+
+def test_a_header_is_drawn_above_the_text(tmp_path):
+    from netbbs.net.prose_editor import EditorHeader
+
+    session = FakeSession(["H", "i", "CTRL+O"], width=40, height=12)
+    header = EditorHeader("New message", (("To", "Alice"), ("Subject", "Plans")))
+    result = asyncio.run(
+        edit_prose(session, initial_text=None, draft_path=tmp_path / "d.draft", max_bytes=1000, header=header)
+    )
+    assert result == "Hi"
+    rows = _screen_before_exit(session, 40, 12)
+    assert rows[:5] == ["New message", "To: Alice", "Subject: Plans", "-" * 40, "Hi"]
+    # The status line keeps its place, the header taking the text's rows.
+    assert "Ctrl+O save" in rows[10]
+
+
+def test_without_a_header_the_text_starts_on_the_first_row(tmp_path):
+    session = FakeSession(["H", "i", "CTRL+O"], width=40, height=12)
+    asyncio.run(edit_prose(session, initial_text=None, draft_path=tmp_path / "d.draft", max_bytes=1000))
+    rows = _screen_before_exit(session, 40, 12)
+    assert rows[0] == "Hi"
+    assert "Ctrl+O save" in rows[10]
+
+
+def test_a_header_gives_up_rows_before_the_text_gets_too_short():
+    from netbbs.net.prose_editor import EditorHeader, _header_rows
+
+    header = EditorHeader("New message", (("To", "Alice"), ("Subject", "Plans")))
+
+    def texts(rows: int) -> list[str]:
+        return ["".join(text for text, _fg, _bold in row) for row in _header_rows(header, width=10, rows=rows, unicode_style=False)]
+
+    assert [row.split(":")[0] for row in texts(21)] == ["New message", "To", "Subject", "-" * 10]
+    # The rule goes first, then the title, then the last fields.
+    assert [row.split(":")[0] for row in texts(7)] == ["New message", "To", "Subject"]
+    assert [row.split(":")[0] for row in texts(6)] == ["To", "Subject"]
+    assert [row.split(":")[0] for row in texts(5)] == ["To"]
+    assert texts(4) == []
+
+
+def test_a_header_is_sanitized_and_cut_to_the_width(tmp_path):
+    from netbbs.net.prose_editor import EditorHeader
+
+    session = FakeSession(["CTRL+O"], width=40, height=12)
+    header = EditorHeader("Reply", (("Subject", "\x1b[31mred\x1b[0m " + "x" * 60),))
+    asyncio.run(
+        edit_prose(session, initial_text=None, draft_path=tmp_path / "d.draft", max_bytes=1000, header=header)
+    )
+    rows = _screen_before_exit(session, 40, 12)
+    assert rows[1].startswith("Subject: ") and "red" in rows[1]
+    assert "\x1b[31m" not in "".join(session.written)
+    assert len(rows[1]) == 40
+
+
+def test_without_recovery_a_draft_on_disk_is_neither_offered_nor_deleted(tmp_path):
+    """Issue #814: a letter's caller already offered its draft and passes it
+    in as the text -- the editor does not ask again, and the draft stays
+    until something replaces it."""
+    draft = tmp_path / "d.draft"
+    draft.write_text("kept letter", encoding="utf-8")
+
+    async def scenario():
+        session = FakeSession(["CTRL+X"])
+        result = await edit_prose(
+            session, initial_text="kept letter", draft_path=draft, max_bytes=100_000, offer_recovery=False,
+        )
+        return result, _written_text(session)
+
+    result, text = asyncio.run(scenario())
+    assert result is None
+    assert "draft from a previous session" not in text
+    assert draft.read_text(encoding="utf-8") == "kept letter"
+
+
+def test_a_draft_handed_in_as_the_text_gets_no_second_blank_line(tmp_path):
+    """A resumed reply ending in an empty line is the caller's own text: the
+    cursor goes to its end without the blank line a fresh quote gets."""
+    draft = tmp_path / "d.draft"
+    draft.write_text("bob wrote:\n> hi\n\nmy answer\n", encoding="utf-8")
+
+    async def scenario():
+        session = FakeSession(_type("more") + ["CTRL+O"])
+        return await edit_prose(
+            session, initial_text="bob wrote:\n> hi\n\nmy answer\n", draft_path=draft, max_bytes=100_000,
+            offer_recovery=False, cursor_at_end=True,
+        )
+
+    assert asyncio.run(scenario()) == "bob wrote:\n> hi\n\nmy answer\nmore"

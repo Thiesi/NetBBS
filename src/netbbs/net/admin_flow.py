@@ -70,13 +70,17 @@ import nacl.signing
 
 from netbbs.attestation import AttestationError, withdraw_link_visibility
 from netbbs.auth.users import (
+    CO_SYSOP_PRESET,
     NEW_ACCOUNT_SENTINEL,
+    STAFF_PERMISSION_LABELS,
     SYSOP_LEVEL,
     AuthError,
+    StaffPermission,
     User,
     UserManagementError,
     UsernameRetiredError,
     approve_pending_user,
+    decline_pending_user,
     count_sysops,
     create_user,
     current_account,
@@ -88,14 +92,19 @@ from netbbs.auth.users import (
     list_retired_usernames,
     list_users,
     release_retired_username,
+    describe_staff_permissions,
+    is_usable_sysop,
     set_can_verify_identity,
+    set_staff_permissions,
     set_user_disabled,
     set_user_level,
 )
 from netbbs.backup import (
     BackupError,
+    running_node_pid,
     create_backup,
     default_backup_destination,
+    door_data_left_behind,
     door_installs_included,
     set_door_installs_included,
     voidrunner_save_directory,
@@ -140,7 +149,9 @@ from netbbs.net.managed_dns_flow import (
     standard_ports_lines as managed_dns_standard_ports_lines,
     cancel_registration_rename, register_via_prompt, release_registration, rename_registration,
 )
-from netbbs.boards.boards import Board, BoardError, create_board, delete_board, list_boards, update_board
+from netbbs.boards.boards import (
+    Board, BoardError, board_siblings, create_board, delete_board, list_boards, move_board, update_board,
+)
 from netbbs.boards.categories import Category, CategoryError
 from netbbs.boards.categories import create_category as create_board_category
 from netbbs.boards.categories import delete_category as delete_board_category
@@ -182,6 +193,7 @@ from netbbs.communities import (
     CommunityError,
     create_community,
     delete_community,
+    move_community,
     get_community,
     get_effective_min_age,
     get_effective_min_read_level,
@@ -205,6 +217,9 @@ from netbbs.config import (
     get_node_map_min_level,
     MAX_NODE_MAP_MIN_LEVEL,
     NODE_MAP_MIN_LEVEL_CONFIG_KEY,
+    get_mail_min_level,
+    MAIL_MIN_LEVEL_CONFIG_KEY,
+    MAX_MAIL_MIN_LEVEL,
     get_registration_mode,
     is_node_display_name_placeholder,
     set_config_without_commit,
@@ -238,7 +253,10 @@ from netbbs.doors.outbound import (
     set_rate_ceiling,
 )
 from netbbs.doors.outbound import targets as outbound_targets
-from netbbs.files.areas import FileArea, FileAreaError, create_file_area, delete_file_area, list_file_areas, update_file_area
+from netbbs.files.areas import (
+    FileArea, FileAreaError, create_file_area, delete_file_area, file_area_siblings, list_file_areas, move_file_area,
+    update_file_area,
+)
 from netbbs.files.categories import FileAreaCategory
 from netbbs.files.categories import FileAreaCategoryError as FileCategoryError
 from netbbs.files.categories import create_category as create_file_category
@@ -300,12 +318,16 @@ from netbbs.link.dial_in import (
 )
 from netbbs.link.key_rotation import KeyRotationError
 from netbbs.link.node_identity import operational_key_history
+from netbbs.link.enforcement import REASON_NODE_PROBATIONARY, decide_user_authorship, node_transport_state
 from netbbs.link.node_profiles import (
-    dismiss_identity_observation, identity_for_fingerprint, identity_for_peer,
+    UNKNOWN_NODE_NAME, dismiss_identity_observation, identity_for_fingerprint, identity_for_peer,
+    link_address_label,
     is_node_fingerprint, latest_identity_observation, list_identity_observations,
     name_key, own_canonical_dns_name, resolve_stored_peer_reference,
 )
-from netbbs.link.relay_mailbox import mailbox_sizes
+from netbbs.link.relay_mailbox import (
+    MAX_MAILBOX_ENVELOPES_PER_RECIPIENT, RELAY_MAILBOX_RETENTION_DAYS, mailbox_holdings,
+)
 from netbbs.link.remote_attestation import (
     clear_remote_attestation_override,
     configure_attestation_authority,
@@ -355,8 +377,12 @@ from netbbs.link.onboarding import (
 from netbbs.link.reliable_nodes import effective_reliable_nodes, reliable_nodes_source
 from netbbs.link.store import load_peer_last_contact
 from netbbs.link.node_map import CANDIDATE as NODE_MAP_CANDIDATE
-from netbbs.link.node_map import NodeMapEntry, build_node_map, has_known_nodes
+from netbbs.link.node_map import (
+    NodeMapEntry, build_node_map, has_known_nodes, relative_time, unknown_node_label,
+)
 from netbbs.net.node_map_flow import NODE_MAP_COLUMNS, all_carried_names
+from netbbs.net.node_map_flow import exchange_sections as node_map_exchange_sections
+from netbbs.net.node_map_flow import own_content_at_peer, probation_rows
 from netbbs.net.node_map_flow import utc_now as node_map_now
 from netbbs.net.node_map_flow import map_title as node_map_title
 from netbbs.net.node_map_flow import node_sections as node_map_sections
@@ -376,6 +402,7 @@ from netbbs.link.trust_issuance import (
     withdraw_vouch_intent,
 )
 from netbbs.link.trust import (
+    NodeProbation,
     TrustDimension,
     TrustState,
     TrustSubject,
@@ -385,6 +412,8 @@ from netbbs.link.trust import (
     configure_trust_domain,
     configure_trusted_reporter,
     get_effective_trust_state,
+    node_probation,
+    is_registered_subject,
     list_sole_authorities,
     list_trust_anchors,
     list_trust_config_audit,
@@ -399,6 +428,14 @@ from netbbs.link.trust import (
     set_trust_override,
 )
 from netbbs.link.mail import unexpire_link_message_delivery
+from netbbs.link.mail_refusals import (
+    TRUST_REASONS,
+    VIA_RELAY,
+    LinkMailRefusal,
+    list_link_mail_refusals,
+    refusal_reason_text,
+)
+from netbbs.mail import MAX_MAIL_PER_RECIPIENT, InboxSize, inbox_sizes
 from netbbs.link.work_items import (
     KIND_LINK_MAIL_DELIVERY,
     WorkItem,
@@ -458,11 +495,27 @@ from netbbs.mrc.settings import (
     validate_mrc_settings,
 )
 from netbbs.mrc.protocol import sanitize_room
+from netbbs.staff import (
+    MAX_AWAY_MESSAGE_CHARS,
+    away_notice,
+    away_problem,
+    count_moderation_items,
+    count_pending_accounts,
+    describe_away,
+    end_away,
+    has_moderation_scope,
+    list_staff,
+    moderation_scope,
+    node_today,
+    set_away,
+)
 from netbbs.moderation.roles import (
     BoardPermission,
     ChannelPermission,
     ModeratorGrantError,
+    describe_grant,
     get_grant,
+    grant_everywhere,
     grant_permissions,
     has_permission,
     list_grants_for_community,
@@ -519,11 +572,17 @@ from netbbs.net.shutdown import (
 from netbbs.net.sysop_monitor import monitor_screen
 from netbbs.net.password_screen import manage_password_screen
 from netbbs.net.ssh_key_screen import manage_ssh_keys_screen
+from netbbs.auth.signup_answers import (
+    MAX_REGISTRATION_QUESTION_LENGTH,
+    get_registration_question,
+    load_signup_answer,
+    set_registration_question,
+)
 from netbbs.net.menu_description_preference import menu_description_level
 from netbbs.net.redraw_preference import (
+    start_new_account_redrawing_in_place,
     redraw_in_place_enabled,
     redraw_in_place_ever_set,
-    set_redraw_in_place_enabled,
 )
 from netbbs.net.breadcrumb_preference import breadcrumb_collapsed_enabled
 from netbbs.net.color_depth_preference import effective_truecolor
@@ -583,6 +642,7 @@ from netbbs.net.welcome_banner import (
     MAX_BANNER_SIZE_BYTES,
     banner_path,
     load_welcome_banner,
+    pre_login_unicode_style,
     set_welcome_banner_enabled,
     welcome_banner_status,
 )
@@ -682,9 +742,8 @@ from netbbs.rendering import (
     cut_to_width,
     display_width,
     GRADIENTS,
-    decode_ansi_bytes,
+    decode_banner_bytes,
     double_frame,
-    field_row,
     gradient_text,
     menu_grid,
     menu_key,
@@ -712,12 +771,18 @@ from netbbs.guest import (
     set_pre_login_notice_without_commit,
 )
 from netbbs.search import SearchIndexIntegrityReport, check_index_integrity, rebuild_indexes
-from netbbs.session_history import previous_callers_enabled, set_previous_callers_enabled
+from netbbs.session_history import (
+    previous_callers_enabled,
+    previous_callers_plain,
+    set_previous_callers_enabled,
+    set_previous_callers_plain,
+)
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 from netbbs.timeutil import (
     _parse_stored_timestamp,
     format_for_display,
+    parse_utc_iso,
     resolve_display_preferences,
     set_display_format,
     set_display_timezone,
@@ -782,7 +847,74 @@ def _link_health_snapshot(db: Database, link_context: LinkContext | None) -> dic
         # (Codex review on #800): a node that stopped Link still has them.
         "carried_to_review": count_carried_to_review(db),
         "carry_offers": count_carry_decisions(db, OFFERED),
+        # Issue #844: a peer on probation here exchanges nothing, which the
+        # peer count alone made look healthy.
+        "peers_on_probation": _count_peers_on_probation(db) if link_context is not None else 0,
     }
+
+
+def _count_peers_on_probation(db: Database) -> int:
+    """Verified peers on probation here, which exchange nothing with this
+    node yet (issue #844). A quarantine or block is the SysOp's own doing
+    and shows on Link status as such."""
+    fingerprints = [row["fingerprint"] for row in db.connection.execute("SELECT fingerprint FROM link_peers")]
+    return sum(node_transport_state(db, fingerprint) == TrustState.PROBATIONARY for fingerprint in fingerprints)
+
+
+def _link_count_pairs(node, state: dict) -> list[tuple[str, int]]:
+    """The Link counts every dashboard shows, with the peers nothing is
+    exchanged with yet when there are any (issue #844)."""
+    pairs = [("Peers", len(node.peers))]
+    if state.get("peers_on_probation"):
+        pairs.append(("On probation", state["peers_on_probation"]))
+    return [*pairs, ("Relays", len(node.relays_serving_me)), ("Dead letters", state["dead_letters"])]
+
+
+def _own_linked_genesis(link_context: LinkContext) -> list:
+    """This node's own linked boards, channels and file areas, as their
+    genesis events: what `sync._push_own_events` offers every peer."""
+    node = link_context.link_node
+    own = link_context.node_identity.fingerprint
+    return [
+        genesis
+        for kind in (node.boards, node.channels, node.file_areas)
+        for genesis in kind.values()
+        if genesis.payload.get("origin_fingerprint") == own
+    ]
+
+
+_MAX_REACH_ROWS = 6
+
+
+async def _peer_reach_rows(lane: DatabaseLane, link_context: LinkContext, genesis) -> list[Field | Note]:
+    """Where one of this node's own linked resources has got to (issue
+    #844): per verified peer, whether it holds it, refused it, or is not
+    sent it while on probation here. Nothing for a resource another node
+    originated -- its origin pushes it, not this node."""
+    if genesis is None or genesis.payload.get("origin_fingerprint") != link_context.node_identity.fingerprint:
+        return []
+    node = link_context.link_node
+    peers = list(node.peers)
+    if not peers:
+        return [Field("At peers", "no verified peers yet", color=MUTED_COLOR)]
+    states = await lane.run(lambda db: {fp: node_transport_state(db, fp).value for fp in peers})
+    labelled = sorted(((_linked_node_label(link_context, fp), fp) for fp in peers), key=lambda item: item[0].casefold())
+    rows: list[Field | Note] = []
+    for label, fingerprint in labelled[:_MAX_REACH_ROWS]:
+        text, color = own_content_at_peer(states[fingerprint], node.peer_exchange.get(fingerprint), genesis.content_id)
+        rows.append(Field(f"At {sanitize_text(label)}", text, color=color))
+    if len(labelled) > _MAX_REACH_ROWS:
+        rows.append(Note(f"... and {len(labelled) - _MAX_REACH_ROWS} more; Link status -> Peers shows each node."))
+    return rows
+
+
+def _linked_announcement(name: str) -> str:
+    """What `[L]ink` says once saved (issue #844): who gets it, and where
+    to look later, since the push itself happens on a later sync pass."""
+    return (
+        f"Linked {name!r}. Peers you have established get it on the next sync pass; "
+        "its NetBBS Link rows here show which ones hold it."
+    )
 
 
 async def _with_fresh_carry_counts(lane: DatabaseLane, state: dict[str, object]) -> dict[str, object]:
@@ -844,6 +976,19 @@ def _wrap_counts_panel(label: str, pairs: Sequence[tuple[str, int]], *, width: i
     return lines
 
 
+def _offline_console_note(node_running: bool) -> str:
+    """What the health panel says when this console has no live node behind
+    it -- `python -m netbbs.admin`, run on the node's machine (issue #834).
+    "Standalone mode" read as "because I declined Link"; the reason is that
+    this process is not the node, and whether the node is up at all."""
+    if node_running:
+        return (
+            "This console runs outside the node. For live controls, log in to "
+            "the node and open the SysOp menu there."
+        )
+    return "The node isn't running, so there are no live controls. Start the node to get them."
+
+
 def _wrap_panel_sentence(text: str, *, prefix: str, width: int, unicode_style: bool) -> list[str]:
     """Word-wrap a plain-text panel sentence (not a `counts_row` pair --
     see `_wrap_counts_panel` for those, and `_fit` above for the one
@@ -900,41 +1045,6 @@ def _get_display_next_backup(db: Database) -> str | None:
     if status.overdue:
         return "due now"
     return format_for_display(status.next_run.isoformat(), db) if status.next_run else None
-
-
-async def _load_condensed_status_line(lane: DatabaseLane, *, unicode_style: bool, terminal_width: int) -> str:
-    """DB-only backup context (GitHub issue #206) for every screen in this
-    module that doesn't already show the richer full panel Users/Content/
-    Operations/Settings/Node have. Update status is deliberately absent:
-    unlike backup recency, it is actionable configuration/status which belongs
-    on the SysOp dashboard, Settings overview, and dedicated Update screen, not
-    on unrelated user/content/theme editors. This remains obtainable from
-    `lane` alone, with no `node_controls`/`link_context`
-    dependency: threading live node/session/Link state down through every
-    nested screen's own call chain (most of which don't currently take
-    either) would be a much bigger ripple than this feature is worth. Users/
-    Content/Operations/Settings/Node keep their own richer panels instead of
-    calling this."""
-    def _load(db: Database) -> str | None:
-        backup_display, _backup_path = _get_display_backup_summary(db)
-        # Code review follow-up (PR #216): format_for_display resolves the
-        # node's configured format/timezone from this same `db` handle --
-        # without it, this was the one place in the module still showing
-        # the raw stored UTC value (with microseconds) instead of matching
-        # the Backup status screen and everywhere else a timestamp appears.
-        return backup_display
-
-    backup_display = await lane.run(_load)
-    # `field_row` does not wrap or truncate. Cut the stored display value to
-    # the available width before sanitizing, matching the order used elsewhere
-    # in this module.
-    backup_label = "Backup: "
-    backup_text = (
-        backup_label
-        + sanitize_text(cut_to_width(backup_display, max(0, terminal_width - len(backup_label))))
-        if backup_display else "Backup: never"
-    )
-    return field_row([(backup_text, None)], unicode_style=unicode_style)
 
 
 # -- outcomes carried into the next redraw ------------------------------------
@@ -1294,6 +1404,11 @@ def _yes_no(value: bool) -> str:
     return "yes" if value else "no"
 
 
+# `netbbs.rendering.layout`'s floor below which `menu_grid` hides
+# descriptions under entries.
+_MIN_MENU_HEIGHT_FOR_DESCRIPTIONS = 15
+
+
 def _degrade_description_level(
     *,
     panel: list[str],
@@ -1322,10 +1437,18 @@ def _degrade_description_level(
     degraded = False
     if effective_desc_level != "off":
         columns = 2 if terminal_width >= 72 else 1
-        needed_rows = -(-entry_count // columns) * 2
-        if needed_rows > available_menu_height:
-            effective_desc_level = "off"
-            degraded = True
+        rows_per_entry_row = -(-entry_count // columns)
+        # `menu_grid` hides descriptions under its own height floor, so a
+        # menu below it takes the one-line form too (review on #872).
+        if rows_per_entry_row * 2 > available_menu_height or available_menu_height < _MIN_MENU_HEIGHT_FOR_DESCRIPTIONS:
+            # Each description on its entry's own line before none at all
+            # (issue #840): at 80x24 a first-time SysOp lost them exactly
+            # where one-word entries needed them.
+            if rows_per_entry_row <= available_menu_height:
+                effective_desc_level = "inline"
+            else:
+                effective_desc_level = "off"
+                degraded = True
     return effective_desc_level, available_menu_height, degraded
 
 
@@ -1455,8 +1578,293 @@ async def admin_menu(
             await _managed_dns_status_screen(session, lane, user)
             await _draw_admin_menu(session, lane, user, node_controls=node_controls,
                                    link_context=link_context, state=dashboard_state)
+        elif choice == "w":
+            await session.write_line("")
+            await _away_screen(session, lane, user)
+            dashboard_state = await _draw_admin_menu(
+                session, lane, user, node_controls=node_controls, link_context=link_context
+            )
         else:
             await session.write(reject_unhandled_key(choice))
+
+
+async def staff_menu(
+    session: Session,
+    lane: DatabaseLane,
+    user: User,
+    *,
+    node_controls: NodeControls | None = None,
+    link_context: LinkContext | None = None,
+) -> None:
+    """
+    The Staff console (design doc §5.6, issue #836): the reduced console a
+    staff member reaches from `[S]taff` on the main menu. Its landing view
+    counts what waits for them, and it offers only the screens their
+    permissions reach -- the accounts waiting for approval, the account
+    list, the moderation queue -- which are the SysOp console's own screens
+    (`_pick_and_edit_user`, `_pending_review_screen`), narrowed by the
+    actor rather than copied. Nothing here reaches Settings, Link, Node,
+    DNS or backups.
+
+    Callers gate entry on `netbbs.staff.is_staff`. The console re-checks at
+    every key, like the SysOp's (issue #659): once the operator holds no
+    staff permission, it closes.
+    """
+    await _draw_staff_menu(session, lane, user)
+    while True:
+        choice = (await session.read_key()).lower()
+        fresh = await lane.run(current_account, user)
+        if fresh is None or not fresh.staff_permissions or fresh.user_level >= SYSOP_LEVEL:
+            await session.write_line(colored("\r\nYour account no longer has staff access.", fg_color=ALERT_COLOR))
+            return
+        user = fresh
+        if choice == "b":
+            await session.write_line("")
+            return
+        if choice == "r":
+            pass
+        elif choice == "a" and user.has_staff(StaffPermission.APPROVE_ACCOUNTS):
+            await session.write_line("")
+            await _pick_and_edit_user(
+                session, lane, user, node_controls, title="Waiting for approval", pending_only=True
+            )
+        elif choice == "u" and user.has_staff(StaffPermission.MANAGE_ACCOUNTS):
+            await session.write_line("")
+            await _pick_and_edit_user(session, lane, user, node_controls, title="Accounts")
+        elif choice == "w":
+            await session.write_line("")
+            await _away_screen(session, lane, user)
+        elif choice == "m" and await lane.run(has_moderation_scope, user):
+            await session.write_line("")
+            await _pending_review_screen(
+                session, lane, user, link_context=link_context,
+                transfers=node_controls.transfers if node_controls is not None else None,
+            )
+        else:
+            await session.write(reject_unhandled_key(choice))
+            continue
+        await _draw_staff_menu(session, lane, user)
+
+
+async def _draw_staff_menu(session: Session, lane: DatabaseLane, user: User) -> None:
+    def _load(db: Database) -> dict[str, object]:
+        return {
+            "pending_accounts": count_pending_accounts(db),
+            "moderates": has_moderation_scope(db, user),
+            "held": count_moderation_items(db, user),
+            "description_level": menu_description_level(db, user),
+            "redraw_in_place": redraw_in_place_enabled(db, user),
+            "unicode_style": unicode_style_enabled(db, user),
+            "collapsed": breadcrumb_collapsed_enabled(db, user),
+            "header_color": effective_header_color_256(db),
+            **_away_state(db, user),
+        }
+
+    state = await lane.run(_load)
+    unicode_style = state["unicode_style"]
+    await session.write_line(
+        "\r\n" + screen_title(
+            "Staff console",
+            breadcrumb=(session.node_display_name,),
+            subtitle=f"Your staff permissions: {describe_staff_permissions(user.staff_permissions)}.",
+            width=session.terminal_width,
+            clear=state["redraw_in_place"],
+            unicode_style=unicode_style, collapsed=state["collapsed"],
+            header_color=state["header_color"], node_name_gradient=session.node_name_gradient,
+        )
+    )
+    counts: list[Field] = []
+    if user.has_staff(StaffPermission.APPROVE_ACCOUNTS):
+        waiting = state["pending_accounts"]
+        counts.append(Field(
+            "Waiting for approval", str(waiting), color=WARNING_COLOR if waiting else MUTED_COLOR,
+        ))
+    if state["moderates"]:
+        held = state["held"]
+        counts.append(Field("Held for moderation", str(held), color=WARNING_COLOR if held else MUTED_COLOR))
+    panel_rows = await _write_sections(session, [Section(None, counts)], unicode_style=unicode_style) if counts else 0
+    for line in _away_panel_lines(state, width=min(session.terminal_width, 78) - 4, unicode_style=unicode_style):
+        await session.write_line(line)
+        panel_rows += 1
+    options: list[MenuEntry] = []
+    if user.has_staff(StaffPermission.APPROVE_ACCOUNTS):
+        options.append(MenuEntry(label=menu_key("A", "ccounts waiting"), brief="Approve or decline signups"))
+    if user.has_staff(StaffPermission.MANAGE_ACCOUNTS):
+        options.append(MenuEntry(label=menu_key("U", "sers"), brief="Levels, disabling, passwords"))
+    if state["moderates"]:
+        options.append(MenuEntry(label=menu_key("M", "oderation"), brief="Held posts and uploads"))
+    options.append(MenuEntry(label=menu_key("w", "ay", prefix="A"), brief="Tell members you're away"))
+    options.append(MenuEntry(label=menu_key("R", "efresh"), brief="Redraw with current numbers"))
+    options.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to the main menu"))
+    await session.write_line(
+        "\r\n" + _fitted_menu(options, state["description_level"], session=session, used_rows=panel_rows + 5)
+    )
+    await _choice_prompt(session)
+
+
+def _date_of(db: Database, stamp: str | None) -> str | None:
+    """A stored timestamp as the node-local date alone (design doc §5.6:
+    the Staff list shows the day of a last session, not the time)."""
+    if not stamp:
+        return None
+    _fmt, tz_name = resolve_display_preferences(db)
+    try:
+        return format_for_display(stamp, override_format="%Y-%m-%d", override_timezone=tz_name)
+    except ValueError:
+        return None
+
+
+def _away_state(db: Database, user: User) -> dict[str, object]:
+    notice = away_notice(db, user)
+    return {"away": notice, "away_since": _date_of(db, notice.since) if notice is not None else None}
+
+
+def _away_panel_lines(state: dict[str, object], *, width: int, unicode_style: bool) -> list[str]:
+    notice = state.get("away")
+    if notice is None:
+        return []
+    text = f"You are marked {describe_away(notice, state['away_since'])}. A[w]ay ends it."
+    return [
+        colored(f"  {line}", fg_color=WARNING_COLOR)
+        for line in _wrap_panel_sentence(sanitize_text(text), prefix="  ", width=width, unicode_style=unicode_style)
+    ]
+
+
+def _parse_return_date(raw: str) -> datetime.date | None:
+    """`YYYY-MM-DD`, the one spelling that reads the same everywhere."""
+    return datetime.date.fromisoformat(raw)
+
+
+async def _away_screen(session: Session, lane: DatabaseLane, user: User) -> None:
+    """
+    Mark yourself away, or end it (design doc §5.6, issue #836): one short
+    line of plain text and an optional return date. It shows on the Staff
+    list beside your name and, when every approver is away, to pending
+    callers. Being away changes nobody's permissions.
+    """
+    while True:
+        state = await lane.run(lambda db: _away_state(db, user))
+        notice = state["away"]
+        await session.write_line("")
+        await session.write_line(colored("Away notice", fg_color=LABEL_COLOR, bold=True))
+        if notice is None:
+            await session.write_line(colored("  You are not marked away.", fg_color=MUTED_COLOR))
+        else:
+            await session.write_line("  " + sanitize_text(describe_away(notice, state["away_since"])))
+        options = [menu_key("S", "et" if notice is None else "et a new notice")]
+        if notice is not None:
+            options.append(menu_key("E", "nd it"))
+        options.append(menu_key("B", "ack"))
+        await write_prompt(session, f"\r\n{action_bar(options, width=session.terminal_width)}: ")
+        choice = (await session.read_key()).lower()
+        await session.write_line("")
+        if choice == "b":
+            return
+        if choice == "e" and notice is not None:
+            await lane.run(end_away, user)
+            _announce_line(session, "You are no longer marked away.")
+            return
+        if choice != "s":
+            await session.write(reject_unhandled_key(choice))
+            continue
+        await write_prompt(session, f"Message (one line, up to {MAX_AWAY_MESSAGE_CHARS} characters): ")
+        message = (await session.read_line()).strip()
+        if not message:
+            _announce_line(session, colored("Cancelled.", fg_color=MUTED_COLOR))
+            continue
+        await write_prompt(session, "Back on (YYYY-MM-DD, blank if you don't know): ")
+        raw_date = (await session.read_line()).strip()
+        try:
+            until = _parse_return_date(raw_date) if raw_date else None
+        except ValueError:
+            _announce_line(session, colored(f"{raw_date!r} is not a date like 2026-10-12.", fg_color=MUTED_COLOR))
+            continue
+        problem = away_problem(message, until, await lane.run(node_today))
+        if problem is not None:
+            _announce_line(session, colored(f"{problem[0].upper()}{problem[1:]}.", fg_color=MUTED_COLOR))
+            continue
+        try:
+            await lane.run(set_away, user, message, until)
+        except UserManagementError as exc:
+            _announce_line(session, colored(str(exc), fg_color=MUTED_COLOR))
+            continue
+        _announce_line(session, "You are marked away. Members see it on the Staff list.")
+        return
+
+
+def _grants_seen_by(db: Database, viewer: User, grants: Sequence) -> str:
+    """A moderator's grants in words, leaving out any that would name
+    something `viewer` can't see -- a hidden Community, a board, area or
+    channel their level or age keeps from them (review on #870). A grant
+    over every board or area names nothing, so it always shows."""
+    from netbbs.net.board_flow import visible_boards
+    from netbbs.net.chat_flow import list_visible_channels_for
+    from netbbs.net.file_flow import visible_areas
+
+    if is_usable_sysop(viewer):
+        shown = list(grants)
+    else:
+        seen = {
+            "board": {b.id for b in visible_boards(db, viewer, community_id=None, community_scoped=False)},
+            "file_area": {a.id for a in visible_areas(db, viewer)},
+            "channel": {c.id for c in list_visible_channels_for(db, viewer)},
+        }
+        shown = []
+        for grant in grants:
+            if grant.object_id is not None:
+                visible = grant.object_id in seen[grant.object_type]
+            elif grant.community_id is not None:
+                community = get_community(db, grant.community_id)
+                visible = community is not None and not community.hidden
+            else:
+                visible = True
+            if visible:
+                shown.append(grant)
+    if not shown:
+        return "moderates content you can't open"
+    return "; ".join(describe_grant(db, grant) for grant in shown)
+
+
+async def staff_list_screen(session: Session, lane: DatabaseLane, user: User) -> None:
+    """
+    Who runs the node (design doc §5.6, issue #836): every usable SysOp,
+    staff member and moderator, what they look after, the day of their
+    last session, and any away notice. For members; the main menu offers
+    it to everyone but guests.
+    """
+    def _load(db: Database) -> tuple[list, dict[int, str | None], dict[int, str | None], dict[int, str]]:
+        entries = list_staff(db)
+        last_on = {entry.user.id: _date_of(db, entry.user.last_login_at) for entry in entries}
+        away_since = {entry.user.id: _date_of(db, entry.away.since) if entry.away else None for entry in entries}
+        looks_after = {
+            entry.user.id: entry.looks_after or _grants_seen_by(db, user, entry.grants) for entry in entries
+        }
+        return entries, last_on, away_since, looks_after
+
+    entries, last_on, away_since, looks_after = await lane.run(_load)
+    rows = [
+        [
+            (sanitize_text(entry.user.username), AUTHOR_COLOR),
+            entry.role,
+            sanitize_text(looks_after[entry.user.id]),
+            (last_on[entry.user.id] or "never", DATE_COLOR),
+        ]
+        for entry in entries
+    ]
+    body: list[Field | Note | Table] = (
+        [Table(("Name", "Role", "Looks after", "Last on"), rows, flex=2)] if rows
+        else [Note("Nobody is listed yet.")]
+    )
+    for entry in entries:
+        if entry.away is not None:
+            body.append(Note(
+                sanitize_text(f"{entry.user.username}: {describe_away(entry.away, away_since[entry.user.id])}"),
+                color=WARNING_COLOR,
+            ))
+    await _show_report(
+        session, lane, user, "Staff", breadcrumb=(),
+        subtitle="Who runs this node, and when they were last on.", sections=[Section(None, body)],
+    )
 
 
 async def _operator_lost_sysop(
@@ -1529,6 +1937,8 @@ async def _draw_admin_menu(
             "unicode_style": unicode_style_enabled(db, actor),
             "collapsed": breadcrumb_collapsed_enabled(db, actor),
             "header_color": effective_header_color_256(db),
+            "node_running": node_controls is None and running_node_pid(db.path) is not None,
+            **_away_state(db, actor),
         }
 
     if state is None:
@@ -1568,7 +1978,7 @@ async def _draw_admin_menu(
         health.append(f"  {counts_row([('Active sessions', active_sessions)])}")
     else:
         standalone_lines = _wrap_panel_sentence(
-            "Live node controls unavailable in standalone mode.",
+            _offline_console_note(bool(state.get("node_running"))),
             prefix="  ", width=box_inner_width, unicode_style=unicode_style,
         )
         health.extend(colored(f"  {line}", fg_color=MUTED_COLOR) for line in standalone_lines)
@@ -1593,7 +2003,7 @@ async def _draw_admin_menu(
         health.extend(
             _wrap_counts_panel(
                 "  ",
-                [("Peers", len(node.peers)), ("Relays", len(node.relays_serving_me)), ("Dead letters", state["dead_letters"])],
+                _link_count_pairs(node, state),
                 width=box_inner_width,
             )
         )
@@ -1698,6 +2108,7 @@ async def _draw_admin_menu(
     quick = [
         MenuEntry(label=menu_key("K", "up", prefix="Bac"), brief="Create and review complete backups"),
         MenuEntry(label=menu_key("D", "NS"), brief="Managed netbbs.org name status"),
+        MenuEntry(label=menu_key("w", "ay", prefix="A"), brief="Tell members you're away"),
     ]
     if node_controls is not None:
         quick.insert(
@@ -1733,14 +2144,21 @@ async def _draw_admin_menu(
         state, node_badge=node_badge, active_sessions=active_sessions, link_context=link_context,
         node_controls=node_controls, unicode_style=unicode_style, width=box_inner_width,
     )
+    # Design doc §5.6: your own away notice, on every landing -- the reminder
+    # that ends a notice nobody dated.
+    away_lines = _away_panel_lines(state, width=box_inner_width, unicode_style=unicode_style)
+    health.extend(away_lines)
+    compact.extend(away_lines)
     level = state["description_level"]
-    for panel, menu_level in ((health, level), (compact, level), (compact, "off")):
+    # Before hiding the descriptions, each on its entry's own line (issue #840).
+    fallbacks = ((health, level), (compact, level), (compact, "inline"), (compact, "off"))
+    for panel, menu_level in fallbacks if level != "off" else ((health, level), (compact, level)):
         menu = _menu(menu_level)
         if _rows(panel, menu) <= session.terminal_height:
             break
     await _write_panel(session, panel, unicode_style=unicode_style, header_color=state["header_color"])
     await session.write_line("\r\n" + menu)
-    if menu_level != level and "Descriptions hidden" not in menu:
+    if menu_level == "off" and level != "off" and "Descriptions hidden" not in menu:
         await session.write_line(
             colored("Descriptions hidden -- terminal too short to show them.", fg_color=MUTED_COLOR)
         )
@@ -1769,7 +2187,7 @@ def _compact_dashboard_panel(
         panel.extend(
             colored(f"  {line}", fg_color=MUTED_COLOR)
             for line in _wrap_panel_sentence(
-                "Live node controls unavailable in standalone mode.",
+                _offline_console_note(bool(state.get("node_running"))),
                 prefix="  ", width=width, unicode_style=unicode_style,
             )
         )
@@ -1786,7 +2204,7 @@ def _compact_dashboard_panel(
             _label("LINK")
             + status_badge("ATTENTION" if link_tone == "warning" else "HEALTHY", tone=link_tone, unicode_style=unicode_style)
             + "  ",
-            [("Peers", len(node.peers)), ("Relays", len(node.relays_serving_me)), ("Dead letters", state["dead_letters"])],
+            _link_count_pairs(node, state),
             width=width,
         ))
     panel.extend(_wrap_counts_panel(
@@ -2070,6 +2488,7 @@ async def _operations_menu(
     """Operational observation and intervention, separate from durable settings."""
     def _load_ops(db: Database) -> dict[str, Any]:
         return {
+            "node_running": node_controls is None and running_node_pid(db.path) is not None,
             **_link_health_snapshot(db, link_context),
             "backup": _get_display_backup_summary(db),
             "description_level": menu_description_level(db, actor),
@@ -2140,7 +2559,7 @@ async def _operations_menu(
                 else:
                     panel.append(colored("NODE HEALTH: ", fg_color=LABEL_COLOR, bold=True) + node_badge)
                     standalone_lines = _wrap_panel_sentence(
-                        "Live node controls unavailable in standalone mode.",
+                        _offline_console_note(bool(state.get("node_running"))),
                         prefix="  ", width=box_inner_width, unicode_style=unicode_style,
                     )
                     panel.extend(colored(f"  {line}", fg_color=MUTED_COLOR) for line in standalone_lines)
@@ -2160,7 +2579,7 @@ async def _operations_menu(
                             colored("LINK OPERATIONS: ", fg_color=LABEL_COLOR, bold=True)
                             + status_badge(link_label, tone=link_tone, unicode_style=unicode_style)
                             + "  ",
-                            [("Peers", len(node.peers)), ("Relays", len(node.relays_serving_me)), ("Dead letters", state["dead_letters"])],
+                            _link_count_pairs(node, state),
                             width=box_inner_width,
                         )
                     )
@@ -2201,7 +2620,13 @@ async def _operations_menu(
                 if active_sessions is not None:
                     panel.append(f"  {counts_row([('Active sessions', active_sessions)])}")
                 else:
-                    panel.append(colored("  Live node controls unavailable in standalone mode.", fg_color=MUTED_COLOR))
+                    panel.extend(
+                        colored(f"  {line}", fg_color=MUTED_COLOR)
+                        for line in _wrap_panel_sentence(
+                            _offline_console_note(bool(state.get("node_running"))),
+                            prefix="  ", width=box_inner_width, unicode_style=unicode_style,
+                        )
+                    )
 
                 if link_context is None:
                     link_badge_text = "UNAVAILABLE" if node_controls is None else "DISABLED"
@@ -2213,7 +2638,7 @@ async def _operations_menu(
                     panel.append(colored("LINK OPERATIONS  ", fg_color=LABEL_COLOR, bold=True) + status_badge(link_label, tone=link_tone, unicode_style=unicode_style))
                     panel.append(
                         "  " + counts_row(
-                            [("Peers", len(node.peers)), ("Relays", len(node.relays_serving_me)), ("Dead letters", state["dead_letters"])]
+                            _link_count_pairs(node, state)
                         )
                     )
                     panel.append(
@@ -2229,6 +2654,7 @@ async def _operations_menu(
             MenuEntry(label=menu_key("S", "earch indexes"), brief="Check and rebuild Find's indexes"),
             MenuEntry(label=menu_key("A", "udit log"), brief="Moderation action history"),
             MenuEntry(label=menu_key("g", prefix="Node lo"), brief="Warnings and errors in netbbs.log"),
+            MenuEntry(label=menu_key("M", "ail"), brief="Mailbox sizes, refused Link mail"),
         ]
         if node_controls is not None:
             options.insert(0, MenuEntry(label=menu_key("N", "ode and sessions"), brief="Sessions, shutdown, and drain"))
@@ -2308,6 +2734,9 @@ async def _operations_menu(
         elif choice == "g":
             await _node_log_screen(session, lane, actor)
             state = await lane.run(_load_ops)
+        elif choice == "m":
+            await _mail_tools_screen(session, lane, actor, link_context=link_context)
+            state = await lane.run(_load_ops)
         else:
             await session.write(reject_unhandled_key(choice))
 
@@ -2342,6 +2771,7 @@ async def _system_menu(
                 utc_now_iso(), override_format=display_format, override_timezone=display_timezone
             ),
             "previous_callers_enabled": previous_callers_enabled(db),
+            "previous_callers_plain": previous_callers_plain(db),
             "guest_username": (lambda u: u.username if u is not None else None)(guest_user(db)),
             "trust_exceptions": len(list_sole_authorities(db)),
             "description_level": menu_description_level(db, actor),
@@ -2406,8 +2836,17 @@ async def _system_menu(
             await _draw_system_menu(session, node_controls, link_context, stats=stats)
         elif choice == "v":
             def _toggle_previous_callers(db: Database) -> None:
-                enabled = not previous_callers_enabled(db)
+                # Three steps (issue #841): shown in the default neon style,
+                # shown plain, hidden, and round again.
+                enabled, plain = previous_callers_enabled(db), previous_callers_plain(db)
+                if enabled and not plain:
+                    set_previous_callers_plain(db, True)
+                    record_action(db, actor=actor, action="set_previous_callers_plain", detail="plain=true")
+                    return
+                enabled = not enabled
                 set_previous_callers_enabled(db, enabled)
+                if enabled:
+                    set_previous_callers_plain(db, False)
                 record_action(
                     db,
                     actor=actor,
@@ -2551,7 +2990,12 @@ async def _draw_system_menu(
             + colored(sanitize_text(_fit(timestamp_value, 2 + len(timestamp_label))), fg_color=VALUE_COLOR),
             "  " + colored(callers_label, fg_color=LABEL_COLOR)
             + colored(
-                "shown after login" if stats["previous_callers_enabled"] else "hidden",
+                _fit(
+                    ("shown after login, plain" if stats["previous_callers_plain"] else "shown after login, neon")
+                    if stats["previous_callers_enabled"]
+                    else "hidden",
+                    2 + len(callers_label),
+                ),
                 fg_color=SUCCESS_COLOR if stats["previous_callers_enabled"] else MUTED_COLOR,
             ),
             "  " + colored(trust_label, fg_color=LABEL_COLOR)
@@ -2568,7 +3012,7 @@ async def _draw_system_menu(
         MenuEntry(label=menu_key("T", "imestamp format"), brief="Node-wide date/time display"),
         MenuEntry(
             label=menu_key("S", " & retention", prefix="Limit"),
-            brief="Uploads, expiry, invites, history",
+            brief="Uploads, expiry, chat, mail level",
         ),
         MenuEntry(
             label=menu_key("w", "ork & login limits", prefix="Net"),
@@ -2591,9 +3035,11 @@ async def _draw_system_menu(
         MenuEntry(
             label=menu_key("V", "ious callers", prefix="Pre"),
             brief=(
-                "Shown after login; press to hide"
-                if stats["previous_callers_enabled"]
-                else "Hidden after login; press to show"
+                "Hidden after login; press to show (neon)"
+                if not stats["previous_callers_enabled"]
+                else "Plain; press to hide"
+                if stats["previous_callers_plain"]
+                else "Neon; press for plain"
             ),
         ),
         MenuEntry(label=menu_key("I", "nter-BBS chat (MRC)"), brief="Bridge channels to the MRC network"),
@@ -2630,7 +3076,6 @@ async def _draw_node_name_screen(
             node_name_gradient=session.node_name_gradient,
         )
     )
-    await session.write_line(await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width))
     safe_name = sanitize_text(name)
     preview = (
         gradient_text(safe_name, gradient, truecolor=False) if gradient is not None
@@ -2693,9 +3138,6 @@ async def _link_participation_screen(session: Session, lane: DatabaseLane, actor
                 session, chrome, "Join NetBBS Link", breadcrumb=("Settings",),
                 subtitle="Whether this node uses the project's reliable nodes as seeds and relays.",
             ),
-            preamble=[await _load_condensed_status_line(
-                lane, unicode_style=chrome.unicode_style, terminal_width=session.terminal_width
-            )],
             sections=sections, actions=actions, page=page, message=message,
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
         )
@@ -2768,7 +3210,7 @@ async def _link_participation_sections(lane: DatabaseLane) -> tuple[list[Section
         Section("What accepting means", [Note(
             "Accepting dials these nodes as seeds after your own configured ones and, for a node that "
             "can't be reached from the internet directly, uses them as relays. It hands them no say over "
-            "your content and is not a trust decision about anyone (design doc §16, issue #219)."
+            "your content and is not a trust decision about anyone."
         )]),
     ], participation
 
@@ -2934,8 +3376,9 @@ async def _guest_access_screen(session: Session, lane: DatabaseLane, actor: User
             help=(
                 "An existing account callers may sign in as without a password. It stays an "
                 "ordinary account: its level and per-object permissions decide what a guest can "
-                "reach, and it keeps its own password for normal sign-in. Clear this field to "
-                "turn guest login off. A SysOp account cannot be used."
+                "reach, and it keeps its own password for normal sign-in. One thing is closed to it "
+                "whatever its level: mail, because every guest would share its mailbox. Clear this "
+                "field to turn guest login off. A SysOp account cannot be used."
             ),
         ),
         FieldSpec(
@@ -3068,7 +3511,6 @@ async def _trust_menu(
                 header_color=header_color,
             node_name_gradient=session.node_name_gradient)
         )
-        await session.write_line(await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width))
         options = [
             MenuEntry(label=menu_key("S", "ubjects"), brief="Trusted node/user subjects"),
             MenuEntry(label=menu_key("D", "omains"), brief="Trusted federation domains"),
@@ -3481,7 +3923,22 @@ async def _trust_subjects_screen(
     )
     if selected is None:
         return
-    subject_name = _trust_subject_name(selected, labels.get(selected.node_fingerprint))
+    await _trust_subject_screen(session, lane, actor, selected, link_context=link_context)
+
+
+async def _trust_subject_screen(
+    session: Session, lane: DatabaseLane, actor: User, selected: TrustSubject, *,
+    link_context: LinkContext | None,
+    breadcrumb: Sequence[str] = ("Settings", "Policy trust", "Subjects"),
+) -> None:
+    """One trust subject: its state per dimension, and every action on it.
+
+    Reached from Policy trust -> Subjects, and from wherever else the SysOp
+    meets a node or a remote user (issue #820): a peer's screen on the node
+    map, a refused letter's sender. One screen, so an action is never built
+    twice."""
+    label = (await lane.run(identity_for_fingerprint, selected.node_fingerprint)).label
+    subject_name = _trust_subject_name(selected, label)
     listing = _Listing()
     while True:
         chrome = await _load_chrome(lane, actor)
@@ -3554,6 +4011,7 @@ async def _trust_subjects_screen(
             sections.append(Section("Remote identity attestations", attestations))
 
         actions = [
+            *_TRUST_QUICK_ACTIONS,
             ("o", menu_key("O", "verride")),
             ("c", menu_key("C", "lear override")),
         ]
@@ -3563,13 +4021,17 @@ async def _trust_subjects_screen(
         choice, listing.page = await show_detail(
             session,
             title=_detail_title(
-                session, chrome, sanitize_text(subject_name), breadcrumb=("Settings", "Policy trust", "Subjects"),
+                session, chrome, sanitize_text(subject_name), breadcrumb=breadcrumb,
             ),
             sections=sections, actions=actions, page=listing.page, message=listing.take_message(),
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
         )
         if choice == "b":
             return
+        if await _trust_quick_action(
+            session, lane, actor, selected, choice, name=subject_name, listing=listing, link_context=link_context,
+        ):
+            continue
         if choice == "o":
             await _set_trust_override_screen(session, lane, actor, selected, listing)
             _retry_deferred_events(link_context, selected)
@@ -3584,26 +4046,39 @@ async def _trust_subjects_screen(
             await _remote_attestation_override_screen(session, lane, actor, selected, listing)
 
 
-async def _pick_trust_dimension(session: Session) -> TrustDimension | None:
+# The override editor's "every dimension" choice (issue #820): what
+# establishing or blocking a subject means, one override per dimension.
+_ALL_DIMENSIONS = "all"
+
+
+async def _pick_trust_dimension(session: Session, *, allow_all: bool = False) -> TrustDimension | str | None:
     await session.write_line("Dimension:")
-    await session.write_line(
-        action_bar(
-            [
-                menu_key("I", "dentity integrity"),
-                menu_key("R", "esource behavior"),
-                menu_key("C", "ontent conduct"),
-                menu_key("B", "ack"),
-            ],
-            width=session.terminal_width,
-        )
-    )
+    entries = [
+        menu_key("I", "dentity integrity"),
+        menu_key("R", "esource behavior"),
+        menu_key("C", "ontent conduct"),
+    ]
+    if allow_all:
+        entries.append(menu_key("A", "ll three"))
+    entries.append(menu_key("B", "ack"))
+    await session.write_line(action_bar(entries, width=session.terminal_width))
     await _choice_prompt(session)
     choice = (await session.read_key()).lower()
+    if allow_all and choice == "a":
+        return _ALL_DIMENSIONS
     return {
         "i": TrustDimension.IDENTITY_INTEGRITY,
         "r": TrustDimension.RESOURCE_BEHAVIOR,
         "c": TrustDimension.CONTENT_CONDUCT,
     }.get(choice)
+
+
+def _dimension_text(dimension: TrustDimension | str | None) -> str:
+    if dimension is None:
+        return "(not chosen)"
+    if dimension == _ALL_DIMENSIONS:
+        return "all three"
+    return dimension.value
 
 
 def _stable_id_for(key: str) -> int:
@@ -3812,9 +4287,17 @@ async def _trust_list_choice(
 
 async def _set_trust_override_screen(
     session: Session, lane: DatabaseLane, actor: User, subject: TrustSubject,
-    listing: "_Listing | None" = None,
+    listing: "_Listing | None" = None, *, state: TrustState | None = None,
+    all_dimensions: bool = False, title: str = "Trust override",
 ) -> None:
     """
+    Issue #820: `state` and `all_dimensions` open the editor already filled
+    in, which is all `[E]stablish` and `Bloc[k]` are -- the same editor, the
+    same reason, the same confirmations, the same audit. `S[t]ate` and
+    `[D]imension` stay editable, so a preset is a starting point, not a
+    different path.
+
+
     Issue #282: was a fixed five-step chain (dimension, state, reason,
     then up to two confirmations) with no way back -- an invalid key
     anywhere cancelled everything. Now a draft editor: `[D]imension`
@@ -3824,10 +4307,10 @@ async def _set_trust_override_screen(
     ESTABLISHED, and the changed-identity re-check loop) before
     applying the override. Declining either leaves the draft intact.
     """
-    draft: dict = {"dimension": None, "state": None, "reason": ""}
+    draft: dict = {"dimension": _ALL_DIMENSIONS if all_dimensions else None, "state": state, "reason": ""}
 
     async def _dimension_prompt(session: Session, lane: DatabaseLane, draft: dict) -> None:
-        dimension = await _pick_trust_dimension(session)
+        dimension = await _pick_trust_dimension(session, allow_all=True)
         if dimension is not None:
             draft["dimension"] = dimension
 
@@ -3856,10 +4339,13 @@ async def _set_trust_override_screen(
     fields = [
         FieldSpec(
             key="dimension", hotkey="d", menu_text=menu_key("D", "imension"), label="Dimension",
-            render=lambda d: d["dimension"].value if d["dimension"] is not None else "(not chosen)",
+            render=lambda d: _dimension_text(d["dimension"]),
             prompt=_dimension_prompt,
             brief="Which trust dimension to force",
-            help="Identity integrity, resource behavior, or content conduct -- each is tracked separately.",
+            help=(
+                "Identity integrity, resource behavior, or content conduct -- each is tracked separately. "
+                "All three sets one override per dimension: what establishing or blocking means."
+            ),
         ),
         FieldSpec(
             key="state", hotkey="t", menu_text=menu_key("t", "ate", prefix="S"), label="State",
@@ -3920,32 +4406,78 @@ async def _set_trust_override_screen(
                 or refreshed_notice.id == identity_notice.id
             ):
                 break
+        dimensions = list(TrustDimension) if dimension == _ALL_DIMENSIONS else [dimension]
+
+        def _apply(db: Database) -> None:
+            for each in dimensions:
+                set_trust_override(db, subject, each, state, reason=reason, actor_user_id=actor.id)
+
         try:
-            await lane.run(
-                set_trust_override, subject, dimension, state,
-                reason=reason, actor_user_id=actor.id,
-            )
+            await lane.run(_apply)
         except ValueError as exc:
             await _say_or_write(session, listing, f"Trust state changed concurrently: {exc}", error=True)
             return None
-        await _say_or_write(session, listing, "Trust override applied and audited.")
+        if len(dimensions) > 1:
+            await _say_or_write(session, listing, f"Set to {state.value} in all three dimensions; audited.")
+        else:
+            await _say_or_write(session, listing, "Trust override applied and audited.")
         return True
 
     await _trust_editor(
-        session, lane, actor, title="Trust override", fields=fields, draft=draft, save=save,
+        session, lane, actor, title=title, fields=fields, draft=draft, save=save,
     )
+
+
+# Issue #820: what a SysOp does to a subject most often, one key away wherever
+# it is shown. Each opens the override editor above with the dimension and
+# state already chosen; nothing is applied before its `[S]ave`.
+_TRUST_QUICK_ACTIONS = (
+    ("e", menu_key("E", "stablish")),
+    ("k", menu_key("k", prefix="Bloc")),
+)
+
+
+async def _trust_quick_action(
+    session: Session, lane: DatabaseLane, actor: User, subject: TrustSubject, choice: str, *,
+    name: str, listing: "_Listing | None", link_context: LinkContext | None,
+) -> bool:
+    """Run `[E]stablish` or `Bloc[k]` if that is what `choice` is; `False`
+    for any other key, which the calling screen handles itself."""
+    presets = {"e": (TrustState.ESTABLISHED, "Establish"), "k": (TrustState.BLOCKED, "Block")}
+    if choice not in presets:
+        return False
+    state, verb = presets[choice]
+    await _set_trust_override_screen(
+        session, lane, actor, subject, listing, state=state, all_dimensions=True,
+        title=f"{verb} {sanitize_text(name)}",
+    )
+    _retry_deferred_events(link_context, subject)
+    return True
+
+
+# The "every override" row of `_clear_trust_override_screen`'s picker.
+_ALL_OVERRIDES = object()
 
 
 async def _clear_trust_override_screen(
     session: Session, lane: DatabaseLane, actor: User, subject: TrustSubject,
     listing: "_Listing | None" = None,
 ) -> None:
-    overrides = await lane.run(list_trust_overrides, subject)
+    overrides: list = list(await lane.run(list_trust_overrides, subject))
+    if len(overrides) > 1:
+        # Issue #820: what `[E]stablish` or `Bloc[k]` set is one override per
+        # dimension, and undoing it should not take three trips.
+        overrides.insert(0, _ALL_OVERRIDES)
     selected = await pick_item(
         session, overrides,
-        name_of=lambda item: f"{item.dimension.value}: {item.state.value}",
-        stable_id_of=lambda item: item.override_id,
-        description_of=lambda item: item.reason,
+        name_of=lambda item: (
+            f"All {len(overrides) - 1} overrides" if item is _ALL_OVERRIDES
+            else f"{item.dimension.value}: {item.state.value}"
+        ),
+        stable_id_of=lambda item: -1 if item is _ALL_OVERRIDES else item.override_id,
+        description_of=lambda item: (
+            "back to what policy computes, in every dimension" if item is _ALL_OVERRIDES else item.reason
+        ),
         title="Active trust overrides",
         empty_message="No active trust overrides.",
         redraw_in_place=await lane.run(redraw_in_place_enabled, actor),
@@ -3956,12 +4488,28 @@ async def _clear_trust_override_screen(
     )
     if selected is None:
         return
+    chosen = [item for item in overrides if item is not _ALL_OVERRIDES] if selected is _ALL_OVERRIDES else [selected]
+
+    def _clear(db: Database) -> None:
+        for item in chosen:
+            try:
+                clear_trust_override(db, item.override_id, actor_user_id=actor.id)
+            except ValueError:
+                # Cleared meanwhile from another session: already what was
+                # asked for, so "all" still ends with every one of them gone.
+                if len(chosen) == 1:
+                    raise
+
     try:
-        await lane.run(clear_trust_override, selected.override_id, actor_user_id=actor.id)
+        await lane.run(_clear)
     except ValueError as exc:
         await _say_or_write(session, listing, f"Trust state changed concurrently: {exc}", error=True)
         return
-    await _say_or_write(session, listing, "Override cleared; recovery policy was recomputed.")
+    await _say_or_write(
+        session, listing,
+        "Overrides cleared; recovery policy was recomputed." if len(chosen) > 1
+        else "Override cleared; recovery policy was recomputed.",
+    )
 
 
 async def _trust_decision_history_screen(
@@ -4827,10 +5375,9 @@ async def _published_identity_screen(
         selected = await pick_item(
             session, live,
             name_of=_issued_subject,
-            # `pick_item`'s [G]oto # parses its input with `int()` and compares
-            # that to `stable_id_of`, so a hex content_id makes the advertised
-            # goto path unusable -- the same derivation the other hash-backed
-            # trust pickers use (Codex review of #590).
+            # `pick_item` wants an `int` identity per row, and a hex content_id
+            # is not one -- the same derivation the other hash-backed trust
+            # pickers use (Codex review of #590).
             stable_id_of=lambda record: _stable_id_for(record.content_id),
             description_of=lambda record: f"signed {record.issued_at[:10]}, expires {record.expires_at[:10]}",
             columns=_ISSUED_COLUMNS,
@@ -5389,11 +5936,9 @@ async def _create_user_screen(session: Session, lane: DatabaseLane, actor: User)
         )
         # Dogfood report: three testers on modern (ANSI-capable) clients
         # never discovered in-place redraw existed, so never turned it
-        # on. New accounts (self-registered or SysOp-created) now start
-        # with it already on -- see the matching self-registration
-        # change in login_flow._register_new_account for the full
-        # rationale.
-        await lane.run(set_redraw_in_place_enabled, new_user, True)
+        # on. Every new account starts with it on, however it was made
+        # (issue #840).
+        await lane.run(start_new_account_redrawing_in_place, new_user)
         return new_user
 
     redraw_in_place, redraw_hint = await lane.run(_resolve_redraw_preference, actor)
@@ -5530,7 +6075,9 @@ def _user_columns(user: User) -> list[str | tuple[str, SegmentColor]]:
     ]
 
 
-async def _pick_target_user(session: Session, lane: DatabaseLane, actor: User, *, title: str) -> User | None:
+async def _pick_target_user(
+    session: Session, lane: DatabaseLane, actor: User, *, title: str, pending_only: bool = False
+) -> User | None:
     """
     The single screen every `[U]sers` submenu entry reaches a target
     account through (design doc -- Thiesi's own dogfood-testing report).
@@ -5560,7 +6107,7 @@ async def _pick_target_user(session: Session, lane: DatabaseLane, actor: User, *
     by name, and paying for this screen's features with the thing they
     asked for is not a refactor, it is a regression with a tidy diff.
 
-    The filter scopes search and goto too, as it did before -- the whole
+    The filter scopes search too, as it did before -- the whole
     point of hiding a class of accounts is to stop having to reach them
     until the SysOp widens the filter again.
     """
@@ -5571,6 +6118,9 @@ async def _pick_target_user(session: Session, lane: DatabaseLane, actor: User, *
     def _load(db: Database) -> list[User]:
         _, ascending_order, descending_order = _USER_SORT_MODES[mode]
         users = list_users(db, order_by=descending_order if descending else ascending_order)
+        if pending_only:
+            # The Staff console's accounts waiting for approval (issue #836).
+            users = [u for u in users if u.pending_approval]
         if visibility == "active_only":
             return [u for u in users if u.disabled_at is None]
         if visibility == "disabled_only":
@@ -5580,7 +6130,7 @@ async def _pick_target_user(session: Session, lane: DatabaseLane, actor: User, *
     unicode_style = await lane.run(unicode_style_enabled, actor)
     users = await lane.run(_load)
     if not users:
-        _announce_line(session, "\r\nNo registered users yet.")
+        _announce_line(session, "\r\nNo accounts are waiting for approval." if pending_only else "\r\nNo registered users yet.")
         return None
 
     def _standing_label() -> str:
@@ -5658,26 +6208,14 @@ async def _pick_target_user(session: Session, lane: DatabaseLane, actor: User, *
         redraw_in_place=await lane.run(redraw_in_place_enabled, actor),
         unicode_style=unicode_style,
         collapsed=await lane.run(breadcrumb_collapsed_enabled, actor),
-        # The console's condensed status line, kept from the screen this
-        # replaced: it was drawn on every render there, and a masthead is
-        # how pick_item draws a block above its own title on every
-        # render. Its row is budgeted now -- see the picker's
-        # _header_lines, which never counted a masthead until this.
-        # A coroutine, not a captured string: this line reports backup
-        # state, and another session completing a backup while the
-        # screen is open used to leave it saying "never" until the SysOp
-        # left and came back -- on a screen that advertises Ctrl-R
-        # (Codex review).
-        masthead=lambda: _load_condensed_status_line(
-            lane, unicode_style=unicode_style, terminal_width=session.terminal_width
-        ),
         accent_color=await lane.run(effective_accent_color_256),
         header_color=await lane.run(effective_header_color_256),
     )
 
 
 async def _pick_and_edit_user(
-    session: Session, lane: DatabaseLane, actor: User, node_controls: NodeControls | None, *, title: str
+    session: Session, lane: DatabaseLane, actor: User, node_controls: NodeControls | None, *, title: str,
+    pending_only: bool = False,
 ) -> None:
     """
     Every per-user action funnels through here now (design doc -- node
@@ -5691,7 +6229,7 @@ async def _pick_and_edit_user(
     SysOp who only meant to promote someone can still also disable them
     right there without leaving and re-picking them a second time.
     """
-    target = await _pick_target_user(session, lane, actor, title=title)
+    target = await _pick_target_user(session, lane, actor, title=title, pending_only=pending_only)
     if target is not None:
         await _user_detail_screen(session, lane, actor, target, node_controls)
 
@@ -5732,6 +6270,7 @@ async def _draw_user_detail(
     collapsed: bool,
     *,
     selected: str | None = None,
+    allowed: frozenset[str] | None = None,
 ) -> bool:
     """Returns whether `target` is currently on the local blocklist --
     unlike `disabled_at`, blocked status isn't a field on `User` itself,
@@ -5746,13 +6285,15 @@ async def _draw_user_detail(
     that line's own `>` cursor -- `None` (nothing arrow-highlighted yet,
     or a `[A]pprove`/`[D]elete`/`[B]ack` action, none of which are
     arrow-selectable fields, matching `edit_resource_draft`'s own
-    Save/Back convention) renders identically to before this feature."""
+    Save/Back convention) renders identically to before this feature.
+
+    `allowed` (issue #836) narrows the menu to what a staff member may do
+    (`_user_detail_keys`); `None` is the SysOp's full screen."""
     await session.write_line(
         "\r\n" + screen_title(sanitize_text(target.username),
             breadcrumb=(session.node_display_name,), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
             header_color=await lane.run(effective_header_color_256), node_name_gradient=session.node_name_gradient)
     )
-    await session.write_line(await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width))
     accent = await lane.run(effective_accent_color_256)
 
     def _editable(hotkey: str, label: str, value: str, *, color: int = VALUE_COLOR) -> Field:
@@ -5806,24 +6347,55 @@ async def _draw_user_detail(
                 "set" if await lane.run(has_password, target) else "(none -- key login only)",
             ),
         ]),
-        # Design doc §18: a narrow, SysOp-grantable permission independent
-        # of the four moderator scope tiers.
+        # Design doc §5.6 (issue #836, F132): everything this account may
+        # do beyond its level, in one place -- the staff permissions, the
+        # verify-identity permission (§5.5) beside them but separate, and
+        # a summary of its moderator grants, which used to show nowhere
+        # on the account.
         Section("Privileges", [
+            _editable(
+                "s", "Staff", describe_staff_permissions(target.staff_permissions),
+                color=VALUE_COLOR if target.staff_permissions else MUTED_COLOR,
+            ),
             _editable("i", "Can verify identity", f"{_yes_no(target.can_verify_identity)} (age/name attestation)"),
+            _grants_field(await lane.run(_grant_summaries, target)),
         ]),
     ]
+    # Issue #835 (F072): what the caller said when signing up, for whoever
+    # decides on the account. Typed by an unauthenticated caller, so
+    # sanitized like any other remote text.
+    signup_answer = await lane.run(load_signup_answer, target.id) if target.pending_approval else None
+    if signup_answer is not None:
+        sections.insert(1, Section("Signup answer", [
+            Note(f"Asked: {sanitize_text(signup_answer.question)}"),
+            Note(f"Answer: {sanitize_text(signup_answer.answer)}"),
+        ]))
     panel_rows = await _write_sections(session, sections, unicode_style=unicode_style)
+    offered = allowed if allowed is not None else _ALL_USER_DETAIL_KEYS
     options = []
-    if target.pending_approval:
+    if target.pending_approval and "a" in offered:
         options.append(MenuEntry(label=menu_key("A", "pprove"), brief="Approve this pending signup"))
-    options.append(MenuEntry(label=menu_key("L", "evel"), brief="Change this user's access level"))
-    options.append(MenuEntry(label=menu_key("T", "oggle enable/disabled"), brief="Enable or disable this account"))
-    options.append(MenuEntry(label=menu_key("I", "dentity verification"), brief="Grant/revoke attestation rights"))
-    options.append(MenuEntry(label=menu_key("K", "ey"), brief="View/replace this user's SSH key"))
-    options.append(MenuEntry(label=menu_key("P", "assword"), brief="Set or clear this user's password"))
-    options.append(MenuEntry(label=menu_key("R", "estrict login"), brief="Block or unblock this account"))
+    if "l" in offered:
+        options.append(MenuEntry(label=menu_key("L", "evel"), brief="Change this user's access level"))
+    if "t" in offered:
+        options.append(MenuEntry(label=menu_key("T", "oggle enable/disabled"), brief="Enable or disable this account"))
+    if "s" in offered:
+        options.append(MenuEntry(label=menu_key("S", "taff"), brief="Staff permissions, Co-SysOp preset"))
+    if "i" in offered:
+        options.append(MenuEntry(label=menu_key("I", "dentity verification"), brief="Grant/revoke attestation rights"))
+    if "k" in offered:
+        options.append(MenuEntry(label=menu_key("K", "ey"), brief="View/replace this user's SSH key"))
+    if "p" in offered:
+        options.append(MenuEntry(label=menu_key("P", "assword"), brief="Set or clear this user's password"))
+    if "r" in offered:
+        options.append(MenuEntry(label=menu_key("R", "estrict login"), brief="Block or unblock this account"))
     options.append(MenuEntry(label=menu_key("H", "istory"), brief="Admin actions on this account"))
-    options.append(MenuEntry(label=menu_key("D", "elete"), brief="Permanently remove this user"))
+    if target.pending_approval and "d" in offered:
+        # Issue #835: turning down a signup is routine, and used to need
+        # the full permanent-delete warning and typed-name confirmation.
+        options.append(MenuEntry(label=menu_key("D", "ecline"), brief="Turn down this signup"))
+    elif "d" in offered:
+        options.append(MenuEntry(label=menu_key("D", "elete"), brief="Permanently remove this user"))
     options.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to the picker"))
     await session.write_line(
         "\r\n" + _fitted_menu(options, description_level, session=session, used_rows=panel_rows + 5)
@@ -5833,7 +6405,50 @@ async def _draw_user_detail(
     return blocked
 
 
-_USER_DETAIL_FIELD_ORDER = ("l", "t", "r", "k", "p", "i")
+_USER_DETAIL_FIELD_ORDER = ("l", "t", "r", "k", "p", "s", "i")
+
+#: Every action key on the account detail -- what a SysOp gets.
+_ALL_USER_DETAIL_KEYS = frozenset("altrkpsihd")
+
+
+def _user_detail_keys(actor: User, target: User) -> frozenset[str]:
+    """
+    The account-detail actions `actor` is offered on `target` (design doc
+    §5.6). A SysOp gets all of them. A staff member gets `[H]istory`, and
+    -- only on an account below 255 holding no staff permission -- level,
+    enable/disable and password with manage accounts, approve and decline
+    with approve accounts. Never keys, the blocklist, staff, identity
+    verification, or deleting an account.
+
+    Presentation only: the mutators check again against the database, so
+    a permission revoked while this screen is open refuses the action.
+    """
+    if is_usable_sysop(actor):
+        return _ALL_USER_DETAIL_KEYS
+    keys = {"h"}
+    within_reach = target.user_level < SYSOP_LEVEL and not target.staff_permissions
+    if within_reach and actor.has_staff(StaffPermission.MANAGE_ACCOUNTS):
+        keys |= {"l", "t", "p"}
+    if within_reach and target.pending_approval and actor.has_staff(StaffPermission.APPROVE_ACCOUNTS):
+        keys |= {"a", "d"}
+    return frozenset(keys)
+
+
+def _grant_summaries(db: Database, target: User) -> list[str]:
+    """`target`'s moderator grants in words (`describe_grant`)."""
+    return [describe_grant(db, grant) for grant in list_grants_for_user(db, target)]
+
+
+def _grants_field(summaries: list[str]) -> Field:
+    """The account detail's moderator-grant line: how many, and each one
+    beneath it. Board and Community names can come from other nodes over
+    Link, so they are sanitized like any remote text."""
+    if not summaries:
+        return Field("Moderator grants", "none", color=MUTED_COLOR)
+    return Field(
+        "Moderator grants", str(len(summaries)),
+        note="; ".join(sanitize_text(summary) for summary in summaries),
+    )
 async def _user_history_screen(session: Session, lane: DatabaseLane, actor: User, target: User) -> None:
     """Every recorded admin action against `target`, newest first, paged.
 
@@ -5919,11 +6534,17 @@ _USER_DETAIL_HELP: dict[str, tuple[str, str]] = {
         "Enable/disable this account. A disabled account can't log in; existing posts/"
         "files/messages they created are untouched.",
     ),
+    "s": (
+        "Staff",
+        "Staff permissions: approve accounts, manage accounts (disable/"
+        "enable, password reset, levels up to 254) and moderate everything. Co-SysOp sets "
+        "all three. A staff member never acts on level 255 or on other staff, and can't "
+        "grant anything.",
+    ),
     "i": (
         "Can verify identity",
-        "A narrow, SysOp-grantable permission (design doc §18) letting this account "
-        "perform age/name attestation for other callers -- independent of the four "
-        "moderator scope tiers.",
+        "Lets this account confirm other callers' age or real name. It is separate "
+        "from moderator grants and staff permissions.",
     ),
     "k": (
         "Public key",
@@ -5995,41 +6616,48 @@ async def _user_detail_screen(
     collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
     redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
     selected: str | None = None
-    blocked = await _draw_user_detail(
-        session, lane, target, description_level, redraw_in_place, unicode_style, collapsed, selected=selected
-    )
+
+    async def _redraw() -> bool:
+        # Recomputed on every draw: an approval or a level change can move
+        # the account in or out of a staff member's reach.
+        nonlocal allowed, field_order
+        allowed = _user_detail_keys(actor, target)
+        field_order = tuple(key for key in _USER_DETAIL_FIELD_ORDER if key in allowed)
+        return await _draw_user_detail(
+            session, lane, target, description_level, redraw_in_place, unicode_style, collapsed,
+            selected=selected, allowed=allowed if allowed != _ALL_USER_DETAIL_KEYS else None,
+        )
+
+    allowed: frozenset[str] = _ALL_USER_DETAIL_KEYS
+    field_order: tuple[str, ...] = _USER_DETAIL_FIELD_ORDER
+    blocked = await _redraw()
     while True:
         key = await _read_user_detail_key(session)
 
         if key.kind == EditorKeyKind.UP:
-            index = _USER_DETAIL_FIELD_ORDER.index(selected) if selected in _USER_DETAIL_FIELD_ORDER else 0
-            selected = _USER_DETAIL_FIELD_ORDER[(index - 1) % len(_USER_DETAIL_FIELD_ORDER)]
-            blocked = await _draw_user_detail(
-                session, lane, target, description_level, redraw_in_place, unicode_style, collapsed, selected=selected
-            )
+            if not field_order:
+                continue
+            index = field_order.index(selected) if selected in field_order else 0
+            selected = field_order[(index - 1) % len(field_order)]
+            blocked = await _redraw()
             continue
         if key.kind == EditorKeyKind.DOWN:
-            index = _USER_DETAIL_FIELD_ORDER.index(selected) if selected in _USER_DETAIL_FIELD_ORDER else -1
-            selected = _USER_DETAIL_FIELD_ORDER[(index + 1) % len(_USER_DETAIL_FIELD_ORDER)]
-            blocked = await _draw_user_detail(
-                session, lane, target, description_level, redraw_in_place, unicode_style, collapsed, selected=selected
-            )
+            if not field_order:
+                continue
+            index = field_order.index(selected) if selected in field_order else -1
+            selected = field_order[(index + 1) % len(field_order)]
+            blocked = await _redraw()
             continue
         if key.kind == EditorKeyKind.ESCAPE:
             if selected is not None:
                 selected = None
-                blocked = await _draw_user_detail(
-                    session, lane, target, description_level, redraw_in_place, unicode_style, collapsed,
-                    selected=selected,
-                )
+                blocked = await _redraw()
                 continue
             await session.write("\a")
             continue
         if key.kind == EditorKeyKind.CTRL and key.char == "h":
             await _show_user_detail_help(session, lane, selected=selected, unicode_style=unicode_style)
-            blocked = await _draw_user_detail(
-                session, lane, target, description_level, redraw_in_place, unicode_style, collapsed, selected=selected
-            )
+            blocked = await _redraw()
             continue
         if key.kind == EditorKeyKind.ENTER or (key.kind == EditorKeyKind.CHAR and key.char == " "):
             if selected is None:
@@ -6044,12 +6672,9 @@ async def _user_detail_screen(
                 # character, never as `EditorKeyKind.CTRL` -- same dual
                 # path `edit_resource_draft` itself handles.
                 await _show_user_detail_help(session, lane, selected=selected, unicode_style=unicode_style)
-                blocked = await _draw_user_detail(
-                    session, lane, target, description_level, redraw_in_place, unicode_style, collapsed,
-                    selected=selected,
-                )
+                blocked = await _redraw()
                 continue
-            if choice in _USER_DETAIL_FIELD_ORDER:
+            if choice in field_order:
                 selected = choice
         else:
             # Left/Right/Backspace/Tab/Home/End/Page Up/Page Down --
@@ -6060,19 +6685,36 @@ async def _user_detail_screen(
         if choice == "b":
             await session.write_line("")
             return
+        elif choice not in allowed:
+            # Design doc §5.6: a staff member sees the account, but only the
+            # actions their permissions cover, and none on a SysOp or
+            # another staff member.
+            await session.write(reject_unhandled_key(choice))
         elif choice == "a" and target.pending_approval:
             await session.write_line("")
             if await prompt_yes_no(session, "Approve this account so it can log in?", default=False):
-                target = await lane.run(approve_pending_user, target, approved_by=actor)
-                _announce_line(session, f"{target.username!r} approved.")
-            blocked = await _draw_user_detail(
-                session, lane, target, description_level, redraw_in_place, unicode_style, collapsed, selected=selected,
-            )
+                try:
+                    target = await lane.run(approve_pending_user, target, approved_by=actor)
+                except UserManagementError as exc:
+                    _announce_line(session, colored(str(exc), fg_color=MUTED_COLOR))
+                else:
+                    _announce_line(session, f"{target.username!r} approved.")
+            blocked = await _redraw()
         elif choice == "l":
             await session.write_line("")
-            await write_prompt(session, f"New level for {target.username!r} [{target.user_level}]: ")
-            raw = (await session.read_line()).strip()
-            if raw:
+            # One style for a number (issue #845, F136): the value opens in
+            # the line to edit, as on every Create/Edit screen, instead of a
+            # `[current]` default beside an empty line.
+            await write_field_prompt(
+                session,
+                colored(f"New level for {target.username!r} ({_EDIT_HINT}):", fg_color=MUTED_COLOR),
+                hint=_EDIT_HINT,
+            )
+            try:
+                raw = (await _read_seeded_line(session, initial=str(target.user_level))).strip()
+            except InputCancelled:
+                raw = ""
+            if raw and raw != str(target.user_level):
                 try:
                     new_level = int(raw)
                 except ValueError:
@@ -6085,9 +6727,7 @@ async def _user_detail_screen(
                     else:
                         _announce_line(session, f"{target.username!r} is now level {target.user_level}.")
                         _request_live_access_recheck(node_controls, target)
-            blocked = await _draw_user_detail(
-                session, lane, target, description_level, redraw_in_place, unicode_style, collapsed, selected=selected,
-            )
+            blocked = await _redraw()
         elif choice == "t":
             await session.write_line("")
             currently_disabled = target.disabled_at is not None
@@ -6104,34 +6744,37 @@ async def _user_detail_screen(
                     )
                     if target.disabled_at is not None:
                         await _revoke_live_sessions(session, node_controls, target, actor)
-            blocked = await _draw_user_detail(
-                session, lane, target, description_level, redraw_in_place, unicode_style, collapsed, selected=selected,
-            )
+            blocked = await _redraw()
         elif choice == "i":
             await session.write_line("")
             new_state = "revoke" if target.can_verify_identity else "grant"
             if await prompt_yes_no(
                 session, f"{new_state.capitalize()} identity-verification permission?", default=False
             ):
-                target = await lane.run(
-                    set_can_verify_identity, target, not target.can_verify_identity, changed_by=actor
-                )
-                _announce_line(session,
-                    f"{target.username!r} can now verify identity: "
-                    f"{'yes' if target.can_verify_identity else 'no'}."
-                )
-                _request_live_access_recheck(node_controls, target)
-            blocked = await _draw_user_detail(
-                session, lane, target, description_level, redraw_in_place, unicode_style, collapsed, selected=selected,
+                try:
+                    target = await lane.run(
+                        set_can_verify_identity, target, not target.can_verify_identity, changed_by=actor
+                    )
+                except UserManagementError as exc:
+                    _announce_line(session, colored(str(exc), fg_color=MUTED_COLOR))
+                else:
+                    _announce_line(session,
+                        f"{target.username!r} can now verify identity: "
+                        f"{'yes' if target.can_verify_identity else 'no'}."
+                    )
+                    _request_live_access_recheck(node_controls, target)
+            blocked = await _redraw()
+        elif choice == "s":
+            target = await _staff_permissions_screen(
+                session, lane, actor, target, node_controls, description_level=description_level
             )
+            blocked = await _redraw()
         elif choice == "k":
             # SysOp-assisted counterpart to the self-service Profile
             # `[K]` field (`netbbs.net.login_flow`'s own `_edit_profile`)
             # -- both now open the same shared `manage_ssh_keys_screen`.
             target = await manage_ssh_keys_screen(session, lane, target, changed_by=actor)
-            blocked = await _draw_user_detail(
-                session, lane, target, description_level, redraw_in_place, unicode_style, collapsed, selected=selected,
-            )
+            blocked = await _redraw()
         elif choice == "p":
             # Issue #611: the SysOp-assisted counterpart to the Profile
             # `[A]ccount password` field -- the same shared
@@ -6139,9 +6782,7 @@ async def _user_detail_screen(
             # it skip the current-password proof for someone else's
             # account, and what the audit row names.
             target = await manage_password_screen(session, lane, target, changed_by=actor)
-            blocked = await _draw_user_detail(
-                session, lane, target, description_level, redraw_in_place, unicode_style, collapsed, selected=selected,
-            )
+            blocked = await _redraw()
         elif choice == "r":
             await session.write_line("")
             action_word = "Unrestrict" if blocked else "Restrict"
@@ -6162,24 +6803,113 @@ async def _user_detail_screen(
                     else:
                         _announce_line(session, f"{target.username!r} is now blocked from logging in.")
                         await _revoke_live_sessions(session, node_controls, target, actor)
-            blocked = await _draw_user_detail(
-                session, lane, target, description_level, redraw_in_place, unicode_style, collapsed, selected=selected,
-            )
+            blocked = await _redraw()
         elif choice == "h":
             await _user_history_screen(session, lane, actor, target)
-            blocked = await _draw_user_detail(
-                session, lane, target, description_level, redraw_in_place, unicode_style, collapsed, selected=selected,
-            )
+            blocked = await _redraw()
+        elif choice == "d" and target.pending_approval:
+            await session.write_line("")
+            if await prompt_yes_no(
+                session, f"Decline {target.username!r}'s signup and remove the account?", default=False
+            ):
+                try:
+                    await lane.run(decline_pending_user, target, declined_by=actor)
+                except UserManagementError as exc:
+                    _announce_line(session, colored(str(exc), fg_color=MUTED_COLOR))
+                    target = await lane.run(get_user_by_id, target.id) or target
+                else:
+                    _announce_line(session, f"{target.username!r}'s signup declined.")
+                    return
+            blocked = await _redraw()
         elif choice == "d":
             await session.write_line("")
             deleted = await _delete_user_confirm(session, lane, actor, target, node_controls)
             if deleted:
                 return
-            blocked = await _draw_user_detail(
-                session, lane, target, description_level, redraw_in_place, unicode_style, collapsed, selected=selected,
-            )
+            blocked = await _redraw()
         else:
             await session.write(reject_unhandled_key(choice))
+
+
+_STAFF_TOGGLE_KEYS: dict[str, StaffPermission] = {
+    "a": StaffPermission.APPROVE_ACCOUNTS,
+    "m": StaffPermission.MANAGE_ACCOUNTS,
+    "e": StaffPermission.MODERATE_ALL,
+}
+
+
+async def _staff_permissions_screen(
+    session: Session, lane: DatabaseLane, actor: User, target: User, node_controls: NodeControls | None,
+    *, description_level: str,
+) -> User:
+    """
+    Give or take `target`'s staff permissions (design doc §5.6, issue
+    #836): one toggle each, the Co-SysOp preset that sets all three in one
+    confirmed step, and one that removes them all. Every change is
+    confirmed, audited by `set_staff_permissions`, and carried into the
+    account's live sessions the way a level change is. Returns the account
+    as it now stands.
+    """
+    while True:
+        await session.write_line("")
+        await session.write_line(
+            colored(f"Staff permissions for {sanitize_text(target.username)}:", fg_color=LABEL_COLOR, bold=True)
+        )
+        options = [
+            MenuEntry(label=menu_key("A", "pprove accounts"),
+                      brief=_yes_no(target.has_staff(StaffPermission.APPROVE_ACCOUNTS))),
+            MenuEntry(label=menu_key("M", "anage accounts"),
+                      brief=_yes_no(target.has_staff(StaffPermission.MANAGE_ACCOUNTS))),
+            MenuEntry(label=menu_key("E", "verything", prefix="Moderate "),
+                      brief=_yes_no(target.has_staff(StaffPermission.MODERATE_ALL))),
+        ]
+        options.append(MenuEntry(label=menu_key("C", "o-SysOp preset"), brief="All three at once"))
+        options.append(MenuEntry(label=menu_key("N", "one"), brief="Remove every staff permission"))
+        options.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to the account"))
+        await session.write_line(_fitted_menu(options, description_level, session=session, used_rows=4))
+        await _choice_prompt(session)
+        choice = (await session.read_key()).lower()
+        await session.write_line("")
+        if choice == "b":
+            return target
+        if choice in _STAFF_TOGGLE_KEYS:
+            flag = _STAFF_TOGGLE_KEYS[choice]
+            giving = not target.has_staff(flag)
+            new_mask = target.staff_permissions | int(flag) if giving else target.staff_permissions & ~int(flag)
+            question = (
+                f"{'Give' if giving else 'Remove'} {STAFF_PERMISSION_LABELS[flag]} "
+                f"{'to' if giving else 'from'} {target.username!r}?"
+                + (" Staff are shown to members on the Staff list." if giving and not target.staff_permissions else "")
+            )
+        elif choice == "c":
+            new_mask = int(CO_SYSOP_PRESET)
+            question = (
+                f"Make {target.username!r} a Co-SysOp -- approve accounts, manage accounts (disable, "
+                "password reset, levels up to 254) and moderate everything? They can't act on "
+                "SysOps or other staff, or reach Settings, Link, Node, DNS or backups, and members "
+                "see them on the Staff list."
+            )
+        elif choice == "n":
+            new_mask = 0
+            question = f"Remove every staff permission from {target.username!r}?"
+        else:
+            await session.write(reject_unhandled_key(choice))
+            continue
+        if new_mask == target.staff_permissions:
+            _announce_line(session, colored("Nothing to change.", fg_color=MUTED_COLOR))
+            continue
+        if not await prompt_yes_no(session, question, default=False):
+            continue
+        try:
+            target = await lane.run(set_staff_permissions, target, new_mask, changed_by=actor)
+        except UserManagementError as exc:
+            _announce_line(session, colored(str(exc), fg_color=MUTED_COLOR))
+            continue
+        _announce_line(
+            session,
+            f"{target.username!r} staff permissions: {describe_staff_permissions(target.staff_permissions)}.",
+        )
+        _request_live_access_recheck(node_controls, target)
 
 
 async def _delete_user_confirm(
@@ -6253,18 +6983,38 @@ async def _registration_settings_screen(session: Session, lane: DatabaseLane, ac
     it used to print the outcome and return, and the Users menu's
     redraw wiped the line before it could be read.
     """
-    def _load(db: Database) -> tuple[RegistrationMode, int]:
-        return get_registration_mode(db), sum(1 for u in list_users(db) if u.pending_approval)
+    def _load(db: Database) -> tuple[RegistrationMode, int, str | None]:
+        return (
+            get_registration_mode(db),
+            sum(1 for u in list_users(db) if u.pending_approval),
+            get_registration_question(db),
+        )
 
     modes = {"o": RegistrationMode.OPEN, "a": RegistrationMode.APPROVAL_REQUIRED, "c": RegistrationMode.CLOSED}
     chrome = await _load_chrome(lane, actor)
     message: str | None = None
     while True:
-        current, pending_count = await lane.run(_load)
+        current, pending_count, question = await lane.run(_load)
         rows: list[Field | Note] = [Field("Current mode", _REGISTRATION_MODE_LABELS[current], bold=True)]
+        # Issue #835 (F072). Shown in every mode, since a SysOp may set it
+        # before switching to approval, but asked only in approval mode.
+        rows.append(Field(
+            "Signup question",
+            sanitize_text(question) if question else "(none)",
+            color=VALUE_COLOR if question else MUTED_COLOR,
+            note=None if current == RegistrationMode.APPROVAL_REQUIRED or not question
+            else "asked only while approval is required",
+        ))
         if pending_count:
             rows.append(Field(
                 "Awaiting approval", f"{pending_count} account(s) -- see [L]ist users", color=WARNING_COLOR
+            ))
+        if current == RegistrationMode.APPROVAL_REQUIRED:
+            # Issue #835: a SysOp's banner promised newcomers they could
+            # "look around a bit" while they waited, and they can't.
+            rows.append(Note(
+                "A new account can't log in at all until you approve it -- not even to look around. "
+                "The caller is told it is waiting for your approval."
             ))
         choice, _page = await show_detail(
             session,
@@ -6277,6 +7027,7 @@ async def _registration_settings_screen(session: Session, lane: DatabaseLane, ac
                 ("o", menu_key("O", "pen")),
                 ("a", menu_key("A", "pproval required")),
                 ("c", menu_key("C", "losed")),
+                ("q", menu_key("Q", "uestion")),
                 _BACK_ACTION,
             ],
             message=message,
@@ -6284,6 +7035,34 @@ async def _registration_settings_screen(session: Session, lane: DatabaseLane, ac
         )
         if choice == "b":
             return
+        if choice == "q":
+            await session.write_line("")
+            await write_prompt(
+                session,
+                f"Question to ask new callers (up to {MAX_REGISTRATION_QUESTION_LENGTH} characters, "
+                "blank for none): ",
+            )
+            text = (await session.read_line()).strip()
+            if len(text) > MAX_REGISTRATION_QUESTION_LENGTH:
+                message = colored(
+                    f"That is {len(text)} characters; the question can be at most "
+                    f"{MAX_REGISTRATION_QUESTION_LENGTH}. Not changed.",
+                    fg_color=ERROR_COLOR,
+                )
+                continue
+
+            def _apply_question(db: Database) -> None:
+                set_registration_question(db, text or None)
+                record_action(
+                    db, actor=actor, action="set_registration_question",
+                    detail="cleared" if not text else f"question={text!r}",
+                )
+
+            await lane.run(_apply_question)
+            message = colored(
+                "Signup question set." if text else "Signup question removed.", fg_color=SUCCESS_COLOR
+            )
+            continue
         new_mode = modes[choice]
         if new_mode == current:
             message = colored("Already set to that mode.", fg_color=MUTED_COLOR)
@@ -6361,10 +7140,6 @@ async def _draw_update_status(
             header_color=header_color,
         node_name_gradient=session.node_name_gradient)
     )
-    # No _load_condensed_status_line() call here (GitHub issue #206) --
-    # same reasoning as _backup_status_screen's own exclusion: this
-    # screen's whole content already is the update-check status, in
-    # richer detail than the condensed line would add, right below.
     auto_badge = (
         status_badge("ON", tone="success", unicode_style=unicode_style)
         if auto_enabled
@@ -6950,6 +7725,52 @@ async def _create_live_backup_owned(
         raise cancelled
 
 
+def _backup_door_sections(voidrunner_dir: Path, installs_on: bool) -> list[Section]:
+    """The Backup page's door sections, for a node that has doors."""
+    return [
+        Section("Door data in a backup", [
+            # `[0]`: this screen runs *inside* the node, so the recorded
+            # location and the one this process would resolve are the same
+            # answer by construction -- the provenance that says which one
+            # it was matters only to the backup CLI, which is a different
+            # process with a different home (issue #555).
+            Field(
+                "Voidrunner source", str(voidrunner_dir),
+                note="Includes saved careers and scores when this directory exists. "
+                     "Close Voidrunner sessions before creating a backup.",
+            ),
+            Field(
+                "War Dialer", "existing node-default and registered override worlds",
+                note="Close War Dialer sessions before backup; restore requires explicit world destinations.",
+            ),
+            Field(
+                "Door outbound receipts", "included automatically",
+                note="Restored beside the database with the archive's own generation.",
+            ),
+        ]),
+        Section("Door installation directories", [
+            Field(
+                "In each backup", "included" if installs_on else "not included",
+                color=WARNING_COLOR if installs_on else VALUE_COLOR, bold=True,
+            ),
+            Note(
+                "Each door's own game installation, which NetBBS otherwise leaves to you. "
+                "Off by default: these are operator-owned and can be far larger than node state. "
+                "Including them makes every backup that much larger and slower, so check you have "
+                "the space and that nothing in those directories links to host data you would not "
+                "want copied. Captured as a copy only -- restore never writes back over a live "
+                "installation."
+                if not installs_on else
+                "Every registered door's game installation is copied into each backup. "
+                "Backups will be larger and slower; restore never writes these back over a live "
+                "installation, so recover them with ordinary file tools. The copy is not quiesced: "
+                "halt a door's service and let its callers leave before backing up, or its game "
+                "state may be captured mid-write."
+            ),
+        ]),
+    ]
+
+
 async def _backup_status_screen(
     session: Session,
     lane: DatabaseLane,
@@ -7010,60 +7831,37 @@ async def _backup_status_screen(
                 flex=1,
             )]))
 
-        installs_on = await lane.run(door_installs_included)
-        sections.append(Section("Door data in a backup", [
-            # `[0]`: this screen runs *inside* the node, so the recorded
-            # location and the one this process would resolve are the same
-            # answer by construction -- the provenance that says which one
-            # it was matters only to the backup CLI, which is a different
-            # process with a different home (issue #555).
-            Field(
-                "Voidrunner source", str(await lane.run(lambda db: voidrunner_save_directory(db.path)[0])),
-                note="Includes saved careers and scores when this directory exists. "
-                     "Close Voidrunner sessions before creating a backup.",
-            ),
-            Field(
-                "War Dialer", "existing node-default and registered override worlds",
-                note="Close War Dialer sessions before backup; restore requires explicit world destinations.",
-            ),
-            Field(
-                "Door outbound receipts", "included automatically",
-                note="Restored beside the database with the archive's own generation.",
-            ),
-        ]))
-        sections.append(Section("Door installation directories", [
-            Field(
-                "In each backup", "included" if installs_on else "not included",
-                color=WARNING_COLOR if installs_on else VALUE_COLOR, bold=True,
-            ),
-            Note(
-                "Each door's own game installation, which NetBBS otherwise leaves to you. "
-                "Off by default: these are operator-owned and can be far larger than node state. "
-                "Including them makes every backup that much larger and slower, so check you have "
-                "the space and that nothing in those directories links to host data you would not "
-                "want copied. Captured as a copy only -- restore never writes back over a live "
-                "installation."
-                if not installs_on else
-                "Every registered door's game installation is copied into each backup. "
-                "Backups will be larger and slower; restore never writes these back over a live "
-                "installation, so recover them with ordinary file tools. The copy is not quiesced: "
-                "halt a door's service and let its callers leave before backing up, or its game "
-                "state may be captured mid-write."
-            ),
-        ]))
-
+        # The schedule sits right under the backups themselves (issue #845,
+        # F066): on a node with no doors, page 1 used to be mostly
+        # Voidrunner, War Dialer and door-installation text.
         sections.append(await _backup_schedule_section(lane, db_path, standalone=not can_create))
+
+        installs_on = await lane.run(door_installs_included)
+        voidrunner_dir = await lane.run(lambda db: voidrunner_save_directory(db.path)[0])
+        # Anything a backup would still capture counts, and a toggle left on
+        # stays reachable to be turned off.
+        has_doors = (
+            bool(await lane.run(list_doors)) or installs_on
+            or await asyncio.to_thread(door_data_left_behind, db_path)
+        )
+        if has_doors:
+            sections.extend(_backup_door_sections(voidrunner_dir, installs_on))
+        else:
+            sections.append(Section("Doors", [Note(
+                "No doors are set up, so backups hold no door data. This section fills in "
+                "once you add one."
+            )]))
 
         if can_create:
             actions = [
                 ("c", menu_key("C", "reate backup now")),
-                ("d", menu_key("D", "oor installations: " + ("on" if installs_on else "off"))),
+                *([("d", menu_key("D", "oor installations: " + ("on" if installs_on else "off")))] if has_doors else []),
                 ("s", menu_key("S", "chedule & destination")),
                 _BACK_ACTION,
             ]
         else:
             sections.append(Section("Creating a backup", [Note(
-                "Live backup creation is unavailable in standalone admin. "
+                "This console runs outside the node, so it can't make a backup itself. "
                 "Run 'python -m netbbs.backup create --to <path>' instead."
             )]))
             actions = [("s", menu_key("S", "chedule & destination")), _BACK_ACTION]
@@ -7082,7 +7880,7 @@ async def _backup_status_screen(
         if choice == "s":
             await _backup_schedule_editor(session, lane, actor, db_path=db_path, identity_dir=identity_dir)
             continue
-        if choice == "d":
+        if choice == "d" and has_doors:
             # A toggle toggles (AGENTS.md, design doc §3.5). The setting is
             # reversible and changes nothing until the next backup runs, so it
             # gets no confirmation; the consequences are screen content above,
@@ -7799,6 +8597,7 @@ async def _limits_settings_screen(session: Session, lane: DatabaseLane, actor: U
             "invite_days": get_invitation_expiry_days(db),
             "scrollback": get_scrollback_limit(db),
             "map_level": get_node_map_min_level(db),
+            "mail_level": get_mail_min_level(db),
         }
 
     current = await lane.run(_load)
@@ -7889,6 +8688,19 @@ async def _limits_settings_screen(session: Session, lane: DatabaseLane, actor: U
                 "from guests, set this above the guest account's level. Only offered while Link is on."
             ),
         ),
+        FieldSpec(
+            key="mail_level", hotkey="m", menu_text=menu_key("M", "ail level"),
+            label="Mail level",
+            render=lambda d: f"level {d['mail_level']} and up",
+            prompt=_int_field("mail_level", "Lowest level"),
+            brief="Who may read and send mail", section="Mail",
+            help=(
+                f"The lowest level that may open E-mail, to read and to send, here and to other BBSes "
+                f"(0-{MAX_MAIL_MIN_LEVEL}; 0 is everyone). Mail to an account below it still arrives and "
+                "waits until its level is raised. The guest account never has mail, whatever its level: "
+                "every guest shares its mailbox."
+            ),
+        ),
     ]
 
     async def save(draft: dict) -> list[str]:
@@ -7899,6 +8711,7 @@ async def _limits_settings_screen(session: Session, lane: DatabaseLane, actor: U
             "invite_days": draft["invite_days"],
             "scrollback": draft["scrollback"],
             "map_level": draft["map_level"],
+            "mail_level": draft["mail_level"],
         }
         # Checked here, before anything is written, so one bad value
         # cannot leave the others half saved; the setters check again.
@@ -7912,6 +8725,8 @@ async def _limits_settings_screen(session: Session, lane: DatabaseLane, actor: U
             raise _LimitsError(f"Chat scrollback must be 1-{MAX_SCROLLBACK_LIMIT} messages.")
         if not 0 <= values["map_level"] <= MAX_NODE_MAP_MIN_LEVEL:
             raise _LimitsError(f"Node map level must be 0-{MAX_NODE_MAP_MIN_LEVEL}.")
+        if not 0 <= values["mail_level"] <= MAX_MAIL_MIN_LEVEL:
+            raise _LimitsError(f"Mail level must be 0-{MAX_MAIL_MIN_LEVEL}.")
         changed = [key for key in values if values[key] != current[key]]
 
         config_keys = {
@@ -7920,6 +8735,7 @@ async def _limits_settings_screen(session: Session, lane: DatabaseLane, actor: U
             "invite_days": INVITATION_EXPIRY_DAYS_CONFIG_KEY,
             "scrollback": SCROLLBACK_LIMIT_CONFIG_KEY,
             "map_level": NODE_MAP_MIN_LEVEL_CONFIG_KEY,
+            "mail_level": MAIL_MIN_LEVEL_CONFIG_KEY,
         }
 
         def _persist(db: Database) -> None:
@@ -8785,7 +9601,7 @@ async def _mrc_status_screen(session: Session, lane: DatabaseLane, actor: User, 
                 session, title=title, actions=[_BACK_ACTION],
                 sections=[Section(None, [
                     Field("State", status_badge("NOT AVAILABLE HERE", tone="neutral", unicode_style=chrome.unicode_style), styled=True),
-                    Note("The MRC bridge lives inside the running node; the standalone admin CLI can't see it."),
+                    Note("The MRC bridge lives inside the running node; this console runs outside the node and can't see it."),
                 ])],
                 redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
             )
@@ -8913,6 +9729,7 @@ async def _link_status_sections(
         peers.append(Field("Sync interval", f"{config.sync_interval_seconds:.0f}s"))
     live_sessions = link_context.realtime_registry.all_sessions() if link_context.realtime_registry is not None else []
     peers.append(Field("Live sessions", str(len(live_sessions))))
+    peers.extend(await _probation_summary(lane, link_context))
     proxy_line = describe_proxy_status()
     if proxy_line is not None:
         # Issue #628: live chat tunnels through the proxy the environment
@@ -8949,12 +9766,37 @@ async def _link_status_sections(
             ))
     relays.append(Field("Relays serving this node", str(len(node.relays_serving_me))))
     relays.append(Field("Own consent requests", f"{len(node.pending_own_relay_requests)} outstanding"))
-    mailbox_by_recipient = await lane.run(mailbox_sizes)
-    if mailbox_by_recipient:
-        held = sum(mailbox_by_recipient.values())
+    holdings = await lane.run(_relay_mailbox_rows)
+    if holdings:
+        held = sum(count for _, count, _ in holdings)
         relays.append(Field(
-            "Relay mailbox", f"{held} envelope(s) held for {len(mailbox_by_recipient)} recipient(s)"
+            "Relay mailbox",
+            f"{held} envelope(s) held for {len(holdings)} recipient(s), "
+            f"each kept up to {RELAY_MAILBOX_RETENTION_DAYS} days",
         ))
+        # Issue #891: per recipient, oldest deposit first -- the one closest
+        # to being dropped, and the likeliest to belong to a node that is
+        # not coming back.
+        now = datetime.datetime.now(datetime.timezone.utc)
+        shown = holdings[:_RELAY_MAILBOX_ROWS_SHOWN]
+        relays.append(Table(
+            ("Held for", "Envelopes", "Oldest"),
+            [
+                (
+                    label,
+                    (
+                        f"{count}/{MAX_MAILBOX_ENVELOPES_PER_RECIPIENT}",
+                        WARNING_COLOR if count >= MAX_MAILBOX_ENVELOPES_PER_RECIPIENT else VALUE_COLOR,
+                    ),
+                    relative_time(oldest, now=now),
+                )
+                for label, count, oldest in shown
+            ],
+            flex=0,
+            right_aligned=frozenset({1}),
+        ))
+        if len(holdings) > len(shown):
+            relays.append(Note(f"... and {len(holdings) - len(shown)} more recipient(s)."))
     else:
         relays.append(Field("Relay mailbox", "empty", color=MUTED_COLOR))
     sections.append(Section("Relays", relays))
@@ -8977,8 +9819,88 @@ async def _link_status_sections(
     content.append(Field("Excluded", str(excluded) if excluded else "none", color=VALUE_COLOR if excluded else MUTED_COLOR))
     content.append(Field("Known events", str(len(node.known_event_ids))))
     content.append(Field("Post-edit chains", str(len(node.post_edits))))
+    # Issue #844: Link Communities do not exist, so say where carried
+    # content lands before a SysOp goes looking for it.
+    content.append(Note(
+        "Boards, channels and file areas carried from other nodes appear in callers' Message boards, "
+        "Chat and Files lists, outside any Community. Edit one to put it in a Community of yours.",
+        color=MUTED_COLOR,
+    ))
     sections.append(Section("Content", content))
     return sections, identity_notices
+
+
+# Issue #891: how many recipients the Link status screen lists under the
+# relay mailbox line; the rest are counted, not listed.
+_RELAY_MAILBOX_ROWS_SHOWN = 10
+
+
+def _relay_mailbox_rows(db: Database) -> list[tuple[str, int, datetime.datetime | None]]:
+    """What this node holds as a relay, per recipient, oldest deposit first:
+    the recipient's name as this node knows it, the envelope count and when
+    the oldest was deposited."""
+    rows = []
+    for holding in mailbox_holdings(db):
+        try:
+            oldest = parse_utc_iso(holding.oldest_received_at)
+        except ValueError:
+            oldest = None
+        identity = identity_for_fingerprint(db, holding.recipient_fingerprint)
+        # Named the way the node map names it, so a node this one has no
+        # profile for reads the same on both screens and keeps the table narrow.
+        label = (
+            unknown_node_label(holding.recipient_fingerprint)
+            if identity.friendly_name == UNKNOWN_NODE_NAME else identity.label
+        )
+        rows.append((label, holding.count, oldest))
+    return rows
+
+
+async def _probation_summary(lane: DatabaseLane, link_context: LinkContext) -> list[Field | Note]:
+    """Link status's answer to "linked, but is anything moving?" (issue
+    #844): peers on probation here exchange nothing, and this node is on
+    probation at each peer the same way until that peer's SysOp establishes
+    it. Only peers this node dials report the second; see `PeerExchange`."""
+    node = link_context.link_node
+    peers = list(node.peers)
+    if not peers:
+        return []
+    states = await lane.run(lambda db: {fp: node_transport_state(db, fp) for fp in peers})
+    waiting = [fp for fp in peers if states[fp] == TrustState.PROBATIONARY]
+    rows: list[Field | Note] = [Field(
+        "On probation here",
+        f"{len(waiting)} of {len(peers)} -- nothing is exchanged with them until you establish them (Peers)"
+        if waiting else "none",
+        color=WARNING_COLOR if waiting else MUTED_COLOR,
+    )]
+    asked = [fp for fp in peers if states[fp] == TrustState.ESTABLISHED and fp in node.peer_exchange]
+    refused = [fp for fp in asked if node.peer_exchange[fp].refused_reason is not None]
+    if refused and all(node.peer_exchange[fp].refused_reason == REASON_NODE_PROBATIONARY for fp in refused):
+        at_peers = (
+            f"on probation at {len(refused)} of {len(asked)} peer(s) this node dials -- they hold back "
+            "what yours sends until their SysOps establish it",
+            WARNING_COLOR,
+        )
+    elif refused:
+        at_peers = (
+            f"refused by {len(refused)} of {len(asked)} peer(s) this node dials, on probation or "
+            "restricted there -- each node's screen under Peers says why",
+            WARNING_COLOR,
+        )
+    elif not _own_linked_genesis(link_context):
+        at_peers = ("not known yet: nothing of yours is linked, so no peer has been asked to take it", MUTED_COLOR)
+    elif asked:
+        at_peers = (f"accepted by the {len(asked)} peer(s) this node dials", SUCCESS_COLOR)
+    else:
+        at_peers = ("not known yet: learned when this node dials a peer you have established", MUTED_COLOR)
+    rows.append(Field("Your node at peers", at_peers[0], color=at_peers[1]))
+    if waiting or refused or not asked:
+        rows.append(Note(
+            "Every node starts on probation with every other, both ways. Establish a peer here once you "
+            "know who runs it, and ask its SysOp to establish yours: until both have, nothing is exchanged.",
+            color=MUTED_COLOR,
+        ))
+    return rows
 
 
 async def _node_map_sysop_screen(
@@ -9046,18 +9968,82 @@ async def _node_map_sysop_screen(
                 selected.first_named.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
                 override_format=display_format, override_timezone=display_timezone,
             )
-        await show_detail(
-            session,
-            title=_detail_title(
-                session, chrome, selected.friendly_name,
-                breadcrumb=("SysOp", "Operations", "Link status", title),
-            ),
-            sections=node_map_sections(
-                selected, carried=carried, now=now, sysop=True, first_named=first_named,
-            ),
-            actions=[_BACK_ACTION],
-            redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
-        )
+        # Issue #820: the trust rows used to be all this screen offered. A node
+        # that is a trust subject here -- every node that has said hello, or
+        # been introduced -- now has the subject screen's actions on its own;
+        # a peer-list candidate has none, since nothing about it is verified.
+        subject = TrustSubject.node(selected.fingerprint)
+        registered = await lane.run(is_registered_subject, subject)
+        own_total = len(_own_linked_genesis(link_context))
+        listing = _Listing()
+        while True:
+            actions: list[tuple[str, str]] = []
+            if registered:
+                actions.extend([
+                    *_TRUST_QUICK_ACTIONS,
+                    ("c", menu_key("C", "lear override")),
+                    ("t", menu_key("T", "rust details")),
+                ])
+            actions.append(_BACK_ACTION)
+            choice, listing.page = await show_detail(
+                session,
+                title=_detail_title(
+                    session, chrome, selected.friendly_name,
+                    breadcrumb=("SysOp", "Operations", "Link status", title),
+                ),
+                sections=node_map_sections(
+                    selected, carried=carried, now=now, sysop=True, first_named=first_named,
+                    trust_notes=_probation_notes(await lane.run(node_probation, selected.fingerprint), state["display"]),
+                    extra_sections=[] if selected.source == NODE_MAP_CANDIDATE else node_map_exchange_sections(
+                        selected, held=link_context.link_node.deferred_events.held_from(selected.fingerprint),
+                        exchange=link_context.link_node.peer_exchange.get(selected.fingerprint),
+                        own_total=own_total, now=now,
+                    ),
+                ),
+                actions=actions, page=listing.page, message=listing.take_message(),
+                redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+            )
+            if choice == "b":
+                break
+            if await _trust_quick_action(
+                session, lane, actor, subject, choice, name=f"node:{selected.friendly_name}",
+                listing=listing, link_context=link_context,
+            ):
+                pass
+            elif choice == "c":
+                await _clear_trust_override_screen(session, lane, actor, subject, listing)
+                _retry_deferred_events(link_context, subject)
+            elif choice == "t":
+                await _trust_subject_screen(
+                    session, lane, actor, subject, link_context=link_context,
+                    breadcrumb=("SysOp", "Operations", "Link status", title),
+                )
+            # Drawn again from the database: the trust rows are what changed.
+            refreshed = next(
+                (entry for entry in (await lane.run(_load))["entries"] if entry.fingerprint == selected.fingerprint),
+                None,
+            )
+            if refreshed is None:
+                break
+            selected = refreshed
+            chrome = await _load_chrome(lane, actor)
+
+
+def _probation_notes(probation: NodeProbation | None, display: tuple) -> list[Field | Note]:
+    """`probation_rows` with its dates in the SysOp's display format."""
+    if probation is None:
+        return []
+    display_format, display_timezone = display
+
+    def _format(value: str | None) -> str | None:
+        if not value:
+            return None
+        return format_for_display(value, override_format=display_format, override_timezone=display_timezone)
+
+    return probation_rows(
+        probation, known_since=_format(probation.known_since),
+        graduates_on=_format(probation.graduates_no_earlier_than),
+    )
 
 
 async def _node_map_has_rows(lane: DatabaseLane, link_context: LinkContext) -> bool:
@@ -9448,9 +10434,6 @@ async def _link_status_screen(
                 session, chrome, "Link status", breadcrumb=("SysOp", "Operations"),
                 subtitle="Identity, capacity, relay activity, and verified peers.",
             ),
-            preamble=[await _load_condensed_status_line(
-                lane, unicode_style=chrome.unicode_style, terminal_width=session.terminal_width
-            )],
             sections=sections, actions=actions, page=page, message=message,
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
         )
@@ -9780,6 +10763,356 @@ async def _outbox_item_screen(
         cancelled = await lane.run(_cancel)
         return colored(f"Cancelled -- status is now {cancelled.status!r}.", fg_color=SUCCESS_COLOR)
     return None
+
+
+# -- mail: mailbox sizes and refused Link mail (issue #820) ------------------
+#
+# Mail is private, and these screens are built so that it stays so: they show
+# counts, accounts, senders and reasons, and never a letter's subject or body --
+# nor, for a refused letter, whom it was for.
+
+_MAIL_PRIVACY_NOTE = (
+    "Mail is private: these screens show counts, senders and reasons, never a subject or a body."
+)
+
+# A mailbox this full is flagged: at the cap, a letter can arrive only by
+# evicting the oldest read one, and not at all once every letter is unread.
+_NEAR_MAIL_CAP = MAX_MAIL_PER_RECIPIENT * 9 // 10
+
+_REFUSAL_VIA_TEXT = {
+    VIA_RELAY: "picked up from a relay that held it",
+}
+
+
+def _inbox_color(size: InboxSize) -> int:
+    if size.total >= MAX_MAIL_PER_RECIPIENT:
+        return ALERT_COLOR if size.unread >= MAX_MAIL_PER_RECIPIENT else WARNING_COLOR
+    return WARNING_COLOR if size.total >= _NEAR_MAIL_CAP else VALUE_COLOR
+
+
+def _refusal_sender(refusal: LinkMailRefusal, node_label: str) -> str:
+    if refusal.sender_user is None:
+        return node_label
+    return link_address_label(refusal.sender_user, node_label)
+
+
+def _load_mail_tools(db: Database) -> dict:
+    refusals = list_link_mail_refusals(db)
+    return {
+        "sizes": inbox_sizes(db),
+        "refusals": refusals,
+        "labels": {
+            fingerprint: identity_for_fingerprint(db, fingerprint).label
+            for fingerprint in {refusal.sender_node_fingerprint for refusal in refusals}
+        },
+        "display": resolve_display_preferences(db),
+    }
+
+
+async def _mail_tools_screen(
+    session: Session, lane: DatabaseLane, actor: User, *, link_context: LinkContext | None,
+) -> None:
+    """Operations -> Mail (issue #820): how full the mailboxes are, and what
+    Link mail this node refused. Before this the Outbox of Link work items was
+    the only mail screen a SysOp had. Reads only; the one thing it leads to
+    that writes is a sender's trust, on the trust screen itself."""
+    while True:
+        state = await lane.run(_load_mail_tools)
+        chrome = await _load_chrome(lane, actor)
+        display_format, display_timezone = state["display"]
+        sizes: list[InboxSize] = state["sizes"]
+        refusals: list[LinkMailRefusal] = state["refusals"]
+
+        boxes: list[Field | Note | Table] = []
+        if sizes:
+            fullest = sizes[0]
+            near = sum(1 for size in sizes if size.total >= _NEAR_MAIL_CAP)
+            boxes.extend([
+                Field("Accounts with mail", str(len(sizes))),
+                Field(
+                    "Letters kept",
+                    f"{sum(size.total for size in sizes)}, {sum(size.unread for size in sizes)} unread",
+                ),
+                Field(
+                    "Fullest", f"{fullest.username}, {fullest.total} of {MAX_MAIL_PER_RECIPIENT}",
+                    color=_inbox_color(fullest),
+                ),
+                Field(
+                    f"{_NEAR_MAIL_CAP}+ letters", str(near), color=WARNING_COLOR if near else VALUE_COLOR,
+                ),
+            ])
+        else:
+            boxes.append(Note("No account has mail."))
+
+        refused: list[Field | Note | Table] = []
+        if refusals:
+            latest = refusals[0]
+            label = state["labels"].get(latest.sender_node_fingerprint, "")
+            when = format_for_display(
+                latest.last_refused_at, override_format=display_format, override_timezone=display_timezone,
+            )
+            refused.extend([
+                Field("Letters refused", str(len(refusals))),
+                Field(
+                    "Latest", _refusal_sender(latest, label),
+                    note=f"{when}: {refusal_reason_text(latest.reason)}",
+                ),
+            ])
+        else:
+            refused.append(Note(
+                "None recorded. Mail this node refuses -- a sender or node it does not trust yet, or "
+                "one it blocks, a full mailbox, no such account -- is listed here."
+            ))
+
+        actions: list[tuple[str, str]] = []
+        if sizes:
+            actions.append(("m", menu_key("M", "ailboxes")))
+        if refusals:
+            actions.append(("r", menu_key("R", "efused Link mail")))
+        actions.append(_BACK_ACTION)
+        choice, _page = await show_detail(
+            session,
+            title=_detail_title(
+                session, chrome, "Mail", breadcrumb=("SysOp", "Operations"),
+                subtitle="Mailbox sizes and the Link mail this node refused.",
+            ),
+            sections=[
+                Section("Mailboxes", boxes, paired=True),
+                Section("Refused Link mail", refused),
+                Section(None, [Note(_MAIL_PRIVACY_NOTE)]),
+            ],
+            actions=actions,
+            redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+        )
+        if choice == "b":
+            return
+        if choice == "m":
+            await _mailboxes_screen(session, lane, actor)
+        elif choice == "r":
+            await _refused_link_mail_screen(session, lane, actor, link_context=link_context)
+
+
+async def _mailboxes_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
+    """Every account with mail and how full its inbox is, the fullest first
+    (issue #820). Counts only -- what counts toward the cap, system notices
+    included -- and never a sender, a subject or a body. `[O]rder` switches to
+    the accounts by name and back."""
+    listing = _Listing()
+    by_name = False
+    while True:
+        sizes = await lane.run(inbox_sizes)
+        chrome = await _load_chrome(lane, actor)
+        if by_name:
+            sizes = sorted(sizes, key=lambda size: size.username.casefold())
+        rows: list[Field | Note | Table] = [Table(
+            ("Account", "Letters", "Unread", "Read", "System", "Of the cap"),
+            [
+                [
+                    (size.username, ACCENT_COLOR),
+                    (str(size.total), _inbox_color(size)),
+                    str(size.unread), str(size.read), str(size.system),
+                    (f"{size.total * 100 // MAX_MAIL_PER_RECIPIENT}%", _inbox_color(size)),
+                ]
+                for size in sizes
+            ],
+            right_aligned=frozenset({1, 2, 3, 4, 5}),
+        )] if sizes else [Note("No account has mail.")]
+        choice, listing.page = await show_detail(
+            session,
+            title=_detail_title(
+                session, chrome, "Mailboxes", breadcrumb=("SysOp", "Operations", "Mail"),
+                subtitle=(
+                    f"By account name. Each inbox keeps up to {MAX_MAIL_PER_RECIPIENT} letters."
+                    if by_name else
+                    f"Fullest first. Each inbox keeps up to {MAX_MAIL_PER_RECIPIENT} letters."
+                ),
+            ),
+            sections=[
+                Section(None, rows),
+                Section(None, [Note(
+                    "System counts the BBS's own notices, which are part of Letters. A full inbox makes room "
+                    "by dropping its oldest read letter; one full of unread mail refuses new mail. "
+                    + _MAIL_PRIVACY_NOTE
+                )]),
+            ],
+            actions=[
+                ("o", menu_key("O", "rder: fullest first" if by_name else "rder: by name")),
+                _BACK_ACTION,
+            ],
+            page=listing.page, message=listing.take_message(),
+            redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+        )
+        if choice == "b":
+            return
+        if choice == "o":
+            by_name = not by_name
+            listing.page = 0
+
+
+async def _refused_link_mail_screen(
+    session: Session, lane: DatabaseLane, actor: User, *, link_context: LinkContext | None,
+) -> None:
+    """The Link mail this node refused, the most recent first (issue #820):
+    who sent it, why it was refused, and how often that sender tried. Each
+    sender told as a bounce; this is the receiving side's record of the same
+    refusals, which nothing kept before. `[O]pen` shows one refusal and leads
+    to its node's and its sender's trust, where establishing or blocking
+    happens."""
+    listing = _Listing()
+    reopen_at: int | None = None
+    while True:
+        state = await lane.run(_load_mail_tools)
+        chrome = await _load_chrome(lane, actor)
+        display_format, display_timezone = state["display"]
+        refusals: list[LinkMailRefusal] = state["refusals"]
+        labels: dict[str, str] = state["labels"]
+
+        def _when(value: str) -> str:
+            return format_for_display(value, override_format=display_format, override_timezone=display_timezone)
+
+        rows: list[Field | Note | Table] = [Table(
+            ("Last refused", "Sender", "Reason", "Tries"),
+            [
+                [
+                    (_when(refusal.last_refused_at), DATE_COLOR),
+                    (_refusal_sender(refusal, labels.get(refusal.sender_node_fingerprint, "")), ACCENT_COLOR),
+                    (refusal_reason_text(refusal.reason), METADATA_COLOR),
+                    str(refusal.attempts),
+                ]
+                for refusal in refusals
+            ],
+            flex=2, right_aligned=frozenset({3}),
+        )] if refusals else [Note("None recorded.")]
+        choice, listing.page = await show_detail(
+            session,
+            title=_detail_title(
+                session, chrome, "Refused Link mail", breadcrumb=("SysOp", "Operations", "Mail"),
+                subtitle="Mail from other nodes not delivered here, and why; each sender got a bounce.",
+            ),
+            sections=[Section(None, rows), Section(None, [Note(_MAIL_PRIVACY_NOTE)])],
+            actions=[("o", menu_key("O", "pen"))] + [_BACK_ACTION] if refusals else [_BACK_ACTION],
+            page=listing.page, message=listing.take_message(),
+            redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+        )
+        if choice == "b":
+            return
+        selected = await pick_item(
+            session, refusals,
+            name_of=lambda refusal: _refusal_sender(refusal, labels.get(refusal.sender_node_fingerprint, "")),
+            stable_id_of=lambda refusal: refusal.id,
+            description_of=lambda refusal: (
+                f"{_when(refusal.last_refused_at)} -- {refusal_reason_text(refusal.reason)}"
+            ),
+            title="Which refused letter?",
+            empty_message="None recorded.",
+            start_stable_id=reopen_at,
+            redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+            collapsed=chrome.collapsed, accent_color=chrome.accent_color, header_color=chrome.header_color,
+        )
+        if selected is None:
+            continue
+        reopen_at = selected.id
+        await _refused_letter_screen(
+            session, lane, actor, selected, node_label=labels.get(selected.sender_node_fingerprint, ""),
+            when=_when, link_context=link_context,
+        )
+
+
+async def _refused_letter_screen(
+    session: Session, lane: DatabaseLane, actor: User, refusal: LinkMailRefusal, *,
+    node_label: str, when, link_context: LinkContext | None,
+) -> None:
+    """One refused letter's sender and reason, with the trust standing of its
+    node and its sender, and the way to each one's trust screen."""
+    node_subject = TrustSubject.node(refusal.sender_node_fingerprint)
+    user_subject = (
+        TrustSubject.user(refusal.sender_node_fingerprint, refusal.sender_user)
+        if refusal.sender_user is not None else None
+    )
+    listing = _Listing()
+    while True:
+        chrome = await _load_chrome(lane, actor)
+
+        def _standing(db: Database) -> tuple[TrustState | None, TrustState | None]:
+            node_state = (
+                node_transport_state(db, node_subject.node_fingerprint)
+                if is_registered_subject(db, node_subject) else None
+            )
+            user_state = (
+                decide_user_authorship(db, user_subject.node_fingerprint, user_subject.opaque_user_id or "").state
+                if user_subject is not None and is_registered_subject(db, user_subject) else None
+            )
+            return node_state, user_state
+
+        node_state, user_state = await lane.run(_standing)
+
+        def _badge(state: TrustState) -> str:
+            return status_badge(state.value, tone=_TRUST_STATE_TONE[state], unicode_style=chrome.unicode_style)
+
+        letter: list[Field | Note | Table] = [
+            Field("From", _refusal_sender(refusal, node_label), bold=True),
+            Field("Node", node_label),
+            Field("Technical identity", refusal.sender_node_fingerprint, color=METADATA_COLOR),
+            Field("Reason", refusal_reason_text(refusal.reason), note=refusal.reason),
+            Field("Arrived", _REFUSAL_VIA_TEXT.get(refusal.via, "pushed here by its node")),
+            Field("First refused", when(refusal.first_refused_at), color=DATE_COLOR),
+            Field("Last refused", when(refusal.last_refused_at), color=DATE_COLOR),
+            Field("Tries", str(refusal.attempts)),
+        ]
+        if refusal.sender_user is None:
+            letter.append(Note(
+                "Refused for its node before the letter was read, so its sender's name is not known here."
+            ))
+        standing: list[Field | Note | Table] = []
+        if node_state is not None:
+            standing.append(Field("Node", _badge(node_state), styled=True))
+        else:
+            standing.append(Note(
+                "Its node is not a trust subject here yet: it becomes one when it links with this node."
+            ))
+        if user_subject is not None:
+            if user_state is not None:
+                standing.append(Field("Sender", _badge(user_state), styled=True))
+            else:
+                standing.append(Note(
+                    "The sender is not a trust subject here yet: once their node is established, their "
+                    "first delivered letter makes them one. Mail follows node trust, so establishing the "
+                    "node is what opens it."
+                ))
+        if refusal.reason not in TRUST_REASONS:
+            standing.append(Note("This refusal was not about trust, so no trust change would have delivered it."))
+
+        actions: list[tuple[str, str]] = []
+        if node_state is not None:
+            actions.append(("n", menu_key("N", "ode trust")))
+        if user_state is not None:
+            actions.append(("u", menu_key("U", "ser trust")))
+        actions.append(_BACK_ACTION)
+        choice, listing.page = await show_detail(
+            session,
+            title=_detail_title(
+                session, chrome, "Refused letter",
+                breadcrumb=("SysOp", "Operations", "Mail", "Refused Link mail"),
+            ),
+            sections=[
+                Section("The letter", letter),
+                Section("Trust here", standing),
+                Section(None, [Note(_MAIL_PRIVACY_NOTE)]),
+            ],
+            actions=actions, page=listing.page, message=listing.take_message(),
+            redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+        )
+        if choice == "b":
+            return
+        breadcrumb = ("SysOp", "Operations", "Mail", "Refused Link mail")
+        if choice == "n":
+            await _trust_subject_screen(
+                session, lane, actor, node_subject, link_context=link_context, breadcrumb=breadcrumb,
+            )
+        elif choice == "u" and user_subject is not None:
+            await _trust_subject_screen(
+                session, lane, actor, user_subject, link_context=link_context, breadcrumb=breadcrumb,
+            )
 
 
 def _diagnostic_level_color(level: str) -> int:
@@ -10801,8 +12134,15 @@ def _delay_seconds_field(key: str = "delay_seconds") -> Callable[[Session, Datab
     mode/message already chosen)."""
 
     async def prompt(session: Session, lane: DatabaseLane, draft: dict) -> None:
-        await write_prompt(session, f"Delay in seconds [{draft[key]:g}]: ")
-        raw = (await session.read_line()).strip()
+        # Opens on the current value, like every other number in the console
+        # (issue #845, F136).
+        await write_field_prompt(
+            session, colored(f"Delay in seconds ({_EDIT_HINT}):", fg_color=MUTED_COLOR), hint=_EDIT_HINT,
+        )
+        try:
+            raw = (await _read_seeded_line(session, initial=_seconds_text(draft[key]))).strip()
+        except InputCancelled:
+            return
         if not raw:
             return
         try:
@@ -11420,7 +12760,6 @@ async def _draw_banners_and_mastheads_menu(
     await _write_wrapped_subtitle(
         session, "Every optional SysOp-authored banner and masthead, grouped by kind."
     )
-    await session.write_line(await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width))
     await session.write_line(
         "\r\n" + _menu_row(
             [
@@ -11502,7 +12841,6 @@ async def _draw_welcome_banner_menu(
     await session.write_line("\r\n" + screen_title("Welcome banner",
             breadcrumb=(session.node_display_name, "Settings", "Mastheads & banners", "Banners"), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
             header_color=await lane.run(effective_header_color_256), node_name_gradient=session.node_name_gradient))
-    await session.write_line(await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width))
     await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style)], unicode_style=unicode_style)
     await session.write_line(
         "\r\n" + _menu_row(
@@ -11525,6 +12863,51 @@ async def _draw_welcome_banner_menu(
     await _choice_prompt(session)
 
 
+# Every banner and masthead file has the same 256 KiB limit.
+_SAVED_BANNER_READ_LIMIT = MAX_BANNER_SIZE_BYTES
+
+
+def _saved_banner_art(status) -> str | None:
+    """The art in a banner's saved file, whether or not it is switched on,
+    or `None` when there is no readable file within the size limit."""
+    if not status.exists or (status.size_bytes or 0) > _SAVED_BANNER_READ_LIMIT:
+        return None
+    try:
+        data = status.path.read_bytes()
+    except OSError:
+        return None
+    return decode_banner_bytes(data) + RESET
+
+
+async def _write_banner_not_live(session: Session, status, *, callers_see: str) -> bool:
+    """A preview's answer when callers are not seeing the SysOp's own art
+    here (issue #841). A saved file that is switched off is shown anyway,
+    because right after saving it the SysOp wants to see their work, not
+    what callers get instead; the line under it says it is off and what
+    callers see meanwhile. Returns whether saved art was shown.
+
+    This replaces lines like "(no banner -- enabled=False, file
+    exists=True)", which read as developer output."""
+    art = _saved_banner_art(status)
+    if art is not None and not status.enabled:
+        await write_preformatted_line(session, art)
+        await session.write_line(
+            colored(
+                f"(Saved, but switched off: callers see {callers_see}. [E]nable turns it on.)",
+                fg_color=MUTED_COLOR,
+            )
+        )
+        return True
+    if status.exists and art is None:
+        message = f"(The saved file is over 256 KiB or can't be read: callers see {callers_see}.)"
+    elif status.enabled:
+        message = f"(Switched on, but no file is saved: callers see {callers_see}.)"
+    else:
+        message = f"(Nothing saved yet: callers see {callers_see}.)"
+    await session.write_line(colored(message, fg_color=MUTED_COLOR))
+    return False
+
+
 async def _preview_welcome_banner_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
     """Renders the exact banner `netbbs.net.login_flow` would show at
     login right now -- the same `load_welcome_banner` call, used as a
@@ -11541,33 +12924,18 @@ async def _preview_welcome_banner_screen(session: Session, lane: DatabaseLane, a
 
     def _load(db: Database) -> tuple:
         truecolor = effective_truecolor(session, db, actor)
-        return welcome_banner_status(db), load_welcome_banner(db, truecolor=truecolor), truecolor
+        # As the connecting caller on this transport gets it (issue #841).
+        banner = load_welcome_banner(db, truecolor=truecolor, unicode_style=pre_login_unicode_style(session))
+        return welcome_banner_status(db), banner, truecolor
 
-    status, banner_text, truecolor = await lane.run(_load)
-    await session.write_line(colored("\r\nPreviewing welcome banner as shown at login:", fg_color=MUTED_COLOR))
-    await session.write_line(
-        colored("Capability: ", fg_color=LABEL_COLOR)
-        + colored(
-            getattr(session, "truecolor_diagnostic", "capability report unavailable"),
-            fg_color=METADATA_COLOR,
-        )
-    )
-    await write_preformatted_line(session, banner_text)
+    status, banner_text, _truecolor = await lane.run(_load)
+    await session.write_line(colored("\r\nPreviewing the welcome banner callers see when they connect:", fg_color=MUTED_COLOR))
     if status.enabled and status.exists and (status.size_bytes or 0) <= MAX_BANNER_SIZE_BYTES:
-        await session.write_line(
-            colored(
-                "(showing your custom file) -- generated truecolor/256-color showcase is intentionally bypassed",
-                fg_color=MUTED_COLOR,
-            )
-        )
-    else:
-        depth = "truecolor gradient" if truecolor else "256-color fallback"
-        await session.write_line(
-            colored(
-                f"(showing the DEFAULT banner -- rendering: {depth}; enabled={status.enabled}, file exists={status.exists})",
-                fg_color=MUTED_COLOR,
-            )
-        )
+        await write_preformatted_line(session, banner_text)
+        await session.write_line(colored("(Your banner, as callers see it.)", fg_color=MUTED_COLOR))
+    elif not await _write_banner_not_live(session, status, callers_see="the default NetBBS banner"):
+        # Nothing of the SysOp's own to show: show what callers do see.
+        await write_preformatted_line(session, banner_text)
     # Dogfood report: this screen used to fall straight through to the
     # menu's own immediate redraw, which -- with redraw_in_place on
     # (the default for new accounts, issue #160's own follow-up)
@@ -11706,7 +13074,7 @@ async def _welcome_banner_gallery_screen(
         preset = selection[1]
         data = load_welcome_banner_preset(preset)
         await session.write_line(colored(f"\r\nPreviewing {preset.name!r}:", fg_color=MUTED_COLOR))
-        await session.write_line(decode_ansi_bytes(data) + RESET)
+        await session.write_line(decode_banner_bytes(data) + RESET)
 
         if not await _preview_apply_choice(session, f"Apply {preset.name!r} as the welcome banner"):
             continue
@@ -12040,7 +13408,7 @@ async def _welcome_banner_filesystem_screen(
 
         data = path.read_bytes()
         await session.write_line(colored(f"\r\nPreviewing {path.name!r}:", fg_color=MUTED_COLOR))
-        await session.write_line(decode_ansi_bytes(data) + RESET)
+        await session.write_line(decode_banner_bytes(data) + RESET)
 
         if not await _preview_apply_choice(session, f"Load {path.name!r} as the welcome banner"):
             continue
@@ -12123,7 +13491,6 @@ async def _draw_main_menu_banner_menu(
     await session.write_line("\r\n" + screen_title("Main-menu masthead",
             breadcrumb=(session.node_display_name, "Settings", "Mastheads & banners", "Mastheads"), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
             header_color=await lane.run(effective_header_color_256), node_name_gradient=session.node_name_gradient))
-    await session.write_line(await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width))
     await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style)], unicode_style=unicode_style)
     await session.write_line("")
     await _write_wrapped_subtitle(
@@ -12170,12 +13537,7 @@ async def _preview_main_menu_banner_screen(session: Session, lane: DatabaseLane,
     status, masthead = await lane.run(_load)
     await session.write_line(colored("\r\nPreviewing the masthead as shown above the main menu:", fg_color=MUTED_COLOR))
     if not masthead:
-        await session.write_line(
-            colored(
-                f"(no masthead would be shown -- enabled={status.enabled}, file exists={status.exists})",
-                fg_color=MUTED_COLOR,
-            )
-        )
+        await _write_banner_not_live(session, status, callers_see="no masthead")
     else:
         await write_preformatted_line(session, masthead)
         await session.write_line(
@@ -12277,7 +13639,7 @@ async def _main_menu_banner_gallery_screen(
         preset = selection[1]
         data = load_main_menu_banner_preset(preset)
         await session.write_line(colored(f"\r\nPreviewing {preset.name!r}:", fg_color=MUTED_COLOR))
-        await session.write_line(decode_ansi_bytes(data) + RESET)
+        await session.write_line(decode_banner_bytes(data) + RESET)
 
         if not await _preview_apply_choice(session, f"Apply {preset.name!r} as the masthead"):
             continue
@@ -12350,7 +13712,7 @@ async def _main_menu_banner_filesystem_screen(
 
         data = path.read_bytes()
         await session.write_line(colored(f"\r\nPreviewing {path.name!r}:", fg_color=MUTED_COLOR))
-        await session.write_line(decode_ansi_bytes(data) + RESET)
+        await session.write_line(decode_banner_bytes(data) + RESET)
 
         if not await _preview_apply_choice(session, f"Load {path.name!r} as the masthead"):
             continue
@@ -12431,11 +13793,10 @@ async def _draw_banners_menu(
         "Optional banners shown throughout a caller's session -- first login, signing off, "
         "and starting/finishing self-service signup.",
     )
-    await session.write_line(await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width))
     await session.write_line(
         "\r\n" + _menu_row(
             [
-                MenuEntry(label=menu_key("W", "elcome banner"), brief="First-login greeting text"),
+                MenuEntry(label=menu_key("W", "elcome banner"), brief="Art shown when a caller connects"),
                 MenuEntry(label=menu_key("L", "ogoff banner"), brief="Shown on an intentional Log off"),
                 MenuEntry(label=menu_key("e", "fore signup", prefix="B"), brief="Shown once, before Create account"),
                 MenuEntry(label=menu_key("f", "ter signup", prefix="A"), brief="Shown once signup succeeds"),
@@ -12519,7 +13880,6 @@ async def _draw_logoff_banner_menu(
         "Shown above the ordinary Goodbye message on an intentional Log off only -- never on an idle "
         "timeout, kick, or account revocation.",
     )
-    await session.write_line(await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width))
     await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style)], unicode_style=unicode_style)
     await session.write_line(
         "\r\n" + _menu_row(
@@ -12548,11 +13908,7 @@ async def _preview_logoff_banner_screen(session: Session, lane: DatabaseLane) ->
     if banner_text:
         await write_preformatted_line(session, banner_text)
     else:
-        await session.write_line(
-            colored(
-                f"(no banner -- enabled={status.enabled}, file exists={status.exists})", fg_color=MUTED_COLOR
-            )
-        )
+        await _write_banner_not_live(session, status, callers_see="no banner")
     await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
     await session.read_any_key()
 
@@ -12638,7 +13994,7 @@ async def _logoff_banner_gallery_screen(
         preset = selection[1]
         data = load_logoff_banner_preset(preset)
         await session.write_line(colored(f"\r\nPreviewing {preset.name!r}:", fg_color=MUTED_COLOR))
-        await session.write_line(decode_ansi_bytes(data) + RESET)
+        await session.write_line(decode_banner_bytes(data) + RESET)
 
         if not await _preview_apply_choice(session, f"Apply {preset.name!r} as the logoff banner"):
             continue
@@ -12709,7 +14065,7 @@ async def _logoff_banner_filesystem_screen(
 
         data = path.read_bytes()
         await session.write_line(colored(f"\r\nPreviewing {path.name!r}:", fg_color=MUTED_COLOR))
-        await session.write_line(decode_ansi_bytes(data) + RESET)
+        await session.write_line(decode_banner_bytes(data) + RESET)
 
         if not await _preview_apply_choice(session, f"Load {path.name!r} as the logoff banner"):
             continue
@@ -12795,7 +14151,6 @@ async def _draw_new_account_banner_before_menu(
         "Shown once, right when a caller starts self-service signup -- before the Create "
         "account prompts, never repeated on a fixable retry.",
     )
-    await session.write_line(await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width))
     await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style)], unicode_style=unicode_style)
     await session.write_line(
         "\r\n" + _menu_row(
@@ -12828,11 +14183,7 @@ async def _preview_new_account_banner_before_screen(session: Session, lane: Data
     if banner_text:
         await write_preformatted_line(session, banner_text)
     else:
-        await session.write_line(
-            colored(
-                f"(no banner -- enabled={status.enabled}, file exists={status.exists})", fg_color=MUTED_COLOR
-            )
-        )
+        await _write_banner_not_live(session, status, callers_see="no banner")
     await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
     await session.read_any_key()
 
@@ -12918,7 +14269,7 @@ async def _new_account_banner_before_gallery_screen(
         preset = selection[1]
         data = load_new_account_banner_before_preset(preset)
         await session.write_line(colored(f"\r\nPreviewing {preset.name!r}:", fg_color=MUTED_COLOR))
-        await session.write_line(decode_ansi_bytes(data) + RESET)
+        await session.write_line(decode_banner_bytes(data) + RESET)
 
         if not await _preview_apply_choice(session, f"Apply {preset.name!r} as the new-account (before) banner"):
             continue
@@ -12991,7 +14342,7 @@ async def _new_account_banner_before_filesystem_screen(
 
         data = path.read_bytes()
         await session.write_line(colored(f"\r\nPreviewing {path.name!r}:", fg_color=MUTED_COLOR))
-        await session.write_line(decode_ansi_bytes(data) + RESET)
+        await session.write_line(decode_banner_bytes(data) + RESET)
 
         if not await _preview_apply_choice(session, f"Load {path.name!r} as the new-account (before) banner"):
             continue
@@ -13079,7 +14430,6 @@ async def _draw_new_account_banner_after_menu(
         "Shown once self-service signup succeeds -- covers both an immediate login and a "
         "pending-approval account, alongside the existing message either way.",
     )
-    await session.write_line(await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width))
     await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style)], unicode_style=unicode_style)
     await session.write_line(
         "\r\n" + _menu_row(
@@ -13112,11 +14462,7 @@ async def _preview_new_account_banner_after_screen(session: Session, lane: Datab
     if banner_text:
         await write_preformatted_line(session, banner_text)
     else:
-        await session.write_line(
-            colored(
-                f"(no banner -- enabled={status.enabled}, file exists={status.exists})", fg_color=MUTED_COLOR
-            )
-        )
+        await _write_banner_not_live(session, status, callers_see="no banner")
     await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
     await session.read_any_key()
 
@@ -13202,7 +14548,7 @@ async def _new_account_banner_after_gallery_screen(
         preset = selection[1]
         data = load_new_account_banner_after_preset(preset)
         await session.write_line(colored(f"\r\nPreviewing {preset.name!r}:", fg_color=MUTED_COLOR))
-        await session.write_line(decode_ansi_bytes(data) + RESET)
+        await session.write_line(decode_banner_bytes(data) + RESET)
 
         if not await _preview_apply_choice(session, f"Apply {preset.name!r} as the new-account (after) banner"):
             continue
@@ -13275,7 +14621,7 @@ async def _new_account_banner_after_filesystem_screen(
 
         data = path.read_bytes()
         await session.write_line(colored(f"\r\nPreviewing {path.name!r}:", fg_color=MUTED_COLOR))
-        await session.write_line(decode_ansi_bytes(data) + RESET)
+        await session.write_line(decode_banner_bytes(data) + RESET)
 
         if not await _preview_apply_choice(session, f"Load {path.name!r} as the new-account (after) banner"):
             continue
@@ -13353,7 +14699,6 @@ async def _draw_mastheads_menu(
         "chat channel picker -- at every level of browsing (top level, a category, a "
         "Community) where applicable.",
     )
-    await session.write_line(await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width))
     await session.write_line(
         "\r\n" + _menu_row(
             [
@@ -13439,9 +14784,8 @@ async def _draw_board_list_masthead_menu(
     await _write_wrapped_subtitle(
         session,
         "Shown above every board-browsing view -- the top level, a category, or a "
-        "Community/Uncategorized scope.",
+        "Community.",
     )
-    await session.write_line(await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width))
     await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style)], unicode_style=unicode_style)
     await session.write_line(
         "\r\n" + _menu_row(
@@ -13470,9 +14814,7 @@ async def _preview_board_list_masthead_screen(session: Session, lane: DatabaseLa
     if masthead_text:
         await write_preformatted_line(session, masthead_text)
     else:
-        await session.write_line(
-            colored(f"(no masthead -- enabled={status.enabled}, file exists={status.exists})", fg_color=MUTED_COLOR)
-        )
+        await _write_banner_not_live(session, status, callers_see="no masthead")
     await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
     await session.read_any_key()
 
@@ -13558,7 +14900,7 @@ async def _board_list_masthead_gallery_screen(
         preset = selection[1]
         data = load_board_list_masthead_preset(preset)
         await session.write_line(colored(f"\r\nPreviewing {preset.name!r}:", fg_color=MUTED_COLOR))
-        await session.write_line(decode_ansi_bytes(data) + RESET)
+        await session.write_line(decode_banner_bytes(data) + RESET)
 
         if not await _preview_apply_choice(session, f"Apply {preset.name!r} as the board list masthead"):
             continue
@@ -13631,7 +14973,7 @@ async def _board_list_masthead_filesystem_screen(
 
         data = path.read_bytes()
         await session.write_line(colored(f"\r\nPreviewing {path.name!r}:", fg_color=MUTED_COLOR))
-        await session.write_line(decode_ansi_bytes(data) + RESET)
+        await session.write_line(decode_banner_bytes(data) + RESET)
 
         if not await _preview_apply_choice(session, f"Load {path.name!r} as the board list masthead"):
             continue
@@ -13715,9 +15057,8 @@ async def _draw_file_area_masthead_menu(
     await _write_wrapped_subtitle(
         session,
         "Shown above every file-area-browsing view -- the top level, a category, or a "
-        "Community/Uncategorized scope.",
+        "Community.",
     )
-    await session.write_line(await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width))
     await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style)], unicode_style=unicode_style)
     await session.write_line(
         "\r\n" + _menu_row(
@@ -13746,9 +15087,7 @@ async def _preview_file_area_masthead_screen(session: Session, lane: DatabaseLan
     if masthead_text:
         await write_preformatted_line(session, masthead_text)
     else:
-        await session.write_line(
-            colored(f"(no masthead -- enabled={status.enabled}, file exists={status.exists})", fg_color=MUTED_COLOR)
-        )
+        await _write_banner_not_live(session, status, callers_see="no masthead")
     await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
     await session.read_any_key()
 
@@ -13834,7 +15173,7 @@ async def _file_area_masthead_gallery_screen(
         preset = selection[1]
         data = load_file_area_masthead_preset(preset)
         await session.write_line(colored(f"\r\nPreviewing {preset.name!r}:", fg_color=MUTED_COLOR))
-        await session.write_line(decode_ansi_bytes(data) + RESET)
+        await session.write_line(decode_banner_bytes(data) + RESET)
 
         if not await _preview_apply_choice(session, f"Apply {preset.name!r} as the file area masthead"):
             continue
@@ -13905,7 +15244,7 @@ async def _file_area_masthead_filesystem_screen(
 
         data = path.read_bytes()
         await session.write_line(colored(f"\r\nPreviewing {path.name!r}:", fg_color=MUTED_COLOR))
-        await session.write_line(decode_ansi_bytes(data) + RESET)
+        await session.write_line(decode_banner_bytes(data) + RESET)
 
         if not await _preview_apply_choice(session, f"Load {path.name!r} as the file area masthead"):
             continue
@@ -13989,9 +15328,8 @@ async def _draw_chat_channel_picker_masthead_menu(
     await _write_wrapped_subtitle(
         session,
         "Shown above every channel-picker view -- the top level, a category, or a "
-        "Community/Uncategorized scope. Never inside a live channel.",
+        "Community. Never inside a live channel.",
     )
-    await session.write_line(await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width))
     await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style)], unicode_style=unicode_style)
     await session.write_line(
         "\r\n" + _menu_row(
@@ -14024,9 +15362,7 @@ async def _preview_chat_channel_picker_masthead_screen(session: Session, lane: D
     if masthead_text:
         await write_preformatted_line(session, masthead_text)
     else:
-        await session.write_line(
-            colored(f"(no masthead -- enabled={status.enabled}, file exists={status.exists})", fg_color=MUTED_COLOR)
-        )
+        await _write_banner_not_live(session, status, callers_see="no masthead")
     await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
     await session.read_any_key()
 
@@ -14112,7 +15448,7 @@ async def _chat_channel_picker_masthead_gallery_screen(
         preset = selection[1]
         data = load_chat_channel_picker_masthead_preset(preset)
         await session.write_line(colored(f"\r\nPreviewing {preset.name!r}:", fg_color=MUTED_COLOR))
-        await session.write_line(decode_ansi_bytes(data) + RESET)
+        await session.write_line(decode_banner_bytes(data) + RESET)
 
         if not await _preview_apply_choice(session, f"Apply {preset.name!r} as the chat channel picker masthead"):
             continue
@@ -14185,7 +15521,7 @@ async def _chat_channel_picker_masthead_filesystem_screen(
 
         data = path.read_bytes()
         await session.write_line(colored(f"\r\nPreviewing {path.name!r}:", fg_color=MUTED_COLOR))
-        await session.write_line(decode_ansi_bytes(data) + RESET)
+        await session.write_line(decode_banner_bytes(data) + RESET)
 
         if not await _preview_apply_choice(session, f"Load {path.name!r} as the chat channel picker masthead"):
             continue
@@ -14385,12 +15721,6 @@ async def _theme_colors_menu(session: Session, lane: DatabaseLane, actor: User) 
 
     redraw_in_place, redraw_hint = await lane.run(_resolve_redraw_preference, actor)
     unicode_style = await lane.run(unicode_style_enabled, actor)
-    # Issue #206's condensed status line on every nested console screen
-    # without a full panel of its own -- kept above the live preview.
-    status_line = await _load_condensed_status_line(
-        lane, unicode_style=unicode_style, terminal_width=session.terminal_width
-    )
-    newline = chr(13) + chr(10)
     await edit_resource_draft(
         session, lane,
         title="Node colors",
@@ -14398,7 +15728,7 @@ async def _theme_colors_menu(session: Session, lane: DatabaseLane, actor: User) 
         save_menu_text=menu_key("S", "ave"), back_menu_text=menu_key("B", "ack"),
         description_level=await lane.run(menu_description_level, actor),
         redraw_in_place=redraw_in_place, redraw_hint=redraw_hint,
-        preamble=lambda d: status_line + newline + _theme_preview_preamble(d),
+        preamble=_theme_preview_preamble,
         unicode_style=unicode_style,
         collapsed=await lane.run(breadcrumb_collapsed_enabled, actor),
         accent_color=await lane.run(effective_accent_color_256),
@@ -14606,8 +15936,8 @@ async def _draw_content_menu(session: Session, *, stats: dict[str, Any]) -> None
         MenuEntry(label=menu_key("F", "ile areas"), brief="Create/edit file areas"),
         MenuEntry(label=menu_key("D", "oors"), brief="Register/edit door games"),
         MenuEntry(label=menu_key("n", "nels", prefix="Chat cha"), brief="Create/edit chat channels"),
-        MenuEntry(label=menu_key("C", "ategories"), brief="Organize boards/areas/channels"),
-        MenuEntry(label=menu_key("O", "mmunities", prefix="C"), brief="Manage Communities"),
+        MenuEntry(label=menu_key("C", "ategories"), brief="Group lists of one kind"),
+        MenuEntry(label=menu_key("O", "mmunities", prefix="C"), brief="Topics holding every kind"),
         MenuEntry(label=menu_key("G", "rant moderator"), brief="Grant a moderation scope"),
         MenuEntry(label=menu_key("R", "evoke moderator"), brief="Revoke a moderation scope"),
         MenuEntry(label=menu_key("P", "ending review"), brief="Posts and files awaiting approval"),
@@ -14713,6 +16043,12 @@ _CLEAR_HINT = "Enter saves, blank clears, Esc keeps"
 #: change" rather than turned into an error a caller would only ever see
 #: by deleting a value on purpose.
 _EDIT_HINT = "Enter saves, Esc cancels"
+
+
+def _seconds_text(value: float) -> str:
+    """A delay as the SysOp would type it: `60`, not `60.0`, and never the
+    6-significant-digit rounding `:g` would seed and save back."""
+    return str(int(value)) if float(value).is_integer() else repr(float(value))
 
 
 async def _read_seeded_line(session: Session, *, initial: str) -> str:
@@ -15193,8 +16529,7 @@ async def _community_menu(session: Session, lane: DatabaseLane, actor: User) -> 
     collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
     redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
     header_color = await lane.run(effective_header_color_256)
-    status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
-    await _draw_community_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
+    await _draw_community_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
     while True:
         choice = (await session.read_key()).lower()
 
@@ -15204,24 +16539,21 @@ async def _community_menu(session: Session, lane: DatabaseLane, actor: User) -> 
         elif choice == "c":
             await session.write_line("")
             await _community_screen(session, lane, actor)
-            status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
-            await _draw_community_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
+            await _draw_community_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == "l":
             await session.write_line("")
             await _list_communities_screen(session, lane, actor)
-            status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
-            await _draw_community_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
+            await _draw_community_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         else:
             await session.write(reject_unhandled_key(choice))
 
 
 async def _draw_community_menu(
     session: Session, description_level: str, redraw_in_place: bool, unicode_style: bool, collapsed: bool,
-    header_color: int | tuple[int, int, int] = HEADER_COLOR, *, status_line: str,
+    header_color: int | tuple[int, int, int] = HEADER_COLOR,
 ) -> None:
     await session.write_line("\r\n" + screen_title("Communities",
             breadcrumb=(session.node_display_name,), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, header_color=header_color, node_name_gradient=session.node_name_gradient))
-    await session.write_line(status_line)
     await session.write_line(
         _menu_row(
             [
@@ -15390,23 +16722,32 @@ async def _community_screen(
 
 
 async def _list_communities_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
-    communities = await lane.run(list_communities)
-    selected = await pick_item(
-        session, communities,
-        name_of=lambda c: c.name,
-        stable_id_of=lambda c: c.id,
-        description_of=_community_description,
-        columns=_COMMUNITY_COLUMNS,
-        column_values_of=_community_columns,
-        title="Communities",
-        empty_message="No Communities yet.",
-        redraw_in_place=await lane.run(redraw_in_place_enabled, actor),
-        unicode_style=await lane.run(unicode_style_enabled, actor),
-        collapsed=await lane.run(breadcrumb_collapsed_enabled, actor),
-        accent_color=await lane.run(effective_accent_color_256),
-        header_color=await lane.run(effective_header_color_256),
-    )
-    if selected is not None:
+    """The Communities in the order callers see them (issue #838). Picking
+    one opens its screen, to edit, move or remove it; leaving that comes
+    back here, on it -- the same loop the category list has, so a SysOp
+    ordering several Communities sees each move land."""
+    reopen_at: int | None = None
+    while True:
+        communities = await lane.run(list_communities)
+        selected = await pick_item(
+            session, communities,
+            name_of=lambda c: c.name,
+            stable_id_of=lambda c: c.id,
+            description_of=_community_description,
+            columns=_COMMUNITY_COLUMNS,
+            column_values_of=_community_columns,
+            title="Communities",
+            empty_message="No Communities yet.",
+            start_stable_id=reopen_at,
+            redraw_in_place=await lane.run(redraw_in_place_enabled, actor),
+            unicode_style=await lane.run(unicode_style_enabled, actor),
+            collapsed=await lane.run(breadcrumb_collapsed_enabled, actor),
+            accent_color=await lane.run(effective_accent_color_256),
+            header_color=await lane.run(effective_header_color_256),
+        )
+        if selected is None:
+            return
+        reopen_at = selected.id
         await _community_detail_screen(session, lane, actor, selected)
 
 
@@ -15431,14 +16772,25 @@ def _community_description(community: Community) -> str:
 
 async def _community_detail_screen(session: Session, lane: DatabaseLane, actor: User, community: Community) -> None:
     """No "pending" equivalent here, unlike boards/areas -- a Community
-    holds no content of its own (design doc §16)."""
+    holds no content of its own (design doc §16). Move [U]p and [D]own
+    set where it sits in the callers' Communities list (issue #838);
+    [R]emove, as on a category's screen, deletes it."""
     description_level = await lane.run(menu_description_level, actor)
     unicode_style = await lane.run(unicode_style_enabled, actor)
     collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
     redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
     header_color = await lane.run(effective_header_color_256)
-    status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
-    await _draw_community_detail(session, community, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
+
+    async def _redraw() -> tuple[int, int]:
+        order = [c.id for c in await lane.run(list_communities)]
+        place = order.index(community.id) if community.id in order else 0
+        await _draw_community_detail(
+            session, community, description_level, redraw_in_place, unicode_style, collapsed, header_color,
+            place=place, total=len(order),
+        )
+        return place, len(order)
+
+    place, total = await _redraw()
     while True:
         choice = (await session.read_key()).lower()
 
@@ -15450,15 +16802,17 @@ async def _community_detail_screen(session: Session, lane: DatabaseLane, actor: 
             updated = await _community_screen(session, lane, actor, existing=community)
             if updated is not None:
                 community = updated
-            status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
-            await _draw_community_detail(session, community, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
-        elif choice == "d":
+            place, total = await _redraw()
+        elif (choice == "u" and place > 0) or (choice == "d" and place < total - 1):
+            await session.write_line("")
+            await lane.run(move_community, community, -1 if choice == "u" else 1, moved_by=actor)
+            place, total = await _redraw()
+        elif choice == "r":
             await session.write_line("")
             deleted = await _delete_community_screen(session, lane, actor, community)
             if deleted:
                 return
-            status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
-            await _draw_community_detail(session, community, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
+            place, total = await _redraw()
         else:
             await session.write(reject_unhandled_key(choice))
 
@@ -15469,18 +16823,19 @@ async def _draw_community_detail(
     collapsed: bool,
     header_color: int | tuple[int, int, int] = HEADER_COLOR,
     *,
-    status_line: str,
+    place: int = 0,
+    total: int = 1,
 ) -> None:
     await session.write_line(
         "\r\n" + screen_title(sanitize_text(community.name),
             breadcrumb=(session.node_display_name,), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
             header_color=header_color, node_name_gradient=session.node_name_gradient)
     )
-    await session.write_line(status_line)
     panel_rows = await _write_sections(session, [
         Section("Community", [
             _description_field(community.description),
             Field("Hidden", _yes_no(community.hidden)),
+            Field("Place", f"{place + 1} of {total}"),
         ]),
         Section("Defaults for its boards, areas and channels", [
             Field("Read level", _optional_int_label(community.default_min_read_level)),
@@ -15492,7 +16847,9 @@ async def _draw_community_detail(
     options = _fitted_menu(
         [
             MenuEntry(label=menu_key("E", "dit"), brief="Change this Community's settings"),
-            MenuEntry(label=menu_key("D", "elete"), brief="Permanently remove it"),
+            *([MenuEntry(label=menu_key("U", "p"), brief="Earlier in the callers' list")] if place > 0 else []),
+            *([MenuEntry(label=menu_key("D", "own"), brief="Later in the callers' list")] if place < total - 1 else []),
+            MenuEntry(label=menu_key("R", "emove"), brief="Permanently remove it"),
             MenuEntry(label=menu_key("B", "ack"), brief="Return to the list"),
         ],
         description_level, session=session, used_rows=panel_rows + 4,
@@ -15504,7 +16861,7 @@ async def _draw_community_detail(
 async def _delete_community_screen(session: Session, lane: DatabaseLane, actor: User, community: Community) -> bool:
     """Shows the blast radius before committing (design doc §16's exact
     confirmation wording): how many boards/channels/areas
-    will revert to Uncategorized, and how many Community-blanket
+    will be left without a Community, and how many Community-blanket
     moderator grants will be revoked outright."""
 
     def _counts(db: Database) -> tuple[int, int, int, int]:
@@ -15518,8 +16875,8 @@ async def _delete_community_screen(session: Session, lane: DatabaseLane, actor: 
     await session.write_line(
         colored(
             f"\r\nThis Community has {board_count} message board(s), {channel_count} chat channel(s), "
-            f"{area_count} file area(s), and {grant_count} moderator grant(s). Deleting will "
-            "un-categorize its resources and revoke those grants. This cannot be undone.",
+            f"{area_count} file area(s), and {grant_count} moderator grant(s). Removing it leaves "
+            "those resources without a Community and revokes those grants. This cannot be undone.",
             fg_color=MUTED_COLOR,
         )
     )
@@ -15547,8 +16904,7 @@ async def _board_menu(
     collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
     redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
     header_color = await lane.run(effective_header_color_256)
-    status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
-    await _draw_board_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
+    await _draw_board_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
     while True:
         choice = (await session.read_key()).lower()
 
@@ -15558,24 +16914,21 @@ async def _board_menu(
         elif choice == "c":
             await session.write_line("")
             await _board_screen(session, lane, actor)
-            status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
-            await _draw_board_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
+            await _draw_board_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == "l":
             await session.write_line("")
             await _list_boards_screen(session, lane, actor, link_context=link_context)
-            status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
-            await _draw_board_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
+            await _draw_board_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         else:
             await session.write(reject_unhandled_key(choice))
 
 
 async def _draw_board_menu(
     session: Session, description_level: str, redraw_in_place: bool, unicode_style: bool, collapsed: bool,
-    header_color: int | tuple[int, int, int] = HEADER_COLOR, *, status_line: str,
+    header_color: int | tuple[int, int, int] = HEADER_COLOR,
 ) -> None:
     await session.write_line("\r\n" + screen_title("Message boards",
             breadcrumb=(session.node_display_name,), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, header_color=header_color, node_name_gradient=session.node_name_gradient))
-    await session.write_line(status_line)
     await session.write_line(
         _menu_row(
             [
@@ -15830,7 +17183,10 @@ async def _list_boards_screen(
     session: Session, lane: DatabaseLane, actor: User, *, link_context: LinkContext | None = None
 ) -> None:
     def _load_boards(db: Database):
-        boards = list_boards(db, order_by="alphabetical")
+        # The SysOp's order (issue #839), which callers' lists follow within
+        # each category and Community; [U]p/[D]own on a detail screen move
+        # one among those, and its Place row says where it sits.
+        boards = list_boards(db, order_by="sysop")
         counts = {board.id: (count_listed_posts(db, board)[0], count_pending_posts(db, board)) for board in boards}
         return boards, _effective_by_id(db, boards), counts, carried_to_review(db, "boards")
 
@@ -16104,6 +17460,22 @@ def _community_columns(community: Community) -> list[str | tuple[str, SegmentCol
     ]
 
 
+def _place_label(place: int, total: int, *, pinned: bool) -> str:
+    """Where a board or area sits in the callers' list (issue #839): among
+    those in the same category and Community, pinned ones apart. It replaced
+    the "Pinned" row, which it now says, so the screen gained no row."""
+    return f"{place + 1} of {total}" + (", pinned first" if pinned else "")
+
+
+def _move_entries(place: int, total: int) -> list[MenuEntry]:
+    """`[U]p`/`[D]own` for a board or area (issue #839), each offered only
+    where it can move, as on a Community's screen."""
+    return [
+        *([MenuEntry(label=menu_key("U", "p"), brief="Earlier in the callers' list")] if place > 0 else []),
+        *([MenuEntry(label=menu_key("D", "own"), brief="Later in the callers' list")] if place < total - 1 else []),
+    ]
+
+
 async def _board_detail_screen(
     session: Session, lane: DatabaseLane, actor: User, board: Board, *, link_context: LinkContext | None = None
 ) -> None:
@@ -16134,7 +17506,16 @@ async def _board_detail_screen(
                 description_level=description_level, redraw_in_place=redraw_in_place,
                 unicode_style=unicode_style, collapsed=collapsed,
             )
-        elif choice == "d":
+        elif choice in ("u", "d") and await lane.run(move_board, board, -1 if choice == "u" else 1, moved_by=actor):
+            # Moved within its category (issue #839); the first cannot go
+            # up nor the last down, and those keys fall through to the bell.
+            await session.write_line("")
+            is_origin, has_incoming_offer, is_closed = await _draw_board_detail(
+                session, lane, board, linked=linked, link_context=link_context,
+                description_level=description_level, redraw_in_place=redraw_in_place,
+                unicode_style=unicode_style, collapsed=collapsed,
+            )
+        elif choice == "r":
             await session.write_line("")
             deleted = await _delete_board_screen(
                 session, lane, actor, board,
@@ -16300,10 +17681,12 @@ def _link_board_field_specs(
             prompt=_forked_from_field(
                 board, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
             ),
-            brief="Origin board this forks from",
+            brief="Most boards: leave it",
             help=(
-                "If this board is a fork of an existing Linked message board, choose it here. "
-                "Leave as-is if it isn't."
+                "Only for a board that carries on another node's Linked message board under this "
+                "node, for example after that board was closed. Peers are told it continues that "
+                "one; each still decides what it carries. A new board of your own is not a fork: "
+                "leave it as '(not a fork)'."
             ),
         ),
     ]
@@ -16369,7 +17752,7 @@ async def _link_board_screen(
         link_context.link_node.boards[board.board_id] = genesis
         link_context.link_node.known_event_ids.add(genesis.content_id)
         link_context.link_node.events[genesis.content_id] = genesis.to_dict()
-        _announce_line(session, f"Linked {board.name!r} -- it will be pushed to peers on the next sync pass.")
+        _announce_line(session, _linked_announcement(board.name))
         return True
 
     redraw_in_place, redraw_hint = await lane.run(_resolve_redraw_preference, actor)
@@ -16642,13 +18025,14 @@ async def _draw_board_detail(
             breadcrumb=(session.node_display_name,), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
             header_color=await lane.run(effective_header_color_256), node_name_gradient=session.node_name_gradient)
     )
-    await session.write_line(await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width))
     # Dogfood follow-up: nothing on this screen (or the board-list picker)
     # ever showed how many posts actually exist or when the last one was
     # made -- a SysOp trying to spot a dead board versus an active one had
     # no way to tell without leaving admin and browsing it as an ordinary
     # reader.
     post_count, last_post_at = await lane.run(count_visible_posts, board)
+    order = [b.id for b in await lane.run(board_siblings, board)]
+    place, total = (order.index(board.id) if board.id in order else 0), len(order)
     if last_post_at is None:
         activity = "no posts yet"
     else:
@@ -16667,7 +18051,7 @@ async def _draw_board_detail(
             _gate_field("Name requirement", board.name_requirement),
         ], paired=True),
         Section("Behavior", [
-            Field("Pinned", _yes_no(board.pinned)),
+            Field("Place", _place_label(place, total, pinned=board.pinned)),
             Field("Moderated", _yes_no(board.moderated)),
             Field(
                 "Max post age",
@@ -16724,11 +18108,14 @@ async def _draw_board_detail(
                         + _linked_node_label(link_context, offer.payload.get("new_origin_fingerprint")),
                         color=WARNING_COLOR,
                     ))
+        if linked and is_origin:
+            link_rows.extend(await _peer_reach_rows(lane, link_context, link_context.link_node.boards.get(board.board_id)))
         sections.append(Section("NetBBS Link", link_rows))
     panel_rows = await _write_sections(session, sections, unicode_style=unicode_style)
     options = [
         MenuEntry(label=menu_key("E", "dit"), brief="Change this board's settings"),
-        MenuEntry(label=menu_key("D", "elete"), brief="Permanently remove this board"),
+        *_move_entries(place, total),
+        MenuEntry(label=menu_key("R", "emove"), brief="Permanently remove this board"),
         MenuEntry(label=menu_key("P", "ending posts"), brief="Review posts awaiting approval"),
         MenuEntry(label=menu_key("H", "istory"), brief="Its moderators and what they did"),
     ]
@@ -16988,14 +18375,19 @@ def _load_pending_items(
     """Everything `actor` may decide on in `boards` and `areas` (every
     board and area when both are `None`), oldest first, at most
     `MAX_QUEUE_ITEMS` of it, and whether more waits. Each item keeps its
-    own id as its `(#N)`; in the node-wide queue, where a post and a file
+    own id as its picker identity; in the node-wide queue, where a post and a file
     may share an id, a file's is negative, as category pickers do
     (worklog, "Stable identity and pagination")."""
     node_wide = boards is None and areas is None
     cap = MAX_QUEUE_ITEMS + 1
     posts: list[tuple[Post, Board]] = []
     entries: list[tuple[FileEntry, FileArea]] = []
-    if node_wide:
+    scope = moderation_scope(db, actor) if node_wide else None
+    if scope is not None:
+        # A moderator's `Moderation (n)` queue (design doc §5.2): one queue
+        # across what their grants cover, drawn like the SysOp's.
+        boards, areas = scope
+    if node_wide and scope is None:
         # One bounded query each, however many boards and areas there are
         # (Codex review on #795).
         boards_by_id = {board.id: board for board in list_boards(db)}
@@ -17074,7 +18466,8 @@ async def _pending_review_screen(
     link_context: LinkContext | None = None, transfers: Any = None,
 ) -> None:
     """Every held post and upload on the node in one queue (issue #678),
-    so a SysOp need not open each board and area to find what waits."""
+    so a SysOp need not open each board and area to find what waits -- or,
+    for anyone else, every one their grants let them decide (issue #836)."""
     while True:
         loaded = await lane.run(_load_pending_items, actor)
         selected = await _pick_pending_item(
@@ -17089,6 +18482,16 @@ async def _pending_review_screen(
             await _file_action_screen(
                 session, lane, actor, selected.entry, selected.area, link_context=link_context, transfers=transfers,
             )
+
+
+async def moderation_queue(
+    session: Session, lane: DatabaseLane, actor: User, *,
+    link_context: LinkContext | None = None, transfers: Any = None,
+) -> None:
+    """`Moderation (n)` on the main menu (design doc §5.2, issue #836): the
+    node-wide queue, narrowed by `_load_pending_items` to the boards and
+    areas `actor` approves on -- one queue, not a visit to each board."""
+    await _pending_review_screen(session, lane, actor, link_context=link_context, transfers=transfers)
 
 
 async def _pending_posts_screen(
@@ -17121,12 +18524,6 @@ async def _post_action_screen(
     collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
     redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
     header_color = await lane.run(effective_header_color_256)
-    # The node's health line is the SysOp's; a board moderator reaching this
-    # from the board's own [Q]ueue (issue #678) is shown the post alone.
-    status_line = (
-        await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
-        if actor.user_level >= SYSOP_LEVEL else None
-    )
     display_format, display_timezone = await lane.run(resolve_display_preferences)
     when = _when_or_raw(post.created_at, override_format=display_format, override_timezone=display_timezone)
     body_mode = post_body_mode(
@@ -17208,7 +18605,6 @@ async def _post_action_screen(
         choice, page = await show_detail(
             session, title=title, sections=sections, actions=actions,
             redraw_in_place=redraw_in_place, unicode_style=unicode_style, page=page,
-            preamble=[status_line] if status_line else [],
         )
         if choice == "b":
             return
@@ -17260,8 +18656,7 @@ async def _area_menu(
     collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
     redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
     header_color = await lane.run(effective_header_color_256)
-    status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
-    await _draw_area_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
+    await _draw_area_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
     while True:
         choice = (await session.read_key()).lower()
 
@@ -17271,29 +18666,25 @@ async def _area_menu(
         elif choice == "c":
             await session.write_line("")
             await _area_screen(session, lane, actor)
-            status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
-            await _draw_area_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
+            await _draw_area_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == "l":
             await session.write_line("")
             await _list_areas_screen(session, lane, actor, link_context=link_context, transfers=transfers)
-            status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
-            await _draw_area_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
+            await _draw_area_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == "g":
             await session.write_line("")
             await _gc_screen(session, lane, actor)
-            status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
-            await _draw_area_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
+            await _draw_area_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         else:
             await session.write(reject_unhandled_key(choice))
 
 
 async def _draw_area_menu(
     session: Session, description_level: str, redraw_in_place: bool, unicode_style: bool, collapsed: bool,
-    header_color: int | tuple[int, int, int] = HEADER_COLOR, *, status_line: str,
+    header_color: int | tuple[int, int, int] = HEADER_COLOR,
 ) -> None:
     await session.write_line("\r\n" + screen_title("File areas",
             breadcrumb=(session.node_display_name,), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, header_color=header_color, node_name_gradient=session.node_name_gradient))
-    await session.write_line(status_line)
     await session.write_line(
         menu_grid(
             [(
@@ -17600,7 +18991,10 @@ async def _list_areas_screen(
     transfers: Any = None,
 ) -> None:
     def _load_areas(db: Database):
-        areas = list_file_areas(db, order_by="alphabetical")
+        # The SysOp's order (issue #839), which callers' lists follow within
+        # each category and Community; [U]p/[D]own on a detail screen move
+        # one among those, and its Place row says where it sits.
+        areas = list_file_areas(db, order_by="sysop")
         counts = {area.id: (count_listed_files(db, area)[0], count_pending_files(db, area)) for area in areas}
         return areas, _effective_by_id(db, areas), counts, carried_to_review(db, "file_areas")
 
@@ -17665,7 +19059,11 @@ async def _area_detail_screen(
             if updated is not None:
                 area = updated
             await _draw_area_detail(session, lane, area, linked=linked, link_context=link_context, description_level=description_level, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed)
-        elif choice == "d":
+        elif choice in ("u", "d") and await lane.run(move_file_area, area, -1 if choice == "u" else 1, moved_by=actor):
+            # Moved within its category (issue #839), as a board moves.
+            await session.write_line("")
+            await _draw_area_detail(session, lane, area, linked=linked, link_context=link_context, description_level=description_level, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed)
+        elif choice == "r":
             await session.write_line("")
             deleted = await _delete_area_screen(
                 session, lane, actor, area,
@@ -17718,8 +19116,9 @@ async def _draw_area_detail(
             breadcrumb=(session.node_display_name,), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
             header_color=await lane.run(effective_header_color_256), node_name_gradient=session.node_name_gradient)
     )
-    await session.write_line(await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width))
     file_count, last_file_at = await lane.run(count_visible_files, area)
+    order = [a.id for a in await lane.run(file_area_siblings, area)]
+    place, total = (order.index(area.id) if area.id in order else 0), len(order)
     if last_file_at is None:
         activity = "no files yet"
     else:
@@ -17738,7 +19137,7 @@ async def _draw_area_detail(
             _gate_field("Name requirement", area.name_requirement),
         ], paired=True),
         Section("Behavior", [
-            Field("Pinned", _yes_no(area.pinned)),
+            Field("Place", _place_label(place, total, pinned=area.pinned)),
             Field("Moderated", _yes_no(area.moderated)),
             Field(
                 "Max file age",
@@ -17747,11 +19146,17 @@ async def _draw_area_detail(
         ], paired=True),
     ]
     if link_context is not None:
-        sections.append(Section("NetBBS Link", [Field("Linked", _yes_no(linked))]))
+        area_link_rows: list[Field | Note] = [Field("Linked", _yes_no(linked))]
+        if linked:
+            area_link_rows.extend(
+                await _peer_reach_rows(lane, link_context, link_context.link_node.file_areas.get(area.area_id))
+            )
+        sections.append(Section("NetBBS Link", area_link_rows))
     panel_rows = await _write_sections(session, sections, unicode_style=unicode_style)
     options = [
         MenuEntry(label=menu_key("E", "dit"), brief="Change this area's settings"),
-        MenuEntry(label=menu_key("D", "elete"), brief="Permanently remove this area"),
+        *_move_entries(place, total),
+        MenuEntry(label=menu_key("R", "emove"), brief="Permanently remove this area"),
         MenuEntry(label=menu_key("P", "ending files"), brief="Review uploads awaiting approval"),
         MenuEntry(label=menu_key("x", "pired files", prefix="E"), brief="Recover before they are purged"),
         MenuEntry(label=menu_key("H", "istory"), brief="Its moderators and what they did"),
@@ -17863,7 +19268,7 @@ async def _link_area_screen(
         link_context.link_node.file_areas[area.area_id] = genesis
         link_context.link_node.known_event_ids.add(genesis.content_id)
         link_context.link_node.events[genesis.content_id] = genesis.to_dict()
-        _announce_line(session, f"Linked {area.name!r} -- it will be pushed to peers on the next sync pass.")
+        _announce_line(session, _linked_announcement(area.name))
         return True
 
     redraw_in_place, redraw_hint = await lane.run(_resolve_redraw_preference, actor)
@@ -17938,13 +19343,12 @@ async def _write_file_record(
     session: Session, entry: FileEntry, *,
     heading: str,
     fields: list[Field],
-    status_line: str,
     redraw_in_place: bool,
     unicode_style: bool,
     collapsed: bool,
     header_color: int | tuple[int, int, int],
 ) -> int:
-    """Title, status line, the file's panel and its description -- what
+    """Title, the file's panel and its description -- what
     the pending review and the expired-file recovery screens both show
     above their action bars. Returns the rows used, for `_fitted_menu`."""
     await session.write_line(
@@ -17952,7 +19356,6 @@ async def _write_file_record(
             breadcrumb=(session.node_display_name,), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
             header_color=header_color, node_name_gradient=session.node_name_gradient)
     )
-    await session.write_line(status_line)
     panel_rows = await _write_sections(session, [Section(heading, fields)], unicode_style=unicode_style)
     # Line by line (issue #463): a description may be a FILE_ID.DIZ
     # block now, and running its ten lines together into one is exactly
@@ -17974,7 +19377,6 @@ async def _draw_file_action(
     collapsed: bool,
     header_color: int | tuple[int, int, int] = HEADER_COLOR,
     *,
-    status_line: str,
     when: str,
     can_download: bool = False,
     area_name: str | None = None,
@@ -17993,7 +19395,7 @@ async def _draw_file_action(
             Field("Pinned", _yes_no(entry.pinned)),
             Field("Exempt from expiry", _yes_no(entry.exempt_from_expiry)),
         ],
-        status_line=status_line, redraw_in_place=redraw_in_place, unicode_style=unicode_style,
+        redraw_in_place=redraw_in_place, unicode_style=unicode_style,
         collapsed=collapsed, header_color=header_color,
     )
     entries = [
@@ -18036,12 +19438,8 @@ async def _file_action_screen(
     collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
     redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
     header_color = await lane.run(effective_header_color_256)
-    # As on the pending-post screen: the node's health line is the SysOp's,
-    # and pinning or keeping takes EDIT, which an approver need not hold.
-    status_line = (
-        await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
-        if actor.user_level >= SYSOP_LEVEL else ""
-    )
+    # As on the pending-post screen: pinning or keeping takes EDIT, which an
+    # approver need not hold.
     can_flag = await lane.run(lambda db: has_permission(
         db, actor, object_type="file_area", object_id=area.id, permission=BoardPermission.EDIT
     ))
@@ -18062,7 +19460,7 @@ async def _file_action_screen(
     async def _draw() -> None:
         await _draw_file_action(
             session, entry, description_level, redraw_in_place, unicode_style, collapsed, header_color,
-            status_line=status_line, when=when, can_download=can_download, area_name=area.name,
+            when=when, can_download=can_download, area_name=area.name,
             can_flag=can_flag,
         )
 
@@ -18166,7 +19564,6 @@ async def _expired_file_screen(
     collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
     redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
     header_color = await lane.run(effective_header_color_256)
-    status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
     display_format, display_timezone = await lane.run(resolve_display_preferences)
     when = format_for_display(entry.created_at, override_format=display_format, override_timezone=display_timezone)
     purge_at = await lane.run(expired_file_purge_at, area, entry)
@@ -18187,7 +19584,7 @@ async def _expired_file_screen(
                 Field("Size", f"{_format_bytes(entry.size_bytes)} ({entry.size_bytes} bytes)"),
                 Field("SHA-256", entry.sha256, color=METADATA_COLOR),
             ],
-            status_line=status_line, redraw_in_place=redraw_in_place, unicode_style=unicode_style,
+            redraw_in_place=redraw_in_place, unicode_style=unicode_style,
             collapsed=collapsed, header_color=header_color,
         )
         entries = []
@@ -18231,8 +19628,7 @@ async def _door_menu(session: Session, lane: DatabaseLane, actor: User, *, door_
     collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
     redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
     header_color = await lane.run(effective_header_color_256)
-    status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
-    await _draw_door_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
+    await _draw_door_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
     while True:
         choice = (await session.read_key()).lower()
 
@@ -18242,41 +19638,35 @@ async def _door_menu(session: Session, lane: DatabaseLane, actor: User, *, door_
         elif choice == "c":
             await session.write_line("")
             await _door_screen(session, lane, actor)
-            status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
-            await _draw_door_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
+            await _draw_door_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == "g":
             await session.write_line("")
             await _door_gallery_screen(session, lane, actor, description_level, redraw_in_place, unicode_style, collapsed,
                                        door_services=door_services, backup_identity_dir=backup_identity_dir)
-            status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
-            await _draw_door_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
+            await _draw_door_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == "f":
             await session.write_line("")
             await _door_filesystem_screen(session, lane, actor, description_level, redraw_in_place, unicode_style, collapsed,
                                           door_services=door_services, backup_identity_dir=backup_identity_dir)
-            status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
-            await _draw_door_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
+            await _draw_door_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == "u":
             await session.write_line("")
             await _upload_door_file_screen(session, lane, actor)
-            status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
-            await _draw_door_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
+            await _draw_door_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == "l":
             await session.write_line("")
             await _list_doors_screen(session, lane, actor, door_services=door_services, backup_identity_dir=backup_identity_dir)
-            status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
-            await _draw_door_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
+            await _draw_door_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         else:
             await session.write(reject_unhandled_key(choice))
 
 
 async def _draw_door_menu(
     session: Session, description_level: str, redraw_in_place: bool, unicode_style: bool, collapsed: bool,
-    header_color: int | tuple[int, int, int] = HEADER_COLOR, *, status_line: str,
+    header_color: int | tuple[int, int, int] = HEADER_COLOR,
 ) -> None:
     await session.write_line("\r\n" + screen_title("Doors",
             breadcrumb=(session.node_display_name,), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, header_color=header_color, node_name_gradient=session.node_name_gradient))
-    await session.write_line(status_line)
     await session.write_line(
         menu_grid(
             [(
@@ -18805,7 +20195,6 @@ async def _draw_door_detail(
             breadcrumb=(session.node_display_name,), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
             header_color=await lane.run(effective_header_color_256), node_name_gradient=session.node_name_gradient)
     )
-    await session.write_line(await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width))
     sections = [
         Section("Door", [
             _description_field(door.description),
@@ -19643,8 +21032,7 @@ async def _channel_menu(
     collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
     redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
     header_color = await lane.run(effective_header_color_256)
-    status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
-    await _draw_channel_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
+    await _draw_channel_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
     while True:
         choice = (await session.read_key()).lower()
 
@@ -19654,24 +21042,21 @@ async def _channel_menu(
         elif choice == "c":
             await session.write_line("")
             await _channel_screen(session, lane, actor)
-            status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
-            await _draw_channel_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
+            await _draw_channel_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == "l":
             await session.write_line("")
             await _list_channels_screen(session, lane, actor, link_context=link_context, mrc_bridge=mrc_bridge, chat_hub=chat_hub)
-            status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
-            await _draw_channel_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
+            await _draw_channel_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         else:
             await session.write(reject_unhandled_key(choice))
 
 
 async def _draw_channel_menu(
     session: Session, description_level: str, redraw_in_place: bool, unicode_style: bool, collapsed: bool,
-    header_color: int | tuple[int, int, int] = HEADER_COLOR, *, status_line: str,
+    header_color: int | tuple[int, int, int] = HEADER_COLOR,
 ) -> None:
     await session.write_line("\r\n" + screen_title("Chat channels",
             breadcrumb=(session.node_display_name,), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, header_color=header_color, node_name_gradient=session.node_name_gradient))
-    await session.write_line(status_line)
     await session.write_line(
         _menu_row(
             [
@@ -20073,7 +21458,6 @@ async def _draw_channel_detail(
             breadcrumb=(session.node_display_name,), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
             header_color=await lane.run(effective_header_color_256), node_name_gradient=session.node_name_gradient)
     )
-    await session.write_line(await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width))
     sections = [
         Section("Chat channel", [
             _description_field(channel.description),
@@ -20094,6 +21478,10 @@ async def _draw_channel_detail(
     sharing: list[Field | Note] = []
     if link_context is not None:
         sharing.append(Field("Linked", _yes_no(linked)))
+        if linked:
+            sharing.extend(
+                await _peer_reach_rows(lane, link_context, link_context.link_node.channels.get(channel.channel_id))
+            )
     open_room = mrc_mapping is not None and mrc_mapping.is_open_room
     if mrc_mapping is None:
         sharing.append(Field("MRC room", "none (not bridged)", color=MUTED_COLOR))
@@ -20470,7 +21858,7 @@ async def _link_channel_screen(
         link_context.link_node.channels[channel.channel_id] = genesis
         link_context.link_node.known_event_ids.add(genesis.content_id)
         link_context.link_node.events[genesis.content_id] = genesis.to_dict()
-        _announce_line(session, f"Linked {channel.name!r} -- it will be pushed to peers on the next sync pass.")
+        _announce_line(session, _linked_announcement(channel.name))
         return True
 
     redraw_in_place, redraw_hint = await lane.run(_resolve_redraw_preference, actor)
@@ -20556,14 +21944,17 @@ async def _category_menu(session: Session, lane: DatabaseLane, actor: User) -> N
     collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
     redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
     header_color = await lane.run(effective_header_color_256)
-    status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
-    await _draw_category_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
+    await _draw_category_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
     while True:
         choice = (await session.read_key()).lower()
 
         if choice == "b":
             await session.write_line("")
             return
+        elif choice == HELP_KEY:
+            await session.write_line("")
+            await _categories_help_screen(session, header_color=header_color, unicode_style=unicode_style)
+            await _draw_category_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == "m":
             await session.write_line("")
             await _generic_category_screen(
@@ -20573,8 +21964,7 @@ async def _category_menu(session: Session, lane: DatabaseLane, actor: User) -> N
                 update=update_board_category, move=move_board_category,
                 error_type=CategoryError, title="Message board categories",
             )
-            status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
-            await _draw_category_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
+            await _draw_category_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == "f":
             await session.write_line("")
             await _generic_category_screen(
@@ -20584,8 +21974,7 @@ async def _category_menu(session: Session, lane: DatabaseLane, actor: User) -> N
                 update=update_file_category, move=move_file_category,
                 error_type=FileCategoryError, title="File-area categories",
             )
-            status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
-            await _draw_category_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
+            await _draw_category_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == "c":
             await session.write_line("")
             await _generic_category_screen(
@@ -20595,19 +21984,41 @@ async def _category_menu(session: Session, lane: DatabaseLane, actor: User) -> N
                 update=update_channel_category, move=move_channel_category,
                 error_type=ChannelCategoryError, title="Chat channel categories",
             )
-            status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
-            await _draw_category_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
+            await _draw_category_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         else:
             await session.write(reject_unhandled_key(choice))
 
 
+async def _categories_help_screen(
+    session: Session, *, header_color: int | tuple[int, int, int], unicode_style: bool
+) -> None:
+    """Ctrl-H on the Categories screen (issue #838): the difference
+    between a category and a Community, which nothing else on screen
+    explained -- a SysOp setting up a node met both words on one menu."""
+    lines = [
+        colored("Categories", fg_color=header_color, bold=True),
+        "  Group the list of one kind: board categories group boards, file-area",
+        "  categories group file areas, chat categories group channels. A caller",
+        "  sees them as folders in that list, at most two levels deep.",
+        "",
+        colored("Communities", fg_color=header_color, bold=True),
+        "  A topic that holds every kind at once: its own boards, chat channels,",
+        "  file areas and games. Callers reach them under C[o]mmunities on the main",
+        "  menu. They are managed under Content, not here.",
+        "",
+        colored("Using both", fg_color=header_color, bold=True),
+        "  A board can have a Community and a category. Inside a Community,",
+        "  callers see only the categories its own boards use.",
+    ]
+    await show_help(session, "Categories help", lines, header_color=header_color, unicode_style=unicode_style)
+
+
 async def _draw_category_menu(
     session: Session, description_level: str, redraw_in_place: bool, unicode_style: bool, collapsed: bool,
-    header_color: int | tuple[int, int, int] = HEADER_COLOR, *, status_line: str,
+    header_color: int | tuple[int, int, int] = HEADER_COLOR,
 ) -> None:
     await session.write_line("\r\n" + screen_title("Categories",
             breadcrumb=(session.node_display_name,), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, header_color=header_color, node_name_gradient=session.node_name_gradient))
-    await session.write_line(status_line)
     await session.write_line(
         _menu_row(
             [
@@ -20621,6 +22032,7 @@ async def _draw_category_menu(
             height=session.terminal_height,
         )
     )
+    await session.write_line(colored("Ctrl-H: categories vs. Communities", fg_color=MUTED_COLOR))
     await _choice_prompt(session)
 
 
@@ -20633,8 +22045,7 @@ async def _generic_category_screen(
     collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
     redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
     header_color = await lane.run(effective_header_color_256)
-    status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
-    await _draw_generic_category_menu(session, title, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
+    await _draw_generic_category_menu(session, title, description_level, redraw_in_place, unicode_style, collapsed, header_color)
     while True:
         choice = (await session.read_key()).lower()
 
@@ -20646,8 +22057,7 @@ async def _generic_category_screen(
             await _create_category_screen(
                 session, lane, actor, create=create, list_top_level=list_top_level, error_type=error_type,
             )
-            status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
-            await _draw_generic_category_menu(session, title, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
+            await _draw_generic_category_menu(session, title, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == "l":
             await session.write_line("")
             await _list_categories_screen(
@@ -20655,8 +22065,7 @@ async def _generic_category_screen(
                 list_subcategories=list_subcategories, delete=delete,
                 update=update, move=move, create=create, error_type=error_type,
             )
-            status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
-            await _draw_generic_category_menu(session, title, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
+            await _draw_generic_category_menu(session, title, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         else:
             await session.write(reject_unhandled_key(choice))
 
@@ -20666,12 +22075,9 @@ async def _draw_generic_category_menu(
     unicode_style: bool,
     collapsed: bool,
     header_color: int | tuple[int, int, int] = HEADER_COLOR,
-    *,
-    status_line: str,
 ) -> None:
     await session.write_line("\r\n" + screen_title(title,
             breadcrumb=(session.node_display_name,), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, header_color=header_color, node_name_gradient=session.node_name_gradient))
-    await session.write_line(status_line)
     await session.write_line(
         _menu_row(
             [
@@ -20966,6 +22372,7 @@ async def _pick_moderator_scope(
         menu_key("x", "", prefix="blanket across all boards "),
         menu_key("y", "", prefix="blanket across all areas "),
         menu_key("z", "", prefix="blanket across all channels "),
+        menu_key("e", "verything", prefix="blanket across "),
     ]
     await session.write_line("Scope:")
     await write_prompt(session, f"{action_bar(scope_options, width=session.terminal_width)}: ")
@@ -21012,6 +22419,9 @@ async def _pick_moderator_scope(
         object_type, label = "file_area", "all file areas (blanket)"
     elif scope_key == "z":
         object_type, label = "channel", "all chat channels (blanket)"
+    elif scope_key == "e":
+        # Issue #836 (F131): boards, areas and channels in one grant.
+        object_type, label = _EVERYWHERE, "every board, file area and chat channel (blanket)"
     else:
         _announce_line(session, colored("Not a valid scope.", fg_color=MUTED_COLOR))
         return None
@@ -21020,10 +22430,29 @@ async def _pick_moderator_scope(
 
 
 
-_MODERATOR_PRESETS = ["full", "limited"]
+_MODERATOR_PRESETS = ["full", "limited", "post", "read"]
+
+#: Presets that are access, not moderation (issue #836): a read or write
+#: grant lets its holder past a board's or file area's level gate. Chat
+#: channels have no read/write split.
+_ACCESS_PRESETS = {"post", "read"}
+
+#: `_pick_moderator_scope`'s "every kind at once" scope (issue #836) --
+#: not an object type; `_grant_moderator_screen` writes it as the three
+#: blanket grants through `grant_everywhere`.
+_EVERYWHERE = "everywhere"
 
 
 def _moderator_preset_label(object_type: str | None, preset: str) -> str:
+    # The access presets can't cover channels, and the everything scope
+    # includes them (review on #868): say so before Save is tried.
+    no_access = object_type in ("channel", _EVERYWHERE)
+    if preset == "post":
+        return "Read and post (boards and areas only)" if no_access else "Read and post (past the level gates)"
+    if preset == "read":
+        return "Read only (boards and areas only)" if no_access else "Read only (past the read level)"
+    if object_type == _EVERYWHERE:
+        object_type = None
     if object_type == "channel":
         return "Full moderator (edit+moderate+manage members)" if preset == "full" else "Moderator only"
     if object_type is None:
@@ -21032,6 +22461,10 @@ def _moderator_preset_label(object_type: str | None, preset: str) -> str:
 
 
 def _moderator_preset_permissions(object_type: str, preset: str):
+    if preset in _ACCESS_PRESETS:
+        if object_type == "channel":
+            raise ModeratorGrantError("read and post grants are for boards and file areas; channels use their level")
+        return BoardPermission.READ | BoardPermission.WRITE if preset == "post" else BoardPermission.READ
     if object_type == "channel":
         if preset == "full":
             return ChannelPermission.EDIT | ChannelPermission.MODERATE | ChannelPermission.MANAGE_MEMBERS
@@ -21142,7 +22575,7 @@ async def _grant_moderator_screen(session: Session, lane: DatabaseLane, actor: U
             brief="Narrow the grant to one Community",
             help=(
                 "For a blanket grant only: limit it to the boards/areas/channels of one Community "
-                "instead of the whole node (design doc, Community-blanket tier)."
+                "instead of the whole node."
             ),
         ),
         FieldSpec(
@@ -21150,11 +22583,15 @@ async def _grant_moderator_screen(session: Session, lane: DatabaseLane, actor: U
             render=lambda d: _moderator_preset_label(d["object_type"], d["preset"]),
             prompt=choice_field("preset", _MODERATOR_PRESETS),
             step=choice_step("preset", _MODERATOR_PRESETS),
-            brief="Full, or approve/moderate only",
+            brief="Moderator, approver, or access",
             help=(
                 "Full moderator can edit, delete/moderate, and (for boards/areas) approve or (for "
                 "channels) manage members. The limited preset only approves (boards/areas) or "
-                "only moderates (channels)."
+                "only moderates (channels). Read and post, and read only, are access rather than "
+                "moderation: they let the holder past the minimum level of whatever the scope "
+                "covers -- one board or area, or every one under a blanket scope -- such as "
+                "posting on an announcements board with write level 255. Age and "
+                "verified-name requirements still apply."
             ),
         ),
     ]
@@ -21168,6 +22605,17 @@ async def _grant_moderator_screen(session: Session, lane: DatabaseLane, actor: U
         label = draft["label"]
         if community is not None:
             label = f"{label} scoped to Community {community.name!r}"
+        if draft["object_type"] == _EVERYWHERE:
+            preset_label = _moderator_preset_label(_EVERYWHERE, draft["preset"])
+            await lane.run(
+                grant_everywhere,
+                draft["user"],
+                board_permissions=_moderator_preset_permissions("board", draft["preset"]),
+                channel_permissions=_moderator_preset_permissions("channel", draft["preset"]),
+                granted_by=actor, community_id=community.id if community is not None else None,
+            )
+            _announce_line(session, f"Granted {preset_label} on {label} to {draft['user'].username!r}.")
+            return True
         preset_label = _moderator_preset_label(draft["object_type"], draft["preset"])
         await lane.run(
             grant_permissions,
@@ -21175,7 +22623,11 @@ async def _grant_moderator_screen(session: Session, lane: DatabaseLane, actor: U
             permissions=_moderator_preset_permissions(draft["object_type"], draft["preset"]),
             granted_by=actor, community_id=community.id if community is not None else None,
         )
-        _announce_line(session, f"Granted {preset_label} on {label} to {draft['user'].username!r}.")
+        _announce_line(
+            session,
+            f"Granted {preset_label} on {label} to {draft['user'].username!r}. "
+            "Members see moderators on the Staff list.",
+        )
         return True
 
     await edit_resource_draft(
