@@ -1117,6 +1117,8 @@ class _TrailingOutput:
     Whatever is still held when the flow returns was written after its last
     question: that is its outcome, and `announce_rest` queues it for the screen
     the console draws next instead of letting that screen's clear erase it.
+    Login uses it the same way for first-run onboarding and the Unicode-style
+    question, whose outcome the first main menu shows (issue #923).
 
     Only ever handed to a flow that uses the session to read and write. It is
     not the session: a flow that compares sessions by identity (the node
@@ -1130,7 +1132,17 @@ class _TrailingOutput:
         self.notice_session = session
 
     def __getattr__(self, name: str):
-        return getattr(self._session, name)
+        attribute = getattr(self._session, name)
+        if name == "read_editor_key":
+            # Only there when the real session has it: flows probe for it
+            # (`getattr(session, "read_editor_key", None)`) and fall back to
+            # line input without it, as some session adapters need.
+            async def read_editor_key(*args, **kwargs):
+                await self._release()
+                return await attribute(*args, **kwargs)
+
+            return read_editor_key
+        return attribute
 
     # `__getattr__` forwards reads only. A flow's activity trail (issue #762)
     # must land on the real session, where the monitor looks for it.
@@ -1166,10 +1178,6 @@ class _TrailingOutput:
         await self._release()
         return await self._session.read_any_key(*args, **kwargs)
 
-    async def read_editor_key(self, *args, **kwargs):
-        await self._release()
-        return await self._session.read_editor_key(*args, **kwargs)
-
     # A Zmodem send talks to the terminal in raw bytes: "Starting Zmodem send
     # ..." has to be on screen before the first of them, not after the last.
     async def write_raw(self, data: bytes) -> None:
@@ -1180,8 +1188,11 @@ class _TrailingOutput:
         await self._release()
         return await self._session.read_byte()
 
-    def announce_rest(self) -> None:
-        """Queue the flow's outcome: the last paragraph of what is still held.
+    def announce_rest(self, *, last_paragraph: bool = True) -> None:
+        """Queue the flow's outcome: the last paragraph of what is still held,
+        or all of it with `last_paragraph=False` -- for login's first-run
+        questions, whose closing lines can be two paragraphs ("Node name set
+        to ...", then "(Saved. ...)") and write no screen title (issue #923).
 
         Not everything still held is an outcome. `send_file_to_caller` writes a
         screen title (with its clear) and "Starting Zmodem send..." and only
@@ -1195,7 +1206,7 @@ class _TrailingOutput:
         held, self._held = self._held, []
         start = 0
         for index, text in enumerate(held):
-            if not text.strip() or _LEADING_BREAK.match(text):
+            if last_paragraph and (not text.strip() or _LEADING_BREAK.match(text)):
                 start = index
         for text in held[start:]:
             if text.strip() and _CLEAR_SEQUENCE not in text:
