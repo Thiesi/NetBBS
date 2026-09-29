@@ -425,17 +425,25 @@ Every account has a level from 0 to 255. A new account starts at **0**,
 whether a caller signed up or you created it, and approving a pending account
 leaves it at 0. **255** is SysOp: the whole console and power over every
 account. Levels 1 to 254 grant nothing by themselves. They matter only where
-you set a minimum: a board's or file area's read and write level (0 for a new
-one), a Community's defaults, and node-wide minimums under **Settings** such
-as the Mail level and the Node map level. Raise an account's level from its
-detail screen under **Users**.
+you set a minimum, and every minimum starts at 0:
+
+- a message board's or file area's **Min read level** and **Min write
+  level**, which a Community can supply as defaults;
+- a chat channel's single **Min level**, to join it;
+- a door's **Min play level**;
+- node-wide minimums under **Settings**, such as the Mail level and the Node
+  map level.
+
+A channel's and a door's level are always set on the channel or door itself,
+never inherited from a Community. Raise an account's level from its detail
+screen under **Users**.
 
 A small club rarely needs more than this:
 
 | Level | Who | Example use |
 | --- | --- | --- |
-| 0 | Everyone, including new callers | General boards, chat and files, left at read and write level 0 |
-| 10 | Members you know | A members' lounge board with read and write level 10 |
+| 0 | Everyone, including new callers | General boards, file areas, chat channels and games, every level left at 0 |
+| 10 | Members you know | A members' lounge board with read and write level 10, and a members' channel with Min level 10 |
 | 255 | You | An announcements board with read level 0 and write level 255 |
 
 Be careful with 255 as a minimum. An announcements board with write level
