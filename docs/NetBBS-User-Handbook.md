@@ -53,6 +53,7 @@ up: from a board to the list you picked it from, and from there to the menu.
 | **Profile** | Change your public profile and personal preferences |
 | **Moderation** (key **A**) | Posts and uploads waiting for your decision, if the SysOp made you a moderator |
 | **Staff** | Your staff console, if the SysOp gave you staff permissions |
+| **Staff list** (key **T**) | Who runs this node: the SysOps, staff and moderators, when each was last on, and who is away |
 
 Lists of boards and file areas keep the SysOp's order, so the number you
 remember for a board still picks it next time. **[O]rder** in a list sorts it
@@ -103,6 +104,16 @@ to speak. `/help` lists the commands available there.
 | `/quit` | Leave chat |
 | `/msg user text` | Send a live private message |
 | `/away text` | Set an away message |
+| `/nick name` | Set a chat alias; a bare `/nick` clears it |
+| `/dm user` | Invite someone online to a private direct chat |
+
+An alias is always shown with the username beside it, as `Quill|Copperplate`,
+so everyone can see who is speaking. An alias that reads like someone else's
+username, or like a staff title such as "SysOp", is refused.
+
+A direct-chat invitation opens on your main menu. If you are somewhere else
+on the board, a line tells you who invited you; go back to the main menu
+within a minute to answer.
 
 Live private messages need the recipient to be online. **E-mail** keeps a
 message for later; it is NetBBS mail, not an Internet email account. If live
@@ -124,6 +135,21 @@ address on its From line, with the same `Re:` subject and quote a local reply
 gets. If that node can't be written to any more, Reply says why instead of
 opening the message. **Sent** shows each message's recipient, with the full
 address for mail that went to another node.
+
+Mail to another node also shows where it stands, in Sent's list and on its
+Delivery line when you open it:
+
+- **Pending**: on its way; the other node has not confirmed it yet.
+- **Delivered**: it is in the recipient's mailbox.
+- **Bounced**: the other node sent it back, and the Delivery line says why,
+  for example that there is no user by that name there, that their mailbox
+  is full of unread mail, or that the node does not trust yours yet.
+- **Expired**: no route to that node worked before delivery gave up, so it
+  was not delivered.
+
+When mail bounces or expires you are told at the main menu, once, even if it
+happened while you were away. Opening the message in Sent counts as being
+told. To try again, send it anew.
 
 Channels marked **MRC** connect to a separate public chat network. Your handle
 and messages are visible there. MRC private messages are optional in your

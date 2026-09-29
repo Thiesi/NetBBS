@@ -20,6 +20,8 @@ from __future__ import annotations
 import asyncio
 import re
 
+import pytest
+
 from netbbs.auth.users import create_user
 from netbbs.chat.hub import ChatHub
 from netbbs.chat.mailbox import MessageMailbox
@@ -1576,4 +1578,129 @@ def test_the_fullscreen_editor_shows_what_the_letter_is(tmp_path):
     assert rows[3] and not rows[3].strip("-─")
     assert any("Ctrl+O save" in row for row in rows)
     lane.close()
+    db.close()
+
+
+# -- delivery state of Link mail in Sent, and telling the sender (issue #806) ---
+
+
+def _sent_link_mail(db, alice, *, subject="Hello"):
+    from netbbs.link.mail import compose_link_message
+
+    node_identity = bootstrap_node_identity("roanoke")
+    remote_identity = bootstrap_node_identity("farpoint")
+    _link_context_with_known_peer(db, node_identity, remote_identity)
+    message = compose_link_message(
+        db, alice, f"bob@{remote_identity.fingerprint}", subject, "Over there", node_identity=node_identity,
+    )
+    return message, remote_identity
+
+
+def _set_delivery(db, message, status, reason=None, notice=0):
+    db.connection.execute(
+        "UPDATE mail_messages SET link_delivery_status = ?, link_delivery_reason = ?, "
+        "link_delivery_notice_pending = ? WHERE link_event_content_id = ?",
+        (status, reason, notice, message.content_id),
+    )
+    db.connection.commit()
+
+
+@pytest.mark.parametrize(
+    ("status", "reason", "tag", "explanation"),
+    [
+        ("pending", None, "[PENDING]", "Delivery: Pending: that BBS has not confirmed it yet."),
+        ("delivered", None, "[DELIVERED]", "Delivery: Delivered to the recipient's mailbox."),
+        (
+            "bounced", "link_policy_node_quarantined", "[BOUNCED]",
+            "Delivery: Bounced: that BBS has quarantined this BBS.",
+        ),
+        (
+            "expired", None, "[EXPIRED]",
+            "Delivery: Expired: no route to that BBS worked before delivery gave up. It was not delivered.",
+        ),
+    ],
+)
+def test_sent_shows_the_delivery_state_in_the_list_and_the_view(tmp_path, status, reason, tag, explanation):
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
+    alice = create_user(db, "alice", password="hunter2pw", user_level=10)
+    message, _remote = _sent_link_mail(db, alice)
+    _set_delivery(db, message, status, reason)
+
+    session = FakeSession(keys=["s", "0", "1", "b", "b", "b"])
+    session.terminal_width = 200
+    lane = DatabaseLane(db_path)
+    asyncio.run(browse_mail(session, lane, alice))
+
+    text = _visible_text(session)
+    assert f"{_FARPOINT} {tag} (" in text
+    assert explanation in text
+    lane.close()
+    db.close()
+
+
+def test_sent_shows_no_delivery_state_for_local_mail(tmp_path):
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
+    alice = create_user(db, "alice", password="hunter2pw", user_level=10)
+    bob = create_user(db, "bob", password="hunter2pw", user_level=10)
+    send_mail(db, alice, bob, "Hello", "body")
+
+    session = FakeSession(keys=["s", "0", "1", "b", "b", "b"])
+    lane = DatabaseLane(db_path)
+    asyncio.run(browse_mail(session, lane, alice))
+
+    text = _visible_text(session)
+    assert "to bob (" in text
+    assert "Delivery:" not in text
+    lane.close()
+    db.close()
+
+
+def _run_main_menu(db_path, db, user):
+    session = FakeSession(keys=["l"], lines=["y"])
+    lane = DatabaseLane(db_path)
+    try:
+        asyncio.run(
+            _main_menu(session, db, ChatHub(), PresenceRegistry(), MessageMailbox(), InputHistory(), user, lane=lane)
+        )
+    finally:
+        lane.close()
+    return _visible_text(session)
+
+
+def test_a_bounce_is_told_at_the_next_main_menu_once(tmp_path):
+    """The bounce arrives while the sender is away; they are told at their
+    next main menu, and not again after that."""
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
+    alice = create_user(db, "alice", password="hunter2pw", user_level=10)
+    message, _remote = _sent_link_mail(db, alice, subject="Lunch")
+    _set_delivery(db, message, "bounced", "unknown_recipient", notice=1)
+
+    first = _run_main_menu(db_path, db, alice)
+    assert (
+        f'Your mail "Lunch" to bob@{_FARPOINT} bounced: there is no user by that name on that BBS.'
+        in " ".join(first.split())
+    )
+
+    second = _run_main_menu(db_path, db, alice)
+    assert "bounced" not in second
+    db.close()
+
+
+def test_opening_a_bounced_message_in_sent_counts_as_being_told(tmp_path):
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
+    alice = create_user(db, "alice", password="hunter2pw", user_level=10)
+    message, _remote = _sent_link_mail(db, alice, subject="Lunch")
+    _set_delivery(db, message, "bounced", "mailbox_full", notice=1)
+
+    session = FakeSession(keys=["s", "0", "1", "b", "b", "b"])
+    lane = DatabaseLane(db_path)
+    asyncio.run(browse_mail(session, lane, alice))
+    lane.close()
+
+    assert db.connection.execute("SELECT link_delivery_notice_pending FROM mail_messages").fetchone()[0] == 0
+    assert "Your mail" not in _run_main_menu(db_path, db, alice)
     db.close()

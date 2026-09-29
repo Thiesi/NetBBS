@@ -59,9 +59,10 @@ from netbbs.boards.posts import count_pending_posts, sweep_expired_posts
 from netbbs.communities import (
     get_community,
     get_effective_min_age,
-    get_effective_min_read_level,
     get_effective_min_write_level,
     get_effective_name_requirement,
+    meets_read_gate,
+    meets_write_gate,
 )
 from netbbs.link.node_profiles import identity_for_fingerprint, present_link_author_label
 from netbbs.link.remote_attestation import format_remote_name_for_resource
@@ -108,7 +109,6 @@ from netbbs.net.session import Session, write_prompt
 from netbbs.net.session_activity import records_activity
 from netbbs.net.sort_ui import SORT_MODE_LABELS, prompt_sort_change
 from netbbs.net.unicode_style_preference import unicode_style_enabled
-from netbbs.permissions import meets_level
 from netbbs.rendering import (
     LABEL_COLOR,
     METADATA_COLOR,
@@ -182,7 +182,7 @@ def visible_boards(db: Database, user: User, *, community_id: int | None, commun
     #838)."""
     boards = [
         b for b in list_boards(db)
-        if meets_level(user, get_effective_min_read_level(db, b)) and meets_age(db, user, get_effective_min_age(db, b))
+        if meets_read_gate(db, user, b) and meets_age(db, user, get_effective_min_age(db, b))
     ]
     if community_scoped:
         boards = [b for b in boards if b.community_id == community_id]
@@ -274,7 +274,7 @@ async def _browse_boards_in_category(
     def _load(order_by: str) -> tuple[list[Board], list[Category]]:
         all_boards = [
             b for b in list_boards(db, order_by=order_by)
-            if meets_level(user, get_effective_min_read_level(db, b))
+            if meets_read_gate(db, user, b)
             and meets_age(db, user, get_effective_min_age(db, b))
         ]
         if community_scoped:
@@ -573,7 +573,7 @@ def _read_only_reason(db: Database, user: User, board: Board, *, closed: bool) -
     if closed:
         return None
     write_level = get_effective_min_write_level(db, board)
-    if not meets_level(user, write_level):
+    if not meets_write_gate(db, user, board):
         return f"Read only: posting needs level {write_level}."
     if not meets_name_requirement(db, user, get_effective_name_requirement(db, board)):
         return f"Read only: posting {NAME_GATE_NOTE}."
@@ -891,7 +891,7 @@ async def _show_board(
     closed = is_board_closed(db, board)
     can_post = (
         not closed
-        and meets_level(user, get_effective_min_write_level(db, board))
+        and meets_write_gate(db, user, board)
         and meets_age(db, user, get_effective_min_age(db, board))
         and meets_name_requirement(db, user, get_effective_name_requirement(db, board))
     )

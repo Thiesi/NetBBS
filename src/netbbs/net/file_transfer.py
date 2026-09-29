@@ -48,9 +48,9 @@ from netbbs.attestation import meets_age, meets_name_requirement
 from netbbs.auth.users import SYSOP_LEVEL, User, get_user_by_id
 from netbbs.communities import (
     get_effective_min_age,
-    get_effective_min_read_level,
-    get_effective_min_write_level,
     get_effective_name_requirement,
+    meets_read_gate,
+    meets_write_gate,
 )
 from netbbs.config import get_max_upload_bytes
 from netbbs.files.areas import FileArea, get_file_area_by_area_id
@@ -352,11 +352,11 @@ def resolve(db: Database, grant: TransferGrant) -> RedeemedTransfer:
     # inside it, and an upload grant redeemed after the read level rose
     # would let a caller contribute to an area they can no longer enter
     # (Codex review).
-    if not meets_level(user, get_effective_min_read_level(db, area)):
+    if not meets_read_gate(db, user, area):
         raise TransferError("you may no longer read this file area")
 
     if grant.direction == UPLOAD:
-        if not meets_level(user, get_effective_min_write_level(db, area)):
+        if not meets_write_gate(db, user, area):
             raise TransferError("you may no longer upload to this file area")
         # The name requirement gates *contributing*, not reading -- the
         # terminal applies it to `can_write` alone, and applying it to

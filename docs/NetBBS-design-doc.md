@@ -587,6 +587,17 @@ area, channel or user's detail, the Settings overview, a banner menu, the
 landing page) can still be taller than the terminal. Paged screens are not
 affected.
 
+A menu too short for a description under each entry puts each one on its
+entry's own line, cut to fit, before it hides them (issue #840): at 80x24 the
+first field test's SysOp read "Descriptions hidden" on the console landing,
+exactly where one-word entries such as Content and Operations needed them.
+Only when even one line per entry does not fit are they hidden, with the note.
+
+Every new account starts with redraw-in-place on, however it was made:
+signed up, created in the console, or the first SysOp created at install
+(issue #840). The first SysOp was the one left out, so a node's own SysOp saw
+screens scroll that every one of her callers saw redrawn.
+
 The outcome of an action is carried into the next redraw; it is never written
 somewhere that redraw erases, and the console never asks for a keypress just to
 keep a result on screen. With redraw-in-place on, a line printed just before
@@ -1985,6 +1996,22 @@ An optional `/nick` alias is presentation metadata only. Every context retains
 the authenticated canonical identity, and permissions, moderation, blocking,
 reputation, and addressing always use canonical identity.
 
+An alias is always shown with the username beside it, as `alias|username`, in
+the live stream as in `/who`, `/whois` and `/names` (issue #843). It may not
+contain `| [ ] < > * ~`: the separator, a status-bar tag's brackets, the angle
+brackets around a speaker, the `*` of actions and notices, and the old alias
+marker. It may not read as another local account's username, or, unless its
+owner is a SysOp, as a staff title: a reserved name from §4.2 or anything
+containing `sysop`. "Reads as" is §4.2's skeleton, applied after accents are
+dropped, Cyrillic and Greek look-alikes become Latin letters, and everything but
+letters and digits is removed, so "Ink Well", "InkWeII" and "InkWell[sysop]"
+are all refused while `InkWell` is the SysOp. An alias that already exists is
+left alone; the username beside it keeps it honest. A display name follows the
+same rule, but protects only SysOp names and staff titles, since it is meant to
+be a person's own name and two people can share one. The rule covers aliases
+this node grants. A Link or MRC name always shows its node or network, and is
+not an alias.
+
 Local chat includes bounded persistent channel scrollback, presence, away
 state, invitations/membership, `/who`, `/whois`, `/names`, `/list`, `/join`,
 `/leave`, `/topic`, completion, and online private conversation.
@@ -2024,7 +2051,14 @@ one active chat screen per session, the same scope Phase 2's one-channel-at-
 a-time limit already establishes below. Fully ephemeral, the same as `/msg`/
 `/private`: no persistence, no scrollback. An invite interrupts the main
 menu live only when the recipient is idle there; otherwise it is shown the
-next time they return to it, never inside an unrelated in-progress screen.
+next time they return to it. A recipient who is on any other screen is told
+in a one-line notice, delivered the way a SysOp's message is, to go back to
+the main menu to answer, and the inviter's waiting screen says the
+invitation opens there (issue #843). A door or a file transfer that owns the
+recipient's terminal gets no notice, only the waiting-screen line. The main
+menu is drawn again after the invitation is handled, with a decline carried
+above its prompt, because a direct chat clears the screen on its way out. For
+the same reason the Who screen does not pause after a direct chat that ran.
 An unanswered invite expires automatically after a short fixed window, with
 an explicit accepted/declined/timed-out outcome always shown to the inviter
 -- never a silent no-op.
@@ -4309,6 +4343,26 @@ push says so with HTTP 403 and a `link_policy_*` reason code, and the sending
 node records that as a bounce, since asking again would get the same answer,
 unless another of the recipient's addresses or relays takes the message
 (§12.4, issue #804).
+
+The sending node shows the state to the sending user (issue #806). Sent marks
+each Link message pending, delivered, bounced or expired, and the message's
+Delivery line gives a bounce's reason in plain words. The reason is the signed
+bounce's `reason` or the refusal's `link_policy_*` code, stored with the
+message (at most 64 characters, since another node chose it); a code this
+node does not know reads as "that BBS refused it". Expired means the delivery
+work item dead-lettered: no route took the message, or this node's own trust
+policy held it back to the end, which is recorded as its own reason. A bounce
+or expiry flags the message until its sender is told: once, at their next
+main menu, which covers a sender who was offline when it happened, or by
+opening it in Sent. Mail the sender already deleted from Sent is not told
+about. A later acceptance clears the flag and wins. A bounce
+message in the inbox would need a system sender (issue #819) and is not sent.
+
+Delivery state records only answers that arrive. Mail a relay took for a
+recipient node that holds the sending node quarantined or blocked is refused
+at pickup without a bounce (§12.4), and nothing on the sending side expires
+mail that was handed over but never answered, so it stays pending. The same
+holds for an acknowledgement that never gets back.
 
 ### 10.4 Routing limitations
 
@@ -12483,6 +12537,35 @@ the day it was set and reminded to its owner at each login, so callers can
 judge a stale one and its owner is prompted to end it. Rejected: requiring a
 return date, which a SysOp who does not know when they will be back could
 only guess.
+
+### Issue #843 — aliases that pass for the SysOp; invitations nobody saw — decided
+
+The persona test found `/nick InkWell[sysop]` accepted and shown as
+`<~InkWell[sysop]~>`, beside a SysOp whose own status bar reads
+"InkWell[sysop]". A direct-chat invitation to a caller in Who's online sat
+unseen while the inviter waited. Normative description: §6.3.
+
+**Decision 1 — the username beside every alias.** Refusing look-alikes
+narrows the gap; showing `alias|username` closes it, since no alias can then
+stand alone. Issue #64 kept the stream to the alias alone as less cluttered.
+The field test is the evidence that clutter was the lesser cost.
+
+**Decision 2 — every username is protected from aliases, only SysOp names
+from display names.** An alias is chosen to be a different name, so refusing
+one that reads as another caller costs nothing. A display name is meant to be
+a person's own, and two callers named Anna must both be able to use it.
+
+**Decision 3 — local aliases only.** A Link name is shown as `name@node` and an
+MRC name with its board, and neither is granted here, so this node has nothing
+to refuse. Rejected: comparing aliases against remote names too, which would
+make a local alias depend on who happens to be linked.
+
+**Decision 4 — tell a busy invitee, do not interrupt their screen.** The
+notice uses the path a SysOp's message already takes into any screen. Rejected:
+answering the invitation from inside every picker, which would spread the
+invite handshake across screens that own their own keys; and writing into a
+door or a Zmodem transfer, which would corrupt what that screen is drawing or
+sending.
 
 ### SFTP over the SSH transport — declined
 

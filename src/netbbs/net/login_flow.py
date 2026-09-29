@@ -58,9 +58,10 @@ from netbbs.net.new_account_banner_after import load_new_account_banner_after
 from netbbs.net.new_account_banner_before import load_new_account_banner_before
 from netbbs.net.node_theme import effective_accent_color, effective_header_color_256, effective_node_name_gradient
 from netbbs.net.nodeconfig import ThrottleConfig
-from netbbs.net.redraw_preference import set_redraw_in_place_enabled
+from netbbs.net.redraw_preference import start_new_account_redrawing_in_place
 from netbbs.net.session import Session, SessionClosedError, write_preformatted_line, write_prompt
 from netbbs.net.signup_text import pending_approval_notice, username_problem_line
+from netbbs.staff import approvers_away_line
 from netbbs.net.session_activity import set_root_activity
 from netbbs.net.session_registry import ActiveSessionRegistry
 from netbbs.net.shutdown import NodeControls, SequenceScheduler, format_remaining_seconds
@@ -1305,7 +1306,8 @@ async def _login(
             # (issue #835). Ends the connection like any other outcome a
             # retry cannot change.
             await _write_connection_notice(
-                session, db, "Waiting for approval", pending_approval_notice(exc.username)
+                session, db, "Waiting for approval",
+                pending_approval_notice(exc.username, approvers_away_line(db)),
             )
             return LoginOutcome.PENDING_APPROVAL
         except AuthError:
@@ -1565,7 +1567,7 @@ async def _register_new_account(
         # flipping `redraw_in_place_enabled`'s own resolve default,
         # which would silently change behavior for every existing
         # account with an unset preference too, not just new ones.
-        set_redraw_in_place_enabled(db, new_user, True)
+        start_new_account_redrawing_in_place(db, new_user)
 
         # GitHub issue #177: covers both successful outcomes below (an
         # account created and immediately usable, or created but pending
@@ -1588,7 +1590,10 @@ async def _register_new_account(
             )
             await session.write_line(
                 colored(
-                    reflow(pending_approval_notice(new_user.username), width=session.terminal_width),
+                    reflow(
+                        pending_approval_notice(new_user.username, approvers_away_line(db)),
+                        width=session.terminal_width,
+                    ),
                     fg_color=WARNING_COLOR,
                 )
             )

@@ -254,7 +254,8 @@ def test_invite_sent_while_recipient_is_elsewhere_is_shown_on_return_and_can_be_
 
             await asyncio.wait_for(invite_task, timeout=2)
             assert "declined." in _written_text(alice_session)
-            assert "Declined." in _written_text(bob_session)
+            # Issue #843: carried above the redrawn menu.
+            await _run_until(lambda: "Declined alice's invitation." in _plain(_written_text(bob_session)))
 
             assert not bob_task.done()  # back at his own main menu
             bob_task.cancel()
@@ -650,4 +651,168 @@ def test_close_works_without_pinned_ui(tmp_path):
         assert "/close" in _plain(_written_text(session))
         assert "\x1b[1;" not in _written_text(session)
     finally:
+        database.close()
+
+
+# -- issue #843: an invitation to a caller who is not at the main menu ------
+
+
+def _invite_scenario(tmp_path, arrange):
+    """Alice invites bob, who is registered but not running his main menu.
+    `arrange(bob_session)` sets bob's session up first. Returns both
+    sessions' output once the invitation has timed out."""
+    import netbbs.chat.direct_invites as direct_invites_module
+
+    database = Database(tmp_path / "node.db")
+    lane = DatabaseLane(database.path)
+    try:
+        alice = create_user(database, "alice", password="hunter2", user_level=10)
+        bob = create_user(database, "bob", password="hunter2", user_level=10)
+
+        async def scenario():
+            node_controls = _node_controls()
+            registry = node_controls.session_registry
+            presence = PresenceRegistry()
+            presence.enter("bob")
+            bob_session = FakeSession()
+            registry.enter(bob_session)
+            registry.mark_authenticated(bob_session, "bob")
+            arrange(bob_session)
+            alice_session = FakeSession()
+            chatted = await asyncio.wait_for(
+                chat_flow.run_direct_chat_invite_flow(
+                    alice_session, lane, ChatHub(), presence, DirectChatInvites(), registry, alice, bob
+                ),
+                timeout=2,
+            )
+            return chatted, _plain(_written_text(alice_session)), _plain(_written_text(bob_session))
+
+        original = direct_invites_module._INVITE_TIMEOUT_SECONDS
+        direct_invites_module._INVITE_TIMEOUT_SECONDS = 0.05
+        try:
+            return asyncio.run(scenario())
+        finally:
+            direct_invites_module._INVITE_TIMEOUT_SECONDS = original
+    finally:
+        lane.close()
+        database.close()
+
+
+def test_a_caller_on_another_screen_is_told_about_the_invitation(tmp_path):
+    # F120: Lena sat in Who's online and never knew; Margo waited.
+    chatted, inviter, invitee = _invite_scenario(tmp_path, lambda bob_session: None)
+    assert chatted is False
+    assert "*** alice invites you to a direct chat. Go back to the main menu within a minute to answer. ***" in invitee
+    assert "bob is not at the main menu. They have been told, and the invitation opens when they get there." in inviter
+
+
+def test_a_caller_in_a_door_is_not_written_to(tmp_path):
+    def in_a_door(bob_session):
+        bob_session.door_active = True
+
+    _chatted, inviter, invitee = _invite_scenario(tmp_path, in_a_door)
+    assert invitee == ""
+    assert "bob is not at the main menu. The invitation opens when they get there." in inviter
+
+
+def test_a_caller_mid_transfer_is_not_written_to(tmp_path):
+    def transferring(bob_session):
+        bob_session.binary_transfer_active = True
+
+    _chatted, _inviter, invitee = _invite_scenario(tmp_path, transferring)
+    assert invitee == ""
+
+
+def test_a_caller_idle_at_the_main_menu_gets_the_prompt_not_a_notice(tmp_path):
+    database = Database(tmp_path / "node.db")
+    lane = DatabaseLane(database.path)
+    try:
+        alice = create_user(database, "alice", password="hunter2", user_level=10)
+        bob = create_user(database, "bob", password="hunter2", user_level=10)
+
+        async def scenario():
+            node_controls = _node_controls()
+            registry = node_controls.session_registry
+            hub = ChatHub()
+            presence = PresenceRegistry()
+            presence.enter("bob")
+            direct_invites = DirectChatInvites()
+            bob_session = FakeSession()
+            registry.enter(bob_session)
+            registry.mark_authenticated(bob_session, "bob")
+            bob_task = asyncio.create_task(
+                _run_main_menu(bob_session, database, bob, node_controls, hub=hub, presence=presence, lane=lane, direct_invites=direct_invites)
+            )
+            await _run_until(lambda: direct_invites.is_watching(bob_session))
+
+            alice_session = FakeSession()
+            invite_task = asyncio.create_task(
+                chat_flow.run_direct_chat_invite_flow(
+                    alice_session, lane, hub, presence, direct_invites, registry, alice, bob
+                )
+            )
+            await _run_until(lambda: "wants to start a direct chat" in _written_text(bob_session))
+            assert "invites you to a direct chat" not in _written_text(bob_session)
+            assert "is not at the main menu" not in _written_text(alice_session)
+            bob_session.queue_key("n")
+            assert await asyncio.wait_for(invite_task, timeout=2) is False
+            bob_task.cancel()
+            await asyncio.gather(bob_task, return_exceptions=True)
+
+        asyncio.run(scenario())
+    finally:
+        lane.close()
+        database.close()
+
+
+def test_main_menu_is_drawn_again_after_a_direct_chat(tmp_path):
+    # F120: after /close the invitee's screen stayed blank -- the chat
+    # clears it on the way out and the menu was not drawn again.
+    database = Database(tmp_path / "node.db")
+    lane = DatabaseLane(database.path)
+    try:
+        alice = create_user(database, "alice", password="hunter2", user_level=10)
+        bob = create_user(database, "bob", password="hunter2", user_level=10)
+
+        async def scenario():
+            node_controls = _node_controls()
+            registry = node_controls.session_registry
+            hub = ChatHub()
+            presence = PresenceRegistry()
+            presence.enter("bob")
+            direct_invites = DirectChatInvites()
+            bob_session = FakeSession()
+            registry.enter(bob_session)
+            registry.mark_authenticated(bob_session, "bob")
+            bob_task = asyncio.create_task(
+                _run_main_menu(bob_session, database, bob, node_controls, hub=hub, presence=presence, lane=lane, direct_invites=direct_invites)
+            )
+            await _run_until(lambda: direct_invites.is_watching(bob_session))
+            prompts_before = _written_text(bob_session).count("Choice")
+
+            alice_session = FakeSession()
+            invite_task = asyncio.create_task(
+                chat_flow.run_direct_chat_invite_flow(
+                    alice_session, lane, hub, presence, direct_invites, registry, alice, bob
+                )
+            )
+            await _run_until(lambda: "wants to start a direct chat" in _written_text(bob_session))
+            bob_session.queue_key("y")
+            room_ready = lambda: any(  # noqa: E731
+                name.startswith(chat_flow._DM_CHANNEL_PREFIX) and hub.participant_count(name) == 2
+                for name in hub._channels
+            )
+            await _run_until(room_ready)
+            bob_session.queue_line("/close")
+            await _run_until(lambda: "has left the direct chat" in _written_text(alice_session))
+            alice_session.queue_key(" ")
+            assert await asyncio.wait_for(invite_task, timeout=2) is True
+
+            await _run_until(lambda: _written_text(bob_session).count("Choice") > prompts_before)
+            bob_task.cancel()
+            await asyncio.gather(bob_task, return_exceptions=True)
+
+        asyncio.run(scenario())
+    finally:
+        lane.close()
         database.close()
