@@ -44,6 +44,7 @@ resolve and was rejected every time, forever.
 from __future__ import annotations
 
 import base64
+import datetime
 import json
 
 import nacl.signing
@@ -67,7 +68,7 @@ from netbbs.link.work_items import KIND_LINK_MAIL_ACK, KIND_LINK_MAIL_DELIVERY, 
 from netbbs.mail import MailError
 from netbbs.rendering.width import cut_to_width
 from netbbs.storage.database import Database
-from netbbs.timeutil import utc_now_iso
+from netbbs.timeutil import parse_utc_iso, utc_iso, utc_now_iso
 
 
 class LinkMailError(Exception):
@@ -111,15 +112,7 @@ def compose_link_message(
             "a reply could never reach you. Ask the SysOp to rename the account."
         )
 
-    subject = subject.strip()
-    if not subject:
-        raise MailError("subject cannot be blank")
-    subject_bytes = len(subject.encode("utf-8"))
-    if subject_bytes > mail_module.MAX_MAIL_SUBJECT_BYTES:
-        raise MailError(f"subject cannot exceed {mail_module.MAX_MAIL_SUBJECT_BYTES} bytes, got {subject_bytes}")
-    body_bytes = len(body.encode("utf-8"))
-    if body_bytes > mail_module.MAX_MAIL_BODY_BYTES:
-        raise MailError(f"body cannot exceed {mail_module.MAX_MAIL_BODY_BYTES} bytes, got {body_bytes}")
+    subject = mail_module.validate_mail_fields(subject, body)
 
     recipient_signing_verify_key = _resolve_peer_signing_key(db, address.node_fingerprint)
 
@@ -205,6 +198,38 @@ def _open_sealed(node_identity: NodeIdentity, ciphertext: bytes) -> bytes:
     raise EncryptionError("sealed to none of this node's signing keys")
 
 
+# How far ahead of this node's clock a letter's signed `created_at` may be
+# and still be believed (issue #808): ordinary clock drift between two
+# nodes, the same five minutes Link's signed requests allow. Anything
+# later is dated by its arrival instead.
+MAX_LINK_MAIL_CLOCK_SKEW = datetime.timedelta(minutes=5)
+# The earliest date a received letter may claim. No NetBBS node wrote mail
+# before this, and a date near year 1 cannot be shown in a timezone west of
+# UTC (`format_for_display` runs off the representable range), which would
+# take the whole inbox down (#878 review).
+EARLIEST_LINK_MAIL_DATE = datetime.datetime(2000, 1, 1, tzinfo=datetime.timezone.utc)
+
+
+def _written_at(created_at: object, arrived_at: str) -> str:
+    """When a received letter was written, for its Date: line (issue #808).
+
+    The sender's signed `created_at`, so a letter that took days to arrive
+    says so rather than looking new. One dated beyond the clock-skew
+    allowance, before `EARLIEST_LINK_MAIL_DATE`, or not a timestamp at all,
+    is dated by its arrival instead: the sender's clock cannot be trusted
+    to put a letter in the future or in an age no display can show.
+    Mailbox order does not depend on this; it is arrival order."""
+    if not isinstance(created_at, str):
+        return arrived_at
+    try:
+        written = parse_utc_iso(created_at)
+    except ValueError:
+        return arrived_at
+    if written < EARLIEST_LINK_MAIL_DATE or written > parse_utc_iso(arrived_at) + MAX_LINK_MAIL_CLOCK_SKEW:
+        return arrived_at
+    return utc_iso(written)
+
+
 def deliver_link_message(
     db: Database, raw_message: dict, *, node_identity: NodeIdentity
 ) -> LinkMessageAccepted | LinkMessageBounced:
@@ -222,15 +247,32 @@ def deliver_link_message(
     this node's own fingerprint; it has no way to know whether `local_
     user_id` actually names a real local account, which is this
     function's first job.
+
+    Everything the sender's node chose is checked here, where it enters
+    (issue #808): the sender's `local_user_id` against the address
+    grammar, since it becomes the address a reply goes to, and the
+    decrypted subject and body against the limits local mail keeps. A
+    letter that fails is bounced `malformed`; one that cannot be opened
+    at all is bounced `undecryptable`. Neither is ever dropped silently:
+    the envelope is already stored and known by now, so an exception
+    here would lose the letter without a word to anyone.
     """
     message = LinkMessage.from_dict(raw_message)
     sender_info = message.payload["sender"]
-    sender_address = f"{sender_info['local_user_id']}@{sender_info['home_node_fingerprint']}"
-    recipient_local_user_id = message.payload["recipient"]["local_user_id"]
+    sender_user = sender_info.get("local_user_id")
+    recipient_local_user_id = message.payload["recipient"].get("local_user_id")
     origin_node_fingerprint = sender_info["home_node_fingerprint"]
 
     def _bounce(reason: str) -> LinkMessageBounced:
         return bounce_link_message(db, raw_message, reason, node_identity=node_identity)
+
+    # A NetBBS node only ever sends a name its own username rules allow,
+    # which is this grammar; an account older than those rules on a node
+    # older than #807 is the one honest source of anything else, and a
+    # reply to it could never be addressed anyway.
+    if not is_valid_user_part(sender_user) or not isinstance(recipient_local_user_id, str):
+        return _bounce("malformed")
+    sender_address = f"{sender_user}@{origin_node_fingerprint}"
 
     try:
         recipient = get_user_by_username(db, recipient_local_user_id)
@@ -238,25 +280,36 @@ def deliver_link_message(
         return _bounce("unknown_recipient")
 
     try:
-        ciphertext = base64.b64decode(message.payload["ciphertext"])
+        ciphertext = base64.b64decode(message.payload["ciphertext"], validate=True)
         plaintext = _open_sealed(node_identity, ciphertext)
-        decoded = json.loads(plaintext)
-    except EncryptionError:
+    except (EncryptionError, KeyError, TypeError, ValueError):
         # handle_events already confirmed this node is the named
         # recipient -- a decryption failure here means the ciphertext
-        # itself is malformed/corrupted, not a routing mistake.
-        return _bounce("unknown_recipient")
+        # was sealed to a key this node never held, or is damaged; it is
+        # not a routing mistake, so it is not `unknown_recipient`.
+        return _bounce("undecryptable")
+
+    try:
+        decoded = json.loads(plaintext)
+        subject = mail_module.validate_mail_fields(decoded["subject"], decoded["body"])
+        body = decoded["body"]
+    except (MailError, KeyError, TypeError, ValueError):
+        return _bounce("malformed")
 
     if _make_room_or_report_full(db, recipient):
         return _bounce("mailbox_full")
 
+    arrived_at = utc_now_iso()
     db.connection.execute(
         """
         INSERT INTO mail_messages
             (sender_user_id, sender_label, recipient_user_id, subject, body, created_at, link_source_event_id)
         VALUES (NULL, ?, ?, ?, ?, ?, ?)
         """,
-        (sender_address, recipient.id, decoded["subject"], decoded["body"], utc_now_iso(), message.content_id),
+        (
+            sender_address, recipient.id, subject, body,
+            _written_at(message.payload.get("created_at"), arrived_at), message.content_id,
+        ),
     )
     db.connection.commit()
 
@@ -314,7 +367,7 @@ def _make_room_or_report_full(db: Database, recipient: User) -> bool:
         """
         SELECT id, sender_deleted_at FROM mail_messages
         WHERE recipient_user_id = ? AND recipient_deleted_at IS NULL AND read_at IS NOT NULL
-        ORDER BY created_at ASC LIMIT 1
+        ORDER BY id ASC LIMIT 1
         """,
         (recipient.id,),
     ).fetchone()
@@ -509,6 +562,8 @@ _BOUNCE_REASON_TEXT = {
     "unknown_recipient": "there is no user by that name on that BBS",
     "mailbox_full": "the recipient's mailbox is full of unread mail",
     "blocked_sender": "that BBS does not accept mail from you or from this BBS",
+    "undecryptable": "that BBS could not decrypt it, so it may have been sealed to a key that BBS no longer holds",
+    "malformed": "that BBS could not accept it as a letter (a bad sender name, subject or body)",
     "link_policy_manual_block": "that BBS has blocked you or this BBS",
     "link_policy_node_quarantined": "that BBS has quarantined this BBS",
     "link_policy_node_probationary_read_only": "that BBS does not trust this BBS yet; its SysOp has to establish it",

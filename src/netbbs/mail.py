@@ -83,6 +83,29 @@ class MailMessage:
         return self.read_at is not None
 
 
+def validate_mail_fields(subject: object, body: object) -> str:
+    """The one check every letter's subject and body pass, whether a
+    caller wrote it here or it arrived over Link (issue #808): both text,
+    a subject that is not blank, both within their byte limits and
+    encodable as UTF-8 (JSON can carry a lone surrogate, which SQLite
+    cannot store). Returns the subject stripped, as it is stored."""
+    if not isinstance(subject, str) or not isinstance(body, str):
+        raise MailError("subject and body must be text")
+    subject = subject.strip()
+    if not subject:
+        raise MailError("subject cannot be blank")
+    try:
+        subject_bytes = len(subject.encode("utf-8"))
+        body_bytes = len(body.encode("utf-8"))
+    except UnicodeEncodeError as exc:
+        raise MailError("subject and body must be valid text") from exc
+    if subject_bytes > MAX_MAIL_SUBJECT_BYTES:
+        raise MailError(f"subject cannot exceed {MAX_MAIL_SUBJECT_BYTES} bytes, got {subject_bytes}")
+    if body_bytes > MAX_MAIL_BODY_BYTES:
+        raise MailError(f"body cannot exceed {MAX_MAIL_BODY_BYTES} bytes, got {body_bytes}")
+    return subject
+
+
 def send_mail(db: Database, sender: User, recipient: User, subject: str, body: str) -> MailMessage:
     """
     Send one message from `sender` to `recipient`.
@@ -96,15 +119,7 @@ def send_mail(db: Database, sender: User, recipient: User, subject: str, body: s
     unread message -- deterministic, matching the design doc's own
     acceptance criterion.
     """
-    subject = subject.strip()
-    if not subject:
-        raise MailError("subject cannot be blank")
-    subject_bytes = len(subject.encode("utf-8"))
-    if subject_bytes > MAX_MAIL_SUBJECT_BYTES:
-        raise MailError(f"subject cannot exceed {MAX_MAIL_SUBJECT_BYTES} bytes, got {subject_bytes}")
-    body_bytes = len(body.encode("utf-8"))
-    if body_bytes > MAX_MAIL_BODY_BYTES:
-        raise MailError(f"body cannot exceed {MAX_MAIL_BODY_BYTES} bytes, got {body_bytes}")
+    subject = validate_mail_fields(subject, body)
 
     _make_room_if_needed(db, recipient)
 
@@ -136,7 +151,7 @@ def _make_room_if_needed(db: Database, recipient: User) -> None:
         """
         SELECT id, sender_deleted_at FROM mail_messages
         WHERE recipient_user_id = ? AND recipient_deleted_at IS NULL AND read_at IS NOT NULL
-        ORDER BY created_at ASC LIMIT 1
+        ORDER BY id ASC LIMIT 1
         """,
         (recipient.id,),
     ).fetchone()
@@ -159,12 +174,16 @@ def get_mail(db: Database, user: User, mail_id: int) -> MailMessage:
 
 def list_inbox(db: Database, user: User) -> list[MailMessage]:
     """Every message in `user`'s inbox they haven't deleted their own
-    view of, newest first."""
+    view of, newest arrival first.
+
+    Arrival, not `created_at`: Link mail keeps the time its sender wrote
+    it (issue #808), so a letter that took days to arrive would otherwise
+    sort below mail read long ago and look old while still unread."""
     rows = db.connection.execute(
         """
         SELECT * FROM mail_messages
         WHERE recipient_user_id = ? AND recipient_deleted_at IS NULL
-        ORDER BY created_at DESC
+        ORDER BY id DESC
         """,
         (user.id,),
     ).fetchall()
@@ -173,12 +192,12 @@ def list_inbox(db: Database, user: User) -> list[MailMessage]:
 
 def list_sent(db: Database, user: User) -> list[MailMessage]:
     """Every message `user` has sent that they haven't deleted their
-    own view of, newest first."""
+    own view of, newest first (by id, the order they were written)."""
     rows = db.connection.execute(
         """
         SELECT * FROM mail_messages
         WHERE sender_user_id = ? AND sender_deleted_at IS NULL
-        ORDER BY created_at DESC
+        ORDER BY id DESC
         """,
         (user.id,),
     ).fetchall()

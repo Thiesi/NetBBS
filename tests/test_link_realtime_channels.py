@@ -1236,3 +1236,45 @@ def test_scrollback_snapshot_cap_applies_after_external_rows_are_filtered(tmp_pa
             await subscriber.teardown()
 
     asyncio.run(scenario())
+
+
+def test_a_peers_user_name_cannot_pose_as_another_nodes_in_a_chat_label(tmp_path):
+    """Issue #808: live lines, presence and scrollback all build their
+    author label with `link_address_label`, so a peer that names its user
+    `mallory@"Trusted"` reads as one address with one `@`, the real one."""
+    from netbbs.link.protocol import build_channel_message_frame, build_presence_delta_frame
+
+    async def scenario():
+        origin = _Node(tmp_path, "origin-hostile-name")
+        subscriber = _Node(tmp_path, "subscriber-hostile-name")
+        _origin_channel, subscriber_channel = _setup_linked_channel(origin, subscriber, name="hostile-name")
+        _establish_trust(subscriber.db, origin.identity.fingerprint)
+        hostile = 'mallory@"Trusted"'
+        expected = f"mallory??Trusted?@{origin.identity.fingerprint}"
+        queue = subscriber.hub.join(subscriber_channel.name, ParticipantId(username="watcher", session_key=1))
+        session = _SnapshotSession(origin.identity.fingerprint)
+        try:
+            await subscriber.bridge._handle_channel_message(session, build_channel_message_frame(
+                subscriber_channel.channel_id, hostile, hostile, "hi", "2026-01-01T00:00:00+00:00",
+            ))
+            await subscriber.bridge._handle_presence_delta(session, build_presence_delta_frame(
+                subscriber_channel.channel_id, "join", hostile, hostile,
+            ))
+            line = await asyncio.wait_for(queue.get(), timeout=2.0)
+            presence = await asyncio.wait_for(queue.get(), timeout=2.0)
+            assert (line.author_label, presence.author_label) == (expected, expected)
+
+            request_id = subscriber.bridge.begin_scrollback_request(
+                subscriber_channel.channel_id, origin.identity.fingerprint
+            )
+            await subscriber.bridge._handle_scrollback_snapshot(session, build_scrollback_snapshot_frame(
+                subscriber_channel.channel_id, request_id,
+                [_snapshot_entry(author_node=origin.identity.fingerprint, author_user=hostile)],
+            ))
+            [replayed] = subscriber.bridge.pop_channel_scrollback(subscriber_channel.channel_id, request_id)
+            assert replayed.author_label == expected
+        finally:
+            await origin.teardown()
+            await subscriber.teardown()
+
+    asyncio.run(scenario())

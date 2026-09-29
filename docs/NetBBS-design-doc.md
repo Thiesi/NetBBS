@@ -4475,8 +4475,9 @@ Transport receipt is not user delivery.
 Separate signed events represent:
 
 - accepted into the recipient mailbox;
-- bounced because of unknown recipient, full mailbox, blocking, or another
-  defined terminal failure;
+- bounced because of unknown recipient, full mailbox, blocking, a letter the
+  recipient node cannot decrypt, a malformed letter, or another defined
+  terminal failure;
 - future expiry where retry policy requires it.
 
 Outbound messages remain pending until an accepted or bounced event arrives.
@@ -4500,6 +4501,41 @@ main menu, which covers a sender who was offline when it happened, or by
 opening it in Sent. Mail the sender already deleted from Sent is not told
 about. A later acceptance clears the flag and wins. A bounce
 message in the inbox would need a system sender (issue #819) and is not sent.
+
+The recipient node checks everything the sending node chose where it enters,
+in `deliver_link_message` (issue #808), and answers each failure with a
+signed bounce rather than an exception that would lose the letter in silence:
+
+- the sender's `local_user_id` must match the address grammar
+  (`[A-Za-z0-9_.-]{1,32}`, §4.4), because it becomes the address a reply goes
+  to. A NetBBS node only sends names its username rules allow; the one honest
+  exception is an account older than those rules on a node older than #807,
+  and a reply to it could not be addressed either. Anything else bounces
+  `malformed`;
+- the decrypted letter must be a JSON object whose subject and body are text
+  within the limits local mail keeps (a subject that is not blank, 200 bytes;
+  a body of up to 20,000 bytes; both encodable as UTF-8). Anything else
+  bounces `malformed`;
+- a ciphertext sealed to none of this node's current or retired signing keys,
+  or not base64 at all, bounces `undecryptable`. It used to bounce
+  `unknown_recipient`, which sent the sender looking for a typo.
+
+`undecryptable` and `malformed` are bounce reasons added after v7.13.0. Every
+earlier release keeps a received bounce's reason without checking it (v7.13
+and older ignore it entirely and just mark the message bounced), so a new code
+reaches an older sender as a plain bounce and costs it nothing but the
+wording.
+
+A received letter is dated by its signed `created_at`, when its sender wrote
+it, so a letter that took days to arrive says so. A `created_at` more than
+five minutes ahead of the recipient node's clock (the skew Link's signed
+requests allow), one before 2000 (no NetBBS node wrote mail then, and a date
+near year 1 cannot be shown in a timezone west of UTC), or one that is not a
+timestamp, is replaced by the arrival time: the sender's clock cannot put a
+letter in the future or out of range. Inbox and Sent
+list mail by arrival (row id), not by that date, so late mail lands at the top
+of the inbox instead of below letters read long ago; making room in a full
+mailbox likewise removes the earliest-arrived read letter.
 
 Delivery state records only answers that arrive. Mail a relay took for a
 recipient node that holds the sending node quarantined or blocked is refused
