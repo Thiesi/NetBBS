@@ -52,7 +52,8 @@ from netbbs.link.boards import LinkContext
 from netbbs.link.enforcement import LinkPolicyAction, decide_node_action
 from netbbs.link.trust import TrustState
 from netbbs.link.mail import (
-    DELIVERY_STATUS_LABELS, LinkMailError, acknowledge_delivery_notices, compose_link_message, delivery_explanation,
+    DELIVERY_STATUS_LABELS, RELAYED_DISPLAY_STATUS, LinkMailError, acknowledge_delivery_notices, compose_link_message,
+    delivery_display_status, delivery_explanation,
 )
 from netbbs.link.node_profiles import (
     ambiguous_node_guidance, link_address_label, unknown_node_guidance, unquote_reference,
@@ -333,7 +334,9 @@ class _MailRow:
 
     @property
     def status(self) -> str | None:
-        status = self.message.link_delivery_status
+        status = delivery_display_status(
+            self.message.link_delivery_status, self.message.link_relay_handoff_at
+        )
         return status if status in DELIVERY_STATUS_LABELS else None
 
 
@@ -1065,11 +1068,12 @@ async def _message_view(
     preamble: list[str] = []
     if to_label is not None:
         preamble.append(colored("To: ", fg_color=LABEL_COLOR) + colored(sanitize_text(to_label), fg_color=accent))
-        delivery = delivery_explanation(message.link_delivery_status, message.link_delivery_reason)
+        shown_status = delivery_display_status(message.link_delivery_status, message.link_relay_handoff_at)
+        delivery = delivery_explanation(shown_status, message.link_delivery_reason)
         if delivery is not None:
             preamble.append(
                 colored("Delivery: ", fg_color=LABEL_COLOR)
-                + colored(delivery, fg_color=_DELIVERY_COLORS.get(message.link_delivery_status, VALUE_COLOR))
+                + colored(delivery, fg_color=_DELIVERY_COLORS.get(shown_status, VALUE_COLOR))
             )
     else:
         sender_label = await _display_sender_label(lane, message)
@@ -1213,6 +1217,7 @@ async def _display_recipient_label(lane: DatabaseLane, message: MailMessage) -> 
 
 _DELIVERY_COLORS = {
     "pending": MUTED_COLOR,
+    RELAYED_DISPLAY_STATUS: MUTED_COLOR,
     "delivered": SUCCESS_COLOR,
     "bounced": ERROR_COLOR,
     "expired": ERROR_COLOR,

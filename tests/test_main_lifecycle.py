@@ -1325,12 +1325,31 @@ def test_signal_triggered_shutdown_is_registered_as_non_cancellable():
     shutdown_event = asyncio.Event()
     shutdown_scheduler = SequenceScheduler()
 
+    class _Connected:
+        pinned_notice_hook = None
+        node_name_gradient = None
+
+        async def write(self, text: str = "") -> None:
+            pass
+
+        async def write_line(self, text: str = "") -> None:
+            pass
+
+    async def _stay_connected(registry: ActiveSessionRegistry) -> None:
+        registry.enter(_Connected())
+        await asyncio.Event().wait()
+
     async def scenario():
         loop = asyncio.get_running_loop()
+        # Someone must be connected: with nobody on, a graceful shutdown no
+        # longer waits (issue #845), and there would be nothing to observe.
+        registry = ActiveSessionRegistry()
+        connected = asyncio.create_task(_stay_connected(registry))
+        await asyncio.sleep(0)
         _install_signal_handlers(
             loop,
             shutdown_event=shutdown_event,
-            session_registry=ActiveSessionRegistry(),
+            session_registry=registry,
             maintenance=MaintenanceMode(),
             shutdown_scheduler=shutdown_scheduler,
             # Long enough that every assertion below runs well before
@@ -1361,6 +1380,8 @@ def test_signal_triggered_shutdown_is_registered_as_non_cancellable():
         await asyncio.gather(original_task, return_exceptions=True)
         replacement.cancel()
         await asyncio.gather(replacement, return_exceptions=True)
+        connected.cancel()
+        await asyncio.gather(connected, return_exceptions=True)
 
     asyncio.run(scenario())
 

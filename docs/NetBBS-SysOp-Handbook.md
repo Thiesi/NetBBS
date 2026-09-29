@@ -260,7 +260,11 @@ need that behavior, arrange an external health check or supervisor yourself.
 NetBBS runs in the foreground. The service manager handles backgrounding.
 `systemctl stop netbbs` or `service netbbs stop` requests a graceful shutdown:
 callers are warned, then disconnected after the configured delay (60 seconds
-by default). Cleanup takes additional time. Increase the service stop timeout
+by default). With nobody connected, or once the last caller leaves, it stops
+without waiting out the delay. A shutdown you schedule from the console keeps
+the delay you chose. Change the delay under **Settings → Network &
+login limits**, or as `[shutdown] graceful_delay_seconds`. Cleanup takes
+additional time. Increase the service stop timeout
 if you raise that delay or configure slow-stopping door services.
 
 The Linux unit restricts writable paths to `/var/lib/netbbs`. **MANUAL:** extend
@@ -769,12 +773,20 @@ encrypted to the recipient's *node*, not to the person, so a SysOp with access
 to the database could read it there; NetBBS gives you no screen for doing so.
 
 Your callers see each Link message's state in their **Sent** mail: pending,
-delivered, bounced (with the other node's reason in plain words) or expired.
-A caller whose mail bounces or expires is told once at their next main menu.
-One refusal never comes back as a bounce: mail left at a relay for a node
-that has *your* node quarantined or blocked. That node sends yours nothing,
-and the relay took the message, so it stays pending. Replaying an expired
-delivery from the **Outbox** puts it back to pending.
+with relay, delivered, bounced (with the other node's reason in plain words)
+or expired. A caller whose mail bounces or expires is told once at their next
+main menu.
+
+"With relay" is mail your node left at a relay because the recipient's node
+cannot be dialed directly. The relay is not the recipient, and one refusal
+never comes back as a bounce: mail for a node that has *your* node
+quarantined or blocked, which sends yours nothing. So if no answer comes back
+within 14 days of the handoff, the letter expires and its sender is told that
+no answer came back, so it may not have arrived. An answer that arrives later
+still counts: the letter turns delivered, or bounced. A relay keeps a letter
+well past those 14 days, so a recipient that is only slow to collect still
+answers in time. Replaying an expired delivery from the **Outbox** puts it
+back to pending.
 
 Mail arriving here is checked the way your own callers' mail is: a sender
 name that is not a valid address, a blank or oversized subject, or an
@@ -859,6 +871,18 @@ screen adds its Link addresses, relay roles and reliability. Last heard is your
 own last contact with the node, or the time its newest descriptor says it was
 signed, never later than when you first stored it; a node not heard of for 30
 days is marked stale, not removed.
+
+**Link status** also shows what your node holds as a relay. When it relays
+for outgoing-only nodes, mail and delivery answers for them wait here until
+they dial in and collect them. The **Relay mailbox** line counts what is held,
+and a table below it lists each node held for, with how many envelopes it has
+(at most 50) and how long the oldest has waited, oldest first. Anything left
+uncollected for 30 days is dropped on the next sync pass, and the diagnostic
+log gets a warning naming the node and how many went. Neither end is told by
+your node, which cannot read or sign that mail; the sender's own node gives up
+on a letter handed to a relay after 14 days and tells its writer that no
+answer came back. A node whose count stays at 50 for weeks is most likely not
+coming back; the time limit clears it without you doing anything.
 
 A node's screen also acts on its trust, when it is a trust subject here (every
 node that has exchanged a hello with yours, or been introduced to it; not a
@@ -1154,10 +1178,38 @@ For the `netbbs.db` in this handbook's examples, the prefix is `netbbs_`. Press
 Placing the file does not turn it on. Each piece has its own switch, off by
 default, and callers keep seeing the built-in default until you open that
 piece's screen under **Settings → Mastheads & banners** and choose **Enable**.
-Its status line shows `disabled -- file: <name> (N bytes)` until you do, and
-**Preview** shows what callers will see. Enable refuses a missing file or one
-over 256 KiB. If a file that was enabled later goes missing or grows past that
-limit, callers get the default silently and the node logs a warning.
+Its status line shows `disabled -- file: <name> (N bytes)` until you do.
+**Preview** shows your saved art even while it is switched off, and says under
+it what callers see meanwhile; with nothing saved it says that too. Enable
+refuses a missing file or one over 256 KiB. If a file that was enabled later
+goes missing or grows past that limit, callers get the default silently and the
+node logs a warning.
+
+Empty rows at the bottom of a piece are not sent, so a banner drawn in the top
+seven rows of the 24-row editor takes seven rows on a caller's screen. Empty
+rows between parts of the art are kept.
+
+**Edit** opens the art editor on an 80x24 canvas. Typing (a space too) paints
+over whatever is at the cursor. At the end of a row the cursor stays put, so
+press **Enter** for the next row; **End** goes to just after the row's last
+character. Retyping a shorter line leaves the end of the old one in place:
+**Ctrl+K** clears from the cursor to the end of the row. **Ctrl+T** picks a
+block or line glyph, **Ctrl+P** and **Ctrl+B** the foreground and background
+colour, **Ctrl+L** repaints the screen, **Ctrl+G** lists every key, **Ctrl+O**
+saves, and **Ctrl+X** quits.
+
+The welcome gallery ends with three quiet designs for clubs that don't want
+neon: **Paper & Ink**, **Library Card** and **Garden Gate**.
+
+Before sign-in, a Telnet caller gets the node's own lines, arrows and default
+banner in plain ASCII, because classic BBS terminals such as SyncTERM read
+CP437 and would show Unicode as noise. A banner of your own is sent as you drew
+it, so one drawn with box or block characters still looks wrong in such a
+terminal. After sign-in, each caller's own Unicode or ASCII choice applies.
+
+**Settings → Previous callers** cycles through three states: the panel after
+login in its default neon style, the same panel plain (your header colour and
+a quiet heading), and hidden.
 
 ## State, backup, and recovery
 
@@ -1246,7 +1298,8 @@ magically reappear during restore.
 
 War Dialer has separate world capture and restore rules; see the
 [door guide](NetBBS-door-guide.md). Third-party installation directories are
-excluded unless **Backup → Door installations** is enabled. That option copies
+excluded unless **Backup → Door installations** is enabled. The Backup screen
+shows the door sections, and that option, only once a door is set up. That option copies
 them without stopping their writers and does not automatically restore them.
 Stop games/services first. A missing or unreadable requested installation fails
 the backup. Symlinks are copied as links, not followed to external data.

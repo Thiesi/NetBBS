@@ -574,7 +574,11 @@ all 10 rows together with its title, frame, and pause; an empty history skips
 the splash rather than stopping the first caller at an empty screen. Confirmed
 truecolor is a progressive visual enhancement with a deliberately polished
 256-color fallback. The SysOp can toggle the splash node-wide from Settings;
-new and upgraded nodes default to showing it.
+new and upgraded nodes default to showing it. The same setting also offers a
+plain style (issue #841): the node's header colour, no gradient, and the
+heading "Previous callers" / "Who has called in lately" instead of the neon
+"signals received" wording, for a node whose tone the neon clashes with. It
+applies to the splash and the menu screen alike.
 
 The same roll is a home-menu screen of its own, `P[r]evious callers`, rendered
 by the one renderer the splash uses so the two can never disagree about who is
@@ -614,19 +618,16 @@ not advertised when their runtime context is unavailable. The dashboard can be
 refreshed explicitly, and action screens return to the console without losing
 the operator's place.
 
-Status context in the console is deliberately two-tier (issue #206). The five
-top-level consoles — Users, Content, Operations, Settings, Node — each show a
-full panel of what's actually relevant there: live counts, health badges, or
-current configuration values. Every nested screen beneath them that has no
-such panel of its own instead shows one condensed line carrying the last-backup
-status obtainable without live node/session/Link state. Update-check outcomes
-remain on the SysOp landing dashboard, Settings overview, and dedicated Update
-screen; repeating them on unrelated user, content, presentation, and policy
-screens makes a global result look like a context-specific warning. This keeps
-recovery-relevant backup context visible while an operator is deep in a nested
-screen without re-deriving a richer panel those screens have no room to show.
-A screen that already has its own full panel does not also show the condensed
-line.
+Status context in the console lives where it is relevant. The landing
+dashboard and the five top-level consoles — Users, Content, Operations,
+Settings, Node — each show a full panel of what's actually relevant there: live
+counts, health badges, or current configuration values. Backup state appears
+on the dashboard, the Operations panel and the Backup screen; update-check
+outcomes on the dashboard, the Settings overview and the Update screen. Nested
+screens repeat neither. Issue #206 once put a condensed "Backup:" line on every
+nested screen; the 2026-09-28 field test (issue #845) found that a first-day
+SysOp read "Backup: never" under Communities, boards and banners as an error
+about those screens, so it was removed.
 
 A console screen that shows facts shows them as a *detail panel*
 (`netbbs.rendering.detail`), the read-only counterpart of the draft editor's
@@ -1452,8 +1453,8 @@ nobody has to open each board and area to find what waits.
 
 A caller granted APPROVE on a board or file area has the same queue on its
 own page: `[Q]ueue (N)` appears there while anything waits, and opens the
-same decision screens without the SysOp's node status line, and without the
-pin and exempt keys unless they also hold EDIT. APPROVE covers the whole
+same decision screens without the pin and exempt keys unless they also hold
+EDIT. APPROVE covers the whole
 decision: it lets its holder reject a held post or upload as well as publish
 it. Deleting something already published still takes DELETE.
 
@@ -2395,8 +2396,8 @@ Compose, Back), so every visit cost a keystroke before any mail showed.
 
 The list:
 - Is a table: number, a `new` column, From, Subject and Date. Sent's is
-  number, To, Subject, a Delivery column (pending, delivered, bounced,
-  expired) when any listed message went over Link,
+  number, To, Subject, a Delivery column (pending, with relay, delivered,
+  bounced, expired) when any listed message went over Link,
   and Date. Each row is numbered once. The generic picker it replaced
   numbered rows twice (`01. (#5) ...`) and prefixed unread subjects with
   `[NEW] `.
@@ -3304,13 +3305,35 @@ reliability degrades.
 The relay mailbox currently supports opaque encrypted Link-message envelopes:
 
 - relays see routing metadata and size, not message content;
-- storage is bounded;
+- storage is bounded in number and in time (below);
 - pickup authenticates the intended recipient;
 - the recipient re-runs normal event verification rather than trusting the
   relay’s claim;
 - relaying does not introduce strangers or weaken the rule that sender and
   recipient identities must already be known sufficiently to verify and
   encrypt.
+
+A relay holds at most `MAX_MAILBOX_ENVELOPES_PER_RECIPIENT` (50) envelopes
+per recipient, refusing a further deposit with HTTP 507, and keeps each for
+at most `RELAY_MAILBOX_RETENTION_DAYS` (30 days) from its deposit (issue
+#891). Every sync pass drops what has waited longer, acknowledgements
+(`link_message_accepted`/`_bounced`) as well as letters, and logs a WARNING
+naming each recipient and how many went. Without the time limit, a recipient
+that never came back -- retired, reinstalled under a new key, gone -- kept
+its 50 slots forever and every later letter for it was refused.
+
+Dropping is silent toward both ends. The relay can neither read nor sign
+anything for the recipient, so it cannot bounce, and nothing announces the
+retention on the wire. The sender learns of the loss from its own timeout on
+relay handoffs: a letter handed to a relay expires on the sending side 14
+days after the handoff (issue #874), with a notice saying no answer came
+back. The relay's retention must therefore stay comfortably longer than that
+timeout, so that a letter the sender is still waiting on is never the one
+dropped. For that reason it is a constant rather than a SysOp setting: a
+relay configured to keep mail a week would turn the sender's "may not have
+arrived" into "certainly did not". The SysOp's **Link status** relay section
+lists each recipient held for, with its count and the age of its oldest
+deposit, oldest first.
 
 Reliability scoring is direct-observation operational data, not Phase-4 social
 reputation.
@@ -4746,17 +4769,21 @@ unless another of the recipient's addresses or relays takes the message
 (§12.4, issue #804).
 
 The sending node shows the state to the sending user (issue #806). Sent marks
-each Link message pending, delivered, bounced or expired, and the message's
+each Link message pending, with relay (§10.3, below), delivered, bounced or
+expired, and the message's
 Delivery line gives a bounce's reason in plain words. The reason is the signed
 bounce's `reason` or the refusal's `link_policy_*` code, stored with the
 message (at most 64 characters, since another node chose it); a code this
 node does not know reads as "that BBS refused it". Expired means the delivery
 work item dead-lettered: no route took the message, or this node's own trust
-policy held it back to the end, which is recorded as its own reason. A bounce
+policy held it back to the end, which is recorded as its own reason
+(`own_policy`), or that a letter left at a relay got no answer in time
+(`no_answer`, below). A bounce
 or expiry flags the message until its sender is told: once, at their next
 main menu, which covers a sender who was offline when it happened, or by
 opening it in Sent. Mail the sender already deleted from Sent is not told
-about. A later acceptance clears the flag and wins. A bounce
+about. A later acceptance clears the flag and wins; a later bounce wins too,
+and flags the message again unless it was already bounced. A bounce
 message in the inbox would need a system sender (issue #819) and is not sent.
 
 The recipient node checks everything the sending node chose where it enters,
@@ -4795,11 +4822,28 @@ list mail by arrival (row id), not by that date, so late mail lands at the top
 of the inbox instead of below letters read long ago; making room in a full
 mailbox likewise removes the earliest-arrived read letter.
 
-Delivery state records only answers that arrive. Mail a relay took for a
-recipient node that holds the sending node quarantined or blocked is refused
-at pickup without a bounce (§12.4), and nothing on the sending side expires
-mail that was handed over but never answered, so it stays pending. The same
-holds for an acknowledgement that never gets back.
+A letter left at a relay is not delivered on the relay's word (issue #874).
+The relay is not the recipient, and some answers never come back: a recipient
+node that holds the sending node quarantined or blocked refuses such mail at
+pickup without a bounce (§12.4), and an acknowledgement can be lost. So the
+sending node records when it handed the letter over
+(`mail_messages.link_relay_handoff_at`); the letter stays `pending`, and Sent
+shows it as "with relay" ("With a relay, no answer yet") rather than plain
+pending. Each sync pass expires a letter still pending 14 days after its
+handoff, with reason `no_answer`, and its sender is told as for any expiry,
+in words that say it may have arrived all the same: no answer came back. An
+answer that arrives later still wins, as above. The timeout is the sending
+node's alone: nothing changes on the wire, and it works the same with old
+relays and old recipients. Mail pushed directly to the recipient never times
+out this way, since the push itself reached the recipient's node; mail left at
+a relay before the upgrade that added the handoff time cannot be told apart
+from it and keeps waiting.
+
+A relay must hold a deposit longer than this timeout. Any limit on how long a
+relay mailbox keeps an uncollected deposit (issue #891 plans 30 days) must stay
+well above 14 days, so that a recipient that is merely slow to collect still
+answers inside the sender's window; a limit below the timeout would let a
+letter vanish while its sender still reads "no answer yet".
 
 ### 10.4 Routing limitations
 
@@ -6425,6 +6469,14 @@ having been built in separate rounds. The config value is now only the
 *prefill default* for the prompt, and what the SIGTERM/SIGINT signal path
 still uses (no one to prompt there).
 
+A SIGTERM shutdown ends its countdown early once nobody is connected,
+checked before the first warning and about once a second after it (issue
+#845). A service-manager stop or restart runs on the configured default,
+not a delay anyone chose for the occasion, and with no caller left there is
+nobody to wait for. A console `[S]hutdown` and the Update restart keep the
+full delay the SysOp chose even if everyone, themselves included, leaves:
+the SysOp may come back to cancel it.
+
 Cancelling a *scheduled* graceful shutdown needed one real design
 decision: `MaintenanceMode.activate()`'s own docstring already stated "no
 way back" — true once a shutdown reaches its actual disconnect step, but
@@ -6516,7 +6568,8 @@ descriptors (`_MAX_CANDIDATE_DESCRIPTORS = 500`, new-fingerprint admission
 capped but refreshing an already-tracked candidate is always allowed),
 relay-serving slots (`max_relay_clients`, decline-not-error), relay mailbox
 envelopes per recipient (`MAX_MAILBOX_ENVELOPES_PER_RECIPIENT = 50`, HTTP 507
-on overflow, no eviction), Link mail delivery/acknowledgement retry
+on overflow, no eviction; since issue #891 each envelope is also dropped after
+`RELAY_MAILBOX_RETENTION_DAYS`, §8.5), Link mail delivery/acknowledgement retry
 (§13.7's backoff-then-dead-letter), local mailbox size (`MAX_MAIL_PER_
 RECIPIENT`, evict-oldest-read/refuse-if-all-unread — already applied to
 incoming Link mail too, bouncing rather than silently dropping), and Zmodem
@@ -7168,9 +7221,13 @@ Completed product work informed by dogfood includes:
   values, metadata, success, and failure through shared theme roles; colored
   narrow output is truncated by visible width rather than raw ANSI length.
   The default web login banner visibly exercises truecolor while the
-  256-color rendering remains equivalent and readable. Profile and banner-
-  preview diagnostics state the transport's detected capability or limitation;
-  a custom SysOp banner explicitly bypasses the generated showcase. Both
+  256-color rendering remains equivalent and readable. Profile diagnostics
+  state the transport's detected capability or limitation; the banner preview
+  no longer does, since a SysOp read it as developer output (issue #841). A
+  custom SysOp banner bypasses the generated showcase. Before sign-in the
+  node's own chrome is plain ASCII over Telnet, where CP437 terminals such as
+  SyncTERM call from, and Unicode on the web and SSH; a custom banner is sent
+  as authored either way (issue #841). Both
   Telnet's and SSH's initial banners are shown before capability negotiation
   completes -- Telnet's can precede NEW-ENVIRON, and SSH's own pre-auth
   banner (asyncssh's `send_auth_banner`, sent from `begin_auth` before any

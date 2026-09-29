@@ -126,7 +126,10 @@ def test_typing_paints_and_advances_the_cursor(tmp_path):
     assert buf.get_cell(0, 2).char == "C"
 
 
-def test_typing_wraps_to_the_next_row_at_the_canvas_width(tmp_path):
+def test_typing_stops_at_the_end_of_the_row_instead_of_wrapping(tmp_path):
+    # Issue #841: the 81st letter of a line used to wrap onto the start
+    # of the next row, breaking that row's art. It now overwrites the
+    # row's last cell, and the row below is untouched.
     async def scenario():
         session = FakeSession(["X"] * 80 + ["Y", "CTRL+O"])
         return await edit_ansi_art(
@@ -136,8 +139,22 @@ def test_typing_wraps_to_the_next_row_at_the_canvas_width(tmp_path):
 
     result = asyncio.run(scenario())
     buf = _buffer_from(result, height=3)
-    assert buf.get_cell(0, 79).char == "X"
-    assert buf.get_cell(1, 0).char == "Y"
+    assert buf.get_cell(0, 78).char == "X"
+    assert buf.get_cell(0, 79).char == "Y"
+    assert buf.get_cell(1, 0).char == " "
+
+
+def test_status_line_says_when_the_cursor_is_at_the_end_of_a_row(tmp_path):
+    async def scenario():
+        session = FakeSession(["X"] * 80 + ["CTRL+X", "D"])
+        await edit_ansi_art(
+            session, initial_bytes=None, draft_path=tmp_path / "d.draft",
+            width=80, height=3, autosave_interval_seconds=9999,
+        )
+        return session
+
+    session = asyncio.run(scenario())
+    assert any("Col 80/80 (end)" in line for line in _status_line_texts(session))
 
 
 def test_arrow_keys_move_the_cursor(tmp_path):
@@ -180,17 +197,115 @@ def test_cursor_cannot_move_past_the_last_row_or_column(tmp_path):
 
 
 def test_home_and_end_jump_within_the_row(tmp_path):
+    # Issue #841: End goes to just after the row's last painted cell, as
+    # in a text editor, not to the canvas's last column.
     async def scenario():
-        session = FakeSession(["RIGHT", "RIGHT", "HOME", "A", "END", "B", "CTRL+O"])
+        session = FakeSession(["RIGHT", "RIGHT", "HOME", "A", "RIGHT", "C", "HOME", "END", "B", "CTRL+O"])
         return await edit_ansi_art(
             session, initial_bytes=None, draft_path=tmp_path / "d.draft",
-            width=5, height=2, autosave_interval_seconds=9999,
+            width=6, height=2, autosave_interval_seconds=9999,
         )
 
     result = asyncio.run(scenario())
-    buf = _buffer_from(result, width=5, height=2)
-    assert buf.get_cell(0, 0).char == "A"
-    assert buf.get_cell(0, 4).char == "B"
+    buf = _buffer_from(result, width=6, height=2)
+    assert [buf.get_cell(0, col).char for col in range(4)] == ["A", " ", "C", "B"]
+
+
+def test_end_on_a_full_row_stays_on_the_last_column(tmp_path):
+    async def scenario():
+        session = FakeSession(["X"] * 4 + ["HOME", "END", "B", "CTRL+O"])
+        return await edit_ansi_art(
+            session, initial_bytes=None, draft_path=tmp_path / "d.draft",
+            width=4, height=2, autosave_interval_seconds=9999,
+        )
+
+    result = asyncio.run(scenario())
+    buf = _buffer_from(result, width=4, height=2)
+    assert [buf.get_cell(0, col).char for col in range(4)] == ["X", "X", "X", "B"]
+    assert buf.get_cell(1, 0).char == " "
+
+
+def test_end_on_an_empty_row_goes_to_its_start(tmp_path):
+    async def scenario():
+        session = FakeSession(["RIGHT", "RIGHT", "END", "B", "CTRL+O"])
+        return await edit_ansi_art(
+            session, initial_bytes=None, draft_path=tmp_path / "d.draft",
+            width=6, height=2, autosave_interval_seconds=9999,
+        )
+
+    result = asyncio.run(scenario())
+    buf = _buffer_from(result, width=6, height=2)
+    assert buf.get_cell(0, 0).char == "B"
+
+
+def test_a_typed_space_overwrites_what_was_there(tmp_path):
+    # Issue #841 (F040): a space paints a blank cell like any character.
+    async def scenario():
+        session = FakeSession(["HOME", " ", " ", "CTRL+O"])
+        return await edit_ansi_art(
+            session, initial_bytes=b"Night", draft_path=tmp_path / "d.draft",
+            width=8, height=2, autosave_interval_seconds=9999,
+        )
+
+    result = asyncio.run(scenario())
+    buf = _buffer_from(result, width=8, height=2)
+    assert "".join(buf.get_cell(0, col).char for col in range(5)) == "  ght"
+
+
+def test_ctrl_k_clears_from_the_cursor_to_the_end_of_the_row(tmp_path):
+    # Issue #841 (F040): retyping a shorter line left the old line's end
+    # behind ("Ink Night Nigh"); Ctrl+K clears it in one key.
+    async def scenario():
+        session = FakeSession(["HOME", "I", "n", "k", "CTRL+K", "CTRL+O"])
+        return await edit_ansi_art(
+            session, initial_bytes=b"Thursday Ink Night\r\nkeep", draft_path=tmp_path / "d.draft",
+            width=20, height=2, autosave_interval_seconds=9999,
+        )
+
+    result = asyncio.run(scenario())
+    buf = _buffer_from(result, width=20, height=2)
+    assert "".join(buf.get_cell(0, col).char for col in range(20)).rstrip() == "Ink"
+    assert "".join(buf.get_cell(1, col).char for col in range(4)) == "keep"
+
+
+def test_ctrl_l_repaints_the_whole_canvas(tmp_path):
+    async def scenario():
+        session = FakeSession(["CTRL+L", "CTRL+O"])
+        await edit_ansi_art(
+            session, initial_bytes=b"ART", draft_path=tmp_path / "d.draft",
+            width=10, height=2, autosave_interval_seconds=9999,
+        )
+        return session
+
+    session = asyncio.run(scenario())
+    # The first draw plus the Ctrl+L repaint: two full renders.
+    assert _written_text(session).count(clear_screen()) >= 3  # 2 renders + the exit clear
+    assert "ART" in "".join(session.written[1:])
+
+
+@pytest.mark.parametrize(
+    ("keys", "title"),
+    [(["CTRL+P", "0", "3"], "Foreground color"), (["CTRL+B", "0", "3"], "Background color"), (["CTRL+T", "0", "1"], "Glyph")],
+)
+def test_every_picker_is_followed_by_a_full_repaint_of_the_canvas(tmp_path, keys, title):
+    # Issue #841 (F039): a picker draws its list over the canvas; the
+    # cell diff didn't know, so the list stayed on screen instead of the
+    # drawing. After a picker the canvas is now drawn again in full.
+    async def scenario():
+        session = FakeSession(keys + ["CTRL+X", "D"])
+        await edit_ansi_art(
+            session, initial_bytes=b"MY PEN", draft_path=tmp_path / "d.draft",
+            width=20, height=2, autosave_interval_seconds=9999,
+        )
+        return session
+
+    session = asyncio.run(scenario())
+    text = _written_text(session)
+    after_picker = text[text.rindex(title):]
+    assert clear_screen() in after_picker
+    # A full render skips blank cells, so the words arrive separately (and
+    # a picked glyph lands on the first one).
+    assert "PEN" in after_picker
 
 
 def test_backspace_erases_and_moves_the_cursor_back(tmp_path):

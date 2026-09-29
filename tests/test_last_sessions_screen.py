@@ -205,6 +205,36 @@ def test_previous_callers_screen_is_truecolor_fancy_and_excludes_current_session
     database.close()
 
 
+def test_previous_callers_screen_plain_style_drops_the_neon(tmp_path):
+    # Issue #841 (F057): a SysOp can have the panel drawn plain, in the
+    # node's header colour with a quiet heading, instead of only hiding it.
+    from netbbs.session_history import set_previous_callers_plain
+
+    database = db_(tmp_path)
+    alice = create_user(database, "alice", password="hunter2", user_level=10)
+    bob = create_user(database, "bob", password="hunter2", user_level=10)
+    record_session_end(database, record_session_start(database, bob))
+    set_previous_callers_plain(database, True)
+    session = FakeSession([" "])
+    session.supports_truecolor = True
+
+    asyncio.run(_show_previous_callers_screen(session, database, alice, current_history_id=None))
+
+    text = _visible(session)
+    assert "Previous callers" in text
+    assert "Who has called in lately" in text
+    assert "SIGNALS" not in text
+    assert "P R E V I O U S" not in text
+    assert "bob" in text
+    # The frame and heading keep to one colour: no gradient, in truecolor
+    # or in 256 colours (review on #889).
+    output = _written_text(session)
+    assert len(set(re.findall(r"\x1b\[38;2;\d+;\d+;\d+m", output))) <= 3
+    heading_line = next(line for line in output.split("\r\n") if "Previous callers" in _ANSI_ESCAPE_RE.sub("", line))
+    assert len(set(re.findall(r"\x1b\[38;5;\d+m", heading_line))) <= 2
+    database.close()
+
+
 def test_previous_callers_screen_shrinks_to_the_available_terminal_rows(tmp_path):
     database = db_(tmp_path)
     alice = create_user(database, "alice", password="hunter2", user_level=10)

@@ -146,7 +146,10 @@ first place; the *only* way such a sender ever learns that recipient's
 someone who has met them directly (see that function's own docstring
 for why this is safe: a wrong/stale candidate address costs a failed
 deposit, never a confidentiality issue, since the payload is already
-sealed to the real recipient's own key). Only `link_message` gets this
+sealed to the real recipient's own key). A deposit ends the delivery
+work item but not the letter: it stays pending with its handoff time
+recorded, and expires as `no_answer` if no answer comes back within
+`RELAY_NO_ANSWER_TIMEOUT` (issue #874). Only `link_message` gets this
 fallback, never an acknowledgement -- `netbbs.link.relay_mailbox`'s own
 documented boundary.
 """
@@ -194,6 +197,8 @@ from netbbs.link.mail_refusals import VIA_RELAY
 from netbbs.link.mail import (
     EXPIRED_BY_OWN_POLICY,
     expire_link_message_delivery,
+    expire_unanswered_relay_mail,
+    record_relay_handoff,
     get_link_mail_acknowledgement,
     get_link_message_for_delivery,
     record_link_message_refused,
@@ -202,7 +207,11 @@ from netbbs.link.protocol import (
     DEFERRED_EVENT_RETRY_SECONDS, MAX_EVENTS_PER_REQUEST, HelloMessage, LinkNode, LinkProtocolError,
     PeerExchange,
 )
-from netbbs.link.relay_mailbox import RelayableEnvelope
+from netbbs.link.relay_mailbox import (
+    RELAY_MAILBOX_RETENTION_DAYS,
+    RelayableEnvelope,
+    prune_expired_relay_mailbox_envelopes,
+)
 from netbbs.link.relay_selection import TARGET_RELAY_COUNT, relays_needing_replacement, select_relay_candidates
 from netbbs.link.reliability import record_dial_outcome
 from netbbs.link.onboarding import participation_accepted
@@ -512,6 +521,10 @@ async def run_link_sync(
             node, session, lane, enforce_trust_policy=enforce_trust_policy
         )
         await _forget_retired_attestations(lane)
+        # Issue #891: mail held here as a relay that its recipient never
+        # came back for. Every pass, whatever this node's own mode: a node
+        # that stopped serving relays still holds what it took before.
+        await _prune_relay_mailbox(lane)
         # Issue #58: relay selection/pickup only makes sense
         # for an outgoing-only node -- a full peer is directly dialable
         # by definition, so it has nothing to gain from seeking relays
@@ -1644,6 +1657,27 @@ async def _reconcile_own_attestations(node: LinkNode, lane: DatabaseLane) -> Non
         )
 
 
+async def _prune_relay_mailbox(lane: DatabaseLane) -> None:
+    """Drop relay-mailbox envelopes older than `RELAY_MAILBOX_RETENTION_DAYS`
+    (issue #891) and say what went. A WARNING, so it reaches the SysOp's
+    bounded diagnostic log (design doc §13.11): the mail is gone for good,
+    and neither end hears it from this node."""
+    try:
+        dropped = await lane.run(prune_expired_relay_mailbox_envelopes)
+    except sqlite3.Error as exc:
+        _logger.warning("Link relay mailbox: could not drop expired envelopes: %s", exc)
+        return
+    if dropped:
+        _logger.warning(
+            "Link relay mailbox: dropped %d envelope(s) held longer than %d days for %d "
+            "recipient(s) that never collected them: %s",
+            sum(dropped.values()),
+            RELAY_MAILBOX_RETENTION_DAYS,
+            len(dropped),
+            ", ".join(f"{fingerprint} ({count})" for fingerprint, count in sorted(dropped.items())),
+        )
+
+
 async def _forget_retired_attestations(lane: DatabaseLane) -> None:
     """Blank the values of received attestations that have expired (issue #596).
 
@@ -2462,7 +2496,16 @@ async def _push_pending_link_mail(
     yet due (still backing off after an earlier failure) is simply not
     returned by `load_due_work_items` this pass; it'll be picked up
     again once `next_attempt_at` has passed.
+
+    First, mail left at a relay that has gone unanswered too long expires
+    (issue #874): a relay deposit ends the delivery work item, so nothing
+    else would ever give up on it.
     """
+    expired = await lane.run(expire_unanswered_relay_mail)
+    if expired:
+        _logger.info(
+            "Link sync: %d letter(s) left at a relay got no answer in time; their senders are told", expired
+        )
     if enforce_trust_policy:
         await lane.run(_wake_mail_for_established_targets)
     for work_item in await lane.run(load_due_work_items, kind=KIND_LINK_MAIL_DELIVERY):
@@ -2521,6 +2564,7 @@ async def _push_pending_link_mail(
             continue
         base_urls = _dialable_addresses_for_peer(node, target_fingerprint)
         delivered = False
+        via_relay = False
         refusals: list[str] = []
         if base_urls:
             delivered = await _try_addresses_via(
@@ -2533,11 +2577,16 @@ async def _push_pending_link_mail(
             # directly-dialable or genuinely outgoing-only.
             relay_urls = _relay_base_urls_for_peer(node, target_fingerprint)
             if relay_urls:
-                delivered = await _try_addresses_via(
+                delivered = via_relay = await _try_addresses_via(
                     relay_urls, lambda url: _deposit_one(session, url, target_fingerprint, message)
                 )
 
         if delivered:
+            if via_relay:
+                # The relay is not the recipient: the letter stays pending,
+                # shown as with a relay, until an answer comes or it times
+                # out (issue #874).
+                await lane.run(record_relay_handoff, work_item.reference_id)
             await lane.run(record_success, work_item)
         elif refusals:
             # The recipient's node heard the message and its trust policy

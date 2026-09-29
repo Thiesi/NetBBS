@@ -82,7 +82,7 @@ from netbbs.net.unicode_style_preference import (
     unicode_style_ever_set,
 )
 from netbbs.guest import guest_is_eligible, guest_login_for, pre_login_notice
-from netbbs.net.welcome_banner import load_welcome_banner
+from netbbs.net.welcome_banner import load_welcome_banner, pre_login_unicode_style
 from netbbs.permissions import meets_level
 from netbbs.rendering import (
     ACCENT_COLOR,
@@ -144,12 +144,10 @@ async def _write_connection_notice(
 ) -> None:
     """Render a terminal connection state without changing its outcome.
 
-    Unconditionally `unicode_style=True` (no `clear=`/ASCII-fallback
-    split like most other screens): this fires pre-authentication, with
-    no account/preference to look up yet, and NetBBS's Telnet transport
-    already sends every screen as UTF-8 regardless of any preference
-    (see `unicode_style_preference`'s own docstring) -- the same
-    reasoning `welcome_banner`'s default banner already uses. `db` is
+    This fires pre-authentication, with no account/preference to look
+    up yet, so its style follows the transport instead
+    (`welcome_banner.pre_login_unicode_style`, issue #841): plain ASCII
+    over Telnet, where CP437 terminals call from, Unicode elsewhere. `db` is
     read directly and synchronously here rather than via `lane.run`
     (issue #162's header-color sweep) -- every call site is a
     connection-lifecycle notice that fires before or around login, the
@@ -182,11 +180,11 @@ async def _write_connection_notice(
             title,
             breadcrumb=(),
             width=width,
-            unicode_style=True,
+            unicode_style=pre_login_unicode_style(session),
             header_color=header_color,
         )
     )
-    await session.write_line(status_badge(title.upper(), tone=tone, unicode_style=True))
+    await session.write_line(status_badge(title.upper(), tone=tone, unicode_style=pre_login_unicode_style(session)))
     await session.write_line(
         colored(reflow(detail, width=width), fg_color=METADATA_COLOR)
     )
@@ -383,7 +381,10 @@ async def _run_authenticated_session(
 
     try:
         await write_preformatted_line(
-            session, load_welcome_banner(db, truecolor=session.supports_truecolor)
+            session,
+            load_welcome_banner(
+                db, truecolor=session.supports_truecolor, unicode_style=pre_login_unicode_style(session)
+            ),
         )
         # Design doc -- node management, Thiesi's own request: shown to
         # *every* connecting client, SysOp-to-be or not -- account level
@@ -1165,10 +1166,8 @@ async def _login(
             ),
             width=session.terminal_width,
             # Pre-authentication -- no account/preference to look up yet,
-            # and every screen is already sent as UTF-8 regardless (see
-            # `unicode_style_preference`'s own docstring), same reasoning
-            # `_write_connection_notice` and the welcome banner both use.
-            unicode_style=True,
+            # so the transport decides (see `_write_connection_notice`).
+            unicode_style=pre_login_unicode_style(session),
             header_color=effective_header_color_256(db),
         )
     )
@@ -1462,7 +1461,7 @@ async def _register_new_account(
                     f"(Attempt {attempt} of {_REGISTRATION_MAX_ATTEMPTS})"
                 ),
                 width=session.terminal_width,
-                unicode_style=True,  # pre-authentication -- see _write_connection_notice
+                unicode_style=pre_login_unicode_style(session),  # pre-authentication -- see _write_connection_notice
                 header_color=effective_header_color_256(db),
             )
         )
