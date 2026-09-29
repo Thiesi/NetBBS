@@ -30,15 +30,16 @@ directly anymore):
   the callback closures then just index into. `netbbs.timeutil.
   resolve_display_preferences` exists specifically for this: fetch the
   node's format/timezone once per picker call, not once per item.
-- `_mail_draft_path` no longer takes a `Database` at all -- it only
-  ever needed the connection's file *path*, not a query, so it now
-  reads `lane.path` directly (a plain in-memory attribute, see
-  `DatabaseLane.path`'s own docstring) rather than going through the
-  lane's worker thread for something that was never actually blocking.
+- `_letter_draft_path` takes no `Database` at all -- it only needs
+  the connection's file *path*, not a query, so it reads `lane.path`
+  directly (a plain in-memory attribute, see `DatabaseLane.path`'s own
+  docstring) rather than going through the lane's worker thread for
+  something that was never actually blocking.
 """
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -83,6 +84,9 @@ from netbbs.net.composition import (
     too_long_message,
 )
 from netbbs.net.confirm import prompt_yes_no
+from netbbs.net.draft_storage import (
+    delete_draft, delete_draft_fields, load_draft, load_draft_fields, save_draft_fields,
+)
 from netbbs.net.editor_preference import fullscreen_editor_enabled
 from netbbs.net.menu_description_preference import menu_description_level
 from netbbs.net.redraw_preference import redraw_in_place_enabled
@@ -152,11 +156,25 @@ async def browse_mail(
     redraw_in_place = await lane.run(redraw_in_place_enabled, user)
     unicode_style = await lane.run(unicode_style_enabled, user)
     collapsed = await lane.run(breadcrumb_collapsed_enabled, user)
+    _adopt_legacy_mail_draft(lane, user)
     await _render_mail_menu(session, lane, user, description_level, redraw_in_place, unicode_style, collapsed)
     while True:
         choice = (await session.read_key()).lower()
 
-        if choice == "b":
+        if choice == "d" and _letter_draft_path(lane, user).exists():
+            # The kept new letter (issue #814): resume it, delete it, or
+            # leave it -- the same choice a board's saved post draft gets.
+            await session.write_line("")
+            draft = _load_letter_draft(_letter_draft_path(lane, user))
+            if draft is not None:
+                outcome = await _letter_draft_choice(session, lane, user, draft, starting_new=False)
+                if outcome == "resume":
+                    await _compose_mail(session, lane, user, link_context=link_context, resume=True)
+                elif outcome == "discard":
+                    _forget_letter(_letter_draft_path(lane, user))
+                    announce(session, "Draft deleted.", tone="muted")
+            await _render_mail_menu(session, lane, user, description_level, redraw_in_place, unicode_style, collapsed)
+        elif choice == "b":
             await session.write_line("")
             return
         elif choice == "i":
@@ -191,12 +209,18 @@ async def _render_mail_menu(
             header_color=await lane.run(effective_header_color_256), node_name_gradient=session.node_name_gradient)
     await session.write_line(f"\r\n{header}")
 
+    draft = _load_letter_draft(_letter_draft_path(lane, user))
+    if draft is not None:
+        # Said on the mail screen, not asked on the way in (issue #814).
+        await session.write_line(colored(f"\r\n{_letter_draft_notice(draft)}", fg_color=MUTED_COLOR))
     options = [
         MenuEntry(label=menu_key("I", "nbox"), brief="Read your received mail"),
         MenuEntry(label=menu_key("S", "ent"), brief="Review mail you've sent"),
         MenuEntry(label=menu_key("C", "ompose"), brief="Write a new message"),
-        MenuEntry(label=menu_key("B", "ack"), brief="Return to the main menu"),
     ]
+    if draft is not None:
+        options.append(MenuEntry(label=menu_key("D", "raft"), brief="Resume or delete your unfinished letter"))
+    options.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to the main menu"))
     await session.write_line(
         f"\r\n{_menu_row(options, width=session.terminal_width, height=session.terminal_height, description_level=description_level)}"
     )
@@ -493,7 +517,7 @@ async def _show_inbox_message(
                 session, lane, user, prefill_link_address=message.sender_label,
                 prefill_subject=subject,
                 prefill_body=quote_body(message.body, author=shown) or None,
-                link_context=link_context,
+                link_context=link_context, reply_key=_reply_key(message),
             )
             continue
         sender = (
@@ -508,6 +532,7 @@ async def _show_inbox_message(
             session, lane, user, prefill_recipient=sender,
             prefill_subject=subject,
             prefill_body=quote_body(message.body, author=message.sender_label) or None,
+            reply_key=_reply_key(message),
         )
 
 
@@ -539,6 +564,8 @@ async def _compose_mail(
     prefill_subject: str = "",
     prefill_body: str | None = None,
     link_context: LinkContext | None = None,
+    reply_key: str | None = None,
+    resume: bool = False,
 ) -> None:
     """
     `link_context`, if given, lets the "To:" prompt accept a `user@node`
@@ -557,6 +584,14 @@ async def _compose_mail(
     "Reply", with the To and Subject prompts under its title, and the
     fullscreen editor and the review screen both showing whom the letter
     is for and under what subject.
+
+    Each letter has its own draft slot (issue #814): the new letter, and a
+    reply to one message (`reply_key`, see `_reply_key`). Either editor keeps the text there as
+    it is typed, with its To and Subject beside it, and "Keep draft &
+    exit" or `/exit` leaves it for later. A letter found in its slot is
+    offered before anything is asked -- resume it, delete it and start
+    again, or go back -- and is never loaded into another letter's
+    editor. `resume` skips that choice: the caller already made it.
     """
     # Both entry points here are a hotkey (`[C]ompose`/`[R]eply`)
     # immediately followed by a `read_line()` prompt -- an Enter that
@@ -579,8 +614,30 @@ async def _compose_mail(
     accent_color = await lane.run(effective_accent_color_256)
     header_color = await lane.run(effective_header_color_256)
     truecolor = await lane.run(lambda db: effective_truecolor(session, db, user))
-    title = "Reply" if prefill_recipient is not None or prefill_link_address is not None else "New message"
+    title = "Reply" if reply_key is not None else "New message"
     link_enabled = link_context is not None
+
+    draft_path = _letter_draft_path(lane, user, reply_key)
+    resumed = _load_letter_draft(draft_path)
+    if resumed is not None and not resume:
+        outcome = await _letter_draft_choice(session, lane, user, resumed, starting_new=True)
+        if outcome == "back":
+            return
+        if outcome == "discard":
+            _forget_letter(draft_path)
+            announce(session, "Draft deleted.", tone="muted")
+            resumed = None
+    if resumed is not None:
+        # The letter as it was left: its To, Subject and text replace what
+        # a fresh start would have filled in.
+        prefill_body = resumed.body
+        if resumed.subject is not None:
+            prefill_subject = resumed.subject
+    kept_notice = (
+        "Draft saved -- you'll be offered it when you reply to this message again."
+        if reply_key is not None
+        else "Draft saved -- it is under [D]raft on the mail screen."
+    )
 
     async def compose_screen(fields: list[tuple[str, str]], hint: str | None = None) -> None:
         await show_compose_screen(
@@ -600,15 +657,25 @@ async def _compose_mail(
 
     # The technical address a Link reply goes to, while To still shows it.
     reply_address: str | None = None
+    recipient_text: str | None = None
+    recipient_label = ""
+    if resumed is not None and resumed.reply_address is not None:
+        prefill_link_address, prefill_recipient = resumed.reply_address, None
+    elif resumed is not None and resumed.recipient_text is not None:
+        prefill_link_address, prefill_recipient = None, None
+        recipient_text, recipient_label = await settle_recipient(resumed.recipient_text)
     if prefill_link_address is not None:
         reply_address = prefill_link_address
         recipient_text = await _display_link_address(lane, prefill_link_address)
         recipient_label = recipient_text
-        await compose_screen([("To", recipient_label)])
     elif prefill_recipient is not None:
         recipient_text = prefill_recipient.username
         recipient_label = recipient_text
-        await compose_screen([("To", recipient_label)])
+    if recipient_text is not None:
+        # A resumed letter shows its Subject too: nothing is asked again.
+        await compose_screen(
+            [("To", recipient_label), *([("Subject", prefill_subject)] if resumed and resumed.subject else [])]
+        )
     else:
         await compose_screen(
             [],
@@ -624,7 +691,9 @@ async def _compose_mail(
             except InputCancelled:
                 recipient_text = ""
             if not recipient_text:
-                announce(session, "Cancelled.", tone="muted")
+                # A resumed letter from before #814 is still kept (review on
+                # #873): say so, not that it is gone.
+                announce(session, kept_notice if resumed is not None else "Cancelled.", tone="muted")
                 return
             # "sysop" reaches the node's SysOp (issue #840, F087).
             recipient_text = await lane.run(resolve_sysop_alias, recipient_text)
@@ -653,30 +722,47 @@ async def _compose_mail(
             break
         recipient_text, recipient_label = await settle_recipient(recipient_text)
 
-    # Checked here rather than at Send (issue #812): an empty subject is
-    # asked for again, one that is too long says by how much, and only
-    # Esc on a fresh prompt gives up on the message.
-    subject = await read_subject(session, max_bytes=MAX_MAIL_SUBJECT_BYTES, current=prefill_subject or None)
-    if subject is None:
-        announce(session, "Message cancelled.", tone="muted")
-        return
+    if resumed is not None and resumed.subject is not None:
+        subject = resumed.subject
+    else:
+        # Checked here rather than at Send (issue #812): an empty subject is
+        # asked for again, one that is too long says by how much, and only
+        # Esc on a fresh prompt gives up on the message.
+        subject = await read_subject(session, max_bytes=MAX_MAIL_SUBJECT_BYTES, current=prefill_subject or None)
+        if subject is None:
+            announce(session, kept_notice if resumed is not None else "Message cancelled.", tone="muted")
+            return
 
     def editor_header() -> EditorHeader:
         return EditorHeader(title, (("To", recipient_label), ("Subject", subject)), color=header_color)
 
-    # A reply starts on the quote, with the cursor under it (issue #675).
+    def keep_fields() -> None:
+        # What the text is for, beside it -- the editors only keep the
+        # text (issue #814).
+        save_draft_fields(
+            draft_path, {"to": recipient_text, "reply_address": reply_address, "subject": subject},
+        )
+
+    keep_fields()
+    # A reply starts on the quote, with the cursor under it (issue #675); a
+    # resumed letter where it was left off.
     body = await _compose_mail_body(
         session, lane, user, initial_text=prefill_body, cursor_at_end=prefill_body is not None,
-        header=editor_header(),
+        header=editor_header(), draft_path=draft_path,
     )
     if body is None or not body.strip():
+        if body is None and draft_path.exists():
+            announce(session, kept_notice, tone="muted")
+            return
+        _forget_letter(draft_path)
         announce(session, "Message cancelled.", tone="muted")
         return
     # Appended once, right after the message is first composed -- not on
     # every subsequent "edit body" pass over the same draft (`netbbs.
     # signature.append_signature`'s own docstring): from here on the
     # signature is just part of the editable body, the same way a real
-    # mail client's compose buffer already works.
+    # mail client's compose buffer already works. Idempotent, so a
+    # resumed letter that already carries it does not get it twice.
     signature = await lane.run(get_signature, user)
     if signature:
         body = append_signature(body, signature)
@@ -708,6 +794,7 @@ async def _compose_mail(
             breadcrumb=("Mail", title),
         )
         if action is ReviewAction.CANCEL:
+            _forget_letter(draft_path)
             announce(session, "Message cancelled.", tone="muted")
             return
         if action is ReviewAction.EDIT_RECIPIENT:
@@ -720,9 +807,19 @@ async def _compose_mail(
             subject = await read_subject(session, max_bytes=MAX_MAIL_SUBJECT_BYTES, current=subject)
             continue
         if action is ReviewAction.EDIT_BODY:
-            revised = await _compose_mail_body(session, lane, user, initial_text=body, header=editor_header())
+            # A letter kept from here keeps the To and Subject review
+            # changed, not the ones it was started with.
+            keep_fields()
+            revised = await _compose_mail_body(
+                session, lane, user, initial_text=body, header=editor_header(), draft_path=draft_path,
+            )
             if revised is not None:
                 body = revised
+            elif draft_path.exists():
+                # "Keep draft & exit" or /exit while revising: the whole
+                # letter is kept for later, as on a board (issue #149).
+                announce(session, kept_notice, tone="muted")
+                return
             else:
                 announce(session, "Body unchanged.", tone="muted")
             continue
@@ -752,6 +849,7 @@ async def _compose_mail(
             except (LinkMailError, MailError) as exc:
                 announce(session, f"Could not send: {exc}", tone="error")
                 continue
+            _forget_letter(draft_path)
             announce(session, "Message sent.")
             return
 
@@ -768,8 +866,114 @@ async def _compose_mail(
         except MailError as exc:
             announce(session, f"Could not send: {exc}", tone="error")
             continue
+        _forget_letter(draft_path)
         announce(session, "Message sent.")
         return
+
+
+@dataclass(frozen=True)
+class _LetterDraft:
+    """A letter kept for later (issue #814): its text, and what it was
+    for. `recipient_text` and `subject` are `None` for a draft kept before
+    #814, which had only its text; `reply_address` is a Link reply's
+    stored `user@<fingerprint>`."""
+
+    body: str
+    recipient_text: str | None
+    reply_address: str | None
+    subject: str | None
+
+
+def _reply_key(message: MailMessage) -> str:
+    """The message a reply answers, for its draft slot's name: its id, and
+    a digest of when and from whom it came -- a mail id can be handed out
+    again once the newest message is gone, and a kept reply must not be
+    offered for a different message that got the same id."""
+    digest = hashlib.sha256(f"{message.created_at}|{message.sender_label}".encode("utf-8")).hexdigest()[:12]
+    return f"{message.id}_{digest}"
+
+
+def _letter_draft_path(lane: DatabaseLane, user: User, reply_key: str | None = None) -> Path:
+    """One slot per letter (issue #814): the caller's new letter, and one
+    per message they are replying to. Before #814 every letter shared one
+    body-only file, so a kept letter was offered in place of the next
+    one's text -- a reply to someone else lost its quote to it."""
+    directory = lane.path.parent / f"{lane.path.name}_drafts"
+    directory.mkdir(parents=True, exist_ok=True)
+    if reply_key is not None:
+        return directory / f"mail_reply_{user.id}_{reply_key}.draft"
+    return directory / f"mail_new_{user.id}.draft"
+
+
+def _adopt_legacy_mail_draft(lane: DatabaseLane, user: User) -> None:
+    """A letter kept before #814 is in the one shared `mail_<id>.draft`,
+    with no To or Subject. It becomes the caller's new letter, unless one
+    is already kept there; resuming it asks for To and Subject again."""
+    new_slot = _letter_draft_path(lane, user)
+    legacy = new_slot.with_name(f"mail_{user.id}.draft")
+    if legacy.exists() and not new_slot.exists():
+        try:
+            legacy.replace(new_slot)
+        except OSError:
+            pass
+
+
+def _load_letter_draft(path: Path) -> _LetterDraft | None:
+    if not path.exists():
+        return None
+    try:
+        body = load_draft(path)
+    except (OSError, UnicodeDecodeError):
+        return None
+    fields = load_draft_fields(path)
+    return _LetterDraft(
+        body=body, recipient_text=fields.get("to"), reply_address=fields.get("reply_address"),
+        subject=fields.get("subject"),
+    )
+
+
+def _forget_letter(path: Path) -> None:
+    delete_draft(path)
+    delete_draft_fields(path)
+
+
+def _letter_draft_notice(draft: _LetterDraft) -> str:
+    """"You have an unfinished letter to Bob: Lunch?" -- plain text; the
+    caller styles it."""
+    to = f" to {sanitize_text(draft.recipient_text)}" if draft.recipient_text else ""
+    about = f": {sanitize_text(draft.subject)}" if draft.subject else ""
+    return f"You have an unfinished letter{to}{about}"
+
+
+async def _letter_draft_choice(
+    session: Session, lane: DatabaseLane, user: User, draft: _LetterDraft, *, starting_new: bool,
+) -> str:
+    """"resume", "discard" or "back" for a kept letter (issue #814) --
+    the same three a board's saved post draft offers. `starting_new` is
+    the caller's [C]ompose or [R]eply, where [D]iscard deletes the kept
+    letter and then starts afresh; from [D]raft it only deletes it."""
+    description_level = await lane.run(menu_description_level, user)
+    await session.write_line(colored(f"\r\n{_letter_draft_notice(draft)}", fg_color=MUTED_COLOR))
+    await session.write_line(
+        _menu_row(
+            [
+                MenuEntry(label=menu_key("R", "esume"), brief="Open it where you left off"),
+                MenuEntry(
+                    label=menu_key("D", "iscard"),
+                    brief="Delete it, then start again" if starting_new else "Delete the draft",
+                ),
+                MenuEntry(label=menu_key("B", "ack"), brief="Leave it for later"),
+            ],
+            width=session.terminal_width, height=session.terminal_height, description_level=description_level,
+        )
+    )
+    await write_prompt(session, "Choice: ")
+    while True:
+        choice = (await session.read_key()).lower()
+        if choice in ("r", "d", "b"):
+            await session.write_line("")
+            return {"r": "resume", "d": "discard", "b": "back"}[choice]
+        await session.write(reject_unhandled_key(choice))
 
 
 def _link_mail_refusal(db, fingerprint: str) -> str | None:
@@ -893,8 +1097,8 @@ def _too_long_to_send(subject: str, body: str) -> str | None:
 
 
 async def _compose_mail_body(
-    session: Session, lane: DatabaseLane, user: User, *, initial_text: str | None, cursor_at_end: bool = False,
-    header: EditorHeader | None = None,
+    session: Session, lane: DatabaseLane, user: User, *, initial_text: str | None, draft_path: Path,
+    cursor_at_end: bool = False, header: EditorHeader | None = None,
 ) -> str | None:
     """Enter or revise one mail body through the user's chosen editor.
 
@@ -902,22 +1106,24 @@ async def _compose_mail_body(
     the caller owns review and persistence. `header` is what the fullscreen
     editor shows above the text; the line editor writes under the compose
     or review screen, which already shows it.
+
+    `draft_path` is this letter's own slot (issue #814), so both editors
+    keep the text as it is typed and offer "Keep draft & exit" / `/exit`.
+    Neither asks about a draft found there: `_compose_mail` has already
+    offered it and passes it in as `initial_text`. `None` with the draft
+    still on disk means the letter was kept; without it, cancelled.
     """
     if await lane.run(fullscreen_editor_enabled, user):
         return await edit_prose(
-            session, initial_text=initial_text, draft_path=_mail_draft_path(lane, user), max_bytes=MAX_MAIL_BODY_BYTES,
+            session, initial_text=initial_text, draft_path=draft_path, max_bytes=MAX_MAIL_BODY_BYTES,
             unicode_style=await lane.run(unicode_style_enabled, user), cursor_at_end=cursor_at_end,
-            header=header,
+            header=header, offer_recovery=False,
         )
     return await edit_line_body(
         session,
         initial_text=initial_text,
         max_bytes=MAX_MAIL_BODY_BYTES,
         max_lines=_MAX_PLAIN_MAIL_LINES,
+        draft_path=draft_path,
+        offer_recovery=False,
     )
-
-
-def _mail_draft_path(lane: DatabaseLane, user: User) -> Path:
-    directory = lane.path.parent / f"{lane.path.name}_drafts"
-    directory.mkdir(parents=True, exist_ok=True)
-    return directory / f"mail_{user.id}.draft"

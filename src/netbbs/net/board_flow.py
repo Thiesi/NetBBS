@@ -826,6 +826,7 @@ _LIST_HELP = [
 
 
 _SAVED_DRAFT_NOTICE = "You have a saved post draft for this message board from an earlier session."
+_SAVED_DRAFT_KEPT_NOTICE = "Your draft is still saved -- [D]raft on this board resumes it."
 _CLOSED_BOARD_NOTICE = "This message board is closed. It can be read, but it takes no new posts."
 _STAYS_LOCAL_NOTICE = "Other nodes carrying this board keep the original: only its origin can change it for them."
 
@@ -1321,10 +1322,17 @@ async def _show_board(
             header_color=effective_header_color(session, db), accent_color=effective_accent_color(session, db),
         )
 
-    async def _compose_new_post(*, initial_body: str | None = None, reply_to: Post | None = None) -> bool:
+    async def _compose_new_post(
+        *, initial_body: str | None = None, reply_to: Post | None = None, resumed: bool = False
+    ) -> bool:
         """[P]ost, or with `reply_to` a reply to that post (issue #675): the
         subject starts as "Re: ...", the body as the post quoted, with the
-        cursor under the quote. Returns whether a post was published."""
+        cursor under the quote. Returns whether a post was published.
+
+        `resumed` (issue #814): `initial_body` is the saved new-post draft,
+        which stays on disk until the editor replaces it -- a subject left
+        empty, or a connection dropped before the first keystroke, no
+        longer loses it."""
         # `[P]ost` is a hotkey followed straight by a line prompt: an Enter
         # typed right behind it ("P<Enter>") would otherwise be read as a
         # blank subject and cancel the post. Same guard as mail's compose.
@@ -1340,6 +1348,9 @@ async def _show_board(
             current=reply_subject(reply_to.subject, max_bytes=MAX_SUBJECT_BYTES) if reply_to is not None else None,
         )
         if not subject:
+            if resumed:
+                announce(session, _SAVED_DRAFT_KEPT_NOTICE, tone="muted")
+                return False
             announce(session, "Reply cancelled." if reply_to else "Post cancelled.", tone="muted")
             return False
         if reply_to is None:
@@ -1370,7 +1381,7 @@ async def _show_board(
         body = await _compose_body(
             session, db, user, initial_text=initial_body, draft_path=draft_path,
             keep_pasted_color=board.allow_color, cursor_at_end=reply_to is not None,
-            header=_editor_header(session, db, board, compose_title, subject),
+            header=_editor_header(session, db, board, compose_title, subject), offer_recovery=not resumed,
         )
         if body is not None:
             # `append_signature` is idempotent (its own docstring): a
@@ -1535,13 +1546,12 @@ async def _show_board(
             if choice == "r":
                 await session.write_line("")
                 saved_text = load_draft(draft_path)
-                # Consumed here, before _compose_new_post ever opens an
-                # editor against the same draft_path -- otherwise that
-                # editor's own crash-recovery check would immediately
-                # offer to "resume" the very draft this menu just handed
-                # off, a redundant second prompt for the same file.
-                delete_draft(draft_path)
-                await _compose_new_post(initial_body=saved_text)
+                # Handed to the editor with `resumed`, which keeps it from
+                # asking about the very draft this menu just handed off --
+                # and leaves it on disk until the editor replaces it, so a
+                # cancelled subject or a dropped connection does not lose
+                # it (issue #814).
+                await _compose_new_post(initial_body=saved_text, resumed=True)
                 return True
             await session.write(reject_unhandled_key(choice))
 
@@ -2263,6 +2273,7 @@ async def _compose_body(
     keep_pasted_color: bool = False,
     cursor_at_end: bool = False,
     header: EditorHeader | None = None,
+    offer_recovery: bool = True,
 ) -> str | None:
     """The single place a post body (or an edit of one) is actually
     entered: the fullscreen prose editor if `user` has opted in,
@@ -2276,12 +2287,15 @@ async def _compose_body(
 
     `keep_pasted_color` is the board's "Color in posts" setting (issue
     #754): where pipe codes are color, pasted color is typed in as them;
-    where they are text, it is dropped rather than left as ``|04``."""
+    where they are text, it is dropped rather than left as ``|04``.
+
+    `offer_recovery` False: `initial_text` already is the saved draft
+    (issue #814), so neither editor asks about it again."""
     if fullscreen_editor_enabled(db, user):
         return await edit_prose(
             session, initial_text=initial_text, draft_path=draft_path, max_bytes=MAX_BODY_BYTES,
             unicode_style=unicode_style_enabled(db, user), keep_pasted_color=keep_pasted_color,
-            cursor_at_end=cursor_at_end, header=header,
+            cursor_at_end=cursor_at_end, header=header, offer_recovery=offer_recovery,
         )
     return await edit_line_body(
         session,
@@ -2290,6 +2304,7 @@ async def _compose_body(
         max_lines=_MAX_PLAIN_POST_LINES,
         draft_path=draft_path,
         keep_pasted_color=keep_pasted_color,
+        offer_recovery=offer_recovery,
     )
 
 

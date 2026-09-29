@@ -70,11 +70,21 @@ Open a message board, select a post, and use the displayed actions to read,
 reply, or start a topic. Follow a resource to make it easier to revisit.
 On a moderated board, your post may wait for approval before others see it.
 
-The text editor shows its commands. In the line editor, `/exit` or `/quit`
-keeps a post draft for later; `/cancel` discards it. In the fullscreen
-editor, **Ctrl+G** shows help and **Ctrl+X** opens the exit choices, including
-**Keep draft & exit**. A saved post draft is offered when you return to
-that board. A draft is not a published post.
+The text editor shows its commands. In the line editor, a blank line starts
+a new paragraph; press Enter on an empty line twice, or type `/done`, to
+finish. `/insert N` writes the next lines before line N until you type
+`/end`, which is how you answer between the quoted lines of a reply; `/list`
+shows every line and where you are writing. `/exit` or `/quit` keeps a draft
+for later; `/cancel` discards it. In the fullscreen editor, **Ctrl+G** shows
+help and **Ctrl+X** opens the exit choices, including **Keep draft & exit**.
+Both editors keep what you have typed if the connection drops.
+
+A draft comes back where you started it. A new post's draft is offered when
+you return to that board, a reply's when you reply to the same post or
+message again. An unfinished letter is shown on the mail screen under
+**[D]raft**, with its recipient and subject, and **Compose** offers it before
+starting a new one: resume it, delete it, or leave it for later. A draft is
+never sent or posted by itself.
 
 Writing a message or a post opens a screen of its own. Mail asks who it is
 for first: a user name, or `name@TheirBBS` for someone on a linked BBS. An

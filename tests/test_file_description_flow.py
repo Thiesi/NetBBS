@@ -421,7 +421,7 @@ def test_a_rejected_save_is_written_back_to_disk_before_anything_else(db, lane, 
             seen.append(draft.read_text(encoding="utf-8"))
 
     monkeypatch.setattr(file_flow, "set_file_description", refuse)
-    session = FakeSession(editor_keys=[_key("e")], lines=["a replacement", "", "/cancel"])
+    session = FakeSession(editor_keys=[_key("e")], lines=["a replacement", "/done", "/cancel"])
     original_write_line = session.write_line
 
     async def write_line(text: str = "") -> None:
@@ -569,7 +569,7 @@ def test_describing_a_pending_upload_twice_in_one_visit_sees_the_first_edit(db, 
     # Describe row 02 (the pending upload), then do it again.
     session = FakeSession(
         editor_keys=[_key("e"), _key("0"), _key("2"), _key("e"), _key("0"), _key("2")],
-        lines=["first wording", "", "second wording", ""],
+        lines=["first wording", "/done", "second wording", "/done"],
     )
 
     asyncio.run(_show_area(session, lane, area, alice))

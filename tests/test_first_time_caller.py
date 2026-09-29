@@ -270,7 +270,7 @@ def test_sysop_typed_at_the_review_screens_to_reaches_the_sysop(tmp_path):
     inkwell = create_user(db, "InkWell", password="hunter2pw", user_level=SYSOP_LEVEL)
     lena = create_user(db, "lena_h", password="hunter2pw", user_level=10)
     create_user(db, "harold", password="hunter2pw", user_level=10)
-    session = MailSession(keys=["c", "t", "s", "b"], lines=["harold", "Hello", "Body", "", "sysop"])
+    session = MailSession(keys=["c", "t", "s", "b"], lines=["harold", "Hello", "Body", "/done", "sysop"])
     lane = DatabaseLane(db.path)
     try:
         asyncio.run(browse_mail(session, lane, lena))

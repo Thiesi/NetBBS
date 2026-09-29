@@ -125,7 +125,7 @@ def test_line_editor_quit_is_a_synonym_for_exit(tmp_path):
 
 
 def test_line_editor_exit_is_not_recognized_without_a_draft_path():
-    """mail_flow.py and other callers that never pass draft_path keep
+    """Callers that never pass draft_path keep
     their exact old behavior -- /exit stays an ordinary unknown
     command there, same as before this parameter existed."""
     session = FakeSession(lines=("/exit", "/cancel"))
@@ -529,3 +529,111 @@ def test_review_fits_the_terminal_at_every_body_length_with_a_described_menu():
                 assert len(rows) <= session.terminal_height, (level, count, recipient, len(rows))
                 paged = "(Page 1 of" in text
                 assert ("line %d\n" % count in text) or paged, (level, count)
+
+
+# -- paragraphs, writing between lines, and keeping the text (issue #814) ------
+
+
+def test_a_blank_line_is_a_paragraph_and_a_second_one_finishes():
+    session = FakeSession(lines=("First paragraph.", "", "Second paragraph.", "", ""))
+    body = asyncio.run(edit_line_body(session, initial_text=None, max_bytes=1_000, max_lines=20))
+    # The closing blank line is not part of the text.
+    assert body == "First paragraph.\n\nSecond paragraph."
+    assert _text(session).count("A second blank line, or /done, finishes.") == 1
+
+
+def test_done_after_a_blank_line_drops_that_blank():
+    session = FakeSession(lines=("text", "", "/done"))
+    assert asyncio.run(edit_line_body(session, initial_text=None, max_bytes=1_000, max_lines=20)) == "text"
+
+
+def test_a_blank_line_on_an_empty_body_is_not_a_paragraph():
+    session = FakeSession(lines=("", "text", "", ""))
+    body = asyncio.run(edit_line_body(session, initial_text=None, max_bytes=1_000, max_lines=20))
+    assert body == "text"
+    assert "Body cannot be blank." in _text(session)
+
+
+def test_insert_keeps_writing_there_until_end():
+    """Answering between a reply's quoted lines: one /insert per answer,
+    not one per line."""
+    quote = "bob wrote:\n> first question\n> second question\n"
+    session = FakeSession(
+        lines=("/insert 3", "Answer one,", "in two lines.", "/end", "Thanks!", "/done")
+    )
+    body = asyncio.run(edit_line_body(session, initial_text=quote, max_bytes=1_000, max_lines=20))
+    assert body == (
+        "bob wrote:\n> first question\nAnswer one,\nin two lines.\n> second question\n\nThanks!"
+    )
+    text = _text(session)
+    assert "Writing before line 3: > second question -- /end goes back to the end." in text
+    # The prompt numbers the line being written.
+    assert "3> " in text and "4> " in text and "7> " in text
+
+
+def test_list_marks_where_new_lines_go():
+    session = FakeSession(lines=("/insert 2", "/list", "/cancel"))
+    asyncio.run(edit_line_body(session, initial_text="one\ntwo", max_bytes=1_000, max_lines=20))
+    text = _text(session)
+    listing = text[text.rindex("  1: one"):]
+    assert listing.index("  1: one") < listing.index("new lines go here") < listing.index("  2: two")
+
+
+def test_deleting_a_line_above_the_insertion_point_keeps_writing_in_the_same_place():
+    session = FakeSession(lines=("/insert 3", "/delete 1", "between", "/done"))
+    body = asyncio.run(edit_line_body(session, initial_text="a\nb\nc", max_bytes=1_000, max_lines=20))
+    assert body == "b\nbetween\nc"
+
+
+def test_every_change_is_kept_in_the_draft(tmp_path):
+    """A dropped connection loses nothing: the text is written as it is
+    typed, as the fullscreen editor's autosave already did."""
+    draft_path = tmp_path / "d.draft"
+    session = FakeSession(lines=("first", "second"))
+    try:
+        asyncio.run(edit_line_body(session, initial_text=None, max_bytes=1_000, max_lines=20, draft_path=draft_path))
+    except AssertionError:
+        pass  # the scripted connection ran out: a disconnect
+    assert draft_path.read_text(encoding="utf-8") == "first\nsecond"
+
+
+def test_without_recovery_a_draft_is_not_offered_and_stays_until_changed(tmp_path):
+    draft_path = tmp_path / "d.draft"
+    draft_path.write_text("kept", encoding="utf-8")
+    session = FakeSession(lines=("/exit",))
+    body = asyncio.run(
+        edit_line_body(
+            session, initial_text="kept", max_bytes=1_000, max_lines=20, draft_path=draft_path,
+            offer_recovery=False,
+        )
+    )
+    assert body is None
+    assert "draft from a previous session" not in _text(session)
+    assert draft_path.read_text(encoding="utf-8") == "kept"
+
+
+def test_done_keeps_a_paragraph_break_typed_mid_text():
+    """Review on #873: after /insert, a blank line then /done is a break
+    between the answer and the quote below it, not a stray closing blank."""
+    session = FakeSession(lines=("/insert 2", "answer", "", "/done"))
+    body = asyncio.run(edit_line_body(session, initial_text="> q1\n> q2", max_bytes=1_000, max_lines=20))
+    assert body == "> q1\nanswer\n\n> q2"
+
+
+def test_two_blank_lines_mid_text_still_finish_without_a_trace():
+    session = FakeSession(lines=("/insert 2", "answer", "", ""))
+    body = asyncio.run(edit_line_body(session, initial_text="> q1\n> q2", max_bytes=1_000, max_lines=20))
+    assert body == "> q1\nanswer\n> q2"
+
+
+def test_a_blank_line_refused_at_the_cap_does_not_jump_to_review():
+    """Review on #873: at the line cap the paragraph break is refused, and
+    the editor asks again rather than finishing under the refusal; a second
+    blank line finishes as usual."""
+    session = FakeSession(lines=("", ""))
+    body = asyncio.run(edit_line_body(session, initial_text="one\ntwo", max_bytes=1_000, max_lines=2))
+    assert body == "one\ntwo"
+    text = _text(session)
+    # Asked again after the refusal, then finished by the second blank line.
+    assert text.index("Body cannot exceed 2 logical lines.") < text.rindex("3> ")
+    assert text.count("3> ") == 2
