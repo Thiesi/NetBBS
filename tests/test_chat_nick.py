@@ -101,7 +101,12 @@ def test_set_nick_rejects_look_alikes_of_any_other_username(db, alice, bob, nick
         set_nick(db, alice, nick)
 
 
-@pytest.mark.parametrize("nick", ["SysOp", "Sys Op", "The SysOp", "Admin", "moderator", "Staff", "5ysop"])
+@pytest.mark.parametrize("nick", [
+    "SysOp", "Sys Op", "The SysOp", "Admin", "moderator", "Staff", "5ysop",
+    # Greek and Cyrillic capitals that read as Latin ones (Claude review):
+    # a Greek Upsilon, a Cyrillic S and O, and a Greek-lettered "ADMIN".
+    "S\u03a5SOP", "\u0405YS\u041eP", "\u0391D\u039cI\u039d",
+])
 def test_set_nick_rejects_staff_titles(db, alice, nick):
     with pytest.raises(NickError, match="staff title"):
         set_nick(db, alice, nick)

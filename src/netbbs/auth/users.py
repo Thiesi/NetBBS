@@ -378,8 +378,18 @@ _RESERVED_SKELETONS = frozenset(username_skeleton(word) for word in SELF_SERVICE
 
 
 # Cyrillic and Greek letters that render like Latin ones, folded onto the
-# Latin letter (after casefolding). Free text can contain them, usernames
-# cannot, so only `presentation_skeleton` needs this.
+# Latin letter they look like. Free text can contain them, usernames cannot,
+# so only `presentation_skeleton` needs this. Capitals are folded before
+# casefolding and small letters after it, because a capital and its small
+# letter can look like different Latin letters (Claude review): Greek "Η"
+# reads as H, its small "η" as n.
+_SCRIPT_CAPITAL_FOLD = str.maketrans({
+    "А": "A", "В": "B", "Е": "E", "Ё": "E", "З": "3", "І": "I", "Ї": "I", "Ј": "J", "К": "K",
+    "М": "M", "Н": "H", "О": "O", "Р": "P", "С": "C", "Т": "T", "У": "Y", "Х": "X", "Ѕ": "S",
+    "Ԁ": "D", "Ԛ": "Q", "Ԝ": "W",
+    "Α": "A", "Β": "B", "Ε": "E", "Ζ": "Z", "Η": "H", "Ι": "I", "Κ": "K", "Μ": "M", "Ν": "N",
+    "Ο": "O", "Ρ": "P", "Τ": "T", "Υ": "Y", "Χ": "X",
+})
 _SCRIPT_FOLD = str.maketrans({
     "а": "a", "в": "b", "е": "e", "ё": "e", "з": "3", "і": "i", "ї": "i", "ј": "j", "к": "k",
     "м": "m", "н": "h", "о": "o", "п": "n", "р": "p", "с": "c", "т": "t", "у": "y", "х": "x",
@@ -396,8 +406,9 @@ def presentation_skeleton(text: str) -> str:
     letters and digits goes, spaces and brackets included, before the
     username folding runs. "Ink Well", "InkWeII" and "Іnkwell" (a
     Cyrillic І) all read as "InkWell"."""
-    decomposed = unicodedata.normalize("NFKD", text.casefold())
-    latin = "".join(ch for ch in decomposed if not unicodedata.combining(ch)).translate(_SCRIPT_FOLD)
+    decomposed = unicodedata.normalize("NFKD", text)
+    bare = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+    latin = bare.translate(_SCRIPT_CAPITAL_FOLD).casefold().translate(_SCRIPT_FOLD)
     return username_skeleton("".join(ch for ch in latin if ch.isalnum()))
 
 
