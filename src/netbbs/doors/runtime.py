@@ -848,6 +848,9 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
         if profile and profile.adapter == "rlogin":
             from netbbs.doors.remote import connect_remote
             endpoint = await connect_remote(profile, info, width, height)
+        elif profile and profile.adapter == "bbslink":
+            from netbbs.doors.bbslink import connect_bbslink
+            endpoint = await connect_bbslink(profile, info, width, height)
         else:
             kind = profile.endpoint if profile else "stdio"
             stdin = stdout = asyncio.subprocess.PIPE

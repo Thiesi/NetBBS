@@ -7,7 +7,7 @@ import shlex
 from dataclasses import asdict, replace
 from pathlib import Path
 
-from netbbs.doors.profiles import (DoorProfile, ProfileError, preflight, profile_advisories,
+from netbbs.doors.profiles import (ADAPTERS, DoorProfile, ProfileError, preflight, profile_advisories,
                                     read_profile_file)
 from netbbs.doors.registry import DoorError, update_door
 from netbbs.doors.runtime import run_door, war_dialer_world_path, war_dialer_path_problem
@@ -222,7 +222,7 @@ async def edit_door_profile(session, lane, actor, door, *, door_services=None):
     add("original_api", "1", "Restore original API on Save", "Runtime",
         original_api_prompt,
         help="Remove compatibility settings on Save. Keeps executable/arguments and game data; correct paths first if needed. Toggle off to keep the profile draft.")
-    add("adapter", "a", "Adapter", "Runtime", choice_field("adapter", ["native", "dosbox", "rlogin", "vm"]))
+    add("adapter", "a", "Adapter", "Runtime", choice_field("adapter", list(ADAPTERS)))
     add("endpoint", "i", "I/O endpoint", "Runtime", choice_field("endpoint", ["stdio", "pty", "socketpair"]))
     add("executable_path", "e", "Executable/runtime path", "Runtime")
     add("args_line", "g", "Arguments", "Runtime", help="Fixed argv. Available substitutions: {node_dir}, {node}, {door32}, {door_sys}, {install_dir}.")

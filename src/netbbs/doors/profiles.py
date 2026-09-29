@@ -15,6 +15,17 @@ class ProfileError(ValueError):
     pass
 
 
+ADAPTERS = ("native", "dosbox", "rlogin", "bbslink", "vm")
+#: Adapters which connect to someone else's service instead of running a
+#: program here: no local process, no shared files, and an operator the caller
+#: must be told about.
+REMOTE_ADAPTERS = frozenset({"rlogin", "bbslink"})
+
+
+def is_remote(profile) -> bool:
+    return profile is not None and profile.adapter in REMOTE_ADAPTERS
+
+
 def _check_substitutions(value: str, allowed: tuple[str, ...], message: str) -> None:
     """Reject any placeholder the caller cannot actually substitute."""
     try:
@@ -80,8 +91,8 @@ class DoorProfile:
     def validate(self) -> DoorProfile:
         if type(self.version) is not int or self.version != 1:
             raise ProfileError("unsupported door profile version")
-        if self.adapter not in ("native", "dosbox", "rlogin", "vm"):
-            raise ProfileError("adapter must be native, dosbox, rlogin, or vm")
+        if self.adapter not in ADAPTERS:
+            raise ProfileError("adapter must be native, dosbox, rlogin, bbslink, or vm")
         if self.endpoint not in ("stdio", "pty", "socketpair"):
             raise ProfileError("endpoint must be stdio, pty, or socketpair")
         if self.encoding not in ("utf-8", "cp437", "raw"):
@@ -157,6 +168,12 @@ class DoorProfile:
             try:
                 validate_remote(self)
             except (ValueError, OSError) as exc:
+                raise ProfileError(str(exc)) from exc
+        if self.adapter == "bbslink":
+            from netbbs.doors.bbslink import validate_bbslink
+            try:
+                validate_bbslink(self)
+            except ValueError as exc:
                 raise ProfileError(str(exc)) from exc
         if self.adapter == "vm":
             from netbbs.doors.vm import validate_vm
@@ -279,6 +296,13 @@ def preflight(door, session=None) -> list[str]:
             from netbbs.doors.remote import identity_fields
             try:
                 identity_fields(profile, {"handle": "probe", "user_id": 1})
+            except (ValueError, OSError) as exc:
+                problems.append(str(exc))
+            return problems
+        if profile.adapter == "bbslink":
+            from netbbs.doors.bbslink import credentials
+            try:
+                credentials(profile)
             except (ValueError, OSError) as exc:
                 problems.append(str(exc))
             return problems

@@ -9461,6 +9461,16 @@ Compatibility extension (issues #296/#297):
   explicit insecure-operation acknowledgement. Provider identity templates
   may read a private operator-created credential file. No caller chooses a
   destination and no privileged source port is requested.
+- A provider with its own protocol gets its own adapter, never a creatively
+  filled RLogin template (issue #565). BBSLink is the first: an HTTP token
+  and authorisation step, then Telnet, both plaintext with no tunnel route,
+  so every non-loopback destination needs the insecure acknowledgement.
+  Both fixed destinations must be allowlisted, the service name is shown as
+  for RLogin, and the three provider codes live only in a private
+  operator-created file. The caller's user number and the door code are the
+  only caller-related values sent. The provider binds the Telnet session to
+  the authorisation by source address, so a node pins one resolved address
+  per launch and serialises handshakes per provider host.
 - A SysOp draft editor provides packaged setup templates, JSON import,
   preflight and an explicit test launch. Back saves nothing; Test may modify
   the game's persistent data. No game, driver, emulator, tunnel or host
