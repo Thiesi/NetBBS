@@ -139,7 +139,7 @@ def test_a_nearly_full_inbox_warns_its_owner(db, lane, alice, bob):
     text = " ".join(session.visible().split())
     assert f"{MAILBOX_NEARLY_FULL} of {MAX_MAIL_PER_RECIPIENT}" in text
     assert "Your mailbox is nearly full" in text
-    assert "Unread mail is never removed." in text
+    assert "Unread and kept mail is never removed." in text
 
 
 def test_the_capacity_note_says_what_happens_at_each_stage():

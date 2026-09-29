@@ -749,7 +749,7 @@ this node refused, and how full your callers' mailboxes are.
 
 - **Refused Link mail** lists each refused letter with its sender, the reason
   in plain words (its node is still on probation here, the sender or node is
-  blocked, no such account, a mailbox full of unread mail, ...), when it was
+  blocked, no such account, a mailbox full of unread and kept mail, ...), when it was
   last refused and how many times its sender tried. **Open** one to see its
   node's and its sender's trust here, and **Node trust** or **User trust**
   takes you to that subject's trust screen to establish or block it. A letter
@@ -757,9 +757,10 @@ this node refused, and how full your callers' mailboxes are.
   node, and the sender's next attempt is delivered. The list keeps the 500 most
   recent refusals, and no more than 50 from any one node.
 - **Mailboxes** lists every account with mail, fullest first (**Order**
-  switches to by name): letters, unread, read, notices from the BBS itself, and
-  how much of the 500-letter cap that is. A full inbox makes room by dropping
-  its oldest read letter; an inbox full of unread mail refuses new mail, and a
+  switches to by name): letters, unread, read, kept (in the caller's Kept
+  folder), notices from the BBS itself, and how much of the 500-letter cap
+  that is. A full inbox makes room by dropping its oldest read letter that is
+  not kept; an inbox full of unread and kept mail refuses new mail, and a
   Link sender gets a "mailbox full" bounce. Callers see the same count in their
   own Inbox header, a warning from 450, and a main-menu line when old read
   mail was removed to make room.

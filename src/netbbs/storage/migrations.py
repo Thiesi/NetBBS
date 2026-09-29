@@ -3745,4 +3745,16 @@ MIGRATIONS = [
         SELECT id, subject, netbbs_plain_post_body(body) FROM mail_messages;
         """,
     ),
+    Migration(
+        description=(
+            "Issue #828: `mail_messages.kept_at` -- when the recipient moved the letter to their "
+            "Kept folder; NULL for every other letter, and for every existing one. It is the "
+            "recipient's alone: Sent is never evicted, so it has nothing to keep. The mailbox "
+            "cap (`netbbs.mail.make_room`) never evicts a kept letter, and a kept letter still "
+            "counts toward `MAX_MAIL_PER_RECIPIENT`, so keeping cannot grow a mailbox past it."
+        ),
+        sql="""
+        ALTER TABLE mail_messages ADD COLUMN kept_at TEXT;
+        """,
+    ),
 ]
