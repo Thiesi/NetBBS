@@ -50,8 +50,6 @@ from netbbs.auth.users import (
 )
 from netbbs.identity.addressing import is_valid_user_part, user_part_problem
 from netbbs.link.boards import LinkContext
-from netbbs.link.enforcement import LinkPolicyAction, decide_node_action
-from netbbs.link.trust import TrustState
 from netbbs.link.mail import (
     DELIVERY_STATUS_LABELS, RELAYED_DISPLAY_STATUS, LinkMailError, acknowledge_delivery_notices, compose_link_message,
     delivery_display_status, delivery_explanation, record_resend,
@@ -130,8 +128,9 @@ from netbbs.file_refs import (
 from netbbs.mail_groups import LetterRecipient, LetterRefused, send_letter, too_many_recipients_text
 from netbbs.net.file_ref_view import (
     attached_rows,
-    choose_file_to_attach,
-    download_ref,
+    change_attached_files,
+    file_actions,
+    get_referenced_file,
     open_refs,
     ref_rows,
 )
@@ -171,6 +170,7 @@ from netbbs.net.mail_recipients import (
     choose_recipient,
     gather_address_book,
     join_recipients,
+    link_mail_refusal,
     picker_request,
     read_to_line_options,
     split_recipients,
@@ -201,6 +201,7 @@ from netbbs.rendering import (
     wrap_to_width,
 )
 from netbbs.rendering.post_body import plain_post_body, post_body_mode, post_body_rows, post_body_text
+from netbbs.rendering.charset import ellipsis_for
 from netbbs.rendering.reflow import wrap_terminal_text
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
@@ -1103,7 +1104,7 @@ class _MailboxScreen:
         (`netbbs.mail.delete_letters`)."""
         targets = self._targets()
         if len(targets) == 1 and not self.marked:
-            subject = truncate_to_width(targets[0].subject, 40, ellipsis="…" if self.unicode_style else "...")
+            subject = truncate_to_width(targets[0].subject, 40, ellipsis=ellipsis_for(self.session, unicode_style=self.unicode_style))
             question = f"Delete \"{subject}\"?"
         else:
             question = f"Delete the {_count(len(targets), 'marked message')}?"
@@ -1403,7 +1404,9 @@ class _MailboxScreen:
             # the others say is still on screen in brief -- the [D]raft key,
             # the "N of 500" count, a row's "!".
             _urgency, text, color = min(pending, key=lambda item: item[0])
-            text = truncate_to_width(text, max(1, width - 1), ellipsis="…" if self.unicode_style else "...")
+            text = truncate_to_width(
+                text, max(1, width - 1), ellipsis=ellipsis_for(self.session, unicode_style=self.unicode_style)
+            )
             notes.append(colored(text, fg_color=color))
         else:
             for _urgency, text, color in pending:
@@ -1483,7 +1486,7 @@ class _MailboxScreen:
                 page_rows, width=width, first_number=1, number_width=number_width, widths=widths,
                 highlighted=self.highlighted - top if self.highlighted is not None else None,
                 sent=self.sent, show_status=show_status, accent=self.accent,
-                ellipsis="…" if self.unicode_style else "...", marked=self.marked,
+                ellipsis=ellipsis_for(self.session, unicode_style=self.unicode_style), marked=self.marked,
             ))
             if roomy:
                 lines.append(rule)
@@ -1828,21 +1831,24 @@ async def _show_inbox_message(
         ]
         if block_target is not None:
             # Issue #817: a toggle, labelled by what it will do.
-            blocked = await lane.run(_is_blocked, user, block_target)
+            blocked = await lane.run(is_blocked, user, block_target)
             actions.append(("k", menu_key("k", " sender", prefix="Unbloc" if blocked else "Bloc")))
         actions.append(("b", menu_key("B", "ack")))
         choice, page = await _show_message(session, lane, user, message, to_label=None, actions=actions, page=page)
         if choice == "b":
             return
         if choice == "k":
-            text, tone = await lane.run(_toggle_block, user, block_target)
+            text, tone = await lane.run(toggle_block, user, block_target)
             announce(session, text, tone=tone)
             continue
         if choice == "f":
             await _forward_message(session, lane, user, message, sent=False, link_context=link_context)
             continue
         if choice == "g":
-            await _get_referenced_file(session, lane, user, refs, transfers=transfers)
+            await get_referenced_file(
+                session, lane, user, refs, noun="letter", breadcrumb=("Mail",),
+                style=await _picker_style(lane, user), transfers=transfers,
+            )
             continue
         if choice == "a":
             shown = await _display_sender_label(lane, message)
@@ -1921,35 +1927,6 @@ async def _show_inbox_message(
         )
 
 
-async def _get_referenced_file(
-    session: Session, lane: DatabaseLane, user: User, refs: list[FileRef], *, transfers: TransferGrants | None,
-) -> None:
-    """`[G]et file` on a letter's view (issue #830): download the file it
-    points at, or with several, the one the reader picks. Only a file they
-    can open now is offered."""
-    opened = await open_refs(lane, user, refs)
-    available = [item.ref for item in opened if item.state == AVAILABLE]
-    if not available:
-        announce(session, "None of the files in this letter is available to you.", tone="error")
-        return
-    ref = available[0]
-    if len(available) > 1:
-        chosen = await pick_item(
-            session, available,
-            name_of=lambda item: item.filename,
-            stable_id_of=lambda item: available.index(item),
-            description_of=lambda item: f"in {item.area_name}",
-            title="Download which file?",
-            breadcrumb=("Mail",),
-            empty_message="None of the files in this letter is available to you.",
-            **await _picker_style(lane, user),
-        )
-        if chosen is None:
-            return
-        ref = chosen
-    await download_ref(session, lane, user, ref, transfers=transfers)
-
-
 async def _picker_style(lane: DatabaseLane, user: User) -> dict:
     return {
         "description_level": await lane.run(menu_description_level, user),
@@ -1965,20 +1942,9 @@ async def _picker_style(lane: DatabaseLane, user: User) -> dict:
 #
 # The review screen of a letter has `[A]ttach file`, and `[R]emove file` once
 # one is attached: a file in a file area here, chosen from the areas and files
-# the writer can open (`netbbs.net.file_ref_view.choose_file_to_attach`). The
-# letter points at it; nothing is copied. Who it goes to is checked at Send.
-
-_ATTACH_KEY = "a"
-_REMOVE_KEY = "r"
-
-
-def _file_actions(files: list[FileRef]) -> list[tuple[str, str, str | None]]:
-    actions: list[tuple[str, str, str | None]] = [
-        (_ATTACH_KEY, menu_key("A", "ttach file"), "Point the letter at a file in a file area"),
-    ]
-    if files:
-        actions.append((_REMOVE_KEY, menu_key("R", "emove file"), "Take a file off the letter"))
-    return actions
+# the writer can open (`netbbs.net.file_ref_view.change_attached_files`, shared
+# with board posts since issue #924). The letter points at it; nothing is
+# copied. Who it goes to is checked at Send.
 
 
 def _file_rows(files: list[FileRef], *, accent: int, to_another_bbs: bool) -> list[str]:
@@ -1990,45 +1956,6 @@ def _file_rows(files: list[FileRef], *, accent: int, to_another_bbs: bool) -> li
             fg_color=MUTED_COLOR,
         ))
     return rows
-
-
-async def _change_files(
-    session: Session, lane: DatabaseLane, user: User, files: list[FileRef], key: str, *,
-    breadcrumb: tuple[str, ...], style: dict,
-) -> list[FileRef]:
-    """`[A]ttach file` or `[R]emove file` on the review screen: the letter's
-    files afterwards, with what happened carried to the review screen."""
-    if key == _ATTACH_KEY:
-        if len(files) >= MAX_FILE_REFS:
-            announce(session, f"A letter can point at {MAX_FILE_REFS} files at most.", tone="error")
-            return files
-        ref = await choose_file_to_attach(session, lane, user, breadcrumb=breadcrumb, **style)
-        if ref is None:
-            return files
-        if any(attached.file_id == ref.file_id for attached in files):
-            announce(session, f"{ref.filename} is already attached.", tone="muted")
-            return files
-        announce(session, f"Attached {ref.filename}.", tone="muted")
-        return [*files, ref]
-    if not files:
-        return files
-    removed = files[0]
-    if len(files) > 1:
-        chosen = await pick_item(
-            session, files,
-            name_of=lambda item: item.filename,
-            stable_id_of=lambda item: files.index(item),
-            description_of=lambda item: f"in {item.area_name}",
-            title="Remove which file?",
-            breadcrumb=breadcrumb,
-            empty_message="No files are attached.",
-            **style,
-        )
-        if chosen is None:
-            return files
-        removed = chosen
-    announce(session, f"Removed {removed.filename}.", tone="muted")
-    return [ref for ref in files if ref is not removed]
 
 
 def _files_field(files: list[FileRef]) -> dict[str, str]:
@@ -2059,27 +1986,30 @@ def _decode_files(text: str | None) -> list[FileRef]:
     return files[:MAX_FILE_REFS]
 
 
-# -- blocked senders (issue #817) ---------------------------------------------
+# -- blocked people (issues #817, #925) ----------------------------------------
 #
-# A caller blocks a sender from a letter they received (`Bloc[k] sender` on
-# its view, a toggle) or by name from Profile > Blocked senders, which lists
-# them and unblocks. Local senders are blocked by account id, Link senders by
-# the `user@<fingerprint>` address their mail came from. The rules --
-# who cannot be blocked, what the sender is told -- are `netbbs.mail`'s.
+# A caller blocks someone from a letter they received (`Bloc[k] sender` on
+# its view, a toggle), from Who's online (`Bloc[k]`, the same toggle), or by
+# name from Profile > Blocked people, which lists them and unblocks. Local
+# accounts are blocked by account id, Link users by their `user@<fingerprint>`
+# address. One list stops both mail and live messages (issue #925). The rules
+# -- who cannot be blocked, what the sender is told -- are `netbbs.mail`'s
+# for mail and `netbbs.messaging_preferences.live_message_refusal`'s for live
+# messages.
 
-_BLOCKED_NOTICE = "Blocked {name}: mail from them is refused from now on, and they are told so."
-_UNBLOCKED_NOTICE = "Unblocked {name}: their mail is accepted again."
+_BLOCKED_NOTICE = "Blocked {name}: their mail and live messages are refused from now on, and they are told so."
+_UNBLOCKED_NOTICE = "Unblocked {name}: their mail and live messages are accepted again."
 
 
 @dataclass(frozen=True)
-class _BlockTarget:
-    """Who `Bloc[k] sender` on a received letter acts on: a local account
-    by id, or a Link sender by address."""
+class BlockTarget:
+    """Who a `Bloc[k]` toggle acts on -- on a received letter or on Who's
+    online: a local account by id, or a Link user by address."""
     user_id: int | None
     address: str | None
 
 
-def _block_target(db: Database, reader: User, message: MailMessage) -> _BlockTarget | None:
+def _block_target(db: Database, reader: User, message: MailMessage) -> BlockTarget | None:
     """The sender a received letter's view can block, or `None`: system
     mail, a deleted account, the reader's own mail, and a SysOp of this
     node offer no block (`netbbs.mail.sender_unblockable_reason`)."""
@@ -2089,16 +2019,17 @@ def _block_target(db: Database, reader: User, message: MailMessage) -> _BlockTar
         sender = get_user_by_id(db, message.sender_user_id)
         if sender is None or sender_unblockable_reason(db, reader, sender) is not None:
             return None
-        return _BlockTarget(user_id=sender.id, address=None)
+        return BlockTarget(user_id=sender.id, address=None)
     if _split_link_address(message.sender_label) is not None:
-        return _BlockTarget(user_id=None, address=message.sender_label)
+        return BlockTarget(user_id=None, address=message.sender_label)
     return None
 
 
 _link_sender_name = link_address_display_label
 
 
-def _is_blocked(db: Database, reader: User, target: _BlockTarget) -> bool:
+def is_blocked(db: Database, reader: User, target: BlockTarget) -> bool:
+    """Whether `reader` blocks `target` (mail and live messages alike)."""
     if target.user_id is not None:
         sender = get_user_by_id(db, target.user_id)
         return sender is not None and blocks_local_sender(db, reader, sender)
@@ -2106,9 +2037,10 @@ def _is_blocked(db: Database, reader: User, target: _BlockTarget) -> bool:
     return blocks_link_sender(db, reader, target.address)
 
 
-def _toggle_block(db: Database, reader: User, target: _BlockTarget) -> tuple[str, str]:
-    """Block the sender if they are not blocked, else unblock them. Returns
-    the outcome line and its tone."""
+def toggle_block(db: Database, reader: User, target: BlockTarget) -> tuple[str, str]:
+    """Block `target` if they are not blocked, else unblock them. Returns
+    the outcome line and its tone. Shared by the letter view and Who's
+    online (issue #925)."""
     if target.user_id is not None:
         sender = get_user_by_id(db, target.user_id)
         if sender is None:
@@ -2188,8 +2120,8 @@ def _unblock_row(db: Database, user: User, row: _BlockedRow) -> tuple[str, str]:
 
 
 async def blocked_senders_screen(session: Session, lane: DatabaseLane, user: User) -> None:
-    """Profile > Blocked senders (issue #817): everyone `user` refuses mail
-    from, newest first. `[A]dd` blocks someone by name -- a local user, or
+    """Profile > Blocked people (issues #817, #925): everyone `user` refuses
+    mail and live messages from, newest first. `[A]dd` blocks someone by name -- a local user, or
     `name@TheirBBS` for someone on a linked BBS -- and `[U]nblock`, or
     picking a row, unblocks it. Each outcome is carried into the redraw."""
 
@@ -2198,7 +2130,7 @@ async def blocked_senders_screen(session: Session, lane: DatabaseLane, user: Use
 
     async def _add() -> list[_BlockedRow] | None:
         await session.write_line("")
-        await write_prompt(session, "Block mail from (a user name, or name@TheirBBS; empty cancels): ")
+        await write_prompt(session, "Block (a user name, or name@TheirBBS; empty cancels): ")
         try:
             text = (await session.read_line(cancellable=True)).strip()
         except InputCancelled:
@@ -2221,15 +2153,15 @@ async def blocked_senders_screen(session: Session, lane: DatabaseLane, user: Use
             name_of=lambda row: row.name,
             stable_id_of=lambda row: row.block.id,
             description_of=lambda row: row.where,
-            title="Blocked senders",
+            title="Blocked people",
             breadcrumb=("Profile",),
-            empty_message="You block no one. Mail from anyone reaches you.",
+            empty_message="You block no one. Mail and live messages from anyone reach you.",
             refresh=_reload,
             live_keys={"a": _add},
             item_keys={"u": _unblock},
             live_nav=[
-                MenuEntry(label=menu_key("A", "dd"), brief="Block mail from someone by name"),
-                MenuEntry(label=menu_key("U", "nblock"), brief="Accept their mail again"),
+                MenuEntry(label=menu_key("A", "dd"), brief="Block someone by name"),
+                MenuEntry(label=menu_key("U", "nblock"), brief="Accept their mail and messages again"),
             ],
             description_level=await lane.run(menu_description_level, user),
             redraw_in_place=await lane.run(redraw_in_place_enabled, user),
@@ -2709,11 +2641,11 @@ async def write_to_all_callers(
             header_color=header_color, truecolor=truecolor, body_mode=body_mode, body_layout="lines",
             breadcrumb=("SysOp", "Mail", title),
             extra_rows=_file_rows(files, accent=accent_color, to_another_bbs=False),
-            extra_actions=_file_actions(files),
+            extra_actions=file_actions(files, noun="letter"),
         )
         if isinstance(action, str):
-            files = await _change_files(
-                session, lane, user, files, action, breadcrumb=("SysOp", "Mail", title),
+            files = await change_attached_files(
+                session, lane, user, files, action, noun="letter", breadcrumb=("SysOp", "Mail", title),
                 style=await _picker_style(lane, user),
             )
             keep_fields()
@@ -3199,11 +3131,12 @@ async def _compose_mail(
             body_layout="lines",
             breadcrumb=("Mail", title),
             extra_rows=_file_rows(files, accent=accent_color, to_another_bbs=to_another_bbs),
-            extra_actions=_file_actions(files),
+            extra_actions=file_actions(files, noun="letter"),
         )
         if isinstance(action, str):
-            files = await _change_files(
-                session, lane, user, files, action, breadcrumb=("Mail", title), style=picker_style(),
+            files = await change_attached_files(
+                session, lane, user, files, action, noun="letter", breadcrumb=("Mail", title),
+                style=picker_style(),
             )
             keep_fields()
             continue
@@ -3470,14 +3403,11 @@ async def _letter_draft_choice(
 def _link_mail_refusal(db, fingerprint: str) -> str | None:
     """Why this node will not send mail to `fingerprint`, in words for the
     caller, or `None` when it will (issue #804). Nothing is queued that the
-    push loop would refuse, and "Message sent." is never shown for it."""
-    decision = decide_node_action(db, fingerprint, LinkPolicyAction.LINK_MAIL)
-    if decision.allowed:
-        return None
-    label = sanitize_text(identity_for_fingerprint(db, fingerprint).label)
-    if decision.state == TrustState.PROBATIONARY:
-        return f"{label} is newly linked; mail opens once the SysOp establishes it."
-    return f"Mail to {label} is closed on this BBS."
+    push loop would refuse, and "Message sent." is never shown for it. The
+    words are `link_mail_refusal`'s, whose tag the To prompt's list shows
+    (issue #920)."""
+    refusal = link_mail_refusal(db, fingerprint)
+    return None if refusal is None else refusal.sentence
 
 
 @dataclass(frozen=True)

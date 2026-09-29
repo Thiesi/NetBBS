@@ -281,8 +281,15 @@ No screen has to know which set a caller has. The mapping is in three layers:
   wide character becomes two cells, zero-width marks are dropped, and control
   characters and escape sequences are never mapped. Width is still measured
   on the Unicode text (§3.2's wrapping, §3.6's columns), so no layout moves
-  when a caller's set changes. `truncate_to_width` asks for the set's own
-  ellipsis: `…` in UTF-8 and `...` in CP437 and ASCII.
+  when a caller's set changes. That makes `…` a single `.` in CP437 and ASCII,
+  which reads as a full stop, so a screen that cuts text picks its marker
+  with `ellipsis_for(session)`: `…` on a UTF-8 terminal, `...` elsewhere.
+- A box-drawing character the table does not list is worked out from the
+  directions its Unicode name says it draws: CP437 gets the light line of
+  that shape (it has no heavy, dashed or mixed light/heavy lines), and ASCII
+  gets `+`, `|`, `-` or `=`. That covers CP437's own mixed single/double
+  corners and tees too, so a CP437 door or CP437 art shown on an ASCII
+  session keeps its frames.
 
 ASCII is true 7-bit: nothing above 0x7F reaches an ASCII session, including
 accented letters in posts, which become their base letters. CP437 is one byte
@@ -310,6 +317,12 @@ CP437 or ASCII, and an explicit choice always wins over detection. Auto means:
   any channel exists, so it is always ASCII.
 - The browser terminal is always UTF-8.
 
+Each Telnet and SSH connection logs one INFO line with the terminal types the
+client reported, how the exchange ended (answered, refused, no answer, or the
+SSH PTY request) and the character set chosen, so a SysOp can read what a
+client calls itself. Reported names are kept to printable ASCII and 40
+characters before they are stored or logged.
+
 After login, a caller whose set was not settled -- an unknown terminal, or one
 that reported only `ansi` -- is asked once which of two sample lines looks
 right: the same frame sent as UTF-8 and as CP437, or neither, which means
@@ -317,8 +330,9 @@ ASCII. The answer becomes their preference. Profile changes it later. The
 earlier yes/no "Does that look garbled?" question and its Unicode/ASCII style
 preference are replaced by this; an account that had switched to ASCII keeps
 ASCII, and every other account moves to Auto. Screens that still vary their
-decoration by style ask for the Unicode style only when the session's set is
-UTF-8 or CP437.
+decoration by style use the decorated variant unless the caller's preference is
+ASCII; a CP437 session gets it mapped. An undetected terminal gets ASCII only
+until the question after login settles it.
 
 A SysOp may override three of the node's branding colors -- accent (board/
 channel/user names and other navigable-item branding), header (section
@@ -799,7 +813,7 @@ laying out the new dimensions.
 Anything gathering more than two values goes through the draft field editor or
 a picker and persists nothing before `[S]ave`. The deliberate exceptions are
 once-only first-run decisions (Link participation, node name, managed DNS,
-the Unicode-style probe), type-the-name confirmations before deletes, and
+the character-set question after login, issue #929), type-the-name confirmations before deletes, and
 masked credential entry (issue #611): a password is typed twice because the
 caller cannot see it, preceded by the current one where the account acts on
 itself, and a draft editor would have to hold the plaintext across redraws to
@@ -2443,8 +2457,14 @@ for a caller mail is open to (`caller_mail_refusal`):
   come before them, and a drain warning (§13.8) before those; the count of
   pending chat channel invitations and any queued `/msg` lines follow them
   (issue #923). Ahead of all of these is the outcome of a question answered
-  during login (the Unicode-style check, a first-run choice), which answers
-  the last thing the caller did.
+  during login (the character-set check, a first-run choice), which answers
+  the last thing the caller did. First of all is the login line itself,
+  "Welcome, <name> › level N › Ctrl-L redraws" (issue #949). Like every
+  notice there it is shown once and not again after Ctrl-L, and it is
+  written nowhere before the menu, in either redraw mode: with
+  redraw-in-place on the menu's clear wiped it unseen, and with it off it
+  would be shown twice. It is built after the login questions, so the
+  character-set answer decides its separator.
 - *In New scan.* A `Mail:` line heads the summary above the list with the
   login notice's two counts ("Mail: 3 new since your last call, 7 unread
   in all"; on a first call `Mail: N unread`), counted from the same
@@ -2563,16 +2583,19 @@ Mail about Link delivery (#806's bounces) is told at the main menu and on the
 sent message's Delivery line, not by a system message; a bounce letter in
 the Inbox could use this sender later.
 
-**Blocked senders** (issue #817). An account can refuse mail from one
-sender. A block names a local account by id, so it survives a rename, or a
+**Blocked people** (issues #817, #925, #948). An account can refuse mail,
+live messages and chat channel invitations from one person. A block names a local account by id, so it survives a rename, or a
 Link sender by the `user@<home-node-fingerprint>` address its mail came
 from (user part compared case-insensitively), never by the node's display
 name, which can change. Blocks live in `mail_blocks`; deleting the blocking
-account or the blocked local account removes the row. A caller blocks from
-a received letter's view (`Bloc[k] sender`, a toggle labelled by what it
-will do) or by name from Profile > Blocked mail senders, which lists the
-blocks and unblocks them. A block affects mail from then on; mail already
-received stays.
+account or the blocked local account removes the row; the table keeps its
+#817 name although it now holds the one block list. A caller blocks from a
+received letter's view (`Bloc[k] sender`, a toggle labelled by what it will
+do), from a caller picked on Who's online (`Bloc[k]`, the same toggle, for a
+local caller by account and for one on a linked node by
+`user@<fingerprint>`), or by name from Profile > Blocked people, which lists
+the blocks and unblocks them. A block affects mail from then on; mail
+already received stays.
 
 - The sender is told. Local mail from a blocked sender is refused at the
   To prompt and by `send_mail` (`MailSenderBlocked`) with "<name> does not
@@ -2592,12 +2615,55 @@ received stays.
   accounts and has to reach them, and a block would buy no privacy from the
   person who runs the database it is stored in. The check reads the sender's
   current level, so a blocked account that later becomes SysOp gets through
-  (the Blocked senders list marks the block as not applied),
+  (the Blocked people list marks the block as not applied),
   and is blocked again if it stops being one. Staff below 255 are blockable.
-- Blocking covers mail only. Live direct messages keep their own opt-out
-  (Profile's direct-message setting), which today gates Who's online, `/dm`
-  and inbound Link direct messages but not `/msg`; one block list across both
-  would first need those paths made consistent, which is its own change.
+- One list covers mail and live messages (issue #925). Before it a block
+  stopped mail only, and the one tool against someone harassing a caller
+  live was the direct-message opt-out, which silences everyone.
+  `netbbs.messaging_preferences.live_message_refusal` is the one check every
+  live path makes before delivering: `/msg`, `/private` (at entry and again
+  for each line, so a block made mid-conversation ends it), `/dm` and Who's
+  online's `[I]nvite to chat` (`run_direct_chat_invite_flow`), Who's online's
+  one-off `[M]essage`, and an inbound Link direct message
+  (`build_direct_message_deliverer`, by the sender's `user@<fingerprint>`).
+  It answers the opt-out first -- the recipient's general choice, which says
+  nothing about the sender -- and then the block, with the same SysOp
+  exemption as mail. `/msg` and `/private` now respect the opt-out too;
+  before #925 they were the one live path that did not.
+- A blocked live sender on this node is told, as a blocked letter's sender
+  is: "<name> does not accept messages from you". An inbound Link direct
+  message from a blocked sender is dropped without an answer, as one to an
+  opted-out or offline recipient already was (§8.10.3): the
+  `direct_message` frame has no reply on the wire, and adding one is a
+  protocol change this does not make. The remote sender sees their usual
+  "(sent to ...)"; their mail, which does have a bounce, tells them.
+- A block stops a chat channel invitation too (issue #948). `/invite` to
+  someone who has blocked the inviter writes no `channel_invitations` row
+  and sends no live notice, and tells the inviter "<name> does not accept
+  messages from you", `/msg`'s words
+  (`netbbs.messaging_preferences.invitation_refusal`). The inviter's right
+  to invite is answered first, so a caller who may not invite anyone hears
+  that rather than learning of a block. The direct-message opt-out does not
+  stop an invitation, as it never has: an invitation waits in the invitee's
+  pending list and asks nothing of them, where a live message interrupts.
+  The SysOp exemption is the same as mail's. `/invite` is the only path that
+  creates an invitation; Link carries none. An invitation made before the
+  block stays pending until it expires or is revoked.
+- Who's online offers only what can succeed (issue #948, after #920's
+  picker). For a local caller who has blocked the viewer it offers neither
+  live action nor `[E]-mail`, since the letter would be refused, and its
+  subtitle says "<name> does not accept messages or mail from you." The
+  screen is still drawn, with `Bloc[k]` where the viewer may block them back
+  (their block does not stop their own mail) and `[B]ack`. A caller on a
+  linked node keeps `[E]-mail`: their node's block list is not known here,
+  and the To prompt or the bounce answers.
+- What a block does not cover. Public chat channels: a block does not hide a
+  blocked person's lines in a shared room, and there is no per-caller ignore
+  in chat; channel moderation (mute, kick, ban) is the tool there. An
+  invitation into a channel is covered (above). MRC
+  private messages come from another network's users, not accounts or Link
+  addresses, and are not covered. SysOp messages (the console's message to a
+  caller) and system notices never pass the check.
 
 **The mailbox is a list; a message is read on its own screen** (issue #810),
 the shape the board post list has (§6.1, issue #679). `[E]-mail` opens the
@@ -2914,7 +2980,8 @@ writer who typed `|12` meant color.
 the screen where they found them, without typing an address:
 - the Directory's member card, `[M]ail`;
 - Who's online, `[E]-mail` on a selected caller (`[M]` there is the live
-  message), for a local caller and for one on a linked node;
+  message), for a local caller and for one on a linked node, but not for a
+  local caller who has blocked the viewer (§6.4 Blocked people, issue #948);
 - Previous callers, `[M]ail a caller`, which asks for the row's number;
 - the board reader, `[M]ail author`: a private reply to the post's author, with
   the post's `Re:` subject and quote, as a board reply has (§6.1). It is offered
@@ -2929,7 +2996,8 @@ address gets (issue #805) -- the address is their stable
 `user@<home-node-fingerprint>` (Who's online's presence, a carried post's
 author label), shown by the node's current name. The action is not offered
 while mail is closed to the caller, on the caller's own card, post or call,
-for a deleted account, or for a carried post's author while Link is off; a
+for a deleted account, for a carried post's author while Link is off, or on
+Who's online for a local caller who has blocked the viewer; a
 recipient-side refusal (the guest account, a peer on probation, a node this one
 is not linked with) is said when the key is pressed. Opting out of direct
 messages (§6.3) does not close mail: Who's online still offers `[E]-mail` for
@@ -2948,21 +3016,36 @@ completion, as chat's): a member's name, the address of a recent
 correspondent, and after `@` the name of a linked BBS; several matches are
 listed under the prompt, wrapped, and more than 24 are counted instead. `?`
 and Enter opens a list (`pick_item`) of everyone the caller can write to:
-recent correspondents first, then the linked BBSes, then the members. On a
+recent correspondents first, then the members, then the linked BBSes. On a
 node with Link on, `name@?` lists just the linked BBSes for that name, and a
 BBS chosen from the full list asks for the user name there. `?` works at the
 review screen's `[T]o` too.
 - Recent correspondents are the last ten people named by letters still in the
   caller's own Inbox and Sent (`netbbs.mail.recent_correspondents`), local and
   Link. System mail, a deleted sender and letters to oneself name no one.
-- Only people mail can reach are offered: never the caller, the guest
-  account, a disabled account or a signup awaiting approval
-  (`mail_recipient_refusal`), or someone who blocked the caller
-  (`mail_sender_refusal`); on Link only met nodes this node sends mail to
-  (§12.4), so a node still on probation is not listed. The Directory lists
-  every account; the To prompt's list is narrower on purpose, since offering
-  an address that is then refused helps no one. Leaving a blocker out tells
-  the caller no more than the To prompt's own honest refusal does.
+- The list also shows who the caller can't write to right now, with the
+  reason, and does not let them be picked (issue #920): someone who blocked
+  the caller, "doesn't accept your mail" (`mail_sender_refusal`); a disabled
+  account, "account disabled", and a signup awaiting approval, "awaiting
+  approval" (`mail_recipient_refusal`); and on Link a met node still on
+  probation (§12.4), "not linked yet". Such a row is muted, has `-` where
+  the number goes and takes no number, so the numbers count only what can be
+  picked; the highlight steps over it, and a search whose one match it is
+  shows it rather than choosing it (`pick_item`'s `selectable_of`). Each row
+  is one line either way, so the page budget is unchanged at 80x24 and
+  40x12. Still left out: the caller, the guest account, which has no mailbox
+  rather than a state that can change, and a node whose mail the SysOp closed
+  (quarantined or blocked). Leaving people out made a missing name look like
+  a typo or a missing account; the operator accepted that the list tells
+  callers about blocks and account states, which the To prompt's refusal
+  already said to anyone who typed the name.
+- The reason is the same check's: `MailRefusal` carries the To prompt's
+  sentence and the list's words together (`mail_recipient_refusal_detail`,
+  `mail_sender_refusal_detail`, `link_mail_refusal`), so the two can't drift
+  apart.
+- Tab offers only what can be picked: a completion is an address the To
+  prompt would take. The list is where a caller learns why someone is
+  missing from it.
 - A pick is only text in To: the To prompt checks it exactly as a typed
   address, and Send checks again. Nothing new is checked, so `mail_someone`
   keeps the same checks as the To prompt.
@@ -4646,7 +4729,8 @@ channel message (§8.10.2): never stored, never a canonical event. The
 receiving node re-checks the sending node's `REALTIME` policy at delivery,
 then delivers exactly as a local `/msg` does (live chat sessions via the
 hub, every other session via the mailbox); an unknown, opted-out, or
-offline recipient is dropped silently -- the sender already checked the
+offline recipient, or one who blocks the sender's `user@<fingerprint>`
+(§6.4 Blocked people, issue #925), is dropped silently -- the sender already checked the
 peer's node-wide presence (a node that has not yet pushed its presence
 gets "couldn't confirm who is online there", never a blind send), which
 the peer pushes the moment the session is tracked -- and receiving a
@@ -5957,7 +6041,7 @@ whole was never registered (above), so its node is what the SysOp acts on.
 
 The sending node applies its own policy before anything is queued: a caller
 addressing a peer this node still holds on probation is told at the To prompt
-that "<node> is newly linked; mail opens once the SysOp establishes it", and a
+that "<node> is not linked yet; mail opens once the SysOp establishes it", and a
 quarantined or blocked peer that mail to it is closed. Mail queued before a
 peer lost standing waits in the outbox, expires when its work item
 dead-letters, and is woken on the next sync pass once the policy allows the
@@ -9317,7 +9401,9 @@ Compatibility extension (issues #296/#297):
   disposable node directories, exact CRLF classic drop files, native stdio,
   controlling PTYs, private inherited DOOR32 sockets, DOSBox-X COM1 sockets,
   and allowlisted outbound RLogin services. Never pass the caller's socket.
-- CP437 doors are transcoded to/from NetBBS's UTF-8 terminals. Browser door
+- A door's stream is transcoded to and from the caller's character set (§3.2):
+  a CP437 door reaches a CP437 terminal unchanged, and is transcoded for UTF-8
+  and ASCII ones; a UTF-8 door is mapped for CP437 and ASCII. Browser door
   mode uses bounded base64 output frames and stream-scoped raw key events;
   stale door input cannot become menu actions. Resize stays out of band;
   fixed geometry is restored to browser-fit geometry on exit. This does not

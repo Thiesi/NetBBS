@@ -51,7 +51,7 @@ def test_cp437_play_and_return_over_real_transport(transport, dos, db, lane, pla
         if telnet:
             from tests.test_telnet import skip_initial_negotiation
             from netbbs.net.telnet import IAC, WILL, BINARY, SB, SE, NAWS
-            await skip_initial_negotiation(reader)
+            await skip_initial_negotiation(reader, writer)
             writer.write(bytes([IAC,WILL,BINARY,IAC,SB,NAWS,0,80,0,25,IAC,SE]))
         await reader.readuntil(b"SYNC")
         writer.write(b"X")
@@ -90,7 +90,7 @@ def test_cp437_play_and_return_over_real_transport(transport, dos, db, lane, pla
                     import asyncssh
                     async with asyncssh.connect("127.0.0.1", server.port, username=player.username,
                                                 password="hunter2", known_hosts=None) as conn:
-                        async with conn.create_process(term_type="ansi", term_size=(80,25), encoding=None) as process:
+                        async with conn.create_process(term_type="xterm", term_size=(80,25), encoding=None) as process:
                             await exchange(process.stdout, process.stdin)
                 else:
                     import aiohttp

@@ -1306,11 +1306,25 @@ saves, and **Ctrl+X** quits.
 The welcome gallery ends with three quiet designs for clubs that don't want
 neon: **Paper & Ink**, **Library Card** and **Garden Gate**.
 
-Before sign-in, a Telnet caller gets the node's own lines, arrows and default
-banner in plain ASCII, because classic BBS terminals such as SyncTERM read
-CP437 and would show Unicode as noise. A banner of your own is sent as you drew
-it, so one drawn with box or block characters still looks wrong in such a
-terminal. After sign-in, each caller's own Unicode or ASCII choice applies.
+Every caller gets text in the character set their terminal reads:
+
+- **Detection when they connect:**
+  - A Telnet caller's terminal is asked what it is. SyncTERM and other classic
+    BBS terminals get CP437, so your art arrives exactly as drawn.
+  - Modern terminals get Unicode.
+  - A Telnet client that doesn't say gets plain ASCII for everything before
+    sign-in, your banner included: boxes become `+`, `-` and `|`.
+  - SSH callers are detected from their terminal type, but the banner SSH shows
+    during login is always ASCII.
+  - The browser always gets Unicode.
+  - The node log has one line per Telnet or SSH connection saying what the
+    terminal called itself and which character set it got, for example
+    `telnet caller 203.0.113.9 terminal type: 'syncterm' (answered); character
+    set cp437 (certain)`. Look there if a caller's screen looks wrong.
+- **After sign-in:**
+  - Each caller's own **Profile → Unicode or CP437** choice applies.
+  - A caller whose terminal wasn't recognised is asked once which of two sample
+    lines looks right.
 
 **Settings → Previous callers** cycles through three states: the panel after
 login in its default neon style, the same panel plain (your header colour and

@@ -42,6 +42,7 @@ from netbbs.digits import is_ascii_number
 from netbbs.net.char_input import CANCEL_KEY, HELP_KEY, REDRAW_KEY, REFRESH_KEY, Completer, EditorKey, EditorKeyKind
 from netbbs.net.help_overlay import show_help
 from netbbs.rendering.ansi import strip_ansi
+from netbbs.rendering.charset import ellipsis_for
 from netbbs.rendering.reflow import wrap_terminal_text
 from netbbs.net.notices import announce, with_notices
 from netbbs.net.session import Session, write_preformatted_line, write_prompt
@@ -201,7 +202,7 @@ def _reverse_row(text: str) -> str:
     return colored(text, reverse=True)
 
 
-def _pad_cell(text: str, width: int, *, align_right: bool) -> str:
+def _pad_cell(text: str, width: int, *, align_right: bool, ellipsis: str = "…") -> str:
     """Fit `text` to exactly `width` display columns.
 
     Measured in display width, not `len` -- a CJK name is two columns
@@ -225,7 +226,8 @@ def _pad_cell(text: str, width: int, *, align_right: bool) -> str:
     """
     text = _normalize_tabs(text)
     if display_width(text) > width:
-        text = truncate_to_width(text, width, ellipsis="…" if width > 1 else "")
+        marker = ellipsis if width > display_width(ellipsis) else ""
+        text = truncate_to_width(text, width, ellipsis=marker)
     padding = " " * max(0, width - display_width(text))
     return padding + text if align_right else text + padding
 
@@ -289,6 +291,7 @@ async def pick_item(
     header_color: int | tuple[int, int, int] = HEADER_COLOR,
     start_stable_id: int | None = None,
     masthead: str | Callable[[], Awaitable[str]] = "",
+    selectable_of: Callable[[T], bool] | None = None,
 ) -> T | None:
     """
     Let the user browse/search/jump through `items` and pick one, or
@@ -507,9 +510,21 @@ async def pick_item(
     whenever a masthead is shown, `clear` is forced `False` on the
     `screen_title` call below and the redraw-in-place clear (if wanted)
     is issued by hand *before* the masthead instead.
+
+    `selectable_of` (issue #920), if given, marks the rows that are shown
+    but cannot be picked: the mail To prompt's list shows the people the
+    caller cannot write to, each with the reason as its description. Such a
+    row is drawn muted with `-` where the number goes and takes no number:
+    the numbers count only the rows that can be picked, so they still run
+    01, 02, ... down the page. The highlight steps over it, a number never
+    reaches it, and a search whose one match it is shows it rather than
+    returning it. `None` (every other caller) makes every row pickable.
     """
     if (columns is None) != (column_values_of is None):
         raise ValueError("pick_item: columns and column_values_of must be given together")
+    # A cut cell ends in "…" on a UTF-8 terminal and in "..." on a CP437 or
+    # ASCII one, where "…" could only be mapped to a single dot (#929).
+    cell_ellipsis = ellipsis_for(session)
     if columns is not None and name_segments_of is not None:
         # Both want to own the name half of the row. Nobody does this
         # today, and silently dropping one of them is exactly the kind
@@ -763,6 +778,19 @@ async def pick_item(
 
     def _narrowed(candidates: Sequence[T]) -> Sequence[T]:
         return _matching(candidates, active_query) if active_query else candidates
+
+    def _pickable(item: T) -> bool:
+        return selectable_of is None or selectable_of(item)
+
+    def _pickable_rows(rows: Sequence[T]) -> list[int]:
+        """The positions in `rows` a number or the highlight can reach, in
+        order: number N is `rows[_pickable_rows(rows)[N - 1]]` (issue #920)."""
+        return [index for index, row in enumerate(rows) if _pickable(row)]
+
+    def _numbered(rows: Sequence[T], number: int) -> T | None:
+        """The row that `number` picks on this page, or `None`."""
+        positions = _pickable_rows(rows)
+        return rows[positions[number - 1]] if 1 <= number <= len(positions) else None
     if start_stable_id is not None:
         for start_index, item in enumerate(working_set):
             if stable_id_of(item) == start_stable_id:
@@ -777,7 +805,7 @@ async def pick_item(
                 page_history = [
                     boundary for boundary in range(0, page_start, start_page_size)
                 ]
-                highlighted = start_index % start_page_size
+                highlighted = start_index % start_page_size if _pickable(item) else None
                 break
 
     async def _render(*, keep_generation: bool = False) -> Sequence[T]:
@@ -912,6 +940,10 @@ async def pick_item(
         # guard exists to stop.
         if highlighted is not None and highlighted >= len(page_items):
             highlighted = None
+        # A row that cannot be picked is never highlighted (issue #920): an
+        # item key's new working set can put one where the highlight was.
+        if highlighted is not None and not _pickable(page_items[highlighted]):
+            highlighted = None
 
         if masthead_text:
             await write_preformatted_line(session, _masthead_prefix())
@@ -933,7 +965,14 @@ async def pick_item(
         name_width = _table_widths(render_width, columns) if columns else None
         if name_width is not None:
             await session.write_line(_table_header(columns, name_width=name_width))
+        number = 0
         for position, item in enumerate(page_items, start=1):
+            # Issue #920: a row that cannot be picked shows `-` in the
+            # number's place and takes no number, so the numbers count only
+            # what they can pick.
+            pickable = _pickable(item)
+            if pickable:
+                number += 1
             # One number per row: the 2-digit prefix is what to press to
             # select *this item, right now, on this page* (issue #838
             # dropped the permanent "(#N)" reference beside it).
@@ -954,10 +993,14 @@ async def pick_item(
             is_highlighted = highlighted == position - 1
             marker = "> " if is_highlighted else "  "
 
+            selector = f"{marker}{number:02d}. " if pickable else f"{marker} -  "
+
             if is_highlighted:
                 key_color = lambda txt: colored(txt, fg_color=accent_color, bold=True)
                 item_name_color = lambda txt: colored(txt, fg_color=accent_color, bold=True)
                 desc_color = VALUE_COLOR
+            elif not pickable:
+                key_color = item_name_color = desc_color = MUTED_COLOR
             else:
                 key_color = MENU_KEY_COLOR
                 item_name_color = accent_color
@@ -966,8 +1009,8 @@ async def pick_item(
             if name_width is not None:
                 # Columnar row (issue #528).
                 segments: list[tuple[str, SegmentColor]] = [
-                    (f"{marker}{position:02d}. ", key_color),
-                    (_pad_cell(sanitize_text(name_of(item)), name_width, align_right=False), item_name_color),
+                    (selector, key_color),
+                    (_pad_cell(sanitize_text(name_of(item)), name_width, align_right=False, ellipsis=cell_ellipsis), item_name_color),
                 ]
                 # Short-changed rows are padded rather than left to
                 # `zip`'s silent truncation: a caller that returns too
@@ -986,8 +1029,10 @@ async def pick_item(
                     if index == last and not column.align_right:
                         cell_text = truncate_to_width(sanitize_text(text), column.width)
                     else:
-                        cell_text = _pad_cell(sanitize_text(text), column.width, align_right=column.align_right)
-                    segments.append((cell_text, item_name_color if is_highlighted else color))
+                        cell_text = _pad_cell(
+                            sanitize_text(text), column.width, align_right=column.align_right, ellipsis=cell_ellipsis
+                        )
+                    segments.append((cell_text, item_name_color if is_highlighted or not pickable else color))
                 if is_highlighted:
                     segments = [(text, _reverse_row) for text, _ in segments]
                 await session.write_line(colored_truncate(
@@ -997,11 +1042,13 @@ async def pick_item(
                 continue
 
             segments = [
-                (f"{marker}{position:02d}. ", key_color),
+                (selector, key_color),
             ]
             if name_segments_of is not None:
                 for text, color in name_segments_of(item):
-                    segments.append((sanitize_text(text), item_name_color if is_highlighted else color))
+                    segments.append((
+                        sanitize_text(text), item_name_color if is_highlighted or not pickable else color,
+                    ))
             elif columns is not None and description:
                 # A columnar picker that fell back to prose because the
                 # terminal is too narrow (Codex review). The whole row
@@ -1017,12 +1064,12 @@ async def pick_item(
                 # secondary text really is prose keep their unbounded
                 # name and lose the tail of a sentence instead, which
                 # is the right trade when the tail is a sentence.
-                fixed = display_width(f"{marker}{position:02d}. ")
+                fixed = display_width(selector)
                 room = render_width - fixed - display_width(f" - {description}")
                 name_text = sanitize_text(name_of(item))
                 if room < display_width(name_text):
                     name_text = _pad_cell(
-                        name_text, max(_MIN_FALLBACK_NAME_WIDTH, room), align_right=False
+                        name_text, max(_MIN_FALLBACK_NAME_WIDTH, room), align_right=False, ellipsis=cell_ellipsis
                     ).rstrip()
                 segments.append((name_text, item_name_color))
             else:
@@ -1172,7 +1219,7 @@ async def pick_item(
             await _show_picker_help(
                 session, on_sort=on_sort, has_refresh=refresh is not None, header_color=header_color,
                 unicode_style=unicode_style, has_create=on_create is not None,
-                live_nav=live_nav,
+                live_nav=live_nav, has_unpickable=any(not _pickable(item) for item in items),
             )
             page_items = await _render()
             continue
@@ -1205,13 +1252,13 @@ async def pick_item(
             # Issue #171. `not page_items` only reachable via the
             # refresh-enabled empty-list path (issue #112) -- nothing to
             # highlight yet, same guard [S]earch/[G]oto already apply.
-            if not page_items:
+            # Only over the rows that can be picked (issue #920).
+            reachable = _pickable_rows(page_items)
+            later = [row for row in reachable if highlighted is None or row > highlighted]
+            if not reachable:
                 await session.write("\a")
-            elif highlighted is None:
-                highlighted = 0
-                page_items = await _render()
-            elif highlighted < len(page_items) - 1:
-                highlighted += 1
+            elif later:
+                highlighted = later[0]
                 page_items = await _render()
             else:
                 # Deliberately no wraparound -- matches this screen's
@@ -1222,13 +1269,12 @@ async def pick_item(
             continue
 
         if key.kind == EditorKeyKind.UP:
-            if not page_items:
+            reachable = _pickable_rows(page_items)
+            earlier = [row for row in reachable if highlighted is None or row < highlighted]
+            if not reachable:
                 await session.write("\a")
-            elif highlighted is None:
-                highlighted = len(page_items) - 1
-                page_items = await _render()
-            elif highlighted > 0:
-                highlighted -= 1
+            elif earlier:
+                highlighted = earlier[-1]
                 page_items = await _render()
             else:
                 await session.write("\a")
@@ -1349,7 +1395,7 @@ async def pick_item(
                 await session.write_line(colored("No matches.", fg_color=ERROR_COLOR))
                 await session.write("Choice: ")
                 continue
-            if len(matches) == 1:
+            if len(matches) == 1 and _pickable(matches[0]):
                 return matches[0]
             # Recorded only now (Codex review). Setting it before the
             # match check meant a search that found nothing still became
@@ -1417,17 +1463,14 @@ async def pick_item(
             if highlighted is not None and highlighted < len(page_items):
                 target = page_items[highlighted]
             else:
-                if not page_items:
+                numbered = len(_pickable_rows(page_items))
+                if not numbered:
                     await session.write(reject_keystroke())
                     continue
                 await session.write_line("")
-                await write_prompt(session, f"Which one (01-{len(page_items):02d}): ")
+                await write_prompt(session, f"Which one (01-{numbered:02d}): ")
                 raw = (await session.read_line()).strip()
-                target = (
-                    page_items[int(raw) - 1]
-                    if is_ascii_number(raw) and 1 <= int(raw) <= len(page_items)
-                    else None
-                )
+                target = _numbered(page_items, int(raw)) if is_ascii_number(raw) else None
                 if target is None:
                     await session.write_line(colored("Out of range.", fg_color=ERROR_COLOR))
                     await write_prompt(session, "Choice: ")
@@ -1470,9 +1513,10 @@ async def pick_item(
                 # One digit and Enter picks that row too (issue #840, F115):
                 # a first-time caller typed "3" and Enter where "03" was
                 # wanted, and nothing happened, not even an error.
-                if 1 <= int(char) <= len(page_items):
+                chosen = _numbered(page_items, int(char))
+                if chosen is not None:
                     await session.write_line("")
-                    return page_items[int(char) - 1]
+                    return chosen
                 await session.write(reject_keystroke(1))
                 continue
             if second_char is not None:
@@ -1487,8 +1531,8 @@ async def pick_item(
                 erase_count = 2 if second_char is not None else 1
                 await session.write(reject_keystroke(erase_count))
                 continue
-            number = int(char + second_char)
-            if 1 <= number <= len(page_items):
+            chosen = _numbered(page_items, int(char + second_char))
+            if chosen is not None:
                 # A valid selection is a real state change -- same "end
                 # the echoed input with its own newline before whatever
                 # comes next" discipline every other branch here already
@@ -1498,7 +1542,7 @@ async def pick_item(
                 # directly after the echoed "02" with no separation at
                 # all, on the same line.
                 await session.write_line("")
-                return page_items[number - 1]
+                return chosen
             await session.write(reject_keystroke(2))
             continue
 
@@ -1550,6 +1594,7 @@ async def _show_picker_help(
     unicode_style: bool = False,
     has_create: bool = False,
     live_nav: Sequence[MenuEntry] = (),
+    has_unpickable: bool = False,
 ) -> None:
     """Ctrl-H's own content for this screen (dogfood feature request --
     the shared picker had no on-demand help at all, only the terse
@@ -1573,6 +1618,11 @@ async def _show_picker_help(
         colored("A number", fg_color=header_color, bold=True),
         "  Selects that item on the current page directly: two digits ('05') at once, "
         "or one digit and Enter ('5' Enter).",
+        *(
+            # Issue #920: only said on a list that has such rows.
+            ["  A row with - in place of a number can't be chosen; the words beside it say why."]
+            if has_unpickable else []
+        ),
         "",
         colored("Search", fg_color=header_color, bold=True),
         "  Filters the list to items whose name contains the text you type. A single "

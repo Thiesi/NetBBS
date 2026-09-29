@@ -32,6 +32,7 @@ from netbbs.net.live_screen import KeyOutcome, fill_row, paint_text, run_live_sc
 from netbbs.net.session import Session, SessionClosedError
 from netbbs.net.session_registry import ActiveSessionRegistry
 from netbbs.rendering.ansi import CSI, strip_ansi
+from netbbs.rendering.charset import input_codec
 from netbbs.rendering.screen_buffer import ScreenBuffer, Snapshot, diff_ansi, full_render_ansi
 from netbbs.rendering.theme import ACCENT_COLOR, ERROR_COLOR, HEADER_COLOR, PRIVILEGE_COLOR, VALUE_COLOR
 from netbbs.rendering.width import wrap_to_width
@@ -151,13 +152,14 @@ class _CallerScreen:
 
 
 class _CallerKeys:
-    """Turns the caller's diverted bytes into typing: UTF-8 text, Enter,
-    Backspace; escape sequences (arrows and such) are skipped whole."""
+    """Turns the caller's diverted bytes into typing: text in their
+    terminal's character set (issue #929), Enter, Backspace; escape
+    sequences (arrows and such) are skipped whole."""
 
     def __init__(self, pane: Pane, session: Session) -> None:
         self.pane = pane
         self.session = session
-        self.decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        self.decoder = codecs.getincrementaldecoder(input_codec(session))("replace")
         self.in_escape = False
         self.in_csi = False
 

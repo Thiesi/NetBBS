@@ -131,10 +131,13 @@ for first: a user name, or `name@TheirBBS` for someone on a linked BBS. An
 empty line or Esc there cancels. Press Tab to complete a name, or, after the
 `@`, the name of a linked BBS; if several fit, they are listed under the
 prompt. Type `?` and press Enter for a list of everyone you can write to:
-people you had mail with lately first, then the linked BBSes, then the
-members of this board. Choose a BBS and you are asked for the person's user
-name there; `name@?` lists just the BBSes for that name. Only people who can
-receive mail from you are offered.
+people you had mail with lately first, then the members of this board, then
+the linked BBSes. Choose a BBS and you are asked for the person's user
+name there; `name@?` lists just the BBSes for that name. The list also shows
+who you can't write to right now, dimmed, with `-` instead of a number and
+the reason beside the name: they don't accept your mail, their account is
+disabled or awaiting approval, or their BBS is not linked yet (this board's
+SysOp hasn't finished linking it). Tab only completes names you can write to.
 
 A letter can go to several people, up to 20, here and on linked BBSes
 alike: separate them with commas, as in `bob, carol@Farpoint`. Tab completes
@@ -276,7 +279,8 @@ their address. The compose screen opens with **To** filled in:
 - In the **Directory**, open a member's card and press **[M]ail**.
 - On **Who's online**, pick a caller and press **[E]-mail** (**[M]** there is
   a live message). It works for a caller on a linked node, and for a caller
-  who has turned off live messages.
+  who has turned off live messages. It is not offered for someone who has
+  blocked you.
 - On **Previous callers**, press **[M]ail a caller** and type the caller's
   number. A caller whose name is hidden there can't be written to from the
   list.
@@ -403,23 +407,39 @@ a letter, you are back on the Sent list, with the new letter at the top and
 the result above the prompt (or on Find's results, if you opened the letter
 from there).
 
-To stop someone's mail, open a letter from them and press **Bloc[k]
-sender**; the same key, now **Unbloc[k] sender**, takes it back. It works
-for someone on this board and for someone on a linked node, who is blocked
-by their address there, so a node changing its name does not undo it.
-**Profile → Blocked mail senders** lists everyone you block, blocks
-someone by name (`alice`, or `alice@OtherNode`) before they have written,
-and unblocks with **[U]nblock** or by picking a row. Mail already in your
-Inbox stays there.
+To stop someone's mail and live messages, open a letter from them and
+press **Bloc[k] sender**, or pick them on **Who's online** and press
+**Bloc[k]**; the same key, now **Unbloc[k]**, takes it back. It works for
+someone on this board and for someone on a linked node, who is blocked by
+their address there, so a node changing its name does not undo it.
+**Profile → Blocked people** lists everyone you block, blocks someone by
+name (`alice`, or `alice@OtherNode`) before they have written, and unblocks
+with **[U]nblock** or by picking a row. Mail already in your Inbox stays
+there.
 
-A blocked sender is told: on this board the To prompt and Send say that
-you do not accept mail from them, and mail from another node bounces with
-that reason. It is never taken and quietly thrown away. The same works the
-other way: if you are told a recipient does not accept mail from you, they
-have blocked you. Two senders cannot be blocked: **System**, and this
-board's SysOp, who has to be able to reach every account on the board.
-Blocking covers mail only; live direct messages have their own setting in
-Profile.
+One block stops both their mail and their live messages: `/msg`,
+`/private`, `/dm` invitations, and messages and chat invitations from Who's
+online. It also stops them inviting you into a chat channel with
+`/invite`. If they are in a private conversation with you when you block
+them, it ends.
+
+A blocked person is told. On this board the To prompt and Send say that
+you do not accept mail from them, and `/msg`, `/private`, `/dm` and
+`/invite` say you do not accept messages from them. Who's online says you
+do not accept messages or mail from them, and offers neither. Mail from another node
+bounces with that reason. It is never taken and quietly thrown away. The
+one exception is a live message from someone on another node: it is
+dropped without an answer, because live messages between nodes have no way
+to send one back. The same works the other way: if you are told someone
+does not accept mail or messages from you, they have blocked you. Two
+senders cannot be blocked: **System**, and this board's SysOp, who has to
+be able to reach every account on the board.
+
+A block does not hide what someone says in a chat channel everyone shares;
+ask a channel operator or the SysOp if someone is disrupting a channel. To
+stop live messages from everyone at once, turn off **Direct messages** in
+Profile; it applies to `/msg` and `/private` as well as `/dm` and Who's
+online, and does not stop mail or channel invitations.
 
 **Read receipts.** When you send mail to someone on this board, Sent shows
 whether they have read it: the list says `read` or `not read`, and the
@@ -517,9 +537,18 @@ Your SysOp controls the time allowed and can help with a missing or locked save.
 ## Preferences and help
 
 Use **Profile** for display, editor, and chat preferences, your SSH keys, and
-your password. If lines and arrows look wrong, switch **Profile → [U]nicode
-style** off; if
-colors are poor, change the color preference. **Ctrl+L** redraws ordinary NetBBS screens after a display problem.
+your password. **Profile → [U]nicode or CP437** sets the characters NetBBS sends
+your terminal:
+
+- **Auto**, the default, follows what your terminal reports when you connect.
+- **Unicode** suits modern terminals and the browser.
+- **CP437** suits classic BBS terminals such as SyncTERM, and shows ANSI art as
+  it was drawn.
+- **ASCII** is plain text that any terminal shows.
+
+If your terminal did not say which it is, NetBBS asks once after you log in
+which of two sample lines looks right. If lines and arrows look wrong later,
+change this setting. If colors are poor, change the color preference. **Ctrl+L** redraws ordinary NetBBS screens after a display problem.
 Games may use different controls.
 
 Some resources require an account level, verified age, or verified name.

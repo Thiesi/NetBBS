@@ -36,12 +36,6 @@ class FakeSession:
         # Scripted `keys` lists that end with "l" need a single logoff-
         # confirmation answer; nothing in this file exercises any other
         # read_line-driven prompt reached via a direct _main_menu() call.
-        # A caller going through run_authenticated_session instead (which
-        # also shows the one-time post-login Unicode-style confirmation
-        # first) must pass `lines=["n", "y"]` explicitly -- defaulting
-        # this class to that shape would wrongly feed the "n" into
-        # direct _main_menu() calls' own first (and often only)
-        # read_line-driven prompt instead.
         self._lines = iter(lines if lines is not None else ["y"])
         self.written: list[str] = []
         self.terminal_width = 80
@@ -237,10 +231,8 @@ def test_offline_invitee_sees_the_notice_and_menu_option_on_next_login(tmp_path)
     _grant_manage_members(db, alice, channel)
     create_invitation(db, channel, bob, invited_by=alice)  # bob is offline the whole time
 
-    # "n" answers the one-time post-login Unicode-style confirmation
-    # (keep it on) that only a real run_authenticated_session() call
-    # shows; "y" is still for the later "Log off?" confirmation.
-    session = FakeSession(keys=["i", "l"], lines=["n", "y"])
+    # "y" is for the "Log off?" confirmation.
+    session = FakeSession(keys=["i", "l"], lines=["y"])
 
     asyncio.run(
         run_authenticated_session(session, db, ChatHub(), PresenceRegistry(), MessageMailbox(), bob)

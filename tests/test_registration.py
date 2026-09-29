@@ -211,8 +211,7 @@ def test_registration_mode_new_key_takes_precedence_over_legacy(db):
 
 
 def test_typing_new_registers_and_logs_straight_in_when_mode_is_open(db):
-    # "n" answers the one-time post-login Unicode-style prompt.
-    session = FakeSession(["new", "alice", "hunter2pw", "hunter2pw", "n", "y"], keys=["l"])
+    session = FakeSession(["new", "alice", "hunter2pw", "hunter2pw", "y"], keys=["l"])
 
     asyncio.run(_run_login(session, db))
 
@@ -331,9 +330,8 @@ def test_registration_shows_an_attempt_counter_from_the_first_screen(db):
 
 def test_registration_retries_in_place_after_a_too_short_password_and_can_still_succeed(db):
     # Attempt 1: too-short password. Attempt 2: succeeds outright.
-    # "n" answers the one-time post-login Unicode-style prompt.
     session = FakeSession(
-        ["new", "alice", "short", "short", "alice", "hunter2pw", "hunter2pw", "n", "y"], keys=["l"],
+        ["new", "alice", "short", "short", "alice", "hunter2pw", "hunter2pw", "y"], keys=["l"],
     )
 
     asyncio.run(_run_login(session, db))
@@ -348,9 +346,8 @@ def test_registration_retries_in_place_after_a_too_short_password_and_can_still_
 def test_registration_retries_in_place_after_a_username_already_taken(db):
     create_user(db, "bob", password="hunter2")
     # Attempt 1: "bob" is taken. Attempt 2: "alice" succeeds.
-    # "n" answers the one-time post-login Unicode-style prompt.
     session = FakeSession(
-        ["new", "bob", "alice", "hunter2pw", "hunter2pw", "n", "y"], keys=["l"],
+        ["new", "bob", "alice", "hunter2pw", "hunter2pw", "y"], keys=["l"],
     )
 
     asyncio.run(_run_login(session, db))
@@ -410,8 +407,7 @@ def test_registration_is_throttled_by_the_shared_login_throttle(db):
 
 
 def test_registration_username_prompt_is_case_insensitive_for_the_sentinel(db):
-    # "n" answers the one-time post-login Unicode-style prompt.
-    session = FakeSession(["NEW", "alice", "hunter2pw", "hunter2pw", "n", "y"], keys=["l"])
+    session = FakeSession(["NEW", "alice", "hunter2pw", "hunter2pw", "y"], keys=["l"])
 
     asyncio.run(_run_login(session, db))
 
@@ -430,9 +426,9 @@ def test_before_banner_shown_once_at_entry_not_on_every_retry(db):
     new_account_banner_before_path(db).write_bytes(b"SIGN UP BELOW")
     set_new_account_banner_before_enabled(db, True)
     # Attempt 1: too-short password (fixable, retries in place).
-    # Attempt 2: succeeds. "n" answers the Unicode-style prompt.
+    # Attempt 2: succeeds.
     session = FakeSession(
-        ["new", "alice", "short", "short", "alice", "hunter2pw", "hunter2pw", "n", "y"], keys=["l"],
+        ["new", "alice", "short", "short", "alice", "hunter2pw", "hunter2pw", "y"], keys=["l"],
     )
 
     asyncio.run(_run_login(session, db))
@@ -449,7 +445,7 @@ def test_after_banner_shown_on_immediate_success(db):
 
     new_account_banner_after_path(db).write_bytes(b"YOU ARE IN")
     set_new_account_banner_after_enabled(db, True)
-    session = FakeSession(["new", "alice", "hunter2pw", "hunter2pw", "n", "y"], keys=["l"])
+    session = FakeSession(["new", "alice", "hunter2pw", "hunter2pw", "y"], keys=["l"])
 
     asyncio.run(_run_login(session, db))
 
@@ -489,8 +485,7 @@ def test_after_banner_not_shown_on_a_fixable_validation_failure(db):
 
 
 def test_disabled_new_account_banners_leave_registration_byte_for_byte_unchanged(db):
-    # "n" answers the one-time post-login Unicode-style prompt.
-    session = FakeSession(["new", "alice", "hunter2pw", "hunter2pw", "n", "y"], keys=["l"])
+    session = FakeSession(["new", "alice", "hunter2pw", "hunter2pw", "y"], keys=["l"])
 
     asyncio.run(_run_login(session, db))
 

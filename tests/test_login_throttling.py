@@ -251,8 +251,7 @@ def test_unauthenticated_slot_is_released_after_login_completes(db, monkeypatch)
         config = _throttle_config(max_concurrent_unauthenticated_sessions=1)
         throttle = _throttle(config)
 
-        # "n" answers the one-time post-login Unicode-style prompt.
-        first_session = FakeSession(["alice", "correct-password", "n", "y"], keys=["l"])
+        first_session = FakeSession(["alice", "correct-password", "y"], keys=["l"])
         await login_flow.handle_session(first_session, db, ChatHub(), PresenceRegistry(), MessageMailbox(), throttle, config, ActiveSessionRegistry(), MaintenanceMode())
         assert "Welcome, alice" in first_session.output
 

@@ -65,7 +65,9 @@ from netbbs.net.signup_text import pending_approval_notice, username_problem_lin
 from netbbs.staff import approvers_away_line
 from netbbs.net.throttle import LoginThrottle
 from netbbs.net.welcome_banner import load_welcome_banner
+from netbbs.net.terminal_detect import classify_terminal_types, clean_terminal_type, describe_detection
 from netbbs.rendering import strip_ansi
+from netbbs.rendering.charset import ASCII, UTF8, map_text
 from netbbs.rendering.pipe_codes import PastedColor
 from netbbs.storage.database import Database
 
@@ -170,6 +172,20 @@ class SSHSession(Session):
             self.truecolor_diagnostic = f"SSH environment reported COLORTERM={colorterm}; using 256-color"
         else:
             self.truecolor_diagnostic = "SSH client did not forward COLORTERM; using 256-color"
+        # The PTY request's terminal type decides the character set (design
+        # doc §3.2, issue #929): SyncTERM sends `syncterm` over SSH too. SSH
+        # clients are otherwise modern, so an unrecognised name keeps UTF-8,
+        # and the caller is asked after login.
+        get_terminal_type = getattr(process, "get_terminal_type", None)
+        terminal_type = clean_terminal_type((get_terminal_type() if get_terminal_type is not None else None) or "")
+        self.terminal_types = (terminal_type,) if terminal_type else ()
+        charset, self.charset_certain = classify_terminal_types(self.terminal_types)
+        self.output_charset = self.detected_charset = charset if charset is not None else UTF8
+        _logger.info(describe_detection(
+            "SSH", self.peer_address, names=self.terminal_types,
+            outcome="PTY request" if terminal_type else "no PTY terminal type",
+            charset=self.output_charset, certain=self.charset_certain,
+        ))
 
     async def _send_text(self, text: str) -> None:
         # Same CRLF normalization TelnetSession.write performs, and the
@@ -177,7 +193,8 @@ class SSHSession(Session):
         # internally, and Session.write_line only appends '\r\n' once at
         # the end.
         normalized = text.replace("\r\n", "\n").replace("\n", "\r\n")
-        data = normalized.encode("utf-8", errors="replace")
+        # Already mapped to the session's character set by `Session.write`.
+        data = normalized.encode(self.output_charset, errors="replace")
         try:
             self._process.stdout.write(data)
             await self._process.stdout.drain()
@@ -390,7 +407,7 @@ class _NetBBSSSHServer(asyncssh.SSHServer):
         # same "capability negotiation hasn't completed yet" problem
         # Telnet's own pre-login banner has.
         assert self._conn is not None  # connection_made always runs first
-        lines = [load_welcome_banner(self._db, truecolor=False)]
+        lines = [load_welcome_banner(self._db, truecolor=False, unicode_style=False)]
         registration_open = get_registration_mode(self._db) != RegistrationMode.CLOSED
         if registration_open:
             lines.append(f"New here? Connect as {NEW_ACCOUNT_SENTINEL!r} to register.")
@@ -428,7 +445,9 @@ class _NetBBSSSHServer(asyncssh.SSHServer):
         # banner_before`'s colored renderings remain exactly as they
         # were for every other caller (Telnet/web pre-login, and SSH's
         # own post-auth welcome screen).
-        self._conn.send_auth_banner(strip_ansi("\r\n".join(lines)) + "\r\n")
+        # Sent before any channel, and so before any terminal type, exists:
+        # ASCII is the one character set every client shows (issue #929).
+        self._conn.send_auth_banner(map_text(strip_ansi("\r\n".join(lines)), ASCII) + "\r\n")
         return True
 
     def password_auth_supported(self) -> bool:
@@ -454,7 +473,7 @@ class _NetBBSSSHServer(asyncssh.SSHServer):
             # banner is the one thing SSH can show before auth succeeds.
             if self._conn is not None:
                 self._conn.send_auth_banner(
-                    pending_approval_notice(exc.username, approvers_away_line(self._db)) + "\r\n"
+                    map_text(pending_approval_notice(exc.username, approvers_away_line(self._db)), ASCII) + "\r\n"
                 )
             return False
         except AuthError:

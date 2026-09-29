@@ -46,6 +46,10 @@ class _FakeSession:
     # (breadcrumb=() notices included) even though it has no visible
     # effect there.
     node_name_gradient: str | None = None
+    # The lockdown SysOp test reaches the first main menu, which is where
+    # the Welcome line is shown (issue #949).
+    terminal_width = 80
+    terminal_height = 24
 
     def __init__(self):
         self.written: list[str] = []
@@ -737,7 +741,7 @@ def test_immediate_shutdown_broadcasts_and_disconnects_without_waiting(tmp_path)
         )
         try:
             reader, writer = await _open_connection_when_ready("127.0.0.1", port(12394))
-            await skip_initial_negotiation(reader)
+            await skip_initial_negotiation(reader, writer)
 
             deadline = asyncio.get_event_loop().time() + 30.0
             while len(session_registry) == 0:
@@ -785,7 +789,7 @@ def test_graceful_shutdown_actually_waits_before_disconnecting(tmp_path):
         )
         try:
             reader, writer = await _open_connection_when_ready("127.0.0.1", port(12393))
-            await skip_initial_negotiation(reader)
+            await skip_initial_negotiation(reader, writer)
 
             deadline = asyncio.get_event_loop().time() + 30.0
             while len(session_registry) == 0:
@@ -1110,8 +1114,12 @@ def test_lockdown_lets_a_sysop_through(tmp_path):
                     node_controls=node_controls,
                 )
             )
-            await asyncio.sleep(0)
-            await asyncio.sleep(0)
+            # The Welcome line is shown above the first main menu's prompt
+            # (issue #949), so wait for that menu to be drawn.
+            for _ in range(500):
+                if any("Welcome, sysop" in line for line in session.written):
+                    break
+                await asyncio.sleep(0.01)
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
 
@@ -1261,10 +1269,8 @@ def test_no_lockdown_notice_before_login_when_lockdown_is_off(tmp_path):
         try:
             create_user(db, "alice", password="hunter2", user_level=10)
             throttle, throttle_config = _real_throttle()
-            # First "n" answers the one-time post-login Unicode-style
-            # confirmation prompt (keep it on); "y" is still for the
-            # later "Log off?" confirmation.
-            session = _ScriptedLoginSession(["alice", "hunter2", "n", "y"], keys=["l"])
+            # "y" is for the "Log off?" confirmation.
+            session = _ScriptedLoginSession(["alice", "hunter2", "y"], keys=["l"])
 
             await login_flow.handle_session(
                 session, db, ChatHub(), PresenceRegistry(), MessageMailbox(),
@@ -1331,10 +1337,8 @@ def test_drain_notice_shown_to_a_non_sysop_after_login_when_a_drain_is_scheduled
             loop = asyncio.get_running_loop()
             drain_task = asyncio.create_task(asyncio.Event().wait())
             node_controls.drain_scheduler.schedule(drain_task, deadline=loop.time() + 30.0, message=None)
-            # "n" answers the one-time post-login Unicode-style
-            # confirmation prompt (keep it on); "y" is still for the
-            # later "Log off?" confirmation.
-            session = _ScriptedLoginSession(["n", "y"], keys=["l"])
+            # "y" is for the "Log off?" confirmation.
+            session = _ScriptedLoginSession(["y"], keys=["l"])
 
             await login_flow.run_authenticated_session(
                 session, db, ChatHub(), PresenceRegistry(), MessageMailbox(), alice,
@@ -1368,10 +1372,8 @@ def test_no_drain_notice_shown_to_a_sysop_even_when_a_drain_is_scheduled(tmp_pat
             loop = asyncio.get_running_loop()
             drain_task = asyncio.create_task(asyncio.Event().wait())
             node_controls.drain_scheduler.schedule(drain_task, deadline=loop.time() + 30.0, message=None)
-            # "n" answers the one-time post-login Unicode-style
-            # confirmation prompt (keep it on); "y" is still for the
-            # later "Log off?" confirmation.
-            session = _ScriptedLoginSession(["n", "y"], keys=["l"])
+            # "y" is for the "Log off?" confirmation.
+            session = _ScriptedLoginSession(["y"], keys=["l"])
 
             await login_flow.run_authenticated_session(
                 session, db, ChatHub(), PresenceRegistry(), MessageMailbox(), sysop,

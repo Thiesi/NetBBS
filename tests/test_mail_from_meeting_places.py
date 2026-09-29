@@ -274,7 +274,7 @@ def test_a_linked_caller_on_a_bbs_still_on_probation_is_refused_with_the_reason(
 
     _run_who(db, lane, alice, session, online=(), link_context=link_context)
 
-    assert "is newly linked; mail opens once the SysOp establishes it." in " ".join(_screens(session)[-1].split())
+    assert "is not linked yet; mail opens once the SysOp establishes it." in " ".join(_screens(session)[-1].split())
     assert "Subject" not in _visible(session)
     assert _sent_rows(db) == []
 

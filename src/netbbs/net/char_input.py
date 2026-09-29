@@ -45,6 +45,7 @@ from typing import Awaitable, Callable, Protocol, Sequence
 
 from netbbs.net.session import SessionClosedError, secret_input
 from netbbs.rendering.ansi import reject_keystroke
+from netbbs.rendering.charset import input_codec
 from netbbs.rendering.pipe_codes import PastedColor
 from netbbs.rendering.width import char_width, display_width
 
@@ -1123,7 +1124,7 @@ async def _read_line_masked(source: ByteSource, write: WriteFunc) -> str:
         if b < 0x80:
             char = chr(b)
         else:
-            char = await _read_utf8_continuation(source, b)
+            char = await _read_high_character(source, b)
             if char is None:
                 continue
 
@@ -1382,7 +1383,7 @@ async def _read_line_editable(
                 if b < 0x80:
                     char = chr(b)
                 else:
-                    char = await _read_utf8_continuation(source, b)
+                    char = await _read_high_character(source, b)
                     if char is None:
                         continue  # malformed/interrupted multi-byte sequence
 
@@ -1515,7 +1516,7 @@ async def read_key(source: ByteSource, write: WriteFunc, echo: bool = True) -> s
         if b < 0x80:
             char = chr(b)
         else:
-            char = await _read_utf8_continuation(source, b)
+            char = await _read_high_character(source, b)
             if char is None:
                 continue
 
@@ -1562,7 +1563,7 @@ async def read_any_key(source: ByteSource, write: WriteFunc, echo: bool = True) 
         if b < 0x80:
             char = chr(b)
         else:
-            char = await _read_utf8_continuation(source, b)
+            char = await _read_high_character(source, b)
             if char is None:
                 continue  # malformed/interrupted multi-byte sequence -- keep waiting for a real key
 
@@ -1711,7 +1712,7 @@ async def read_editor_key(
         if b < 0x80:
             char = chr(b)
         else:
-            char = await _read_utf8_continuation(source, b)
+            char = await _read_high_character(source, b)
             if char is None:
                 continue  # malformed/interrupted multi-byte sequence
 
@@ -1750,6 +1751,15 @@ async def discard_buffered_input(source: ByteSource) -> None:
         peek = await _read_byte_with_timeout(source, _FOLLOWUP_BYTE_TIMEOUT)
         if peek is None:
             return
+
+
+async def _read_high_character(source: ByteSource, lead_byte: int) -> str | None:
+    """The character a byte above 0x7F starts, in the caller's terminal's
+    character set (issue #929): a CP437 terminal sends one byte per
+    character; every other terminal sends UTF-8."""
+    if input_codec(source) == "cp437":
+        return bytes([lead_byte]).decode("cp437")
+    return await _read_utf8_continuation(source, lead_byte)
 
 
 async def _read_utf8_continuation(source: ByteSource, lead_byte: int) -> str | None:

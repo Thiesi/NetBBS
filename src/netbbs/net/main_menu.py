@@ -658,6 +658,8 @@ async def _main_menu_loop(
                 if first_draw:
                     # A drain under way, told first (issue #923): written at
                     # login, before this menu's clear, it was wiped unseen.
+                    # Only login's Welcome line (issue #949) and the answer
+                    # to a login question, queued before this menu, precede it.
                     drain_line = login_drain_notice(user, node_controls)
                     if drain_line is not None:
                         announce_styled(session, drain_line)

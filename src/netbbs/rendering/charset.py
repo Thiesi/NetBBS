@@ -89,7 +89,56 @@ _FOLD: dict[str, str] = {
     "¼": "4", "½": "2", "¾": "4", "µ": "u", "÷": "/",
     # Spacing accents, whose decomposition is only a space and a mark.
     "´": "'", "¨": '"', "¯": "-", "¸": ",", "ˆ": "^", "˜": "~", "˝": '"', "˘": "u", "˙": ".",
+    # The rest of CP437's upper half, for a CP437 door or CP437 art shown
+    # on an ASCII terminal (#929 PR 6): its Greek letters and maths signs.
+    "₧": "P", "ƒ": "f", "⌐": "-", "¬": "-",
+    "α": "a", "Γ": "G", "π": "p", "Σ": "E", "σ": "s", "τ": "t", "Φ": "O", "Θ": "O",
+    "Ω": "O", "δ": "d", "∞": "8", "φ": "o", "ε": "e", "∩": "n", "≡": "=", "≥": ">",
+    "≤": "<", "⌠": "|", "⌡": "|", "≈": "~", "∙": ".", "√": "v",
 }
+
+
+# A light CP437 line for each set of directions a box character draws.
+_LIGHT_BOX = {
+    frozenset("LR"): "─", frozenset("UD"): "│", frozenset("L"): "─", frozenset("R"): "─",
+    frozenset("U"): "│", frozenset("D"): "│",
+    frozenset("DR"): "┌", frozenset("DL"): "┐", frozenset("UR"): "└", frozenset("UL"): "┘",
+    frozenset("UDR"): "├", frozenset("UDL"): "┤", frozenset("DLR"): "┬", frozenset("ULR"): "┴",
+    frozenset("UDLR"): "┼",
+}
+
+
+def _box_substitute(ch: str, charset: Charset) -> str | None:
+    """A substitute for a box-drawing character the table does not list,
+    worked out from the directions its Unicode name says it draws: CP437
+    gets the light line of that shape (it has no heavy, dashed or mixed
+    light/heavy lines), ASCII gets `+`, `|`, `-` or `=`. CP437's own
+    mixed single/double corners and tees (╒ ╡ ╫ ...) are why the ASCII
+    half exists: a CP437 door or piece of art shown on an ASCII terminal
+    is full of them."""
+    name = unicodedata.name(ch, "")
+    if not name.startswith("BOX DRAWINGS "):
+        return None
+    if "DIAGONAL" in name:
+        if "CROSS" in name:
+            return "X"
+        return "/" if "UPPER RIGHT TO LOWER LEFT" in name else "\\"
+    words = set(name.split())
+    directions = set()
+    if "VERTICAL" in words:
+        directions |= {"U", "D"}
+    if "HORIZONTAL" in words:
+        directions |= {"L", "R"}
+    directions |= {word[0] for word in words & {"UP", "DOWN", "LEFT", "RIGHT"}}
+    if not directions:
+        return None
+    if charset == CP437:
+        return _LIGHT_BOX.get(frozenset(directions))
+    if directions <= {"L", "R"}:
+        return "=" if "DOUBLE" in words and "DASH" not in words else "-"
+    if directions <= {"U", "D"}:
+        return "|"
+    return "+"
 
 
 def _encodable(text: str, charset: Charset) -> bool:
@@ -147,6 +196,11 @@ def _map_char(ch: str, charset: Charset) -> str:
         fitted = _fit(folded, width, charset)
         if fitted is not None:
             return fitted
+    box = _box_substitute(ch, charset)
+    if box is not None:
+        fitted = _fit(box, width, charset)
+        if fitted is not None:
+            return fitted
     return "?" * width
 
 
@@ -185,7 +239,25 @@ def encode_text(text: str, charset: Charset) -> bytes:
     return map_text(text, charset).encode(charset, errors="replace")
 
 
+def input_codec(session: object) -> str:
+    """The codec a caller's typed bytes are in: CP437 for a CP437
+    terminal, UTF-8 otherwise (an ASCII terminal's bytes are valid UTF-8,
+    and a UTF-8 terminal the caller chose ASCII for still types UTF-8)."""
+    return "cp437" if getattr(session, "output_charset", UTF8) == CP437 else "utf-8"
+
+
 def ellipsis(charset: Charset) -> str:
     """The truncation marker for `charset`: one column in UTF-8, three
     plain dots where the single-character ellipsis does not exist."""
     return "…" if charset == UTF8 else "..."
+
+
+def ellipsis_for(session: object, *, unicode_style: bool = True) -> str:
+    """The truncation marker a screen should append for `session`: "…"
+    only on a UTF-8 terminal with decorated screens, three dots
+    otherwise. `map_text` has to keep widths, so it can only turn "…"
+    into a single "."; a screen that truncates knows the width and can
+    afford the real three dots."""
+    if not unicode_style:
+        return "..."
+    return ellipsis(getattr(session, "output_charset", UTF8))

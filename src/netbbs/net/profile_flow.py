@@ -95,7 +95,13 @@ from netbbs.net.mrc_lastseen_preference import mrc_lastseen_recorded, set_mrc_la
 from netbbs.net.mrc_private_preference import mrc_private_messages_enabled, set_mrc_private_messages_enabled
 from netbbs.rendering.pipe_codes import CGA_COLOR_NAMES
 from netbbs.rendering.reflow import wrap_terminal_text
-from netbbs.net.unicode_style_preference import set_unicode_style_enabled, unicode_style_enabled
+from netbbs.net.unicode_style_preference import (
+    CHARSET_PREFERENCES,
+    apply_charset_preference,
+    charset_preference,
+    set_charset_preference,
+    unicode_style_enabled,
+)
 from netbbs.permissions import meets_level
 from netbbs.rendering import (
     ERROR_COLOR,
@@ -997,6 +1003,20 @@ def _profile_field(label: str, value: str, *, value_color: int = VALUE_COLOR) ->
 _MAX_BIO_PREVIEW_LINES = 3
 
 
+_CHARSET_NAMES = {"utf-8": "Unicode", "cp437": "CP437", "ascii": "ASCII"}
+
+
+def _charset_label(preference: str, session: Session) -> str:
+    if preference == "auto":
+        return f"Auto (now {_CHARSET_NAMES.get(getattr(session, 'output_charset', 'utf-8'), 'Unicode')})"
+    return {"unicode": "Unicode", "cp437": "CP437", "ascii": "ASCII"}[preference]
+
+
+async def _persist_charset(session: Session, lane: DatabaseLane, user: User, preference: str) -> None:
+    await lane.run(set_charset_preference, user, preference)
+    apply_charset_preference(session, preference)
+
+
 async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> None:
     """
     Edit your own vCard and caller preferences (design doc) --
@@ -1040,6 +1060,7 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
         "description_level": description_level,
         "redraw_in_place": redraw_in_place,
         "unicode_style": unicode_style,
+        "charset": await lane.run(charset_preference, user),
         "mrc_colors": await lane.run(mrc_colors_enabled, user),
         "post_colors": await lane.run(post_colors_enabled, user),
         "mrc_nick_color": await lane.run(mrc_nick_color, user),
@@ -1249,7 +1270,7 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
         ),
         FieldSpec(
             key="accepts_dm", hotkey="m", menu_text=menu_key("M", "essages"),
-            label="Direct messages (Who's online)",
+            label="Direct messages",
             render=lambda d: "accepted" if d["accepts_dm"] else "not accepted",
             prompt=live_choice_field(
                 "accepts_dm", [False, True],
@@ -1257,24 +1278,28 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
             ),
             brief="Direct-message preferences",
             help=(
-                "Whether other callers can send you a direct/private chat message from the "
-                "Who's online screen. Doesn't affect linked-channel chat -- only direct, "
-                "one-to-one messages."
+                "Whether other callers can send you live one-to-one messages: /msg, /private, "
+                "a message from Who's online, a direct-chat invite (/dm), or a message from "
+                "someone on a linked BBS. Doesn't affect chat channels or mail. To stop one "
+                "person rather than everyone, block them (Blocked people, below)."
             ),
             section="Communication",
         ),
         FieldSpec(
-            key="blocked_senders", hotkey="o", menu_text=menu_key("o", "cked senders", prefix="Bl"),
-            label="Blocked mail senders",
+            key="blocked_senders", hotkey="o", menu_text=menu_key("o", "cked people", prefix="Bl"),
+            label="Blocked people",
             render=lambda d: f"{d['blocked_sender_count']} blocked" if d["blocked_sender_count"] else "(none)",
             prompt=_blocked_senders_prompt,
-            brief="Refuse mail from someone",
+            brief="Refuse mail and messages from someone",
             help=(
-                "Lists the senders whose mail you refuse, on this BBS and on linked BBSes, and lets "
-                "you block someone by name or unblock them. A blocked sender is told their letter "
-                "was refused. You can also block a sender from a letter they sent you. Mail from "
-                "the system and from this BBS's SysOp can't be blocked. Mail only: direct chat "
-                "messages have their own setting above."
+                "Lists the people you block, on this BBS and on linked BBSes, and lets you block "
+                "someone by name or unblock them. A block refuses their mail and their live "
+                "messages: /msg, /private, /dm and Who's online. Someone on this BBS is told you "
+                "don't accept mail or messages from them; someone on a linked BBS is told about "
+                "mail, while their live messages are dropped without a word. You can also block "
+                "someone from a letter they sent you or from Who's online. The system and this "
+                "BBS's SysOp can't be blocked. A block doesn't hide what someone says in a chat "
+                "channel."
             ),
             section="Communication",
         ),
@@ -1397,18 +1422,19 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
             section="Display",
         ),
         FieldSpec(
-            key="unicode_style", hotkey="u", menu_text=menu_key("U", "nicode style"),
-            label="Unicode decorative style",
-            render=lambda d: "on" if d["unicode_style"] else "off",
+            key="charset", hotkey="u", menu_text=menu_key("U", "nicode or CP437"),
+            label="Character set",
+            render=lambda d: _charset_label(d["charset"], session),
             prompt=live_choice_field(
-                "unicode_style", [False, True],
-                persist=lambda lane, v: lane.run(set_unicode_style_enabled, user, v),
+                "charset", list(CHARSET_PREFERENCES),
+                persist=lambda lane, v: _persist_charset(session, lane, user, v),
             ),
-            brief="Unicode arrows/bullets vs. plain ASCII",
+            brief="What your terminal shows: Auto, Unicode, CP437 or ASCII",
             help=(
-                "Whether menus/breadcrumbs use Unicode characters (›, ●, etc.) for a "
-                "cleaner look, or fall back to plain ASCII ('/', '[X]', etc.) for a terminal "
-                "that renders Unicode incorrectly."
+                "Which characters NetBBS sends your terminal. Auto follows what your terminal "
+                "reported when you connected. Unicode suits modern terminals and the browser; "
+                "CP437 suits classic BBS terminals such as SyncTERM and shows ANSI art as drawn; "
+                "ASCII is plain text any terminal shows. Takes effect at once."
             ),
             section="Display",
         ),

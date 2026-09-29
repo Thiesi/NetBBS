@@ -116,6 +116,7 @@ from netbbs.chat import (
     ban_user,
     chat_stream_label,
     create_invitation,
+    may_invite,
     display_label,
     format_with_preference,
     get_channel_by_name,
@@ -169,7 +170,7 @@ from netbbs.mrc.settings import (
 from netbbs.net.mrc_color_preference import mrc_colors_enabled
 from netbbs.rendering.pipe_codes import render_pipe_codes, strip_pipe_codes
 from netbbs.timeutil import utc_now_iso
-from netbbs.messaging_preferences import accepts_direct_messages
+from netbbs.messaging_preferences import invitation_refusal, live_message_refusal
 from netbbs.moderation import ChannelPermission, has_permission
 from netbbs.net.char_input import Completer, InputHistory, LineViewport, LiveInputBuffer, reject_unhandled_key
 from netbbs.net.char_input import move_cursor as relative_move_cursor
@@ -2202,6 +2203,10 @@ async def _handle_msg(ctx: ChatCommandContext, args: str) -> None:
     if target is None:
         return
 
+    # Issue #925: `/msg` respects the recipient's direct-message opt-out
+    # and block list, as `/dm` and Who's online do.
+    if await _refuse_live_message(ctx.session, ctx.lane, target, ctx.user):
+        return
     if not ctx.presence.is_online(target.username):
         await ctx.session.write_line(
             colored(f"{sanitize_text(target.username)} is not currently online.", fg_color=MUTED_COLOR)
@@ -2209,6 +2214,17 @@ async def _handle_msg(ctx: ChatCommandContext, args: str) -> None:
         return
 
     await _deliver_private_message(ctx, target, body)
+
+
+async def _refuse_live_message(session: Session, lane: DatabaseLane, target: User, sender: User) -> bool:
+    """Tell `session` why `target` takes no live message from `sender`
+    (`netbbs.messaging_preferences.live_message_refusal`: the opt-out or
+    a block, issue #925) and return `True`; `False` when it may be sent."""
+    refusal = await lane.run(lambda db: live_message_refusal(db, target, sender=sender))
+    if refusal is None:
+        return False
+    await session.write_line(colored(sanitize_text(refusal), fg_color=MUTED_COLOR))
+    return True
 
 
 async def _handle_private(ctx: ChatCommandContext, args: str) -> ChatAction | None:
@@ -2259,6 +2275,8 @@ async def _handle_private(ctx: ChatCommandContext, args: str) -> ChatAction | No
     if target is None:
         return None
 
+    if await _refuse_live_message(ctx.session, ctx.lane, target, ctx.user):
+        return None
     if not ctx.presence.is_online(target.username):
         await ctx.session.write_line(
             colored(f"{sanitize_text(target.username)} is not currently online.", fg_color=MUTED_COLOR)
@@ -2316,10 +2334,7 @@ async def _handle_dm(ctx: ChatCommandContext, args: str) -> ChatAction | None:
     # request that is already known to be impossible. The outer flow
     # repeats both checks after unwind because either state may change
     # in the meantime.
-    if not await ctx.lane.run(accepts_direct_messages, target):
-        await ctx.session.write_line(
-            colored(f"{sanitize_text(target.username)} has opted out of direct messages.", fg_color=MUTED_COLOR)
-        )
+    if await _refuse_live_message(ctx.session, ctx.lane, target, ctx.user):
         return None
     if not ctx.presence.is_online(target.username):
         await ctx.session.write_line(
@@ -3755,6 +3770,11 @@ async def _handle_invite(ctx: ChatCommandContext, args: str) -> None:
     and silently reaches nobody for an offline invitee, yet it always
     printed "(sent to X)" regardless -- misleading the inviter into
     believing a notification went out when none did.
+
+    Issue #948: someone who has blocked the inviter is not invited -- no
+    row, no live notice -- and the inviter is told so in `/msg`'s words
+    (`netbbs.messaging_preferences.invitation_refusal`). The
+    direct-message opt-out does not stop an invitation.
     """
     target_name = args.strip()
     if not target_name:
@@ -3765,12 +3785,25 @@ async def _handle_invite(ctx: ChatCommandContext, args: str) -> None:
     if target is None:
         return
 
+    def _invite(db: Database) -> str | None:
+        # The right to invite is answered first: a caller who may not
+        # invite anyone is told that, not whether this invitee blocks them.
+        if may_invite(db, ctx.channel, ctx.user):
+            refusal = invitation_refusal(db, target, inviter=ctx.user)
+            if refusal is not None:
+                return refusal
+        create_invitation(db, ctx.channel, target, invited_by=ctx.user)
+        return None
+
     try:
-        await ctx.lane.run(create_invitation, ctx.channel, target, invited_by=ctx.user)
+        refusal = await ctx.lane.run(_invite)
     except MembershipError:
         await ctx.session.write_line(
             colored("You do not have permission to invite users to this channel.", fg_color=MUTED_COLOR)
         )
+        return
+    if refusal is not None:
+        await ctx.session.write_line(colored(sanitize_text(refusal), fg_color=MUTED_COLOR))
         return
 
     if ctx.presence.is_online(target.username):
@@ -5481,6 +5514,14 @@ async def _chat_loop(
                                 )
                                 private_target = None
                                 continue
+                            # Issue #925: a block or opt-out made while the
+                            # conversation is open ends it, like going offline.
+                            if await _refuse_live_message(session, lane, private_target, user):
+                                private_target = None
+                                await session.write_line(
+                                    colored(f"Returned to #{sanitize_text(channel.name)}.", fg_color=MUTED_COLOR)
+                                )
+                                continue
                             await _deliver_private_message(ctx, private_target, line)
                             continue
 
@@ -6284,10 +6325,7 @@ async def run_direct_chat_invite_flow(
     out, so a caller that would otherwise hold an outcome on a "Press
     any key" pause has nothing left to show.
     """
-    if not await lane.run(accepts_direct_messages, target):
-        await session.write_line(
-            colored(f"{sanitize_text(target.username)} has opted out of direct messages.", fg_color=MUTED_COLOR)
-        )
+    if await _refuse_live_message(session, lane, target, user):
         return False
     if not presence.is_online(target.username):
         await session.write_line(

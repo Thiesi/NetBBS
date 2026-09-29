@@ -61,6 +61,7 @@ from netbbs.net.new_account_banner_after import load_new_account_banner_after
 from netbbs.net.new_account_banner_before import load_new_account_banner_before
 from netbbs.net.node_theme import effective_accent_color, effective_header_color_256, effective_node_name_gradient
 from netbbs.net.nodeconfig import ThrottleConfig
+from netbbs.net.notices import announce_styled
 from netbbs.net.redraw_preference import start_new_account_redrawing_in_place
 from netbbs.net.session import Session, SessionClosedError, write_preformatted_line, write_prompt
 from netbbs.net.signup_text import pending_approval_notice, username_problem_line
@@ -79,9 +80,11 @@ from netbbs.net.throttle import LoginThrottle
 # a few sentences, which lose nothing by being narrow.
 _PRE_NEGOTIATION_WIDTH = 40
 from netbbs.net.unicode_style_preference import (
-    set_unicode_style_enabled,
+    apply_charset_preference,
+    charset_preference,
+    charset_preference_ever_set,
+    set_charset_preference,
     unicode_style_enabled,
-    unicode_style_ever_set,
 )
 from netbbs.guest import guest_is_eligible, guest_login_for, pre_login_notice
 from netbbs.net.welcome_banner import load_welcome_banner, pre_login_unicode_style
@@ -565,49 +568,87 @@ def _apply_access_change(session: Session, current: User, session_registry: Acti
         changed.set()
 
 
-async def _confirm_unicode_style(session: Session, db: Database, user: User) -> None:
-    """One-time post-login check (dogfood feature request): shows a
-    live sample of the Unicode breadcrumb style and asks whether it
-    rendered cleanly, since -- unlike `netbbs.net.color_depth_
-    preference`'s own COLORTERM signal -- there's no reliable way to
-    detect real UTF-8 terminal support ahead of time. The sample is
-    built with the actual `screen_title(..., unicode_style=True)`, not
-    a hand-typed copy, so what's shown always matches what real screens
-    will actually look like.
+_CHARSET_SAMPLE = "\u250c\u2500\u2500 caf\u00e9 \u2500\u2500\u2510"
 
-    Fires exactly once per account, gated on `unicode_style_ever_set`.
-    Answering either way -- including keeping it on -- writes the
-    preference, which itself counts as "touched" and prevents asking
-    again (`netbbs.net.unicode_style_preference`'s own established
-    contract, shared with `redraw_preference`)."""
-    if unicode_style_ever_set(db, user):
+
+async def _confirm_charset(session: Session, db: Database, user: User, *, apply_to: Session | None = None) -> None:
+    """Ask once which sample line looks right, when the terminal did not
+    say for certain which character set it reads (design doc §3.2, issue
+    #929): it reported no known terminal type, or only `ansi`. The same
+    frame goes out once as UTF-8 and once as CP437, byte for byte,
+    whatever the session is using; "neither" means ASCII. The answer
+    becomes the caller's preference and applies at once.
+
+    A caller who has already chosen -- in Profile, here before, or by
+    switching the old Unicode style off -- is not asked."""
+    if getattr(session, "charset_certain", True) or charset_preference_ever_set(db, user):
         return
-    if getattr(session, "transport_name", None) == "web":
-        # The browser terminal always draws them, so the question only
-        # puzzled callers there (issue #840, F090/F112). Nothing is saved:
-        # the same account dialling in with an ASCII-only client later is
-        # still asked (review on #871).
-        return
+    await session.write_line("")
+    await session.write_line("Which of these lines looks right on your screen?")
+    await session.write_raw(b"  [1] " + _CHARSET_SAMPLE.encode("utf-8") + b"\r\n")
+    await session.write_raw(b"  [2] " + _CHARSET_SAMPLE.encode("cp437") + b"\r\n")
+    await session.write_line("  [3] Neither of them")
+    await write_prompt(session, "Your choice [1/2/3]: ")
+    choice = ""
+    while choice not in ("1", "2", "3"):
+        choice = await session.read_key(echo=False)
+    # A caller who types the digit and then Enter must not have that Enter
+    # dismiss the next screen (review on #943).
+    discard_buffered_enter = getattr(session, "discard_buffered_enter", None)
+    if discard_buffered_enter is not None:
+        await discard_buffered_enter()
+    await session.write_line(choice)
+    preference = {"1": "unicode", "2": "cp437", "3": "ascii"}[choice]
+    set_charset_preference(db, user, preference)
+    apply_charset_preference(apply_to if apply_to is not None else session, preference)
+    label = {"unicode": "Unicode", "cp437": "CP437", "ascii": "plain ASCII"}[preference]
     await session.write_line(
-        colored("\r\nNetBBS can use a few Unicode characters for a cleaner look, like this:", fg_color=METADATA_COLOR)
+        colored(f"Using {label}. You can change this later in Your profile, under Character set.",
+                fg_color=MUTED_COLOR)
     )
-    await session.write_line(
-        screen_title(
-            "Example", breadcrumb=(session.node_display_name, "System"), width=session.terminal_width,
-            unicode_style=True, header_color=effective_header_color_256(db),
-        node_name_gradient=session.node_name_gradient).split("\r\n")[0]
+
+
+def _welcome_line(
+    session: Session, db: Database, user: User, node_controls: NodeControls | None
+) -> str:
+    """The login line, "Welcome, <name> › level N › Ctrl-L redraws".
+
+    Shown once, as the first notice above the first main menu's prompt
+    (issue #949), in either redraw mode -- so it is written nowhere else.
+    Built after the login questions, so the character-set answer (issue
+    #929) already decides its separator."""
+    # The Ctrl-L mention (issue #102) lives here, once per session,
+    # rather than repeated on every single menu redraw the way list
+    # screens' own Ctrl-L/Ctrl-R hint is (netbbs.net.picker) -- the main
+    # menu's own options line is already dense enough without adding a
+    # permanent trailer to it too. Separator matches the main menu's own
+    # subtitle line just below it (style spec, round following the
+    # pre-5.0.0 "beautify" audit) instead of the flat, always-ASCII "/"
+    # this used to hardcode -- built by hand rather than via field_row
+    # since the username segment keeps its own pre-existing `bold=True`,
+    # which that shared helper doesn't (and doesn't need to, for its
+    # other callers) support per-field.
+    welcome_separator = (
+        colored(" › ", fg_color=METADATA_COLOR) if unicode_style_enabled(db, user) else "  /  "
     )
-    switch_off = await prompt_yes_no(
-        session, "Does that look garbled or wrong? Switch to plain ASCII instead?", default=False
-    )
-    set_unicode_style_enabled(db, user, not switch_off)
-    if switch_off:
-        await session.write_line(
-            colored(
-                "Switched to plain ASCII style. You can change this later in Your profile.",
-                fg_color=MUTED_COLOR,
-            )
+    welcome = (
+        colored(
+            f"Welcome, {sanitize_text(user.username)}",
+            fg_color=effective_accent_color(session, db),
+            bold=True,
         )
+        + welcome_separator
+        + colored(f"level {user.user_level}", fg_color=VALUE_COLOR)
+        + welcome_separator
+        + colored("Ctrl-L redraws", fg_color=METADATA_COLOR)
+    )
+    if (
+        node_controls is not None
+        and node_controls.maintenance.is_lockdown_active()
+        and meets_level(user, SYSOP_LEVEL)
+    ):
+        welcome += " (Maintenance mode is ON.)"
+    return welcome
 
 
 async def run_authenticated_session(
@@ -668,6 +709,9 @@ async def run_authenticated_session(
     # node-name-gradient section docstring for why).
     session.node_display_name = get_node_display_name(db)
     session.node_name_gradient = effective_node_name_gradient(db)
+    # The caller's character set preference replaces what was detected at
+    # connect time, from the first screen after login on (issue #929).
+    apply_charset_preference(session, charset_preference(db, user))
     # Issue #611: the self-service password change re-verifies the
     # current password from inside this session, and that check charges
     # the node's login throttle rather than opening a second, unbounded
@@ -682,43 +726,10 @@ async def run_authenticated_session(
         await session.write_line(f"\r\n{LOCKDOWN_MESSAGE}")
         return
 
-    # The Ctrl-L mention (issue #102) lives here, once per session,
-    # rather than repeated on every single menu redraw the way list
-    # screens' own Ctrl-L/Ctrl-R hint is (netbbs.net.picker) -- the main
-    # menu's own options line is already dense enough without adding a
-    # permanent trailer to it too. Separator matches the main menu's own
-    # subtitle line just below it (style spec, round following the
-    # pre-5.0.0 "beautify" audit) instead of the flat, always-ASCII "/"
-    # this used to hardcode -- built by hand rather than via field_row
-    # since the username segment keeps its own pre-existing `bold=True`,
-    # which that shared helper doesn't (and doesn't need to, for its
-    # other callers) support per-field.
-    welcome_separator = (
-        colored(" › ", fg_color=METADATA_COLOR) if unicode_style_enabled(db, user) else "  /  "
-    )
-    welcome = (
-        "\r\n"
-        + colored(
-            f"Welcome, {sanitize_text(user.username)}",
-            fg_color=effective_accent_color(session, db),
-            bold=True,
-        )
-        + welcome_separator
-        + colored(f"level {user.user_level}", fg_color=VALUE_COLOR)
-        + welcome_separator
-        + colored("Ctrl-L redraws", fg_color=METADATA_COLOR)
-    )
-    if (
-        node_controls is not None
-        and node_controls.maintenance.is_lockdown_active()
-        and meets_level(user, SYSOP_LEVEL)
-    ):
-        welcome += " (Maintenance mode is ON.)"
-    await session.write_line(welcome)
-    # Issue #923: the pending-invitation count and the drain warning are
-    # not written here. The main menu's redraw-in-place clear came next
-    # and wiped them unseen; the first main menu tells them above its
-    # prompt instead (`netbbs.net.main_menu`, `first_draw`).
+    # Issue #949: the Welcome line is not written here either. Like the
+    # notices below (issue #923), it was wiped by the first main menu's
+    # redraw-in-place clear; it is carried above that menu's prompt
+    # instead, once the login questions are answered (`_welcome_line`).
 
     # Design doc §16 (issues #219 Decision 7 and #201 Decision 1): the
     # fallback anchor for the first-run screen (reliable-node
@@ -795,7 +806,12 @@ async def run_authenticated_session(
         # never answers -- placing it before the watcher existed would
         # leave a revoked account's session completely unprotected for
         # as long as it sat here (GitHub issue #29's whole point).
-        await _confirm_unicode_style(first_run, db, user)
+        # The answer is applied to the real session: `first_run` only
+        # holds the outcome line for the first main menu (issue #923).
+        await _confirm_charset(first_run, db, user, apply_to=session)
+        # The Welcome line first, then what the questions said (issue
+        # #949): ahead of anything already queued for the first menu.
+        announce_styled(session, _welcome_line(session, db, user, node_controls), first=True)
         first_run.announce_rest(last_paragraph=False)
         await _show_previous_callers_screen(
             session, db, user, current_history_id=history_id

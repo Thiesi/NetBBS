@@ -118,6 +118,41 @@ def mail_access_refusal(db: Database, user: User) -> str | None:
     return None
 
 
+@dataclass(frozen=True)
+class MailRefusal:
+    """Why mail can't go to someone, said twice from one check (issue
+    #920): `sentence` is what the To prompt answers when the address is
+    typed, `tag` the few words the To prompt's list shows beside a name it
+    lists but does not let the caller pick. `tag` is `None` for someone the
+    list leaves out altogether (the guest account)."""
+
+    sentence: str
+    tag: str | None
+
+
+#: The list's words for `mail_recipient_refusal`'s and
+#: `mail_sender_refusal`'s reasons (issue #920).
+DISABLED_RECIPIENT_TAG = "account disabled"
+PENDING_RECIPIENT_TAG = "awaiting approval"
+SENDER_BLOCK_TAG = "doesn't accept your mail"
+
+
+def mail_recipient_refusal_detail(db: Database, recipient: User) -> MailRefusal | None:
+    """`mail_recipient_refusal` with the list's words for it."""
+    if guest_is_eligible(db, recipient):
+        return MailRefusal(f"{recipient.username} is this board's shared guest account, which has no mailbox.", None)
+    if recipient.disabled_at is not None:
+        return MailRefusal(
+            f"{recipient.username}'s account is disabled, so it can't receive mail.", DISABLED_RECIPIENT_TAG,
+        )
+    if recipient.pending_approval:
+        return MailRefusal(
+            f"{recipient.username}'s account is still waiting for approval, so it can't receive mail yet.",
+            PENDING_RECIPIENT_TAG,
+        )
+    return None
+
+
 def mail_recipient_refusal(db: Database, recipient: User) -> str | None:
     """Why no mail may be delivered to `recipient`, or `None`. Checked for
     local mail by `send_mail`, `send_system_mail` and at the To prompt, and
@@ -134,13 +169,8 @@ def mail_recipient_refusal(db: Database, recipient: User) -> str | None:
     An account below the mail level still receives: the mail waits for the
     day the SysOp raises its level, as a board's posts wait for a caller
     who cannot read them yet."""
-    if guest_is_eligible(db, recipient):
-        return f"{recipient.username} is this board's shared guest account, which has no mailbox."
-    if recipient.disabled_at is not None:
-        return f"{recipient.username}'s account is disabled, so it can't receive mail."
-    if recipient.pending_approval:
-        return f"{recipient.username}'s account is still waiting for approval, so it can't receive mail yet."
-    return None
+    refusal = mail_recipient_refusal_detail(db, recipient)
+    return None if refusal is None else refusal.sentence
 
 
 def mail_recipient_bounce_reason(db: Database, recipient: User) -> str | None:
@@ -166,7 +196,9 @@ def mail_recipient_bounce_reason(db: Database, recipient: User) -> str | None:
 # mail at all, by `mail_sender_refusal`, which says whether it takes mail from
 # *this* sender: `send_mail` and the To prompt for local mail, and
 # `netbbs.link.mail.deliver_link_message` for Link mail, which bounces
-# `blocked_by_recipient`.
+# `blocked_by_recipient`. The same list stops live messages too (issue #925,
+# `netbbs.messaging_preferences.live_message_refusal`): the table keeps its
+# `mail_blocks` name, but it is the account's one block list.
 #
 # The sender is told. A blocked letter is refused at the To prompt and at Send
 # with "<name> does not accept mail from you", and a Link letter bounces with
@@ -287,6 +319,13 @@ def blocks_link_sender(db: Database, recipient: User, address: str) -> bool:
     return db.connection.execute(
         "SELECT 1 FROM mail_blocks WHERE user_id = ? AND blocked_address = ?", (recipient.id, address)
     ).fetchone() is not None
+
+
+def mail_sender_refusal_detail(db: Database, recipient: User, *, sender: User) -> MailRefusal | None:
+    """`mail_sender_refusal` for a local sender, with the list's words for
+    it (issue #920)."""
+    refusal = mail_sender_refusal(db, recipient, sender=sender)
+    return None if refusal is None else MailRefusal(refusal, SENDER_BLOCK_TAG)
 
 
 def mail_sender_refusal(
