@@ -59,7 +59,9 @@ from netbbs.link.node_profiles import (
 )
 from netbbs.mail import (
     GUEST_MAIL_REFUSAL,
+    MAILBOX_NEARLY_FULL,
     MAX_MAIL_BODY_BYTES,
+    MAX_MAIL_PER_RECIPIENT,
     MAX_MAIL_SUBJECT_BYTES,
     SYSTEM_SENDER_LABEL,
     MailBlock,
@@ -259,6 +261,30 @@ _ORDER_UNREAD = "unread"
 
 _EMPTY_INBOX = "Your inbox is empty. New mail will appear here."
 _EMPTY_SENT = "You haven't sent any mail. [C]ompose writes a new message."
+def mailbox_capacity_note(total: int, unread: int) -> tuple[str, str] | None:
+    """What the Inbox says about its cap (issue #818), and its tone, once it
+    holds `MAILBOX_NEARLY_FULL` messages; `None` below that."""
+    if total >= MAX_MAIL_PER_RECIPIENT and unread >= total:
+        return (
+            f"Your mailbox is full of unread mail ({MAX_MAIL_PER_RECIPIENT} messages): new mail is "
+            "turned away until you read or delete some.",
+            "error",
+        )
+    if total >= MAX_MAIL_PER_RECIPIENT:
+        return (
+            f"Your mailbox is full ({MAX_MAIL_PER_RECIPIENT} messages): each new message removes your "
+            "oldest read one. Delete what you don't need to keep it.",
+            "warning",
+        )
+    if total >= MAILBOX_NEARLY_FULL:
+        return (
+            f"Your mailbox is nearly full: at {MAX_MAIL_PER_RECIPIENT} messages, each new one removes "
+            "your oldest read message. Unread mail is never removed.",
+            "warning",
+        )
+    return None
+
+
 _IDENTITY_NOTE = (
     f"{_IDENTITY_FLAG} Identity changed: that sender's BBS now has a different cryptographic identity. "
     "Open the message for details."
@@ -476,7 +502,9 @@ async def _load_mail_rows(lane: DatabaseLane, user: User, *, sent: bool) -> list
     for message in messages:
         identity_changed = False
         if sent:
-            key = (message.recipient_remote_address, message.recipient_user_id)
+            # A deleted recipient has no id; its kept name tells it apart
+            # from another deleted one (issue #818).
+            key = (message.recipient_remote_address or message.recipient_label, message.recipient_user_id)
             if key not in names:
                 names[key] = await _display_recipient_label(lane, message)
         elif message.from_system:
@@ -801,7 +829,12 @@ class _MailboxScreen:
                 colored(f"{unread} unread message{'s' if unread != 1 else ''}", fg_color=WARNING_COLOR)
                 if unread else colored("Inbox caught up", fg_color=SUCCESS_COLOR)
             )
-            parts.append(colored(f"{total} in all", fg_color=VALUE_COLOR))
+            # Counted against the cap (issue #818): the whole Inbox, read or
+            # not, whatever [F]ind is showing.
+            parts.append(colored(
+                f"{total} of {MAX_MAIL_PER_RECIPIENT}",
+                fg_color=WARNING_COLOR if total >= MAILBOX_NEARLY_FULL else VALUE_COLOR,
+            ))
             if self.order == _ORDER_UNREAD:
                 parts.append(colored("unread first", fg_color=MUTED_COLOR))
         if self.query:
@@ -873,6 +906,13 @@ class _MailboxScreen:
         if draft is not None:
             # Said on the mail screen, not asked on the way in (issue #814).
             note(_letter_draft_notice(draft), MUTED_COLOR)
+        if not self.sent:
+            capacity = mailbox_capacity_note(
+                len(self.all_rows), sum(1 for row in self.all_rows if not row.message.is_read),
+            )
+            if capacity is not None:
+                text, tone = capacity
+                note(text, ERROR_COLOR if tone == "error" else WARNING_COLOR)
         if not self.sent and any(row.identity_changed for row in self.all_rows):
             note(_IDENTITY_NOTE, WARNING_COLOR)
         above = "\r\n".join(["", header, *notes])
@@ -1110,7 +1150,8 @@ def _system_mail_note(session: Session) -> str:
 
 async def _display_recipient_label(lane: DatabaseLane, message: MailMessage) -> str:
     """Who a sent message went to: the remote address of Link mail (issue
-    #805), else the local recipient's current name."""
+    #805), else the local recipient's current name, or the name it had when
+    its account was deleted (issue #818)."""
     if message.recipient_remote_address is not None:
         return await _display_link_address(lane, message.recipient_remote_address)
     recipient = (
@@ -1118,7 +1159,11 @@ async def _display_recipient_label(lane: DatabaseLane, message: MailMessage) -> 
         if message.recipient_user_id is not None
         else None
     )
-    return recipient.username if recipient is not None else "(deleted account)"
+    if recipient is not None:
+        return recipient.username
+    if message.recipient_label:
+        return f"{message.recipient_label} (deleted account)"
+    return "(deleted account)"
 
 
 _DELIVERY_COLORS = {

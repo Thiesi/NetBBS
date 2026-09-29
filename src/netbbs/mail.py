@@ -42,6 +42,10 @@ MAX_MAIL_BODY_BYTES = 20_000
 # doesn't call for per-node tuning, so this isn't built as a knob speculatively.
 MAX_MAIL_PER_RECIPIENT = 500
 
+# From this many messages the mailbox warns its owner that the cap is near
+# (issue #818): nine in ten, so there is room to act before anything goes.
+MAILBOX_NEARLY_FULL = MAX_MAIL_PER_RECIPIENT * 9 // 10
+
 # What the mailbox calls mail the BBS itself sent (issue #819). Shown for
 # any row whose `from_system` flag is set, never looked up by name: the
 # label stored with the row is only what the NOT NULL column holds.
@@ -98,15 +102,43 @@ def mail_access_refusal(db: Database, user: User) -> str | None:
 
 def mail_recipient_refusal(db: Database, recipient: User) -> str | None:
     """Why no mail may be delivered to `recipient`, or `None`. Checked for
-    local mail by `send_mail` and at the To prompt, and for Link mail on
-    arrival (`netbbs.link.mail.deliver_link_message`).
+    local mail by `send_mail`, `send_system_mail` and at the To prompt, and
+    for Link mail on arrival (`netbbs.link.mail.deliver_link_message`,
+    which bounces with `mail_recipient_bounce_reason`).
 
-    Only the guest account is refused. An account below the mail level
-    still receives: the mail waits for the day the SysOp raises its level,
-    as a board's posts wait for a caller who cannot read them yet."""
+    Three accounts take no mail: the shared guest account (issue #816), a
+    disabled account, and a signup still awaiting approval (issue #818).
+    Neither of the last two can sign in to read it, so mail sent there
+    would sit unread and its sender would never hear. Mail already in an
+    account when it is disabled stays where it is, for the day it is
+    enabled again.
+
+    An account below the mail level still receives: the mail waits for the
+    day the SysOp raises its level, as a board's posts wait for a caller
+    who cannot read them yet."""
     if guest_is_eligible(db, recipient):
         return f"{recipient.username} is this board's shared guest account, which has no mailbox."
+    if recipient.disabled_at is not None:
+        return f"{recipient.username}'s account is disabled, so it can't receive mail."
+    if recipient.pending_approval:
+        return f"{recipient.username}'s account is still waiting for approval, so it can't receive mail yet."
     return None
+
+
+def mail_recipient_bounce_reason(db: Database, recipient: User) -> str | None:
+    """`mail_recipient_refusal` as the reason code a Link bounce carries
+    (`netbbs.link.events`), or `None` when the account takes mail.
+
+    The guest account bounces `no_mailbox`. A disabled account and a
+    pending signup share `recipient_unavailable` (issue #818), which says
+    only that the account takes no mail at the moment: whether an account
+    here is disabled is this node's business, not another node's, and
+    both states can end."""
+    if mail_recipient_refusal(db, recipient) is None:
+        return None
+    if guest_is_eligible(db, recipient):
+        return "no_mailbox"
+    return "recipient_unavailable"
 
 
 # -- blocked senders (issue #817) -----------------------------------------------
@@ -290,6 +322,10 @@ class MailMessage:
     # Sent by the BBS itself (issue #819): no sender account, no reply,
     # never carried over Link. See `send_system_mail`.
     from_system: bool = False
+    # The local recipient's name when their account was deleted (issue
+    # #818): `recipient_user_id` is NULL then, and the sender's Sent copy
+    # still says who the letter went to. NULL while the account exists.
+    recipient_label: str | None = None
 
     @property
     def is_read(self) -> bool:
@@ -426,12 +462,13 @@ def make_room(db: Database, recipient: User) -> bool:
     delivery both come through here, so the rule is one rule.
 
     A read message from the system goes before any read letter (issue
-    #819): a notice the BBS sent is not to push out mail a person wrote."""
-    count = db.connection.execute(
-        "SELECT COUNT(*) AS n FROM mail_messages WHERE recipient_user_id = ? AND recipient_deleted_at IS NULL",
-        (recipient.id,),
-    ).fetchone()["n"]
-    if count < MAX_MAIL_PER_RECIPIENT:
+    #819): a notice the BBS sent is not to push out mail a person wrote.
+
+    Each eviction is counted for the owner (issue #818), who is told at
+    their next main menu how many old messages went
+    (`pending_eviction_notice`); nothing about which ones, since the
+    notice line is all that is left of them."""
+    if inbox_count(db, recipient) < MAX_MAIL_PER_RECIPIENT:
         return True
 
     oldest_read = db.connection.execute(
@@ -444,8 +481,56 @@ def make_room(db: Database, recipient: User) -> bool:
     ).fetchone()
     if oldest_read is None:
         return False
+    db.connection.execute(
+        """
+        INSERT INTO mail_eviction_notices (user_id, evicted, since) VALUES (?, 1, ?)
+        ON CONFLICT (user_id) DO UPDATE SET evicted = evicted + 1
+        """,
+        (recipient.id, utc_now_iso()),
+    )
     _hard_delete_or_mark(db, oldest_read["id"], sender_deleted_at=oldest_read["sender_deleted_at"], recipient_deleted_at=utc_now_iso())
     return True
+
+
+def inbox_count(db: Database, user: User) -> int:
+    """How many messages count toward `user`'s `MAX_MAIL_PER_RECIPIENT`:
+    every one in the inbox they have not deleted, read or not."""
+    return db.connection.execute(
+        "SELECT COUNT(*) AS n FROM mail_messages WHERE recipient_user_id = ? AND recipient_deleted_at IS NULL",
+        (user.id,),
+    ).fetchone()["n"]
+
+
+def pending_eviction_notice(db: Database, user: User) -> tuple[str | None, int]:
+    """The line telling `user` that old read mail was removed to make room
+    (issue #818), and the count to acknowledge once it is on screen; `None`
+    and 0 when nothing was. Nothing is marked here: a caller who drops
+    before the menu is drawn is told next time."""
+    row = db.connection.execute(
+        "SELECT evicted FROM mail_eviction_notices WHERE user_id = ?", (user.id,)
+    ).fetchone()
+    if row is None or row["evicted"] <= 0:
+        return None, 0
+    evicted = row["evicted"]
+    what = "your oldest read message was" if evicted == 1 else f"your {evicted} oldest read messages were"
+    return (
+        f"Your mailbox was full ({MAX_MAIL_PER_RECIPIENT} messages), so {what} removed to make room "
+        "for new mail. Unread mail is never removed.",
+        evicted,
+    )
+
+
+def acknowledge_eviction_notice(db: Database, user: User, evicted: int) -> None:
+    """`user` has been told of `evicted` removals. Subtracted rather than
+    cleared, so a removal made while the notice was on its way is told
+    next time."""
+    if evicted <= 0:
+        return
+    db.connection.execute(
+        "UPDATE mail_eviction_notices SET evicted = evicted - ? WHERE user_id = ?", (evicted, user.id)
+    )
+    db.connection.execute("DELETE FROM mail_eviction_notices WHERE user_id = ? AND evicted <= 0", (user.id,))
+    db.connection.commit()
 
 
 def get_mail(db: Database, user: User, mail_id: int) -> MailMessage:
@@ -623,6 +708,60 @@ def _hard_delete_or_mark(
     db.connection.commit()
 
 
+def release_mail_of_deleted_account_without_commit(db: Database, user: User) -> None:
+    """The mail side of deleting `user`'s account (issue #818), run by
+    `netbbs.auth.users.delete_user` inside its transaction, just before
+    the account row goes.
+
+    A letter is one row with two views, the sender's Sent copy and the
+    recipient's inbox copy. The deleted account's view of each of its
+    letters is deleted as if they had deleted it themselves: a letter
+    nobody else can see any more is removed now, and one the other side
+    still has is marked, so their own delete removes the row later
+    (`_hard_delete_or_mark`) instead of leaving it behind. Before this, a
+    deleted recipient took the sender's Sent copy with it (the foreign key
+    cascaded), and a deleted sender left rows nobody could ever delete.
+
+    A local letter the deleted account received keeps its name in
+    `recipient_label`, so the sender's Sent copy can still say who it went
+    to. Outbound Link mail keeps its row as ever: its delivery status is
+    still tracked, and a pending one is still sent."""
+    now = utc_now_iso()
+    conn = db.connection
+    # Received mail no one else sees: from Link or the system (no local
+    # sender), from an account already deleted, from itself, or deleted
+    # by its sender already.
+    conn.execute(
+        """
+        DELETE FROM mail_messages
+        WHERE recipient_user_id = ?
+          AND (sender_user_id IS NULL OR sender_user_id = recipient_user_id OR sender_deleted_at IS NOT NULL)
+        """,
+        (user.id,),
+    )
+    conn.execute(
+        """
+        UPDATE mail_messages
+        SET recipient_deleted_at = COALESCE(recipient_deleted_at, ?), recipient_label = ?
+        WHERE recipient_user_id = ?
+        """,
+        (now, user.username, user.id),
+    )
+    # Sent local mail whose recipient no longer has it.
+    conn.execute(
+        """
+        DELETE FROM mail_messages
+        WHERE sender_user_id = ? AND recipient_remote_address IS NULL
+          AND (recipient_user_id IS NULL OR recipient_deleted_at IS NOT NULL)
+        """,
+        (user.id,),
+    )
+    conn.execute(
+        "UPDATE mail_messages SET sender_deleted_at = ? WHERE sender_user_id = ? AND sender_deleted_at IS NULL",
+        (now, user.id),
+    )
+
+
 def _row_to_message(row: sqlite3.Row) -> MailMessage:
     return MailMessage(
         id=row["id"],
@@ -639,4 +778,5 @@ def _row_to_message(row: sqlite3.Row) -> MailMessage:
         link_delivery_status=row["link_delivery_status"],
         link_delivery_reason=row["link_delivery_reason"],
         from_system=bool(row["from_system"]),
+        recipient_label=row["recipient_label"],
     )
