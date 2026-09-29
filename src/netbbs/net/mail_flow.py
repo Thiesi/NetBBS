@@ -1484,11 +1484,22 @@ async def _show_sent_message(
     session: Session, lane: DatabaseLane, user: User, message: MailMessage,
     *, link_context: LinkContext | None = None,
 ) -> None:
+    """A letter the caller sent. `[R]eply` writes to its recipient again (a
+    follow-up, issue #825); `Re[s]end`, on Link mail that bounced or
+    expired, sends the same letter again as a new one. A letter sent from
+    either returns to the Sent list, where it now is, with "Message sent."
+    above the prompt; anything else comes back to this view."""
     to_label = await _display_recipient_label(lane, message)
-    if message.link_delivery_status in ("bounced", "expired"):
+    failed = message.link_delivery_status in ("bounced", "expired")
+    if failed:
         # Seen here, so the main menu need not tell it again (issue #806).
         await lane.run(acknowledge_delivery_notices, [message.id])
-    actions = [("f", menu_key("F", "orward")), ("d", menu_key("D", "elete")), ("b", menu_key("B", "ack"))]
+    actions = [("r", menu_key("R", "eply"))]
+    if failed and message.recipient_remote_address is not None:
+        # Only a letter that did not arrive (issue #825): one that did, or
+        # may yet, would reach its reader twice.
+        actions.append(("s", menu_key("s", "end", prefix="Re")))
+    actions += [("f", menu_key("F", "orward")), ("d", menu_key("D", "elete")), ("b", menu_key("B", "ack"))]
     page = 0
     while True:
         choice, page = await _show_message(session, lane, user, message, to_label=to_label, actions=actions, page=page)
@@ -1497,11 +1508,60 @@ async def _show_sent_message(
         if choice == "f":
             await _forward_message(session, lane, user, message, sent=True, link_context=link_context)
             continue
+        if choice in ("r", "s"):
+            if await _write_to_recipient(
+                session, lane, user, message, resend=choice == "s", link_context=link_context,
+            ):
+                return
+            continue
         if not await prompt_yes_no(session, "Delete this message?", default=False):
             continue
         await lane.run(delete_for_sender, user, message)
         announce(session, "Message deleted.")
         return
+
+
+async def _write_to_recipient(
+    session: Session, lane: DatabaseLane, user: User, message: MailMessage,
+    *, resend: bool, link_context: LinkContext | None,
+) -> bool:
+    """[R]eply or Re[s]end on a sent letter (issue #825): a new letter to
+    the one it went to, by `mail_someone`, so every check a letter to them
+    makes is made before anything is written, and again at Send.
+
+    A reply is a follow-up: "Re:" and the caller's own letter quoted, as a
+    reply to a received one is -- the recipient may no longer have it, and
+    the quote is easy to delete. A resend is the letter itself, unquoted,
+    under its own subject, in a draft slot of its own (`_resend_key`); the
+    old row stays as it is. Returns whether a letter was sent."""
+    if message.recipient_remote_address is None and message.recipient_user_id is None:
+        # Deleted since it was sent (issue #818): no one to write to.
+        name = f"{sanitize_text(message.recipient_label)}'s account" if message.recipient_label else "That account"
+        what = "this letter can't be sent again" if resend else "a reply can't reach them"
+        announce(session, f"{name} no longer exists, so {what}.", tone="error")
+        return False
+    if resend:
+        subject = message.subject
+        # The letter as it was sent, signature and all: escape sequences
+        # out, color pipe codes kept (issue #809).
+        body = post_body_text(message.body)
+        keys = {"resend_key": _resend_key(message)}
+    else:
+        subject = reply_subject(message.subject, max_bytes=MAX_MAIL_SUBJECT_BYTES)
+        body = quote_body(plain_post_body(message.body), author=user.username)
+        keys = {"reply_key": _reply_key(message)}
+    if message.recipient_remote_address is not None:
+        return await mail_someone(
+            session, lane, user, link_address=message.recipient_remote_address, subject=subject,
+            quote=body, link_context=link_context, **keys,
+        )
+    recipient = await lane.run(get_user_by_id, message.recipient_user_id)
+    if recipient is None:
+        announce(session, "That account no longer exists, so a letter can't reach it.", tone="error")
+        return False
+    return await mail_someone(
+        session, lane, user, recipient=recipient, subject=subject, quote=body, link_context=link_context, **keys,
+    )
 
 
 # -- a letter opened from outside the mailbox (issue #824) --------------------
@@ -1579,8 +1639,9 @@ async def mail_someone(
     subject: str = "",
     quote: str | None = None,
     reply_key: str | None = None,
+    resend_key: str | None = None,
     link_context: LinkContext | None = None,
-) -> None:
+) -> bool:
     """Write to `recipient`, a local account, or to `link_address`, the
     stable `user@<fingerprint>` of someone on a linked BBS (issue #821).
 
@@ -1589,7 +1650,8 @@ async def mail_someone(
     uses them. `reply_key` gives such a reply a draft slot of its own (see
     `_letter_draft_path`); without one the letter is the caller's new
     letter, and a new letter already kept there is offered first, as
-    `[C]ompose` offers it.
+    `[C]ompose` offers it. `resend_key` is a sent letter sent again (issue
+    #825): `quote` is then that letter's text, not a quote of it.
 
     Nothing is written here. Every outcome -- a refusal, "Message sent.",
     "Cancelled." -- is announced (`netbbs.net.notices`), so the screen the
@@ -1600,11 +1662,13 @@ async def mail_someone(
     the guest account has no mailbox) and `mail_sender_refusal` (a
     recipient who blocked the caller, issue #817), and for a Link address that this
     node is linked with that BBS and will send it mail (issue #804), in
-    words for an address the caller did not type."""
+    words for an address the caller did not type.
+
+    Returns whether a letter was sent."""
     refusal = await lane.run(lambda db: caller_mail_refusal(session, db, user))
     if refusal is not None:
         announce(session, refusal, tone="error")
-        return
+        return False
     if link_address is not None:
         shown = await _display_link_address(lane, link_address)
         if link_context is None:
@@ -1612,36 +1676,35 @@ async def mail_someone(
                 session, f"This BBS is not linked with other BBSes right now, so mail can't reach {shown}.",
                 tone="error",
             )
-            return
+            return False
         checked = await lane.run(lambda db: _check_link_reply_address(db, link_address, reply=False))
         if isinstance(checked, str):
             announce_styled(session, colored(checked, fg_color=ERROR_COLOR))
-            return
-        await _compose_mail(
+            return False
+        return await _compose_mail(
             session, lane, user, prefill_link_address=link_address, prefill_subject=subject,
-            prefill_body=quote or None, link_context=link_context, reply_key=reply_key,
+            prefill_body=quote or None, link_context=link_context, reply_key=reply_key, resend_key=resend_key,
         )
-        return
     if recipient is None:
         raise ValueError("mail_someone needs a recipient or a link_address")
     # The account as it is now: renamed, or deleted, since the screen drew.
     current = await lane.run(get_user_by_id, recipient.id)
     if current is None:
         announce(session, f"{recipient.username}'s account no longer exists.", tone="error")
-        return
+        return False
     if current.id == user.id:
         announce(session, "That is your own account.", tone="muted")
-        return
+        return False
     refused = await lane.run(mail_recipient_refusal, current)
     if refused is None:
         # Nor one who blocked the caller (issue #817), as the To prompt says.
         refused = await lane.run(lambda db: mail_sender_refusal(db, current, sender=user))
     if refused is not None:
         announce(session, refused, tone="error")
-        return
-    await _compose_mail(
+        return False
+    return await _compose_mail(
         session, lane, user, prefill_recipient=current, prefill_subject=subject,
-        prefill_body=quote or None, link_context=link_context, reply_key=reply_key,
+        prefill_body=quote or None, link_context=link_context, reply_key=reply_key, resend_key=resend_key,
     )
 
 
@@ -1703,8 +1766,9 @@ async def _compose_mail(
     link_context: LinkContext | None = None,
     reply_key: str | None = None,
     forward_key: str | None = None,
+    resend_key: str | None = None,
     resume: bool = False,
-) -> None:
+) -> bool:
     """
     `link_context`, if given, lets the "To:" prompt accept a `user@node`
     address (design doc) in addition to a
@@ -1727,14 +1791,20 @@ async def _compose_mail(
     forward: titled "Forward", with To asked for as a new letter's is, and
     the editor opening at the top of `prefill_body`, where a note goes.
 
+    `resend_key` (issue #825, see `_resend_key`) makes it a sent letter
+    sent again: titled "Resend", `prefill_body` the letter as it was sent,
+    signature included, so none is added.
+
     Each letter has its own draft slot (issue #814): the new letter, a
     reply to one message (`reply_key`, see `_reply_key`), and a forward
-    of one (`forward_key`). Either editor keeps the text there as
+    of one (`forward_key`), and a resend of one (`resend_key`). Either editor keeps the text there as
     it is typed, with its To and Subject beside it, and "Keep draft &
     exit" or `/exit` leaves it for later. A letter found in its slot is
     offered before anything is asked -- resume it, delete it and start
     again, or go back -- and is never loaded into another letter's
     editor. `resume` skips that choice: the caller already made it.
+
+    Returns whether the letter was sent.
     """
     # Both entry points here are a hotkey (`[C]ompose`/`[R]eply`)
     # immediately followed by a `read_line()` prompt -- an Enter that
@@ -1758,15 +1828,22 @@ async def _compose_mail(
     header_color = await lane.run(effective_header_color_256)
     truecolor = await lane.run(lambda db: effective_truecolor(session, db, user))
     body_mode = await lane.run(_mail_body_mode, user)
-    title = "Forward" if forward_key is not None else "Reply" if reply_key is not None else "New message"
+    if forward_key is not None:
+        title = "Forward"
+    elif resend_key is not None:
+        title = "Resend"
+    elif reply_key is not None:
+        title = "Reply"
+    else:
+        title = "New message"
     link_enabled = link_context is not None
 
-    draft_path = _letter_draft_path(lane, user, reply_key, forward_key=forward_key)
+    draft_path = _letter_draft_path(lane, user, reply_key, forward_key=forward_key, resend_key=resend_key)
     resumed = _load_letter_draft(draft_path)
     if resumed is not None and not resume:
         outcome = await _letter_draft_choice(session, lane, user, resumed, starting_new=True)
         if outcome == "back":
-            return
+            return False
         if outcome == "discard":
             _forget_letter(draft_path)
             announce(session, "Draft deleted.", tone="muted")
@@ -1779,6 +1856,8 @@ async def _compose_mail(
             prefill_subject = resumed.subject
     if forward_key is not None:
         kept_notice = "Draft saved -- you'll be offered it when you forward this message again."
+    elif resend_key is not None:
+        kept_notice = "Draft saved -- you'll be offered it when you resend this message again."
     elif reply_key is not None:
         kept_notice = "Draft saved -- you'll be offered it when you reply to this message again."
     else:
@@ -1839,7 +1918,7 @@ async def _compose_mail(
                 # A resumed letter from before #814 is still kept (review on
                 # #873): say so, not that it is gone.
                 announce(session, kept_notice if resumed is not None else "Cancelled.", tone="muted")
-                return
+                return False
             # "sysop" reaches the node's SysOp (issue #840, F087).
             recipient_text = await lane.run(resolve_sysop_alias, recipient_text)
             if link_enabled and "@" in recipient_text:
@@ -1886,7 +1965,7 @@ async def _compose_mail(
         subject = await read_subject(session, max_bytes=MAX_MAIL_SUBJECT_BYTES, current=prefill_subject or None)
         if subject is None:
             announce(session, kept_notice if resumed is not None else "Message cancelled.", tone="muted")
-            return
+            return False
 
     def editor_header() -> EditorHeader:
         return EditorHeader(title, (("To", recipient_label), ("Subject", subject)), color=header_color)
@@ -1912,10 +1991,10 @@ async def _compose_mail(
     if body is None or not body.strip():
         if body is None and draft_path.exists():
             announce(session, kept_notice, tone="muted")
-            return
+            return False
         _forget_letter(draft_path)
         announce(session, "Message cancelled.", tone="muted")
-        return
+        return False
     # Appended once, right after the message is first composed -- not on
     # every subsequent "edit body" pass over the same draft (`netbbs.
     # signature.append_signature`'s own docstring): from here on the
@@ -1926,6 +2005,10 @@ async def _compose_mail(
     if forward_key is not None:
         # Under the note, above the letter passed on (issue #822).
         body = sign_forward(body, signature)
+    elif resend_key is not None:
+        # Signed when it was first sent (issue #825); a signature changed
+        # since would sign it twice.
+        pass
     elif signature:
         body = append_signature(body, signature)
 
@@ -1961,7 +2044,7 @@ async def _compose_mail(
         if action is ReviewAction.CANCEL:
             _forget_letter(draft_path)
             announce(session, "Message cancelled.", tone="muted")
-            return
+            return False
         if action is ReviewAction.EDIT_RECIPIENT:
             edited = await read_prefilled_field(session, "To", recipient_text)
             if edited != recipient_text:
@@ -1984,7 +2067,7 @@ async def _compose_mail(
                 # "Keep draft & exit" or /exit while revising: the whole
                 # letter is kept for later, as on a board (issue #149).
                 announce(session, kept_notice, tone="muted")
-                return
+                return False
             else:
                 announce(session, "Body unchanged.", tone="muted")
             continue
@@ -1996,7 +2079,12 @@ async def _compose_mail(
             # edited from the review screen since, and a peer's standing
             # can change while the message is written.
             if reply_address is not None:
-                checked = await lane.run(_check_link_reply_address, reply_address)
+                # Worded for what the letter is: a reply, or a letter to
+                # someone met elsewhere or sent again (issue #825).
+                is_reply = reply_key is not None
+                checked = await lane.run(
+                    lambda db: _check_link_reply_address(db, reply_address, reply=is_reply)
+                )
             else:
                 checked = await lane.run(_check_link_recipient, recipient_text)
             if isinstance(checked, str):
@@ -2016,7 +2104,7 @@ async def _compose_mail(
                 continue
             _forget_letter(draft_path)
             announce(session, "Message sent.")
-            return
+            return True
 
         try:
             recipient = await lane.run(get_user_by_username, recipient_text)
@@ -2035,7 +2123,7 @@ async def _compose_mail(
         nudge(recipient.username)
         _forget_letter(draft_path)
         announce(session, "Message sent.")
-        return
+        return True
 
 
 @dataclass(frozen=True)
@@ -2067,6 +2155,13 @@ def _forward_key(message: MailMessage) -> str:
     return _reply_key(message)
 
 
+def _resend_key(message: MailMessage) -> str:
+    """The sent letter a resend repeats, for its draft slot's name (issue
+    #825): the same id and digest a reply's slot uses, in a slot of its
+    own."""
+    return _reply_key(message)
+
+
 def post_reply_key(root_post_id: str) -> str:
     """The draft slot of a private reply to a board post's author (issue
     #821), apart from any reply to a mail message: a digest of the post's
@@ -2076,9 +2171,11 @@ def post_reply_key(root_post_id: str) -> str:
 
 def _letter_draft_path(
     lane: DatabaseLane, user: User, reply_key: str | None = None, *, forward_key: str | None = None,
+    resend_key: str | None = None,
 ) -> Path:
     """One slot per letter (issue #814): the caller's new letter, and one
-    per message they are replying to or forwarding (issue #822). Before
+    per message they are replying to, forwarding (issue #822) or resending
+    (issue #825). Before
     #814 every letter shared one body-only file, so a kept letter was
     offered in place of the next one's text -- a reply to someone else
     lost its quote to it."""
@@ -2086,6 +2183,8 @@ def _letter_draft_path(
     directory.mkdir(parents=True, exist_ok=True)
     if forward_key is not None:
         return directory / f"mail_forward_{user.id}_{forward_key}.draft"
+    if resend_key is not None:
+        return directory / f"mail_resend_{user.id}_{resend_key}.draft"
     if reply_key is not None:
         return directory / f"mail_reply_{user.id}_{reply_key}.draft"
     return directory / f"mail_new_{user.id}.draft"
