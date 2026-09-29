@@ -706,7 +706,6 @@ async def _push_own_events(
     if wanted is not None:
         exchange.holds |= (own_genesis & declared) - set(wanted)
     if not to_push:
-        exchange.refused_reason = None
         return
     for index in range(0, len(to_push), MAX_EVENTS_PER_REQUEST):
         try:
@@ -731,8 +730,12 @@ async def _push_own_events(
             # received nothing, so the next pass owes it this same
             # stretch, not the one after it.
             return
-    exchange.refused_reason = None
-    exchange.holds |= own_genesis & {event.content_id for event in sending}
+    # Only content answers whether the peer takes this node's content: key
+    # transitions pass even a peer's probation, so a push of those alone
+    # leaves the last answer standing.
+    if sending:
+        exchange.refused_reason = None
+        exchange.holds |= own_genesis & {event.content_id for event in sending}
     if wanted is None and resource_events:
         fallback_offsets[peer_fingerprint] = (start + len(sending)) % len(resource_events)
 

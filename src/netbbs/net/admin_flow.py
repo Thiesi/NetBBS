@@ -9830,6 +9830,8 @@ async def _probation_summary(lane: DatabaseLane, link_context: LinkContext) -> l
             "what yours sends until their SysOps establish it",
             WARNING_COLOR,
         )
+    elif not _own_linked_genesis(link_context):
+        at_peers = ("not known yet: nothing of yours is linked, so no peer has been asked to take it", MUTED_COLOR)
     elif asked:
         at_peers = (f"accepted by the {len(asked)} peer(s) this node dials", SUCCESS_COLOR)
     else:

@@ -168,6 +168,37 @@ def test_a_push_refused_for_probation_is_recorded(tmp_path, caplog):
         seed.close()
 
 
+def test_key_transitions_alone_say_nothing_about_a_peers_probation(tmp_path):
+    """Key transitions pass a peer's probation, so a node with nothing linked
+    must not read their acceptance as the peer taking its content."""
+    dialer_identity = bootstrap_node_identity("dialer")
+    seed_identity = bootstrap_node_identity("seed")
+    dialer_node = LinkNode(identity=dialer_identity)
+    seed_node = LinkNode(identity=seed_identity)
+    dialer = _NodeDb(tmp_path, "dialer")
+    seed = _NodeDb(tmp_path, "seed")
+
+    async def scenario():
+        server = await _run_server(seed_node, seed.lane, enforce_trust_policy=True)
+        try:
+            async with aiohttp.ClientSession() as session:
+                task = asyncio.create_task(run_link_sync(
+                    dialer_node, session, [f"http://127.0.0.1:{server.port}"],
+                    lambda: _hello_for(dialer_node), dialer.lane, interval_seconds=60.0,
+                ))
+                await run_sync_briefly(task)
+        finally:
+            await server.stop()
+
+    try:
+        asyncio.run(scenario())
+        exchange = dialer_node.peer_exchange[seed_identity.fingerprint]
+        assert exchange.refused_reason is None and exchange.holds == set()
+    finally:
+        dialer.close()
+        seed.close()
+
+
 def test_a_peer_that_took_a_linked_board_is_recorded_as_holding_it(tmp_path):
     dialer_identity = bootstrap_node_identity("dialer")
     seed_identity = bootstrap_node_identity("seed")
