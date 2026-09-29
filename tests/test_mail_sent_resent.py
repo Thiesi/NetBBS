@@ -334,3 +334,17 @@ def test_existing_letters_have_no_resend_recorded(people):
     columns = {row["name"] for row in db.connection.execute("PRAGMA table_info(mail_messages)")}
     assert "resent_at" in columns
     assert get_mail(db, alice, letter.id).resent_at is None
+
+
+@pytest.mark.parametrize(("width", "height"), [(80, 24), (40, 12)])
+def test_resend_again_bar_and_resent_line_fit(linked, width, height):
+    db_path, db, alice, link_context, _node, _remote, address = linked
+    record_resend(db, alice, [_old_row(db, address)["id"]], [address])
+    session = FakeSession(keys=["s", "1", "b", "b", "b"])
+    session.terminal_width, session.terminal_height = width, height
+    _run(db_path, session, alice, link_context=link_context)
+
+    lines = _visible_text(session).replace("\r", "").split("\n")
+    assert any("Re[s]end again" in line for line in lines)
+    assert any(line.startswith("Resent: ") for line in lines)
+    assert all(len(line) <= width for line in lines if "Re[s]end" in line or "Resent" in line)
