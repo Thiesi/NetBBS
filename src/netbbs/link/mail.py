@@ -88,10 +88,23 @@ def compose_link_message(
     body: str,
     *,
     node_identity: NodeIdentity,
+    group: mail_module.LetterGroup | None = None,
+    group_addresses: list[str] | None = None,
+    commit: bool = True,
 ) -> LinkMessage:
     """
     Build, sign, encrypt, and queue one outbound `link_message`
     addressed to `recipient_address`.
+
+    `group` makes it one copy of a letter to several people (issue #827),
+    stored with the group's id and To like every other copy; and
+    `group_addresses` is that To as the recipient's node can read it --
+    everyone as `user@<home-node-fingerprint>` -- which goes inside the
+    sealed plaintext beside the subject and body (`"to"`, with the group's
+    id as `"group"`). A node that does not know the keys reads the subject
+    and body and ignores them, so the letter arrives there as a letter to
+    one person. `commit=False` leaves the transaction open for the rest of
+    the copies.
 
     Always encrypts to the *recipient's home node's* derived key
     (`netbbs.identity.encryption`, tier 1 only), resolved
@@ -117,7 +130,11 @@ def compose_link_message(
 
     recipient_signing_verify_key = _resolve_peer_signing_key(db, address.node_fingerprint)
 
-    plaintext = json.dumps({"subject": subject, "body": body}).encode("utf-8")
+    sealed: dict = {"subject": subject, "body": body}
+    if group is not None and group_addresses:
+        sealed["to"] = list(group_addresses)
+        sealed["group"] = group.id
+    plaintext = json.dumps(sealed).encode("utf-8")
     ciphertext = encrypt_for(recipient_signing_verify_key, plaintext)
 
     created_at = utc_now_iso()
@@ -136,12 +153,14 @@ def compose_link_message(
         """
         INSERT INTO mail_messages
             (sender_user_id, sender_label, recipient_remote_address, subject, body,
-             created_at, link_event_json, link_event_content_id, link_delivery_status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+             created_at, link_event_json, link_event_content_id, link_delivery_status,
+             mail_group_id, mail_group_to)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
         """,
         (
             sender.id, sender.username, str(address), subject, body, created_at,
             json.dumps(message.to_dict()), message.content_id,
+            group.id if group else None, group.to if group else None,
         ),
     )
     # Searchable in the sender's Sent (issue #824), in the same transaction.
@@ -153,9 +172,70 @@ def compose_link_message(
         db, kind=KIND_LINK_MAIL_DELIVERY, reference_id=message.content_id,
         target_fingerprint=address.node_fingerprint,
     )
-    db.connection.commit()
+    if commit:
+        db.connection.commit()
 
     return message
+
+
+def check_link_mail_recipient(db: Database, sender: User, recipient_address: str) -> str | None:
+    """Why `compose_link_message` would refuse to write to
+    `recipient_address` for `sender`, or `None` -- asked of every copy of a
+    letter to several people (issue #827) before any is written."""
+    try:
+        address = parse_address(recipient_address)
+    except AddressError as exc:
+        return str(exc)
+    if not is_valid_user_part(sender.username):
+        return (
+            f"your user name {sender.username!r} cannot be written as a Link address, so "
+            "a reply could never reach you. Ask the SysOp to rename the account."
+        )
+    try:
+        _resolve_peer_signing_key(db, address.node_fingerprint)
+    except LinkMailError as exc:
+        return str(exc)
+    return None
+
+
+def _received_group(
+    db: Database, decoded: dict, *, origin_node_fingerprint: str, node_identity: NodeIdentity,
+) -> mail_module.LetterGroup | None:
+    """The group a received letter is a copy of (issue #827), from the
+    `"to"` and `"group"` its sender sealed beside the subject and body, or
+    `None` for a letter to one person. What the sender's node put there is
+    only a To to show, so anything malformed is left out rather than
+    bounced: a letter whose list cannot be read is still a letter. Its id is
+    kept with the sender's node's identity, so no other node's letter can
+    share it."""
+    token, addresses = decoded.get("group"), decoded.get("to")
+    if not isinstance(token, str) or not isinstance(addresses, list):
+        return None
+    if not 1 <= len(token) <= 32 or not token.isalnum():
+        return None
+    members: list[mail_module.GroupMember] = []
+    for address in addresses[: mail_module.MAX_MAIL_RECIPIENTS]:
+        if not isinstance(address, str):
+            continue
+        split = mail_module.split_link_address(address)
+        if split is None or not is_valid_user_part(split[0]):
+            continue
+        user_part, fingerprint = split
+        if fingerprint == node_identity.fingerprint:
+            # Someone here: shown by their account, as a local letter's To.
+            try:
+                account = get_user_by_username(db, user_part)
+            except AuthError:
+                members.append(mail_module.GroupMember(name=user_part))
+            else:
+                members.append(mail_module.GroupMember(user_id=account.id, name=account.username))
+        else:
+            members.append(mail_module.GroupMember(address=f"{user_part}@{fingerprint}"))
+    if len(members) < 2:
+        return None
+    return mail_module.LetterGroup(
+        id=f"{token}@{origin_node_fingerprint}", to=mail_module.encode_group_to(members),
+    )
 
 
 def _resolve_peer_signing_key(db: Database, node_fingerprint: str) -> nacl.signing.VerifyKey:
@@ -308,6 +388,9 @@ def deliver_link_message(
         body = decoded["body"]
     except (MailError, KeyError, TypeError, ValueError):
         return _bounce("malformed")
+    group = _received_group(
+        db, decoded, origin_node_fingerprint=origin_node_fingerprint, node_identity=node_identity,
+    )
 
     if _make_room_or_report_full(db, recipient):
         return _bounce("mailbox_full")
@@ -320,12 +403,13 @@ def deliver_link_message(
         """
         INSERT INTO mail_messages
             (sender_user_id, sender_label, recipient_user_id, subject, body, created_at, link_source_event_id,
-             sender_deleted_at)
-        VALUES (NULL, ?, ?, ?, ?, ?, ?, ?)
+             sender_deleted_at, mail_group_id, mail_group_to)
+        VALUES (NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             sender_address, recipient.id, subject, body,
             _written_at(message.payload.get("created_at"), arrived_at), message.content_id, arrived_at,
+            group.id if group else None, group.to if group else None,
         ),
     )
     index_mail_without_commit(db, db.connection.execute("SELECT last_insert_rowid()").fetchone()[0])

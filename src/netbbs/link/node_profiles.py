@@ -308,7 +308,8 @@ def _identity_matches(identity: NodeDisplayIdentity, needle: str) -> bool:
 def link_address_label(user: str, node_label: str) -> str:
     """`user@node` as a caller reads it (issue #807). A node name that itself
     contains `@` is quoted -- `bob@"Cats @ Night"` -- so a reader can tell
-    where the user name ends; the To prompt accepts the quoted form back.
+    where the user name ends, and so is one with a comma, which separates
+    mail recipients (issue #827); the To prompt accepts the quoted form back.
 
     The user half comes from a peer's signed payload and nothing on the way
     in holds it to the username grammar, so a peer could otherwise name its
@@ -323,7 +324,9 @@ def link_address_parts(user: str, node_label: str) -> tuple[str, str]:
     """The two halves `link_address_label` joins with `@`, for a caller
     that styles them apart (the chat line, issue #899)."""
     user = user.replace("@", "?").replace('"', "?")
-    return user, (f'"{node_label}"' if "@" in node_label else node_label)
+    # A comma is quoted too (issue #827): mail's To field separates several
+    # addresses with commas, so `bob@Cats, Dogs` would read as two.
+    return user, (f'"{node_label}"' if "@" in node_label or "," in node_label else node_label)
 
 
 def qualified_node_name(identity: NodeDisplayIdentity) -> str:

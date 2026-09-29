@@ -10827,8 +10827,10 @@ async def _mail_tools_screen(
 ) -> None:
     """Operations -> Mail (issue #820): how full the mailboxes are, and what
     Link mail this node refused. Before this the Outbox of Link work items was
-    the only mail screen a SysOp had. Reads only; the one thing it leads to
-    that writes is a sender's trust, on the trust screen itself."""
+    the only mail screen a SysOp had. It reads only; what it leads to that
+    writes is a sender's trust, on the trust screen itself, and mail to all
+    callers (issue #827): `[W]rite to all callers` from the SysOp's own
+    account, `[N]otice to all callers` from the BBS itself."""
     while True:
         state = await lane.run(_load_mail_tools)
         chrome = await _load_chrome(lane, actor)
@@ -10877,7 +10879,10 @@ async def _mail_tools_screen(
                 "one it blocks, a full mailbox, no such account -- is listed here."
             ))
 
-        actions: list[tuple[str, str]] = []
+        actions: list[tuple[str, str]] = [
+            ("w", menu_key("W", "rite to all callers")),
+            ("n", menu_key("N", "otice to all callers")),
+        ]
         if sizes:
             actions.append(("m", menu_key("M", "ailboxes")))
         if refusals:
@@ -10892,6 +10897,12 @@ async def _mail_tools_screen(
             sections=[
                 Section("Mailboxes", boxes, paired=True),
                 Section("Refused Link mail", refused),
+                Section("Mail to all callers", [Note(
+                    "One letter to every account that takes mail, as a copy each. Write to all callers "
+                    "sends it from your own account, signed, and callers can reply to you; Notice to all "
+                    "callers sends it from the BBS itself, which no one can reply to. A full mailbox "
+                    "turns its copy away, and you are told whose."
+                )]),
                 Section(None, [Note(_MAIL_PRIVACY_NOTE)]),
             ],
             actions=actions,
@@ -10899,7 +10910,12 @@ async def _mail_tools_screen(
         )
         if choice == "b":
             return
-        if choice == "m":
+        if choice in ("w", "n"):
+            # Deferred: the mail UI imports much of the session layer.
+            from netbbs.net.mail_flow import write_to_all_callers
+
+            await write_to_all_callers(session, lane, actor, as_system=choice == "n")
+        elif choice == "m":
             await _mailboxes_screen(session, lane, actor)
         elif choice == "r":
             await _refused_link_mail_screen(session, lane, actor, link_context=link_context)

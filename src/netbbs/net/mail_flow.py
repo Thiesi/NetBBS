@@ -64,6 +64,7 @@ from netbbs.mail import (
     MAILBOX_NEARLY_FULL,
     MAX_MAIL_BODY_BYTES,
     MAX_MAIL_PER_RECIPIENT,
+    MAX_MAIL_RECIPIENTS,
     MAX_MAIL_SUBJECT_BYTES,
     SYSTEM_SENDER_LABEL,
     MailBlock,
@@ -71,14 +72,19 @@ from netbbs.mail import (
     MailboxFullError,
     MailError,
     MailMessage,
+    all_callers_recipients,
     block_link_sender,
     block_local_sender,
     blocks_link_sender,
     blocks_local_sender,
+    copy_recipient_label,
     delete_for_recipient,
     delete_for_sender,
     delete_letters,
     get_mail,
+    group_members,
+    group_to_label,
+    is_to_all_callers,
     link_address_display_label,
     list_inbox,
     list_mail_blocks,
@@ -88,8 +94,11 @@ from netbbs.mail import (
     mail_sender_refusal,
     mark_read,
     mark_unread,
+    new_mail_group_id,
     recipient_display_label,
     send_mail,
+    send_to_all_callers,
+    sent_group_copies,
     sender_display_label,
     sender_unblockable_reason,
     set_kept,
@@ -99,6 +108,7 @@ from netbbs.mail import (
     unblock_link_sender,
     unblock_local_sender,
 )
+from netbbs.mail_groups import LetterRecipient, LetterRefused, send_letter, too_many_recipients_text
 from netbbs.net.char_input import (
     HELP_KEY, REDRAW_KEY, EditorKey, EditorKeyKind, InputCancelled, reject_unhandled_key,
 )
@@ -133,8 +143,10 @@ from netbbs.net.mail_recipients import (
     RecipientCompleter,
     choose_recipient,
     gather_address_book,
+    join_recipients,
     picker_request,
     read_to_line_options,
+    split_recipients,
 )
 from netbbs.net.notices import announce, announce_styled, pending_notice_rows, take_notices, write_notices
 from netbbs.net.session import Session, write_prompt
@@ -388,6 +400,14 @@ class _MailRow:
     # Listed by conversation, a later letter of the conversation above it
     # (issue #828): drawn indented.
     continues: bool = False
+    # In Sent, every copy of a letter to several people (issue #827), which
+    # the one row stands for; empty for a letter to one person.
+    copies: tuple[MailMessage, ...] = ()
+
+    @property
+    def ids(self) -> list[int]:
+        """The letters this row acts on: every copy it stands for."""
+        return [copy.id for copy in self.copies] if self.copies else [self.message.id]
 
     @property
     def shown_subject(self) -> str:
@@ -395,10 +415,17 @@ class _MailRow:
 
     @property
     def status(self) -> str | None:
-        status = delivery_display_status(
-            self.message.link_delivery_status, self.message.link_relay_handoff_at
-        )
-        return status if status in DELIVERY_STATUS_LABELS else None
+        statuses = [
+            delivery_display_status(copy.link_delivery_status, copy.link_relay_handoff_at)
+            for copy in (self.copies or (self.message,))
+        ]
+        statuses = [status for status in statuses if status in DELIVERY_STATUS_LABELS]
+        # A letter to several people shows the copy that needs the caller
+        # most: one that did not arrive, then one still on its way.
+        for wanted in ("bounced", "expired", "pending", RELAYED_DISPLAY_STATUS, "delivered"):
+            if wanted in statuses:
+                return wanted
+        return None
 
 
 def _cell(text: str) -> str:
@@ -573,9 +600,22 @@ async def _load_mail_rows(lane: DatabaseLane, user: User, *, sent: bool) -> list
     names: dict[tuple[str | None, int | None], str] = {}
     warnings: dict[str, bool] = {}
     rows: list[_MailRow] = []
+    # Sent lists a letter to several people once (issue #827): its newest
+    # copy stands for all of them.
+    group_copies: dict[str, list[MailMessage]] = {}
+    if sent:
+        for message in messages:
+            if message.mail_group_id is not None:
+                group_copies.setdefault(message.mail_group_id, []).append(message)
     for message in messages:
         identity_changed = False
-        if sent:
+        if sent and message.mail_group_id is not None:
+            copies = group_copies.get(message.mail_group_id)
+            if copies is None or copies[0] is not message:
+                continue
+            key = ("group:" + message.mail_group_id, None)
+            names[key] = await _display_recipient_label(lane, message)
+        elif sent:
             # A deleted recipient has no id; its kept name tells it apart
             # from another deleted one (issue #818).
             key = (message.recipient_remote_address or message.recipient_label, message.recipient_user_id)
@@ -603,6 +643,8 @@ async def _load_mail_rows(lane: DatabaseLane, user: User, *, sent: bool) -> list
                 message.created_at, override_format=display_format, override_timezone=display_timezone
             ),
             identity_changed=identity_changed,
+            copies=tuple(reversed(group_copies[message.mail_group_id]))
+            if sent and message.mail_group_id is not None else (),
         ))
     return rows
 
@@ -957,9 +999,13 @@ class _MailboxScreen:
         if not await prompt_yes_no(self.session, question, default=False):
             return
         deleted = await self.lane.run(
-            delete_letters, self.user, [row.message.id for row in targets], sent=self.sent,
+            delete_letters, self.user, [mail_id for row in targets for mail_id in row.ids], sent=self.sent,
         )
         self.marked = set()
+        if deleted and any(row.copies for row in targets):
+            # Counted as the list shows them: a letter to several people is
+            # one letter, however many copies went (issue #827).
+            deleted = len(targets)
         announce(self.session, f"Deleted {_count(deleted, 'message')}.")
         await self._reload()
 
@@ -1336,6 +1382,7 @@ async def _message_view(
     to_label: str | None,
     unicode_style: bool = False,
     collapsed: bool = False,
+    copies: list[MailMessage] | None = None,
 ) -> tuple[str, list[str], list[str]]:
     """The title, the header rows (From or To, Date, any identity warning)
     and the body rows of one message, for `show_detail` to draw a page at a
@@ -1354,13 +1401,27 @@ async def _message_view(
     preamble: list[str] = []
     if to_label is not None:
         preamble.append(colored("To: ", fg_color=LABEL_COLOR) + colored(sanitize_text(to_label), fg_color=accent))
-        shown_status = delivery_display_status(message.link_delivery_status, message.link_relay_handoff_at)
-        delivery = delivery_explanation(shown_status, message.link_delivery_reason)
-        if delivery is not None:
-            preamble.append(
-                colored("Delivery: ", fg_color=LABEL_COLOR)
-                + colored(delivery, fg_color=_DELIVERY_COLORS.get(shown_status, VALUE_COLOR))
-            )
+        if message.mail_group_id is not None:
+            # A letter to several people (issue #827): each Link copy has a
+            # delivery of its own, named by whom it went to.
+            for copy in copies or [message]:
+                shown_status = delivery_display_status(copy.link_delivery_status, copy.link_relay_handoff_at)
+                delivery = delivery_explanation(shown_status, copy.link_delivery_reason)
+                if delivery is None:
+                    continue
+                name = sanitize_text(await lane.run(copy_recipient_label, copy))
+                preamble.append(
+                    colored(f"Delivery to {name}: ", fg_color=LABEL_COLOR)
+                    + colored(delivery, fg_color=_DELIVERY_COLORS.get(shown_status, VALUE_COLOR))
+                )
+        else:
+            shown_status = delivery_display_status(message.link_delivery_status, message.link_relay_handoff_at)
+            delivery = delivery_explanation(shown_status, message.link_delivery_reason)
+            if delivery is not None:
+                preamble.append(
+                    colored("Delivery: ", fg_color=LABEL_COLOR)
+                    + colored(delivery, fg_color=_DELIVERY_COLORS.get(shown_status, VALUE_COLOR))
+                )
     else:
         sender_label = await _display_sender_label(lane, message)
         preamble.append(
@@ -1374,8 +1435,10 @@ async def _message_view(
         if message.from_system:
             preamble.append(colored(_system_mail_note(session), fg_color=MUTED_COLOR))
         # Received mail names its recipient too (issue #810): the reader,
-        # as a letter's envelope would.
-        preamble.append(colored("To: ", fg_color=LABEL_COLOR) + colored(sanitize_text(user.username), fg_color=accent))
+        # as a letter's envelope would -- or everyone a letter to several
+        # people went to (issue #827).
+        received_to = await lane.run(group_to_label, message) or user.username
+        preamble.append(colored("To: ", fg_color=LABEL_COLOR) + colored(sanitize_text(received_to), fg_color=accent))
     display_format, display_timezone = await lane.run(resolve_display_preferences)
     displayed_date = format_for_display(
         message.created_at, override_format=display_format, override_timezone=display_timezone
@@ -1408,14 +1471,17 @@ async def _show_message(
     to_label: str | None,
     actions: list[tuple[str, str]],
     page: int,
+    copies: list[MailMessage] | None = None,
 ) -> tuple[str, int]:
     """One message on `show_detail`: returns the action key and the page
-    it was pressed on."""
+    it was pressed on. `copies` are the Sent copies of a letter to several
+    people (issue #827)."""
     unicode_style = await lane.run(unicode_style_enabled, user)
     title, preamble, body_rows = await _message_view(
         session, lane, user, message=message, to_label=to_label,
         unicode_style=unicode_style,
         collapsed=await lane.run(breadcrumb_collapsed_enabled, user),
+        copies=copies,
     )
     return await show_detail(
         session,
@@ -1492,11 +1558,15 @@ async def _show_inbox_message(
 ) -> None:
     message = await lane.run(mark_read, user, message)
     block_target = await lane.run(_block_target, user, message)
+    # Issue #827: a copy of a letter to several people answers them all.
+    reply_all = await lane.run(_reply_all_entries, user, message)
     page = 0
     while True:
         # Mail the BBS sent has nobody to answer (issue #819): no Reply key,
         # and the view says why.
         actions = [] if message.from_system else [("r", menu_key("R", "eply"))]
+        if len(reply_all) > 1:
+            actions.append(("a", menu_key("a", "ll", prefix="Reply ")))
         actions += [
             # Offered on system mail too (issue #822): passing a notice on
             # to someone -- the SysOp, say -- harms no one.
@@ -1521,6 +1591,15 @@ async def _show_inbox_message(
             continue
         if choice == "f":
             await _forward_message(session, lane, user, message, sent=False, link_context=link_context)
+            continue
+        if choice == "a":
+            shown = await _display_sender_label(lane, message)
+            await _write_to_several(
+                session, lane, user, reply_all,
+                subject=reply_subject(message.subject, max_bytes=MAX_MAIL_SUBJECT_BYTES),
+                body=quote_body(plain_post_body(message.body), author=shown),
+                link_context=link_context, reply_key=_reply_all_key(message),
+            )
             continue
         if choice == "e":
             keep = message.kept_at is None
@@ -1778,6 +1857,9 @@ async def _show_sent_message(
     expired, sends the same letter again as a new one. A letter sent from
     either returns to the Sent list, where it now is, with "Message sent."
     above the prompt; anything else comes back to this view."""
+    if message.mail_group_id is not None:
+        await _show_sent_group(session, lane, user, message, link_context=link_context)
+        return
     to_label = await _display_recipient_label(lane, message)
     failed = message.link_delivery_status in ("bounced", "expired")
     if failed:
@@ -1806,6 +1888,69 @@ async def _show_sent_message(
         if not await prompt_yes_no(session, "Delete this message?", default=False):
             continue
         await lane.run(delete_for_sender, user, message)
+        announce(session, "Message deleted.")
+        return
+
+
+async def _show_sent_group(
+    session: Session, lane: DatabaseLane, user: User, message: MailMessage,
+    *, link_context: LinkContext | None,
+) -> None:
+    """A letter the caller sent to several people (issue #827), shown once
+    for all its copies: To names everyone, and each Link copy's delivery is
+    on a line of its own. `[R]eply` writes to them all again; `Re[s]end`
+    sends the letter again to those whose copy bounced or expired, and to
+    no one else; `[D]elete` removes every copy from Sent. Mail to all
+    callers has no Reply or Resend: it is sent from the SysOp console."""
+    copies = await lane.run(sent_group_copies, user, message)
+    to_all = is_to_all_callers(message)
+    failed = [copy for copy in copies if copy.link_delivery_status in ("bounced", "expired")]
+    if failed:
+        # Seen here, so the main menu need not tell them again (issue #806).
+        await lane.run(acknowledge_delivery_notices, [copy.id for copy in failed])
+    actions: list[tuple[str, str]] = []
+    if not to_all:
+        actions.append(("r", menu_key("R", "eply")))
+        if failed:
+            actions.append(("s", menu_key("s", "end", prefix="Re")))
+    actions += [("f", menu_key("F", "orward")), ("d", menu_key("D", "elete")), ("b", menu_key("B", "ack"))]
+    to_label = await _display_recipient_label(lane, message)
+    page = 0
+    while True:
+        choice, page = await _show_message(
+            session, lane, user, message, to_label=to_label, actions=actions, page=page, copies=copies,
+        )
+        if choice == "b":
+            return
+        if choice == "f":
+            await _forward_message(session, lane, user, message, sent=True, link_context=link_context)
+            continue
+        if choice == "r":
+            entries = await lane.run(_sent_group_entries, copies)
+            if await _write_to_several(
+                session, lane, user, entries,
+                subject=reply_subject(message.subject, max_bytes=MAX_MAIL_SUBJECT_BYTES),
+                body=quote_body(plain_post_body(message.body), author=user.username),
+                link_context=link_context, reply_key=_reply_key(message),
+            ):
+                return
+            continue
+        if choice == "s":
+            if link_context is None:
+                announce(session, "This BBS is not linked with other BBSes right now, so it can't be resent.", tone="error")
+                continue
+            # The letter as it was sent, to the ones it did not reach.
+            if await _write_to_several(
+                session, lane, user, [copy.recipient_remote_address for copy in failed if copy.recipient_remote_address],
+                subject=message.subject, body=post_body_text(message.body),
+                link_context=link_context, resend_key=_resend_key(message),
+            ):
+                return
+            continue
+        question = f"Delete this message? It goes from Sent for all {len(copies)} recipients."
+        if not await prompt_yes_no(session, question, default=False):
+            continue
+        await lane.run(delete_letters, user, [copy.id for copy in copies], sent=True)
         announce(session, "Message deleted.")
         return
 
@@ -1997,6 +2142,185 @@ async def mail_someone(
     )
 
 
+# -- SysOp mail to all callers (issue #827) -------------------------------------
+#
+# Written from the SysOp console (Operations > Mail), not the mailbox: it is
+# the SysOp acting for the BBS, as the console's other mail tools are, and a
+# To-prompt keyword for "everyone" would be one no caller could find and every
+# SysOp could type by accident. The letter goes out as one ordinary copy per
+# account that takes mail (`netbbs.mail.send_to_all_callers`), from the
+# SysOp's own account, which callers can reply to, or from the system, which
+# nobody can.
+
+#: How many names the outcome of mail to all callers lists before counting.
+_ALL_CALLERS_NAMES_SHOWN = 5
+
+
+def _all_callers_draft_path(lane: DatabaseLane, user: User, *, as_system: bool) -> Path:
+    """Mail to all callers has a draft slot of its own, one for each
+    sender, apart from the SysOp's own new letter."""
+    directory = lane.path.parent / f"{lane.path.name}_drafts"
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory / f"mail_{'notice' if as_system else 'all'}_{user.id}.draft"
+
+
+def all_callers_outcome(sent: int, mailbox_full: tuple[str, ...], left_out: int) -> tuple[str, int]:
+    """What sending to all callers did, in one line for the SysOp, and its
+    color: how many it reached, whose mailbox was full (named, then
+    counted), and how many accounts take no mail."""
+    parts = [f"Sent to {_count(sent, 'caller')}."]
+    if mailbox_full:
+        names = ", ".join(sanitize_text(name) for name in mailbox_full[:_ALL_CALLERS_NAMES_SHOWN])
+        more = len(mailbox_full) - _ALL_CALLERS_NAMES_SHOWN
+        if more > 0:
+            names += f" and {more} more"
+        parts.append(f"Not delivered, mailbox full of unread and kept mail: {names}.")
+    if left_out:
+        parts.append(
+            f"{_count(left_out, 'account')} left out: the guest account, disabled accounts and signups "
+            "awaiting approval take no mail."
+        )
+    return " ".join(parts), WARNING_COLOR if mailbox_full else SUCCESS_COLOR
+
+
+async def write_to_all_callers(
+    session: Session, lane: DatabaseLane, user: User, *, as_system: bool,
+) -> bool:
+    """Write one letter to every account on this BBS that takes mail (issue
+    #827): from `user`'s own account -- signed, and callers can reply -- or,
+    `as_system`, from the BBS itself (issue #819): no signature, no reply.
+
+    The same compose screens as any letter: Subject, the caller's editor,
+    and the review screen, where Send sends it. There is no To: who it goes
+    to is decided at Send (`netbbs.mail.all_callers_recipients`), and the
+    review screen says how many. The letter keeps a draft slot of its own,
+    and with it the group id that makes a second Send of the same letter --
+    a retry, a kept draft -- refused rather than sent twice. What happened
+    is carried to the screen the SysOp came from: how many it reached, and
+    each recipient whose full mailbox turned it away. Returns whether it
+    was sent."""
+    discard_buffered_enter = getattr(session, "discard_buffered_enter", None)
+    if discard_buffered_enter is not None:
+        await discard_buffered_enter()
+    description_level = await lane.run(menu_description_level, user)
+    redraw_in_place = await lane.run(redraw_in_place_enabled, user)
+    unicode_style = await lane.run(unicode_style_enabled, user)
+    collapsed = await lane.run(breadcrumb_collapsed_enabled, user)
+    accent_color = await lane.run(effective_accent_color_256)
+    header_color = await lane.run(effective_header_color_256)
+    truecolor = await lane.run(lambda db: effective_truecolor(session, db, user))
+    body_mode = await lane.run(_mail_body_mode, user)
+    title = "Notice to all callers" if as_system else "Letter to all callers"
+    sender = None if as_system else user
+    kept_notice = f"Draft saved -- you'll be offered it the next time you open {title}."
+
+    draft_path = _all_callers_draft_path(lane, user, as_system=as_system)
+    resumed = _load_letter_draft(draft_path)
+    if resumed is not None:
+        outcome = await _letter_draft_choice(session, lane, user, resumed, starting_new=True)
+        if outcome == "back":
+            return False
+        if outcome == "discard":
+            _forget_letter(draft_path)
+            announce(session, "Draft deleted.", tone="muted")
+            resumed = None
+    group_id = resumed.group_id if resumed is not None and resumed.group_id else new_mail_group_id()
+
+    async def audience() -> str:
+        recipients, _left_out = await lane.run(all_callers_recipients, sender)
+        who = "from the BBS itself, with no reply" if as_system else "from you; they can reply"
+        return f"To all callers: {_count(len(recipients), 'account')} that take mail, {who}."
+
+    await show_compose_screen(
+        session, title=title, breadcrumb=("SysOp", "Mail"), fields=[], hint=await audience(),
+        redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
+        header_color=header_color, accent_color=accent_color,
+    )
+    if resumed is not None and resumed.subject is not None:
+        subject = resumed.subject
+    else:
+        subject = await read_subject(session, max_bytes=MAX_MAIL_SUBJECT_BYTES)
+        if subject is None:
+            announce(session, "Message cancelled.", tone="muted")
+            return False
+
+    def editor_header() -> EditorHeader:
+        return EditorHeader(title, (("To", "All callers"), ("Subject", subject)), color=header_color)
+
+    def keep_fields() -> None:
+        save_draft_fields(draft_path, {"to": None, "reply_address": None, "subject": subject, "group": group_id})
+
+    keep_fields()
+    body = await _compose_mail_body(
+        session, lane, user, initial_text=resumed.body if resumed is not None else None,
+        cursor_at_end=resumed is not None, header=editor_header(), draft_path=draft_path,
+    )
+    if body is None or not body.strip():
+        if body is None and draft_path.exists():
+            announce(session, kept_notice, tone="muted")
+            return False
+        _forget_letter(draft_path)
+        announce(session, "Message cancelled.", tone="muted")
+        return False
+    if not as_system:
+        # The SysOp's own letter is signed as any of theirs; a notice from
+        # the BBS is not the SysOp's to sign.
+        signature = await lane.run(get_signature, user)
+        if signature:
+            body = append_signature(body, signature)
+
+    while True:
+        too_long = _too_long_to_send(subject, body)
+        if too_long is not None:
+            announce(session, too_long, tone="error")
+        announce(session, await audience(), tone="muted")
+        action = await review_composition(
+            session, recipient=None, subject=subject, body=body,
+            commit_key="s", commit_label="end", commit_brief="Send it to all callers",
+            description_level=description_level, redraw_in_place=redraw_in_place,
+            unicode_style=unicode_style, collapsed=collapsed, accent_color=accent_color,
+            header_color=header_color, truecolor=truecolor, body_mode=body_mode, body_layout="lines",
+            breadcrumb=("SysOp", "Mail", title),
+        )
+        if action is ReviewAction.CANCEL:
+            _forget_letter(draft_path)
+            announce(session, "Message cancelled.", tone="muted")
+            return False
+        if action is ReviewAction.EDIT_SUBJECT:
+            subject = await read_subject(session, max_bytes=MAX_MAIL_SUBJECT_BYTES, current=subject)
+            keep_fields()
+            continue
+        if action is ReviewAction.EDIT_BODY:
+            keep_fields()
+            revised = await _compose_mail_body(
+                session, lane, user, initial_text=body, header=editor_header(), draft_path=draft_path,
+            )
+            if revised is not None:
+                body = revised
+            elif draft_path.exists():
+                announce(session, kept_notice, tone="muted")
+                return False
+            else:
+                announce(session, "Body unchanged.", tone="muted")
+            continue
+        if action is not ReviewAction.COMMIT or too_long is not None:
+            continue
+        try:
+            result = await lane.run(
+                lambda db: send_to_all_callers(db, subject, body, group_id=group_id, sender=sender)
+            )
+        except MailError as exc:
+            announce(session, f"Could not send: {exc}", tone="error")
+            continue
+        _forget_letter(draft_path)
+        # Issue #823: those online now hear of it now.
+        for name in result.sent_to:
+            nudge(name)
+        text, color = all_callers_outcome(len(result.sent_to), result.mailbox_full, result.left_out)
+        announce(session, text, color=color)
+        return True
+
+
 # -- forwarding (issue #822) ---------------------------------------------------
 
 
@@ -2050,6 +2374,7 @@ async def _compose_mail(
     *,
     prefill_recipient: User | None = None,
     prefill_link_address: str | None = None,
+    prefill_to: list[str] | None = None,
     prefill_subject: str = "",
     prefill_body: str | None = None,
     link_context: LinkContext | None = None,
@@ -2092,6 +2417,16 @@ async def _compose_mail(
     offered before anything is asked -- resume it, delete it and start
     again, or go back -- and is never loaded into another letter's
     editor. `resume` skips that choice: the caller already made it.
+
+    Several people (issue #827): the To field takes addresses separated by
+    commas, each checked as it is typed and named when it is refused, up
+    to `MAX_MAIL_RECIPIENTS`. Such a letter is sent as one copy per
+    recipient (`netbbs.mail_groups.send_letter`), all or none: a recipient
+    who cannot take it is named at Send, and [T]o drops or fixes them.
+    `prefill_to` fills To with several addresses -- Reply all, a follow-up
+    to a letter to several people -- which Send checks like typed ones.
+    Each letter keeps a group id with its draft, so a letter to several
+    people sent once is never sent again from its draft.
 
     Returns whether the letter was sent.
     """
@@ -2169,7 +2504,26 @@ async def _compose_mail(
     async def settle_recipient(text: str) -> tuple[str, str]:
         """What to keep as the address, and how to show it (issue #813). A
         local name is kept as the account spells it, so `[T]o` opens on
-        that too; a Link address is kept as typed, for Send to check again."""
+        that too; a Link address is kept as typed, for Send to check again.
+        Several addresses (issue #827) are each settled so."""
+        entries = split_recipients(text)
+        if len(entries) > 1:
+            settled: list[tuple[str, str]] = []
+            for entry in entries:
+                kept, label = await settle_one(entry)
+                # One person named twice -- `bob, Bob`, or `sysop` and the
+                # SysOp's own name -- is one recipient (review on #910), and
+                # a list that comes down to one is a letter to one person.
+                if kept.casefold() not in {other.casefold() for other, _label in settled}:
+                    settled.append((kept, label))
+            if len(settled) == 1:
+                return settled[0]
+            return join_recipients([kept for kept, _label in settled]), join_recipients(
+                [label for _kept, label in settled]
+            )
+        return await settle_one(text)
+
+    async def settle_one(text: str) -> tuple[str, str]:
         # "sysop" wherever an address is typed, [T]o included (#840).
         text = await lane.run(resolve_sysop_alias, text)
         if link_enabled and "@" in text:
@@ -2186,11 +2540,17 @@ async def _compose_mail(
     reply_address: str | None = None
     recipient_text: str | None = None
     recipient_label = ""
+    # Kept with the draft (issue #827): a letter to several people sent
+    # from it once is refused if its draft is sent again.
+    group_id = resumed.group_id if resumed is not None and resumed.group_id else new_mail_group_id()
     if resumed is not None and resumed.reply_address is not None:
         prefill_link_address, prefill_recipient = resumed.reply_address, None
     elif resumed is not None and resumed.recipient_text is not None:
         prefill_link_address, prefill_recipient = None, None
         recipient_text, recipient_label = await settle_recipient(resumed.recipient_text)
+    elif prefill_to:
+        prefill_link_address, prefill_recipient = None, None
+        recipient_text, recipient_label = await settle_recipient(join_recipients(prefill_to))
     if prefill_link_address is not None:
         reply_address = prefill_link_address
         recipient_text = await _display_link_address(lane, prefill_link_address)
@@ -2207,68 +2567,66 @@ async def _compose_mail(
         to_hint = (
             "Who is it for? Type their user name, or name@TheirBBS for someone on a linked BBS. "
             if link_enabled else "Who is it for? Type their user name. "
-        ) + "Tab completes a name; ? and Enter lists who you can write to. An empty line or Esc cancels."
+        ) + (
+            f"Several people: separate them with commas (up to {MAX_MAIL_RECIPIENTS}). "
+            "Tab completes a name; ? and Enter lists who you can write to. An empty line or Esc cancels."
+        )
         await compose_screen([], hint=to_hint)
         # Tab and ? (issue #826): gathered once, as the prompt opens.
         book = await lane.run(lambda db: gather_address_book(db, user, link_enabled=link_enabled))
         to_options = read_to_line_options(RecipientCompleter(book, session, "To: "))
         picked = False
+        # What the prompt opens with: a list with one address refused is
+        # given back to fix, not typed again (issue #827).
+        seed = ""
         while True:
             await write_prompt(session, "To: ")
             try:
-                recipient_text = (await session.read_line(cancellable=True, **to_options)).strip()
+                if seed:
+                    typed_text = await session.read_line(cancellable=True, initial=seed, **to_options)
+                else:
+                    typed_text = await session.read_line(cancellable=True, **to_options)
             except InputCancelled:
-                recipient_text = ""
-            if not recipient_text:
+                typed_text = ""
+            seed = ""
+            entries = split_recipients(typed_text)
+            if not entries:
                 # A resumed letter from before #814 is still kept (review on
                 # #873): say so, not that it is gone.
                 announce(session, kept_notice if resumed is not None else "Cancelled.", tone="muted")
                 return False
-            request = picker_request(recipient_text, link_enabled=link_enabled)
+            # `?` as the last address (issue #826) lists who to add.
+            request = picker_request(entries[-1], link_enabled=link_enabled)
             picked = False
             if request is not None:
                 chosen = await choose_recipient(session, book, request, **picker_style())
                 await compose_screen([], hint=to_hint)
                 if chosen is None:
+                    if len(entries) > 1:
+                        seed = join_recipients(entries[:-1]) + ", "
                     continue
                 # Checked below exactly as a typed address is.
-                recipient_text, picked = chosen, True
-            # "sysop" reaches the node's SysOp (issue #840, F087).
-            recipient_text = await lane.run(resolve_sysop_alias, recipient_text)
-            if link_enabled and "@" in recipient_text:
-                # Checked as it is typed, like a local name (issue #807):
-                # a bad address is asked for again here, not after the
-                # message is written.
-                checked = await lane.run(_check_link_recipient, recipient_text)
-                if isinstance(checked, str):
-                    await session.write_line(colored(checked, fg_color=ERROR_COLOR))
-                    continue
-                break
-            try:
-                typed = await lane.run(get_user_by_username, recipient_text)
-            except AuthError:
-                # Retry in place rather than discarding the whole compose
-                # attempt on one typo -- the identical error at the final
-                # commit step below already only re-prompts for the
-                # recipient, keeping subject/body intact; this matches
-                # that, instead of the harsher "start over" outcome
-                # hitting it here first would otherwise cause.
-                await session.write_line(
-                    colored(f"No such user: {sanitize_text(recipient_text)!r}", fg_color=ERROR_COLOR)
-                )
+                entries[-1], picked = chosen, True
+            if len(entries) > MAX_MAIL_RECIPIENTS:
+                await session.write_line(colored(too_many_recipients_text(len(entries)), fg_color=ERROR_COLOR))
+                seed = join_recipients(entries)
                 continue
-            # The guest account takes no mail (issue #816): said here, before
-            # anything is written, and asked again.
-            refused = await lane.run(mail_recipient_refusal, typed)
-            if refused is None:
-                # Nor does one that blocked this caller (issue #817): said
-                # before the letter is written, not after.
-                refused = await lane.run(lambda db: mail_sender_refusal(db, typed, sender=user))
-            if refused is not None:
-                await session.write_line(colored(sanitize_text(refused), fg_color=ERROR_COLOR))
+            # Each address checked as it is typed (issues #807, #816, #817):
+            # one that is refused is asked for again here, not after the
+            # message is written, and a list says which one.
+            checked = await lane.run(
+                lambda db: [_check_to_entry(db, user, entry, link_enabled) for entry in entries]
+            )
+            problems = [(entry, result) for entry, result in zip(entries, checked) if isinstance(result, str)]
+            if problems:
+                for entry, problem in problems:
+                    shown = _name_the_problem(entry, problem) if len(entries) > 1 else problem
+                    await session.write_line(colored(shown, fg_color=ERROR_COLOR))
+                if len(entries) > 1:
+                    seed = join_recipients(entries)
                 continue
             break
-        recipient_text, recipient_label = await settle_recipient(recipient_text)
+        recipient_text, recipient_label = await settle_recipient(join_recipients(entries))
         if picked:
             # Chosen from the list, so never typed on this screen: shown.
             await compose_screen([("To", recipient_label)])
@@ -2291,7 +2649,8 @@ async def _compose_mail(
         # What the text is for, beside it -- the editors only keep the
         # text (issue #814).
         save_draft_fields(
-            draft_path, {"to": recipient_text, "reply_address": reply_address, "subject": subject},
+            draft_path,
+            {"to": recipient_text, "reply_address": reply_address, "subject": subject, "group": group_id},
         )
 
     keep_fields()
@@ -2366,11 +2725,14 @@ async def _compose_mail(
             # Opened on the name the caller reads, not a technical identity
             # the To prompt resolved it to (issue #826); unchanged keeps it.
             edited = await read_prefilled_field(session, "To", recipient_label)
-            request = picker_request(edited, link_enabled=link_enabled)
+            edited_entries = split_recipients(edited)
+            request = picker_request(edited_entries[-1], link_enabled=link_enabled) if edited_entries else None
             if request is not None:
-                # ? here too, and what is chosen is checked at Send.
+                # ? here too, as the last address, and what is chosen is
+                # checked at Send.
                 book = await lane.run(lambda db: gather_address_book(db, user, link_enabled=link_enabled))
-                edited = await choose_recipient(session, book, request, **picker_style()) or recipient_label
+                chosen = await choose_recipient(session, book, request, **picker_style())
+                edited = join_recipients([*edited_entries[:-1], chosen]) if chosen else recipient_label
             if edited != recipient_label:
                 reply_address = None
                 recipient_text, recipient_label = await settle_recipient(edited)
@@ -2396,6 +2758,15 @@ async def _compose_mail(
                 announce(session, "Body unchanged.", tone="muted")
             continue
         if too_long is not None:
+            continue
+
+        if reply_address is None and len(split_recipients(recipient_text)) > 1:
+            if await _send_to_several(
+                session, lane, user, split_recipients(recipient_text), subject, body,
+                group_id=group_id, link_context=link_context,
+            ):
+                _forget_letter(draft_path)
+                return True
             continue
 
         if link_enabled and (reply_address is not None or "@" in recipient_text):
@@ -2461,6 +2832,8 @@ class _LetterDraft:
     recipient_text: str | None
     reply_address: str | None
     subject: str | None
+    # The letter's group id (issue #827), for a draft kept since.
+    group_id: str | None = None
 
 
 def _reply_key(message: MailMessage) -> str:
@@ -2470,6 +2843,12 @@ def _reply_key(message: MailMessage) -> str:
     offered for a different message that got the same id."""
     digest = hashlib.sha256(f"{message.created_at}|{message.sender_label}".encode("utf-8")).hexdigest()[:12]
     return f"{message.id}_{digest}"
+
+
+def _reply_all_key(message: MailMessage) -> str:
+    """The draft slot of Reply all to a message (issue #827): apart from a
+    kept Reply to its sender alone."""
+    return f"all_{_reply_key(message)}"
 
 
 def _forward_key(message: MailMessage) -> str:
@@ -2538,6 +2917,7 @@ def _load_letter_draft(path: Path) -> _LetterDraft | None:
     return _LetterDraft(
         body=body, recipient_text=fields.get("to"), reply_address=fields.get("reply_address"),
         subject=fields.get("subject"),
+        group_id=fields.get("group") if isinstance(fields.get("group"), str) else None,
     )
 
 
@@ -2634,6 +3014,183 @@ def _check_link_recipient(db, recipient_text: str) -> _LinkRecipient | str:
     if refusal is not None:
         return refusal
     return resolved
+
+
+@dataclass(frozen=True)
+class _CheckedRecipient:
+    """One To address that passed the To prompt's checks: an account here
+    (`user`), or a Link recipient (`link`). `text` is what To keeps for it:
+    the account's name, or `user@<fingerprint>`."""
+    text: str
+    user: User | None = None
+    link: _LinkRecipient | None = None
+
+
+def _check_to_entry(db, sender: User, text: str, link_enabled: bool) -> _CheckedRecipient | str:
+    """The To prompt's checks for one address, typed or chosen (issues
+    #807, #816, #817, #840): `sysop` names the node's SysOp; a Link address
+    must name a node this BBS sends mail to; a local name must be an
+    account that takes mail from `sender`. Returns the recipient, or why
+    not, sanitized, in the words the prompt shows."""
+    text = resolve_sysop_alias(db, text)
+    if link_enabled and "@" in text:
+        checked = _check_link_recipient(db, text)
+        if isinstance(checked, str):
+            return checked
+        return _CheckedRecipient(text=f"{checked.user}@{checked.fingerprint}", link=checked)
+    try:
+        account = get_user_by_username(db, text)
+    except AuthError:
+        return f"No such user: {sanitize_text(text)!r}"
+    refused = mail_recipient_refusal(db, account)
+    if refused is None:
+        refused = mail_sender_refusal(db, account, sender=sender)
+    if refused is not None:
+        return sanitize_text(refused)
+    return _CheckedRecipient(text=account.username, user=account)
+
+
+def _name_the_problem(entry: str, problem: str) -> str:
+    """A refusal for one address of several (issue #827), saying which:
+    the address in front, unless the words already name it."""
+    shown = sanitize_text(entry)
+    return problem if shown.casefold() in problem.casefold() else f"{shown}: {problem}"
+
+
+async def _send_to_several(
+    session: Session, lane: DatabaseLane, user: User, entries: list[str], subject: str, body: str,
+    *, group_id: str, link_context: LinkContext | None,
+) -> bool:
+    """Send from the review screen to several people (issue #827). Every
+    address is checked again as the To prompt checks it -- To may have been
+    edited, a peer's standing can change while the letter is written --
+    and then the letter goes to all of them or to none
+    (`netbbs.mail_groups.send_letter`). Every refusal is carried to the
+    review screen, one line per recipient. Returns whether it was sent."""
+    link_enabled = link_context is not None
+    if len(entries) > MAX_MAIL_RECIPIENTS:
+        announce(session, too_many_recipients_text(len(entries)), tone="error")
+        return False
+    checked = await lane.run(lambda db: [_check_to_entry(db, user, entry, link_enabled) for entry in entries])
+    problems = [(entry, result) for entry, result in zip(entries, checked) if isinstance(result, str)]
+    if problems:
+        for entry, problem in problems:
+            announce_styled(session, colored(_name_the_problem(entry, problem), fg_color=ERROR_COLOR))
+        announce(session, "Nothing was sent. [T]o changes who it is for.", tone="muted")
+        return False
+    recipients = [
+        LetterRecipient(user=result.user) if result.user is not None else LetterRecipient(address=result.text)
+        for result in checked
+        if isinstance(result, _CheckedRecipient)
+    ]
+    for recipient in recipients:
+        if recipient.address is not None:
+            # Each Link recipient's node on its own (review on #910): the
+            # caution names whose node it is.
+            warning = await _link_mail_identity_warning(lane, recipient.address)
+            if warning is not None:
+                name = sanitize_text(await _display_link_address(lane, recipient.address))
+                await session.write_line(colored(f"{name}: {warning}", fg_color=MUTED_COLOR, bold=True))
+    node_identity = link_context.node_identity if link_context is not None else None
+    try:
+        count = await lane.run(
+            send_letter, user, recipients, subject, body, group_id=group_id, node_identity=node_identity,
+        )
+    except LetterRefused as exc:
+        for recipient, problem in exc.problems:
+            if recipient.user is not None:
+                name = recipient.user.username
+            else:
+                assert recipient.address is not None
+                name = await _display_link_address(lane, recipient.address)
+            announce_styled(session, colored(_name_the_problem(name, problem), fg_color=ERROR_COLOR))
+        announce(session, "Nothing was sent. [T]o changes who it is for.", tone="muted")
+        return False
+    except (LinkMailError, MailError) as exc:
+        announce(session, f"Could not send: {exc}", tone="error")
+        return False
+    # Issue #823: a recipient online now hears of it now.
+    for recipient in recipients:
+        if recipient.user is not None:
+            nudge(recipient.user.username)
+    announce(session, f"Message sent to {count} people.")
+    return True
+
+
+def _reply_all_entries(db, reader: User, message: MailMessage) -> list[str]:
+    """Who Reply all on a received copy of a letter to several people
+    writes to (issue #827), as To addresses: its sender first, then
+    everyone else it went to but the reader. An account is named by its
+    current name; one deleted since, or a name another BBS listed that no
+    account here has, is left out. Empty for a letter to one person, and
+    for mail to all callers, which is answered by Reply alone."""
+    members = group_members(message)
+    if members is None:
+        return []
+    entries: list[str] = []
+    if message.sender_user_id is not None:
+        sender = get_user_by_id(db, message.sender_user_id)
+        if sender is not None and sender.id != reader.id:
+            entries.append(sender.username)
+    elif not message.from_system and _split_link_address(message.sender_label) is not None:
+        entries.append(message.sender_label)
+    for member in members:
+        if member.address is not None:
+            entries.append(member.address)
+        elif member.user_id is not None and member.user_id != reader.id:
+            account = get_user_by_id(db, member.user_id)
+            if account is not None:
+                entries.append(account.username)
+    unique: list[str] = []
+    for entry in entries:
+        if entry.casefold() not in {kept.casefold() for kept in unique}:
+            unique.append(entry)
+    return unique
+
+
+def _sent_group_entries(db, copies: list[MailMessage]) -> list[str]:
+    """Who a letter to several people went to (issue #827), as To
+    addresses for a follow-up: a Link recipient by the address it went to,
+    an account by its current name; one deleted since is left out."""
+    entries = []
+    for copy in copies:
+        if copy.recipient_remote_address is not None:
+            entries.append(copy.recipient_remote_address)
+        elif copy.recipient_user_id is not None:
+            account = get_user_by_id(db, copy.recipient_user_id)
+            if account is not None:
+                entries.append(account.username)
+    return entries
+
+
+async def _write_to_several(
+    session: Session, lane: DatabaseLane, user: User, entries: list[str], *,
+    subject: str, body: str, link_context: LinkContext | None, **keys,
+) -> bool:
+    """A letter to several people the caller did not type (issue #827):
+    Reply all, a follow-up to a letter to several people, a resend of its
+    copies that bounced. Each address gets the To prompt's checks first;
+    one that fails is left out, and said so, as `mail_someone` refuses a
+    single recipient before anything is written. Returns whether a letter
+    was sent."""
+    refusal = await lane.run(lambda db: caller_mail_refusal(session, db, user))
+    if refusal is not None:
+        announce(session, refusal, tone="error")
+        return False
+    link_enabled = link_context is not None
+    checked = await lane.run(lambda db: [_check_to_entry(db, user, entry, link_enabled) for entry in entries])
+    kept = [result.text for result in checked if isinstance(result, _CheckedRecipient)]
+    for entry, result in zip(entries, checked):
+        if isinstance(result, str):
+            name = await _display_link_address(lane, entry)
+            announce_styled(session, colored(f"Left out: {_name_the_problem(name, result)}", fg_color=WARNING_COLOR))
+    if not kept:
+        announce(session, "No one it went to can be written to now.", tone="error")
+        return False
+    return await _compose_mail(
+        session, lane, user, prefill_to=kept, prefill_subject=subject, prefill_body=body or None,
+        link_context=link_context, **keys,
+    )
 
 
 def _resolve_link_address(db, recipient_text: str) -> _LinkRecipient | str:

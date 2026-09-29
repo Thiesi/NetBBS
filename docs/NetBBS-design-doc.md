@@ -2547,6 +2547,76 @@ letters from the cap, and lists by conversation:
 A received message's view names its recipient: `From:`, `To:` (the reader)
 and `Date:`, as a sent message's view has `To:`.
 
+**One letter to several people** (issue #827). The To field takes up to
+`MAX_MAIL_RECIPIENTS` (20) addresses, local and Link mixed, separated by
+commas; a comma inside double quotes (a quoted node name) does not separate.
+Each address gets the To prompt's checks as it is typed, and a refused one is
+named, with the typed list given back to fix. Tab completes the address after
+the last comma, and `?` as the last address opens the list for it.
+- **One copy per recipient.** Send writes one ordinary letter per recipient:
+  a local row by `send_mail`'s rules, a Link row by `compose_link_message`'s.
+  Each copy has its own delivery state, bounce, cap handling, block and
+  refusal, and every rule of this section applies to it unchanged. The
+  alternative -- one letter row with a recipient table -- was rejected: every
+  per-side rule (deletion, Kept, read state, the cap, delivery, search) is
+  per row today and would have had to learn about recipients.
+- **The copies are linked** by `mail_messages.mail_group_id`, and each
+  carries the whole To in `mail_group_to` (JSON: an account by id and name,
+  shown by its current name; a Link address; or `{"all": true}`). The list
+  is stored with every copy rather than read back from the others, because a
+  copy both sides deleted is gone and the To must not lose a name with it.
+  There is no blind copy: everyone sees everyone.
+- **All or none at Send.** Every copy is checked -- the account takes mail,
+  has not blocked the sender, has room; the Link node has keys on file --
+  before any is written, and all are written in one transaction
+  (`netbbs.mail_groups.send_letter`). A recipient who cannot take it is named
+  on the review screen and nothing is sent; `[T]o` drops or fixes them.
+  Sending to the others anyway was rejected: the copies already written would
+  list someone who never got the letter, and a second Send would reach the
+  others twice. Link delivery is later and per copy, so a Link copy can still
+  bounce on its own.
+- **Never twice.** The group id is chosen when the letter is started and
+  kept with its draft; a group id already sent is refused
+  (`letter_already_sent`), so a draft sent again after a dropped connection
+  reaches nobody twice.
+- **Over Link** the To goes inside the sealed plaintext beside the subject
+  and body: `"to"`, everyone as `user@<home-node-fingerprint>` (this node's
+  own accounts by its own fingerprint), and `"group"`, the group id. It is
+  not a signed payload field, so no capability is needed: a node that does
+  not know the keys reads the subject and body and shows a letter to one
+  person. The receiving node keeps the list only if it reads cleanly (at
+  most `MAX_MAIL_RECIPIENTS` well-formed addresses and a short alphanumeric
+  id); anything else is dropped, not bounced, since the list is only
+  something to show. Its own accounts become local entries, and the group
+  id is stored as `<id>@<sender fingerprint>`, so no other node's letter
+  can share it.
+- **Reading.** Each copy's `To:` is the whole list. `Reply [a]ll` on a
+  received copy writes to its sender and everyone else on it but the reader;
+  `[R]eply` stays the sender alone. Sent lists the letter once, by its newest
+  copy, with the list under To and the status of the copy that needs the
+  caller most (bounced, expired, pending, with relay, delivered). Its view
+  gives each Link copy a `Delivery to <name>:` line; `[R]eply` writes to them
+  all again, `Re[s]end` only to the copies that bounced or expired, and
+  `[D]elete` (on the view or the list) removes every copy from Sent. Find
+  shows it once in Sent, matched by anyone on it. A follow-up the caller did
+  not type (Reply all, Reply, Resend) checks each address first and leaves
+  out, by name, anyone who can no longer be written to.
+- **Mail to all callers.** A SysOp writes to every account that takes mail
+  from Operations → Mail in the console: `[W]rite to all callers` from their
+  own account, signed, repliable and in their Sent as one letter, or
+  `[N]otice to all callers` from the system (issue #819), unsigned and not
+  repliable. The recipients are the address book's: every account
+  `mail_recipient_refusal` and `mail_sender_refusal` let through, but the
+  sender's own (the system's notice reaches the SysOp too). Unlike a letter
+  to several people, a full mailbox does not stop it: that recipient is
+  skipped and named in the outcome, with the count of accounts left out.
+  All copies go in one transaction, and the group id makes it never-twice
+  like any group. Each copy's To reads `Everyone on this BBS`, and it has no
+  `Reply all`. It is local only. It lives in the console rather than the
+  mailbox because it is the SysOp acting for the BBS, as the console's other
+  mail tools are; a To-prompt keyword for everyone would be one no caller
+  could find and a SysOp could type by accident.
+
 **How a body reads** (issue #809). A letter keeps its writer's lines: the
 message view, Sent's view and the review screen show every line as written,
 and wrap only a line wider than the terminal, at a word

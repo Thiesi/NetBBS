@@ -119,7 +119,18 @@ prompt. Type `?` and press Enter for a list of everyone you can write to:
 people you had mail with lately first, then the linked BBSes, then the
 members of this board. Choose a BBS and you are asked for the person's user
 name there; `name@?` lists just the BBSes for that name. Only people who can
-receive mail from you are offered. The fullscreen editor shows what you are
+receive mail from you are offered.
+
+A letter can go to several people, up to 20, here and on linked BBSes
+alike: separate them with commas, as in `bob, carol@Farpoint`. Tab completes
+the name after the last comma, and `?` as the last name opens the list for
+that one. Each name is checked as you type it; if one can't be used, you are
+told which and why, and the prompt opens again on what you typed, to fix.
+Each person gets their own copy, and every copy shows everyone it went to --
+there is no blind copy. If one of them can't take it when you press **Send**
+-- their mailbox is full, say -- nothing is sent to anyone: the review screen
+names them, and **[T]o** lets you take them off and send to the rest. The
+fullscreen editor shows what you are
 writing above the text: the recipient or board, and the subject. Nothing is
 sent or posted until you choose to on the review screen, which keeps To and
 Subject at the top and shows a long message a page at a time. Turn the
@@ -311,6 +322,21 @@ still applies on this side -- for example your SysOp has since stopped mail
 to that node -- you are told so when you press the key or at Send. Resend is
 only offered for mail that bounced or expired: a letter that arrived, or may
 still arrive, would reach its reader twice.
+
+A letter to several people is one row in Sent, with everyone's names under
+To. Opening it shows a Delivery line for each person on another node, and
+the list shows the one that needs you most -- a bounce before a letter still
+on its way. **Re[s]end** there sends the letter again only to those whose
+copy bounced or expired; **[R]eply** writes to them all again; **[D]elete**
+removes it from Sent for everyone it went to (their copies stay theirs).
+When you receive such a letter, its To line shows everyone it went to, and
+**Reply [a]ll** writes to its sender and everyone else on it, where
+**[R]eply** writes to the sender alone. Anyone who can't be written to any
+more is left out, and you are told who.
+
+Mail your SysOp sends to all callers shows `Everyone on this BBS` as its To.
+If it comes from **System** it has no Reply; if it comes from the SysOp's own
+account, **[R]eply** answers the SysOp.
 
 To follow up on a letter you sent, open it in Sent and press **[R]eply**.
 It writes to the letter's recipient, with `Re:` in front of the subject and
