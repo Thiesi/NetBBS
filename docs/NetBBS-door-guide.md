@@ -1556,9 +1556,11 @@ before launch, as for any remote service.
 
 **Failures** reach callers as "could not be started"; the reason is in the
 door's **Last diagnostic**. `BBSLink refused the session: ...` is BBSLink's
-own answer, most often a mistyped code. `BBSLink answered HTTP ...`, a
-connection error, or `did not complete its handshake within 15 seconds`
-means the service or the network is down.
+own answer, most often a mistyped code. `BBSLink answered HTTP ...`,
+`BBSLink did not answer at <address> port <port> ...` (port 80 is the
+authorisation step, 23 the game session), another connection error, or
+`did not complete its handshake within 15 seconds` means the service or the
+network is down.
 
 ## Verification and troubleshooting
 

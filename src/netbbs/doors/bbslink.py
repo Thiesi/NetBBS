@@ -137,6 +137,13 @@ async def _connect(family, kind, proto, address):
     try:
         sock.setblocking(False)
         await asyncio.wait_for(loop.sock_connect(sock, address), _CONNECT_ATTEMPT_SECONDS)
+    except TimeoutError as exc:
+        # Only this attempt's bound can land here: the whole handshake's
+        # `asyncio.timeout` arrives as a cancellation. Both are TimeoutError
+        # since 3.11, so the step is named now, while it still can be.
+        sock.close()
+        raise ConnectionError(f"BBSLink did not answer at {address[0]} port {address[1]} "
+                              f"within {_CONNECT_ATTEMPT_SECONDS} seconds") from exc
     except BaseException:
         sock.close()
         raise

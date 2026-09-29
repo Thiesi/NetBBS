@@ -297,6 +297,37 @@ def test_two_callers_handshakes_never_interleave(tmp_path):
     assert server.events == ["token", "auth", "telnet"] * 2
 
 
+def test_a_telnet_port_that_never_answers_is_named_not_blamed_on_the_whole_handshake(tmp_path, monkeypatch):
+    """Review on #960: a per-connect timeout used to surface as the 15-second
+    handshake message after two seconds, because both are TimeoutError."""
+    monkeypatch.setattr(bbslink, "_CONNECT_ATTEMPT_SECONDS", 0.2)
+    server = FakeBBSLink()
+
+    async def scenario():
+        http_port, telnet_port = await server.start()
+        loop = asyncio.get_running_loop()
+        real_connect = loop.sock_connect
+
+        async def silent_telnet(sock, address):
+            if address[1] == telnet_port:
+                await asyncio.sleep(30)  # a port that drops SYNs
+            return await real_connect(sock, address)
+
+        loop.sock_connect = silent_telnet
+        try:
+            profile = _profile(tmp_path, http_port=http_port, port=telnet_port)
+            with pytest.raises(OSError) as raised:
+                await bbslink.connect_bbslink(profile, {"user_id": 1, "handle": "a"}, 80, 24)
+            return str(raised.value)
+        finally:
+            await server.stop()
+
+    message = asyncio.run(asyncio.wait_for(scenario(), 5))
+    assert "15 seconds" not in message
+    assert message.startswith("BBSLink did not answer at 127.0.0.1 port ")
+    assert server.events == ["token", "auth"]
+
+
 def test_an_unreachable_provider_fails_within_the_bound(tmp_path, monkeypatch):
     monkeypatch.setattr(bbslink, "_CONNECT_ATTEMPT_SECONDS", 0.2)
 
