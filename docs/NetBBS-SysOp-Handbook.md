@@ -693,10 +693,25 @@ other. Deleting a board, channel or file area this node originated is still a
 real delete. Link status shows `carried/cap` for all three kinds and how many are
 offered and excluded.
 
-To carry a remote resource, use its Link browsing/carry actions. Carrying a message board
-creates a local browsable copy; file catalogues do not automatically download
-all file contents. Ask the other SysOp to verify both sides when first testing
+There is nothing to subscribe to: what an established peer shares arrives on
+its own, within the caps. A node's screen under **Link status → Peers** lists
+what this node already carries from it and, while it is on probation here,
+what it offers that is being held back. Carrying a message board creates a
+local browsable copy; file catalogues do not automatically download all file
+contents. Carried boards, channels and file areas appear in callers' **Message
+boards**, **Chat** and **Files** lists, outside any Community, because Link
+Communities do not exist; edit one and set its **Community** to put it in one
+of yours. Ask the other SysOp to verify both sides when first testing
 publication. Hello/discovery alone does not prove content arrived.
+
+Linking one of your own boards, channels or file areas sends it to the peers
+you have established, on a later sync pass. Its **NetBBS Link** rows then show,
+for each peer, whether it holds it, refused it because your node is on
+probation there, or is not sent it while it is on probation here. A node
+learns this only from peers it dials itself, so a peer that only dials yours
+reads "not known". **Fork of** is for a board that carries on another node's
+board under yours, for example after that one was closed; leave it empty for
+a board of your own.
 
 Asynchronous delivery can continue after a peer reconnects. Live chat and
 private messages require a working live session; a failed live message is not
@@ -811,9 +826,21 @@ use a second address, or a protocol demultiplexer in front of both.
 Use **Link status** for peers and relay state, **Outbox** for pending or failed
 work, and **Diagnostics / Follow log** for explanations.
 
+Every node starts on probation with every other, in both directions. A peer
+on probation here sends nothing this node accepts, and this node sends it
+nothing of yours; your node is on probation at each peer the same way until
+that peer's SysOp establishes it. Automatic graduation takes at least 30 days,
+three days of contact and vouches from two trust domains, so on a node with no
+trusted reporters only **Establish** ends it. Establish a peer once you know who
+runs it, and ask its SysOp to establish yours. **Link status** counts the peers
+on probation here and says whether the peers your node dials still hold yours
+on probation; the SysOp console's LINK line counts them too.
+
 **Link status → Peers** is the node map: every node this one knows, as callers
 see it under **Directory → Node map** ("Nodes known to" your board), plus what
-callers do not see. Peer-list candidates are marked unverified and "never heard
+callers do not see. A node on probation here says when probation could end
+by itself and what is still missing; its **Exchange** rows say what is held
+back from it and whether it takes what yours sends. Peer-list candidates are marked unverified and "never heard
 from"; nodes you quarantine or block in any trust dimension are marked, with
 each dimension's state, because callers do not see them at all. Each node's
 screen adds its Link addresses, relay roles and reliability. Last heard is your

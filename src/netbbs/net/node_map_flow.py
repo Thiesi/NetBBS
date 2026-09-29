@@ -33,7 +33,9 @@ from netbbs.link.node_map import (
     relative_time,
 )
 from netbbs.link.node_profiles import name_key
-from netbbs.link.trust import TrustDimension
+from netbbs.link.enforcement import REASON_NODE_PROBATIONARY
+from netbbs.link.protocol import HeldBack, PeerExchange
+from netbbs.link.trust import NodeProbation, TrustDimension
 from netbbs.net.breadcrumb_preference import breadcrumb_collapsed_enabled
 from netbbs.net.chat_flow import _may_enter_quietly, _visible_channels_for
 from netbbs.net.detail_view import show_detail
@@ -48,6 +50,7 @@ from netbbs.rendering import (
     ALERT_COLOR,
     METADATA_COLOR,
     MUTED_COLOR,
+    SUCCESS_COLOR,
     VALUE_COLOR,
     WARNING_COLOR,
     menu_key,
@@ -72,6 +75,118 @@ _DIMENSION_LABELS = {
     TrustDimension.CONTENT_CONDUCT.value: "Content trust",
 }
 _TRUST_COLORS = {"blocked": ALERT_COLOR, "quarantined": WARNING_COLOR}
+
+
+# Issue #844: a node's transport trust here, strongest first -- what decides
+# whether anything is exchanged with it (`netbbs.link.enforcement`).
+_TRANSPORT_ORDER = ("blocked", "quarantined", "probationary", "established")
+_HELD_KIND_LABELS = (("boards", "Board"), ("channels", "Channel"), ("file_areas", "File area"))
+
+
+def transport_state(entry: NodeMapEntry) -> str:
+    """The node's trust here as far as exchange goes: the stronger of its
+    identity and resource states (content trust never stops exchange)."""
+    states = {
+        entry.trust.get(TrustDimension.IDENTITY_INTEGRITY.value, "probationary"),
+        entry.trust.get(TrustDimension.RESOURCE_BEHAVIOR.value, "probationary"),
+    }
+    return next((state for state in _TRANSPORT_ORDER if state in states), "established")
+
+
+def probation_rows(
+    probation: NodeProbation, *, known_since: str | None, graduates_on: str | None
+) -> list[Field | Note]:
+    """What probation means for this node and how it ends (issue #844).
+
+    `known_since` and `graduates_on` are `probation`'s timestamps already
+    formatted for the viewer."""
+    rows: list[Field | Note] = [
+        Note(
+            "On probation here, as every node is at first: what it offers is held back, and "
+            "this node sends it nothing of yours. Establish it once you know who runs it.",
+            color=WARNING_COLOR,
+        ),
+    ]
+    if known_since:
+        rows.append(Field("Known since", known_since))
+    rows.append(Field(
+        "Ends by itself",
+        f"no earlier than {graduates_on or 'unknown'}, after {probation.required_activity_days} days "
+        f"of contact ({probation.activity_days} so far) and vouches from "
+        f"{probation.required_vouch_domains} trust domains ({probation.vouch_domains} so far)",
+    ))
+    if probation.vouch_reporters == 0:
+        rows.append(Note(
+            "No trusted reporter here vouches for nodes, so it never leaves probation by "
+            "itself: only Establish ends it.",
+            color=MUTED_COLOR,
+        ))
+    if probation.active_triggers:
+        rows.append(Note(
+            f"{probation.active_triggers} active complaint(s) also keep it on probation; "
+            "see Trust details.",
+            color=WARNING_COLOR,
+        ))
+    return rows
+
+
+def _refusal_text(reason: str) -> str:
+    if reason == REASON_NODE_PROBATIONARY:
+        return "refused: your node is on probation there, until its SysOp establishes yours"
+    return f"refused by its trust policy ({sanitize_text(reason)})"
+
+
+def own_content_at_peer(
+    state_here: str, exchange: PeerExchange | None, genesis_id: str | None = None,
+    *, own_total: int = 0, now: datetime | None = None,
+) -> tuple[str, int]:
+    """Whether a peer takes this node's own linked content (issue #844),
+    as `(text, color)`: one resource when `genesis_id` is given, else all
+    `own_total` of them. Learned only from peers this node dials; see
+    `netbbs.link.protocol.PeerExchange`."""
+    if state_here != "established":
+        return f"nothing sent while it is {state_here} here", WARNING_COLOR
+    if exchange is None:
+        return "not known: learned when this node dials it", MUTED_COLOR
+    when = relative_time(datetime.fromtimestamp(exchange.at, timezone.utc), now=now) if exchange.at else "unknown"
+    if exchange.refused_reason is not None:
+        return f"{_refusal_text(exchange.refused_reason)} ({when})", WARNING_COLOR
+    if genesis_id is not None:
+        if genesis_id in exchange.holds:
+            return f"has it ({when})", SUCCESS_COLOR
+        return f"not yet: sent on a coming sync pass ({when})", MUTED_COLOR
+    if not own_total:
+        return f"nothing of yours is linked yet ({when})", MUTED_COLOR
+    held = len(exchange.holds)
+    color = SUCCESS_COLOR if held >= own_total else VALUE_COLOR
+    return f"holds {held} of your {own_total} linked board(s), channel(s) and file area(s) ({when})", color
+
+
+def exchange_sections(
+    entry: NodeMapEntry, *, held: HeldBack, exchange: PeerExchange | None, own_total: int,
+    now: datetime,
+) -> list[Section]:
+    """The SysOp's answer to "is anything moving?" for one node (issue
+    #844): what this node holds back from it, and whether it takes yours."""
+    state_here = transport_state(entry)
+    if state_here == "established":
+        from_it = ("accepted", SUCCESS_COLOR)
+    elif held.count:
+        from_it = (f"held back: {held.count} item(s) while it is {state_here} here", WARNING_COLOR)
+    else:
+        from_it = (f"held back while it is {state_here} here; nothing offered yet", WARNING_COLOR)
+    to_text, to_color = own_content_at_peer(state_here, exchange, own_total=own_total, now=now)
+    sections = [Section("Exchange", [
+        Field("What it sends", from_it[0], color=from_it[1]),
+        Field("What yours sends", to_text, color=to_color),
+    ])]
+    offered: list[Field | Note] = [
+        Field(label, name) for kind, label in _HELD_KIND_LABELS for name in held.names.get(kind, ())
+    ]
+    if offered:
+        offered.append(Note("Carried here once you establish it, within your carry caps.", color=MUTED_COLOR))
+        sections.append(Section("Offered, held back", offered))
+    return sections
 
 
 @dataclass(frozen=True)
@@ -203,7 +318,8 @@ def _dial_in_lines(entry: NodeMapEntry) -> list[str]:
 
 def node_sections(
     entry: NodeMapEntry, *, carried: CarriedNames, now: datetime, sysop: bool,
-    first_named: str | None = None,
+    first_named: str | None = None, trust_notes: list[Field | Note] | None = None,
+    extra_sections: list[Section] | None = None,
 ) -> list[Section]:
     """One node's detail. Every `Field` value is sanitized by the panel;
     names, DNS names and addresses here are the remote node's own text."""
@@ -242,7 +358,8 @@ def node_sections(
         ]
         if entry.trust_hidden:
             trust_rows.append(Note("Quarantined or blocked here, so callers do not see it on the map."))
-        sections.append(Section("Trust", trust_rows))
+        sections.append(Section("Trust", [*trust_rows, *(trust_notes or ())]))
+        sections.extend(extra_sections or ())
         if origin_only:
             reach: list[Field | Note] = [Field("Addresses", "unknown", color=MUTED_COLOR)]
         else:
