@@ -117,6 +117,7 @@ from types import SimpleNamespace
 
 from netbbs import __version__
 from netbbs.config import get_config
+from netbbs.digits import is_ascii_number
 from netbbs.link.node_identity import NodeIdentity, NodeIdentityError
 from netbbs.managed_dns.credential import (
     credential_path_for as _managed_dns_credential_path_for,
@@ -1727,7 +1728,7 @@ def _parse_war_dialer_destinations(values: list[str] | None) -> dict[str, Path] 
     result = {}
     for value in values:
         key, separator, path = value.partition("=")
-        if not separator or not key.isdigit() or not path.strip() or key in result:
+        if not separator or not is_ascii_number(key) or not path.strip() or key in result:
             raise BackupError("War Dialer destinations must be unique KEY=PATH entries.")
         result[key] = Path(path)
     return result
