@@ -624,3 +624,16 @@ def test_two_blank_lines_mid_text_still_finish_without_a_trace():
     session = FakeSession(lines=("/insert 2", "answer", "", ""))
     body = asyncio.run(edit_line_body(session, initial_text="> q1\n> q2", max_bytes=1_000, max_lines=20))
     assert body == "> q1\nanswer\n> q2"
+
+
+def test_a_blank_line_refused_at_the_cap_does_not_jump_to_review():
+    """Review on #873: at the line cap the paragraph break is refused, and
+    the editor asks again rather than finishing under the refusal; a second
+    blank line finishes as usual."""
+    session = FakeSession(lines=("", ""))
+    body = asyncio.run(edit_line_body(session, initial_text="one\ntwo", max_bytes=1_000, max_lines=2))
+    assert body == "one\ntwo"
+    text = _text(session)
+    # Asked again after the refusal, then finished by the second blank line.
+    assert text.index("Body cannot exceed 2 logical lines.") < text.rindex("3> ")
+    assert text.count("3> ") == 2

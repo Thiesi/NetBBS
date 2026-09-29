@@ -327,6 +327,8 @@ async def edit_line_body(
     point = len(lines)
     # The line just typed was blank: another one finishes.
     blank_pending = False
+    # ...and whether that blank went into the text (the cap may refuse it).
+    blank_added = False
     paragraph_hint_shown = False
     # Passed only when asked for, so a Session that predates the option
     # still reads lines here.
@@ -380,17 +382,20 @@ async def edit_line_body(
         lowered = command.lower()
 
         if raw == "" and not blank_pending and "\n".join(lines).strip():
-            # A paragraph break; the next blank line finishes.
-            if await add_line(""):
-                blank_pending = True
-                if not paragraph_hint_shown:
-                    paragraph_hint_shown = True
-                    await session.write_line(
-                        colored("(New paragraph. A second blank line, or /done, finishes.)", fg_color=MUTED_COLOR)
-                    )
-                continue
+            # A paragraph break; the next blank line finishes. At the line or
+            # size cap the break is refused, said by `apply`, and the next
+            # blank line still finishes (review on #873): the refusal is not
+            # followed straight by review.
+            blank_added = await add_line("")
+            blank_pending = True
+            if not paragraph_hint_shown:
+                paragraph_hint_shown = True
+                await session.write_line(
+                    colored("(New paragraph. A second blank line, or /done, finishes.)", fg_color=MUTED_COLOR)
+                )
+            continue
         if raw == "" or lowered == "/done":
-            if blank_pending and (raw == "" or point == len(lines)):
+            if blank_pending and blank_added and (raw == "" or point == len(lines)):
                 # The blank that asked to finish is not part of the text --
                 # unless /done follows a blank typed mid-text, which is a
                 # paragraph break the caller meant (review on #873).
