@@ -685,7 +685,7 @@ DELIVERY_STATUS_LABELS = {
 # which route a bounce took and does not need to.
 _BOUNCE_REASON_TEXT = {
     "unknown_recipient": "there is no user by that name on that BBS",
-    "mailbox_full": "the recipient's mailbox is full of unread and kept mail",
+    "mailbox_full": "the recipient's mailbox is full of unread mail",
     "blocked_sender": "that BBS does not accept mail from you or from this BBS",
     "blocked_by_recipient": "the recipient does not accept mail from you",
     "undecryptable": "that BBS could not decrypt it, so it may have been sealed to a key that BBS no longer holds",

@@ -216,13 +216,13 @@ can also open mail only from a certain access level; below it, the main menu
 offers no **E-mail**.
 
 **E-mail** opens on your Inbox, with how many messages are unread at the top
-and how full it is: your mailbox holds 500 messages, and the header counts
+and how full it is: your Inbox holds 500 messages, and the header counts
 them, for example `120 of 500`. From 450 the Inbox warns you. At 500, each
 new message removes your oldest message you have already read; unread mail is
-never removed, and neither is mail you keep (see **Kept** below). A mailbox
-full of unread and kept mail turns new mail away until you read, delete or
-stop keeping some. If old mail was removed to make room, the main menu tells
-you how many messages went, once.
+never removed. A mailbox full of unread mail turns new mail away until you
+read or delete some, or move some to **Kept** (below), which does not count
+toward the 500. If old mail was removed to make room, the main menu tells you
+how many messages went, once.
 
 You are told when mail arrives. The first main menu after you log in says how
 many unread messages wait, and **New scan** shows the count above its list.
@@ -240,9 +240,14 @@ press a row's number, to read a message. On a long list, **[N]ext page** and
   Inbox.
 - **[K]ept** lists the letters you keep. **K[e]ep** in the Inbox (on the list
   or in a letter) moves a letter there, and **Mov[e] to Inbox** moves it back.
-  The mailbox never removes a kept letter to make room, but it still counts
-  toward the 500, so keep what matters, not everything. The Inbox header says
-  how many are in Kept.
+  The mailbox never removes a kept letter to make room, and kept letters do
+  not count toward the Inbox's 500. Kept has its own limit instead: it holds
+  100 letters, and its header counts them, for example `40 of 100`. When it
+  is full, keeping another letter is refused with "Kept is full (100 letters)
+  -- move some back to the Inbox or delete them first." Keeping marked
+  letters is all or none: if they do not all fit, none move, your marks stay,
+  and you are told how many more Kept has room for. The Inbox header says how
+  many are in Kept.
 - **[C]ompose** writes a new message.
 - **[M]ark** (or Space) marks the highlighted message with `*` and moves to
   the next, so you can mark a run of them; press it again on a marked one to
@@ -330,7 +335,7 @@ Delivery line when you open it:
 - **Delivered**: it is in the recipient's mailbox.
 - **Bounced**: the other node sent it back, and the Delivery line says why,
   for example that there is no user by that name there, that their mailbox
-  is full of unread and kept mail, or that the node does not trust yours yet.
+  is full of unread mail, or that the node does not trust yours yet.
 - **Expired**: no route to that node worked before delivery gave up, so it
   was not delivered. Mail left at a relay expires when no answer came back
   in 14 days; it may still have arrived, and if an answer turns up later,

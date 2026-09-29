@@ -436,7 +436,7 @@ from netbbs.link.mail_refusals import (
     list_link_mail_refusals,
     refusal_reason_text,
 )
-from netbbs.mail import MAX_MAIL_PER_RECIPIENT, InboxSize, inbox_sizes
+from netbbs.mail import MAX_KEPT_PER_RECIPIENT, MAX_MAIL_PER_RECIPIENT, InboxSize, inbox_sizes
 from netbbs.link.work_items import (
     KIND_LINK_MAIL_DELIVERY,
     WorkItem,
@@ -10802,8 +10802,8 @@ _MAIL_PRIVACY_NOTE = (
 )
 
 # A mailbox this full is flagged: at the cap, a letter can arrive only by
-# evicting the oldest read one it does not keep, and not at all once every
-# letter is unread or kept (issue #828).
+# evicting the oldest read one, and not at all once every letter is unread.
+# Kept letters are outside the cap (issue #921), so only the Inbox counts.
 _NEAR_MAIL_CAP = MAX_MAIL_PER_RECIPIENT * 9 // 10
 
 _REFUSAL_VIA_TEXT = {
@@ -10812,9 +10812,14 @@ _REFUSAL_VIA_TEXT = {
 
 
 def _inbox_color(size: InboxSize) -> int:
-    if size.total >= MAX_MAIL_PER_RECIPIENT:
+    if size.inbox >= MAX_MAIL_PER_RECIPIENT:
         return ALERT_COLOR if size.evictable <= 0 else WARNING_COLOR
-    return WARNING_COLOR if size.total >= _NEAR_MAIL_CAP else VALUE_COLOR
+    return WARNING_COLOR if size.inbox >= _NEAR_MAIL_CAP else VALUE_COLOR
+
+
+def _kept_color(size: InboxSize) -> int:
+    # A full Kept folder refuses to keep another letter (issue #921).
+    return WARNING_COLOR if size.kept >= MAX_KEPT_PER_RECIPIENT else VALUE_COLOR
 
 
 def _refusal_sender(refusal: LinkMailRefusal, node_label: str) -> str:
@@ -10855,7 +10860,7 @@ async def _mail_tools_screen(
         boxes: list[Field | Note | Table] = []
         if sizes:
             fullest = sizes[0]
-            near = sum(1 for size in sizes if size.total >= _NEAR_MAIL_CAP)
+            near = sum(1 for size in sizes if size.inbox >= _NEAR_MAIL_CAP)
             boxes.extend([
                 Field("Accounts with mail", str(len(sizes))),
                 Field(
@@ -10863,11 +10868,11 @@ async def _mail_tools_screen(
                     f"{sum(size.total for size in sizes)}, {sum(size.unread for size in sizes)} unread",
                 ),
                 Field(
-                    "Fullest", f"{fullest.username}, {fullest.total} of {MAX_MAIL_PER_RECIPIENT}",
+                    "Fullest", f"{fullest.username}, {fullest.inbox} of {MAX_MAIL_PER_RECIPIENT}",
                     color=_inbox_color(fullest),
                 ),
                 Field(
-                    f"{_NEAR_MAIL_CAP}+ letters", str(near), color=WARNING_COLOR if near else VALUE_COLOR,
+                    f"{_NEAR_MAIL_CAP}+ in an Inbox", str(near), color=WARNING_COLOR if near else VALUE_COLOR,
                 ),
             ])
         else:
@@ -10938,7 +10943,8 @@ async def _mail_tools_screen(
 async def _mailboxes_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
     """Every account with mail and how full its inbox is, the fullest first
     (issue #820). Counts only -- what counts toward the cap, system notices
-    included -- and never a sender, a subject or a body. `[O]rder` switches to
+    included, and Kept, which has its own limit (issue #921) -- and never a
+    sender, a subject or a body. `[O]rder` switches to
     the accounts by name and back."""
     listing = _Listing()
     by_name = False
@@ -10953,8 +10959,8 @@ async def _mailboxes_screen(session: Session, lane: DatabaseLane, actor: User) -
                 [
                     (size.username, ACCENT_COLOR),
                     (str(size.total), _inbox_color(size)),
-                    str(size.unread), str(size.read), str(size.kept), str(size.system),
-                    (f"{size.total * 100 // MAX_MAIL_PER_RECIPIENT}%", _inbox_color(size)),
+                    str(size.unread), str(size.read), (str(size.kept), _kept_color(size)), str(size.system),
+                    (f"{size.inbox * 100 // MAX_MAIL_PER_RECIPIENT}%", _inbox_color(size)),
                 ]
                 for size in sizes
             ],
@@ -10974,8 +10980,9 @@ async def _mailboxes_screen(session: Session, lane: DatabaseLane, actor: User) -
                 Section(None, rows),
                 Section(None, [Note(
                     "Kept counts the letters the owner moved to their Kept folder, and System the BBS's own "
-                    "notices; both are part of Letters. A full inbox makes room by dropping its oldest read "
-                    "letter that is not kept; one full of unread and kept mail refuses new mail. "
+                    "notices; both are part of Letters. Of the cap counts the Inbox alone: Kept is outside "
+                    f"the cap and holds up to {MAX_KEPT_PER_RECIPIENT} letters of its own. A full inbox makes "
+                    "room by dropping its oldest read letter; one full of unread mail refuses new mail. "
                     + _MAIL_PRIVACY_NOTE
                 )]),
             ],
