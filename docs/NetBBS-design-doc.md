@@ -614,19 +614,16 @@ not advertised when their runtime context is unavailable. The dashboard can be
 refreshed explicitly, and action screens return to the console without losing
 the operator's place.
 
-Status context in the console is deliberately two-tier (issue #206). The five
-top-level consoles — Users, Content, Operations, Settings, Node — each show a
-full panel of what's actually relevant there: live counts, health badges, or
-current configuration values. Every nested screen beneath them that has no
-such panel of its own instead shows one condensed line carrying the last-backup
-status obtainable without live node/session/Link state. Update-check outcomes
-remain on the SysOp landing dashboard, Settings overview, and dedicated Update
-screen; repeating them on unrelated user, content, presentation, and policy
-screens makes a global result look like a context-specific warning. This keeps
-recovery-relevant backup context visible while an operator is deep in a nested
-screen without re-deriving a richer panel those screens have no room to show.
-A screen that already has its own full panel does not also show the condensed
-line.
+Status context in the console lives where it is relevant. The landing
+dashboard and the five top-level consoles — Users, Content, Operations,
+Settings, Node — each show a full panel of what's actually relevant there: live
+counts, health badges, or current configuration values. Backup state appears
+on the dashboard, the Operations panel and the Backup screen; update-check
+outcomes on the dashboard, the Settings overview and the Update screen. Nested
+screens repeat neither. Issue #206 once put a condensed "Backup:" line on every
+nested screen; the 2026-09-28 field test (issue #845) found that a first-day
+SysOp read "Backup: never" under Communities, boards and banners as an error
+about those screens, so it was removed.
 
 A console screen that shows facts shows them as a *detail panel*
 (`netbbs.rendering.detail`), the read-only counterpart of the draft editor's
@@ -1452,8 +1449,8 @@ nobody has to open each board and area to find what waits.
 
 A caller granted APPROVE on a board or file area has the same queue on its
 own page: `[Q]ueue (N)` appears there while anything waits, and opens the
-same decision screens without the SysOp's node status line, and without the
-pin and exempt keys unless they also hold EDIT. APPROVE covers the whole
+same decision screens without the pin and exempt keys unless they also hold
+EDIT. APPROVE covers the whole
 decision: it lets its holder reject a held post or upload as well as publish
 it. Deleting something already published still takes DELETE.
 
