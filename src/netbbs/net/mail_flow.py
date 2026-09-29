@@ -54,7 +54,7 @@ from netbbs.link.enforcement import LinkPolicyAction, decide_node_action
 from netbbs.link.trust import TrustState
 from netbbs.link.mail import (
     DELIVERY_STATUS_LABELS, RELAYED_DISPLAY_STATUS, LinkMailError, acknowledge_delivery_notices, compose_link_message,
-    delivery_display_status, delivery_explanation,
+    delivery_display_status, delivery_explanation, record_resend,
 )
 from netbbs.link.node_profiles import (
     ambiguous_node_guidance, link_address_label, unknown_node_guidance, unquote_reference,
@@ -321,7 +321,13 @@ _RECEIPT_STATUS_LABELS = {
     _RECEIPT_NONE_READ: "not read",
     _RECEIPT_NOT_SHARED: "no receipt",
 }
-_STATUS_LABELS = {**DELIVERY_STATUS_LABELS, **_RECEIPT_STATUS_LABELS}
+# A Link letter that bounced or expired and was sent again with Resend
+# (issue #919). Still a failed letter, so it ranks with bounced and expired
+# -- after them, since those still wait on the caller -- and above a copy on
+# its way or a receipt.
+_RESENT_STATUS = "resent"
+_FAILED_STATUSES = ("bounced", "expired")
+_STATUS_LABELS = {**DELIVERY_STATUS_LABELS, _RESENT_STATUS: "resent", **_RECEIPT_STATUS_LABELS}
 _STATUS_WIDTH = max([len(_DELIVERY_HEADING), len(_STATUS_HEADING), *(len(label) for label in _STATUS_LABELS.values())])
 _HINT_MIN_HEIGHT = 20
 # From this height the list is set off by blank rows and rules; below it
@@ -465,20 +471,28 @@ class _MailRow:
 
     @property
     def status(self) -> str | None:
-        statuses = [
-            delivery_display_status(copy.link_delivery_status, copy.link_relay_handoff_at)
-            for copy in (self.copies or (self.message,))
-        ]
-        statuses = [status for status in statuses if status in DELIVERY_STATUS_LABELS]
+        statuses = [_sent_copy_status(copy) for copy in (self.copies or (self.message,))]
         # A letter to several people shows the copy that needs the caller
-        # most: one that did not arrive, then one still on its way, then
-        # whether its local copies were read (issue #829).
-        for wanted in ("bounced", "expired", "pending", RELAYED_DISPLAY_STATUS):
+        # most: one that did not arrive, then one that did not and was
+        # resent (issue #919) -- so `resent` shows only once every failed
+        # copy was -- then one still on its way, then whether its local
+        # copies were read (issue #829).
+        for wanted in (*_FAILED_STATUSES, _RESENT_STATUS, "pending", RELAYED_DISPLAY_STATUS):
             if wanted in statuses:
                 return wanted
         if self.receipt is not None:
             return self.receipt
         return "delivered" if "delivered" in statuses else None
+
+
+def _sent_copy_status(copy: MailMessage) -> str | None:
+    """Where one copy in Sent stands, for the list's column: its delivery
+    state (`delivery_display_status`), except that a failed one the caller
+    sent again is `_RESENT_STATUS` (issue #919). `None` for local mail."""
+    status = delivery_display_status(copy.link_delivery_status, copy.link_relay_handoff_at)
+    if status in _FAILED_STATUSES and copy.resent_at is not None:
+        return _RESENT_STATUS
+    return status if status in DELIVERY_STATUS_LABELS else None
 
 
 def _cell(text: str) -> str:
@@ -1503,6 +1517,10 @@ async def _message_view(
                     colored(f"Delivery to {name}: ", fg_color=LABEL_COLOR)
                     + colored(delivery, fg_color=_DELIVERY_COLORS.get(shown_status, VALUE_COLOR))
                 )
+                if copy.resent_at is not None:
+                    preamble.append(
+                        _resent_line(f"Resent to {name}: ", copy.resent_at, display_format, display_timezone)
+                    )
         else:
             shown_status = delivery_display_status(message.link_delivery_status, message.link_relay_handoff_at)
             delivery = delivery_explanation(shown_status, message.link_delivery_reason)
@@ -1511,6 +1529,8 @@ async def _message_view(
                     colored("Delivery: ", fg_color=LABEL_COLOR)
                     + colored(delivery, fg_color=_DELIVERY_COLORS.get(shown_status, VALUE_COLOR))
                 )
+            if message.resent_at is not None:
+                preamble.append(_resent_line("Resent: ", message.resent_at, display_format, display_timezone))
         preamble.extend(await _read_receipt_lines(
             lane, user, message, copies or [message],
             when=lambda iso: format_for_display(
@@ -1545,6 +1565,13 @@ async def _message_view(
     truecolor = await lane.run(lambda db: effective_truecolor(session, db, user))
     body_rows = post_body_rows(message.body, session.terminal_width, body_mode, truecolor=truecolor, layout="lines")
     return title, preamble, body_rows
+
+
+def _resent_line(label: str, resent_at: str, display_format, display_timezone) -> str:
+    """The line under a failed letter's Delivery saying it was sent again
+    (issue #919), and where the new one is."""
+    when = format_for_display(resent_at, override_format=display_format, override_timezone=display_timezone)
+    return colored(label, fg_color=LABEL_COLOR) + colored(f"{when} (the new copy is in Sent)", fg_color=METADATA_COLOR)
 
 
 def _letter_file_refs(db: Database, message: MailMessage, copies: list[MailMessage] | None = None) -> list[FileRef]:
@@ -1719,6 +1746,8 @@ _DELIVERY_COLORS = {
     "delivered": SUCCESS_COLOR,
     "bounced": ERROR_COLOR,
     "expired": ERROR_COLOR,
+    # Dealt with (issue #919): the new copy has a row of its own.
+    _RESENT_STATUS: MUTED_COLOR,
     _RECEIPT_READ_ALL: SUCCESS_COLOR,
     _RECEIPT_SOME_READ: VALUE_COLOR,
     _RECEIPT_NONE_READ: MUTED_COLOR,
@@ -2188,22 +2217,26 @@ async def _show_sent_message(
 ) -> None:
     """A letter the caller sent. `[R]eply` writes to its recipient again (a
     follow-up, issue #825); `Re[s]end`, on Link mail that bounced or
-    expired, sends the same letter again as a new one. A letter sent from
-    either returns to the Sent list, where it now is, with "Message sent."
-    above the prompt; anything else comes back to this view."""
+    expired, sends the same letter again as a new one, and the old one then
+    shows as resent (issue #919). A letter sent from either, or from
+    `[F]orward` (issue #919), returns to the Sent list, where it now is,
+    with "Message sent." above the prompt; anything else comes back to
+    this view."""
     if message.mail_group_id is not None:
         await _show_sent_group(session, lane, user, message, link_context=link_context)
         return
     to_label = await _display_recipient_label(lane, message)
-    failed = message.link_delivery_status in ("bounced", "expired")
+    failed = message.link_delivery_status in _FAILED_STATUSES
     if failed:
         # Seen here, so the main menu need not tell it again (issue #806).
         await lane.run(acknowledge_delivery_notices, [message.id])
     actions = [("r", menu_key("R", "eply"))]
     if failed and message.recipient_remote_address is not None:
         # Only a letter that did not arrive (issue #825): one that did, or
-        # may yet, would reach its reader twice.
-        actions.append(("s", menu_key("s", "end", prefix="Re")))
+        # may yet, would reach its reader twice. Once resent, the key says
+        # it would be another copy (issue #919).
+        again = " again" if message.resent_at is not None else ""
+        actions.append(("s", menu_key("s", "end" + again, prefix="Re")))
     actions += [("f", menu_key("F", "orward")), ("d", menu_key("D", "elete")), ("b", menu_key("B", "ack"))]
     page = 0
     while True:
@@ -2211,7 +2244,10 @@ async def _show_sent_message(
         if choice == "b":
             return
         if choice == "f":
-            await _forward_message(session, lane, user, message, sent=True, link_context=link_context)
+            # Like Reply and Resend (issue #919): a letter sent from here
+            # returns to the list it was opened from.
+            if await _forward_message(session, lane, user, message, sent=True, link_context=link_context):
+                return
             continue
         if choice in ("r", "s"):
             if await _write_to_recipient(
@@ -2238,15 +2274,19 @@ async def _show_sent_group(
     callers has no Reply or Resend: it is sent from the SysOp console."""
     copies = await lane.run(sent_group_copies, user, message)
     to_all = is_to_all_callers(message)
-    failed = [copy for copy in copies if copy.link_delivery_status in ("bounced", "expired")]
+    failed = [copy for copy in copies if copy.link_delivery_status in _FAILED_STATUSES]
     if failed:
         # Seen here, so the main menu need not tell them again (issue #806).
         await lane.run(acknowledge_delivery_notices, [copy.id for copy in failed])
+    # Resend goes to the failed copies not yet resent; once every one was
+    # (issue #919), "Resend again" goes to them all again.
+    to_resend = [copy for copy in failed if copy.resent_at is None] or failed
     actions: list[tuple[str, str]] = []
     if not to_all:
         actions.append(("r", menu_key("R", "eply")))
         if failed:
-            actions.append(("s", menu_key("s", "end", prefix="Re")))
+            again = " again" if all(copy.resent_at is not None for copy in failed) else ""
+            actions.append(("s", menu_key("s", "end" + again, prefix="Re")))
     actions += [("f", menu_key("F", "orward")), ("d", menu_key("D", "elete")), ("b", menu_key("B", "ack"))]
     to_label = await _display_recipient_label(lane, message)
     page = 0
@@ -2257,7 +2297,10 @@ async def _show_sent_group(
         if choice == "b":
             return
         if choice == "f":
-            await _forward_message(session, lane, user, message, sent=True, link_context=link_context)
+            # Like Reply and Resend (issue #919): a letter sent from here
+            # returns to the list it was opened from.
+            if await _forward_message(session, lane, user, message, sent=True, link_context=link_context):
+                return
             continue
         if choice == "r":
             entries = await lane.run(_sent_group_entries, copies)
@@ -2275,9 +2318,11 @@ async def _show_sent_group(
                 continue
             # The letter as it was sent, to the ones it did not reach.
             if await _write_to_several(
-                session, lane, user, [copy.recipient_remote_address for copy in failed if copy.recipient_remote_address],
+                session, lane, user,
+                [copy.recipient_remote_address for copy in to_resend if copy.recipient_remote_address],
                 subject=message.subject, body=post_body_text(message.body),
                 link_context=link_context, resend_key=_resend_key(message),
+                resend_of=tuple(copy.id for copy in to_resend),
             ):
                 return
             continue
@@ -2313,7 +2358,7 @@ async def _write_to_recipient(
         # The letter as it was sent, signature and all: escape sequences
         # out, color pipe codes kept (issue #809).
         body = post_body_text(message.body)
-        keys = {"resend_key": _resend_key(message)}
+        keys = {"resend_key": _resend_key(message), "resend_of": (message.id,)}
     else:
         subject = reply_subject(message.subject, max_bytes=MAX_MAIL_SUBJECT_BYTES)
         body = quote_body(plain_post_body(message.body), author=user.username)
@@ -2408,6 +2453,7 @@ async def mail_someone(
     quote: str | None = None,
     reply_key: str | None = None,
     resend_key: str | None = None,
+    resend_of: tuple[int, ...] = (),
     link_context: LinkContext | None = None,
 ) -> bool:
     """Write to `recipient`, a local account, or to `link_address`, the
@@ -2419,7 +2465,9 @@ async def mail_someone(
     `_letter_draft_path`); without one the letter is the caller's new
     letter, and a new letter already kept there is offered first, as
     `[C]ompose` offers it. `resend_key` is a sent letter sent again (issue
-    #825): `quote` is then that letter's text, not a quote of it.
+    #825): `quote` is then that letter's text, not a quote of it, and
+    `resend_of` the failed letter, marked resent once this one is sent
+    (issue #919, see `_compose_mail`).
 
     Nothing is written here. Every outcome -- a refusal, "Message sent.",
     "Cancelled." -- is announced (`netbbs.net.notices`), so the screen the
@@ -2452,6 +2500,7 @@ async def mail_someone(
         return await _compose_mail(
             session, lane, user, prefill_link_address=link_address, prefill_subject=subject,
             prefill_body=quote or None, link_context=link_context, reply_key=reply_key, resend_key=resend_key,
+            resend_of=resend_of,
         )
     if recipient is None:
         raise ValueError("mail_someone needs a recipient or a link_address")
@@ -2473,6 +2522,7 @@ async def mail_someone(
     return await _compose_mail(
         session, lane, user, prefill_recipient=current, prefill_subject=subject,
         prefill_body=quote or None, link_context=link_context, reply_key=reply_key, resend_key=resend_key,
+        resend_of=resend_of,
     )
 
 
@@ -2696,7 +2746,7 @@ async def write_to_all_callers(
 async def _forward_message(
     session: Session, lane: DatabaseLane, user: User, message: MailMessage,
     *, sent: bool, link_context: LinkContext | None,
-) -> None:
+) -> bool:
     """[F]orward on a letter's view, Inbox or Sent: a new letter under
     "Fwd:" whose body is the letter itself, whole, under a header saying
     whom it was from and to, when, and under what subject
@@ -2717,11 +2767,11 @@ async def _forward_message(
 
     The files the letter points at (issue #830) go with the forward, those
     the forwarder can open themselves; Send checks them for its new
-    recipients as for any letter."""
+    recipients as for any letter. Returns whether the forward was sent."""
     refusal = await lane.run(lambda db: caller_mail_refusal(session, db, user))
     if refusal is not None:
         announce(session, refusal, tone="error")
-        return
+        return False
     if sent:
         sender_label, recipient_label = user.username, await _display_recipient_label(lane, message)
     else:
@@ -2736,7 +2786,7 @@ async def _forward_message(
     copies = await lane.run(sent_group_copies, user, message) if sent else None
     refs = await lane.run(_letter_file_refs, message, copies)
     opened = await open_refs(lane, user, refs)
-    await _compose_mail(
+    return await _compose_mail(
         session, lane, user,
         prefill_subject=forward_subject(message.subject, max_bytes=MAX_MAIL_SUBJECT_BYTES),
         prefill_body=body, link_context=link_context, forward_key=_forward_key(message),
@@ -2758,6 +2808,7 @@ async def _compose_mail(
     reply_key: str | None = None,
     forward_key: str | None = None,
     resend_key: str | None = None,
+    resend_of: tuple[int, ...] = (),
     resume: bool = False,
     prefill_files: list[FileRef] | None = None,
 ) -> bool:
@@ -2785,7 +2836,10 @@ async def _compose_mail(
 
     `resend_key` (issue #825, see `_resend_key`) makes it a sent letter
     sent again: titled "Resend", `prefill_body` the letter as it was sent,
-    signature included, so none is added.
+    signature included, so none is added. `resend_of` names the failed
+    letters it repeats (issue #919): once it is sent, each of them that
+    went to an address it went to is marked resent (`record_resend`), so
+    a copy `[T]o` dropped stays a failure in Sent.
 
     Each letter has its own draft slot (issue #814): the new letter, a
     reply to one message (`reply_key`, see `_reply_key`), and a forward
@@ -3167,7 +3221,7 @@ async def _compose_mail(
         if reply_address is None and len(split_recipients(recipient_text)) > 1:
             if await _send_to_several(
                 session, lane, user, split_recipients(recipient_text), subject, body,
-                group_id=group_id, link_context=link_context, files=files,
+                group_id=group_id, link_context=link_context, files=files, resend_of=resend_of,
             ):
                 _forget_letter(draft_path)
                 return True
@@ -3208,6 +3262,8 @@ async def _compose_mail(
             except (LinkMailError, MailError) as exc:
                 announce(session, f"Could not send: {exc}", tone="error")
                 continue
+            if resend_of:
+                await lane.run(record_resend, user, list(resend_of), [technical_recipient])
             _forget_letter(draft_path)
             announce(session, "Message sent.")
             return True
@@ -3474,13 +3530,16 @@ def _name_the_problem(entry: str, problem: str) -> str:
 async def _send_to_several(
     session: Session, lane: DatabaseLane, user: User, entries: list[str], subject: str, body: str,
     *, group_id: str, link_context: LinkContext | None, files: list[FileRef] = (),
+    resend_of: tuple[int, ...] = (),
 ) -> bool:
     """Send from the review screen to several people (issue #827). Every
     address is checked again as the To prompt checks it -- To may have been
     edited, a peer's standing can change while the letter is written --
     and then the letter goes to all of them or to none
     (`netbbs.mail_groups.send_letter`). Every refusal is carried to the
-    review screen, one line per recipient. Returns whether it was sent."""
+    review screen, one line per recipient. A resend (`resend_of`, issue
+    #919) marks the failed copies it reached as resent. Returns whether
+    it was sent."""
     link_enabled = link_context is not None
     if len(entries) > MAX_MAIL_RECIPIENTS:
         announce(session, too_many_recipients_text(len(entries)), tone="error")
@@ -3526,6 +3585,9 @@ async def _send_to_several(
     except (LinkMailError, MailError) as exc:
         announce(session, f"Could not send: {exc}", tone="error")
         return False
+    if resend_of:
+        addresses = [recipient.address for recipient in recipients if recipient.address is not None]
+        await lane.run(record_resend, user, list(resend_of), addresses)
     # Issue #823: a recipient online now hears of it now.
     for recipient in recipients:
         if recipient.user is not None:
