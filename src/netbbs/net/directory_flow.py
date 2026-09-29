@@ -19,8 +19,8 @@ from netbbs.directory import get_vcard, has_bio, is_bio_visible
 from netbbs.link.boards import LinkContext
 from netbbs.link.node_profiles import identity_for_fingerprint, link_address_label, presentations_confusable
 from netbbs.doors import list_doors
-from netbbs.mail import sender_unblockable_reason
-from netbbs.messaging_preferences import accepts_direct_messages, live_message_refusal
+from netbbs.mail import mail_sender_refusal, sender_unblockable_reason
+from netbbs.messaging_preferences import LIVE_BLOCK_REFUSAL, accepts_direct_messages, live_message_refusal
 from netbbs.net.breadcrumb_preference import breadcrumb_collapsed_enabled
 from netbbs.net.char_input import reject_unhandled_key
 from netbbs.net.chat_flow import run_direct_chat_invite_flow
@@ -538,6 +538,11 @@ async def _caller_who_screen(
         offer_invite = live and direct_invites is not None and lane is not None
         if live:
             subtitle = "Choose how you would like to connect."
+        elif mail_sender_refusal(db, target, sender=user) is not None:
+            # Opted out *and* blocking the caller: the opt-out answers first,
+            # but the block closes mail too, so "e-mail still reaches them"
+            # would be false.
+            subtitle = LIVE_BLOCK_REFUSAL.format(name=target.username)
         elif offer_mail and not accepts_direct_messages(db, target):
             subtitle = f"{target.username} has opted out of direct messages; e-mail still reaches them."
         else:

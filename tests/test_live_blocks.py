@@ -233,6 +233,18 @@ def test_who_is_online_refuses_messages_to_someone_who_blocks_you(db, lane, alic
     assert "[M]essage" not in text and "[I]nvite" not in text
 
 
+def test_who_is_online_does_not_promise_mail_to_someone_who_opted_out_and_blocks_you(db, lane, alice, bob):
+    set_accepts_direct_messages(db, bob, False)
+    block_local_sender(db, bob, alice)
+    session = KeySession(keys=["0", "1", "b", "b"])
+
+    _run_who(db, lane, alice, session)
+
+    text = " ".join(_visible(session).split())
+    assert "e-mail still reaches them" not in text
+    assert "bob does not accept messages from you." in text
+
+
 def test_who_is_online_blocks_and_unblocks_a_local_caller(db, lane, alice, bob):
     session = KeySession(keys=["0", "1", "k", "0", "1", "k", "b"])
 
