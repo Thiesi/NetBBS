@@ -219,7 +219,7 @@ def test_keep_moves_letters_to_kept_and_back(node):
     screens = session.screens()
     assert "Moved 1 message to Kept." in screens[1]
     assert "Precious" not in screens[1].split("Moved")[0].split("Date")[-1]
-    assert "1 in Kept" in screens[1]
+    assert "1 unread in Kept" in screens[1]
     kept_screen = screens[2]
     assert "NetBBS › Mail › Kept" in kept_screen
     assert re.search(r"> 1 +new +alice +Precious", kept_screen)
@@ -309,7 +309,8 @@ def test_every_folder_fits_with_marks(node, width, height, folder_keys):
     set_kept(db, bob, [m.id for m in list_inbox(db, bob)[:20]], kept=True)
     path = mail_flow._letter_draft_path(lane, bob)
     path.write_text("A letter", encoding="utf-8")
-    session = FakeSession([*folder_keys, "m", "m", "b", "b"], width=width, height=height)
+    # The cursor ends on a marked row, where the bar reads Un[m]ark (review on #908).
+    session = FakeSession([*folder_keys, "m", "m", "UP", "b", "b"], width=width, height=height)
 
     _run(session, lane, bob)
 
@@ -348,3 +349,18 @@ def test_upgrading_keeps_every_letter_and_keeps_none_of_them(tmp_path, monkeypat
         assert [tuple(row) for row in rows] == [("Hello", None)]
     finally:
         upgraded.close()
+
+
+@pytest.mark.parametrize("width", [80, 40])
+def test_the_inbox_header_says_when_kept_mail_is_unread(node, width):
+    """The main menu counts an unread kept letter as unread; the Inbox
+    must not read "caught up" without saying where it is (review on #908)."""
+    db, lane, bob, alice, _carol = node
+    letter = send_mail(db, alice, bob, "Unopened", "body")
+    set_kept(db, bob, [letter.id], kept=True)
+    session = FakeSession(["b"], width=width, height=24)
+
+    _run(session, lane, bob)
+
+    header = " ".join(session.screens()[0].split())
+    assert "1 unread in Kept" in header

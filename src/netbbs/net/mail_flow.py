@@ -1095,9 +1095,16 @@ class _MailboxScreen:
                 f"{received} of {MAX_MAIL_PER_RECIPIENT}",
                 fg_color=WARNING_COLOR if received >= MAILBOX_NEARLY_FULL else VALUE_COLOR,
             ))
-            kept = received - total
-            if not self.kept and kept and not narrow:
-                parts.append(colored(f"{kept} in Kept", fg_color=MUTED_COLOR))
+            if not self.kept:
+                kept = [row.message for row in self.received_rows if row.message.kept_at is not None]
+                kept_unread = sum(1 for message in kept if not message.is_read)
+                if kept_unread:
+                    # The main menu counts these as unread too (review on
+                    # #908): said at any width, or the Inbox would read
+                    # "caught up" while the main menu says otherwise.
+                    parts.append(colored(f"{kept_unread} unread in Kept", fg_color=WARNING_COLOR))
+                elif kept and not narrow:
+                    parts.append(colored(f"{len(kept)} in Kept", fg_color=MUTED_COLOR))
         order = self._effective_order()
         if order in _ORDER_LABELS and not narrow:
             parts.append(colored(_ORDER_LABELS[order], fg_color=MUTED_COLOR))
@@ -1131,9 +1138,10 @@ class _MailboxScreen:
             options.append(MenuEntry(label=menu_key("S", "ent"), brief="Review mail you've sent"))
             options.append(MenuEntry(label=menu_key("K", "ept"), brief="Mail you keep from the mailbox cap"))
         if row_count:
-            if measuring or highlighted is None or highlighted.message.id not in self.marked:
+            if not measuring and (highlighted is None or highlighted.message.id not in self.marked):
                 options.append(MenuEntry(label=menu_key("M", "ark"), brief="Mark the highlighted message"))
             else:
+                # Un[m]ark is the longer label, which the page budget measures.
                 options.append(MenuEntry(label=menu_key("m", "ark", prefix="Un"), brief="Unmark it"))
             options.append(MenuEntry(
                 label=menu_key("l", "ete", prefix="De"),
