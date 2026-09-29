@@ -184,8 +184,6 @@ async def _add_key(session: Session, lane: DatabaseLane, target: User, *, change
     except InputCancelled:
         await session.write_line("")
         return target
-    if not label:
-        return target
     if _looks_like_key(label):
         await session.write_line(colored(
             "That looks like a key, not a label. Nothing was added.", fg_color=ERROR_COLOR,
@@ -196,7 +194,7 @@ async def _add_key(session: Session, lane: DatabaseLane, target: User, *, change
     except AuthError as exc:
         await session.write_line(colored(str(exc), fg_color=ERROR_COLOR))
         return target
-    await session.write_line(colored(f"Key {label!r} added.", fg_color=MUTED_COLOR))
+    await session.write_line(colored(f"Key {(label or 'unlabeled')!r} added.", fg_color=MUTED_COLOR))
     return target
 
 

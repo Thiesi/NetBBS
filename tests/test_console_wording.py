@@ -117,6 +117,15 @@ def test_escape_at_the_label_adds_nothing(db, lane):
     assert list_ssh_keys(db, owner) == []
 
 
+def test_enter_on_an_empty_label_still_adds_the_key(db, lane):
+    # A raw base64 key has no comment to offer, so the label opens empty;
+    # the prompt says Enter saves, so Enter must not drop the key.
+    owner = _key_owner(db)
+    session = FakeSession(["a", base64.b64encode(_raw_key()).decode(), "", "b"])
+    asyncio.run(manage_ssh_keys_screen(session, lane, owner, changed_by=owner))
+    assert [key.label for key in list_ssh_keys(db, owner)] == ["unlabeled"]
+
+
 def test_key_list_puts_the_fingerprint_on_its_own_line(db, lane):
     owner = _key_owner(db)
     session = FakeSession(["a", _openssh_line(_raw_key()), "laptop", "b"])
