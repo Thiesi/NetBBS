@@ -9485,9 +9485,8 @@ def test_user_picker_filtered_to_empty_still_offers_the_way_back(db, lane, sysop
     """A search followed by a visibility change can empty the page while
     the roster still has selectable accounts -- and the empty screen
     advertised only the live keys and Back, though [S]earch (blank
-    clears), [G]oto and Ctrl-H all still work. Hiding them made the way
-    out undiscoverable rather than unavailable (issue #537, Codex
-    review)."""
+    clears) and Ctrl-H still work. Hiding them made the way out
+    undiscoverable rather than unavailable (issue #537, Codex review)."""
     from netbbs.auth.users import set_user_disabled
 
     for name in ("alice", "alina"):
@@ -9506,7 +9505,7 @@ def test_user_picker_filtered_to_empty_still_offers_the_way_back(db, lane, sysop
     after = text[text.rindex("No users match that view."):]
     assert "Showing: Disabled users only" in after, "it says which filter emptied it"
     assert "[S]earch" in after, "and offers the key that clears the search"
-    assert "[G]oto" in after
+    assert "[G]oto" not in after  # issue #838
 
 
 # -- published identity: what this node asserts about its own users ---------

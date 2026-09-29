@@ -229,6 +229,13 @@ def _pad_cell(text: str, width: int, *, align_right: bool) -> str:
     return padding + text if align_right else text + padding
 
 
+def _is_ascii_number(text: str) -> bool:
+    """Digits `int()` accepts. `str.isdigit()` also accepts "²" and other
+    Unicode digits `int()` rejects, which crashed a picker reading one
+    from a UTF-8 terminal (review of #859)."""
+    return bool(text) and text.isascii() and text.isdigit()
+
+
 def _table_widths(terminal_width: int, columns: Sequence[ListColumn]) -> int | None:
     """The name column's width for a columnar page, or `None` when this
     terminal is too narrow to hold the table at all."""
@@ -829,12 +836,10 @@ async def pick_item(
                 # The list is empty because a search or a filter made it
                 # so, not because there is nothing here (Codex review).
                 # [S]earch with a blank query clears back to everything,
-                # [G]oto reaches any row by its reference, and Ctrl-H
-                # explains both -- and the handlers accept all three, so
-                # hiding them made the way out undiscoverable rather
+                # and Ctrl-H explains it -- and the handlers accept both,
+                # so hiding them made the way out undiscoverable rather
                 # than unavailable.
                 keys.append(menu_key("S", "earch"))
-                keys.append(menu_key("G", "oto #"))
             if on_create is not None:
                 # The whole point of staying here (issue #530): an empty
                 # list with a way out of being empty.
@@ -1426,7 +1431,7 @@ async def pick_item(
                 raw = (await session.read_line()).strip()
                 target = (
                     page_items[int(raw) - 1]
-                    if raw.isdigit() and 1 <= int(raw) <= len(page_items)
+                    if _is_ascii_number(raw) and 1 <= int(raw) <= len(page_items)
                     else None
                 )
                 if target is None:
@@ -1462,14 +1467,14 @@ async def pick_item(
             await session.write_line("")
             return created
 
-        if char.isdigit():
+        if _is_ascii_number(char):
             second = await _read_navigable_key(session, distinguish_ctrl_h=True)
             second_char = (
                 second.char if second.kind == EditorKeyKind.CHAR and second.char is not None else None
             )
             if second_char is not None:
                 await session.write(second_char)
-            if second_char is None or not second_char.isdigit():
+            if second_char is None or not _is_ascii_number(second_char):
                 # The first digit is always echoed just above. A second
                 # key that was itself an ordinary character (including
                 # a non-digit one) was just echoed the same way; a

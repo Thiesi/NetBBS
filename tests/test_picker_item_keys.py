@@ -100,6 +100,14 @@ def test_the_typed_number_is_the_rows_place_on_this_page_not_its_id():
     assert written.index(acted_on[0]) > written.index("page 2/")
 
 
+def test_a_unicode_digit_is_refused_rather_than_crashing():
+    # "²" passes str.isdigit() but int() rejects it (review of #859).
+    acted_on, selected = _pick(["m", "\u00b2", "b"])
+
+    assert acted_on == []
+    assert selected is None
+
+
 def test_an_unknown_reference_acts_on_nothing():
     acted_on, _selected = _pick(["m", "9", "b"])
 
