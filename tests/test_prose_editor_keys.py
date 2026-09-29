@@ -59,6 +59,15 @@ def test_a_cut_after_another_key_starts_afresh(tmp_path):
     assert result == "b\nc\n"
 
 
+def test_help_or_a_cancelled_exit_between_cuts_starts_afresh(tmp_path):
+    # Ctrl+G and Ctrl+X's Cancel are handled before _dispatch; they still
+    # end the run of cuts (claude review on #876).
+    result, _ = _edit(["CTRL+K", "CTRL+G", " ", "CTRL+K", "CTRL+Y", "CTRL+O"], tmp_path, initial_text="a\nb\nc")
+    assert result == "b\nc"
+    result, _ = _edit(["CTRL+K", "CTRL+X", "c", "CTRL+K", "CTRL+Y", "CTRL+O"], tmp_path, initial_text="a\nb\nc")
+    assert result == "b\nc"
+
+
 def test_the_cut_lines_can_be_pasted_more_than_once(tmp_path):
     result, _ = _edit(["CTRL+K", "CTRL+Y", "CTRL+Y", "CTRL+O"], tmp_path, initial_text="x\ny")
     assert result == "x\nx\ny"

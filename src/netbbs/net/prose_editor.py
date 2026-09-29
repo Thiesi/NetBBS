@@ -273,6 +273,11 @@ async def edit_prose(
 
         while True:
             key = await session.read_editor_key(**read_options)
+            if not (key.kind == EditorKeyKind.CTRL and key.char == "k"):
+                # Any other key ends a run of Ctrl-K cuts, including the
+                # ones handled here and never dispatched -- Ctrl+G's help
+                # and Ctrl+X's Cancel (claude review on #876).
+                state.cutting = False
 
             if key.kind == EditorKeyKind.CTRL and key.char == "g":
                 # Ctrl+G, nano's own Help convention -- deliberately
