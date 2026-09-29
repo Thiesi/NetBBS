@@ -1292,9 +1292,10 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
                 "folder when you first opened it, and you see the same for mail you send. It "
                 "works both ways: turn it off and no one sees when you read their mail, and you "
                 "no longer see when anyone reads yours. Off also hides the receipts already given; "
-                "turning it on again shows them again. A sender is told that you don't share "
-                "receipts, so your unread-looking letter isn't taken for one you haven't read. "
-                "Mail to and from other BBSes never has read receipts."
+                "turning it on again shows them again. Mail read while either of you had receipts "
+                "off never shows as read, even after you both turn them on. A sender is told that "
+                "you don't share receipts, so your unread-looking letter isn't taken for one you "
+                "haven't read. Mail to and from other BBSes never has read receipts."
             ),
             section="Communication",
         ),
