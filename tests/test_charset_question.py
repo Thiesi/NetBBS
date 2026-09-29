@@ -46,6 +46,9 @@ class _Session:
     async def read_key(self, echo=True):
         return self.keys.pop(0)
 
+    async def discard_buffered_enter(self):
+        self.discarded = True
+
 
 @pytest.mark.parametrize(
     ("key", "preference", "charset"),
@@ -81,3 +84,11 @@ def test_a_caller_who_already_chose_is_not_asked(db):
     session = _Session([])
     asyncio.run(_confirm_charset(session, db, user))
     assert session.text == ""
+
+
+def test_the_enter_after_the_digit_is_discarded(db):
+    # Review on #943: otherwise it dismisses the previous-callers screen.
+    user = create_user(db, "harold", password="hunter2", user_level=10)
+    session = _Session(["1"])
+    asyncio.run(_confirm_charset(session, db, user))
+    assert getattr(session, "discarded", False)

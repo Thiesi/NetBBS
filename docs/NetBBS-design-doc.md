@@ -799,7 +799,7 @@ laying out the new dimensions.
 Anything gathering more than two values goes through the draft field editor or
 a picker and persists nothing before `[S]ave`. The deliberate exceptions are
 once-only first-run decisions (Link participation, node name, managed DNS,
-the Unicode-style probe), type-the-name confirmations before deletes, and
+the character-set question after login, issue #929), type-the-name confirmations before deletes, and
 masked credential entry (issue #611): a password is typed twice because the
 caller cannot see it, preceded by the current one where the account acts on
 itself, and a draft editor would have to hold the plaintext across redraws to

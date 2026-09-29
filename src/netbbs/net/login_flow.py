@@ -591,6 +591,11 @@ async def _confirm_charset(session: Session, db: Database, user: User, *, apply_
     choice = ""
     while choice not in ("1", "2", "3"):
         choice = await session.read_key(echo=False)
+    # A caller who types the digit and then Enter must not have that Enter
+    # dismiss the next screen (review on #943).
+    discard_buffered_enter = getattr(session, "discard_buffered_enter", None)
+    if discard_buffered_enter is not None:
+        await discard_buffered_enter()
     await session.write_line(choice)
     preference = {"1": "unicode", "2": "cp437", "3": "ascii"}[choice]
     set_charset_preference(db, user, preference)
