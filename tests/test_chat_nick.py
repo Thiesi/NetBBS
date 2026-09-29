@@ -168,3 +168,15 @@ def test_chat_stream_label_reverts_after_clearing(db, alice):
     set_nick(db, alice, "DeepParse")
     set_nick(db, alice, "")
     assert chat_stream_label(db, alice) == "alice"
+
+
+def test_an_alias_set_before_parentheses_were_reserved_is_not_shown(db, alice):
+    # Issue #899: parentheses now hold the account, so an old "Ann (bob)"
+    # would read as two accounts, one of them forged.
+    from netbbs.user_preferences import set_user_preference
+
+    set_user_preference(db, alice, "nick", "Ann (bob)")
+
+    assert get_nick(db, alice) is None
+    assert display_label(db, alice) == "alice"
+    assert chat_stream_label(db, alice) == "alice"

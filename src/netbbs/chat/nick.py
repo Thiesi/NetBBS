@@ -98,9 +98,16 @@ def set_nick(db: Database, user: User, nick: str) -> None:
 def get_nick(db: Database, user: User) -> str | None:
     """`user`'s current alias, or `None` if unset/cleared. An empty
     stored value (from `set_nick(db, user, "")`) is treated the same
-    as never having been set."""
+    as never having been set.
+
+    So is an alias set before one of its characters became reserved.
+    Parentheses now hold the account (issue #899), so an old `Ann (bob)`
+    would show as `Ann (bob) (mallory)` -- two accounts, one forged. It
+    is dropped rather than rewritten; its owner can set a new one."""
     value = get_user_preference(db, user, _NICK_KEY)
-    return value if value else None
+    if not value or any(ch in _RESERVED_NICK_CHARACTERS for ch in value):
+        return None
+    return value
 
 
 def display_label(db: Database, user: User) -> str:

@@ -2188,8 +2188,10 @@ owner is a SysOp, as a staff title: a reserved name from §4.2 or anything
 containing `sysop`. "Reads as" is §4.2's skeleton, applied after accents are
 dropped, Cyrillic and Greek look-alikes become Latin letters, and everything but
 letters and digits is removed, so "Ink Well", "InkWeII" and "InkWell[sysop]"
-are all refused while `InkWell` is the SysOp. An alias that already exists is
-left alone; the username beside it keeps it honest. A display name follows the
+are all refused while `InkWell` is the SysOp. An alias that already exists and
+reads as another name is left alone; the username beside it keeps it honest. One
+holding a character reserved since it was set is not shown at all: an old
+`Ann (bob)` would otherwise read as a second, forged account (issue #899). A display name follows the
 same rule, but protects only SysOp names and staff titles, since it is meant to
 be a person's own name and two people can share one. The rule covers aliases
 this node grants. A Link or MRC name always shows its node or network, and is
@@ -13526,8 +13528,11 @@ it joined two names, separated them, or which side was the account.
 "Name (handle)" already reads as a name and the account behind it, needs no
 fallback on a terminal without UTF-8, and keeps #843's rule that no alias
 stands alone. Aliases may no longer contain parentheses, so none can carry a
-forged second account; existing ones are left alone, since the real username
-beside them keeps them honest. The verified-name unit keeps its own `(=...=)`
+forged second account, and one set before that is no longer shown: with the
+account's own marker inside it, the real username beside it no longer keeps it
+honest. The chat status bar, which showed `username (alias)`, now reads
+`alias (username)` like the stream, and `/names` marks MRC callers `(on MRC)`
+as `/who` does. The verified-name unit keeps its own `(=...=)`
 marker. Rejected: `aka`, English and longer on every line; an arrow, which has
 no settled meaning and could read as "talking to".
 

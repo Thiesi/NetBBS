@@ -196,7 +196,8 @@ def test_render_shows_own_username(db, hub, presence, channel, alice):
 def test_render_shows_own_nick_when_set(db, hub, presence, channel, alice):
     set_nick(db, alice, "night_owl")
     text = _plain(chat_flow._render_chat_status_line(db, hub, presence, channel, alice))
-    assert "alice(night_owl)" in text
+    # issue #899: the alias leads, the account follows in parentheses.
+    assert "night_owl (alice)" in text
 
 
 def test_render_shows_topic_when_set(db, hub, presence, channel, alice):
