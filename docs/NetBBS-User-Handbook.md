@@ -339,6 +339,9 @@ Delivery line when you open it:
   was not delivered. Mail left at a relay expires when no answer came back
   in 14 days; it may still have arrived, and if an answer turns up later,
   Sent shows it as delivered or bounced after all.
+- **Resent**: it bounced or expired, and you sent it again with
+  **Re[s]end**. The new copy is a letter of its own in Sent, with its own
+  state.
 
 A letter shows the way its writer typed it: each line stays a line, and
 only a line too wide for your screen wraps. Mail can be in color, written
@@ -350,17 +353,24 @@ When mail bounces or expires you are told at the main menu, once, even if it
 happened while you were away. Opening the message in Sent counts as being
 told. To try again, open it in Sent and press **Re[s]end**: the compose
 screen opens with the same recipient, subject and text, ready to send as a
-new letter, and the old one stays in Sent as it was. If the reason it failed
-still applies on this side -- for example your SysOp has since stopped mail
-to that node -- you are told so when you press the key or at Send. Resend is
-only offered for mail that bounced or expired: a letter that arrived, or may
-still arrive, would reach its reader twice.
+new letter. Once it is sent you are back on the Sent list, and the old
+letter reads **resent** there; opening it shows when, on a `Resent:` line
+under its Delivery line, and the key reads **Re[s]end again**. If you sent
+the resend to someone else instead, the old letter stays as it was. If the
+reason it failed still applies on this side -- for example your SysOp has
+since stopped mail to that node -- you are told so when you press the key
+or at Send. Resend is only offered for mail that bounced or expired: a
+letter that arrived, or may still arrive, would reach its reader twice.
+**[R]eply** and **[F]orward** on a letter in Sent also bring you back to
+the Sent list once the new letter is sent.
 
 A letter to several people is one row in Sent, with everyone's names under
 To. Opening it shows a Delivery line for each person on another node, and
 the list shows the one that needs you most -- a bounce before a letter still
 on its way. **Re[s]end** there sends the letter again only to those whose
-copy bounced or expired; **[R]eply** writes to them all again; **[D]elete**
+copy bounced or expired and was not resent yet; the list reads **resent**
+once every one of them was, and the key then reads **Re[s]end again**.
+**[R]eply** writes to them all again; **[D]elete**
 removes it from Sent for everyone it went to (their copies stay theirs).
 When you receive such a letter, its To line shows everyone it went to, and
 **Reply [a]ll** writes to its sender and everyone else on it, where

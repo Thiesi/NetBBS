@@ -799,6 +799,39 @@ def acknowledge_delivery_notices(db: Database, mail_ids: list[int]) -> None:
     db.connection.commit()
 
 
+def record_resend(db: Database, sender: User, mail_ids: list[int], addresses: list[str]) -> None:
+    """A Resend went out (issue #919): mark each of `sender`'s failed letters
+    in `mail_ids` whose recipient is one of `addresses` -- the
+    `user@<fingerprint>` the new letter actually went to, which `[T]o` may
+    have changed -- as resent now. A letter resent again takes the later
+    time. Only a bounced or expired Link letter of `sender`'s is ever
+    marked; the new letter is a row of its own, and nothing else changes."""
+    wanted: set[str] = set()
+    for address in addresses:
+        try:
+            wanted.add(str(parse_address(address)).casefold())
+        except AddressError:
+            continue
+    if not mail_ids or not wanted:
+        return
+    rows = db.connection.execute(
+        f"""
+        SELECT id, recipient_remote_address FROM mail_messages
+        WHERE id IN ({','.join('?' * len(mail_ids))}) AND sender_user_id = ?
+          AND recipient_remote_address IS NOT NULL AND link_delivery_status IN ('bounced', 'expired')
+        """,
+        (*mail_ids, sender.id),
+    ).fetchall()
+    ids = [row["id"] for row in rows if row["recipient_remote_address"].casefold() in wanted]
+    if not ids:
+        return
+    db.connection.execute(
+        f"UPDATE mail_messages SET resent_at = ? WHERE id IN ({','.join('?' * len(ids))})",
+        (utc_now_iso(), *ids),
+    )
+    db.connection.commit()
+
+
 def _delivery_notice_text(db: Database, row) -> str:
     subject = row["subject"]
     cut = cut_to_width(subject, _NOTICE_SUBJECT_COLUMNS)
