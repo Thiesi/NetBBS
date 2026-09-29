@@ -474,7 +474,7 @@ def test_linked_board_post_full_vertical_materializes_and_is_visible_via_ordinar
     """A board_post reaches a real peer over a real socket, materializes
     into a real `posts` row (issue #73), and is then genuinely visible
     through every ordinary user-facing read path on the carrying node:
-    `list_posts_page` (browsing), `netbbs.search.search_posts` ([F]ind),
+    `list_posts_page` (browsing), `netbbs.search.search_posts` ([/] Find),
     and `netbbs.activity.unread_post_count` (New Scan) -- not just a raw
     SQL row check, which is as far as `test_link_sync.py`'s own
     materialization test goes today (see issue #80's own survey)."""
@@ -512,7 +512,7 @@ def test_linked_board_post_full_vertical_materializes_and_is_visible_via_ordinar
         assert [p.subject for p in page.posts] == ["hello world"]
         assert page.posts[0].author_label == f"alice@{dialer_identity.fingerprint}"
 
-        # [F]ind.
+        # [/] Find.
         hits = search_posts(seed.db, bob, "hello")
         assert [h.subject for h in hits] == ["hello world"]
 
@@ -905,7 +905,7 @@ def test_linked_channel_message_full_vertical_materializes_and_is_visible_via_or
     real peer over a real socket, materializes into a real `channel_
     messages` row, and is genuinely visible through every ordinary
     user-facing read path on the carrying node -- `get_scrollback`
-    (browsing), `netbbs.search.search_channel_messages` ([F]ind), and
+    (browsing), `netbbs.search.search_channel_messages` ([/] Find), and
     `netbbs.activity.unread_channel_count` (New Scan)."""
     dialer_identity = bootstrap_node_identity("dialer")
     seed_node = LinkNode(identity=bootstrap_node_identity("seed"))
@@ -941,7 +941,7 @@ def test_linked_channel_message_full_vertical_materializes_and_is_visible_via_or
         assert [m.body for m in scrollback] == ["hello there"]
         assert scrollback[0].author_label == f"alice@{dialer_identity.fingerprint}"
 
-        # [F]ind.
+        # [/] Find.
         hits = search_channel_messages(seed.db, bob, "hello", visible_channels=[carried_channel])
         assert [h.body for h in hits] == ["hello there"]
 

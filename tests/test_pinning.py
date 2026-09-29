@@ -118,7 +118,7 @@ def test_the_newest_page_does_not_list_a_shown_pin_twice(db, mod, monkeypatch):
 
 
 def test_a_page_reached_by_a_cursor_has_no_pinned_block(db, mod, monkeypatch):
-    """A [N]ew scan or [F]ind jump opens on its target, not on old pins
+    """A [N]ew scan or [/] Find jump opens on its target, not on old pins
     (Codex review on #783)."""
     board = _board(db, mod)
     made = _posts(db, board, mod, 6, monkeypatch)

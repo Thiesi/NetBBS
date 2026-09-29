@@ -13,10 +13,10 @@ entire interactive experience -- login, the main menu, and every screen
 reachable from it. Split apart for maintainability (each extraction is
 its own commit in the project history) into `netbbs.net.board_flow`
 (message-board browsing/posting), `netbbs.net.scan_and_find` (`[N]ew
-scan`/`[F]ind`), `netbbs.net.directory_flow` (the user directory and
+scan`/`[/] Find`), `netbbs.net.directory_flow` (the user directory and
 `[W]ho's online`), `netbbs.net.profile_flow` (profile/identity editing,
 session history), and `netbbs.net.main_menu` (the menu loop itself and
-the shared Communities/Uncategorized/Jump-to resource-type sub-menu) --
+the Communities path) --
 this module now owns only session entry and authentication, the one
 piece every other screen module is ultimately reached through.
 """

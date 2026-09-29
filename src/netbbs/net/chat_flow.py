@@ -14,7 +14,7 @@ status line (`_render_chat_status_line`, repainted after nearly every
 message) and the tab-completer (`_build_completer`, rebuilt fresh on
 every `read_line()` call) are both hot, read-only, cosmetic paths that
 still move fully onto the lane, same as everything else, rather than
-staying on a lingering `db` the way `file_flow.has_visible_areas` did —
+staying on a lingering `db` the way `file_flow.visible_areas` did —
 real added per-message overhead, accepted as consistent with the
 "defer benchmarking to #59's harness" stance rather than guessed at
 now.
@@ -431,21 +431,18 @@ def _visible_channels_for(db: Database, user: User, *, order_by: str = "alphabet
     return visible
 
 
-def has_visible_channels(
+def visible_channels(
     db: Database, user: User, *, community_id: int | None = None, community_scoped: bool = False
-) -> bool:
-    """Whether `user` can see at least one channel under the given
-    Community filter -- public (unlike `_visible_channels_for`)
-    specifically so `netbbs.net.login_flow`'s shared resource-type
-    sub-menu can use it for the same "only offer what currently
-    applies" conditional visibility `_has_visible_boards` provides for
-    boards (design doc §16). Deliberately still `db`-based --
-    a menu-gating check called from still-unmigrated `login_flow.py`
-    code, same category as `netbbs.net.file_flow.has_visible_areas`."""
+) -> list[Channel]:
+    """Every channel `user` can see under the given Community filter --
+    what a Community's page offers and counts (design doc §16, issue
+    #838). Deliberately still `db`-based -- a menu-gating check called
+    from `netbbs.net.main_menu`'s unmigrated drawing code, same category
+    as `netbbs.net.file_flow.visible_areas`."""
     channels = _visible_channels_for(db, user)
     if community_scoped:
         channels = [c for c in channels if c.community_id == community_id]
-    return bool(channels)
+    return channels
 
 
 def list_visible_channels_for(db: Database, user: User) -> list[Channel]:
@@ -453,8 +450,8 @@ def list_visible_channels_for(db: Database, user: User) -> list[Channel]:
     public (unlike `_visible_channels_for`) so issue #56's `[N]ew scan`
     screen (`netbbs.net.login_flow`) can reuse this module's own
     hidden/members_only/permission visibility logic instead of
-    duplicating it, the same reasoning `has_visible_channels` already
-    applies for its own boolean-only callers."""
+    duplicating it, the same reasoning `visible_channels` already
+    applies for a Community's page."""
     return _visible_channels_for(db, user)
 
 
@@ -611,7 +608,7 @@ async def _pick_channel(
     # GitHub issue #176: resolved once, reused for both pick_item calls
     # below (flat and mixed-with-categories) -- shows at every level of
     # channel browsing this recursive function reaches (top level, a
-    # category, a Community/Uncategorized scope), matching
+    # category, a Community's scope), matching
     # `board_flow._browse_boards_in_category`'s own identical wiring.
     # Never the inside of a live channel -- see chat_channel_picker_
     # banner's own module docstring for why that's a categorically

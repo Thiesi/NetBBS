@@ -26,8 +26,8 @@ from netbbs.chat.channels import create_channel
 from netbbs.communities import create_community, get_effective_min_write_level
 from netbbs.files.areas import create_file_area
 from netbbs.net.chat_flow import _authorize_channel_entry
-from netbbs.net.file_flow import has_visible_areas
-from netbbs.net.board_flow import _has_visible_boards
+from netbbs.net.file_flow import visible_areas
+from netbbs.net.board_flow import visible_boards
 from netbbs.storage.database import Database
 
 
@@ -46,7 +46,7 @@ def test_board_with_inherited_read_level_and_no_community_does_not_crash(tmp_pat
 
     # Previously: TypeError from meets_level(user, None). Now: resolves
     # to 0 via get_effective_min_read_level, so bob (level 10) sees it.
-    assert _has_visible_boards(db, bob, community_id=None, community_scoped=False) is True
+    assert bool(visible_boards(db, bob, community_id=None, community_scoped=False)) is True
 
 
 def test_board_with_inherited_write_level_and_no_community_does_not_crash(tmp_path):
@@ -63,7 +63,7 @@ def test_file_area_with_inherited_read_level_and_no_community_does_not_crash(tmp
     bob = create_user(db, "bob", password="hunter2pw", user_level=10)
     create_file_area(db, "files", min_read_level=None, creator=sysop)
 
-    assert has_visible_areas(db, bob, community_id=None, community_scoped=False) is True
+    assert bool(visible_areas(db, bob, community_id=None, community_scoped=False)) is True
 
 
 # -- level inheritance actually gates access, not just resolves in isolation -
@@ -77,8 +77,8 @@ def test_board_read_level_inherits_communitys_default(tmp_path):
     community = create_community(db, "Staff Only", default_min_read_level=50, creator=sysop)
     create_board(db, "internal", min_read_level=None, community_id=community.id, creator=sysop)
 
-    assert _has_visible_boards(db, low, community_id=community.id, community_scoped=True) is False
-    assert _has_visible_boards(db, high, community_id=community.id, community_scoped=True) is True
+    assert bool(visible_boards(db, low, community_id=community.id, community_scoped=True)) is False
+    assert bool(visible_boards(db, high, community_id=community.id, community_scoped=True)) is True
 
 
 def test_file_area_read_level_inherits_communitys_default(tmp_path):
@@ -89,8 +89,8 @@ def test_file_area_read_level_inherits_communitys_default(tmp_path):
     community = create_community(db, "Staff Only", default_min_read_level=50, creator=sysop)
     create_file_area(db, "internal-files", min_read_level=None, community_id=community.id, creator=sysop)
 
-    assert has_visible_areas(db, low, community_id=community.id, community_scoped=True) is False
-    assert has_visible_areas(db, high, community_id=community.id, community_scoped=True) is True
+    assert bool(visible_areas(db, low, community_id=community.id, community_scoped=True)) is False
+    assert bool(visible_areas(db, high, community_id=community.id, community_scoped=True)) is True
 
 
 # -- age/name-requirement inheritance actually gates channel entry ----------

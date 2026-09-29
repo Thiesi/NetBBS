@@ -337,8 +337,7 @@ picker (issue #176) -- since each renders once per view as a
 pick_item`, structurally identical to the main menu despite being a
 recursive, categorized/Community-scoped browsing hierarchy rather than
 one flat screen. Each masthead shows at *every* level that hierarchy
-reaches (the unfiltered top level, a category, a Community/Uncategorized
-scope), not only the very first screen -- it marks "you're in this
+reaches (the unfiltered top level, a category, a Community's scope), not only the very first screen -- it marks "you're in this
 section," not one specific screen state. This required `pick_item`
 itself to grow a `masthead` parameter (threaded through its own internal
 redraw closure so the masthead survives paging/search/sort/refresh, not
@@ -659,7 +658,7 @@ the editors' `/done`, `/exit` and `/help`.
 What a typed filename could reach and a keystroke cannot, recorded because
 it was a deliberate trade and not an oversight:
 
-- **A file on another page.** `[F]ind` covers it: searching enters the area
+- **A file on another page.** `[/] Find` covers it: searching enters the area
   with that file at the top of its page, where its number or `[D]` takes it.
   (It is the first row, not a preselected cursor — `_show_area` starts with
   no highlight.)
@@ -674,7 +673,7 @@ it was a deliberate trade and not an oversight:
   the same rule the caller-facing screens follow (issue #475).
 - **An expired file.** Nothing, and that is now the decided answer rather
   than a loss: expiry ends a file's reach to callers entirely (§5.3, issue
-  #639). The listing and `[F]ind` are approved-and-current only, and a caller
+  #639). The listing and `[/] Find` are approved-and-current only, and a caller
   who knows a name has no way to spend it. A SysOp reaches an expired file
   while the grace period lasts through `E[x]pired files` on the file area's
   admin detail screen, which carries the same `[D]ownload` (§5.3).
@@ -1261,7 +1260,7 @@ edit permission can pin a post or file, and can keep it from expiring:
   also stays in the dated listing where it was posted. So a pin the block
   has no room for is still reached by paging, and the opening page leaves
   out only the dated rows its block already shows. A page reached by paging
-  or by a `[N]ew scan`/`[F]ind` jump has no pinned block, so a jump opens on
+  or by a `[N]ew scan`/`[/] Find` jump has no pinned block, so a jump opens on
   its target.
 - **How the block looks:** it sits under a labelled "Pinned" rule, parted
   from the dated rows by a plain one. On a board the labelled rule replaces
@@ -1322,7 +1321,7 @@ The moderators are listed there, not on the detail screen itself, which at
 
 **Expiry is a caller-facing boundary, not only a delisting** (issue #639).
 Once a post or a file is `expired`, no keystroke a caller can press reaches
-it: listings, `[F]ind` and the file area's own screens are
+it: listings, `[/] Find` and the file area's own screens are
 approved-and-current only, and knowing an exact name buys nothing. This
 holds for both boards and file areas, and it is the whole of what a caller
 may rely on.
@@ -1688,7 +1687,7 @@ The list:
   a post in the list does not count as reading it. `[M]ark all read` counts
   everything on the board as read; it is offered only while something is
   unread.
-- Opens a `[N]ew scan` or `[F]ind` jump with the cursor on its target.
+- Opens a `[N]ew scan` or `[/] Find` jump with the cursor on its target.
 
 A post opens on `show_detail`:
 - The title, a byline (author, date, `edited`, `new`, the post it replies to)
@@ -2060,6 +2059,13 @@ Each board, channel, or file area has zero or one Community. “Uncategorized”
 the absence of a Community, not a synthetic row. Categories remain a separate
 layer below Communities.
 
+The SysOp orders Communities (issue #838): the callers' Communities list
+follows each one's `position`, not its name, and a new Community goes last. A
+Community's console screen moves it up or down and shows its place. Nodes
+upgraded from before this keep the alphabetical order they showed. The first
+field test's SysOp named a Community "The Clubhouse -- Start here" and watched
+it sort last, with nothing she could do about it.
+
 Categories (for boards, file areas and chat channels, each kind independent)
 are at most two levels deep. The SysOp orders them: every listing follows a
 category's `position` among its siblings, not its name (issue #681). The
@@ -2077,15 +2083,30 @@ Communities provide:
 - Community-scoped blanket moderator grants;
 - a future unit for Link carry and governance.
 
-The main navigation exposes:
+The main menu (issue #838) offers content two ways:
 
-- Communities;
-- Uncategorized resources;
-- Jump/search by resource type.
+- **By kind:** `[M]essage boards`, `[C]hat`, `[F]iles` and `[G]ames` open
+  the whole node's list of that kind, whichever Community each item belongs
+  to. They come first, because they are what callers who know other BBSes
+  look for. M, C and F are always shown; Games only while a door is visible.
+- **By topic:** `C[o]mmunities`, shown while at least one Community is
+  visible, lists them; picking one opens its page -- its description and an
+  entry per kind it holds, with how many -- which leads to the same board,
+  channel, area or door browsers scoped to that Community. Back from a
+  Community's page returns to the Communities list.
 
-Each path leads to the same resource-type submenu and then the normal board,
-channel, or area browser. Resources unrelated to Communities—mail, directory,
-profiles, preferences, and administration—retain their own navigation.
+"Uncategorized" (no Community) is a data-model term only. A resource with no
+Community is listed under its kind like any other, so there is no menu entry
+for "resources outside a Community". The earlier design had one, next to a
+`[J]ump to...` type picker; a first-time SysOp created a Community only to
+escape the word, and callers read Jump as a name search (field test, #831).
+Both were removed. `[/] Find` holds the slash because `[F]` is Files, and `[?]`
+is kept for the main menu's help entry (#840).
+
+A SysOp on a node with no boards, channels or file areas at all sees, and
+nobody else does, where to create the first one. Resources unrelated to
+Communities—mail, directory, profiles, preferences, and administration—retain
+their own navigation.
 
 Community-scoped category views must filter at the query layer so a category
 used by resources in several Communities does not leak another Community’s
@@ -2098,7 +2119,7 @@ Deleting a Community:
 - shows the blast radius before confirmation.
 
 Existing nodes migrate safely because the nullable Community reference leaves
-all existing resources Uncategorized until a SysOp assigns them.
+all existing resources without a Community until a SysOp assigns them.
 
 #### Link Communities
 
@@ -2316,8 +2337,7 @@ resources no longer visible.
 
 A single new main-menu entry — `[N]ew scan`, the traditional BBS term for
 exactly this feature — is the fast, always-shown surface issue #56 asks
-for, following the same unconditional-visibility
-precedent `[J]ump to...` already sets.
+for, always shown like `[M]essage boards`, `[C]hat` and `[F]iles`.
 
 New scan covers **every board, channel, and file area the user can currently
 access**, not only followed ones — matching the traditional meaning of a
@@ -2379,7 +2399,7 @@ capability from the item picker's simple, per-call substring name match
   built, is a distinct protocol extension requiring its own explicit design
   (rate limits, query exposure, opt-in) — never an implied consequence of
   local search existing;
-- **UI**: a new, always-shown `[F]ind` main-menu entry (`netbbs.net.
+- **UI**: a new, always-shown `[/] Find` main-menu entry (`netbbs.net.
   scan_and_find._find_screen`), alongside `[N]ew scan` — prompts for one
   free-text query, matches it against all three content types at once, and
   jumps straight to a selected hit: a post/file lands on the exact matched
@@ -8186,7 +8206,7 @@ scripted tests.
 Also implemented: local FTS5-backed search (`netbbs.search`) over board
 posts, files, and channel scrollback, synced from every write path, gated by
 the exact same visibility rules browsing already enforces, and surfaced as a
-new `[F]ind` main-menu entry that jumps straight to a selected hit. FTS5
+new `[/] Find` main-menu entry that jumps straight to a selected hit. FTS5
 availability, this round's stated blocker, was resolved by tracing pkgsrc's
 actual build chain rather than empirical access to a NetBSD box: `lang/
 python312` buildlinks against `databases/sqlite3`, whose own Makefile passes
@@ -8499,7 +8519,7 @@ local chat stays fully usable and Link-unaware.
 
 Minimal threading, no broader `chat_flow` refactor: only `browse_channels`/
 `_chat_loop` gained the new parameter, and only the three existing `netbbs.
-net.login_flow` call sites (`[N]ew scan`, `[F]ind`, the main channel-browse
+net.login_flow` call sites (`[N]ew scan`, `[/] Find`, the main channel-browse
 menu) needed updating to pass their own already-in-scope `link_context`
 through. A real two-node end-to-end test (`tests/test_link_end_to_end.py`)
 drives `_chat_loop` itself with a scripted `FakeSession`, not a direct
@@ -11662,7 +11682,7 @@ Two things found while deciding it, which changed the shape of the answer:
 
 **Decision 1 — expiry ends a caller's reach, in both subsystems.** A caller
 may rely on this: expired means gone. Rejected: a `show expired` toggle on
-the file listing, and returning expired rows from `[F]ind` labelled. Both put
+the file listing, and returning expired rows from `[/] Find` labelled. Both put
 delisted content back in front of callers, which is the one thing expiry
 exists to stop, and the second costs the most to build — the expiry sweep
 calls `reindex_file`, which *deletes* a row from `file_search` as soon as it

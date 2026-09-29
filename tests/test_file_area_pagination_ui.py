@@ -11,7 +11,7 @@ This screen used to read whole typed *lines* and carry `/download`,
 only screen in NetBBS that did. It is keystroke-only now (design doc
 §3.5), so every script here is `keys=`, not `lines=`. `/download
 <filename>`'s area-wide name lookup was the one form that reached a
-file on another page; `[F]ind` (netbbs.net.scan_and_find) reaches it
+file on another page; `[/] Find` (netbbs.net.scan_and_find) reaches it
 instead, entering this area with that file as row 1 of its page. What
 stays covered here is the pagination half of that reach -- paging back
 into history and downloading from an older page.
@@ -206,7 +206,7 @@ def test_download_works_for_a_file_reached_by_paging_back_into_history(tmp_path,
     which is what pagination itself put at risk -- but the way there is
     now `[O]lder` until the file is on the page and then its number,
     not a `/download <filename>` lookup across the whole area. (The
-    one-step reach that lookup gave is `[F]ind`'s job now, and belongs
+    one-step reach that lookup gave is `[/] Find`'s job now, and belongs
     to its own tests.)"""
     db_path = tmp_path / "node.db"
     db = Database(db_path)

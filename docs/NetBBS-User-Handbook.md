@@ -27,7 +27,7 @@ forgotten it, ask the SysOp to set a new one; nobody can recover the old one.
 
 ## Find your way around
 
-Press a highlighted letter such as **[J]** for **Jump to**. Most menus react
+Press a highlighted letter such as **[M]** for **Message boards**. Most menus react
 immediately, without Enter. When typing text, use Enter to submit it.
 **Ctrl+U** clears the line you are typing, and at a field that allows it,
 Esc leaves it without changing anything.
@@ -36,11 +36,13 @@ things in different places. **[B]ack** leaves most screens.
 
 | Main-menu choice | What it does |
 | --- | --- |
-| **Communities** | Browse subjects grouping message boards, chat channels, file areas, and doors |
-| **Uncategorized** | Browse resources outside a Community |
-| **Jump to** | Go straight to a type of resource, including games |
+| **Message boards** | Every message board on this node |
+| **Chat** | Every chat channel |
+| **Files** | Every file area |
+| **Games** | Door games, when the SysOp has set some up |
+| **Communities** (key **O**) | Topics the SysOp set up, each with its own boards, chat channels, file areas and games |
 | **New scan** | See unread activity and resources you have not visited |
-| **Find** | Search content available on this node |
+| **Find** (key **/**) | Search content available on this node |
 | **E-mail** | Read and send persistent NetBBS mail |
 | **Who's online** | See callers and available ways to contact them |
 | **Profile** | Change your public profile and personal preferences |
@@ -145,7 +147,7 @@ later or tell your SysOp.
 
 ## Play a door game
 
-Choose **Jump to → Games**, or browse a Community's games. Availability
+Choose **Games** on the main menu, or a Community's games. Availability
 depends on what your SysOp has registered.
 
 - **Retro Trivia:** answer a short round of multiple-choice questions.

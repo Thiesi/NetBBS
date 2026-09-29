@@ -121,22 +121,19 @@ def test_a_second_pending_message_delivered_after_returning_to_the_menu(db, monk
         # screen entirely. Delivered by `session` (GitHub issue #27) --
         # the exact object passed in here is the same one _main_menu is
         # about to flush() by. **kwargs absorbs the community_id/
-        # community_scoped/title_prefix keywords _resource_type_menu now
-        # passes through (design doc §16) -- irrelevant here.
+        # community_scoped/title_prefix keywords the main menu passes
+        # through (design doc §16) -- irrelevant here.
         mailbox.deliver(session, "*** Private message from bob: while you were away", _T)
 
-    # Patched on main_menu, not login_flow -- _resource_type_menu (the
-    # actual call site, reached via [J]ump to... -> [M]essage Boards)
-    # lives there now, with its own independent `_browse_boards` import
+    # Patched on main_menu, not login_flow -- the actual call site
+    # (`[M]essage boards`) lives there, with its own independent `_browse_boards` import
     # binding (netbbs.net.board_flow's real function is unaffected;
     # patching main_menu's copy of the name is what's needed here).
     monkeypatch.setattr(main_menu, "_browse_boards", fake_browse_boards)
 
     async def scenario():
-        # jump to... (boards/chat/areas are always offered, unfiltered)
-        # -> [M]essage Boards -> back out of the resource-type sub-menu
-        # -> logoff.
-        session = FakeSession(keys=["j", "m", "b", "l"])
+        # [M]essage boards -> logoff.
+        session = FakeSession(keys=["m", "l"])
         await main_menu._main_menu(session, db, object(), PresenceRegistry(), mailbox, InputHistory(), user)
         return session
 

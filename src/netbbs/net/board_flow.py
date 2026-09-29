@@ -1,7 +1,7 @@
 """
-Message-board browsing and posting: `[B]oards` (and every route into it
--- `[C]ommunities`, `[U]ncategorized`, `[J]ump to...`, `[N]ew scan`,
-`[F]ind`), one bounded page of posts at a time (design doc, issue #10),
+Message-board browsing and posting: `[M]essage boards` (and every route
+into it -- a Community's page, `[N]ew scan`,
+`[/] Find`), one bounded page of posts at a time (design doc, issue #10),
 composing/editing/tombstoning a post, and quoted-reply rendering.
 
 Split out of `netbbs.net.login_flow` (that module's own maintenance
@@ -10,7 +10,7 @@ out of that file, but a genuinely self-contained one -- nothing here
 calls back into `login_flow` itself, only outward into shared
 preference/rendering/domain modules. `_show_board` is this module's own
 main entry point from elsewhere in the split (the main menu, `[N]ew
-scan`, `[F]ind` search-hit selection) -- extracted before those other
+scan`, `[/] Find` search-hit selection) -- extracted before those other
 pieces specifically so they could import it cleanly from here rather
 than from `login_flow` (which will, once every other screen group is
 also split out, hold only session-entry/auth logic).
@@ -175,18 +175,17 @@ async def _browse_boards(
     )
 
 
-def _has_visible_boards(db: Database, user: User, *, community_id: int | None, community_scoped: bool) -> bool:
-    """Whether `user` can see at least one board under the given
-    Community filter -- backs the shared resource-type sub-menu's
-    "only offer what currently applies" conditional visibility (design
-    doc §16), same convention as `[I]nvitations`."""
+def visible_boards(db: Database, user: User, *, community_id: int | None, community_scoped: bool) -> list[Board]:
+    """Every board `user` can see under the given Community filter --
+    what a Community's page offers and counts (design doc §16, issue
+    #838)."""
     boards = [
         b for b in list_boards(db)
         if meets_level(user, get_effective_min_read_level(db, b)) and meets_age(db, user, get_effective_min_age(db, b))
     ]
     if community_scoped:
         boards = [b for b in boards if b.community_id == community_id]
-    return bool(boards)
+    return boards
 
 
 async def _browse_boards_in_category(
@@ -226,22 +225,22 @@ async def _browse_boards_in_category(
 
     `community_id`/`community_scoped` (design doc §16) narrow
     browsing to one Community's boards (`community_scoped=True`,
-    `community_id=X`), Uncategorized boards (`community_scoped=True`,
-    `community_id=None` -- `board.community_id == None` filters
-    identically to the real-Community case, no special-casing needed),
-    or no filter at all (`community_scoped=False`, the default --
-    every existing caller's unchanged behavior, and what `[J]ump to...`
-    uses). `title_prefix`, threaded alongside, is `None` for the
-    unfiltered/Jump case (keeping today's unchanged "Available message
-    boards" title) or a human label ("Uncategorized", a Community's own
-    name) that's passed to `pick_item` as an ancestor `breadcrumb`
+    `community_id=X`), boards outside every Community
+    (`community_scoped=True`, `community_id=None` --
+    `board.community_id == None` filters identically to the
+    real-Community case, no special-casing needed), or no filter at all
+    (`community_scoped=False`, the default, and what the main menu's
+    `[M]essage boards` uses -- issue #838). `title_prefix`, threaded
+    alongside, is `None` for the unfiltered case (keeping the "Available
+    message boards" title) or a Community's own
+    name that's passed to `pick_item` as an ancestor `breadcrumb`
     segment otherwise, so it renders muted with only "Message boards"
     itself in the current-location color -- not folded into the title
     text as a fake, uniformly-colored breadcrumb (dogfood-reported bug,
     see `pick_item`'s own `breadcrumb` docstring).
     Category leak prevention ("only show/offer categories
     currently used by ≥1 resource in this Community") only applies when
-    `community_scoped` -- the unfiltered Jump path shows every category
+    `community_scoped` -- the unfiltered path shows every category
     exactly as it always has.
 
     Sort mode (design doc, dogfood feature request): unlike
@@ -267,7 +266,7 @@ async def _browse_boards_in_category(
     # GitHub issue #176: resolved once, reused for both pick_item calls
     # below (flat and mixed-with-categories) -- shows at every level of
     # board browsing this recursive function reaches (top level, a
-    # category, a Community/Uncategorized scope), not only the very
+    # category, a Community's scope), not only the very
     # first unfiltered screen, matching this feature's own scoping
     # decision.
     board_masthead = load_board_list_banner(db)
@@ -303,9 +302,9 @@ async def _browse_boards_in_category(
     boards_here, categories_here = _load(current_mode)
     category_name = get_board_category_by_id(db, category_id).name if category_id is not None else None
     # Where the caller came from, carried onto the board's own screens
-    # (issue #679): the Community (or "Uncategorized") and the category.
+    # (issue #679): the Community, if any, and the category.
     # Continues the path this picker shows: the Community (or
-    # "Uncategorized") is above "Message boards", a category below it.
+    # none) is above "Message boards", a category below it.
     board_breadcrumb = (
         *((sanitize_text(title_prefix),) if title_prefix else ()),
         "Message boards",
@@ -1637,7 +1636,7 @@ async def _show_board(
                 continue
             await session.write(reject_unhandled_key(choice))
 
-    # A [N]ew scan or [F]ind jump opens the list with its target at the top;
+    # A [N]ew scan or [/] Find jump opens the list with its target at the top;
     # the cursor starts on it, so Enter reads what the caller came for.
     highlighted: int | None = 0 if page_anchor is not None else None
     await _render_fresh(page, highlighted)
