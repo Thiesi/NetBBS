@@ -317,7 +317,7 @@ from netbbs.link.dial_in import (
 )
 from netbbs.link.key_rotation import KeyRotationError
 from netbbs.link.node_identity import operational_key_history
-from netbbs.link.enforcement import decide_user_authorship, node_transport_state
+from netbbs.link.enforcement import REASON_NODE_PROBATIONARY, decide_user_authorship, node_transport_state
 from netbbs.link.node_profiles import (
     dismiss_identity_observation, identity_for_fingerprint, identity_for_peer,
     link_address_label,
@@ -376,6 +376,8 @@ from netbbs.link.store import load_peer_last_contact
 from netbbs.link.node_map import CANDIDATE as NODE_MAP_CANDIDATE
 from netbbs.link.node_map import NodeMapEntry, build_node_map, has_known_nodes
 from netbbs.net.node_map_flow import NODE_MAP_COLUMNS, all_carried_names
+from netbbs.net.node_map_flow import exchange_sections as node_map_exchange_sections
+from netbbs.net.node_map_flow import own_content_at_peer, probation_rows
 from netbbs.net.node_map_flow import utc_now as node_map_now
 from netbbs.net.node_map_flow import map_title as node_map_title
 from netbbs.net.node_map_flow import node_sections as node_map_sections
@@ -395,6 +397,7 @@ from netbbs.link.trust_issuance import (
     withdraw_vouch_intent,
 )
 from netbbs.link.trust import (
+    NodeProbation,
     TrustDimension,
     TrustState,
     TrustSubject,
@@ -404,6 +407,7 @@ from netbbs.link.trust import (
     configure_trust_domain,
     configure_trusted_reporter,
     get_effective_trust_state,
+    node_probation,
     is_registered_subject,
     list_sole_authorities,
     list_trust_anchors,
@@ -832,7 +836,74 @@ def _link_health_snapshot(db: Database, link_context: LinkContext | None) -> dic
         # (Codex review on #800): a node that stopped Link still has them.
         "carried_to_review": count_carried_to_review(db),
         "carry_offers": count_carry_decisions(db, OFFERED),
+        # Issue #844: a peer on probation here exchanges nothing, which the
+        # peer count alone made look healthy.
+        "peers_on_probation": _count_peers_on_probation(db) if link_context is not None else 0,
     }
+
+
+def _count_peers_on_probation(db: Database) -> int:
+    """Verified peers on probation here, which exchange nothing with this
+    node yet (issue #844). A quarantine or block is the SysOp's own doing
+    and shows on Link status as such."""
+    fingerprints = [row["fingerprint"] for row in db.connection.execute("SELECT fingerprint FROM link_peers")]
+    return sum(node_transport_state(db, fingerprint) == TrustState.PROBATIONARY for fingerprint in fingerprints)
+
+
+def _link_count_pairs(node, state: dict) -> list[tuple[str, int]]:
+    """The Link counts every dashboard shows, with the peers nothing is
+    exchanged with yet when there are any (issue #844)."""
+    pairs = [("Peers", len(node.peers))]
+    if state.get("peers_on_probation"):
+        pairs.append(("On probation", state["peers_on_probation"]))
+    return [*pairs, ("Relays", len(node.relays_serving_me)), ("Dead letters", state["dead_letters"])]
+
+
+def _own_linked_genesis(link_context: LinkContext) -> list:
+    """This node's own linked boards, channels and file areas, as their
+    genesis events: what `sync._push_own_events` offers every peer."""
+    node = link_context.link_node
+    own = link_context.node_identity.fingerprint
+    return [
+        genesis
+        for kind in (node.boards, node.channels, node.file_areas)
+        for genesis in kind.values()
+        if genesis.payload.get("origin_fingerprint") == own
+    ]
+
+
+_MAX_REACH_ROWS = 6
+
+
+async def _peer_reach_rows(lane: DatabaseLane, link_context: LinkContext, genesis) -> list[Field | Note]:
+    """Where one of this node's own linked resources has got to (issue
+    #844): per verified peer, whether it holds it, refused it, or is not
+    sent it while on probation here. Nothing for a resource another node
+    originated -- its origin pushes it, not this node."""
+    if genesis is None or genesis.payload.get("origin_fingerprint") != link_context.node_identity.fingerprint:
+        return []
+    node = link_context.link_node
+    peers = list(node.peers)
+    if not peers:
+        return [Field("At peers", "no verified peers yet", color=MUTED_COLOR)]
+    states = await lane.run(lambda db: {fp: node_transport_state(db, fp).value for fp in peers})
+    labelled = sorted(((_linked_node_label(link_context, fp), fp) for fp in peers), key=lambda item: item[0].casefold())
+    rows: list[Field | Note] = []
+    for label, fingerprint in labelled[:_MAX_REACH_ROWS]:
+        text, color = own_content_at_peer(states[fingerprint], node.peer_exchange.get(fingerprint), genesis.content_id)
+        rows.append(Field(f"At {sanitize_text(label)}", text, color=color))
+    if len(labelled) > _MAX_REACH_ROWS:
+        rows.append(Note(f"... and {len(labelled) - _MAX_REACH_ROWS} more; Link status -> Peers shows each node."))
+    return rows
+
+
+def _linked_announcement(name: str) -> str:
+    """What `[L]ink` says once saved (issue #844): who gets it, and where
+    to look later, since the push itself happens on a later sync pass."""
+    return (
+        f"Linked {name!r}. Peers you have established get it on the next sync pass; "
+        "its NetBBS Link rows here show which ones hold it."
+    )
 
 
 async def _with_fresh_carry_counts(lane: DatabaseLane, state: dict[str, object]) -> dict[str, object]:
@@ -1956,7 +2027,7 @@ async def _draw_admin_menu(
         health.extend(
             _wrap_counts_panel(
                 "  ",
-                [("Peers", len(node.peers)), ("Relays", len(node.relays_serving_me)), ("Dead letters", state["dead_letters"])],
+                _link_count_pairs(node, state),
                 width=box_inner_width,
             )
         )
@@ -2157,7 +2228,7 @@ def _compact_dashboard_panel(
             _label("LINK")
             + status_badge("ATTENTION" if link_tone == "warning" else "HEALTHY", tone=link_tone, unicode_style=unicode_style)
             + "  ",
-            [("Peers", len(node.peers)), ("Relays", len(node.relays_serving_me)), ("Dead letters", state["dead_letters"])],
+            _link_count_pairs(node, state),
             width=width,
         ))
     panel.extend(_wrap_counts_panel(
@@ -2532,7 +2603,7 @@ async def _operations_menu(
                             colored("LINK OPERATIONS: ", fg_color=LABEL_COLOR, bold=True)
                             + status_badge(link_label, tone=link_tone, unicode_style=unicode_style)
                             + "  ",
-                            [("Peers", len(node.peers)), ("Relays", len(node.relays_serving_me)), ("Dead letters", state["dead_letters"])],
+                            _link_count_pairs(node, state),
                             width=box_inner_width,
                         )
                     )
@@ -2591,7 +2662,7 @@ async def _operations_menu(
                     panel.append(colored("LINK OPERATIONS  ", fg_color=LABEL_COLOR, bold=True) + status_badge(link_label, tone=link_tone, unicode_style=unicode_style))
                     panel.append(
                         "  " + counts_row(
-                            [("Peers", len(node.peers)), ("Relays", len(node.relays_serving_me)), ("Dead letters", state["dead_letters"])]
+                            _link_count_pairs(node, state)
                         )
                     )
                     panel.append(
@@ -3150,7 +3221,7 @@ async def _link_participation_sections(lane: DatabaseLane) -> tuple[list[Section
         Section("What accepting means", [Note(
             "Accepting dials these nodes as seeds after your own configured ones and, for a node that "
             "can't be reached from the internet directly, uses them as relays. It hands them no say over "
-            "your content and is not a trust decision about anyone (design doc §16, issue #219)."
+            "your content and is not a trust decision about anyone."
         )]),
     ], participation
 
@@ -6493,16 +6564,15 @@ _USER_DETAIL_HELP: dict[str, tuple[str, str]] = {
     ),
     "s": (
         "Staff",
-        "Staff permissions (design doc §5.6): approve accounts, manage accounts (disable/"
+        "Staff permissions: approve accounts, manage accounts (disable/"
         "enable, password reset, levels up to 254) and moderate everything. Co-SysOp sets "
         "all three. A staff member never acts on level 255 or on other staff, and can't "
         "grant anything.",
     ),
     "i": (
         "Can verify identity",
-        "A narrow, SysOp-grantable permission (design doc §18) letting this account "
-        "perform age/name attestation for other callers -- independent of the four "
-        "moderator scope tiers.",
+        "Lets this account confirm other callers' age or real name. It is separate "
+        "from moderator grants and staff permissions.",
     ),
     "k": (
         "Public key",
@@ -9658,6 +9728,7 @@ async def _link_status_sections(
         peers.append(Field("Sync interval", f"{config.sync_interval_seconds:.0f}s"))
     live_sessions = link_context.realtime_registry.all_sessions() if link_context.realtime_registry is not None else []
     peers.append(Field("Live sessions", str(len(live_sessions))))
+    peers.extend(await _probation_summary(lane, link_context))
     proxy_line = describe_proxy_status()
     if proxy_line is not None:
         # Issue #628: live chat tunnels through the proxy the environment
@@ -9722,8 +9793,62 @@ async def _link_status_sections(
     content.append(Field("Excluded", str(excluded) if excluded else "none", color=VALUE_COLOR if excluded else MUTED_COLOR))
     content.append(Field("Known events", str(len(node.known_event_ids))))
     content.append(Field("Post-edit chains", str(len(node.post_edits))))
+    # Issue #844: Link Communities do not exist, so say where carried
+    # content lands before a SysOp goes looking for it.
+    content.append(Note(
+        "Boards, channels and file areas carried from other nodes appear in callers' Message boards, "
+        "Chat and Files lists, outside any Community. Edit one to put it in a Community of yours.",
+        color=MUTED_COLOR,
+    ))
     sections.append(Section("Content", content))
     return sections, identity_notices
+
+
+async def _probation_summary(lane: DatabaseLane, link_context: LinkContext) -> list[Field | Note]:
+    """Link status's answer to "linked, but is anything moving?" (issue
+    #844): peers on probation here exchange nothing, and this node is on
+    probation at each peer the same way until that peer's SysOp establishes
+    it. Only peers this node dials report the second; see `PeerExchange`."""
+    node = link_context.link_node
+    peers = list(node.peers)
+    if not peers:
+        return []
+    states = await lane.run(lambda db: {fp: node_transport_state(db, fp) for fp in peers})
+    waiting = [fp for fp in peers if states[fp] == TrustState.PROBATIONARY]
+    rows: list[Field | Note] = [Field(
+        "On probation here",
+        f"{len(waiting)} of {len(peers)} -- nothing is exchanged with them until you establish them (Peers)"
+        if waiting else "none",
+        color=WARNING_COLOR if waiting else MUTED_COLOR,
+    )]
+    asked = [fp for fp in peers if states[fp] == TrustState.ESTABLISHED and fp in node.peer_exchange]
+    refused = [fp for fp in asked if node.peer_exchange[fp].refused_reason is not None]
+    if refused and all(node.peer_exchange[fp].refused_reason == REASON_NODE_PROBATIONARY for fp in refused):
+        at_peers = (
+            f"on probation at {len(refused)} of {len(asked)} peer(s) this node dials -- they hold back "
+            "what yours sends until their SysOps establish it",
+            WARNING_COLOR,
+        )
+    elif refused:
+        at_peers = (
+            f"refused by {len(refused)} of {len(asked)} peer(s) this node dials, on probation or "
+            "restricted there -- each node's screen under Peers says why",
+            WARNING_COLOR,
+        )
+    elif not _own_linked_genesis(link_context):
+        at_peers = ("not known yet: nothing of yours is linked, so no peer has been asked to take it", MUTED_COLOR)
+    elif asked:
+        at_peers = (f"accepted by the {len(asked)} peer(s) this node dials", SUCCESS_COLOR)
+    else:
+        at_peers = ("not known yet: learned when this node dials a peer you have established", MUTED_COLOR)
+    rows.append(Field("Your node at peers", at_peers[0], color=at_peers[1]))
+    if waiting or refused or not asked:
+        rows.append(Note(
+            "Every node starts on probation with every other, both ways. Establish a peer here once you "
+            "know who runs it, and ask its SysOp to establish yours: until both have, nothing is exchanged.",
+            color=MUTED_COLOR,
+        ))
+    return rows
 
 
 async def _node_map_sysop_screen(
@@ -9797,6 +9922,7 @@ async def _node_map_sysop_screen(
         # a peer-list candidate has none, since nothing about it is verified.
         subject = TrustSubject.node(selected.fingerprint)
         registered = await lane.run(is_registered_subject, subject)
+        own_total = len(_own_linked_genesis(link_context))
         listing = _Listing()
         while True:
             actions: list[tuple[str, str]] = []
@@ -9815,6 +9941,12 @@ async def _node_map_sysop_screen(
                 ),
                 sections=node_map_sections(
                     selected, carried=carried, now=now, sysop=True, first_named=first_named,
+                    trust_notes=_probation_notes(await lane.run(node_probation, selected.fingerprint), state["display"]),
+                    extra_sections=[] if selected.source == NODE_MAP_CANDIDATE else node_map_exchange_sections(
+                        selected, held=link_context.link_node.deferred_events.held_from(selected.fingerprint),
+                        exchange=link_context.link_node.peer_exchange.get(selected.fingerprint),
+                        own_total=own_total, now=now,
+                    ),
                 ),
                 actions=actions, page=listing.page, message=listing.take_message(),
                 redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
@@ -9843,6 +9975,23 @@ async def _node_map_sysop_screen(
                 break
             selected = refreshed
             chrome = await _load_chrome(lane, actor)
+
+
+def _probation_notes(probation: NodeProbation | None, display: tuple) -> list[Field | Note]:
+    """`probation_rows` with its dates in the SysOp's display format."""
+    if probation is None:
+        return []
+    display_format, display_timezone = display
+
+    def _format(value: str | None) -> str | None:
+        if not value:
+            return None
+        return format_for_display(value, override_format=display_format, override_timezone=display_timezone)
+
+    return probation_rows(
+        probation, known_since=_format(probation.known_since),
+        graduates_on=_format(probation.graduates_no_earlier_than),
+    )
 
 
 async def _node_map_has_rows(lane: DatabaseLane, link_context: LinkContext) -> bool:
@@ -17491,10 +17640,12 @@ def _link_board_field_specs(
             prompt=_forked_from_field(
                 board, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
             ),
-            brief="Origin board this forks from",
+            brief="Most boards: leave it",
             help=(
-                "If this board is a fork of an existing Linked message board, choose it here. "
-                "Leave as-is if it isn't."
+                "Only for a board that carries on another node's Linked message board under this "
+                "node, for example after that board was closed. Peers are told it continues that "
+                "one; each still decides what it carries. A new board of your own is not a fork: "
+                "leave it as '(not a fork)'."
             ),
         ),
     ]
@@ -17560,7 +17711,7 @@ async def _link_board_screen(
         link_context.link_node.boards[board.board_id] = genesis
         link_context.link_node.known_event_ids.add(genesis.content_id)
         link_context.link_node.events[genesis.content_id] = genesis.to_dict()
-        _announce_line(session, f"Linked {board.name!r} -- it will be pushed to peers on the next sync pass.")
+        _announce_line(session, _linked_announcement(board.name))
         return True
 
     redraw_in_place, redraw_hint = await lane.run(_resolve_redraw_preference, actor)
@@ -17917,6 +18068,8 @@ async def _draw_board_detail(
                         + _linked_node_label(link_context, offer.payload.get("new_origin_fingerprint")),
                         color=WARNING_COLOR,
                     ))
+        if linked and is_origin:
+            link_rows.extend(await _peer_reach_rows(lane, link_context, link_context.link_node.boards.get(board.board_id)))
         sections.append(Section("NetBBS Link", link_rows))
     panel_rows = await _write_sections(session, sections, unicode_style=unicode_style)
     options = [
@@ -18966,7 +19119,12 @@ async def _draw_area_detail(
         ], paired=True),
     ]
     if link_context is not None:
-        sections.append(Section("NetBBS Link", [Field("Linked", _yes_no(linked))]))
+        area_link_rows: list[Field | Note] = [Field("Linked", _yes_no(linked))]
+        if linked:
+            area_link_rows.extend(
+                await _peer_reach_rows(lane, link_context, link_context.link_node.file_areas.get(area.area_id))
+            )
+        sections.append(Section("NetBBS Link", area_link_rows))
     panel_rows = await _write_sections(session, sections, unicode_style=unicode_style)
     options = [
         MenuEntry(label=menu_key("E", "dit"), brief="Change this area's settings"),
@@ -19083,7 +19241,7 @@ async def _link_area_screen(
         link_context.link_node.file_areas[area.area_id] = genesis
         link_context.link_node.known_event_ids.add(genesis.content_id)
         link_context.link_node.events[genesis.content_id] = genesis.to_dict()
-        _announce_line(session, f"Linked {area.name!r} -- it will be pushed to peers on the next sync pass.")
+        _announce_line(session, _linked_announcement(area.name))
         return True
 
     redraw_in_place, redraw_hint = await lane.run(_resolve_redraw_preference, actor)
@@ -21314,6 +21472,10 @@ async def _draw_channel_detail(
     sharing: list[Field | Note] = []
     if link_context is not None:
         sharing.append(Field("Linked", _yes_no(linked)))
+        if linked:
+            sharing.extend(
+                await _peer_reach_rows(lane, link_context, link_context.link_node.channels.get(channel.channel_id))
+            )
     open_room = mrc_mapping is not None and mrc_mapping.is_open_room
     if mrc_mapping is None:
         sharing.append(Field("MRC room", "none (not bridged)", color=MUTED_COLOR))
@@ -21690,7 +21852,7 @@ async def _link_channel_screen(
         link_context.link_node.channels[channel.channel_id] = genesis
         link_context.link_node.known_event_ids.add(genesis.content_id)
         link_context.link_node.events[genesis.content_id] = genesis.to_dict()
-        _announce_line(session, f"Linked {channel.name!r} -- it will be pushed to peers on the next sync pass.")
+        _announce_line(session, _linked_announcement(channel.name))
         return True
 
     redraw_in_place, redraw_hint = await lane.run(_resolve_redraw_preference, actor)
@@ -22419,7 +22581,7 @@ async def _grant_moderator_screen(session: Session, lane: DatabaseLane, actor: U
             brief="Narrow the grant to one Community",
             help=(
                 "For a blanket grant only: limit it to the boards/areas/channels of one Community "
-                "instead of the whole node (design doc, Community-blanket tier)."
+                "instead of the whole node."
             ),
         ),
         FieldSpec(

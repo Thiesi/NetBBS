@@ -170,7 +170,10 @@ from netbbs.link.events import (
     INVENTORY_NOT_CARRIED_CAPABILITY,
     INVENTORY_PAGES_CAPABILITY,
     LINK_MESSAGE_OBJECT_TYPE,
+    BoardGenesis,
+    ChannelGenesis,
     EndpointDescriptor,
+    FileAreaGenesis,
     LinkMessage,
     LinkMessageBounced,
     canonical_bytes,
@@ -197,6 +200,7 @@ from netbbs.link.mail import (
 )
 from netbbs.link.protocol import (
     DEFERRED_EVENT_RETRY_SECONDS, MAX_EVENTS_PER_REQUEST, HelloMessage, LinkNode, LinkProtocolError,
+    PeerExchange,
 )
 from netbbs.link.relay_mailbox import RelayableEnvelope
 from netbbs.link.relay_selection import TARGET_RELAY_COUNT, relays_needing_replacement, select_relay_candidates
@@ -594,6 +598,7 @@ async def _push_own_events(
     wanted: list[str] | None,
     peer_fingerprint: str,
     fallback_offsets: dict[str, int],
+    declared: frozenset[str] = frozenset(),
 ) -> None:
     """
     Push this node's own originated events to one seed -- design doc
@@ -691,17 +696,51 @@ async def _push_own_events(
     resource_budget = max(MAX_EVENTS_PER_REQUEST - len(transitions), MAX_EVENTS_PER_REQUEST // 2)
     sending = selected[:resource_budget]
     to_push = transitions + sending
+    # Issue #844: what the SysOp is shown about this peer taking this node's
+    # boards, channels and file areas. A genesis this exchange declared and
+    # the peer did not ask for is one it holds.
+    own_genesis = {event.content_id for event in resource_events if isinstance(event, _GENESIS_TYPES)}
+    exchange = node.peer_exchange.setdefault(peer_fingerprint, PeerExchange())
+    exchange.at = time.time()
+    exchange.holds &= own_genesis
+    if wanted is not None:
+        exchange.holds |= (own_genesis & declared) - set(wanted)
+    if own_genesis and own_genesis <= exchange.holds:
+        # It holds everything of this node's: whatever it refused before,
+        # it takes this node's content now, pushed or pulled.
+        exchange.refused_reason = None
     if not to_push:
         return
     for index in range(0, len(to_push), MAX_EVENTS_PER_REQUEST):
         try:
             await push_events(node, session, seed_url, to_push[index:index + MAX_EVENTS_PER_REQUEST])
+        except LinkPolicyRefused as exc:
+            # The peer's own text, kept for the SysOp's screens: bounded.
+            exchange.refused_reason = exc.reason_code[:80]
+            if exc.reason_code == REASON_NODE_PROBATIONARY:
+                # The peer's ordinary state for a node it has just met, not a
+                # fault: said once, like probation here (issue #834).
+                _log_once(
+                    node, f"probation-there:{peer_fingerprint}",
+                    "Link: node %s holds this node on probation, so it does not take what this "
+                    "node sends yet. Its SysOp has to establish this node; see Link status.",
+                    peer_fingerprint,
+                )
+            else:
+                _logger.warning("Link sync: could not push events to seed %s: %s", seed_url, exc)
+            return
         except LinkTransportError as exc:
             _logger.warning("Link sync: could not push events to seed %s: %s", seed_url, exc)
             # Deliberately without advancing the offset: the seed
             # received nothing, so the next pass owes it this same
             # stretch, not the one after it.
             return
+    # Only content answers whether the peer takes this node's content: key
+    # transitions pass even a peer's probation, so a push of those alone
+    # leaves the last answer standing.
+    if sending:
+        exchange.refused_reason = None
+        exchange.holds |= own_genesis & {event.content_id for event in sending}
     if wanted is None and resource_events:
         fallback_offsets[peer_fingerprint] = (start + len(sending)) % len(resource_events)
 
@@ -795,6 +834,7 @@ async def _sync_one_seed(
     # leave it unset, and the push below treats that differently from
     # an answered "I need nothing from you."
     wanted: list[str] | None = None
+    declared: frozenset[str] = frozenset()
     # Issue #685: which page of a declaration too large for one request this
     # pass sends, counted per seed so each one is walked through every page.
     page_cursor = node.inventory_page_cursors.get(seed_peer.fingerprint, 0)
@@ -812,6 +852,12 @@ async def _sync_one_seed(
             ),
             paged=descriptor_has_capability(seed_peer.descriptor, INVENTORY_PAGES_CAPABILITY),
             page_cursor=page_cursor,
+        )
+        declared = frozenset(
+            content_id
+            for resources in (inventory_request.boards, inventory_request.channels, inventory_request.file_areas)
+            for content_ids in resources.values()
+            for content_id in content_ids
         )
         events, _more_available, wanted = await request_inventory(
             node, session, seed_url, inventory_request
@@ -842,7 +888,8 @@ async def _sync_one_seed(
                         # established starts to arrive.
                         waiting_for = referenced_identities(event)
                         node.deferred_events.defer(
-                            event, waiting_for=waiting_for[0] if waiting_for else None, now=time.time()
+                            event, waiting_for=waiting_for[0] if waiting_for else None, now=time.time(),
+                            held_from=_held_from(event),
                         )
                         continue
                 allowed_events.append(event)
@@ -909,7 +956,7 @@ async def _sync_one_seed(
     if peer_state == TrustState.ESTABLISHED:
         await _push_own_events(
             node, session, seed_url, lane, wanted=wanted,
-            peer_fingerprint=seed_peer.fingerprint,
+            peer_fingerprint=seed_peer.fingerprint, declared=declared,
             # A caller with no loop of its own gets a throwaway: a single
             # pass has nothing to rotate against.
             fallback_offsets=fallback_offsets if fallback_offsets is not None else {},
@@ -1877,6 +1924,20 @@ def _log_once(node: LinkNode, key: str, message: str, *args: object) -> None:
         node.explained_in_log.clear()
     node.explained_in_log.add(key)
     _logger.info(message, *args)
+
+
+_GENESIS_TYPES = (BoardGenesis, ChannelGenesis, FileAreaGenesis)
+
+
+def _held_from(event: dict) -> str | None:
+    """The node an event refused by trust policy is held back from, for its
+    SysOp's screens (issue #844): its author's node. Unvalidated input, so a
+    shape `event_author` cannot read names nobody."""
+    try:
+        author = event_author(event)
+    except (AttributeError, TypeError):
+        return None
+    return author.node_fingerprint if author is not None else None
 
 
 def _log_withheld_event(node: LinkNode, event: dict, reason_code: str | None) -> None:
