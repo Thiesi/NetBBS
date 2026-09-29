@@ -2937,7 +2937,14 @@ async def _compose_mail(
         # body at the limit, but the signature is added afterwards and can
         # carry it over. Said on the review screen, where [B]ody and
         # [U]pdate subject fix it; Send is refused until then.
+        to_another_bbs = link_enabled and (
+            reply_address is not None or any("@" in entry for entry in split_recipients(recipient_text))
+        )
         too_long = _too_long_to_send(subject, body)
+        if too_long is None and files and to_another_bbs:
+            # A letter to another BBS ends with a line naming each file
+            # (issue #830), which counts toward its length there.
+            too_long = _file_lines_too_long(await lane.run(body_with_link_text, body, files))
         if too_long is not None:
             announce(session, too_long, tone="error")
         action = await review_composition(
@@ -2960,12 +2967,7 @@ async def _compose_mail(
             body_mode=body_mode,
             body_layout="lines",
             breadcrumb=("Mail", title),
-            extra_rows=_file_rows(
-                files, accent=accent_color,
-                to_another_bbs=link_enabled and (
-                    reply_address is not None or any("@" in entry for entry in split_recipients(recipient_text))
-                ),
-            ),
+            extra_rows=_file_rows(files, accent=accent_color, to_another_bbs=to_another_bbs),
             extra_actions=_file_actions(files),
         )
         if isinstance(action, str):
@@ -3544,6 +3546,18 @@ def _unavailable_file_problem(db: Database, sender: User, files: list[FileRef]) 
     for ref in files:
         if open_ref(db, sender, ref).state != AVAILABLE:
             return f"{ref.filename} is no longer available to you. [R]emove it from the letter, then send it."
+    return None
+
+
+def _file_lines_too_long(link_body: str) -> str | None:
+    """Why a letter whose Link copy is `link_body` -- the body with its
+    file lines (issue #830) -- is too long to send, or `None`."""
+    over = characters_over(link_body, MAX_MAIL_BODY_BYTES)
+    if over:
+        return (
+            f"{too_long_message('With the file lines added for someone on another BBS, the message is', over)}"
+            " -- shorten it with [B]ody or [R]emove a file."
+        )
     return None
 
 

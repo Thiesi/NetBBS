@@ -422,6 +422,27 @@ def test_a_link_letter_to_one_person_names_the_file_in_its_body(db, lane):
     assert _ref_rows(db) == []
 
 
+def test_file_lines_that_push_a_link_letter_over_the_limit_are_caught_on_review(db, lane):
+    from netbbs.mail import MAX_MAIL_BODY_BYTES
+
+    alice = _user(db, "alice")
+    node_identity, farpoint = bootstrap_node_identity("roanoke"), bootstrap_node_identity("farpoint")
+    link_context = _link_context_with_known_peer(db, node_identity, farpoint)
+    _file(db, alice)
+    long_line = "x" * (MAX_MAIL_BODY_BYTES - 10)
+    session = FakeSession(
+        keys=["c", "a", "0", "1", "0", "1", "s", "c", "b"],
+        lines=["carol@Farpoint", "Look", long_line, "/done"],
+    )
+    session.terminal_width = 200
+
+    asyncio.run(browse_mail(session, lane, alice, link_context=link_context))
+
+    text = " ".join(_visible_text(session).split())
+    assert "With the file lines added for someone on another BBS, the message is" in text
+    assert list_sent(db, alice) == []
+
+
 def test_a_draft_keeps_the_letters_files():
     refs = [FileRef(file_id="abc", filename="a.zip", area_name="Uploads", size_bytes=3)]
 
