@@ -357,6 +357,31 @@ def test_deliver_link_message_evicts_the_oldest_read_message_when_full_but_some_
     assert subjects == ["hello"]  # the old read one was evicted to make room
 
 
+def test_deliver_link_message_evicts_a_read_system_notice_before_a_read_letter(
+    db, bob, node_identity, remote_node_identity, monkeypatch
+):
+    """Link delivery shares the local quota rule (issue #819): a notice the
+    BBS sent goes before a letter a person wrote."""
+    import netbbs.mail as mail_module
+
+    monkeypatch.setattr(mail_module, "MAX_MAIL_PER_RECIPIENT", 2)
+    db.connection.execute(
+        """
+        INSERT INTO mail_messages
+            (sender_user_id, sender_label, recipient_user_id, subject, body, created_at, read_at)
+        VALUES (NULL, 'someone', ?, 'a letter', 'body', '2026-01-01T00:00:00Z', '2026-01-01T00:01:00Z')
+        """,
+        (bob.id,),
+    )
+    notice = mail_module.send_system_mail(db, bob, "a notice", "body")
+    mail_module.mark_read(db, bob, notice)
+
+    deliver_link_message(db, _incoming_message(node_identity, remote_node_identity).to_dict(), node_identity=node_identity)
+
+    subjects = [m.subject for m in mail_module.list_inbox(db, bob)]
+    assert subjects == ["hello", "a letter"]
+
+
 # -- apply_link_message_accepted / apply_link_message_bounced ------------------
 
 
