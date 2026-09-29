@@ -107,7 +107,19 @@ def test_ctrl_e_answered_no_keeps_the_text(tmp_path):
 
 def test_ctrl_y_brings_erased_text_back(tmp_path):
     result, _ = _edit(["CTRL+E", "y", "CTRL+Y", "CTRL+O"], tmp_path, initial_text="one\ntwo")
-    assert result == "one\ntwo\n"
+    assert result == "one\ntwo"
+
+
+def test_ctrl_y_brings_back_a_text_erased_at_the_size_limit(tmp_path):
+    text = "a" * 20 + "\n" + "b" * 19
+    result, _ = _edit(["CTRL+E", "y", "CTRL+Y", "CTRL+O"], tmp_path, initial_text=text, max_bytes=len(text))
+    assert result == text
+
+
+def test_ctrl_y_restores_a_quote_with_its_blank_line_once(tmp_path):
+    text = "lena_h wrote:\n> Hi\n"
+    result, _ = _edit(["CTRL+E", "y", "CTRL+Y", "CTRL+O"], tmp_path, initial_text=text)
+    assert result == text
 
 
 def test_ctrl_e_is_in_the_help(tmp_path):

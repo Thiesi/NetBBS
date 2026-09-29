@@ -444,8 +444,11 @@ def _dispatch(state: _EditorState, key: EditorKey, width: int, height: int) -> b
         if not state.cut_lines:
             return True
         # Whole lines, so they go in above the cursor's line from its start;
-        # pasted mid-line they end it there, as in nano.
-        pasted = "\n".join(state.cut_lines) + "\n"
+        # pasted mid-line they end it there, as in nano. Into an empty text
+        # there is no line to go above: pasted without the break, Ctrl+Y
+        # after Ctrl+E gives back exactly what was erased, even a text at
+        # the size limit (review on #902).
+        pasted = "\n".join(state.cut_lines) + ("\n" if buffer.to_text() else "")
         if _byte_length(buffer.to_text()) + _byte_length(pasted) > state.max_bytes:
             return True
         buffer.insert_text(pasted)
