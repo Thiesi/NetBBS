@@ -315,6 +315,18 @@ def test_previous_callers_refuses_a_hidden_name_and_your_own_call(db, lane, alic
     assert _sent_rows(db) == []
 
 
+def test_previous_callers_refuses_a_superscript_digit_instead_of_crashing(db, lane, alice, bob):
+    """`"²".isdigit()` is True but `int("²")` raises: typing it (AltGr+2 on
+    a German keyboard) at the number prompt ended the session (#928)."""
+    _called(db, bob)
+    session = FakeSession(keys=["m", "b"], lines=["²"])
+
+    asyncio.run(_previous_callers_screen(session, db, alice, lane=lane))
+
+    assert "There is no caller ² on this list." in _screens(session)[1]
+    assert _sent_rows(db) == []
+
+
 def test_previous_callers_without_mail_is_dismissed_with_any_key(db, lane, alice, bob):
     _called(db, bob)
     set_mail_min_level(db, 50)

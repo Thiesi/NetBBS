@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import re
 
+from netbbs.digits import is_ascii_number
 from netbbs.rendering.ansi import BOLD, RESET
 from netbbs.rendering.ansi import bg as ansi_bg
 from netbbs.rendering.ansi import bg_rgb as ansi_bg_rgb
@@ -61,7 +62,7 @@ def _sgr_paints_spaces(params: str, painting: bool) -> bool:
     values = params.split(";") if params else ["0"]
     index = 0
     while index < len(values):
-        value = int(values[index]) if values[index].isdigit() else 0
+        value = int(values[index]) if is_ascii_number(values[index]) else 0
         if value in (38, 48):
             # 38/48;5;n and 38/48;2;r;g;b carry their own arguments.
             if value == 48:

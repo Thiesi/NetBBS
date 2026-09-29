@@ -1117,13 +1117,15 @@ messages.
   `netbbs.mail.release_mail_of_deleted_account_without_commit` in the same
   transaction, as `delete_user` does; skipping it fails the DELETE with a
   CHECK error rather than orphaning mail.
-- Read receipts (issue #829) are `mail_messages.first_read_at`, set by
-  `mark_read` alone and never cleared (Mark unread clears only `read_at`).
-  Whether a receipt shows is decided at display time by
-  `netbbs.mail.read_receipts`, from both sides' *current* preference, so
-  every screen that shows one must go through it rather than read
-  `first_read_at` itself -- that is what makes opting out hide receipts
-  already given.
+- Read receipts (issue #829) are `mail_messages.first_read_at` plus
+  `first_read_shared` (issue #922: both sides shared receipts at that first
+  reading), both set by `mark_read` alone and never cleared (Mark unread
+  clears only `read_at`). Whether a receipt shows is decided at display time
+  by `netbbs.mail.read_receipts`, from `first_read_shared` *and* both sides'
+  *current* preference, so every screen that shows one must go through it
+  rather than read `first_read_at` itself -- that is what makes opting out
+  hide receipts already given, and what keeps a reading made while either
+  side had receipts off from ever showing.
 - A letter to several people (issue #827) is one row per recipient sharing
   `mail_group_id`; `mail_group_to` holds the whole To on every copy. Any
   per-letter feature (receipts, attachments, threads) works per row and

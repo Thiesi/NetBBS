@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import re
 
+from netbbs.digits import is_ascii_number
 from netbbs.rendering.ansi import CSI, RESET, bg, fg
 
 # Every pipe token a client might emit: two alphanumerics after `|`.
@@ -69,7 +70,7 @@ def strip_non_color_pipe_codes(text: str) -> str:
 
     def _keep_color(match: re.Match[str]) -> str:
         token = match.group(0)
-        if token[1:].isdigit() and int(token[1:]) in range(0, 24):
+        if is_ascii_number(token[1:]) and int(token[1:]) in range(0, 24):
             return token
         return ""
 
@@ -89,7 +90,7 @@ def render_pipe_codes(text: str) -> str:
         nonlocal emitted
         token = match.group(0)
         digits = token[1:]
-        if not digits.isdigit():
+        if not is_ascii_number(digits):
             return ""
         code = int(digits)
         if code in FOREGROUND_CODES:

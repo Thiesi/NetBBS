@@ -39,6 +39,7 @@ from netbbs.files.areas import FileArea, list_file_areas
 from netbbs.files.entries import count_listed_files
 from netbbs.link.boards import LinkContext
 from netbbs.mrc.bridge import MrcBridge
+from netbbs.mrc.protocol import MRC_LABEL_SUFFIX, mrc_sender
 from netbbs.net.board_flow import _show_board
 from netbbs.net.breadcrumb_preference import breadcrumb_collapsed_enabled
 from netbbs.net.char_input import InputHistory
@@ -581,6 +582,15 @@ def _looks_like_attempted_boolean_syntax(query: str) -> bool:
     return any(token.lower() in _BOOLEAN_LOOKING_WORDS for token in query.split())
 
 
+def _chat_hit_author(author_label: str) -> str:
+    """Who said a chat line Find turned up. An MRC sender reads `(on MRC)`,
+    as `/who` has it, not the stored `(MRC)`, which after a name now reads
+    as an account (issue #899)."""
+    if author_label.endswith(MRC_LABEL_SUFFIX):
+        return f"{mrc_sender(author_label)} (on MRC)"
+    return author_label
+
+
 async def _find_screen(
     session: Session,
     db: Database,
@@ -623,7 +633,8 @@ async def _find_screen(
 
     The caller's own mail is searched too (issue #824) -- their Inbox and
     Sent, never anyone else's (`netbbs.search.search_mail`) -- unless mail
-    is closed to them (`caller_mail_refusal`, issue #816), and a letter
+    is closed to them (`caller_mail_refusal`, issue #816). Mail results
+    come first, ahead of posts, files and chat (issue #918), and a letter
     opens in the mailbox's own message view (`open_letter`).
     """
     mail_open = await lane.run(lambda db: caller_mail_refusal(session, db, user)) is None
@@ -655,6 +666,24 @@ async def _find_screen(
         next_index = 1
         items: list[_SearchResultItem] = []
         truncated = False
+
+        # The caller's own letters (issue #824), for a caller mail is open
+        # to: no guest and nobody below the mail level (issue #816). Listed
+        # first (issue #918): the caller's own mail is often what they are
+        # looking for.
+        if mail_open:
+            mail_hits = search_mail(db, user, query, limit=_SEARCH_RESULT_LIMIT + 1)
+            truncated = truncated or len(mail_hits) > _SEARCH_RESULT_LIMIT
+            for hit in mail_hits[:_SEARCH_RESULT_LIMIT]:
+                where = f"to {hit.label}" if hit.sent else f"from {hit.label}"
+                items.append(
+                    _SearchResultItem(
+                        kind="mail", name=hit.message.subject,
+                        description=f"[MAIL] {where}: {_search_snippet(plain_post_body(hit.message.body))}",
+                        result_index=next_index, mail=hit,
+                    )
+                )
+                next_index += 1
 
         post_hits = search_posts(db, user, query, limit=_SEARCH_RESULT_LIMIT + 1)
         truncated = truncated or len(post_hits) > _SEARCH_RESULT_LIMIT
@@ -691,27 +720,12 @@ async def _find_screen(
             items.append(
                 _SearchResultItem(
                     kind="channel_message", name=_search_snippet(hit.body),
-                    description=f"[CHAT] #{hit.channel.name} by {hit.author_label}",
+                    description=f"[CHAT] #{hit.channel.name} by {_chat_hit_author(hit.author_label)}",
                     result_index=next_index, message=hit,
                 )
             )
             next_index += 1
 
-        # The caller's own letters (issue #824), for a caller mail is open
-        # to: no guest and nobody below the mail level (issue #816).
-        if mail_open:
-            mail_hits = search_mail(db, user, query, limit=_SEARCH_RESULT_LIMIT + 1)
-            truncated = truncated or len(mail_hits) > _SEARCH_RESULT_LIMIT
-            for hit in mail_hits[:_SEARCH_RESULT_LIMIT]:
-                where = f"to {hit.label}" if hit.sent else f"from {hit.label}"
-                items.append(
-                    _SearchResultItem(
-                        kind="mail", name=hit.message.subject,
-                        description=f"[MAIL] {where}: {_search_snippet(plain_post_body(hit.message.body))}",
-                        result_index=next_index, mail=hit,
-                    )
-                )
-                next_index += 1
         return items, truncated
 
     items, truncated = await lane.run(_load)

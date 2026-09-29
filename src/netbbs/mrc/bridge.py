@@ -1681,7 +1681,9 @@ class MrcBridge:
             return
         # Display only (issue #378): the spec says to show underscores as
         # spaces; matching and addressing keep the wire spelling.
-        author_label = f"{protocol.display_handle(packet.from_user) or 'unknown'}@{packet.from_site or 'unknown'} (MRC)"
+        author_label = protocol.mrc_author_label(
+            protocol.display_handle(packet.from_user) or "unknown", packet.from_site or "unknown"
+        )
         try:
             recorded = await self._lane.run(
                 record_message, mapping.channel, kind=kind, author_label=author_label,

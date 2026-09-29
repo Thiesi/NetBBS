@@ -53,6 +53,7 @@ from typing import Awaitable, Callable
 from urllib.error import URLError
 
 from netbbs.config import get_config, set_config
+from netbbs.digits import is_ascii_number
 from netbbs.selfupdate import get_auto_update_check_enabled
 from netbbs.storage.database import Database
 
@@ -135,7 +136,7 @@ def _default_fetch(url: str) -> bytes:
     request = urllib.request.Request(url, headers={"User-Agent": "netbbs-reliable-nodes"})
     with urllib.request.urlopen(request, timeout=30) as response:
         declared = response.headers.get("Content-Length")
-        if declared is not None and declared.isdigit() and int(declared) > MAX_RELIABLE_NODES_RESPONSE_BYTES:
+        if declared is not None and is_ascii_number(declared) and int(declared) > MAX_RELIABLE_NODES_RESPONSE_BYTES:
             raise ReliableNodesError(
                 f"reliable-nodes list response exceeds {MAX_RELIABLE_NODES_RESPONSE_BYTES} bytes"
             )

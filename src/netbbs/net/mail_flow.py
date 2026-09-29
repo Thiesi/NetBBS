@@ -73,7 +73,6 @@ from netbbs.mail import (
     MailboxFullError,
     MailError,
     MailMessage,
-    RECEIPT_DELETED_UNREAD,
     RECEIPT_HIDDEN,
     RECEIPT_NOT_READ,
     RECEIPT_READ,
@@ -540,9 +539,7 @@ def _receipt_summary(receipts: list[ReadReceipt]) -> str | None:
     """The Sent list's read state for a letter's local copies (issue #829):
     whether every copy that reports its reading was read, some or none; that
     no recipient shares receipts; or None with no receipt to show."""
-    reported = [receipt for receipt in receipts if receipt.state in (
-        RECEIPT_READ, RECEIPT_NOT_READ, RECEIPT_DELETED_UNREAD,
-    )]
+    reported = [receipt for receipt in receipts if receipt.state in (RECEIPT_READ, RECEIPT_NOT_READ)]
     if reported:
         read = sum(receipt.state == RECEIPT_READ for receipt in reported)
         if read == len(reported):
@@ -1577,8 +1574,9 @@ async def _read_receipt_lines(
 
     A letter to one person has one `Read:` line. A letter to several people
     names its recipients by what their receipts say -- read (with when),
-    not read yet, deleted unread, not shared -- a line each, which keeps
-    twenty recipients to four lines. Mail to all callers counts instead of
+    not read yet, not shared -- a line each, which keeps twenty recipients
+    to three lines. A letter deleted unopened is "not read yet" like any
+    other (issue #922): the recipient's deletion is not the sender's to see. Mail to all callers counts instead of
     naming. A recipient who does not share receipts is always said to, even
     to a sender who does not share them either: that is only their setting,
     and it keeps "not read" from being guessed. Of everything else, a sender
@@ -1599,7 +1597,6 @@ async def _read_receipt_lines(
             return [line("Read: ", when(receipt.read_at), SUCCESS_COLOR)]
         text, color = {
             RECEIPT_NOT_READ: ("not yet", MUTED_COLOR),
-            RECEIPT_DELETED_UNREAD: ("no, deleted without being read", MUTED_COLOR),
             RECEIPT_WITHHELD: (f"not shown, as {name} doesn't share read receipts", MUTED_COLOR),
             RECEIPT_HIDDEN: (_RECEIPTS_OFF_TEXT, MUTED_COLOR),
         }[receipt.state]
@@ -1630,7 +1627,6 @@ async def _read_receipt_lines(
     for state, label, color in (
         (RECEIPT_READ, "Read by: ", SUCCESS_COLOR),
         (RECEIPT_NOT_READ, "Not read yet: ", MUTED_COLOR),
-        (RECEIPT_DELETED_UNREAD, "Deleted unread: ", MUTED_COLOR),
         (RECEIPT_WITHHELD, "Don't share read receipts: ", MUTED_COLOR),
     ):
         if state in grouped:
