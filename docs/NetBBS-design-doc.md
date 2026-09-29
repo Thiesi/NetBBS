@@ -4272,7 +4272,8 @@ work item dead-lettered: no route took the message, or this node's own trust
 policy held it back to the end, which is recorded as its own reason. A bounce
 or expiry flags the message until its sender is told: once, at their next
 main menu, which covers a sender who was offline when it happened, or by
-opening it in Sent. A later acceptance clears the flag and wins. A bounce
+opening it in Sent. Mail the sender already deleted from Sent is not told
+about. A later acceptance clears the flag and wins. A bounce
 message in the inbox would need a system sender (issue #819) and is not sent.
 
 Delivery state records only answers that arrive. Mail a relay took for a

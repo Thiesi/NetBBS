@@ -563,12 +563,13 @@ def pending_delivery_notices(db: Database, sender: User) -> tuple[list[str], lis
     the lines are on screen. Persistent, so a sender who was offline when
     the bounce arrived is told at their next main menu (issue #806).
     Nothing is marked here: a caller who drops before the menu is drawn is
-    told next time."""
+    told next time. Mail the sender deleted from Sent is left out: they are
+    done with it, and Sent can no longer show it."""
     rows = db.connection.execute(
         """
         SELECT id, subject, recipient_remote_address, link_delivery_status, link_delivery_reason
         FROM mail_messages
-        WHERE sender_user_id = ? AND link_delivery_notice_pending = 1
+        WHERE sender_user_id = ? AND link_delivery_notice_pending = 1 AND sender_deleted_at IS NULL
         ORDER BY id
         """,
         (sender.id,),

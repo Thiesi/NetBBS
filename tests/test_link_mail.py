@@ -614,6 +614,17 @@ def test_pending_delivery_notices_name_the_message_and_the_reason_until_acknowle
     assert pending_delivery_notices(db, alice) == ([], [])
 
 
+def test_pending_delivery_notices_leave_out_mail_deleted_from_sent(db, alice, node_identity, remote_node_identity):
+    from netbbs.mail import delete_for_sender, list_sent
+
+    message = _sent(db, alice, remote_node_identity, node_identity)
+    delete_for_sender(db, alice, list_sent(db, alice)[0])
+
+    apply_link_message_bounced(db, _bounce(remote_node_identity, message))
+
+    assert pending_delivery_notices(db, alice) == ([], [])
+
+
 def test_pending_delivery_notices_cap_the_list_and_count_the_rest(db, alice, node_identity, remote_node_identity):
     _seed_peer(db, remote_node_identity)
     for index in range(MAX_DELIVERY_NOTICES_SHOWN + 3):
