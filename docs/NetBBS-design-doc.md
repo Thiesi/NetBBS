@@ -424,9 +424,10 @@ editor on every change -- so a dropped connection keeps the text too.
 Every draft slot belongs to one composition, and a draft is only ever
 offered for the composition it belongs to (issue #814): a board's new post
 (one per caller and board), a reply to one post, an edit of one post, a
-caller's new letter (one per caller), a reply to one message. A caller that
-offers its draft itself -- a board's `[D]raft`, mail's `[D]raft`, `[C]ompose`
-or `[R]eply` -- passes the draft in as the text with `offer_recovery` off, so
+caller's new letter (one per caller), a reply to one message, a forward of one
+message (issue #822). A caller that
+offers its draft itself -- a board's `[D]raft`, mail's `[D]raft`, `[C]ompose`,
+`[R]eply` or `[F]orward` -- passes the draft in as the text with `offer_recovery` off, so
 the editor neither asks again nor deletes the draft before something replaces
 it. Before #814 mail had one body-only draft per user, which the fullscreen
 editor offered in place of any later letter's text: a reply to someone else
@@ -2416,6 +2417,29 @@ back on the screen they came from with the outcome above its prompt.
 A letter started from the Directory, Who's online or Previous callers is the
 caller's new letter, the same slot `[C]ompose` uses: a kept new letter is
 offered first, and resuming it keeps its own recipient.
+
+**Forwarding** (issue #822). `[F]orward` on a received letter's view and on a
+sent letter's view starts a new letter titled "Forward": Subject gets `Fwd: `
+unless it already starts with `Fwd:` or `Fw:` (the `Re:` rule, one helper in
+`netbbs.quoting`), and the body is the letter under a header --
+`---------- Forwarded message ----------`, then `From:`, `To:`, `Date:` and
+`Subject:` as the view names them (a Link address by its node's current name,
+system mail as **System**, the date in the forwarder's format), a blank line,
+and the body. The caller types the recipient at the To prompt, which makes
+every check a new letter's does, so any letter goes to a local account or a
+Link address alike; the fullscreen editor opens at the top, where a note goes.
+- The body is carried verbatim, not quoted. A forward passes a letter on for
+  someone else to read: `>` would mark it as text being answered, and the
+  quote's bounds (40 lines, 8,000 bytes, stop at the signature) would cut what
+  the forward exists to carry. Escape sequences are removed; color pipe codes
+  stay, so it reads as the original did.
+- Nothing extra bounds it: a letter at the body limit is over it once the
+  header is added, and the review screen says so in characters and refuses
+  Send until `[B]ody` shortens it (issue #812), as for any over-limit letter.
+- System mail can be forwarded. Passing a moderation notice on -- to the SysOp,
+  say -- harms no one, and the header says it came from System.
+- `caller_mail_refusal` is checked when the key is pressed. Each letter's
+  forward has its own draft slot, apart from a reply to it.
 
 ### 6.5 Communities
 

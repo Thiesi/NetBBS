@@ -1,7 +1,8 @@
 """
 Replying with a quote (issue #675): the subject a reply starts with and
 the quoted text its body starts with. Shared by a board post's `[R]eply`
-and mail's Reply, so the two read the same.
+and mail's Reply, so the two read the same. Mail's Forward (issue #822)
+takes its subject rule and its forwarded-message header from here too.
 
 Both callers hand `quote_body` the body a reader with color off sees
 (`netbbs.rendering.post_body.plain_post_body`) -- mail too, since it
@@ -31,8 +32,19 @@ def reply_subject(subject: str, *, max_bytes: int) -> str:
     """`subject` with "Re: " in front, unless it already starts with one,
     cut to `max_bytes` of UTF-8 so the prefix cannot push a subject at the
     limit over it."""
+    return _prefixed_subject(subject, "Re:", ("re:",), max_bytes=max_bytes)
+
+
+def forward_subject(subject: str, *, max_bytes: int) -> str:
+    """`subject` with "Fwd: " in front, unless it already starts with one
+    (or with the "Fw:" some mail programs write), cut to `max_bytes` as
+    `reply_subject` is (issue #822)."""
+    return _prefixed_subject(subject, "Fwd:", ("fwd:", "fw:"), max_bytes=max_bytes)
+
+
+def _prefixed_subject(subject: str, prefix: str, already: tuple[str, ...], *, max_bytes: int) -> str:
     stripped = subject.strip()
-    text = stripped if stripped.lower().startswith("re:") else f"Re: {stripped}"
+    text = stripped if stripped.lower().startswith(already) else f"{prefix} {stripped}"
     encoded = text.encode("utf-8")
     if len(encoded) <= max_bytes:
         return text
@@ -75,3 +87,31 @@ def quote_body(body: str, *, author: str) -> str:
         quoted.append(row)
     header = f"{cut_to_width(author, 60)} wrote:"
     return "\n".join([header, *quoted, ""])
+
+
+FORWARD_RULE = "---------- Forwarded message ----------"
+
+
+def forward_body(body: str, *, sender: str, recipient: str, date: str, subject: str) -> str:
+    """`body` as a forward carries it (issue #822): a header naming whom
+    it was from and to, when and under what subject, then a blank line and
+    the body itself, whole.
+
+    Verbatim, not quoted: a forward passes a letter on for someone else to
+    read, so it is not marked as text being answered, and nothing is cut --
+    `quote_body` stops at `MAX_QUOTED_LINES` and at the signature, which a
+    forward must keep. What the forwarder may send is bounded by the mail
+    body limit instead, checked before the letter is reviewed.
+
+    `body` keeps its color pipe codes, so the forward reads as the original
+    did; it and every header value may come from another node and are
+    sanitized here. Text for an editor, never anything rendered."""
+    text = sanitize_text(body.replace("\r\n", "\n").replace("\r", "\n"), allow_newlines=True).strip("\n")
+    header = [
+        FORWARD_RULE,
+        f"From: {sanitize_text(sender)}",
+        f"To: {sanitize_text(recipient)}",
+        f"Date: {sanitize_text(date)}",
+        f"Subject: {sanitize_text(subject)}",
+    ]
+    return "\n".join([*header, "", text])
