@@ -70,6 +70,11 @@ NICK_COLOR = 39   # sky blue — a `/nick` alias shown alone in the live chat st
                   # (design doc), distinct from ACCENT_COLOR/SELF_COLOR so
                   # "this is a stand-in name, not necessarily the account's own" reads
                   # as its own visual category rather than blending into either
+NODE_COLOR = 116  # pale turquoise — the linked node after the `@` of a chat
+                  # speaker (issue #899), so `user@Node` splits at a glance into
+                  # who is talking and where from. Paler than NICK_COLOR's
+                  # saturated azure, which can sit on the next line, and not
+                  # gold, which is the speaker's own name beside it
 VERIFIED_COLOR = 82  # vivid green — a SysOp-verified real name (design doc),
                      # applied to the whole "(=name=)" unit at render time,
                      # directly from the trusted attested_value, never derived from

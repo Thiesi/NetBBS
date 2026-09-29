@@ -1779,6 +1779,19 @@ bulk `UPDATE`/`DELETE`, since `reindex_post`/`reindex_file` need to be
 called once per affected id afterward and a set-based statement doesn't
 otherwise expose which rows it touched.
 
+`mail_search` (issue #824) is keyed by rowid = `mail_messages.id`, not an
+UNINDEXED id column: a letter is removed by rowid on every hard delete, and
+an FTS5 filter on an UNINDEXED column scans the whole table. Every
+`INSERT INTO mail_messages` must call `index_mail_without_commit` before its
+commit and every `DELETE FROM mail_messages` must call
+`unindex_mail_without_commit` (bulk deletes go through
+`netbbs.mail._delete_letters_without_commit`, which collects the ids first);
+the entry is private text, so a missed delete leaves words of a letter
+nobody has behind. Setting a side's `*_deleted_at` changes nothing in the
+index: whose mailbox a letter is in is read from the row at query time. A
+test that inserts a `mail_messages` row with raw SQL gets no index entry,
+so Find will not see its body.
+
 **Content-hash IDs are not orderable by recency (GitHub issue #68, fixed).**
 `_resolve_current_version` and `edit_post`'s own "current revision" lookup
 both pick the newest approved revision of a post's edit chain by ordering

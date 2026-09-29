@@ -342,7 +342,7 @@ def test_forward_hotkey_is_on_both_views_and_clashes_with_nothing(people, monkey
         assert bar_rows and all(len(line) <= width for line in bar_rows)
     inbox_bar, sent_bar = bars
     assert inbox_bar == ["r", "f", "u", "d", "k", "b"]
-    assert sent_bar == ["f", "d", "b"]
+    assert sent_bar == ["r", "f", "d", "b"]
     # The pager's own keys stay N and P.
     assert not {"n", "p"} & {*inbox_bar, *sent_bar}
 

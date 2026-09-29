@@ -24,6 +24,7 @@ piece every other screen module is ultimately reached through.
 from __future__ import annotations
 
 import asyncio
+import logging
 from enum import Enum, auto
 from pathlib import Path
 
@@ -50,6 +51,7 @@ from netbbs.mrc.bridge import MrcBridge
 from netbbs.net.char_input import InputHistory
 from netbbs.net.confirm import prompt_yes_no
 from netbbs.net.logoff_banner import load_logoff_banner
+from netbbs.net.mail_arrivals import watch_for_mail
 from netbbs.net.main_menu import _main_menu
 from netbbs.net.maintenance import LOCKDOWN_MESSAGE, LOCKDOWN_NOTICE, MAINTENANCE_MESSAGE, MaintenanceMode
 from netbbs.net.onboarding_flow import offer_onboarding
@@ -115,6 +117,8 @@ _MAX_LOGIN_ATTEMPTS = 3
 # for a real disable/delete, cheap enough that one extra SELECT per
 # live session per interval is a non-issue at this project's declared
 # scale (§14, dozens to low hundreds of concurrent sessions).
+_logger = logging.getLogger(__name__)
+
 _REVOCATION_CHECK_INTERVAL_SECONDS = 5.0
 
 # Bounds the watcher's own "you're disconnected" notice (GitHub issue
@@ -772,6 +776,7 @@ async def run_authenticated_session(
     completed_history_entry = None
     intentional_logoff = False
     watcher_task: asyncio.Task | None = None
+    mail_watch_task: asyncio.Task | None = None
     # Issue #762: onboarding, the Unicode question and the previous-callers
     # screen come before the main menu, which is what empties the trail.
     set_root_activity(session, "Logging in")
@@ -786,6 +791,9 @@ async def run_authenticated_session(
         watcher_task = asyncio.create_task(
             _watch_for_account_revocation(session, db, user, node_controls.session_registry)
         )
+        # Issue #823: mail that arrives while this caller is online is
+        # announced, live in chat and at the next screen elsewhere.
+        mail_watch_task = asyncio.create_task(watch_for_mail(session, db, user))
     try:
         if lane is not None and meets_level(user, SYSOP_LEVEL):
             await offer_onboarding(session, lane)
@@ -811,6 +819,10 @@ async def run_authenticated_session(
             current_history_id=history_id,
         )
     finally:
+        if mail_watch_task is not None:
+            # First, before anything here can raise: nothing else stops it,
+            # and it would poll for a session that is gone (review on #898).
+            mail_watch_task.cancel()
         presence.leave(user.username)
         if (
             not presence.is_online(user.username)
@@ -832,6 +844,16 @@ async def run_authenticated_session(
                 await watcher_task
             except asyncio.CancelledError:
                 pass
+        if mail_watch_task is not None:
+            # Retrieved last, so it adds no wait before the account watcher
+            # is stopped. A failure of its own is logged rather than raised
+            # from here, where it would mask how the session ended.
+            try:
+                await mail_watch_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                _logger.exception("New-mail watcher for %s failed", user.username)
 
     # GitHub issue #177: only reached when `_main_menu` returns normally,
     # not when it (or anything nested under it) raises -- which covers

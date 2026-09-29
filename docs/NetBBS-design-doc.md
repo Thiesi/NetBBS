@@ -437,7 +437,7 @@ Every draft slot belongs to one composition, and a draft is only ever
 offered for the composition it belongs to (issue #814): a board's new post
 (one per caller and board), a reply to one post, an edit of one post, a
 caller's new letter (one per caller), a reply to one message, a forward of one
-message (issue #822). A caller that
+message (issue #822), a resend of one sent message (issue #825). A caller that
 offers its draft itself -- a board's `[D]raft`, mail's `[D]raft`, `[C]ompose`,
 `[R]eply` or `[F]orward` -- passes the draft in as the text with `offer_recovery` off, so
 the editor neither asks again nor deletes the draft before something replaces
@@ -1090,6 +1090,17 @@ dropped from a typed reference, which is unambiguous because no friendly name,
 DNS name or fingerprint may contain a double quote. A typed address splits at
 its first `@`, since a user name cannot contain one and a node name can.
 
+A chat line, and each line of a Link private conversation, names a linked
+speaker's node by its friendly name alone (issue #899): the DNS name repeated
+on every line cost more width than it told anyone. Where another node this BBS
+knows of claims the same name -- as its friendly name or its DNS name, the one
+namespace the identity warning uses -- or this BBS claims it now or did
+recently, the name is qualified -- `Name · dns.example`, or `Name · abc123`, the first six characters
+of the technical identity, when the node has no DNS name -- and the node map
+disambiguates a shared name the same way. Both qualified forms resolve when
+typed back. The speaker is styled in parts: the brackets and the `@` muted,
+the user in the speaker color, the node in its own color (`NODE_COLOR`).
+
 The user half of an address follows the local username grammar (ASCII letters,
 digits, `_`, `-`, `.`, at most 32 characters), capitals included: a name is
 addressed exactly as it is displayed, and the recipient node looks it up
@@ -1110,7 +1121,11 @@ Peers retain authenticated observations of all three values. A friendly-name
 change under the same fingerprint is an informational continuity notice. A DNS
 change under the same fingerprint is a more prominent routing notice. Reuse of
 a familiar friendly or DNS name by a different fingerprint is a strong
-cryptographic-identity warning: the UI explains that recovery/replacement may
+cryptographic-identity warning. A friendly name counts as familiar when it reads
+as one -- compared by §4.2's skeleton as §6.3 extends it for aliases, the key they are
+checked with, so "0utBound", "Out Bound" and "OutBоund" with a Cyrillic о are
+all "OutBound" (issue #900) -- while a DNS name must match exactly: it is unique
+by registration, and folding would equate different real hosts. The UI explains that recovery/replacement may
 be legitimate but impersonation is possible, and it does not prevent the user
 from continuing. Presentation names never transfer trust or reputation between
 fingerprints.
@@ -1904,13 +1919,26 @@ parent, listed on the board like any other post. There is no threaded view.
 - **Body:** starts as the post quoted, with the cursor under the quote:
   "<author> wrote:", then each line of the post before its signature with
   `> ` in front. A line that was already quoted becomes `> > `.
-- **Attribution line:** the board reader, which reflows prose, shows a line
-  ending in " wrote:" (not itself quoted) as a line of its own, never joined
-  to the text around it. A replier who trims the quote and writes straight
-  under "<author> wrote:" would otherwise have their words read as the
-  quoted author's (#837). This holds for any such line, not just ones the
-  quote wrote, since a reader cannot tell them apart. Mail keeps every line
-  anyway.
+- **Attribution line:** "<author> wrote:" is always a line of its own. The
+  board reader used to reflow prose, and joined the text a replier wrote
+  straight under a trimmed quote onto it, so their words read as the quoted
+  author's (#837). Posts now keep their lines (see **How a post reads**),
+  which keeps the attribution apart for any author, as mail always did.
+- **How a post reads** (issue #837): a board post keeps the lines its author
+  wrote, as a letter does (issue #809): the reader, the review screen, the
+  pending-post screen and a post's history show every line as written and
+  wrap only a line wider than the terminal, at a word
+  (`netbbs.rendering.post_body.lined_body_rows`), in every display mode and
+  for posts carried over Link alike. Posts used to be reflowed into
+  paragraphs, which merged bullet lists, sign-offs ("73, Harold") and short
+  separate lines into one, in both editors' output. The line editor's blank
+  line is a paragraph break and the fullscreen editor's lines are the
+  author's, so neither needs a reader to rejoin lines. A post written before
+  this that relied on reflow -- a paragraph typed as several short lines --
+  shows those lines as typed. Rejected: reflowing only posts from the line
+  editor (the reader cannot tell the editors apart, and a carried post has
+  no editor at all) and a per-post "keep lines" flag (a second layout for
+  the same text).
 - **Quote limits:** a quote is at most 40 lines and 8 KB, and a cut quote
   ends with `> [...]`, so a reply to a long post stays writable in the line
   editor.
@@ -1945,8 +1973,9 @@ carried exactly as written and filtered on output
 - **Who sees what:** where color is allowed, a reader with "Post colors" on
   (Profile, on by default) sees it; with it off, plain text without the codes.
   Where it is not allowed, a body shows as text, pipe codes as typed.
-- **Layout:** a colored body reflows like any other. Every row restates the
-  color it inherits and ends with a reset, because the reader pages by rows.
+- **Layout:** a colored body keeps its lines like any other. Every row
+  restates the color it inherits and ends with a reset, because the reader
+  pages by rows.
   The state is kept normalized, so a flood of codes costs each row one short
   prefix. The review screen and the SysOp's pending-post screen show a body
   the same way.
@@ -2106,7 +2135,10 @@ the authenticated canonical identity, and permissions, moderation, blocking,
 reputation, and addressing always use canonical identity.
 
 An alias is always shown with the username beside it, as `alias|username`, in
-the live stream as in `/who`, `/whois` and `/names` (issue #843). It may not
+the live stream as in `/who`, `/whois` and `/names` (issue #843). In the live
+stream the alias leads in its own color and `|username` follows muted (issue
+#899): the username is there so no alias stands alone, not to compete with the
+name its owner chose. It may not
 contain `| [ ] < > * ~`: the separator, a status-bar tag's brackets, the angle
 brackets around a speaker, the `*` of actions and notices, and the old alias
 marker. It may not read as another local account's username, or, unless its
@@ -2264,6 +2296,40 @@ the owner can act on it.
 Local mail is the domain extended by Link messages; Link mail does not create a
 parallel mailbox UI.
 
+**Telling a caller that mail arrived** (issue #823). Three places, all only
+for a caller mail is open to (`caller_mail_refusal`):
+
+- *At login.* The first main menu after login says how many messages are
+  unread, above its prompt. The main menu's mail notices are told together
+  in one order: that count, then the cap's eviction count (#818), then the
+  caller's own Link mail that bounced or expired (#806). Moderation outcomes
+  come before them.
+- *In New scan.* A `Mail: N unread` line heads the summary above the list,
+  and `[E]-mail` opens the mailbox from there. A line with a key, like the
+  replies to the caller, not a row: the list is places, and a mailbox row
+  would renumber every board beneath it.
+- *While online.* A per-session watcher (`netbbs.net.mail_arrivals`, started
+  next to the account watcher) compares the Inbox's unread letters with the
+  ones it has seen. It polls every five seconds, so every way a letter
+  arrives is covered -- local, Link, system, another process -- without a
+  hook in each delivery path; a local send also wakes the recipient's
+  watchers at once. It tells the caller the way `/msg` does: through
+  `Session.pinned_notice_hook` when a screen has one (chat, the SysOp's live
+  monitor), so the line appears at once; otherwise as a notice for the next
+  screen drawn, never written into a door (`door_active`) or an editor. An
+  idle main menu or Inbox races the watcher's arrival event against its key
+  read and redraws at once, so its counts and rows are current; the Inbox
+  keeps its pending key read across that redraw rather than cancelling it.
+  Letters are told apart by `(id, created_at)`, not by id, because the table
+  has no AUTOINCREMENT; a letter marked unread again is not new. Up to three
+  arrivals are named ("New mail from bob: Lunch?"), more are counted.
+
+There is no preference to turn the live notice off: it is one line per
+letter, and callers already choose who may write to them (blocked senders,
+below). A `/msg` queued for a caller outside chat is carried above the main
+menu's prompt in the same way; before #823 it was written above the menu,
+where a redraw in place cleared it unseen.
+
 **Who may use mail** (issue #816). Mail has a node-wide level, `mail_min_level`
 (Settings > Limits & retention, default 0, so open to every account). It
 covers reading, writing and replying, to this node and over Link, as one
@@ -2412,7 +2478,8 @@ The list:
 - `[F]ind` narrows the folder to mail with a word in the name or the
   subject, as the row shows them. The picker's `[S]earch` said "by name"
   but matched the subject, `[NEW] ` prefix included, so "new" matched every
-  unread message.
+  unread message. The main menu's Find searches bodies too, across both
+  folders (issue #824, §6.6).
 - `[U]nread` on the list marks the highlighted message unread, or read if
   it is unread; the reader's `[U]nread` marks the open message unread and
   returns to the list. Opening a message is still what marks it read.
@@ -2428,10 +2495,11 @@ and `Date:`, as a sent message's view has `To:`.
 message view, Sent's view and the review screen show every line as written,
 and wrap only a line wider than the terminal, at a word
 (`netbbs.rendering.post_body.lined_body_rows`). Mail used to reflow a body the
-way a board post reflows. That ran a greeting into the first sentence, a list
+way a board post then reflowed. That ran a greeting into the first sentence, a list
 into one line and a signature into `-- Alice of Q Pen club treasurer`. A
 letter's short lines are its form, not text to rewrap. `>` quote lines are
-muted and keep their marker when they wrap, as in a post.
+muted and keep their marker when they wrap. Board posts read the same way
+since issue #837.
 
 A body is filtered exactly as a post on a board that allows color (§6.1,
 "Color in posts"): pipe codes and SGR color show, and every other escape
@@ -2505,6 +2573,35 @@ only at the forwarded letter's own.
   say -- harms no one, and the header says it came from System.
 - `caller_mail_refusal` is checked when the key is pressed. Each letter's
   forward has its own draft slot, apart from a reply to it.
+
+**Reply and Resend on Sent** (issue #825). A sent letter's view is
+`[R]eply Re[s]end [F]orward [D]elete [B]ack`; both new keys write to the
+letter's recipient through `mail_someone`, so the checks a letter started from
+a meeting place gets are made when the key is pressed, and Send makes them
+again (`send_mail`'s recipient and block checks, `_check_link_reply_address`
+for a Link address). A recipient whose account was deleted since (#818) is
+refused at the key, by the name Sent shows. After a letter is sent the view
+closes and the screen it was opened from -- the Sent list, the new letter on
+it, or the main menu's Find results (#824) -- shows "Message sent." above its
+prompt; a cancelled, kept or refused one comes back to the view.
+- `[R]eply` is a follow-up: `Re:` by the reply rule, and the caller's own
+  letter quoted under "<caller> wrote:" as a reply to a received letter is
+  quoted. Quoting one's own letter was chosen over an empty body: the
+  recipient may have deleted it, and the quote is one keystroke to remove. It
+  shares the reply draft slot scheme (`_reply_key`), so it is offered only for
+  that letter.
+- `Re[s]end` is offered only on Link mail that bounced or expired (any
+  reason, `no_answer` included). Mail that was delivered, is pending or is
+  with a relay may reach its reader, and local mail cannot fail after Send, so
+  a second copy there would only be a duplicate; the caller can still forward
+  it or write anew. The new letter is titled "Resend", goes to the stored
+  `recipient_remote_address`, and carries the subject and body verbatim --
+  not quoted, not `Fwd:` -- with escape sequences removed and color pipe codes
+  kept, as a forward's body is. The signature it was sent with is part of the
+  body, so none is appended again. It has a draft slot of its own per letter
+  (`mail_resend_<user>_<key>.draft`), apart from a reply to or a forward of
+  it. The failed row is not changed: it keeps its status and reason, and
+  opening it still clears its notice flag (#806).
 
 ### 6.5 Communities
 
@@ -2851,10 +2948,11 @@ capability from the item picker's simple, per-call substring name match
 (`pick_item`'s own search command, unrelated and unchanged — see below):
 
 - **scope**: only this node's own already-stored content — approved board
-  posts (subject/body), approved file entries (filename/description), and
-  retained channel scrollback (message body). Never content this node does
-  not itself carry — there is no Link-wide query protocol, and this design
-  does not imply or require one;
+  posts (subject/body), approved file entries (filename/description),
+  retained channel scrollback (message body), and the searching caller's own
+  mail (issue #824, below). Never content this node does not itself carry —
+  there is no Link-wide query protocol, and this design does not imply or
+  require one;
 - **mechanism**: SQLite FTS5 virtual tables (`post_search`, `file_search`,
   `channel_message_search`), kept in sync with `posts`/`files`/
   `channel_messages` by explicit calls from `netbbs.boards.posts`/
@@ -2868,7 +2966,10 @@ capability from the item picker's simple, per-call substring name match
   a root with no approved revision left is never indexed.
   `channel_message_search` is pruned in the same statement that trims
   scrollback's own ring buffer, so a search can never surface a message
-  already gone from retained scrollback.
+  already gone from retained scrollback. `mail_search` mirrors
+  `mail_messages` one-to-one, keyed by the letter's id as its rowid, and
+  is written and removed in the same transaction as the row
+  (`netbbs.mail`, `netbbs.link.mail`);
   FTS5 availability was traced, not just assumed, for this project's actual
   NetBSD/pkgsrc target: `lang/python312`'s Makefile buildlinks against
   `databases/sqlite3` (not an amalgamation bundled into Python itself), and
@@ -2900,21 +3001,47 @@ capability from the item picker's simple, per-call substring name match
   default newest page. A channel message instead just enters its channel —
   channels have no "jump to one message" concept, the same limitation
   `[N]ew scan`'s own channel dispatch already accepts.
+- **the caller's own mail (issue #824)**: Find searches the caller's Inbox
+  and Sent folder, never anyone else's mail and never a letter the caller
+  deleted from their side (the other party's copy stays theirs). System
+  mail is in the Inbox, so it is searched too. A letter matches when each
+  typed word is in its subject, its body as plain text (color codes and
+  escapes removed, as the post index does), or the From/To name the mailbox
+  shows. Those names are resolved when shown — a Link node can rename, a
+  local recipient is looked up by id — so they are matched at query time,
+  word by word the way FTS5's `unicode61` tokenizer matches, rather than
+  indexed; the subject and body come from `mail_search`. Mail results are
+  listed after the others under `[MAIL]`, "from" or "to" the name, newest
+  first, capped like every other kind. Nobody mail is closed to (issue
+  #816: the guest, including a session that came in as the guest, and
+  callers below the mail level) gets mail results, and the main menu's
+  Find entry then names only posts, files and chat. A letter opens in the
+  mailbox's own message view with all its actions, and opening an Inbox
+  letter marks it read as in the mailbox; `[B]ack` returns to the results,
+  and a letter deleted there leaves them. The gate is checked again when a
+  letter is opened, since the SysOp can close mail meanwhile.
+
+  An index rather than a scan of the caller's rows: the Inbox is capped at
+  500 but each letter may be 20 KB, Sent is not capped, and the scan runs
+  on the node's single database lane, so a mailbox full of long letters
+  would have held every other caller's queries for seconds. The index is
+  one more copy of private text, which is why its entries go with the row
+  and why the integrity check covers it.
 
 Local, in-page substring matching over a short list (`pick_item`'s own
 search command) is unrelated and unchanged — it is not "search" in this
 section's sense, just incremental filtering of an already-open, already
 access-checked list.
 
-**Integrity checking and rebuild (issue #74).** Because the three FTS
+**Integrity checking and rebuild (issue #74).** Because the four FTS
 tables above are synced by explicit per-write-path calls rather than one
 shared transaction with the authoritative write, a crash between the two,
 a future write path that forgets to call the right reindex function, or a
 restored older backup can leave them stale with no prior way to detect or
 repair it. `netbbs.search.check_index_integrity(db)` reports drift
 (missing/stale/extra entries, by id only — never the drifted content
-itself) for all three tables against authoritative `posts`/`files`/
-`channel_messages` data; `netbbs.search.rebuild_indexes(db)` replaces
+itself) for all four tables against authoritative `posts`/`files`/
+`channel_messages`/`mail_messages` data; `netbbs.search.rebuild_indexes(db)` replaces
 their contents outright, using the exact same "what should be indexed"
 computation the check compares against, so a rebuild always converges to
 a clean check immediately after. Exposed as a standalone maintenance
@@ -4828,7 +4955,7 @@ a relay before the upgrade that added the handoff time cannot be told apart
 from it and keeps waiting.
 
 A relay must hold a deposit longer than this timeout. Any limit on how long a
-relay mailbox keeps an uncollected deposit (issue #891 plans 30 days) must stay
+relay mailbox keeps an uncollected deposit (30 days since issue #891) must stay
 well above 14 days, so that a recipient that is merely slow to collect still
 answers inside the sender's window; a limit below the timeout would let a
 letter vanish while its sender still reads "no answer yet".
@@ -13078,6 +13205,65 @@ answering the invitation from inside every picker, which would spread the
 invite handshake across screens that own their own keys; and writing into a
 door or a Zmodem transfer, which would corrupt what that screen is drawing or
 sending.
+
+### Issue #899 — the speaker label on a chat line — decided
+
+A chat line from a linked node read `<Phase4Ops@OutBound · outbound.netbbs.org>`:
+fine once, a lot of width on every line of a conversation, and one run of one
+color that did not show where the user ended and the node began. Normative
+description: §4.4 and §6.3.
+
+**Decision 1 — the friendly name alone, qualified only when shared.** The DNS
+name stays on the screens that have room for it. On a chat line the friendly
+name is the only thing marking where a caller comes from, which #843 Decision 3
+relies on, so a name another known node or this BBS also uses keeps its
+qualifier, in the form the node map already used. The existing caution for an
+undismissed cryptographic-identity observation stays in front of the line.
+"The same name" includes one that reads the same (issue #900).
+
+**Decision 2 — `Name · abc123` replaces `Name abc123`.** The node map's form
+without a DNS name could not be typed back; with the reserved `·` it can, and it
+matches the DNS-qualified form. Rejected: a fingerprint prefix alone, which
+drops the name a reader knows the node by.
+
+**Decision 3 — style the parts, not the whole.** Brackets and `@` muted, the user
+in the speaker color, the node in `NODE_COLOR`. The same split fixes the
+alias label: it read `Quill|lena_h` with the username at the alias's weight,
+so readers could not tell which was the alias and the alias no longer read as
+the chosen name. The alias now leads in its color with `|username` muted; the
+text, and so #843's rule that no alias stands alone, is unchanged. Rejected:
+restricting node friendly names to the alias character set, which would make
+this node refuse the hello of any existing peer whose name uses one, and would
+undo #807's quoting of names containing `@`.
+
+### Issue #900 — look-alike node names — decided
+
+Friendly names were compared by Unicode form and case only, so "0utBound" beside
+a known "OutBound" raised no warning and needed no qualifier. With #899 dropping
+the DNS name from chat lines, that left the friendly name as the only anchor in
+exactly the place where passing for a familiar node pays. Normative description:
+§4.4.
+
+**Decision 1 — two keys for two questions.** "Could a reader confuse these?"
+uses the presentation skeleton (`look_alike_key`): the cryptographic-identity
+warning, and every screen that qualifies a shared name (chat, node map, Who,
+the board-origin picker). "Is this the same name?" keeps the exact key: a rename
+under one fingerprint, the claim history's deduplication, and resolving a typed
+reference. Rejected: resolving typed references by skeleton, which would let a
+look-alike node receive what a caller addressed to the real one.
+
+**Decision 2 — DNS names are not folded.** Registration already makes them
+unique, and `presentation_skeleton` drops `-` and `.`, so `out-bound.example.org`
+and `outbound.example.org` would become one. Screens that show a DNS name show
+all of it, so Who and the board-origin picker add a technical identity only
+where full labels could still be confused: the friendly names read alike and
+the DNS names do not tell the nodes apart, because one has none or both share
+it.
+
+**Decision 3 — this node's own look-alike name is a warning, not a refusal.** A
+SysOp who renames their node to read like a node it knows is told so and the
+name is kept: two hobbyists choosing one name is harmless, and the nodes that
+know both already flag whichever arrived second.
 
 ### SFTP over the SSH transport — declined
 
