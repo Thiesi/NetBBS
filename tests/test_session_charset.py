@@ -196,6 +196,8 @@ def test_raw_doors_pass_bytes_through():
         ("utf-8", CP437, bytes([0x82]), "é".encode("utf-8")),
         ("utf-8", UTF8, "é".encode("utf-8"), "é".encode("utf-8")),
         ("utf-8", ASCII, b"e", b"e"),
+        # An ASCII terminal still types UTF-8 (review on #940).
+        ("cp437", ASCII, "é".encode("utf-8"), bytes([0x82])),
     ],
 )
 def test_keystrokes_reach_the_door_in_its_encoding(door_encoding, charset, typed, expected):

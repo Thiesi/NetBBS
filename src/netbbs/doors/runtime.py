@@ -35,7 +35,7 @@ from netbbs.net.unicode_style_preference import unicode_style_enabled
 from netbbs.net.session import SessionClosedError
 from netbbs.net.session_activity import records_activity
 from netbbs.moderation.log import record_action
-from netbbs.rendering.charset import ASCII, CP437, UTF8, encode_text
+from netbbs.rendering.charset import CP437, UTF8, encode_text
 
 _logger = logging.getLogger(__name__)
 DOOR_CPU_LIMIT_SECONDS = 300
@@ -425,7 +425,9 @@ class DoorTerminal:
         self.pending = deque()
 
     def _input_passes_through(self) -> bool:
-        if self.encoding == "raw" or self.charset == ASCII:
+        # What the terminal *types* is CP437 on a CP437 terminal and UTF-8
+        # on every other one, an ASCII one included (review on #940).
+        if self.encoding == "raw":
             return True
         door = "cp437" if self.encoding == "cp437" else "utf-8"
         return door == ("cp437" if self.charset == CP437 else "utf-8")
