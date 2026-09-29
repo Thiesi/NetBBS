@@ -1,14 +1,16 @@
 """
 Local full-text search over this node's own carried content (design doc
 §6.6, issue #56's last piece) -- board posts, files, and recent channel
-scrollback. Never Link-wide: a search only ever queries this node's own
-SQLite FTS5 tables, and a query string is never transmitted to any peer
-or broadcast over Link, by design and without exception.
+scrollback -- and over the searching caller's own mailbox (issue #824).
+Never Link-wide: a search only ever queries this node's own SQLite FTS5
+tables, and a query string is never transmitted to any peer or broadcast
+over Link, by design and without exception.
 
-Three FTS5 virtual tables (`netbbs.storage.migrations`) are kept in sync
-with `posts`/`files`/`channel_messages` by explicit calls from
-`netbbs.boards.posts`, `netbbs.files.entries`, and
-`netbbs.chat.scrollback` at every write path -- never SQL triggers,
+Four FTS5 virtual tables (`netbbs.storage.migrations`) are kept in sync
+with `posts`/`files`/`channel_messages`/`mail_messages` by explicit calls
+from `netbbs.boards.posts`, `netbbs.files.entries`,
+`netbbs.chat.scrollback`, `netbbs.mail` and `netbbs.link.mail` at every
+write path -- never SQL triggers,
 matching this codebase's existing convention. `post_search` only ever
 holds the *resolved current* approved revision of a post's edit chain
 (mirroring `netbbs.boards.posts._resolve_current_version`): a superseded
@@ -16,20 +18,25 @@ revision, a still-pending edit, or a root with no approved revision left
 is never indexed. `file_search` mirrors `files` one-to-one (files have
 no edit chain). `channel_message_search` is pruned in lockstep with
 `netbbs.chat.scrollback`'s own bounded ring-buffer trim, so a search can
-never surface a message already gone from scrollback.
+never surface a message already gone from scrollback. `mail_search`
+mirrors `mail_messages` one-to-one, keyed by the letter's id (see
+`search_mail`'s section).
 
 Query-time authorization reuses the exact same visibility gates normal
 browsing already enforces (`netbbs.net.scan_and_find._new_scan_screen`'s own
 pattern) -- a level/age/community gate for boards and file areas,
 `netbbs.net.chat_flow.list_visible_channels_for` for channels -- so
 search can never be a side-channel revealing a restricted resource's
-existence or content.
+existence or content. Mail is searched only in the caller's own Inbox and
+Sent folder.
 """
 
 from __future__ import annotations
 
 import argparse
+import re
 import sqlite3
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -38,7 +45,7 @@ from netbbs.attestation import meets_age
 from netbbs.auth.users import User
 from netbbs.communities import get_effective_min_age, meets_read_gate
 from netbbs.rendering.pipe_codes import strip_pipe_codes
-from netbbs.rendering.post_body import indexed_post_body
+from netbbs.rendering.post_body import indexed_post_body, plain_post_body
 from netbbs.rendering.reflow import print_wrapped
 from netbbs.storage.database import Database
 
@@ -57,6 +64,7 @@ if TYPE_CHECKING:
     from netbbs.boards.boards import Board
     from netbbs.chat.channels import Channel
     from netbbs.files.areas import FileArea
+    from netbbs.mail import MailMessage
 
 # Channel message kinds worth searching -- mirrors
 # netbbs.activity._CHANNEL_CONTENT_KINDS exactly: join/leave/mute/etc.
@@ -267,6 +275,149 @@ def search_channel_messages(
     return hits
 
 
+# -- the caller's own mail (issue #824) --------------------------------------
+#
+# `mail_search` holds every `mail_messages` row's subject and plain-text body
+# under the letter's own id as its rowid, one entry per row for as long as
+# the row exists: `index_mail_without_commit` on every insert (`netbbs.mail`
+# and `netbbs.link.mail`), `unindex_mail_without_commit` on every delete
+# (`netbbs.mail`). Which side of a letter is still in whose mailbox is not
+# indexed -- a letter deleted by one party is still the other's -- and is
+# decided at query time from the row itself, so marking a side deleted
+# changes nothing here.
+#
+# A letter is also found by the From/To name the mailbox shows for it. Those
+# names are resolved when shown (a Link node can rename; a local recipient's
+# name is looked up by id), so they cannot be indexed; they are matched here
+# the way FTS5's default `unicode61` tokenizer would match them: every typed
+# word as a whole word, ignoring case and accents. A query matches a letter
+# when each of its words is in the subject, the body or that name.
+
+_WORD_RE = re.compile(r"[^\W_]+")
+
+
+def _search_words(text: str) -> str:
+    """`text` as a space-separated run of folded words, padded with a space
+    at each end so a phrase can be looked up with word boundaries."""
+    folded = unicodedata.normalize("NFKD", text.casefold())
+    folded = "".join(char for char in folded if not unicodedata.combining(char))
+    return " " + " ".join(_WORD_RE.findall(folded)) + " "
+
+
+@dataclass(frozen=True)
+class MailSearchHit:
+    message: MailMessage
+    sent: bool
+    """Found in the caller's Sent folder, not their Inbox. A letter to
+    oneself is in both, and is a hit in each."""
+    label: str
+    """Who the letter is from (Inbox) or to (Sent), as the mailbox shows it."""
+
+
+def search_mail(db: Database, user: User, query: str, *, limit: int = 20) -> list[MailSearchHit]:
+    """`user`'s own letters matching `query`, newest first: their Inbox and
+    their Sent folder, never anyone else's, and never a letter they deleted
+    from their side (the other party's copy is theirs). Mail from the BBS
+    itself is in the Inbox, so it is searched too. Nothing for a caller
+    `netbbs.mail.mail_access_refusal` turns away (issue #816); the screen
+    also refuses a session that came in as the guest, which only it can
+    tell."""
+    from netbbs.mail import (  # deferred -- see module's TYPE_CHECKING note
+        MailMessage, mail_access_refusal, recipient_display_label, sender_display_label,
+    )
+
+    tokens = [token for token in query.replace('"', " ").split() if _search_words(token).strip()]
+    if not tokens or mail_access_refusal(db, user) is not None:
+        return []
+
+    # Every side of a letter still in the caller's mailbox, with the name it
+    # shows -- never the bodies, which the index answers for.
+    sides = db.connection.execute(
+        """
+        SELECT id, sender_user_id, sender_label, recipient_user_id, recipient_remote_address,
+               recipient_label, from_system, recipient_user_id = ? AND recipient_deleted_at IS NULL AS in_inbox,
+               sender_user_id = ? AND sender_deleted_at IS NULL AS in_sent
+          FROM mail_messages
+         WHERE (recipient_user_id = ? AND recipient_deleted_at IS NULL)
+            OR (sender_user_id = ? AND sender_deleted_at IS NULL)
+         ORDER BY id DESC
+        """,
+        (user.id, user.id, user.id, user.id),
+    ).fetchall()
+    if not sides:
+        return []
+
+    matched: list[set[int]] = []
+    for token in tokens:
+        rows = db.connection.execute(
+            """
+            SELECT m.id FROM mail_search s JOIN mail_messages m ON m.id = s.rowid
+             WHERE mail_search MATCH ?
+               AND ((m.recipient_user_id = ? AND m.recipient_deleted_at IS NULL)
+                 OR (m.sender_user_id = ? AND m.sender_deleted_at IS NULL))
+            """,
+            (_match_expression(token), user.id, user.id),
+        ).fetchall()
+        matched.append({row["id"] for row in rows})
+    phrases = [_search_words(token) for token in tokens]
+
+    labels: dict[tuple, str] = {}
+    found: list[tuple[int, bool, str]] = []
+    for row in sides:
+        for sent in (False, True):
+            if not row["in_sent" if sent else "in_inbox"]:
+                continue
+            envelope = MailMessage(
+                id=row["id"], sender_user_id=row["sender_user_id"], sender_label=row["sender_label"],
+                recipient_user_id=row["recipient_user_id"], subject="", body="", created_at="",
+                read_at=None, sender_deleted_at=None, recipient_deleted_at=None,
+                recipient_remote_address=row["recipient_remote_address"],
+                from_system=bool(row["from_system"]), recipient_label=row["recipient_label"],
+            )
+            if sent:
+                key = (True, envelope.recipient_remote_address, envelope.recipient_user_id, envelope.recipient_label)
+            else:
+                key = (False, envelope.sender_label, envelope.from_system)
+            if key not in labels:
+                labels[key] = recipient_display_label(db, envelope) if sent else sender_display_label(db, envelope)
+            label = labels[key]
+            name_words = _search_words(label)
+            if all(
+                row["id"] in ids or phrase in name_words for ids, phrase in zip(matched, phrases)
+            ):
+                found.append((row["id"], sent, label))
+        if len(found) >= limit:
+            break
+    from netbbs.mail import get_mail  # deferred, as above
+
+    return [
+        MailSearchHit(message=get_mail(db, user, mail_id), sent=sent, label=label)
+        for mail_id, sent, label in found[:limit]
+    ]
+
+
+def index_mail_without_commit(db: Database, mail_id: int) -> None:
+    """Index letter `mail_id`, just inserted: its subject, and its body as
+    plain text -- color codes and escape sequences (issue #809) are neither
+    words anyone searches for nor anything a result may print. Called in
+    the inserting transaction, before its commit."""
+    row = db.connection.execute("SELECT subject, body FROM mail_messages WHERE id = ?", (mail_id,)).fetchone()
+    if row is None:
+        return
+    db.connection.execute("DELETE FROM mail_search WHERE rowid = ?", (mail_id,))
+    db.connection.execute(
+        "INSERT INTO mail_search (rowid, subject, body) VALUES (?, ?, ?)",
+        (mail_id, row["subject"], plain_post_body(row["body"])),
+    )
+
+
+def unindex_mail_without_commit(db: Database, mail_ids) -> None:
+    """Forget letters `mail_ids`, being deleted for good: a letter nobody
+    has any more leaves no words of it behind. Called in the deleting
+    transaction."""
+    db.connection.executemany("DELETE FROM mail_search WHERE rowid = ?", [(mail_id,) for mail_id in mail_ids])
+
+
 # -- jump-to-hit cursors ---------------------------------------------------
 #
 # Selecting a search hit should land a user on the matched post/file, not
@@ -418,15 +569,15 @@ def prune_channel_message_search(db: Database, channel_id: int) -> None:
 
 # -- integrity checking and rebuild (issue #74) ---------------------------
 #
-# The three FTS tables above are maintained by explicit calls from every
+# The four FTS tables above are maintained by explicit calls from every
 # write path in netbbs.boards.posts/netbbs.files.entries/netbbs.chat.
-# scrollback, not SQL triggers or one shared transaction with the
+# scrollback/netbbs.mail/netbbs.link.mail, not SQL triggers or one shared transaction with the
 # authoritative write -- a crash, SQLite error, interrupted migration, or
 # a future write path that forgets to call the right reindex function can
 # leave a table stale with no supported way to detect or repair it. The
-# three `_expected_*_index` functions below are the single source of
+# four `_expected_*_index` functions below are the single source of
 # truth for "what should currently be indexed," computed straight from
-# `posts`/`files`/`channel_messages`; `check_index_integrity` compares
+# `posts`/`files`/`channel_messages`/`mail_messages`; `check_index_integrity` compares
 # that against what the FTS tables actually contain, and `rebuild_indexes`
 # replaces their contents with it outright. Both therefore agree by
 # construction -- a rebuild always converges to a clean check immediately
@@ -496,6 +647,13 @@ def _expected_channel_message_index(db: Database) -> dict[int, tuple[int, str]]:
     return {row["id"]: (row["channel_id"], _indexed_channel_body(row["body"], row["external_source"])) for row in rows}
 
 
+def _expected_mail_index(db: Database) -> dict[int, tuple[str, str]]:
+    """`mail id -> (subject, plain body)` for every letter still stored,
+    whoever's mailbox it is in, matching `index_mail_without_commit`."""
+    rows = db.connection.execute("SELECT id, subject, body FROM mail_messages").fetchall()
+    return {row["id"]: (row["subject"], plain_post_body(row["body"])) for row in rows}
+
+
 def _indexed_channel_body(body: str, external_source: str | None) -> str:
     """What the index holds for a channel message: the stored body, or
     for an MRC row (issue #298) the body with its `|NN` color codes
@@ -534,10 +692,12 @@ class SearchIndexIntegrityReport:
     posts: IndexDrift
     files: IndexDrift
     channel_messages: IndexDrift
+    # Issue #824. Ids only, like the others: never a letter's words.
+    mail: IndexDrift
 
     @property
     def is_clean(self) -> bool:
-        return self.posts.is_clean and self.files.is_clean and self.channel_messages.is_clean
+        return self.posts.is_clean and self.files.is_clean and self.channel_messages.is_clean and self.mail.is_clean
 
 
 def _diff_index(expected: dict, actual: dict) -> IndexDrift:
@@ -551,7 +711,7 @@ def _diff_index(expected: dict, actual: dict) -> IndexDrift:
 
 
 def check_index_integrity(db: Database) -> SearchIndexIntegrityReport:
-    """Compare all three FTS tables against authoritative data without
+    """Compare all four FTS tables against authoritative data without
     rebuilding anything -- a read-only diagnostic safe to run at startup
     or on demand. See `IndexDrift`/`SearchIndexIntegrityReport` for what
     a caller can learn from the result; `rebuild_indexes` is the repair
@@ -568,16 +728,21 @@ def check_index_integrity(db: Database) -> SearchIndexIntegrityReport:
         row["message_id"]: (row["channel_id"], row["body"])
         for row in db.connection.execute("SELECT message_id, channel_id, body FROM channel_message_search")
     }
+    mail_actual = {
+        row["rowid"]: (row["subject"], row["body"])
+        for row in db.connection.execute("SELECT rowid, subject, body FROM mail_search")
+    }
     return SearchIndexIntegrityReport(
         posts=_diff_index(_expected_post_index(db), posts_actual),
         files=_diff_index(_expected_file_index(db), files_actual),
         channel_messages=_diff_index(_expected_channel_message_index(db), channel_actual),
+        mail=_diff_index(_expected_mail_index(db), mail_actual),
     )
 
 
 def rebuild_indexes(db: Database) -> SearchIndexIntegrityReport:
     """
-    Rebuild all three FTS tables from authoritative data, replacing their
+    Rebuild all four FTS tables from authoritative data, replacing their
     entire contents. Idempotent, and safe to run at any time -- a crash
     between an authoritative commit and its reindex call, an interrupted
     migration, or a restored older backup can all leave these tables
@@ -613,6 +778,13 @@ def rebuild_indexes(db: Database) -> SearchIndexIntegrityReport:
         [(message_id, channel_id, body) for message_id, (channel_id, body) in channel_expected.items()],
     )
 
+    mail_expected = _expected_mail_index(db)
+    db.connection.execute("DELETE FROM mail_search")
+    db.connection.executemany(
+        "INSERT INTO mail_search (rowid, subject, body) VALUES (?, ?, ?)",
+        [(mail_id, subject, body) for mail_id, (subject, body) in mail_expected.items()],
+    )
+
     db.connection.commit()
     return before
 
@@ -625,6 +797,7 @@ def _print_report(report: SearchIndexIntegrityReport) -> None:
         ("post_search", report.posts),
         ("file_search", report.files),
         ("channel_message_search", report.channel_messages),
+        ("mail_search", report.mail),
     ):
         if drift.is_clean:
             continue

@@ -56,7 +56,7 @@ from netbbs.link.mail import (
 )
 from netbbs.link.node_profiles import (
     ambiguous_node_guidance, link_address_label, unknown_node_guidance, unquote_reference,
-    identity_for_fingerprint, is_node_fingerprint, latest_identity_observation, resolve_stored_peer_reference,
+    identity_for_fingerprint, latest_identity_observation, resolve_stored_peer_reference,
 )
 from netbbs.mail import (
     GUEST_MAIL_REFUSAL,
@@ -76,6 +76,8 @@ from netbbs.mail import (
     blocks_local_sender,
     delete_for_recipient,
     delete_for_sender,
+    get_mail,
+    link_address_display_label,
     list_inbox,
     list_mail_blocks,
     list_sent,
@@ -84,8 +86,11 @@ from netbbs.mail import (
     mail_sender_refusal,
     mark_read,
     mark_unread,
+    recipient_display_label,
     send_mail,
+    sender_display_label,
     sender_unblockable_reason,
+    split_link_address,
     unblock,
     unblock_link_sender,
     unblock_local_sender,
@@ -1114,40 +1119,22 @@ async def _show_message(
     )
 
 
-def split_link_address(technical_address: str) -> tuple[str, str] | None:
-    """`(user, fingerprint)` of a stored `user@<home-node-fingerprint>`, or
-    `None` for a local name. Split at the last `@`: the user half comes from
-    a peer's signed payload and nothing holds it to the username grammar,
-    while a fingerprint never contains one."""
-    user, separator, fingerprint = technical_address.rpartition("@")
-    if not separator or not is_node_fingerprint(fingerprint):
-        return None
-    return user, fingerprint
-
-
-# Public for the board reader's [M]ail author (issue #821); this module's own
-# call sites keep the name they had.
+# `netbbs.mail.split_link_address`, public here for the board reader's
+# [M]ail author (issue #821); this module's own call sites keep the name they
+# had.
 _split_link_address = split_link_address
 
 
 async def _display_link_address(lane: DatabaseLane, technical_address: str) -> str:
     """Resolve a stored Link address's technical home node only at render
     time; a local name is returned as it is."""
-    split = _split_link_address(technical_address)
-    if split is None:
-        return technical_address
-    user, fingerprint = split
-    node_label = (await lane.run(identity_for_fingerprint, fingerprint)).label
-    return link_address_label(user, node_label)
+    return await lane.run(link_address_display_label, technical_address)
 
 
 async def _display_sender_label(lane: DatabaseLane, message: MailMessage) -> str:
-    """Who a received message is from: `SYSTEM_SENDER_LABEL` for mail the
-    BBS sent (issue #819) -- by its flag, never by the stored name -- else
-    the sender's name or Link address."""
-    if message.from_system:
-        return SYSTEM_SENDER_LABEL
-    return await _display_link_address(lane, message.sender_label)
+    """`netbbs.mail.sender_display_label`: the name a received letter shows
+    as its sender, which Find matches too (issue #824)."""
+    return await lane.run(sender_display_label, message)
 
 
 def _system_mail_note(session: Session) -> str:
@@ -1158,21 +1145,9 @@ def _system_mail_note(session: Session) -> str:
 
 
 async def _display_recipient_label(lane: DatabaseLane, message: MailMessage) -> str:
-    """Who a sent message went to: the remote address of Link mail (issue
-    #805), else the local recipient's current name, or the name it had when
-    its account was deleted (issue #818)."""
-    if message.recipient_remote_address is not None:
-        return await _display_link_address(lane, message.recipient_remote_address)
-    recipient = (
-        await lane.run(get_user_by_id, message.recipient_user_id)
-        if message.recipient_user_id is not None
-        else None
-    )
-    if recipient is not None:
-        return recipient.username
-    if message.recipient_label:
-        return f"{message.recipient_label} (deleted account)"
-    return "(deleted account)"
+    """`netbbs.mail.recipient_display_label`: the name a sent letter shows
+    as its recipient, which Find matches too (issue #824)."""
+    return await lane.run(recipient_display_label, message)
 
 
 _DELIVERY_COLORS = {
@@ -1327,12 +1302,7 @@ def _block_target(db: Database, reader: User, message: MailMessage) -> _BlockTar
     return None
 
 
-def _link_sender_name(db: Database, address: str) -> str:
-    split = _split_link_address(address)
-    if split is None:
-        return address
-    user_part, fingerprint = split
-    return link_address_label(user_part, identity_for_fingerprint(db, fingerprint).label)
+_link_sender_name = link_address_display_label
 
 
 def _is_blocked(db: Database, reader: User, target: _BlockTarget) -> bool:
@@ -1502,6 +1472,55 @@ async def _show_sent_message(
         await lane.run(delete_for_sender, user, message)
         announce(session, "Message deleted.")
         return
+
+
+# -- a letter opened from outside the mailbox (issue #824) --------------------
+
+
+LETTER_GONE_NOTICE = "That message is no longer in your mailbox."
+
+
+def current_letter(db: Database, user: User, mail_id: int, *, sent: bool) -> MailMessage | None:
+    """Letter `mail_id` as it stands now, while it is still in `user`'s
+    Sent folder (`sent`) or Inbox; `None` once they deleted it from that
+    side, or it is gone altogether."""
+    try:
+        message = get_mail(db, user, mail_id)
+    except MailError:
+        return None
+    if sent:
+        still_there = message.sender_user_id == user.id and message.sender_deleted_at is None
+    else:
+        still_there = message.recipient_user_id == user.id and message.recipient_deleted_at is None
+    return message if still_there else None
+
+
+async def open_letter(
+    session: Session, lane: DatabaseLane, user: User, mail_id: int, *, sent: bool,
+    link_context: LinkContext | None = None,
+) -> bool:
+    """Open one of the caller's own letters found by the main menu's Find
+    (issue #824) in the mailbox's own message view, with all its actions:
+    an Inbox letter is marked read on opening, as in the mailbox. `B`ack
+    returns to the caller's screen.
+
+    Mail's gate is checked again here (issue #816): the SysOp can close
+    mail while the results are on screen. Returns whether the letter is
+    still in that folder afterwards -- `False` once the caller deleted it
+    in the view, or when it was gone before it could open (said so)."""
+    refusal = await lane.run(lambda db: caller_mail_refusal(session, db, user))
+    if refusal is not None:
+        announce(session, refusal, tone="error")
+        return True
+    message = await lane.run(lambda db: current_letter(db, user, mail_id, sent=sent))
+    if message is None:
+        announce(session, LETTER_GONE_NOTICE, tone="muted")
+        return False
+    if sent:
+        await _show_sent_message(session, lane, user, message, link_context=link_context)
+    else:
+        await _show_inbox_message(session, lane, user, message, link_context=link_context)
+    return await lane.run(lambda db: current_letter(db, user, mail_id, sent=sent)) is not None
 
 
 # -- mail from where callers meet (issue #821) --------------------------------

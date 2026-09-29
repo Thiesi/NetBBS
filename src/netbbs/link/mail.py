@@ -67,6 +67,7 @@ from netbbs.link.node_profiles import identity_for_fingerprint, link_address_lab
 from netbbs.link.work_items import KIND_LINK_MAIL_ACK, KIND_LINK_MAIL_DELIVERY, enqueue_work_item_without_commit
 from netbbs.mail import MailError
 from netbbs.rendering.width import cut_to_width
+from netbbs.search import index_mail_without_commit
 from netbbs.storage.database import Database
 from netbbs.timeutil import parse_utc_iso, utc_iso, utc_now_iso
 
@@ -143,6 +144,8 @@ def compose_link_message(
             json.dumps(message.to_dict()), message.content_id,
         ),
     )
+    # Searchable in the sender's Sent (issue #824), in the same transaction.
+    index_mail_without_commit(db, db.connection.execute("SELECT last_insert_rowid()").fetchone()[0])
     # Same transaction as the insert above (design doc §13.7): a crash
     # between the two must never leave a message with no work item ever
     # tracking its delivery.
@@ -325,6 +328,7 @@ def deliver_link_message(
             _written_at(message.payload.get("created_at"), arrived_at), message.content_id, arrived_at,
         ),
     )
+    index_mail_without_commit(db, db.connection.execute("SELECT last_insert_rowid()").fetchone()[0])
     db.connection.commit()
 
     accepted = build_link_message_accepted(
