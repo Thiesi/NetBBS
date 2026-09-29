@@ -275,7 +275,7 @@ class RecipientCompleter:
 
     Only what can be written to is offered (issue #920): the list shows
     the rest with the reason, but a completion is an address the To
-    prompt would refuse."""
+    prompt would take."""
 
     def __init__(self, book: AddressBook, session: Session, prompt: str) -> None:
         self._book = book
