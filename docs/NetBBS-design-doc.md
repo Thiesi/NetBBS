@@ -6282,6 +6282,14 @@ having been built in separate rounds. The config value is now only the
 *prefill default* for the prompt, and what the SIGTERM/SIGINT signal path
 still uses (no one to prompt there).
 
+A SIGTERM shutdown ends its countdown early once nobody is connected,
+checked before the first warning and about once a second after it (issue
+#845). A service-manager stop or restart runs on the configured default,
+not a delay anyone chose for the occasion, and with no caller left there is
+nobody to wait for. A console `[S]hutdown` and the Update restart keep the
+full delay the SysOp chose even if everyone, themselves included, leaves:
+the SysOp may come back to cancel it.
+
 Cancelling a *scheduled* graceful shutdown needed one real design
 decision: `MaintenanceMode.activate()`'s own docstring already stated "no
 way back" — true once a shutdown reaches its actual disconnect step, but
