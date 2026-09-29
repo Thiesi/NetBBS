@@ -1481,7 +1481,8 @@ async def mail_someone(
 
     The checks are the mailbox's own: the caller's mail access
     (`caller_mail_refusal`), the recipient's (`mail_recipient_refusal` --
-    the guest account has no mailbox), and for a Link address that this
+    the guest account has no mailbox) and `mail_sender_refusal` (a
+    recipient who blocked the caller, issue #817), and for a Link address that this
     node is linked with that BBS and will send it mail (issue #804), in
     words for an address the caller did not type."""
     refusal = await lane.run(lambda db: caller_mail_refusal(session, db, user))
@@ -1516,6 +1517,9 @@ async def mail_someone(
         announce(session, "That is your own account.", tone="muted")
         return
     refused = await lane.run(mail_recipient_refusal, current)
+    if refused is None:
+        # Nor one who blocked the caller (issue #817), as the To prompt says.
+        refused = await lane.run(lambda db: mail_sender_refusal(db, current, sender=user))
     if refused is not None:
         announce(session, refused, tone="error")
         return

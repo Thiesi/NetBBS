@@ -23,7 +23,7 @@ from netbbs.chat import ChatHub, PresenceRegistry
 from netbbs.config import set_mail_min_level
 from netbbs.guest import set_guest_user
 from netbbs.link.node_identity import bootstrap_node_identity
-from netbbs.mail import list_inbox
+from netbbs.mail import block_local_sender, list_inbox
 from netbbs.messaging_preferences import set_accepts_direct_messages
 from netbbs.net import board_flow
 from netbbs.net.directory_flow import _browse_directory, _caller_who_screen
@@ -133,6 +133,18 @@ def test_the_guest_account_is_refused_on_its_card_with_the_reason(db, lane, alic
 
     card = [screen for screen in _screens(session) if "Member profile" in screen][-1]
     assert "visitor is this board's shared guest account, which has no mailbox." in card
+    assert "Subject" not in _visible(session)
+    assert _sent_rows(db) == []
+
+
+def test_a_member_who_blocked_the_caller_is_refused_before_anything_is_written(db, lane, alice, bob):
+    block_local_sender(db, bob, alice)
+    session = FakeSession(keys=["0", "2", "m", "b", "b"])
+
+    asyncio.run(_browse_directory(session, db, alice, lane=lane))
+
+    card = [screen for screen in _screens(session) if "Member profile" in screen][-1]
+    assert "bob does not accept mail from you." in card
     assert "Subject" not in _visible(session)
     assert _sent_rows(db) == []
 
