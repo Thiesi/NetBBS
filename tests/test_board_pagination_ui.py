@@ -447,9 +447,32 @@ def test_editing_an_already_seen_post_does_not_make_it_unread_again(tmp_path):
     db.close()
 
 
-def test_jump_to_first_unread_opens_on_the_post_right_after_the_cursor(tmp_path, monkeypatch):
+def test_jump_to_first_unread_opens_the_ordinary_page_when_it_is_there(tmp_path, monkeypatch):
+    """Issue #839 (F095): a jump whose target is on the newest page opens
+    that page, read posts and all, numbered as an ordinary visit numbers
+    them -- not a page of unread posts renumbered from 01."""
     db = Database(tmp_path / "node.db")
-    board, alice = _make_board_with_posts(db, _PAGE_SIZE + 1, monkeypatch)
+    board, alice = _make_board_with_posts(db, 4, monkeypatch)
+    bob = create_user(db, "bob", password="hunter2", user_level=10)
+
+    posts = db.connection.execute(
+        "SELECT post_id, created_at FROM posts ORDER BY created_at ASC"
+    ).fetchall()
+    cursor = (posts[1]["created_at"], posts[1]["post_id"])  # bob has seen the first two
+
+    session = FakeSession(keys=["b"])
+    asyncio.run(_show_board(session, db, board, bob, initial_cursor=cursor))
+
+    assert _listed(session) == {0, 1, 2, 3}
+    # ...and the cursor starts on the first unread, so Enter reads it.
+    assert re.search(r">\s+3\s+Subject 2\b", session.visible_output)
+    db.close()
+
+
+def test_jump_to_first_unread_opens_on_the_post_right_after_the_cursor(tmp_path, monkeypatch):
+    """More unread than a page holds: the page starts at the first one."""
+    db = Database(tmp_path / "node.db")
+    board, alice = _make_board_with_posts(db, 40, monkeypatch)
     bob = create_user(db, "bob", password="hunter2", user_level=10)
 
     posts = db.connection.execute(

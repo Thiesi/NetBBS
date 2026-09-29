@@ -108,10 +108,10 @@ def test_masthead_also_shown_when_drilling_into_a_category(db, lane, alice):
     file_area_banner_path(db).write_bytes(b"MY CUSTOM FILE AREA MASTHEAD")
     set_file_area_banner_enabled(db, True)
 
-    session = FakeSession(["0", "1", "b"])
+    session = FakeSession(["0", "1", "b", "b"])
     asyncio.run(file_flow.browse_file_areas(session, lane, alice))
     text = _written_text(session)
-    assert text.count("MY CUSTOM FILE AREA MASTHEAD") == 2
+    assert text.count("MY CUSTOM FILE AREA MASTHEAD") == 3
 
 
 def test_masthead_with_redraw_in_place_clears_before_the_masthead_not_after(db, lane, alice):

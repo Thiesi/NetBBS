@@ -298,7 +298,6 @@ async def _browse_boards_in_category(
     current_mode = get_effective_sort_mode(
         db, user, "board", community_id=effective_community_id, category_id=category_id
     )
-    boards_here, categories_here = _load(current_mode)
     category_name = get_board_category_by_id(db, category_id).name if category_id is not None else None
     # Where the caller came from, carried onto the board's own screens
     # (issue #679): the Community, if any, and the category.
@@ -371,20 +370,72 @@ async def _browse_boards_in_category(
         activity, _ = _activity(item)
         return about_separator.join(part for part in (activity, _about(item)) if part) or None
 
-    if not categories_here:
-        async def on_sort_flat() -> list[Board] | None:
+    # Back from a board or a category comes back to this list, on the row
+    # left (issue #839): it used to return past it, to the menu the list
+    # was opened from. Reloaded each time, since reading changes what is new.
+    reopen_at: int | None = None
+    while True:
+        boards_here, categories_here = _load(mode_box["mode"])
+        if not categories_here:
+            async def on_sort_flat() -> list[Board] | None:
+                new_mode = await _run_sort_prompt()
+                if new_mode is None:
+                    return None
+                mode_box["mode"] = new_mode
+                new_boards, _ = _load(new_mode)
+                return new_boards
+
+            board = await pick_item(
+                session,
+                boards_here,
+                name_of=lambda b: b.name,
+                stable_id_of=lambda b: b.id,
+                description_of=_prose_of,
+                columns=_BOARD_LIST_COLUMNS,
+                column_values_of=_columns_of,
+                description_level=description_level,
+                title=title,
+                breadcrumb=picker_breadcrumb,
+                empty_message="No message boards are available to you yet.",
+                on_sort=on_sort_flat,
+                sort_label=_sort_label,
+                redraw_in_place=redraw_in_place,
+                unicode_style=unicode_style,
+                collapsed=collapsed,
+                accent_color=accent_color,
+                header_color=header_color,
+                masthead=board_masthead,
+                start_stable_id=reopen_at,
+            )
+            if board is None:
+                return
+            reopen_at = board.id
+            await _show_board(session, db, board, user, link_context=link_context, breadcrumb=board_breadcrumb)
+            continue
+
+        mixed: list[Category | Board] = [*categories_here, *boards_here]
+
+        def render_name(item: Category | Board) -> str:
+            return f"[{item.name}]" if isinstance(item, Category) else item.name
+
+        def stable_id(item: Category | Board) -> int:
+            return item.id if isinstance(item, Board) else -item.id
+
+        async def on_sort_mixed() -> list[Category | Board] | None:
             new_mode = await _run_sort_prompt()
             if new_mode is None:
                 return None
             mode_box["mode"] = new_mode
             new_boards, _ = _load(new_mode)
-            return new_boards
+            return [*categories_here, *new_boards]
 
-        board = await pick_item(
+        selected = await pick_item(
             session,
-            boards_here,
-            name_of=lambda b: b.name,
-            stable_id_of=lambda b: b.id,
+            mixed,
+            name_of=render_name,
+            stable_id_of=stable_id,
+            on_sort=on_sort_mixed,
+            sort_label=_sort_label,
             description_of=_prose_of,
             columns=_BOARD_LIST_COLUMNS,
             column_values_of=_columns_of,
@@ -392,67 +443,26 @@ async def _browse_boards_in_category(
             title=title,
             breadcrumb=picker_breadcrumb,
             empty_message="No message boards are available to you yet.",
-            on_sort=on_sort_flat,
-            sort_label=_sort_label,
             redraw_in_place=redraw_in_place,
             unicode_style=unicode_style,
             collapsed=collapsed,
             accent_color=accent_color,
             header_color=header_color,
             masthead=board_masthead,
+            start_stable_id=reopen_at,
         )
-        if board is not None:
-            await _show_board(session, db, board, user, link_context=link_context, breadcrumb=board_breadcrumb)
-        return
+        if selected is None:
+            return
+        reopen_at = stable_id(selected)
 
-    mixed: list[Category | Board] = [*categories_here, *boards_here]
-
-    def render_name(item: Category | Board) -> str:
-        return f"[{item.name}]" if isinstance(item, Category) else item.name
-
-    def stable_id(item: Category | Board) -> int:
-        return item.id if isinstance(item, Board) else -item.id
-
-    async def on_sort_mixed() -> list[Category | Board] | None:
-        new_mode = await _run_sort_prompt()
-        if new_mode is None:
-            return None
-        mode_box["mode"] = new_mode
-        new_boards, _ = _load(new_mode)
-        return [*categories_here, *new_boards]
-
-    selected = await pick_item(
-        session,
-        mixed,
-        name_of=render_name,
-        stable_id_of=stable_id,
-        on_sort=on_sort_mixed,
-        sort_label=_sort_label,
-        description_of=_prose_of,
-        columns=_BOARD_LIST_COLUMNS,
-        column_values_of=_columns_of,
-        description_level=description_level,
-        title=title,
-        breadcrumb=picker_breadcrumb,
-        empty_message="No message boards are available to you yet.",
-        redraw_in_place=redraw_in_place,
-        unicode_style=unicode_style,
-        collapsed=collapsed,
-        accent_color=accent_color,
-        header_color=header_color,
-        masthead=board_masthead,
-    )
-    if selected is None:
-        return
-
-    if isinstance(selected, Category):
-        await _browse_boards_in_category(
-            session, db, user, category_id=selected.id,
-            community_id=community_id, community_scoped=community_scoped, title_prefix=title_prefix,
-            link_context=link_context,
-        )
-    else:
-        await _show_board(session, db, selected, user, link_context=link_context, breadcrumb=board_breadcrumb)
+        if isinstance(selected, Category):
+            await _browse_boards_in_category(
+                session, db, user, category_id=selected.id,
+                community_id=community_id, community_scoped=community_scoped, title_prefix=title_prefix,
+                link_context=link_context,
+            )
+        else:
+            await _show_board(session, db, selected, user, link_context=link_context, breadcrumb=board_breadcrumb)
 
 
 def _can_edit_post(db: Database, post: Post, user: User) -> bool:
@@ -1532,6 +1542,22 @@ async def _show_board(
         # board is empty and (worse) prompt to compose the first post.
         page_anchor = None
         page = list_posts_page(db, board, user, limit=_page_limit(), with_pinned=True, pinned_block_rows=_PINNED_BLOCK_ROWS)
+    # A [N]ew scan or [/] Find jump puts the cursor on the post it came for.
+    # When that post is on the newest page, the jump opens that page, the
+    # one an ordinary visit shows, rather than a page starting at the post:
+    # that page left out every read post and numbered the rest from 01, so
+    # the number a caller remembered picked nothing (issue #839, F095).
+    jump_highlight: int | None = None
+    if page_anchor is not None and page.posts:
+        target = page.posts[0].root_post_id
+        newest = list_posts_page(
+            db, board, user, limit=_page_limit(), with_pinned=True, pinned_block_rows=_PINNED_BLOCK_ROWS
+        )
+        on_newest = next((i for i, listed in enumerate(newest.posts) if listed.root_post_id == target), None)
+        if on_newest is not None:
+            page, page_anchor, jump_highlight = newest, None, on_newest
+        else:
+            jump_highlight = 0
     if not page.posts:
         # Dogfood report: this used to skip straight to composing the
         # first post whenever the caller could write, with no [P]ost/
@@ -1635,9 +1661,9 @@ async def _show_board(
                 continue
             await session.write(reject_unhandled_key(choice))
 
-    # A [N]ew scan or [/] Find jump opens the list with its target at the top;
-    # the cursor starts on it, so Enter reads what the caller came for.
-    highlighted: int | None = 0 if page_anchor is not None else None
+    # A [N]ew scan or [/] Find jump starts with the cursor on its target, so
+    # Enter reads what the caller came for.
+    highlighted: int | None = jump_highlight
     await _render_fresh(page, highlighted)
     while True:
         key, echoed = await _read_list_key(session)

@@ -32,7 +32,8 @@ immediately, without Enter. When typing text, use Enter to submit it.
 **Ctrl+U** clears the line you are typing, and at a field that allows it,
 Esc leaves it without changing anything.
 Follow the action bar on the current screen: letters can mean different
-things in different places. **[B]ack** leaves most screens.
+things in different places. **[B]ack** leaves most screens and goes one level
+up: from a board to the list you picked it from, and from there to the menu.
 
 | Main-menu choice | What it does |
 | --- | --- |
@@ -41,7 +42,7 @@ things in different places. **[B]ack** leaves most screens.
 | **Files** | Every file area |
 | **Games** | Door games, when the SysOp has set some up |
 | **Communities** (key **O**) | Topics the SysOp set up, each with its own boards, chat channels, file areas and games |
-| **New scan** | See unread activity and resources you have not visited |
+| **New scan** | See unread activity and resources you have not visited; Back from each one brings you back with the next new one ready for Enter, and **[R]eplies** opens the replies to your posts |
 | **Find** (key **/**) | Search content available on this node |
 | **E-mail** | Read and send persistent NetBBS mail |
 | **Who's online** | See callers and available ways to contact them |
