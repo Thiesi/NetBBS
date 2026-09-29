@@ -617,8 +617,12 @@ async def _main_menu_loop(
                 for text in delivery_lines:
                     announce(session, text, tone="error")
                 # Read mail the mailbox cap removed to make room, counted
-                # and told once (issue #818) -- never which messages.
-                eviction_line, evicted = pending_eviction_notice(db, user)
+                # and told once (issue #818) -- never which messages. Held
+                # for a caller mail is closed to, who has no Inbox to see.
+                eviction_line, evicted = (
+                    pending_eviction_notice(db, user)
+                    if caller_mail_refusal(session, db, user) is None else (None, 0)
+                )
                 if eviction_line is not None:
                     announce(session, eviction_line, color=WARNING_COLOR)
                 await _draw_main_menu(session, db, mailbox, user, node_controls=node_controls, notice=notice)

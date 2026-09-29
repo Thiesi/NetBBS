@@ -456,3 +456,16 @@ def test_removing_an_account_without_releasing_its_mail_fails_loudly(db, alice, 
     with pytest.raises(sqlite3.IntegrityError):
         db.connection.execute("DELETE FROM users WHERE id = ?", (bob.id,))
     db.connection.rollback()
+
+
+def test_the_removal_notice_waits_while_mail_is_closed_to_its_owner(db, lane, alice, bob):
+    from netbbs.config import set_mail_min_level
+
+    _fill_inbox(db, alice, bob, MAX_MAIL_PER_RECIPIENT, read=True)
+    send_mail(db, alice, bob, "New one", "body")
+    set_mail_min_level(db, 20)
+
+    session = _menu(db, lane, bob, ["l"])
+
+    assert "removed to make room" not in " ".join(_visible_text(session).split())
+    assert pending_eviction_notice(db, bob)[1] == 1
