@@ -1481,7 +1481,7 @@ async def _show_board(
                 announce(session, cancelled_notice, tone="muted")
             return False
         await _review_and_commit(
-            session, db, user, board, subject=subject, body=body, draft_path=draft_path,
+            session, db, user, board, subject=subject, body=body, draft_path=draft_path, files=[],
             commit_key="p", commit_label="ost", commit_brief="Publish this reply" if reply_to else "Publish this post",
             title=compose_title, breadcrumb=(*breadcrumb, board_name),
             cancelled_notice=cancelled_notice,
@@ -1525,7 +1525,7 @@ async def _show_board(
             # ends without one, and the signature would take its color.
             body = append_signature(body + "\x1b[0m", signature)
         await _review_and_commit(
-            session, db, user, board, subject=subject, body=body, draft_path=draft_path,
+            session, db, user, board, subject=subject, body=body, draft_path=draft_path, files=[],
             commit_key="p", commit_label="ost", commit_brief="Publish this post",
             title="New art post", breadcrumb=(*breadcrumb, board_name),
             cancelled_notice="Post cancelled.",
@@ -1977,9 +1977,14 @@ async def _edit_existing_post(
             announce(session, "Edit cancelled.", tone="muted")
         return
 
-    current_files = shown_post_refs(db, post)
+    # Only the author changes what their post points at (review on #913): a
+    # moderator's edit keeps the files as they are, and offers no file keys,
+    # so nothing is attached to someone else's post -- or to a carried one --
+    # checked only against the moderator's own access.
+    own_post = post.author_user_id is not None and post.author_user_id == user.id
+    current_files = shown_post_refs(db, post) if own_post else None
 
-    async def _save(subject: str, body: str, files: list[FileRef]) -> bool:
+    async def _save(subject: str, body: str, files: list[FileRef] | None) -> bool:
         if subject == post.subject and body == post.body and files == current_files:
             announce(session, "No changes to save.", tone="muted")
             return True
@@ -2030,7 +2035,7 @@ async def _review_and_commit(
     commit_brief: str,
     cancelled_notice: str,
     draft_saved_notice: str,
-    commit: Callable[[str, str, list[FileRef]], Awaitable[bool]],
+    commit: Callable[[str, str, list[FileRef] | None], Awaitable[bool]],
     layout: str = "prose",
     title: str = "New post",
     breadcrumb: tuple[str, ...] = ("Message boards",),
@@ -2055,11 +2060,12 @@ async def _review_and_commit(
 
     `files` are the files the post points at so far (issue #842), changed
     here with `[A]ttach file` and `[R]emove file` and handed to `commit`
-    with the subject and body."""
+    with the subject and body. `None` -- a moderator editing someone else's
+    post -- offers no file keys and hands `commit` `None`: the files stay."""
     body_mode = post_body_mode(
         board_allows_color=board.allow_color, reader_wants_color=post_colors_enabled(db, user)
     )
-    files = list(files or [])
+    files = list(files) if files is not None else None
     linked = is_board_linked(db, board)
     while True:
         # Said on arrival, in characters (issue #812), rather than by the
@@ -2090,10 +2096,13 @@ async def _review_and_commit(
             body_mode=body_mode,
             body_layout=layout,
             breadcrumb=(*breadcrumb, title),
-            extra_rows=_file_rows(db, board, files, accent=effective_accent_color(session, db), linked=linked),
-            extra_actions=file_actions(files, noun="post"),
+            extra_rows=(
+                _file_rows(db, board, files, accent=effective_accent_color(session, db), linked=linked)
+                if files is not None else ()
+            ),
+            extra_actions=file_actions(files, noun="post") if files is not None else (),
         )
-        if isinstance(action, str):
+        if isinstance(action, str) and files is not None:
             # `[A]ttach file` or `[R]emove file`: the pickers run on a lane,
             # opened for as long as they are.
             file_lane = DatabaseLane(db.path)

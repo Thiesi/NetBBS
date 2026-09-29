@@ -18639,10 +18639,12 @@ async def _post_action_screen(
             Section("Proposed text" if current is not None else "Message", [Styled(body_rows)]),
         ]
         files_changed = [item.ref for item in proposed_files] != [item.ref for item in current_files]
-        if proposed_files and (current is None or files_changed):
+        if (current is None and proposed_files) or (current is not None and files_changed):
+            # "none" when a held edit drops every file (review on #913): the
+            # moderator must see that approving it removes them.
             sections.append(Section(
                 "Proposed files" if current is not None else "Files",
-                [Styled(ref_rows(proposed_files, accent=accent)[1:])],
+                [Styled(ref_rows(proposed_files, accent=accent)[1:] or ["none"])],
             ))
         if current is not None and files_changed:
             sections.append(Section(

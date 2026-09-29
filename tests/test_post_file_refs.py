@@ -73,6 +73,16 @@ def _set_area(db, area, **columns):
     db.connection.commit()
 
 
+@pytest.fixture(autouse=True)
+def _distinct_times(monkeypatch):
+    """A fresh time for every revision: two revisions with the same text in
+    the same clock tick (15 ms on Windows) would get the same content id."""
+    ticks = iter(range(1, 100_000))
+    monkeypatch.setattr(
+        posts_module, "utc_now_iso", lambda: f"2026-09-29T10:00:00.{next(ticks):06d}Z",
+    )
+
+
 def _ref_rows(db):
     return db.connection.execute("SELECT * FROM post_file_refs ORDER BY post_id, position").fetchall()
 
@@ -178,7 +188,6 @@ def test_references_go_with_a_rejected_post_an_expired_one_and_a_deleted_board(d
     expiring = create_board(db, "Short", creator=mod, max_post_age_days=1)
     monkeypatch.setattr(posts_module, "utc_now_iso", lambda: "2020-01-01T00:00:00.000000Z")
     create_post(db, expiring, alice, "Old", "x", files=[ref])
-    monkeypatch.undo()
     assert len(_ref_rows(db)) == 1
     sweep_expired_posts(db, expiring)  # expired and past its grace: deleted
     assert db.connection.execute("SELECT COUNT(*) FROM posts WHERE board_id = ?", (expiring.id,)).fetchone()[0] == 0
@@ -306,3 +315,44 @@ def test_a_held_post_shows_its_files_to_the_moderator(db, tmp_path):
         lane.close()
 
     assert "page.png  7 B in Practice pages" in _screens(session)
+
+
+def test_a_moderators_edit_offers_no_file_keys_and_keeps_the_files(db):
+    alice, mod = _user(db, "alice"), _user(db, "mod", user_level=255)
+    board = create_board(db, "Critique", creator=mod)
+    _area, _entry, ref = _file(db, alice)
+    post = create_post(db, board, alice, "My page", "v1", files=[ref])
+    _file(db, mod, area_name="Staff", filename="staff.png", min_read_level=200)
+    # Open the post, [E]dit, keep the subject, a new body, then [S]ave.
+    session = FakeSession(["1", "e", "", "Fixed a typo.", "/done", "s", "b", "b"], width=120)
+
+    asyncio.run(board_flow._show_board(session, db, board, mod))
+
+    review = next(screen for screen in session.screens() if "Fixed a typo." in screen)
+    assert "[A]ttach file" not in review and "[R]emove file" not in review
+    assert shown_post_refs(db, post) == [ref]
+
+
+def test_a_held_edit_that_drops_every_file_says_so_to_the_moderator(db):
+    from netbbs.net.admin_flow import _post_action_screen
+    from netbbs.storage.execution import DatabaseLane
+
+    alice, mod = _user(db, "alice"), _user(db, "mod", user_level=255)
+    board = create_board(db, "Held", creator=mod, moderated=True)
+    _area, _entry, ref = _file(db, alice)
+    post = create_post(db, board, alice, "Look", "x", files=[ref])
+    from netbbs.boards.posts import approve_post
+
+    post = approve_post(db, post, approved_by=mod)
+    held_edit = edit_post(db, post, board, subject="Look", body="x", edited_by=alice, files=[])
+
+    lane = DatabaseLane(db.path)
+    try:
+        session = FakeSession(["b"], width=120)
+        asyncio.run(_post_action_screen(session, lane, mod, held_edit, board))
+    finally:
+        lane.close()
+
+    text = _screens(session).upper()
+    assert "PROPOSED FILES" in text and "CURRENT FILES" in text
+    assert text.index("NONE", text.index("PROPOSED FILES")) < text.index("CURRENT FILES")
