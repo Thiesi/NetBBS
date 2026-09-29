@@ -282,6 +282,13 @@ async def _show_lines(session: Session, lines: list[str], *, point: int | None =
             await session.write_line(f"     {continuation}")
 
 
+def _is_line_number(text: str) -> bool:
+    """Digits `int()` accepts. `str.isdigit()` also takes "²" (AltGr+2 on a
+    German keyboard), which `int()` rejects -- a crash that ended the
+    session mid-composition (review on #902; as `picker._is_ascii_number`)."""
+    return bool(text) and text.isascii() and text.isdigit()
+
+
 def _parse_line_range(command: str, line_count: int) -> tuple[int, int] | None:
     """`/delete N` or `/delete N-M` (issue #837): trimming a 19-line quote
     took 17 commands, one per line."""
@@ -289,7 +296,7 @@ def _parse_line_range(command: str, line_count: int) -> tuple[int, int] | None:
     if len(parts) != 2:
         return None
     first, dash, last = parts[1].partition("-")
-    if not first.isdigit() or (dash and not last.isdigit()):
+    if not _is_line_number(first) or (dash and not _is_line_number(last)):
         return None
     start, end = int(first), int(last) if dash else int(first)
     return (start, end) if 1 <= start <= end <= line_count else None
@@ -297,7 +304,7 @@ def _parse_line_range(command: str, line_count: int) -> tuple[int, int] | None:
 
 def _parse_line_number(command: str, line_count: int, *, allow_end: bool = False) -> int | None:
     parts = command.split()
-    if len(parts) != 2 or not parts[1].isdigit():
+    if len(parts) != 2 or not _is_line_number(parts[1]):
         return None
     number = int(parts[1])
     maximum = line_count + 1 if allow_end else line_count

@@ -46,6 +46,15 @@ def test_a_backwards_or_out_of_range_span_is_refused():
     assert _text(session).count("Usage: /delete N or /delete N-M (1-3)") == 3
 
 
+def test_a_superscript_digit_is_refused_not_a_crash():
+    commands = ["/delete 1-\u00b2", "/delete \u00b2", "/edit \u00b2", "/insert \u00b3", "/done"]
+    body, session = _line_edit(commands, initial_text="a\nb\nc")
+    assert body == "a\nb\nc"
+    assert "Usage: /delete" in _text(session)
+    assert "Usage: /edit" in _text(session)
+    assert "Usage: /insert" in _text(session)
+
+
 def test_deleting_above_an_insert_point_keeps_writing_in_the_same_place():
     body, _ = _line_edit(["/insert 4", "/delete 1-2", "new", "/done"], initial_text="a\nb\nc\nd")
     assert body == "c\nnew\nd"
