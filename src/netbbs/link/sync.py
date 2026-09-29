@@ -146,7 +146,10 @@ first place; the *only* way such a sender ever learns that recipient's
 someone who has met them directly (see that function's own docstring
 for why this is safe: a wrong/stale candidate address costs a failed
 deposit, never a confidentiality issue, since the payload is already
-sealed to the real recipient's own key). Only `link_message` gets this
+sealed to the real recipient's own key). A deposit ends the delivery
+work item but not the letter: it stays pending with its handoff time
+recorded, and expires as `no_answer` if no answer comes back within
+`RELAY_NO_ANSWER_TIMEOUT` (issue #874). Only `link_message` gets this
 fallback, never an acknowledgement -- `netbbs.link.relay_mailbox`'s own
 documented boundary.
 """
@@ -191,6 +194,8 @@ from netbbs.link.mail_refusals import VIA_RELAY
 from netbbs.link.mail import (
     EXPIRED_BY_OWN_POLICY,
     expire_link_message_delivery,
+    expire_unanswered_relay_mail,
+    record_relay_handoff,
     get_link_mail_acknowledgement,
     get_link_message_for_delivery,
     record_link_message_refused,
@@ -2401,7 +2406,16 @@ async def _push_pending_link_mail(
     yet due (still backing off after an earlier failure) is simply not
     returned by `load_due_work_items` this pass; it'll be picked up
     again once `next_attempt_at` has passed.
+
+    First, mail left at a relay that has gone unanswered too long expires
+    (issue #874): a relay deposit ends the delivery work item, so nothing
+    else would ever give up on it.
     """
+    expired = await lane.run(expire_unanswered_relay_mail)
+    if expired:
+        _logger.info(
+            "Link sync: %d letter(s) left at a relay got no answer in time; their senders are told", expired
+        )
     if enforce_trust_policy:
         await lane.run(_wake_mail_for_established_targets)
     for work_item in await lane.run(load_due_work_items, kind=KIND_LINK_MAIL_DELIVERY):
@@ -2460,6 +2474,7 @@ async def _push_pending_link_mail(
             continue
         base_urls = _dialable_addresses_for_peer(node, target_fingerprint)
         delivered = False
+        via_relay = False
         refusals: list[str] = []
         if base_urls:
             delivered = await _try_addresses_via(
@@ -2472,11 +2487,16 @@ async def _push_pending_link_mail(
             # directly-dialable or genuinely outgoing-only.
             relay_urls = _relay_base_urls_for_peer(node, target_fingerprint)
             if relay_urls:
-                delivered = await _try_addresses_via(
+                delivered = via_relay = await _try_addresses_via(
                     relay_urls, lambda url: _deposit_one(session, url, target_fingerprint, message)
                 )
 
         if delivered:
+            if via_relay:
+                # The relay is not the recipient: the letter stays pending,
+                # shown as with a relay, until an answer comes or it times
+                # out (issue #874).
+                await lane.run(record_relay_handoff, work_item.reference_id)
             await lane.run(record_success, work_item)
         elif refusals:
             # The recipient's node heard the message and its trust policy

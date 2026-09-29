@@ -231,12 +231,17 @@ Mail to another node also shows where it stands, in Sent's list and on its
 Delivery line when you open it:
 
 - **Pending**: on its way; the other node has not confirmed it yet.
+- **With relay**: the other node can't be reached directly, so your BBS left
+  the letter at a relay for it to collect, and no answer has come back yet.
+  If none comes within 14 days, it expires.
 - **Delivered**: it is in the recipient's mailbox.
 - **Bounced**: the other node sent it back, and the Delivery line says why,
   for example that there is no user by that name there, that their mailbox
   is full of unread mail, or that the node does not trust yours yet.
 - **Expired**: no route to that node worked before delivery gave up, so it
-  was not delivered.
+  was not delivered. Mail left at a relay expires when no answer came back
+  in 14 days; it may still have arrived, and if an answer turns up later,
+  Sent shows it as delivered or bounced after all.
 
 A letter shows the way its writer typed it: each line stays a line, and
 only a line too wide for your screen wraps. Mail can be in color, written

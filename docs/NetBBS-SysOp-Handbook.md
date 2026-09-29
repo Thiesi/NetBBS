@@ -754,12 +754,21 @@ encrypted to the recipient's *node*, not to the person, so a SysOp with access
 to the database could read it there; NetBBS gives you no screen for doing so.
 
 Your callers see each Link message's state in their **Sent** mail: pending,
-delivered, bounced (with the other node's reason in plain words) or expired.
-A caller whose mail bounces or expires is told once at their next main menu.
-One refusal never comes back as a bounce: mail left at a relay for a node
-that has *your* node quarantined or blocked. That node sends yours nothing,
-and the relay took the message, so it stays pending. Replaying an expired
-delivery from the **Outbox** puts it back to pending.
+with relay, delivered, bounced (with the other node's reason in plain words)
+or expired. A caller whose mail bounces or expires is told once at their next
+main menu.
+
+"With relay" is mail your node left at a relay because the recipient's node
+cannot be dialed directly. The relay is not the recipient, and one refusal
+never comes back as a bounce: mail for a node that has *your* node
+quarantined or blocked, which sends yours nothing. So if no answer comes back
+within 14 days of the handoff, the letter expires and its sender is told that
+no answer came back, so it may not have arrived. An answer that arrives later
+still counts: the letter turns delivered, or bounced. Relays keep what they
+are handed for 30 days by default; if you run a relay, keep its retention
+longer than those 14 days, or a slow recipient's mail can disappear while its
+sender still waits. Replaying an expired delivery from the **Outbox** puts it
+back to pending.
 
 Mail arriving here is checked the way your own callers' mail is: a sender
 name that is not a valid address, a blank or oversized subject, or an

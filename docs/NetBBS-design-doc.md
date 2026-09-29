@@ -2360,8 +2360,8 @@ Compose, Back), so every visit cost a keystroke before any mail showed.
 
 The list:
 - Is a table: number, a `new` column, From, Subject and Date. Sent's is
-  number, To, Subject, a Delivery column (pending, delivered, bounced,
-  expired) when any listed message went over Link,
+  number, To, Subject, a Delivery column (pending, with relay, delivered,
+  bounced, expired) when any listed message went over Link,
   and Date. Each row is numbered once. The generic picker it replaced
   numbered rows twice (`01. (#5) ...`) and prefixed unread subjects with
   `[NEW] `.
@@ -4683,17 +4683,21 @@ unless another of the recipient's addresses or relays takes the message
 (§12.4, issue #804).
 
 The sending node shows the state to the sending user (issue #806). Sent marks
-each Link message pending, delivered, bounced or expired, and the message's
+each Link message pending, with relay (§10.3, below), delivered, bounced or
+expired, and the message's
 Delivery line gives a bounce's reason in plain words. The reason is the signed
 bounce's `reason` or the refusal's `link_policy_*` code, stored with the
 message (at most 64 characters, since another node chose it); a code this
 node does not know reads as "that BBS refused it". Expired means the delivery
 work item dead-lettered: no route took the message, or this node's own trust
-policy held it back to the end, which is recorded as its own reason. A bounce
+policy held it back to the end, which is recorded as its own reason
+(`own_policy`), or that a letter left at a relay got no answer in time
+(`no_answer`, below). A bounce
 or expiry flags the message until its sender is told: once, at their next
 main menu, which covers a sender who was offline when it happened, or by
 opening it in Sent. Mail the sender already deleted from Sent is not told
-about. A later acceptance clears the flag and wins. A bounce
+about. A later acceptance clears the flag and wins; a later bounce wins too,
+and flags the message again unless it was already bounced. A bounce
 message in the inbox would need a system sender (issue #819) and is not sent.
 
 The recipient node checks everything the sending node chose where it enters,
@@ -4732,11 +4736,28 @@ list mail by arrival (row id), not by that date, so late mail lands at the top
 of the inbox instead of below letters read long ago; making room in a full
 mailbox likewise removes the earliest-arrived read letter.
 
-Delivery state records only answers that arrive. Mail a relay took for a
-recipient node that holds the sending node quarantined or blocked is refused
-at pickup without a bounce (§12.4), and nothing on the sending side expires
-mail that was handed over but never answered, so it stays pending. The same
-holds for an acknowledgement that never gets back.
+A letter left at a relay is not delivered on the relay's word (issue #874).
+The relay is not the recipient, and some answers never come back: a recipient
+node that holds the sending node quarantined or blocked refuses such mail at
+pickup without a bounce (§12.4), and an acknowledgement can be lost. So the
+sending node records when it handed the letter over
+(`mail_messages.link_relay_handoff_at`); the letter stays `pending`, and Sent
+shows it as "with relay" ("With a relay, no answer yet") rather than plain
+pending. Each sync pass expires a letter still pending 14 days after its
+handoff, with reason `no_answer`, and its sender is told as for any expiry,
+in words that say it may have arrived all the same: no answer came back. An
+answer that arrives later still wins, as above. The timeout is the sending
+node's alone: nothing changes on the wire, and it works the same with old
+relays and old recipients. Mail pushed directly to the recipient never times
+out this way, since the push itself reached the recipient's node; mail left at
+a relay before the upgrade that added the handoff time cannot be told apart
+from it and keeps waiting.
+
+A relay must hold a deposit longer than this timeout. Relay mailbox retention
+(issue #891, 30 days by default) is set well above 14 days so that a recipient
+that is merely slow to collect still answers inside the sender's window;
+lowering it below the timeout would let a letter vanish while its sender still
+reads "no answer yet".
 
 ### 10.4 Routing limitations
 

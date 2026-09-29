@@ -1233,10 +1233,65 @@ def test_full_relay_round_trip_delivers_a_message_to_an_outgoing_only_recipient(
 
         # The relay's own mailbox is empty again -- picked up and cleared.
         assert bob.db.connection.execute("SELECT * FROM link_relay_mailbox").fetchone() is None
+
+        # Issue #874: alice's copy is not delivered on the relay's word. It
+        # stays pending (carol's acceptance cannot reach alice's made-up
+        # address here), with the handoff recorded for Sent and the timeout.
+        sent = alice.db.connection.execute(
+            "SELECT link_delivery_status, link_relay_handoff_at FROM mail_messages"
+        ).fetchone()
+        assert sent["link_delivery_status"] == "pending"
+        assert sent["link_relay_handoff_at"] is not None
     finally:
         alice.close()
         bob.close()
         carol.close()
+
+
+def test_the_sync_pass_expires_mail_left_at_a_relay_that_got_no_answer(tmp_path):
+    """Issue #874: a relay deposit ends the delivery work item, so the sync
+    pass itself gives up on the letter once 14 days pass with no answer,
+    and leaves a letter handed over more recently alone."""
+    from netbbs.link.sync import _push_pending_link_mail
+
+    alice_identity = bootstrap_node_identity("alice")
+    carol_identity = bootstrap_node_identity("carol")
+    alice = _NodeDb(tmp_path, "alice")
+    try:
+        _seed_peer(alice.db, carol_identity)
+        alice_user = create_user(alice.db, "alice", password="hunter2", user_level=10)
+        old = compose_link_message(
+            alice.db, alice_user, f"carol@{carol_identity.fingerprint}", "old", "b", node_identity=alice_identity,
+        )
+        recent = compose_link_message(
+            alice.db, alice_user, f"carol@{carol_identity.fingerprint}", "recent", "b",
+            node_identity=alice_identity,
+        )
+        # Both were deposited at a relay: their work items are done.
+        alice.db.connection.execute("UPDATE link_work_items SET status = 'pushed'")
+        alice.db.connection.execute(
+            "UPDATE mail_messages SET link_relay_handoff_at = ? WHERE link_event_content_id = ?",
+            ("2000-01-01T00:00:00.000000Z", old.content_id),
+        )
+        alice.db.connection.execute(
+            "UPDATE mail_messages SET link_relay_handoff_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
+            "WHERE link_event_content_id = ?",
+            (recent.content_id,),
+        )
+        alice.db.connection.commit()
+
+        asyncio.run(_push_pending_link_mail(LinkNode(identity=alice_identity), None, alice.lane))
+
+        rows = {
+            row["subject"]: tuple(row)[1:]
+            for row in alice.db.connection.execute(
+                "SELECT subject, link_delivery_status, link_delivery_reason, link_delivery_notice_pending "
+                "FROM mail_messages"
+            )
+        }
+        assert rows == {"old": ("expired", "no_answer", 1), "recent": ("pending", None, 0)}
+    finally:
+        alice.close()
 
 
 def test_full_relay_round_trip_delivers_an_acknowledgement_back_to_an_outgoing_only_sender(tmp_path):

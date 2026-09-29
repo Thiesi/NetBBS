@@ -1131,6 +1131,15 @@ messages.
 - `deliver_link_message` runs after the envelope is saved and marked known,
   so an exception there loses the letter with no answer to anyone; every
   failure must end in a bounce.
+- A relay deposit ends a letter's `link_mail_delivery` work item
+  (`record_success`), so no dead-letter will ever expire it. What gives up on
+  it is `link_relay_handoff_at` (issue #874): set when the deposit succeeds,
+  checked every sync pass by `expire_unanswered_relay_mail`, which expires
+  the letter as `no_answer` 14 days later. "With a relay" is a display state
+  derived from `pending` plus that column, not a stored status, so every
+  guard written against `'pending'` still covers it. The relay's own
+  retention (issue #891) must stay longer than that timeout, or a slow
+  recipient loses the letter while its sender still reads "no answer yet".
 
 ### Signature auto-append: idempotency, not a "first compose only" flag
 

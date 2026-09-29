@@ -3713,4 +3713,20 @@ MIGRATIONS = [
         );
         """,
     ),
+    Migration(
+        description=(
+            "Issue #874: `mail_messages.link_relay_handoff_at` -- when this node left a "
+            "still-pending Link letter in a relay mailbox for its recipient's node to collect. "
+            "The letter stays `pending`; Sent shows it as with a relay, and the sync pass "
+            "expires it with reason `no_answer` once 14 days pass with no answer. NULL for "
+            "every existing row: a pending letter cannot be told apart from one pushed "
+            "directly, so mail handed to a relay before this migration keeps waiting as before."
+        ),
+        sql="""
+        ALTER TABLE mail_messages ADD COLUMN link_relay_handoff_at TEXT;
+        CREATE INDEX idx_mail_messages_link_relay_handoff
+            ON mail_messages(link_relay_handoff_at)
+            WHERE link_delivery_status = 'pending' AND link_relay_handoff_at IS NOT NULL;
+        """,
+    ),
 ]
