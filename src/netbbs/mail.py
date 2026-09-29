@@ -189,7 +189,9 @@ def mail_recipient_bounce_reason(db: Database, recipient: User) -> str | None:
 # mail at all, by `mail_sender_refusal`, which says whether it takes mail from
 # *this* sender: `send_mail` and the To prompt for local mail, and
 # `netbbs.link.mail.deliver_link_message` for Link mail, which bounces
-# `blocked_by_recipient`.
+# `blocked_by_recipient`. The same list stops live messages too (issue #925,
+# `netbbs.messaging_preferences.live_message_refusal`): the table keeps its
+# `mail_blocks` name, but it is the account's one block list.
 #
 # The sender is told. A blocked letter is refused at the To prompt and at Send
 # with "<name> does not accept mail from you", and a Link letter bounces with
