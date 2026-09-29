@@ -133,3 +133,10 @@ def test_a_node_wide_blanket_read_grant_opens_every_board_it_covers(db, sysop, h
     _grant(db, sysop, helper, "board", None, BoardPermission.READ)
     assert meets_read_gate(db, helper, one) and meets_read_gate(db, helper, two)
     assert not meets_read_gate(db, helper, vault)
+
+
+def test_the_everything_scope_says_access_presets_are_for_boards_and_areas():
+    from netbbs.net.admin_flow import _EVERYWHERE, _moderator_preset_label
+
+    assert "boards and areas only" in _moderator_preset_label(_EVERYWHERE, "post")
+    assert _moderator_preset_label(_EVERYWHERE, "full") == "Full moderator"

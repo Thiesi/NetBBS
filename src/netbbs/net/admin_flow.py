@@ -21541,10 +21541,15 @@ _EVERYWHERE = "everywhere"
 
 
 def _moderator_preset_label(object_type: str | None, preset: str) -> str:
+    # The access presets can't cover channels, and the everything scope
+    # includes them (review on #868): say so before Save is tried.
+    no_access = object_type in ("channel", _EVERYWHERE)
     if preset == "post":
-        return "Read and post (past the level gates)" if object_type != "channel" else "Read and post (not for channels)"
+        return "Read and post (boards and areas only)" if no_access else "Read and post (past the level gates)"
     if preset == "read":
-        return "Read only (past the read level)" if object_type != "channel" else "Read only (not for channels)"
+        return "Read only (boards and areas only)" if no_access else "Read only (past the read level)"
+    if object_type == _EVERYWHERE:
+        object_type = None
     if object_type == "channel":
         return "Full moderator (edit+moderate+manage members)" if preset == "full" else "Moderator only"
     if object_type is None:
@@ -21672,9 +21677,7 @@ async def _grant_moderator_screen(session: Session, lane: DatabaseLane, actor: U
         ),
         FieldSpec(
             key="preset", hotkey="p", menu_text=menu_key("P", "reset"), label="Preset",
-            render=lambda d: _moderator_preset_label(
-                None if d["object_type"] == _EVERYWHERE else d["object_type"], d["preset"]
-            ),
+            render=lambda d: _moderator_preset_label(d["object_type"], d["preset"]),
             prompt=choice_field("preset", _MODERATOR_PRESETS),
             step=choice_step("preset", _MODERATOR_PRESETS),
             brief="Moderator, approver, or access",
@@ -21700,7 +21703,7 @@ async def _grant_moderator_screen(session: Session, lane: DatabaseLane, actor: U
         if community is not None:
             label = f"{label} scoped to Community {community.name!r}"
         if draft["object_type"] == _EVERYWHERE:
-            preset_label = _moderator_preset_label(None, draft["preset"])
+            preset_label = _moderator_preset_label(_EVERYWHERE, draft["preset"])
             await lane.run(
                 grant_everywhere,
                 draft["user"],
