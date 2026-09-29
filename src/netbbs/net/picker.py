@@ -42,6 +42,7 @@ from netbbs.digits import is_ascii_number
 from netbbs.net.char_input import CANCEL_KEY, HELP_KEY, REDRAW_KEY, REFRESH_KEY, Completer, EditorKey, EditorKeyKind
 from netbbs.net.help_overlay import show_help
 from netbbs.rendering.ansi import strip_ansi
+from netbbs.rendering.charset import ellipsis_for
 from netbbs.rendering.reflow import wrap_terminal_text
 from netbbs.net.notices import announce, with_notices
 from netbbs.net.session import Session, write_preformatted_line, write_prompt
@@ -201,7 +202,7 @@ def _reverse_row(text: str) -> str:
     return colored(text, reverse=True)
 
 
-def _pad_cell(text: str, width: int, *, align_right: bool) -> str:
+def _pad_cell(text: str, width: int, *, align_right: bool, ellipsis: str = "…") -> str:
     """Fit `text` to exactly `width` display columns.
 
     Measured in display width, not `len` -- a CJK name is two columns
@@ -225,7 +226,8 @@ def _pad_cell(text: str, width: int, *, align_right: bool) -> str:
     """
     text = _normalize_tabs(text)
     if display_width(text) > width:
-        text = truncate_to_width(text, width, ellipsis="…" if width > 1 else "")
+        marker = ellipsis if width > display_width(ellipsis) else ""
+        text = truncate_to_width(text, width, ellipsis=marker)
     padding = " " * max(0, width - display_width(text))
     return padding + text if align_right else text + padding
 
@@ -520,6 +522,9 @@ async def pick_item(
     """
     if (columns is None) != (column_values_of is None):
         raise ValueError("pick_item: columns and column_values_of must be given together")
+    # A cut cell ends in "…" on a UTF-8 terminal and in "..." on a CP437 or
+    # ASCII one, where "…" could only be mapped to a single dot (#929).
+    cell_ellipsis = ellipsis_for(session)
     if columns is not None and name_segments_of is not None:
         # Both want to own the name half of the row. Nobody does this
         # today, and silently dropping one of them is exactly the kind
@@ -1005,7 +1010,7 @@ async def pick_item(
                 # Columnar row (issue #528).
                 segments: list[tuple[str, SegmentColor]] = [
                     (selector, key_color),
-                    (_pad_cell(sanitize_text(name_of(item)), name_width, align_right=False), item_name_color),
+                    (_pad_cell(sanitize_text(name_of(item)), name_width, align_right=False, ellipsis=cell_ellipsis), item_name_color),
                 ]
                 # Short-changed rows are padded rather than left to
                 # `zip`'s silent truncation: a caller that returns too
@@ -1024,7 +1029,9 @@ async def pick_item(
                     if index == last and not column.align_right:
                         cell_text = truncate_to_width(sanitize_text(text), column.width)
                     else:
-                        cell_text = _pad_cell(sanitize_text(text), column.width, align_right=column.align_right)
+                        cell_text = _pad_cell(
+                            sanitize_text(text), column.width, align_right=column.align_right, ellipsis=cell_ellipsis
+                        )
                     segments.append((cell_text, item_name_color if is_highlighted or not pickable else color))
                 if is_highlighted:
                     segments = [(text, _reverse_row) for text, _ in segments]
@@ -1062,7 +1069,7 @@ async def pick_item(
                 name_text = sanitize_text(name_of(item))
                 if room < display_width(name_text):
                     name_text = _pad_cell(
-                        name_text, max(_MIN_FALLBACK_NAME_WIDTH, room), align_right=False
+                        name_text, max(_MIN_FALLBACK_NAME_WIDTH, room), align_right=False, ellipsis=cell_ellipsis
                     ).rstrip()
                 segments.append((name_text, item_name_color))
             else:

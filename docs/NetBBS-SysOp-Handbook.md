@@ -1314,6 +1314,10 @@ Every caller gets text in the character set their terminal reads:
   - SSH callers are detected from their terminal type, but the banner SSH shows
     during login is always ASCII.
   - The browser always gets Unicode.
+  - The node log has one line per Telnet or SSH connection saying what the
+    terminal called itself and which character set it got, for example
+    `telnet caller 203.0.113.9 terminal type: 'syncterm' (answered); character
+    set cp437 (certain)`. Look there if a caller's screen looks wrong.
 - **After sign-in:**
   - Each caller's own **Profile → Unicode or CP437** choice applies.
   - A caller whose terminal wasn't recognised is asked once which of two sample

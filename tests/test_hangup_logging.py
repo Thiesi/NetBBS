@@ -187,7 +187,11 @@ def test_ssh_hangup_logs_one_info_line(caplog, error):
 
     with caplog.at_level(logging.DEBUG, logger=ssh_module.__name__):
         asyncio.run(scenario())
-    records = [r for r in caplog.records if r.name == ssh_module.__name__]
+    # The connection's terminal-type line (#929) is not about the hang-up.
+    records = [
+        r for r in caplog.records
+        if r.name == ssh_module.__name__ and "terminal type:" not in r.getMessage()
+    ]
     assert [(r.levelno, r.getMessage()) for r in records] == [
         (logging.INFO, "SSH caller 198.51.100.7 disconnected")
     ]
