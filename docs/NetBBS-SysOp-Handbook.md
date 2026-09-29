@@ -1134,8 +1134,8 @@ new lines. Storage garbage collection and draft pruning show the proposed work
 before confirmation; review it instead of deleting files directly.
 
 **Operations → Search indexes** compares what **Find** searches with the posts,
-files and chat messages themselves, and shows how many entries are missing,
-stale or left over. **Rebuild** replaces the indexes from that content; it
+files, chat messages and mail themselves, and shows how many entries are
+missing, stale or left over: counts only, never a letter's words. **Rebuild** replaces the indexes from that content; it
 cannot lose any. It also works from `python -m netbbs.admin`, and
 `python -m netbbs.search check|rebuild --db PATH` does the same from a script.
 

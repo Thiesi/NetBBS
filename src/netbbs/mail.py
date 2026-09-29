@@ -20,10 +20,11 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass
 
-from netbbs.auth.users import User, is_usable_sysop
-from netbbs.config import get_mail_min_level
+from netbbs.auth.users import User, get_user_by_id, is_usable_sysop
+from netbbs.config import get_mail_min_level, is_node_fingerprint_shape
 from netbbs.guest import guest_is_eligible
 from netbbs.permissions.levels import meets_level
+from netbbs.search import index_mail_without_commit, unindex_mail_without_commit
 from netbbs.storage.database import Database
 from netbbs.timeutil import utc_now_iso
 
@@ -396,10 +397,11 @@ def send_mail(db: Database, sender: User, recipient: User, subject: str, body: s
         """,
         (sender.id, sender.username, recipient.id, subject, body, created_at),
     )
-    db.connection.commit()
     row = db.connection.execute(
         "SELECT * FROM mail_messages WHERE id = last_insert_rowid()"
     ).fetchone()
+    index_mail_without_commit(db, row["id"])
+    db.connection.commit()
     return _row_to_message(row)
 
 
@@ -443,10 +445,11 @@ def send_system_mail(db: Database, recipient: User, subject: str, body: str) -> 
         """,
         (SYSTEM_SENDER_LABEL, recipient.id, subject, body, created_at, created_at),
     )
-    db.connection.commit()
     row = db.connection.execute(
         "SELECT * FROM mail_messages WHERE id = last_insert_rowid()"
     ).fetchone()
+    index_mail_without_commit(db, row["id"])
+    db.connection.commit()
     return _row_to_message(row)
 
 
@@ -576,6 +579,61 @@ def list_sent(db: Database, user: User) -> list[MailMessage]:
         (user.id,),
     ).fetchall()
     return [_row_to_message(row) for row in rows]
+
+
+# -- who a letter is from and to, as a reader sees it -----------------------
+#
+# One answer for the mailbox's list and message view and for the main
+# menu's Find (issue #824), which matches a letter by these names.
+
+
+def split_link_address(technical_address: str) -> tuple[str, str] | None:
+    """`(user, fingerprint)` of a stored `user@<home-node-fingerprint>`, or
+    `None` for a local name. Split at the last `@`: the user half comes from
+    a peer's signed payload and nothing holds it to the username grammar,
+    while a fingerprint never contains one."""
+    user, separator, fingerprint = technical_address.rpartition("@")
+    if not separator or not is_node_fingerprint_shape(fingerprint):
+        return None
+    return user, fingerprint
+
+
+def link_address_display_label(db: Database, technical_address: str) -> str:
+    """A stored Link address with its home node resolved to the name that
+    node goes by now (never stored: a node can rename); a local name is
+    returned as it is."""
+    # Deferred: `netbbs.link`'s package imports its mail module, which
+    # imports this one.
+    from netbbs.link.node_profiles import identity_for_fingerprint, link_address_label
+
+    split = split_link_address(technical_address)
+    if split is None:
+        return technical_address
+    user_part, fingerprint = split
+    return link_address_label(user_part, identity_for_fingerprint(db, fingerprint).label)
+
+
+def sender_display_label(db: Database, message: MailMessage) -> str:
+    """Who a received letter is from: `SYSTEM_SENDER_LABEL` for mail the
+    BBS sent (issue #819) -- by its flag, never by the stored name -- else
+    the sender's name or Link address."""
+    if message.from_system:
+        return SYSTEM_SENDER_LABEL
+    return link_address_display_label(db, message.sender_label)
+
+
+def recipient_display_label(db: Database, message: MailMessage) -> str:
+    """Who a sent letter went to: the remote address of Link mail (issue
+    #805), else the local recipient's current name, or the name it had when
+    its account was deleted (issue #818)."""
+    if message.recipient_remote_address is not None:
+        return link_address_display_label(db, message.recipient_remote_address)
+    recipient = get_user_by_id(db, message.recipient_user_id) if message.recipient_user_id is not None else None
+    if recipient is not None:
+        return recipient.username
+    if message.recipient_label:
+        return f"{message.recipient_label} (deleted account)"
+    return "(deleted account)"
 
 
 def unread_count(db: Database, user: User) -> int:
@@ -741,6 +799,7 @@ def _hard_delete_or_mark(
 ) -> None:
     if sender_deleted_at is not None and recipient_deleted_at is not None:
         db.connection.execute("DELETE FROM mail_messages WHERE id = ?", (mail_id,))
+        unindex_mail_without_commit(db, [mail_id])
     else:
         db.connection.execute(
             "UPDATE mail_messages SET sender_deleted_at = ?, recipient_deleted_at = ? WHERE id = ?",
@@ -772,10 +831,10 @@ def release_mail_of_deleted_account_without_commit(db: Database, user: User) -> 
     # Received mail no one else sees: from Link or the system (no local
     # sender), from an account already deleted, from itself, or deleted
     # by its sender already.
-    conn.execute(
+    _delete_letters_without_commit(
+        db,
         """
-        DELETE FROM mail_messages
-        WHERE recipient_user_id = ?
+        recipient_user_id = ?
           AND (sender_user_id IS NULL OR sender_user_id = recipient_user_id OR sender_deleted_at IS NOT NULL)
         """,
         (user.id,),
@@ -789,10 +848,10 @@ def release_mail_of_deleted_account_without_commit(db: Database, user: User) -> 
         (now, user.username, user.id),
     )
     # Sent local mail whose recipient no longer has it.
-    conn.execute(
+    _delete_letters_without_commit(
+        db,
         """
-        DELETE FROM mail_messages
-        WHERE sender_user_id = ? AND recipient_remote_address IS NULL
+        sender_user_id = ? AND recipient_remote_address IS NULL
           AND (recipient_user_id IS NULL OR recipient_deleted_at IS NOT NULL)
         """,
         (user.id,),
@@ -801,6 +860,16 @@ def release_mail_of_deleted_account_without_commit(db: Database, user: User) -> 
         "UPDATE mail_messages SET sender_deleted_at = ? WHERE sender_user_id = ? AND sender_deleted_at IS NULL",
         (now, user.id),
     )
+
+
+def _delete_letters_without_commit(db: Database, where: str, parameters: tuple) -> None:
+    """Delete the letters `where` selects, and their search entries (issue
+    #824) with them."""
+    ids = [row["id"] for row in db.connection.execute(f"SELECT id FROM mail_messages WHERE {where}", parameters)]
+    if not ids:
+        return
+    db.connection.executemany("DELETE FROM mail_messages WHERE id = ?", [(mail_id,) for mail_id in ids])
+    unindex_mail_without_commit(db, ids)
 
 
 def _row_to_message(row: sqlite3.Row) -> MailMessage:

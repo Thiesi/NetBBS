@@ -2431,7 +2431,8 @@ The list:
 - `[F]ind` narrows the folder to mail with a word in the name or the
   subject, as the row shows them. The picker's `[S]earch` said "by name"
   but matched the subject, `[NEW] ` prefix included, so "new" matched every
-  unread message.
+  unread message. The main menu's Find searches bodies too, across both
+  folders (issue #824, §6.6).
 - `[U]nread` on the list marks the highlighted message unread, or read if
   it is unread; the reader's `[U]nread` marks the open message unread and
   returns to the list. Opening a message is still what marks it read.
@@ -2870,10 +2871,11 @@ capability from the item picker's simple, per-call substring name match
 (`pick_item`'s own search command, unrelated and unchanged — see below):
 
 - **scope**: only this node's own already-stored content — approved board
-  posts (subject/body), approved file entries (filename/description), and
-  retained channel scrollback (message body). Never content this node does
-  not itself carry — there is no Link-wide query protocol, and this design
-  does not imply or require one;
+  posts (subject/body), approved file entries (filename/description),
+  retained channel scrollback (message body), and the searching caller's own
+  mail (issue #824, below). Never content this node does not itself carry —
+  there is no Link-wide query protocol, and this design does not imply or
+  require one;
 - **mechanism**: SQLite FTS5 virtual tables (`post_search`, `file_search`,
   `channel_message_search`), kept in sync with `posts`/`files`/
   `channel_messages` by explicit calls from `netbbs.boards.posts`/
@@ -2887,7 +2889,10 @@ capability from the item picker's simple, per-call substring name match
   a root with no approved revision left is never indexed.
   `channel_message_search` is pruned in the same statement that trims
   scrollback's own ring buffer, so a search can never surface a message
-  already gone from retained scrollback.
+  already gone from retained scrollback. `mail_search` mirrors
+  `mail_messages` one-to-one, keyed by the letter's id as its rowid, and
+  is written and removed in the same transaction as the row
+  (`netbbs.mail`, `netbbs.link.mail`);
   FTS5 availability was traced, not just assumed, for this project's actual
   NetBSD/pkgsrc target: `lang/python312`'s Makefile buildlinks against
   `databases/sqlite3` (not an amalgamation bundled into Python itself), and
@@ -2919,21 +2924,47 @@ capability from the item picker's simple, per-call substring name match
   default newest page. A channel message instead just enters its channel —
   channels have no "jump to one message" concept, the same limitation
   `[N]ew scan`'s own channel dispatch already accepts.
+- **the caller's own mail (issue #824)**: Find searches the caller's Inbox
+  and Sent folder, never anyone else's mail and never a letter the caller
+  deleted from their side (the other party's copy stays theirs). System
+  mail is in the Inbox, so it is searched too. A letter matches when each
+  typed word is in its subject, its body as plain text (color codes and
+  escapes removed, as the post index does), or the From/To name the mailbox
+  shows. Those names are resolved when shown — a Link node can rename, a
+  local recipient is looked up by id — so they are matched at query time,
+  word by word the way FTS5's `unicode61` tokenizer matches, rather than
+  indexed; the subject and body come from `mail_search`. Mail results are
+  listed after the others under `[MAIL]`, "from" or "to" the name, newest
+  first, capped like every other kind. Nobody mail is closed to (issue
+  #816: the guest, including a session that came in as the guest, and
+  callers below the mail level) gets mail results, and the main menu's
+  Find entry then names only posts, files and chat. A letter opens in the
+  mailbox's own message view with all its actions, and opening an Inbox
+  letter marks it read as in the mailbox; `[B]ack` returns to the results,
+  and a letter deleted there leaves them. The gate is checked again when a
+  letter is opened, since the SysOp can close mail meanwhile.
+
+  An index rather than a scan of the caller's rows: the Inbox is capped at
+  500 but each letter may be 20 KB, Sent is not capped, and the scan runs
+  on the node's single database lane, so a mailbox full of long letters
+  would have held every other caller's queries for seconds. The index is
+  one more copy of private text, which is why its entries go with the row
+  and why the integrity check covers it.
 
 Local, in-page substring matching over a short list (`pick_item`'s own
 search command) is unrelated and unchanged — it is not "search" in this
 section's sense, just incremental filtering of an already-open, already
 access-checked list.
 
-**Integrity checking and rebuild (issue #74).** Because the three FTS
+**Integrity checking and rebuild (issue #74).** Because the four FTS
 tables above are synced by explicit per-write-path calls rather than one
 shared transaction with the authoritative write, a crash between the two,
 a future write path that forgets to call the right reindex function, or a
 restored older backup can leave them stale with no prior way to detect or
 repair it. `netbbs.search.check_index_integrity(db)` reports drift
 (missing/stale/extra entries, by id only — never the drifted content
-itself) for all three tables against authoritative `posts`/`files`/
-`channel_messages` data; `netbbs.search.rebuild_indexes(db)` replaces
+itself) for all four tables against authoritative `posts`/`files`/
+`channel_messages`/`mail_messages` data; `netbbs.search.rebuild_indexes(db)` replaces
 their contents outright, using the exact same "what should be indexed"
 computation the check compares against, so a rebuild always converges to
 a clean check immediately after. Exposed as a standalone maintenance
@@ -4847,7 +4878,7 @@ a relay before the upgrade that added the handoff time cannot be told apart
 from it and keeps waiting.
 
 A relay must hold a deposit longer than this timeout. Any limit on how long a
-relay mailbox keeps an uncollected deposit (issue #891 plans 30 days) must stay
+relay mailbox keeps an uncollected deposit (30 days since issue #891) must stay
 well above 14 days, so that a recipient that is merely slow to collect still
 answers inside the sender's window; a limit below the timeout would let a
 letter vanish while its sender still reads "no answer yet".

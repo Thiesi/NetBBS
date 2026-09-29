@@ -11730,6 +11730,8 @@ _SEARCH_INDEX_LABELS = (
     ("posts", "Message posts"),
     ("files", "Files"),
     ("channel_messages", "Chat messages"),
+    # Issue #824: counted like the rest; the SysOp never sees a letter.
+    ("mail", "Mail"),
 )
 
 
@@ -11751,7 +11753,7 @@ def _search_index_section(report: SearchIndexIntegrityReport) -> Section:
     if not report.is_clean:
         rows.append(Note(
             "Find leaves out missing and stale entries and can list removed ones. "
-            "Rebuild replaces the indexes from the posts, files and messages themselves."
+            "Rebuild replaces the indexes from the posts, files, messages and mail themselves."
         ))
     return Section("Check", rows)
 
@@ -11761,7 +11763,7 @@ def _rebuild_search_indexes(db: Database, actor: User) -> tuple[int, SearchIndex
     before = rebuild_indexes(db)
     fixed = sum(
         len(drift.missing) + len(drift.stale) + len(drift.extra)
-        for drift in (before.posts, before.files, before.channel_messages)
+        for drift in (before.posts, before.files, before.channel_messages, before.mail)
     )
     record_action(db, actor=actor, action="rebuild_search_indexes", detail=f"entries corrected={fixed}")
     return fixed, check_index_integrity(db)

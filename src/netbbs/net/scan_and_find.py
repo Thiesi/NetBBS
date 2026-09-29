@@ -50,7 +50,7 @@ from netbbs.net.chat_flow import (
 )
 from netbbs.net.file_flow import enter_file_area
 from netbbs.mail import unread_count as unread_mail_count
-from netbbs.net.mail_flow import browse_mail, caller_mail_refusal
+from netbbs.net.mail_flow import browse_mail, caller_mail_refusal, open_letter
 from netbbs.net.notices import announce, announce_styled
 from netbbs.net.node_theme import effective_accent_color, effective_header_color, effective_header_color_256
 from netbbs.net.picker import pick_item
@@ -59,14 +59,17 @@ from netbbs.net.redraw_preference import redraw_in_place_enabled
 from netbbs.net.session import Session
 from netbbs.net.unicode_style_preference import unicode_style_enabled
 from netbbs.rendering import MUTED_COLOR, colored, reject_keystroke, sanitize_text, screen_title
+from netbbs.rendering.post_body import plain_post_body
 from netbbs.search import (
     ChannelMessageSearchHit,
     FileSearchHit,
+    MailSearchHit,
     PostSearchHit,
     file_jump_cursor,
     post_jump_cursor,
     search_channel_messages,
     search_files,
+    search_mail,
     search_posts,
 )
 from netbbs.storage.database import Database
@@ -497,10 +500,11 @@ async def _new_scan_screen(
 @dataclass(frozen=True)
 class _SearchResultItem:
     """One row in issue #56's `[/] Find` results picker -- a matched post,
-    file, or retained channel message, already filtered to what `user`
-    can currently access (`search_posts`/`search_files`/
-    `search_channel_messages`'s own authorization). Built fresh per
-    query, never persisted.
+    file, retained channel message, or one of the caller's own letters
+    (issue #824), already filtered to what `user` can currently access
+    (`search_posts`/`search_files`/`search_channel_messages`/
+    `search_mail`'s own authorization). Built fresh per query, never
+    persisted.
 
     `result_index` (dogfood follow-up), not `id(item)`, is this item's
     `stable_id_of` -- a plain 1-based position in this one query's own
@@ -511,13 +515,14 @@ class _SearchResultItem:
     real, honest identifier here. It is not printed: rows show only the
     number that selects them (issue #838)."""
 
-    kind: str  # "post" | "file" | "channel_message"
+    kind: str  # "post" | "file" | "channel_message" | "mail"
     name: str
     description: str
     result_index: int
     post: PostSearchHit | None = None
     file: FileSearchHit | None = None
     message: ChannelMessageSearchHit | None = None
+    mail: MailSearchHit | None = None
 
 
 # A search result row renders as "  NN. name - description",
@@ -544,7 +549,8 @@ _SEARCH_RESULT_LIMIT = 20
 
 
 def _search_snippet(text: str) -> str:
-    text = text.strip()
+    # One line: a body's line breaks and indentation are not the row's.
+    text = " ".join(text.split())
     if len(text) <= _SEARCH_RESULT_SNIPPET_LENGTH:
         return text
     return text[:_SEARCH_RESULT_SNIPPET_LENGTH] + "..."
@@ -608,12 +614,21 @@ async def _find_screen(
     boards/files, scrollback is a bounded, revision-less ring buffer),
     the same limitation `_new_scan_screen`'s own channel dispatch
     already accepts.
+
+    The caller's own mail is searched too (issue #824) -- their Inbox and
+    Sent, never anyone else's (`netbbs.search.search_mail`) -- unless mail
+    is closed to them (`caller_mail_refusal`, issue #816), and a letter
+    opens in the mailbox's own message view (`open_letter`).
     """
+    mail_open = await lane.run(lambda db: caller_mail_refusal(session, db, user)) is None
     await session.write_line(
         "\r\n" + screen_title(
             "Search",
             breadcrumb=(session.node_display_name,),
-            subtitle="Find posts, files, and retained chat on this node.",
+            subtitle=(
+                "Find posts, files, retained chat, and your own mail on this node." if mail_open
+                else "Find posts, files, and retained chat on this node."
+            ),
             width=session.terminal_width,
             clear=redraw_in_place_enabled(db, user),
             unicode_style=unicode_style_enabled(db, user), collapsed=breadcrumb_collapsed_enabled(db, user),
@@ -675,6 +690,22 @@ async def _find_screen(
                 )
             )
             next_index += 1
+
+        # The caller's own letters (issue #824), for a caller mail is open
+        # to: no guest and nobody below the mail level (issue #816).
+        if mail_open:
+            mail_hits = search_mail(db, user, query, limit=_SEARCH_RESULT_LIMIT + 1)
+            truncated = truncated or len(mail_hits) > _SEARCH_RESULT_LIMIT
+            for hit in mail_hits[:_SEARCH_RESULT_LIMIT]:
+                where = f"to {hit.label}" if hit.sent else f"from {hit.label}"
+                items.append(
+                    _SearchResultItem(
+                        kind="mail", name=hit.message.subject,
+                        description=f"[MAIL] {where}: {_search_snippet(plain_post_body(hit.message.body))}",
+                        result_index=next_index, mail=hit,
+                    )
+                )
+                next_index += 1
         return items, truncated
 
     items, truncated = await lane.run(_load)
@@ -733,6 +764,15 @@ async def _find_screen(
                 session, lane, selected.file.area, user, initial_cursor=cursor,
                 link_context=link_context, transfers=transfers,
             )
+        elif selected.kind == "mail":
+            # The mailbox's own message view and actions; a letter deleted
+            # there leaves the results (issue #824).
+            still_there = await open_letter(
+                session, lane, user, selected.mail.message.id, sent=selected.mail.sent,
+                link_context=link_context,
+            )
+            if not still_there:
+                items = [item for item in items if item is not selected]
         else:
             await browse_channels(
                 session, lane, hub, presence, mailbox, history, user,
