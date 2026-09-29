@@ -278,6 +278,10 @@ def deliver_link_message(
         recipient = get_user_by_username(db, recipient_local_user_id)
     except AuthError:
         return _bounce("unknown_recipient")
+    # The shared guest account has no mailbox (issue #816): every guest
+    # caller would read what arrived there.
+    if mail_module.mail_recipient_refusal(db, recipient) is not None:
+        return _bounce("no_mailbox")
 
     try:
         ciphertext = base64.b64decode(message.payload["ciphertext"], validate=True)
@@ -537,6 +541,7 @@ _BOUNCE_REASON_TEXT = {
     "blocked_sender": "that BBS does not accept mail from you or from this BBS",
     "undecryptable": "that BBS could not decrypt it, so it may have been sealed to a key that BBS no longer holds",
     "malformed": "that BBS could not accept it as a letter (a bad sender name, subject or body)",
+    "no_mailbox": "that account takes no mail (it is the BBS's shared guest account)",
     "link_policy_manual_block": "that BBS has blocked you or this BBS",
     "link_policy_node_quarantined": "that BBS has quarantined this BBS",
     "link_policy_node_probationary_read_only": "that BBS does not trust this BBS yet; its SysOp has to establish it",

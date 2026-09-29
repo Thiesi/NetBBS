@@ -1247,10 +1247,10 @@ That is the whole feature, and the boundary is deliberate: guest login is an
 *authentication* shortcut and never an authorization model. The guest is an
 ordinary account, so levels, per-object permissions, age and name gates,
 moderation, auditing and Link trust apply to it exactly as to any other
-caller, and **no code anywhere branches on whether a caller is a guest**. A
-SysOp says what a guest may do the same way they say it for anybody else: by
-setting the guest account's level, and by granting or withholding per-object
-permissions.
+caller, and **no code branches on whether a caller is a guest** -- with one
+exception, mail, below. A SysOp says what a guest may do the same way they say
+it for anybody else: by setting the guest account's level, and by granting or
+withholding per-object permissions.
 
 Three consequences follow, and are intended rather than gaps:
 
@@ -1279,6 +1279,15 @@ Three consequences follow, and are intended rather than gaps:
   whatever row holds it now, and `users.id` is `INTEGER PRIMARY KEY` without
   `AUTOINCREMENT`, so SQLite hands a freed rowid to the next account created.
   Either alone would hand passwordless access to a replacement account.
+- **The guest account has no mail** (issue #816, §6.4). This is the one place
+  the guest is treated as a guest, because a mailbox is not an area an account
+  may or may not enter: it is the account's own correspondence. Every guest
+  signs in as the same account, so its inbox would be read by strangers and
+  anything sent from it would go out under one name many people type into.
+  No level expresses that without also closing mail to every ordinary account
+  at the guest's level. "The guest account" means the account guest login
+  signs in without a password right now (`guest_is_eligible`); turning guest
+  login off gives it its mail back.
 - A guest session **may not manage the account's credentials.** The guest is an
   ordinary account in every other respect, but whether a session may touch an
   SSH key is a question about how that session authenticated, not about the
@@ -2206,6 +2215,30 @@ Recipient mailboxes are bounded. When full:
 
 Local mail is the domain extended by Link messages; Link mail does not create a
 parallel mailbox UI.
+
+**Who may use mail** (issue #816). Mail has a node-wide level, `mail_min_level`
+(Settings > Limits & retention, default 0, so open to every account). It
+covers reading, writing and replying, to this node and over Link, as one
+level: a caller who could read but not write could not answer, and one who
+could write but not read would never see the reply. Below it the main menu
+offers no `[E]-mail` and its header no mail count. It gates the caller, not
+the recipient: mail to an account below the level still arrives, and waits
+until the SysOp raises the account's level, as a board's posts wait for a
+caller who cannot read them yet.
+
+The guest account (§4.6) never has mail, whatever its level and whatever the
+mail level says, and nothing is delivered to it. Local mail to it is refused
+at the To prompt and by `send_mail` and `send_system_mail`
+(`MailRecipientRefused`), Link mail to it bounces `no_mailbox` (§10.3), and a
+moderator's rejection of a guest's post sends no rejection mail -- the
+main-menu notice still tells whoever signs in next. A session that signed in
+through guest login stays refused for as long as it lasts, even if the SysOp
+turns guest login off or moves it meanwhile: the account's check reads the
+current setting, so the session's login route (`authenticated_without_credential`)
+is checked too. `netbbs.mail.mail_access_refusal` is the one check for the
+account, `netbbs.net.mail_flow.caller_mail_refusal` adds the session's, and
+`mail_recipient_refusal` is the one for the recipient; `browse_mail` makes the
+caller's check itself, so no way into mail can skip it.
 
 **Mail from the system** (issue #819). Some mail is sent by the BBS itself,
 not by a person: today, a moderation rejection (§6.1). Such a message has no
@@ -4508,8 +4541,9 @@ Separate signed events represent:
 
 - accepted into the recipient mailbox;
 - bounced because of unknown recipient, full mailbox, blocking, a letter the
-  recipient node cannot decrypt, a malformed letter, or another defined
-  terminal failure;
+  recipient node cannot decrypt, a malformed letter, a recipient that takes no
+  mail (`no_mailbox`: the node's shared guest account, issue #816, §6.4), or
+  another defined terminal failure;
 - future expiry where retry policy requires it.
 
 Outbound messages remain pending until an accepted or bounced event arrives.

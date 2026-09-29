@@ -21,6 +21,9 @@ import sqlite3
 from dataclasses import dataclass
 
 from netbbs.auth.users import User
+from netbbs.config import get_mail_min_level
+from netbbs.guest import guest_is_eligible
+from netbbs.permissions.levels import meets_level
 from netbbs.storage.database import Database
 from netbbs.timeutil import utc_now_iso
 
@@ -52,6 +55,58 @@ class MailError(Exception):
     body, blank subject) or an unauthorized access attempt (a user
     trying to act on a message they're neither the sender nor recipient
     of)."""
+
+
+class MailRecipientRefused(MailError):
+    """Raised by `send_mail` for a recipient whose account takes no mail
+    (`mail_recipient_refusal`); the text is the reason, for the sender."""
+
+
+# Who may use mail, and who may be sent it (issue #816, design doc §6.4).
+#
+# The guest account is the one account refused outright, whatever its level.
+# Guest login (issue #531) is otherwise deliberately *not* a special case:
+# levels and per-object permissions say what a guest may do, as for anyone.
+# Mail is where that stops working, because a mailbox is not an area the
+# account may or may not enter -- it is the account's own private
+# correspondence. Every guest caller signs in as the same account, so its
+# inbox would be read by strangers and anything sent from it would go out
+# under one name that many people type into. No level can close that without
+# also closing mail for every ordinary account at the guest's level.
+#
+# "The guest account" is the account guest login currently signs in without
+# a password (`guest_is_eligible`). Turn guest login off, and it is an
+# ordinary account again with its mail back.
+
+GUEST_MAIL_REFUSAL = (
+    "Mail needs an account of your own: the guest account is shared, so it "
+    "has no mailbox. Register to send and receive mail."
+)
+
+
+def mail_access_refusal(db: Database, user: User) -> str | None:
+    """Why `user` may not open mail -- read, write or reply, local and Link
+    alike -- or `None` when they may. The one check every entry point
+    makes."""
+    if guest_is_eligible(db, user):
+        return GUEST_MAIL_REFUSAL
+    level = get_mail_min_level(db)
+    if not meets_level(user, level):
+        return f"Mail is open from access level {level}; yours is {user.user_level}."
+    return None
+
+
+def mail_recipient_refusal(db: Database, recipient: User) -> str | None:
+    """Why no mail may be delivered to `recipient`, or `None`. Checked for
+    local mail by `send_mail` and at the To prompt, and for Link mail on
+    arrival (`netbbs.link.mail.deliver_link_message`).
+
+    Only the guest account is refused. An account below the mail level
+    still receives: the mail waits for the day the SysOp raises its level,
+    as a board's posts wait for a caller who cannot read them yet."""
+    if guest_is_eligible(db, recipient):
+        return f"{recipient.username} is this board's shared guest account, which has no mailbox."
+    return None
 
 
 class MailboxFullError(Exception):
@@ -128,8 +183,16 @@ def send_mail(db: Database, sender: User, recipient: User, subject: str, body: s
     unread and full, raises `MailboxFullError` instead of destroying an
     unread message -- deterministic, matching the design doc's own
     acceptance criterion.
+
+    Raises `MailRecipientRefused` for a recipient that takes no mail (the
+    guest account, issue #816). The sender is not checked here: whether a
+    caller may write mail is the mail screen's gate (`mail_access_refusal`),
+    and a moderator's rejection notice is sent on the moderator's behalf.
     """
     subject = validate_mail_fields(subject, body)
+    refusal = mail_recipient_refusal(db, recipient)
+    if refusal is not None:
+        raise MailRecipientRefused(refusal)
 
     _make_room_if_needed(db, recipient)
 
@@ -167,9 +230,14 @@ def send_system_mail(db: Database, recipient: User, subject: str, body: str) -> 
     The same limits and cap as `send_mail`: a system message counts
     toward the recipient's `MAX_MAIL_PER_RECIPIENT`, but is the first read
     message evicted to make room (`make_room`), and a mailbox full of
-    unread mail raises `MailboxFullError` rather than lose anything.
+    unread mail raises `MailboxFullError` rather than lose anything. A
+    recipient that takes no mail raises `MailRecipientRefused`, as in
+    `send_mail` (issue #816).
     """
     subject = validate_mail_fields(subject, body)
+    refusal = mail_recipient_refusal(db, recipient)
+    if refusal is not None:
+        raise MailRecipientRefused(refusal)
 
     _make_room_if_needed(db, recipient)
 
