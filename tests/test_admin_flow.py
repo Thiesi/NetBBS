@@ -5447,6 +5447,25 @@ def test_node_name_setting_a_new_name_persists_it(db, lane, sysop):
     assert get_node_display_name(db) == "My Cool BBS"
 
 
+def test_node_name_that_reads_like_a_known_node_is_set_with_a_warning(db, lane, sysop, tmp_path):
+    # Issue #900: warned, not refused.
+    from netbbs.config import get_node_display_name
+    from netbbs.link.node_identity import bootstrap_node_identity
+    from netbbs.link.protocol import LinkNode
+    from netbbs.link.store import save_peer
+
+    node = LinkNode(identity=bootstrap_node_identity(tmp_path / "outbound"))
+    save_peer(db, node.handle_hello(node.build_hello(
+        addresses=None, outgoing_only=True, created_at="2026-09-29T00:00:00+00:00",
+        friendly_name="OutBound", canonical_dns_name="outbound.example.org",
+    )))
+    session = FakeSession(["s", "n", "n", "0ut Bound", "b", "b", "b"])
+    _run(session, lane, sysop)
+    written = _normalized_visible(_written_text(session))
+    assert "Node name set to '0ut Bound', which reads like OutBound · outbound.example.org." in written
+    assert get_node_display_name(db) == "0ut Bound"
+
+
 def test_node_name_rejects_a_name_over_the_length_limit(db, lane, sysop):
     from netbbs.config import MAX_NODE_DISPLAY_NAME_LENGTH, get_node_display_name
 
