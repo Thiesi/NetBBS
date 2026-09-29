@@ -279,9 +279,11 @@ def deliver_link_message(
     except AuthError:
         return _bounce("unknown_recipient")
     # The shared guest account has no mailbox (issue #816): every guest
-    # caller would read what arrived there.
-    if mail_module.mail_recipient_refusal(db, recipient) is not None:
-        return _bounce("no_mailbox")
+    # caller would read what arrived there. A disabled account or a signup
+    # awaiting approval takes no mail either (issue #818).
+    refused = mail_module.mail_recipient_bounce_reason(db, recipient)
+    if refused is not None:
+        return _bounce(refused)
     # The recipient blocked this sender (issue #817), by the address the
     # letter came from, never by the node's changeable display name.
     if mail_module.mail_sender_refusal(db, recipient, sender_address=sender_address) is not None:
@@ -308,15 +310,19 @@ def deliver_link_message(
         return _bounce("mailbox_full")
 
     arrived_at = utc_now_iso()
+    # No Sent copy of it exists on this node, so its sender side is deleted
+    # from the start and the recipient's delete removes the row (issue
+    # #818, the same as system mail).
     db.connection.execute(
         """
         INSERT INTO mail_messages
-            (sender_user_id, sender_label, recipient_user_id, subject, body, created_at, link_source_event_id)
-        VALUES (NULL, ?, ?, ?, ?, ?, ?)
+            (sender_user_id, sender_label, recipient_user_id, subject, body, created_at, link_source_event_id,
+             sender_deleted_at)
+        VALUES (NULL, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             sender_address, recipient.id, subject, body,
-            _written_at(message.payload.get("created_at"), arrived_at), message.content_id,
+            _written_at(message.payload.get("created_at"), arrived_at), message.content_id, arrived_at,
         ),
     )
     db.connection.commit()
@@ -547,6 +553,7 @@ _BOUNCE_REASON_TEXT = {
     "undecryptable": "that BBS could not decrypt it, so it may have been sealed to a key that BBS no longer holds",
     "malformed": "that BBS could not accept it as a letter (a bad sender name, subject or body)",
     "no_mailbox": "that account takes no mail (it is the BBS's shared guest account)",
+    "recipient_unavailable": "that account is not taking mail at the moment",
     "link_policy_manual_block": "that BBS has blocked you or this BBS",
     "link_policy_node_quarantined": "that BBS has quarantined this BBS",
     "link_policy_node_probationary_read_only": "that BBS does not trust this BBS yet; its SysOp has to establish it",

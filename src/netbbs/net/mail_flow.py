@@ -59,7 +59,9 @@ from netbbs.link.node_profiles import (
 )
 from netbbs.mail import (
     GUEST_MAIL_REFUSAL,
+    MAILBOX_NEARLY_FULL,
     MAX_MAIL_BODY_BYTES,
+    MAX_MAIL_PER_RECIPIENT,
     MAX_MAIL_SUBJECT_BYTES,
     SYSTEM_SENDER_LABEL,
     MailBlock,
@@ -259,6 +261,30 @@ _ORDER_UNREAD = "unread"
 
 _EMPTY_INBOX = "Your inbox is empty. New mail will appear here."
 _EMPTY_SENT = "You haven't sent any mail. [C]ompose writes a new message."
+def mailbox_capacity_note(total: int, unread: int) -> tuple[str, str] | None:
+    """What the Inbox says about its cap (issue #818), and its tone, once it
+    holds `MAILBOX_NEARLY_FULL` messages; `None` below that."""
+    if total >= MAX_MAIL_PER_RECIPIENT and unread >= total:
+        return (
+            f"Your mailbox is full of unread mail ({MAX_MAIL_PER_RECIPIENT} messages): new mail is "
+            "turned away until you read or delete some.",
+            "error",
+        )
+    if total >= MAX_MAIL_PER_RECIPIENT:
+        return (
+            f"Your mailbox is full ({MAX_MAIL_PER_RECIPIENT} messages): each new message removes your "
+            "oldest read one. Delete what you don't need to keep it.",
+            "warning",
+        )
+    if total >= MAILBOX_NEARLY_FULL:
+        return (
+            f"Your mailbox is nearly full: at {MAX_MAIL_PER_RECIPIENT} messages, each new one removes "
+            "your oldest read message. Unread mail is never removed.",
+            "warning",
+        )
+    return None
+
+
 _IDENTITY_NOTE = (
     f"{_IDENTITY_FLAG} Identity changed: that sender's BBS now has a different cryptographic identity. "
     "Open the message for details."
@@ -476,7 +502,9 @@ async def _load_mail_rows(lane: DatabaseLane, user: User, *, sent: bool) -> list
     for message in messages:
         identity_changed = False
         if sent:
-            key = (message.recipient_remote_address, message.recipient_user_id)
+            # A deleted recipient has no id; its kept name tells it apart
+            # from another deleted one (issue #818).
+            key = (message.recipient_remote_address or message.recipient_label, message.recipient_user_id)
             if key not in names:
                 names[key] = await _display_recipient_label(lane, message)
         elif message.from_system:
@@ -801,7 +829,12 @@ class _MailboxScreen:
                 colored(f"{unread} unread message{'s' if unread != 1 else ''}", fg_color=WARNING_COLOR)
                 if unread else colored("Inbox caught up", fg_color=SUCCESS_COLOR)
             )
-            parts.append(colored(f"{total} in all", fg_color=VALUE_COLOR))
+            # Counted against the cap (issue #818): the whole Inbox, read or
+            # not, whatever [F]ind is showing.
+            parts.append(colored(
+                f"{total} of {MAX_MAIL_PER_RECIPIENT}",
+                fg_color=WARNING_COLOR if total >= MAILBOX_NEARLY_FULL else VALUE_COLOR,
+            ))
             if self.order == _ORDER_UNREAD:
                 parts.append(colored("unread first", fg_color=MUTED_COLOR))
         if self.query:
@@ -873,6 +906,13 @@ class _MailboxScreen:
         if draft is not None:
             # Said on the mail screen, not asked on the way in (issue #814).
             note(_letter_draft_notice(draft), MUTED_COLOR)
+        if not self.sent:
+            capacity = mailbox_capacity_note(
+                len(self.all_rows), sum(1 for row in self.all_rows if not row.message.is_read),
+            )
+            if capacity is not None:
+                text, tone = capacity
+                note(text, ERROR_COLOR if tone == "error" else WARNING_COLOR)
         if not self.sent and any(row.identity_changed for row in self.all_rows):
             note(_IDENTITY_NOTE, WARNING_COLOR)
         above = "\r\n".join(["", header, *notes])
@@ -1070,7 +1110,7 @@ async def _show_message(
     )
 
 
-def _split_link_address(technical_address: str) -> tuple[str, str] | None:
+def split_link_address(technical_address: str) -> tuple[str, str] | None:
     """`(user, fingerprint)` of a stored `user@<home-node-fingerprint>`, or
     `None` for a local name. Split at the last `@`: the user half comes from
     a peer's signed payload and nothing holds it to the username grammar,
@@ -1079,6 +1119,11 @@ def _split_link_address(technical_address: str) -> tuple[str, str] | None:
     if not separator or not is_node_fingerprint(fingerprint):
         return None
     return user, fingerprint
+
+
+# Public for the board reader's [M]ail author (issue #821); this module's own
+# call sites keep the name they had.
+_split_link_address = split_link_address
 
 
 async def _display_link_address(lane: DatabaseLane, technical_address: str) -> str:
@@ -1110,7 +1155,8 @@ def _system_mail_note(session: Session) -> str:
 
 async def _display_recipient_label(lane: DatabaseLane, message: MailMessage) -> str:
     """Who a sent message went to: the remote address of Link mail (issue
-    #805), else the local recipient's current name."""
+    #805), else the local recipient's current name, or the name it had when
+    its account was deleted (issue #818)."""
     if message.recipient_remote_address is not None:
         return await _display_link_address(lane, message.recipient_remote_address)
     recipient = (
@@ -1118,7 +1164,11 @@ async def _display_recipient_label(lane: DatabaseLane, message: MailMessage) -> 
         if message.recipient_user_id is not None
         else None
     )
-    return recipient.username if recipient is not None else "(deleted account)"
+    if recipient is not None:
+        return recipient.username
+    if message.recipient_label:
+        return f"{message.recipient_label} (deleted account)"
+    return "(deleted account)"
 
 
 _DELIVERY_COLORS = {
@@ -1435,6 +1485,98 @@ async def _show_sent_message(session: Session, lane: DatabaseLane, user: User, m
         await lane.run(delete_for_sender, user, message)
         announce(session, "Message deleted.")
         return
+
+
+# -- mail from where callers meet (issue #821) --------------------------------
+#
+# Directory, Who's online, Previous callers and the board reader each offer a
+# Mail action. They all come through here, so every one of them makes the same
+# checks the mailbox's own To prompt makes, and lands on the same compose
+# screen with the recipient already filled in.
+
+
+async def mail_open_to(session: Session, lane: DatabaseLane, user: User) -> bool:
+    """Whether a screen outside the mailbox offers its Mail action at all:
+    only while mail is open to the caller (issue #816). `mail_someone`
+    checks again when the key is pressed, since the SysOp can close mail
+    while the screen is up."""
+    return await lane.run(lambda db: caller_mail_refusal(session, db, user)) is None
+
+
+async def mail_someone(
+    session: Session,
+    lane: DatabaseLane,
+    user: User,
+    *,
+    recipient: User | None = None,
+    link_address: str | None = None,
+    subject: str = "",
+    quote: str | None = None,
+    reply_key: str | None = None,
+    link_context: LinkContext | None = None,
+) -> None:
+    """Write to `recipient`, a local account, or to `link_address`, the
+    stable `user@<fingerprint>` of someone on a linked BBS (issue #821).
+
+    The compose screen opens with To filled in; `subject` and `quote` start
+    the Subject prompt and the body, as the board reader's private reply
+    uses them. `reply_key` gives such a reply a draft slot of its own (see
+    `_letter_draft_path`); without one the letter is the caller's new
+    letter, and a new letter already kept there is offered first, as
+    `[C]ompose` offers it.
+
+    Nothing is written here. Every outcome -- a refusal, "Message sent.",
+    "Cancelled." -- is announced (`netbbs.net.notices`), so the screen the
+    caller came from shows it above its prompt when it redraws.
+
+    The checks are the mailbox's own: the caller's mail access
+    (`caller_mail_refusal`), the recipient's (`mail_recipient_refusal` --
+    the guest account has no mailbox) and `mail_sender_refusal` (a
+    recipient who blocked the caller, issue #817), and for a Link address that this
+    node is linked with that BBS and will send it mail (issue #804), in
+    words for an address the caller did not type."""
+    refusal = await lane.run(lambda db: caller_mail_refusal(session, db, user))
+    if refusal is not None:
+        announce(session, refusal, tone="error")
+        return
+    if link_address is not None:
+        shown = await _display_link_address(lane, link_address)
+        if link_context is None:
+            announce(
+                session, f"This BBS is not linked with other BBSes right now, so mail can't reach {shown}.",
+                tone="error",
+            )
+            return
+        checked = await lane.run(lambda db: _check_link_reply_address(db, link_address, reply=False))
+        if isinstance(checked, str):
+            announce_styled(session, colored(checked, fg_color=ERROR_COLOR))
+            return
+        await _compose_mail(
+            session, lane, user, prefill_link_address=link_address, prefill_subject=subject,
+            prefill_body=quote or None, link_context=link_context, reply_key=reply_key,
+        )
+        return
+    if recipient is None:
+        raise ValueError("mail_someone needs a recipient or a link_address")
+    # The account as it is now: renamed, or deleted, since the screen drew.
+    current = await lane.run(get_user_by_id, recipient.id)
+    if current is None:
+        announce(session, f"{recipient.username}'s account no longer exists.", tone="error")
+        return
+    if current.id == user.id:
+        announce(session, "That is your own account.", tone="muted")
+        return
+    refused = await lane.run(mail_recipient_refusal, current)
+    if refused is None:
+        # Nor one who blocked the caller (issue #817), as the To prompt says.
+        refused = await lane.run(lambda db: mail_sender_refusal(db, current, sender=user))
+    if refused is not None:
+        announce(session, refused, tone="error")
+        return
+    await _compose_mail(
+        session, lane, user, prefill_recipient=current, prefill_subject=subject,
+        prefill_body=quote or None, link_context=link_context, reply_key=reply_key,
+    )
 
 
 async def _compose_mail(
@@ -1790,6 +1932,13 @@ def _reply_key(message: MailMessage) -> str:
     return f"{message.id}_{digest}"
 
 
+def post_reply_key(root_post_id: str) -> str:
+    """The draft slot of a private reply to a board post's author (issue
+    #821), apart from any reply to a mail message: a digest of the post's
+    stable id, which is safe in a file name whatever a peer put in it."""
+    return "post_" + hashlib.sha256(root_post_id.encode("utf-8")).hexdigest()[:16]
+
+
 def _letter_draft_path(lane: DatabaseLane, user: User, reply_key: str | None = None) -> Path:
     """One slot per letter (issue #814): the caller's new letter, and one
     per message they are replying to. Before #814 every letter shared one
@@ -1973,20 +2122,26 @@ def _recipient_label(db, recipient_text: str, link_enabled: bool) -> str:
         return recipient_text
 
 
-def _check_link_reply_address(db, technical_address: str) -> _LinkRecipient | str:
+def _check_link_reply_address(db, technical_address: str, *, reply: bool = True) -> _LinkRecipient | str:
     """Check the stored `user@<fingerprint>` a Link reply goes to (issue
     #805) the way `_check_link_recipient` checks a typed address -- the
     same refusal when this node will not send that peer mail -- in words
-    that fit an address the caller did not type."""
+    that fit an address the caller did not type.
+
+    `reply=False` is a letter started from where the caller met that person
+    (issue #821) -- Who's online, a carried post's author -- rather than an
+    answer to their mail, and says so."""
+    what = "a reply" if reply else "mail"
     split = _split_link_address(technical_address)
     if split is None:
-        return "This message has no address a reply could go to."
+        return "This message has no address a reply could go to." if reply else "There is no address mail could go to."
     user, fingerprint = split
     shown = sanitize_text(link_address_label(user, identity_for_fingerprint(db, fingerprint).label))
     if not is_valid_user_part(user):
-        return f"{shown} is not an address mail can be sent to, so a reply can't reach it."
+        return f"{shown} is not an address mail can be sent to, so {what} can't reach it."
     if resolve_stored_peer_reference(db, fingerprint, met_only=True) != fingerprint:
-        return f"This BBS is no longer linked with the BBS {shown} writes from, so a reply can't reach it."
+        linked = "no longer linked" if reply else "not linked"
+        return f"This BBS is {linked} with the BBS {shown} writes from, so {what} can't reach it."
     return _check_link_recipient(db, f"{user}@{fingerprint}")
 
 

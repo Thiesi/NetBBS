@@ -150,11 +150,20 @@ contact fails, send mail explicitly—chat does not silently turn it into mail.
 
 Signed in as the board's guest, you have no mail: every guest shares that
 account, so its mailbox would be everyone's. Register an account of your own
-to send and receive mail. Mail sent to the guest account is refused. A SysOp
+to send and receive mail. Mail sent to the guest account is refused, and so
+is mail to an account that is disabled or still waiting for the SysOp's
+approval: the To prompt tells you, and mail from another node bounces with
+"that account is not taking mail at the moment". A SysOp
 can also open mail only from a certain access level; below it, the main menu
 offers no **E-mail**.
 
-**E-mail** opens on your Inbox, with how many messages are unread at the top.
+**E-mail** opens on your Inbox, with how many messages are unread at the top
+and how full it is: your mailbox holds 500 messages, and the header counts
+them, for example `120 of 500`. From 450 the Inbox warns you. At 500, each
+new message removes your oldest message you have already read; unread mail is
+never removed, and a mailbox full of unread mail turns new mail away until
+you read or delete some. If old mail was removed to make room, the main menu
+tells you how many messages went, once.
 Each row shows who a message is from, its subject and its date, with `new`
 beside mail you have not opened yet. Move with Up/Down and press Enter, or
 press a row's number, to read a message. On a long list, **[N]ext page** and
@@ -169,6 +178,27 @@ press a row's number, to read a message. On a long list, **[N]ext page** and
   line shows everything again.
 - **[U]nread** marks the highlighted message unread, or read without opening
   it. While you read a message, its own **[U]nread** does the same.
+
+You can also write to someone from where you found them, without typing
+their address. The compose screen opens with **To** filled in:
+
+- In the **Directory**, open a member's card and press **[M]ail**.
+- On **Who's online**, pick a caller and press **[E]-mail** (**[M]** there is
+  a live message). It works for a caller on a linked node, and for a caller
+  who has turned off live messages.
+- On **Previous callers**, press **[M]ail a caller** and type the caller's
+  number. A caller whose name is hidden there can't be written to from the
+  list.
+- While reading a post, **[M]ail author** answers its author privately, with
+  the post's `Re:` subject and a quote, as a reply on the board would have.
+  You don't need to be allowed to post on that board, and it works for a post
+  carried from a linked node too.
+
+After you send the letter, keep it or cancel it, you are back on the screen
+you came from, with the result above the prompt. None of these is offered
+for yourself, or while mail is closed to you. If the person can't be written
+to, for example the guest account or someone on a node that has only just
+linked with this one, you are told why when you press the key.
 
 A `!` before a sender's name means their node's identity has changed. The
 message explains it when you open it.
@@ -193,7 +223,9 @@ opens once your SysOp establishes that node.
 address on its From line, with the same `Re:` subject and quote a local reply
 gets. If that node can't be written to any more, Reply says why instead of
 opening the message. **Sent** shows each message's recipient, with the full
-address for mail that went to another node.
+address for mail that went to another node. Your copy stays in Sent even if
+the recipient's account is later deleted; it then reads, for example,
+`bob (deleted account)`.
 
 Mail to another node also shows where it stands, in Sent's list and on its
 Delivery line when you open it:
