@@ -275,3 +275,19 @@ def test_a_reply_slot_is_not_shared_with_a_message_that_reuses_an_id():
     reused = MailMessage(id=5, sender_label="carol", created_at="2026-02-01T00:00:00+00:00", **fields)
     assert _reply_key(first) != _reply_key(reused)
     assert _reply_key(first).startswith("5_")
+
+
+def test_leaving_a_resumed_old_letter_at_its_prompts_says_it_is_still_kept(node):
+    """Review on #873: a pre-#814 letter asks To and Subject again; leaving
+    there keeps it, and the outcome says so rather than "cancelled"."""
+    _, lane, alice, _, _ = node
+    legacy = _letter_draft_path(lane, alice).with_name(f"mail_{alice.id}.draft")
+    legacy.write_text("An old letter", encoding="utf-8")
+
+    session = FakeSession(keys=["d", "r", "b"], lines=[""])
+    asyncio.run(browse_mail(session, lane, alice))
+
+    text = _visible_text(session)
+    assert "Draft saved -- it is under [D]raft on the mail screen." in text
+    assert "Cancelled." not in text
+    assert _letter_draft_path(lane, alice).read_text(encoding="utf-8") == "An old letter"

@@ -610,3 +610,17 @@ def test_without_recovery_a_draft_is_not_offered_and_stays_until_changed(tmp_pat
     assert body is None
     assert "draft from a previous session" not in _text(session)
     assert draft_path.read_text(encoding="utf-8") == "kept"
+
+
+def test_done_keeps_a_paragraph_break_typed_mid_text():
+    """Review on #873: after /insert, a blank line then /done is a break
+    between the answer and the quote below it, not a stray closing blank."""
+    session = FakeSession(lines=("/insert 2", "answer", "", "/done"))
+    body = asyncio.run(edit_line_body(session, initial_text="> q1\n> q2", max_bytes=1_000, max_lines=20))
+    assert body == "> q1\nanswer\n\n> q2"
+
+
+def test_two_blank_lines_mid_text_still_finish_without_a_trace():
+    session = FakeSession(lines=("/insert 2", "answer", "", ""))
+    body = asyncio.run(edit_line_body(session, initial_text="> q1\n> q2", max_bytes=1_000, max_lines=20))
+    assert body == "> q1\nanswer\n> q2"

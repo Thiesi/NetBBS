@@ -390,8 +390,10 @@ async def edit_line_body(
                     )
                 continue
         if raw == "" or lowered == "/done":
-            if blank_pending:
-                # The blank that asked to finish is not part of the text.
+            if blank_pending and (raw == "" or point == len(lines)):
+                # The blank that asked to finish is not part of the text --
+                # unless /done follows a blank typed mid-text, which is a
+                # paragraph break the caller meant (review on #873).
                 del lines[point - 1]
                 point -= 1
                 blank_pending = False

@@ -658,7 +658,9 @@ async def _compose_mail(
             except InputCancelled:
                 recipient_text = ""
             if not recipient_text:
-                announce(session, "Cancelled.", tone="muted")
+                # A resumed letter from before #814 is still kept (review on
+                # #873): say so, not that it is gone.
+                announce(session, kept_notice if resumed is not None else "Cancelled.", tone="muted")
                 return
             if link_enabled and "@" in recipient_text:
                 # Checked as it is typed, like a local name (issue #807):
@@ -693,7 +695,7 @@ async def _compose_mail(
         # Esc on a fresh prompt gives up on the message.
         subject = await read_subject(session, max_bytes=MAX_MAIL_SUBJECT_BYTES, current=prefill_subject or None)
         if subject is None:
-            announce(session, "Message cancelled.", tone="muted")
+            announce(session, kept_notice if resumed is not None else "Message cancelled.", tone="muted")
             return
 
     def editor_header() -> EditorHeader:
