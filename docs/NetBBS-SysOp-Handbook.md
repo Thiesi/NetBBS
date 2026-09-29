@@ -641,6 +641,14 @@ reach it; rename it if its owner needs to. Mail already waiting in the **Outbox*
 node goes out on the next Link pass after you establish it, and expires if
 the node is not established before its retries run out.
 
+Your callers see each Link message's state in their **Sent** mail: pending,
+delivered, bounced (with the other node's reason in plain words) or expired.
+A caller whose mail bounces or expires is told once at their next main menu.
+One refusal never comes back as a bounce: mail left at a relay for a node
+that has *your* node quarantined or blocked. That node sends yours nothing,
+and the relay took the message, so it stays pending. Replaying an expired
+delivery from the **Outbox** puts it back to pending.
+
 ### Behind an HTTP proxy
 
 If your node's only way out is an HTTP proxy, set the standard variables in

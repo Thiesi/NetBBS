@@ -4240,6 +4240,25 @@ node records that as a bounce, since asking again would get the same answer,
 unless another of the recipient's addresses or relays takes the message
 (§12.4, issue #804).
 
+The sending node shows the state to the sending user (issue #806). Sent marks
+each Link message pending, delivered, bounced or expired, and the message's
+Delivery line gives a bounce's reason in plain words. The reason is the signed
+bounce's `reason` or the refusal's `link_policy_*` code, stored with the
+message (at most 64 characters, since another node chose it); a code this
+node does not know reads as "that BBS refused it". Expired means the delivery
+work item dead-lettered: no route took the message, or this node's own trust
+policy held it back to the end, which is recorded as its own reason. A bounce
+or expiry flags the message until its sender is told: once, at their next
+main menu, which covers a sender who was offline when it happened, or by
+opening it in Sent. A later acceptance clears the flag and wins. A bounce
+message in the inbox would need a system sender (issue #819) and is not sent.
+
+Delivery state records only answers that arrive. Mail a relay took for a
+recipient node that holds the sending node quarantined or blocked is refused
+at pickup without a bounce (§12.4), and nothing on the sending side expires
+mail that was handed over but never answered, so it stays pending. The same
+holds for an acknowledgement that never gets back.
+
 ### 10.4 Routing limitations
 
 Direct delivery requires a known peer with a usable endpoint. An outgoing-only
