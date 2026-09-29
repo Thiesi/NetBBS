@@ -122,3 +122,14 @@ def test_the_grant_screen_offers_read_and_post_as_access_presets():
     assert "past the level gates" in _moderator_preset_label("board", "post")
     with pytest.raises(ModeratorGrantError):
         _moderator_preset_permissions("channel", "post")
+
+
+def test_a_node_wide_blanket_read_grant_opens_every_board_it_covers(db, sysop, helper):
+    # The scope decides what a grant opens (review on #868): a blanket grant
+    # covers every board, and file areas are a kind of their own.
+    one = create_board(db, "Inner circle", creator=sysop, min_read_level=200)
+    two = create_board(db, "Staff room", creator=sysop, min_read_level=SYSOP_LEVEL)
+    vault = create_file_area(db, "Vault", creator=sysop, min_read_level=200)
+    _grant(db, sysop, helper, "board", None, BoardPermission.READ)
+    assert meets_read_gate(db, helper, one) and meets_read_gate(db, helper, two)
+    assert not meets_read_gate(db, helper, vault)

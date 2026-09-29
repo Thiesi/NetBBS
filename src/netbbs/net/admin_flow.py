@@ -21334,8 +21334,9 @@ async def _grant_moderator_screen(session: Session, lane: DatabaseLane, actor: U
                 "Full moderator can edit, delete/moderate, and (for boards/areas) approve or (for "
                 "channels) manage members. The limited preset only approves (boards/areas) or "
                 "only moderates (channels). Read and post, and read only, are access rather than "
-                "moderation: they let the holder past that board's or file area's minimum level, "
-                "such as posting on an announcements board with write level 255. Age and "
+                "moderation: they let the holder past the minimum level of whatever the scope "
+                "covers -- one board or area, or every one under a blanket scope -- such as "
+                "posting on an announcements board with write level 255. Age and "
                 "verified-name requirements still apply."
             ),
         ),
