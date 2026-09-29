@@ -507,3 +507,25 @@ def test_review_breadcrumb_says_what_is_being_reviewed():
         )
     )
     assert re.search(r"NetBBS \W Mail \W New message \W Review composition", _visible(session))
+
+
+def test_review_fits_the_terminal_at_every_body_length_with_a_described_menu():
+    """Review on #861: a body too tall for the described menu but short
+    enough for the packed bar was cut for the packed bar and drawn under
+    the described one. Every length must fit, on every layout step."""
+    for level in ("off", "brief", "detailed"):
+        for count in range(1, 45):
+            for recipient in ("bob", None):
+                session = NavigableFakeSession(keys=("c",))
+                asyncio.run(
+                    review_composition(
+                        session, recipient=recipient, subject="Hi", body=_long_body(count),
+                        commit_key="s" if recipient else "p", commit_label="end",
+                        description_level=level,
+                    )
+                )
+                text = _visible(session)
+                rows = text[: text.index("Choice: ")].split("\n")
+                assert len(rows) <= session.terminal_height, (level, count, recipient, len(rows))
+                paged = "(Page 1 of" in text
+                assert ("line %d\n" % count in text) or paged, (level, count)

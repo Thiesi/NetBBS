@@ -612,7 +612,7 @@ async def review_composition(
     divider_color = 238 if truecolor else RULE_COLOR
     preview_rule = colored(rule_char * min(width, 78), fg_color=divider_color)
 
-    def _menu(paged: bool) -> list[str]:
+    def _menu(paged: bool, packed: bool) -> list[str]:
         options = [MenuEntry(label=menu_key(commit_key.upper(), commit_label), brief=commit_brief)]
         if recipient is not None:
             options.append(MenuEntry(label=menu_key("T", "o"), brief="Change the recipient"))
@@ -632,10 +632,10 @@ async def review_composition(
                 ),
             ])
         options.append(MenuEntry(label=menu_key("C", "ancel"), brief="Discard this draft"))
-        # A described menu takes the rows a long body needs: once the body
-        # has to be paged, the packed bar gives them back (design doc §3.5's
-        # rule for a detail screen with its own described menu).
-        level = "off" if paged else description_level
+        # A described menu takes the rows a long body needs: a body it does
+        # not leave room for gets the packed bar instead, before any paging
+        # (design doc §3.5's rule for a detail screen with a described menu).
+        level = "off" if packed else description_level
         row = _menu_row(options, width=width, height=session.terminal_height, description_level=level)
         return _rows(row, width)
 
@@ -671,23 +671,32 @@ async def review_composition(
         )
         return rows
 
-    def _budget(paged: bool) -> int:
+    def _budget(paged: bool, packed: bool) -> int:
         # Lead-in, heading and fields, two rules, the blank row and menu,
         # the page line, the help hint, carried outcomes, the prompt.
         fixed = (
-            (0 if redraw_in_place else 1) + len(_head()) + 2 + 1 + len(_menu(paged))
+            (0 if redraw_in_place else 1) + len(_head()) + 2 + 1 + len(_menu(paged, packed))
             + (1 if paged else 0) + 1 + len(message_rows) + 1
         )
         return max(_MIN_PAGE_ROWS, session.terminal_height - fixed)
 
-    pages = paginate(blocks, budget=_budget(False)) or [[]]
+    # Each step is tried only when the one before does not fit, and the
+    # screen is drawn with the layout its pages were cut for: the described
+    # menu, then the packed bar, then the packed bar with pages (review on
+    # #861: a body fitting only the packed bar was drawn under the
+    # described menu, overflowing the terminal).
+    paged = packed = False
+    pages = paginate(blocks, budget=_budget(paged, packed)) or [[]]
+    if len(pages) > 1 and description_level != "off":
+        packed = True
+        pages = paginate(blocks, budget=_budget(paged, packed))
     if len(pages) > 1:
-        pages = paginate(blocks, budget=_budget(True))
-    paged = len(pages) > 1
+        packed = paged = True
+        pages = paginate(blocks, budget=_budget(paged, packed))
     page = 0
 
     async def draw() -> None:
-        rows = [*_head(), preview_rule, *pages[page], preview_rule, "", *_menu(paged)]
+        rows = [*_head(), preview_rule, *pages[page], preview_rule, "", *_menu(paged, packed)]
         if paged:
             rows.append(colored(f"(Page {page + 1} of {len(pages)} -- PgUp/PgDn to switch)", fg_color=MUTED_COLOR))
         rows.append(colored("(Ctrl-H for help on these fields)", fg_color=MUTED_COLOR))
