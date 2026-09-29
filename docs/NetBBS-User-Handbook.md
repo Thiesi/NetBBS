@@ -275,6 +275,13 @@ Open a file area and select an upload or download action. Use the browser
 transfer controls, a browser link offered by the node, or a Zmodem-capable
 terminal client. Browser links require the SysOp to configure the web
 listener. PuTTY and ordinary SSH clients do not provide Zmodem by themselves.
+If a Zmodem transfer fails, you stay on the file list: press **[W]** there for
+a browser link instead.
+
+When you upload through a browser link, the terminal tells you once the file
+has arrived, and whether it waits for approval before others can see it. In
+the browser terminal the list updates by itself; elsewhere, press Ctrl-L on
+the file list to see the new file.
 
 Treat a transfer link like a password: it grants access to that transfer.
 Links expire; request a fresh one if needed. A remote file may first need

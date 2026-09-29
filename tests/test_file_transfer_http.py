@@ -751,3 +751,88 @@ def test_head_probes_have_their_own_bound(node, monkeypatch):
     status, message, _ = _head(node, url)
     assert status == 429
     assert "busy" in message
+
+
+# -- what an upload answers, and whom it tells (issue #842) ---------------
+
+
+def _post_upload(node, alice, area, *, accept: str | None = None, on_stored=None, payload=b"payload"):
+    async def scenario():
+        async with node:
+            grant = node.grants.issue(direction=UPLOAD, user=alice, area=area, on_stored=on_stored)
+            form = aiohttp.FormData()
+            form.add_field("file", payload, filename="copperplate-week1.png")
+            headers = {"Accept": accept} if accept is not None else {}
+            async with aiohttp.ClientSession() as client:
+                async with client.post(f"{node.base}/transfer/{grant.token}", data=form, headers=headers) as response:
+                    return response.status, response.headers.get("Content-Type", ""), await response.text()
+
+    return _run(scenario)
+
+
+def test_a_browser_form_upload_ends_on_a_page_not_on_json(node):
+    """A person who opened a printed link in a browser tab submits its
+    form, which asks for HTML. They used to be left looking at
+    `{"filename": ..., "status": "approved"}`."""
+    alice = create_user(node.db, "alice", password="hunter2", user_level=10)
+    area = create_file_area(node.db, "Practice pages", creator=alice)
+
+    status, content_type, body = _post_upload(
+        node, alice, area, accept="text/html,application/xhtml+xml,*/*;q=0.8",
+    )
+
+    assert status == 200
+    assert content_type.startswith("text/html")
+    assert "<h1>Uploaded</h1>" in body
+    assert "copperplate-week1.png" in body
+    assert "[Practice pages]" in body
+    assert "go back to your terminal" in body
+    assert '"status"' not in body
+
+
+def test_a_browser_form_upload_into_a_moderated_area_says_it_waits(node):
+    alice = create_user(node.db, "alice", password="hunter2", user_level=10)
+    sysop = create_user(node.db, "sysop", password="hunter2", user_level=255)
+    area = create_file_area(node.db, "docs", creator=sysop, moderated=True)
+
+    _, _, body = _post_upload(node, alice, area, accept="text/html")
+
+    assert "waits for approval" in body
+
+
+def test_the_terminal_page_and_scripts_still_get_json(node):
+    """The browser terminal's own upload panel uses `fetch()`, which sends
+    `*/*`, and parses the JSON it gets back."""
+    alice = create_user(node.db, "alice", password="hunter2", user_level=10)
+    area = create_file_area(node.db, "docs", creator=alice)
+
+    status, content_type, body = _post_upload(node, alice, area, accept="*/*")
+
+    assert status == 200
+    assert content_type.startswith("application/json")
+    assert '"status": "approved"' in body
+
+
+def test_an_upload_grant_tells_whoever_asked_for_it(node):
+    alice = create_user(node.db, "alice", password="hunter2", user_level=10)
+    area = create_file_area(node.db, "docs", creator=alice)
+    told = []
+
+    _post_upload(node, alice, area, on_stored=told.append)
+
+    assert [entry.filename for entry in told] == ["copperplate-week1.png"]
+
+
+def test_a_failing_listener_does_not_fail_the_upload(node):
+    """The file is stored before anyone is told: a terminal that has gone
+    wrong must not turn that into a refused upload."""
+    alice = create_user(node.db, "alice", password="hunter2", user_level=10)
+    area = create_file_area(node.db, "docs", creator=alice)
+
+    def broken(entry):
+        raise RuntimeError("the terminal went away")
+
+    status, _, _ = _post_upload(node, alice, area, on_stored=broken)
+
+    assert status == 200
+    assert list_files_page(node.db, area, alice).entries[0].filename == "copperplate-week1.png"

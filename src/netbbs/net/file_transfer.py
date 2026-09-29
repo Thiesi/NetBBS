@@ -39,7 +39,7 @@ import html
 import logging
 import secrets
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 from urllib.parse import quote
@@ -159,6 +159,11 @@ class TransferGrant:
     #: Issue #728: a SysOp sending one file to a fixed place on the node --
     #: a banner piece or a door file -- instead of into a file area.
     sysop_upload: SysOpUploadTarget | None = None
+    #: Issue #842: told about the file an upload grant stored, so the
+    #: terminal that asked for the link can say it arrived. Without it the
+    #: caller's screen stays silent while the file lands somewhere they
+    #: cannot see.
+    on_stored: Callable[[FileEntry], None] | None = field(default=None, compare=False, repr=False)
 
     def is_live(self, *, now: float | None = None) -> bool:
         return (now if now is not None else time.monotonic()) < self.expires_at
@@ -197,7 +202,8 @@ class TransferGrants:
         return self._base_url
 
     def issue(
-        self, *, direction: str, user: User, area: FileArea, file_id: str | None = None
+        self, *, direction: str, user: User, area: FileArea, file_id: str | None = None,
+        on_stored: Callable[[FileEntry], None] | None = None,
     ) -> TransferGrant:
         self._sweep()
         if len(self._grants) >= self._max_outstanding:
@@ -218,6 +224,7 @@ class TransferGrants:
             area_id=area.area_id,
             file_id=file_id,
             expires_at=self._clock() + self._ttl_seconds,
+            on_stored=on_stored,
         )
         self._grants[grant.token] = grant
         return grant
@@ -702,7 +709,7 @@ class TransferGateway:
 
         target = resolved.grant.sysop_upload
         if target is not None:
-            return await self._install_sysop_upload(resolved, target, temp_path, filename)
+            return await self._install_sysop_upload(request, resolved, target, temp_path, filename)
 
         try:
             sha256, size_bytes = await asyncio.to_thread(hash_and_measure, temp_path)
@@ -728,15 +735,23 @@ class TransferGateway:
             "transfer: %r uploaded %r (%d bytes) to area %r",
             resolved.user.username, entry.filename, entry.size_bytes, resolved.area.name,
         )
-        return web.json_response({
+        on_stored = resolved.grant.on_stored
+        if on_stored is not None:
+            # Best-effort: the file is stored, and a terminal that has
+            # gone away must not turn that into a failed upload.
+            try:
+                on_stored(entry)
+            except Exception:
+                _logger.warning("transfer: could not tell the terminal about %r", entry.filename, exc_info=True)
+        return _upload_response(request, {
             "filename": entry.filename,
             "size_bytes": entry.size_bytes,
             "status": entry.status,
             "description": entry.description,
-        })
+        }, where=f"[{resolved.area.name}]")
 
 
-    async def _install_sysop_upload(self, resolved, target: SysOpUploadTarget, temp_path: Path, filename: str):
+    async def _install_sysop_upload(self, request, resolved, target: SysOpUploadTarget, temp_path: Path, filename: str):
         """Issue #728: put a SysOp's upload at the destination they chose
         before the link was issued. The sent file's own name is ignored."""
         from aiohttp import web
@@ -763,12 +778,12 @@ class TransferGateway:
                 text=f"This node could not write {target.label}: {exc.strerror or exc}"
             ) from exc
         _logger.info("transfer: %r uploaded %s (%d bytes)", resolved.user.username, target.label, size)
-        return web.json_response({
+        return _upload_response(request, {
             "filename": target.destination.name,
             "size_bytes": size,
             "status": "installed",
             "description": None,
-        })
+        }, where=target.label)
 
 
 async def install_and_record(lane, user: User, target: SysOpUploadTarget, temp_path: Path, *, sent_as: str) -> int:
@@ -1007,6 +1022,49 @@ def _content_disposition(filename: str) -> str:
     ascii_name = filename.encode("ascii", errors="replace").decode("ascii").replace('"', "_")
     quoted = quote(filename, safe="")
     return f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quoted}"
+
+def _upload_response(request, stored: dict, *, where: str):
+    """What a finished upload answers (issue #842): JSON for the browser
+    terminal's own upload panel and for scripts, a page for a person.
+
+    A link printed on a terminal is opened in an ordinary browser tab, and
+    submitting its form used to leave that person looking at raw JSON. A
+    form submission asks for `text/html`; `fetch()` (the terminal page) and
+    command-line clients send `*/*` and keep getting the JSON they parse."""
+    from aiohttp import web
+
+    if "text/html" not in request.headers.get("Accept", ""):
+        return web.json_response(stored)
+    if stored["status"] == "pending":
+        after = "It waits for approval before other callers can see it."
+    elif stored["status"] == "installed":
+        after = "It is in place now."
+    else:
+        after = "Other callers can see it now."
+    return web.Response(
+        text=_page(
+            "Uploaded",
+            f"<p><strong>{html.escape(stored['filename'])}</strong> "
+            f"({stored['size_bytes']:,} bytes) arrived in {html.escape(where)}. {html.escape(after)}</p>"
+            "<p>You can close this tab and go back to your terminal.</p>",
+        ),
+        content_type="text/html",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+def _page(title: str, body: str) -> str:
+    """The plain page shell both transfer pages share."""
+    return (
+        "<!doctype html>"
+        "<html lang=\"en\"><head><meta charset=\"utf-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+        f"<title>{html.escape(title)} - NetBBS</title>"
+        "<style>body{font-family:system-ui,sans-serif;margin:2rem auto;max-width:32rem;"
+        "line-height:1.5;padding:0 1rem}p{color:#555}button{font:inherit;padding:.4rem 1rem}</style>"
+        f"</head><body><h1>{html.escape(title)}</h1>{body}</body></html>"
+    )
+
 
 def _upload_form(action: str, grant: TransferGrant) -> str:
     """The page a caller lands on when they open an upload link.

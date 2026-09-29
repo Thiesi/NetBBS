@@ -50,6 +50,7 @@ for, not a structural requirement the way the picker case was.
 from __future__ import annotations
 
 import logging
+import weakref
 from dataclasses import replace
 from pathlib import Path
 from typing import Callable
@@ -447,20 +448,50 @@ def _format_size(size_bytes: int) -> str:
         size /= 1024
 
 
-def _file_column_widths(terminal_width: int) -> tuple[int, int, int, int, int]:
-    """Returns (idx_w, name_w, size_w, date_w, uploader_w) for columnar file listing."""
+def _file_column_widths(terminal_width: int, *, uploader_need: int | None = None) -> tuple[int, int, int, int, int]:
+    """Returns (idx_w, name_w, size_w, date_w, uploader_w) for columnar file listing.
+
+    `uploader_need` is the widest uploader on the page. The uploader column
+    takes only that much, up to its usual width, and the filename gets the
+    rest (issue #842): it is what a caller reads a file list for, and at 80
+    columns it had 18 against the uploader's 28, so
+    "copperplate-minuscules-week1.png" lost its week and its extension
+    beside an uploader column holding "Copperplate". A verified name in
+    `(=...=)` still gets the full width it had."""
     idx_w = 4
     size_w = 9
     date_w = 16
+    uploader_max = 16 if terminal_width < 80 else 28 + min(10, (terminal_width - 80) // 4)
+    uploader_w = uploader_max if uploader_need is None else max(len("Uploader"), min(uploader_max, uploader_need))
+    # The row is the index label (five columns with its cursor marker),
+    # the other four cells and four single-space gutters.
+    name_w = terminal_width - (5 + size_w + date_w + uploader_w + 4)
     if terminal_width < 80:
-        uploader_w = 16
-        fixed = idx_w + 1 + size_w + 1 + date_w + 1 + uploader_w
-        name_w = max(12, terminal_width - fixed - 1)
-    else:
-        extra = terminal_width - 80
-        name_w = 18 + min(10, extra // 2)
-        uploader_w = 28 + min(10, extra // 4)
+        name_w = max(12, name_w - 1)
     return idx_w, name_w, size_w, date_w, uploader_w
+
+
+def cut_filename(name: str, width: int, *, ellipsis: str = "...") -> str:
+    """`name` fitted to `width` columns with its end kept (issue #842).
+
+    A filename cut at the end loses exactly what tells two files apart --
+    "week1.png" from "week2.png" -- and the extension that says what the
+    file is. So the cut is taken out of the middle, keeping the extension
+    and a few characters before it."""
+    if visible_width(name) <= width:
+        return name
+    room = width - visible_width(ellipsis)
+    if room < 4:
+        return cut_to_width(name, width)
+    dot = name.rfind(".")
+    extension = name[dot:] if 0 < dot and visible_width(name[dot:]) <= 10 else ""
+    tail_room = min(visible_width(extension) + 6, room // 2)
+    tail = ""
+    for ch in reversed(name):
+        if visible_width(ch + tail) > tail_room:
+            break
+        tail = ch + tail
+    return cut_to_width(name, room - visible_width(tail)) + ellipsis + tail
 
 
 async def _render_area_page(
@@ -511,10 +542,11 @@ async def _render_area_page(
     # came to look broken to most people in the first place.
     zmodem = supports_zmodem(session)
     _receive_how = "receive via Zmodem" if zmodem else "get a browser download link"
-    _receive_one = (
-        "Receive the highlighted file via Zmodem" if zmodem
-        else "Get a browser download link for the highlighted file"
-    )
+    # Short enough for one menu column (issue #842): at 120 columns the
+    # hints split into three, each with about 34 columns for its brief, and
+    # "Get a browser download link for the highlighted file" was cut to
+    # "...for the hi".
+    _receive_one = "Receive this file via Zmodem" if zmodem else "Browser link for this file"
     _send_how = "Send a file via Zmodem" if zmodem else "Send a file from your browser"
 
     n_files = len(page.entries)
@@ -534,19 +566,19 @@ async def _render_area_page(
         hints.append(
             MenuEntry(
                 label=menu_key("E", "dit description"),
-                brief="Describe a file, or your upload awaiting approval" if describable_pending
+                brief="Describe a file or waiting upload" if describable_pending
                 else "Describe the highlighted file",
             )
         )
     if show_transfer_hint and zmodem:
         hints.append(
-            MenuEntry(label=menu_key("W", "eb transfer"), brief="Get a browser link instead of Zmodem")
+            MenuEntry(label=menu_key("W", "eb transfer"), brief="Browser link instead of Zmodem")
         )
     if show_remote_hint:
         hints.append(
             MenuEntry(
                 label=menu_key("L", "ink catalogue"),
-                brief="Browse/fetch this file area's remote catalogue",
+                brief="Fetch files other nodes offer",
             )
         )
     if queue_count:
@@ -555,7 +587,7 @@ async def _render_area_page(
         # Issue #675: a followed area is listed first in [N]ew scan.
         hints.append(
             MenuEntry(label=menu_key("f", "ollow", prefix="Un"), brief="Stop following this file area") if following
-            else MenuEntry(label=menu_key("F", "ollow"), brief="List this file area first in New scan")
+            else MenuEntry(label=menu_key("F", "ollow"), brief="List this area first in New scan")
         )
     if can_pin and n_files > 0:
         hints.append(MenuEntry(label=menu_key("i", "n", prefix="P"), brief="Pin or unpin a file at the top"))
@@ -1048,7 +1080,11 @@ async def _show_area(
                     # bell.
                     await _render_and_advance_cursor(page, highlighted=highlighted)
                     continue
-                await send_file_to_caller(session, lane, area, entry, user, transfers=transfers)
+                if await send_file_to_caller(session, lane, area, entry, user, transfers=transfers, web_hint=True):
+                    # The Zmodem send failed (issue #842): stay on this
+                    # list, where [W]eb transfer is the way that works.
+                    await _render_and_advance_cursor(page, highlighted=highlighted)
+                    continue
                 return
             elif kind == "upload":
                 if not can_write:
@@ -1058,11 +1094,16 @@ async def _show_area(
                     session, lane, area, user, link_context=link_context, transfers=transfers
                 ) is not False:
                     return
-                # The browser is uploading; the caller is still here.
+                # The browser is uploading, or a Zmodem upload failed; the
+                # caller is still here either way.
                 await _render_and_advance_cursor(page, highlighted=highlighted)
                 continue
             elif kind == "refresh":
                 page = await lane.run(list_files_page, area, user, with_pinned=True)
+                # An upload that just arrived may be one of this caller's
+                # waiting ones (issue #842), which only [E] can reach.
+                pending_uploads = await lane.run(lambda db: list_pending_files(db, area, requesting_user=user))
+                describable_pending = [entry for entry in pending_uploads if _may_describe(entry)]
                 highlighted = None
                 await _render_and_advance_cursor(page, highlighted=highlighted)
                 continue
@@ -1249,7 +1290,7 @@ async def _show_area(
         )
     if describable_pending:
         hints.append(
-            MenuEntry(label=menu_key("E", "dit description"), brief="Describe an upload awaiting approval")
+            MenuEntry(label=menu_key("E", "dit description"), brief="Describe your waiting upload")
         )
     if transfers is not None and supports_zmodem(session):
         # The same key the listing offers (Codex review): an empty area
@@ -1262,7 +1303,7 @@ async def _show_area(
         hints.append(
             MenuEntry(
                 label=menu_key("L", "ink catalogue"),
-                brief="Browse/fetch this file area's remote catalogue",
+                brief="Fetch files other nodes offer",
             )
         )
     back = MenuEntry(label=menu_key("B", "ack"), brief="Return to the previous menu")
@@ -1276,7 +1317,7 @@ async def _show_area(
         follow_entry = (
             MenuEntry(label=menu_key("f", "ollow", prefix="Un"), brief="Stop following this file area")
             if follows["on"]
-            else MenuEntry(label=menu_key("F", "ollow"), brief="List this file area first in New scan")
+            else MenuEntry(label=menu_key("F", "ollow"), brief="List this area first in New scan")
         )
         return [*hints, *([_queue_entry(queued)] if queued else []), follow_entry, back]
 
@@ -1307,6 +1348,13 @@ async def _show_area(
 
         if choice == "b":
             await session.write_line("")
+            return
+        if choice == REDRAW_KEY:
+            # Ctrl-L looks again (issue #842), which is also what the
+            # browser page sends once an upload finishes: the area's first
+            # file used to arrive while this screen went on saying it had
+            # none. Drawn afresh, so what the upload announced shows too.
+            await _show_area(session, lane, area, user, link_context=link_context, transfers=transfers)
             return
         if choice == "u" and can_write:
             await session.write_line("")
@@ -1701,7 +1749,12 @@ async def _render_file_page(
     divider_color = 238 if truecolor else RULE_COLOR
     rule_char = "─" if unicode_style else "-"
 
-    idx_w, name_w, size_w, date_w, uploader_w = _file_column_widths(session.terminal_width)
+    uploaders = [
+        await lane.run(_uploader_display_name, entry, name_requirement=name_requirement) for entry in page.entries
+    ]
+    idx_w, name_w, size_w, date_w, uploader_w = _file_column_widths(
+        session.terminal_width, uploader_need=max((visible_width(u) for u in uploaders), default=0),
+    )
 
     header_cols = [
         f"{'#':^4}",
@@ -1740,7 +1793,7 @@ async def _render_file_page(
         if entry.pinned:
             # Pinned files are listed first (issue #675); this says why.
             name_clean = f"pin {name_clean}"
-        name_cut = cut_to_width(name_clean, name_w)
+        name_cut = cut_filename(name_clean, name_w, ellipsis="…" if unicode_style else "...")
         if visible_width(name_cut) < name_w:
             name_padded = name_cut + " " * (name_w - visible_width(name_cut))
         else:
@@ -1756,7 +1809,7 @@ async def _render_file_page(
         else:
             date_padded = date_cut
 
-        uploader_display = await lane.run(_uploader_display_name, entry, name_requirement=name_requirement)
+        uploader_display = uploaders[position - 1]
         vis_u = visible_width(uploader_display)
         if vis_u <= uploader_w:
             uploader_padded = uploader_display + " " * (uploader_w - vis_u)
@@ -2193,10 +2246,34 @@ def supports_zmodem(session: Session) -> bool:
 
 def what_of(direction: str, area: FileArea, entry: FileEntry | None) -> str:
     """How one transfer is described on screen, in both the
-    absolute-URL and same-origin paths."""
+    absolute-URL and same-origin paths: what finishes "Open this in a
+    browser to ...", so a verb phrase (issue #842 -- it used to read "to
+    download of 'x'")."""
     if direction == UPLOAD:
         return f"upload to [{sanitize_text(area.name)}]"
-    return f"download of {sanitize_text(entry.filename)!r}" if entry is not None else "download"
+    return f"download {sanitize_text(entry.filename)!r}" if entry is not None else "download"
+
+
+def _tell_of_upload(session: Session, area: FileArea) -> Callable[[FileEntry], None]:
+    """What an upload link reports back to the terminal that asked for it
+    (issue #842). The file arrives over HTTP, somewhere this session never
+    sees, so without this the caller got no word that it worked.
+
+    Queued as an outcome for the next screen drawn here, the way every
+    other result is. Holds the session weakly: a link outlives a caller
+    who hung up, and must not keep their session alive for ten minutes."""
+    owner = weakref.ref(session)
+    area_name = area.name
+
+    def tell(entry: FileEntry) -> None:
+        live = owner()
+        if live is None:
+            return
+        announce(live, f"Uploaded {entry.filename!r} ({_format_size(entry.size_bytes)}) to [{area_name}].")
+        if entry.status == "pending":
+            announce(live, "It waits for approval before other callers can see it.", tone="muted")
+
+    return tell
 
 
 async def _offer_transfer_link(
@@ -2224,9 +2301,13 @@ async def _offer_transfer_link(
         mint=lambda: transfers.issue(
             direction=direction, user=user, area=area,
             file_id=entry.file_id if entry is not None else None,
+            on_stored=_tell_of_upload(session, area) if direction == UPLOAD else None,
         ),
         direction=direction, what=what_of(direction, area, entry),
         filename=entry.filename if entry is not None else None,
+        # Issue #842: the upload lands out of this terminal's sight, and
+        # Ctrl-L is how the file list here looks again.
+        then="Once it has uploaded, press Ctrl-L here to see it." if direction == UPLOAD else None,
     )
 
 
@@ -2238,12 +2319,15 @@ async def offer_grant(
     direction: str,
     what: str,
     filename: str | None = None,
+    then: str | None = None,
 ) -> bool:
     """Mint one grant with `mint` and put its link on screen, or say why
     there is none. Shared by the file area and by the SysOp's own uploads
     (issue #728), which differ only in what the grant is for.
-    `what` finishes "Open this in a browser to ...". Returns whether a link
-    was handed out; every refusal has already been announced."""
+    `what` finishes "Open this in a browser to ...", and `then` follows a
+    printed link, saying what to do once the transfer is done. Returns
+    whether a link was handed out; every refusal has already been
+    announced."""
     # Decided before anything is minted (Codex review): a grant issued
     # on a node that cannot express a URL, to a session with no page to
     # hand a relative one to, is a token nobody can redeem -- and 128 of
@@ -2285,7 +2369,7 @@ async def offer_grant(
             announce_styled(
                 session,
                 colored(
-                    f"\r\nYour browser is handling the {what}."
+                    "\r\nYour browser is starting the download."
                     if direction == DOWNLOAD
                     else "\r\nPick a file in your browser to upload it.",
                     fg_color=MUTED_COLOR,
@@ -2325,7 +2409,7 @@ async def offer_grant(
         announce_styled(
             session,
             colored(
-                f"\r\nYour browser is handling the {what}."
+                "\r\nYour browser is starting the download."
                 if direction == DOWNLOAD
                 else "\r\nPick a file in your browser to upload it.",
                 fg_color=MUTED_COLOR,
@@ -2344,6 +2428,8 @@ async def offer_grant(
             fg_color=MUTED_COLOR,
         )
     )
+    if then is not None:
+        announce_styled(session, colored(then, fg_color=MUTED_COLOR))
     return True
 
 
@@ -2592,7 +2678,9 @@ async def _handle_upload(
         # itself on any failure of its own; a NotImplementedError means
         # receive_file never even opened it.
         announce_styled(session, colored(f"\r\nUpload failed: {exc}", fg_color=ERROR_COLOR))
-        return True
+        _point_at_browser_transfer(session, transfers, direction=UPLOAD)
+        # Back to the list (issue #842), where [W]eb transfer is.
+        return False
     announce_styled(
         session,
         colored(
@@ -2621,11 +2709,31 @@ async def _handle_upload(
     return True
 
 
+def _point_at_browser_transfer(session: Session, transfers: TransferGrants | None, *, direction: str) -> None:
+    """After a failed Zmodem transfer, name the way that works without it
+    (issue #842): most terminals have no Zmodem at all, and the failure
+    message alone left the caller guessing."""
+    if transfers is None:
+        return
+    announce_styled(
+        session,
+        colored(
+            f"Press [W] for a browser {'upload' if direction == UPLOAD else 'download'} link instead.",
+            fg_color=MUTED_COLOR,
+        ),
+    )
+
+
 @records_activity("Downloading")
 async def send_file_to_caller(
     session: Session, lane: DatabaseLane, area: FileArea, entry: FileEntry, user: User, *,
     transfers: TransferGrants | None = None,
-) -> None:
+    web_hint: bool = False,
+) -> bool:
+    """Returns whether the caller should stay where they were: `True` only
+    when a Zmodem send failed (issue #842), so the file list stays up with
+    its [W]eb transfer key. `web_hint` says that key is on the screen the
+    caller goes back to, so the failure can point at it."""
     # Takes the entry the caller actually chose -- a number key, Enter
     # on the cursor, or `_choose_entry`'s picker -- rather than a
     # filename to look up again. While `/download <filename>` existed
@@ -2660,7 +2768,7 @@ async def send_file_to_caller(
                     fg_color=ERROR_COLOR,
                 )
             )
-        return
+        return False
 
     entry_filename = sanitize_text(entry.filename)
     heading = screen_title(
@@ -2685,7 +2793,9 @@ async def send_file_to_caller(
         await zmodem.send_file(session, entry.filename, data)
     except (zmodem.ZmodemError, NotImplementedError) as exc:
         announce_styled(session, colored(f"\r\nDownload failed: {exc}", fg_color=ERROR_COLOR))
-        return
+        if web_hint:
+            _point_at_browser_transfer(session, transfers, direction=DOWNLOAD)
+        return True
     except OSError:
         # The row the caller chose is the row that gets sent now, rather
         # than one re-read by name -- so a file deleted and then
@@ -2701,5 +2811,6 @@ async def send_file_to_caller(
                 fg_color=ERROR_COLOR,
             )
         )
-        return
+        return False
     announce_styled(session, colored(f"\r\nSent {entry_filename!r}.", fg_color=SUCCESS_COLOR))
+    return False

@@ -188,7 +188,7 @@ def test_w_offers_a_download_link_for_the_selected_file(db, lane, alice, grants)
 
     asyncio.run(_show_area(session, lane, area, alice, transfers=grants))
 
-    assert "download of 'game.zip'" in session.visible_output
+    assert "to download 'game.zip':" in session.visible_output
     assert _url_in(session) is not None
 
 
@@ -339,7 +339,7 @@ def test_a_download_offered_to_the_page_names_the_file(db, lane, alice, grants):
 
     assert session.offered[0]["direction"] == "download"
     assert session.offered[0]["filename"] == "game.zip"
-    assert "Your browser is handling" in session.visible_output
+    assert "Your browser is starting the download" in session.visible_output
 
 
 def test_a_page_that_cannot_take_it_still_gets_the_url(db, lane, alice, grants):
@@ -456,3 +456,189 @@ def test_an_upload_helper_that_reports_nothing_still_closes_the_screen(db, lane,
         )
 
     asyncio.run(scenario())  # returns rather than spinning
+
+
+# -- issue #842: telling the caller what happened ------------------------
+
+
+def test_the_download_link_line_reads_as_a_sentence(db, lane, alice, grants):
+    area = create_file_area(db, "downloads", creator=alice)
+    upload_file(db, area, alice, "copperplate-guide-55deg.pdf", b"payload")
+    session = BrowserSession(editor_keys=[_key("1")])
+
+    asyncio.run(_show_area(session, lane, area, alice, transfers=grants))
+
+    assert "Open this in a browser to download 'copperplate-guide-55deg.pdf':" in session.visible_output
+    assert "download of" not in session.visible_output
+
+
+def test_an_upload_link_tells_the_terminal_when_the_file_arrives(db, lane, alice, grants):
+    """The upload happens over HTTP, out of this session's sight. The link
+    it minted reports back, and the next screen drawn here says so."""
+    area = create_file_area(db, "Practice pages", creator=alice)
+    session = FakeSession(editor_keys=[_key("w")], keys=["u"])
+    upload_file(db, area, alice, "first.txt", b"x")
+
+    asyncio.run(_show_area(session, lane, area, alice, transfers=grants))
+    assert "press Ctrl-L here to see it" in session.visible_output
+
+    token = _url_in(session).rsplit("/", 1)[1]
+    grant = grants.peek(token)
+    stored = upload_file(db, area, alice, "copperplate-week1.png", b"a practice page")
+    grant.on_stored(stored)
+
+    assert "Uploaded 'copperplate-week1.png' (15 B) to [Practice pages]." in session.visible_output
+
+
+def test_an_upload_waiting_for_approval_says_so(db, lane, alice, grants):
+    sysop = create_user(db, "sysop", password="hunter2", user_level=255)
+    area = create_file_area(db, "critique", creator=sysop, moderated=True)
+    session = FakeSession()
+
+    tell = file_flow._tell_of_upload(session, area)
+    tell(upload_file(db, area, alice, "page.png", b"ink"))
+
+    assert "Uploaded 'page.png'" in session.visible_output
+    assert "waits for approval" in session.visible_output
+
+
+def test_a_link_does_not_keep_a_hung_up_session_alive(db, lane, alice):
+    import gc
+    import weakref
+
+    area = create_file_area(db, "docs", creator=alice)
+    session = FakeSession()
+    tell = file_flow._tell_of_upload(session, area)
+    gone = weakref.ref(session)
+    del session
+    gc.collect()
+
+    assert gone() is None
+    tell(upload_file(db, area, alice, "late.txt", b"x"))  # says nothing, raises nothing
+
+
+class _ArrivingSession(FakeSession):
+    """An empty area whose first file lands while the caller looks at it,
+    then the Ctrl-L the browser page sends once its upload is done."""
+
+    def __init__(self, arrive, **kwargs):
+        super().__init__(**kwargs)
+        self._arrive = arrive
+        self._arrived = False
+
+    async def read_key(self, echo: bool = True) -> str:
+        if not self._arrived:
+            self._arrived = True
+            self._arrive()
+            return "\x0c"
+        return await super().read_key(echo)
+
+
+def test_ctrl_l_on_an_empty_area_shows_its_first_file(db, lane, alice, grants):
+    area = create_file_area(db, "Practice pages", creator=alice)
+    session = _ArrivingSession(lambda: upload_file(db, area, alice, "first-page.png", b"ink"))
+
+    asyncio.run(_show_area(session, lane, area, alice, transfers=grants))
+
+    after = session.visible_output.split("has no files yet", 1)[1]
+    assert "first-page.png" in after
+
+
+class _NoZmodemClient(FakeSession):
+    """A terminal that claims nothing about Zmodem, and whose emulator
+    never answers the handshake."""
+
+    async def write_raw(self, data: bytes) -> None:
+        from netbbs.net import zmodem
+
+        raise zmodem.ZmodemError("no response from client — does your terminal support Zmodem?")
+
+    async def read_byte(self):
+        from netbbs.net import zmodem
+
+        raise zmodem.ZmodemError("no response from client — does your terminal support Zmodem?")
+
+
+def test_a_failed_zmodem_download_stays_on_the_list_and_points_at_the_browser(db, lane, alice, grants):
+    area = create_file_area(db, "downloads", creator=alice)
+    upload_file(db, area, alice, "guide.pdf", b"payload")
+    session = _NoZmodemClient(editor_keys=[_key("1")])
+
+    asyncio.run(_show_area(session, lane, area, alice, transfers=grants))
+
+    text = session.visible_output
+    assert "Download failed" in text
+    assert "Press [W] for a browser download link instead." in text
+    # Still in the area: the list is drawn again after the failure.
+    assert text.count("1 file on this page") == 2
+
+
+def test_a_failed_zmodem_upload_stays_on_the_list_and_points_at_the_browser(db, lane, alice, grants):
+    area = create_file_area(db, "downloads", creator=alice)
+    upload_file(db, area, alice, "guide.pdf", b"payload")
+    session = _NoZmodemClient(editor_keys=[_key("u")])
+
+    asyncio.run(_show_area(session, lane, area, alice, transfers=grants))
+
+    text = session.visible_output
+    assert "Upload failed" in text
+    assert "Press [W] for a browser upload link instead." in text
+    assert text.count("1 file on this page") == 2
+
+
+def test_without_a_browser_route_the_failure_does_not_point_at_one(db, lane, alice):
+    area = create_file_area(db, "downloads", creator=alice)
+    upload_file(db, area, alice, "guide.pdf", b"payload")
+    session = _NoZmodemClient(editor_keys=[_key("1")])
+
+    asyncio.run(_show_area(session, lane, area, alice))
+
+    assert "Download failed" in session.visible_output
+    assert "Press [W]" not in session.visible_output
+
+
+def test_a_long_filename_keeps_its_extension_on_the_list(db, lane, alice):
+    area = create_file_area(db, "Practice pages", creator=alice)
+    upload_file(db, area, alice, "copperplate-minuscules-week1.png", b"ink")
+    upload_file(db, area, alice, "a-much-longer-name-for-a-practice-sheet-week2.png", b"ink")
+    session = FakeSession(width=80)
+
+    asyncio.run(_show_area(session, lane, area, alice))
+
+    text = session.visible_output
+    # Room for the whole name beside a short uploader...
+    assert "copperplate-minuscules-week1.png" in text
+    # ... and a name that still does not fit loses its middle, not its end.
+    assert "week2.png" in text
+    assert re.search(r"a-much-longer-name\S*(\.\.\.|…)\S*week2\.png", text)
+
+
+def test_cut_filename_keeps_the_end():
+    assert file_flow.cut_filename("copperplate-minuscules-week1.png", 26) == "copperplate-m...-week1.png"
+    assert file_flow.cut_filename("short.txt", 26) == "short.txt"
+    assert file_flow.cut_filename("noextensionatallinthisname", 12).endswith("name")
+
+
+def test_file_screen_briefs_fit_a_menu_column():
+    """At 120 columns the file list's keys split into three menu columns,
+    each leaving 34 columns for a brief; a longer one is cut mid-word
+    ("Get a browser download link for the hi")."""
+    import ast
+    import inspect
+
+    from netbbs.rendering import layout
+
+    column = (layout._THREE_COLUMN_MIN_WIDTH - layout._COLUMN_GUTTER * 2) // 3
+    room = column - len(layout._DESCRIPTION_INDENT)
+    tree = ast.parse(inspect.getsource(file_flow))
+    too_long = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and getattr(node.func, "id", None) == "MenuEntry"):
+            continue
+        for keyword in node.keywords:
+            if keyword.arg != "brief":
+                continue
+            for value in ast.walk(keyword.value):
+                if isinstance(value, ast.Constant) and isinstance(value.value, str) and len(value.value) > room:
+                    too_long.append(value.value)
+    assert too_long == []
