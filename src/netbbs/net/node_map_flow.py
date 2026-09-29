@@ -169,7 +169,15 @@ def exchange_sections(
     """The SysOp's answer to "is anything moving?" for one node (issue
     #844): what this node holds back from it, and whether it takes yours."""
     state_here = transport_state(entry)
-    if state_here == "established":
+    if state_here == "established" and held.count:
+        # Its callers are subjects of their own: one still on probation here
+        # has what it writes held back although its node is established.
+        from_it = (
+            f"accepted, except {held.count} item(s) held back from its callers still on probation "
+            "here (Settings -> Policy trust -> Subjects)",
+            WARNING_COLOR,
+        )
+    elif state_here == "established":
         from_it = ("accepted", SUCCESS_COLOR)
     elif held.count:
         from_it = (f"held back: {held.count} item(s) while it is {state_here} here", WARNING_COLOR)

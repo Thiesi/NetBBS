@@ -375,6 +375,18 @@ def test_a_peer_screen_shows_probation_what_it_offers_and_what_yours_sends(db, l
     assert "Board: Pen Talk" in detail
 
 
+def test_an_established_peer_still_shows_what_its_probationary_callers_had_held_back(db, lane):
+    sysop = create_user(db, "sysop", password="hunter2", user_level=SYSOP_LEVEL)
+    link_context, peer = _link_context_with_peer(db)
+    for dimension in (TrustDimension.IDENTITY_INTEGRITY, TrustDimension.RESOURCE_BEHAVIOR):
+        set_trust_override(db, TrustSubject.node(peer.fingerprint), dimension, TrustState.ESTABLISHED, reason="known")
+    link_context.link_node.deferred_events.defer(
+        _genesis(peer, "Pen Talk").to_dict(), waiting_for=None, now=10**12, held_from=peer.fingerprint,
+    )
+    text = _run(FakeSession(["s", "l", "p", "0", "1", "b", "b", "b", "b", "b"]), lane, sysop, link_context)
+    assert "What it sends: accepted, except 1 item(s) held back from its callers still on probation" in text
+
+
 def test_an_own_linked_board_shows_where_it_has_got_to(db, lane):
     sysop = create_user(db, "sysop", password="hunter2", user_level=SYSOP_LEVEL)
     link_context, peer = _link_context_with_peer(db)
