@@ -734,7 +734,6 @@ from netbbs.rendering import (
     GRADIENTS,
     decode_ansi_bytes,
     double_frame,
-    field_row,
     gradient_text,
     menu_grid,
     menu_key,
@@ -963,41 +962,6 @@ def _get_display_next_backup(db: Database) -> str | None:
     if status.overdue:
         return "due now"
     return format_for_display(status.next_run.isoformat(), db) if status.next_run else None
-
-
-async def _load_condensed_status_line(lane: DatabaseLane, *, unicode_style: bool, terminal_width: int) -> str:
-    """DB-only backup context (GitHub issue #206) for every screen in this
-    module that doesn't already show the richer full panel Users/Content/
-    Operations/Settings/Node have. Update status is deliberately absent:
-    unlike backup recency, it is actionable configuration/status which belongs
-    on the SysOp dashboard, Settings overview, and dedicated Update screen, not
-    on unrelated user/content/theme editors. This remains obtainable from
-    `lane` alone, with no `node_controls`/`link_context`
-    dependency: threading live node/session/Link state down through every
-    nested screen's own call chain (most of which don't currently take
-    either) would be a much bigger ripple than this feature is worth. Users/
-    Content/Operations/Settings/Node keep their own richer panels instead of
-    calling this."""
-    def _load(db: Database) -> str | None:
-        backup_display, _backup_path = _get_display_backup_summary(db)
-        # Code review follow-up (PR #216): format_for_display resolves the
-        # node's configured format/timezone from this same `db` handle --
-        # without it, this was the one place in the module still showing
-        # the raw stored UTC value (with microseconds) instead of matching
-        # the Backup status screen and everywhere else a timestamp appears.
-        return backup_display
-
-    backup_display = await lane.run(_load)
-    # `field_row` does not wrap or truncate. Cut the stored display value to
-    # the available width before sanitizing, matching the order used elsewhere
-    # in this module.
-    backup_label = "Backup: "
-    backup_text = (
-        backup_label
-        + sanitize_text(cut_to_width(backup_display, max(0, terminal_width - len(backup_label))))
-        if backup_display else "Backup: never"
-    )
-    return field_row([(backup_text, None)], unicode_style=unicode_style)
 
 
 # -- outcomes carried into the next redraw ------------------------------------
@@ -3012,7 +2976,6 @@ async def _draw_node_name_screen(
             node_name_gradient=session.node_name_gradient,
         )
     )
-    await session.write_line(await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width))
     safe_name = sanitize_text(name)
     preview = (
         gradient_text(safe_name, gradient, truecolor=False) if gradient is not None
@@ -3075,9 +3038,6 @@ async def _link_participation_screen(session: Session, lane: DatabaseLane, actor
                 session, chrome, "Join NetBBS Link", breadcrumb=("Settings",),
                 subtitle="Whether this node uses the project's reliable nodes as seeds and relays.",
             ),
-            preamble=[await _load_condensed_status_line(
-                lane, unicode_style=chrome.unicode_style, terminal_width=session.terminal_width
-            )],
             sections=sections, actions=actions, page=page, message=message,
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
         )
@@ -3451,7 +3411,6 @@ async def _trust_menu(
                 header_color=header_color,
             node_name_gradient=session.node_name_gradient)
         )
-        await session.write_line(await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width))
         options = [
             MenuEntry(label=menu_key("S", "ubjects"), brief="Trusted node/user subjects"),
             MenuEntry(label=menu_key("D", "omains"), brief="Trusted federation domains"),
@@ -6149,19 +6108,6 @@ async def _pick_target_user(
         redraw_in_place=await lane.run(redraw_in_place_enabled, actor),
         unicode_style=unicode_style,
         collapsed=await lane.run(breadcrumb_collapsed_enabled, actor),
-        # The console's condensed status line, kept from the screen this
-        # replaced: it was drawn on every render there, and a masthead is
-        # how pick_item draws a block above its own title on every
-        # render. Its row is budgeted now -- see the picker's
-        # _header_lines, which never counted a masthead until this.
-        # A coroutine, not a captured string: this line reports backup
-        # state, and another session completing a backup while the
-        # screen is open used to leave it saying "never" until the SysOp
-        # left and came back -- on a screen that advertises Ctrl-R
-        # (Codex review).
-        masthead=(lambda: _load_condensed_status_line(
-            lane, unicode_style=unicode_style, terminal_width=session.terminal_width
-        )) if is_usable_sysop(actor) else "",
         accent_color=await lane.run(effective_accent_color_256),
         header_color=await lane.run(effective_header_color_256),
     )
@@ -6242,15 +6188,12 @@ async def _draw_user_detail(
     Save/Back convention) renders identically to before this feature.
 
     `allowed` (issue #836) narrows the menu to what a staff member may do
-    (`_user_detail_keys`) and leaves out the node's health line, which is
-    the SysOp's; `None` is the SysOp's full screen."""
+    (`_user_detail_keys`); `None` is the SysOp's full screen."""
     await session.write_line(
         "\r\n" + screen_title(sanitize_text(target.username),
             breadcrumb=(session.node_display_name,), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
             header_color=await lane.run(effective_header_color_256), node_name_gradient=session.node_name_gradient)
     )
-    if allowed is None:
-        await session.write_line(await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width))
     accent = await lane.run(effective_accent_color_256)
 
     def _editable(hotkey: str, label: str, value: str, *, color: int = VALUE_COLOR) -> Field:
@@ -7088,10 +7031,6 @@ async def _draw_update_status(
             header_color=header_color,
         node_name_gradient=session.node_name_gradient)
     )
-    # No _load_condensed_status_line() call here (GitHub issue #206) --
-    # same reasoning as _backup_status_screen's own exclusion: this
-    # screen's whole content already is the update-check status, in
-    # richer detail than the condensed line would add, right below.
     auto_badge = (
         status_badge("ON", tone="success", unicode_style=unicode_style)
         if auto_enabled
@@ -7677,6 +7616,52 @@ async def _create_live_backup_owned(
         raise cancelled
 
 
+def _backup_door_sections(voidrunner_dir: Path, installs_on: bool) -> list[Section]:
+    """The Backup page's door sections, for a node that has doors."""
+    return [
+        Section("Door data in a backup", [
+            # `[0]`: this screen runs *inside* the node, so the recorded
+            # location and the one this process would resolve are the same
+            # answer by construction -- the provenance that says which one
+            # it was matters only to the backup CLI, which is a different
+            # process with a different home (issue #555).
+            Field(
+                "Voidrunner source", str(voidrunner_dir),
+                note="Includes saved careers and scores when this directory exists. "
+                     "Close Voidrunner sessions before creating a backup.",
+            ),
+            Field(
+                "War Dialer", "existing node-default and registered override worlds",
+                note="Close War Dialer sessions before backup; restore requires explicit world destinations.",
+            ),
+            Field(
+                "Door outbound receipts", "included automatically",
+                note="Restored beside the database with the archive's own generation.",
+            ),
+        ]),
+        Section("Door installation directories", [
+            Field(
+                "In each backup", "included" if installs_on else "not included",
+                color=WARNING_COLOR if installs_on else VALUE_COLOR, bold=True,
+            ),
+            Note(
+                "Each door's own game installation, which NetBBS otherwise leaves to you. "
+                "Off by default: these are operator-owned and can be far larger than node state. "
+                "Including them makes every backup that much larger and slower, so check you have "
+                "the space and that nothing in those directories links to host data you would not "
+                "want copied. Captured as a copy only -- restore never writes back over a live "
+                "installation."
+                if not installs_on else
+                "Every registered door's game installation is copied into each backup. "
+                "Backups will be larger and slower; restore never writes these back over a live "
+                "installation, so recover them with ordinary file tools. The copy is not quiesced: "
+                "halt a door's service and let its callers leave before backing up, or its game "
+                "state may be captured mid-write."
+            ),
+        ]),
+    ]
+
+
 async def _backup_status_screen(
     session: Session,
     lane: DatabaseLane,
@@ -7737,54 +7722,27 @@ async def _backup_status_screen(
                 flex=1,
             )]))
 
-        installs_on = await lane.run(door_installs_included)
-        sections.append(Section("Door data in a backup", [
-            # `[0]`: this screen runs *inside* the node, so the recorded
-            # location and the one this process would resolve are the same
-            # answer by construction -- the provenance that says which one
-            # it was matters only to the backup CLI, which is a different
-            # process with a different home (issue #555).
-            Field(
-                "Voidrunner source", str(await lane.run(lambda db: voidrunner_save_directory(db.path)[0])),
-                note="Includes saved careers and scores when this directory exists. "
-                     "Close Voidrunner sessions before creating a backup.",
-            ),
-            Field(
-                "War Dialer", "existing node-default and registered override worlds",
-                note="Close War Dialer sessions before backup; restore requires explicit world destinations.",
-            ),
-            Field(
-                "Door outbound receipts", "included automatically",
-                note="Restored beside the database with the archive's own generation.",
-            ),
-        ]))
-        sections.append(Section("Door installation directories", [
-            Field(
-                "In each backup", "included" if installs_on else "not included",
-                color=WARNING_COLOR if installs_on else VALUE_COLOR, bold=True,
-            ),
-            Note(
-                "Each door's own game installation, which NetBBS otherwise leaves to you. "
-                "Off by default: these are operator-owned and can be far larger than node state. "
-                "Including them makes every backup that much larger and slower, so check you have "
-                "the space and that nothing in those directories links to host data you would not "
-                "want copied. Captured as a copy only -- restore never writes back over a live "
-                "installation."
-                if not installs_on else
-                "Every registered door's game installation is copied into each backup. "
-                "Backups will be larger and slower; restore never writes these back over a live "
-                "installation, so recover them with ordinary file tools. The copy is not quiesced: "
-                "halt a door's service and let its callers leave before backing up, or its game "
-                "state may be captured mid-write."
-            ),
-        ]))
-
+        # The schedule sits right under the backups themselves (issue #845,
+        # F066): on a node with no doors, page 1 used to be mostly
+        # Voidrunner, War Dialer and door-installation text.
         sections.append(await _backup_schedule_section(lane, db_path, standalone=not can_create))
+
+        installs_on = await lane.run(door_installs_included)
+        voidrunner_dir = await lane.run(lambda db: voidrunner_save_directory(db.path)[0])
+        # A toggle left on stays reachable to be turned off.
+        has_doors = bool(await lane.run(list_doors)) or voidrunner_dir.is_dir() or installs_on
+        if has_doors:
+            sections.extend(_backup_door_sections(voidrunner_dir, installs_on))
+        else:
+            sections.append(Section("Doors", [Note(
+                "No doors are set up, so backups hold no door data. This section fills in "
+                "once you add one."
+            )]))
 
         if can_create:
             actions = [
                 ("c", menu_key("C", "reate backup now")),
-                ("d", menu_key("D", "oor installations: " + ("on" if installs_on else "off"))),
+                *([("d", menu_key("D", "oor installations: " + ("on" if installs_on else "off")))] if has_doors else []),
                 ("s", menu_key("S", "chedule & destination")),
                 _BACK_ACTION,
             ]
@@ -7809,7 +7767,7 @@ async def _backup_status_screen(
         if choice == "s":
             await _backup_schedule_editor(session, lane, actor, db_path=db_path, identity_dir=identity_dir)
             continue
-        if choice == "d":
+        if choice == "d" and has_doors:
             # A toggle toggles (AGENTS.md, design doc §3.5). The setting is
             # reversible and changes nothing until the next backup runs, so it
             # gets no confirmation; the consequences are screen content above,
@@ -10233,9 +10191,6 @@ async def _link_status_screen(
                 session, chrome, "Link status", breadcrumb=("SysOp", "Operations"),
                 subtitle="Identity, capacity, relay activity, and verified peers.",
             ),
-            preamble=[await _load_condensed_status_line(
-                lane, unicode_style=chrome.unicode_style, terminal_width=session.terminal_width
-            )],
             sections=sections, actions=actions, page=page, message=message,
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
         )
@@ -12555,7 +12510,6 @@ async def _draw_banners_and_mastheads_menu(
     await _write_wrapped_subtitle(
         session, "Every optional SysOp-authored banner and masthead, grouped by kind."
     )
-    await session.write_line(await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width))
     await session.write_line(
         "\r\n" + _menu_row(
             [
@@ -12637,7 +12591,6 @@ async def _draw_welcome_banner_menu(
     await session.write_line("\r\n" + screen_title("Welcome banner",
             breadcrumb=(session.node_display_name, "Settings", "Mastheads & banners", "Banners"), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
             header_color=await lane.run(effective_header_color_256), node_name_gradient=session.node_name_gradient))
-    await session.write_line(await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width))
     await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style)], unicode_style=unicode_style)
     await session.write_line(
         "\r\n" + _menu_row(
@@ -13258,7 +13211,6 @@ async def _draw_main_menu_banner_menu(
     await session.write_line("\r\n" + screen_title("Main-menu masthead",
             breadcrumb=(session.node_display_name, "Settings", "Mastheads & banners", "Mastheads"), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
             header_color=await lane.run(effective_header_color_256), node_name_gradient=session.node_name_gradient))
-    await session.write_line(await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width))
     await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style)], unicode_style=unicode_style)
     await session.write_line("")
     await _write_wrapped_subtitle(
@@ -13566,7 +13518,6 @@ async def _draw_banners_menu(
         "Optional banners shown throughout a caller's session -- first login, signing off, "
         "and starting/finishing self-service signup.",
     )
-    await session.write_line(await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width))
     await session.write_line(
         "\r\n" + _menu_row(
             [
@@ -13654,7 +13605,6 @@ async def _draw_logoff_banner_menu(
         "Shown above the ordinary Goodbye message on an intentional Log off only -- never on an idle "
         "timeout, kick, or account revocation.",
     )
-    await session.write_line(await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width))
     await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style)], unicode_style=unicode_style)
     await session.write_line(
         "\r\n" + _menu_row(
@@ -13930,7 +13880,6 @@ async def _draw_new_account_banner_before_menu(
         "Shown once, right when a caller starts self-service signup -- before the Create "
         "account prompts, never repeated on a fixable retry.",
     )
-    await session.write_line(await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width))
     await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style)], unicode_style=unicode_style)
     await session.write_line(
         "\r\n" + _menu_row(
@@ -14214,7 +14163,6 @@ async def _draw_new_account_banner_after_menu(
         "Shown once self-service signup succeeds -- covers both an immediate login and a "
         "pending-approval account, alongside the existing message either way.",
     )
-    await session.write_line(await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width))
     await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style)], unicode_style=unicode_style)
     await session.write_line(
         "\r\n" + _menu_row(
@@ -14488,7 +14436,6 @@ async def _draw_mastheads_menu(
         "chat channel picker -- at every level of browsing (top level, a category, a "
         "Community) where applicable.",
     )
-    await session.write_line(await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width))
     await session.write_line(
         "\r\n" + _menu_row(
             [
@@ -14576,7 +14523,6 @@ async def _draw_board_list_masthead_menu(
         "Shown above every board-browsing view -- the top level, a category, or a "
         "Community.",
     )
-    await session.write_line(await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width))
     await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style)], unicode_style=unicode_style)
     await session.write_line(
         "\r\n" + _menu_row(
@@ -14852,7 +14798,6 @@ async def _draw_file_area_masthead_menu(
         "Shown above every file-area-browsing view -- the top level, a category, or a "
         "Community.",
     )
-    await session.write_line(await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width))
     await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style)], unicode_style=unicode_style)
     await session.write_line(
         "\r\n" + _menu_row(
@@ -15126,7 +15071,6 @@ async def _draw_chat_channel_picker_masthead_menu(
         "Shown above every channel-picker view -- the top level, a category, or a "
         "Community. Never inside a live channel.",
     )
-    await session.write_line(await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width))
     await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style)], unicode_style=unicode_style)
     await session.write_line(
         "\r\n" + _menu_row(
@@ -15520,12 +15464,6 @@ async def _theme_colors_menu(session: Session, lane: DatabaseLane, actor: User) 
 
     redraw_in_place, redraw_hint = await lane.run(_resolve_redraw_preference, actor)
     unicode_style = await lane.run(unicode_style_enabled, actor)
-    # Issue #206's condensed status line on every nested console screen
-    # without a full panel of its own -- kept above the live preview.
-    status_line = await _load_condensed_status_line(
-        lane, unicode_style=unicode_style, terminal_width=session.terminal_width
-    )
-    newline = chr(13) + chr(10)
     await edit_resource_draft(
         session, lane,
         title="Node colors",
@@ -15533,7 +15471,7 @@ async def _theme_colors_menu(session: Session, lane: DatabaseLane, actor: User) 
         save_menu_text=menu_key("S", "ave"), back_menu_text=menu_key("B", "ack"),
         description_level=await lane.run(menu_description_level, actor),
         redraw_in_place=redraw_in_place, redraw_hint=redraw_hint,
-        preamble=lambda d: status_line + newline + _theme_preview_preamble(d),
+        preamble=_theme_preview_preamble,
         unicode_style=unicode_style,
         collapsed=await lane.run(breadcrumb_collapsed_enabled, actor),
         accent_color=await lane.run(effective_accent_color_256),
@@ -16328,8 +16266,7 @@ async def _community_menu(session: Session, lane: DatabaseLane, actor: User) -> 
     collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
     redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
     header_color = await lane.run(effective_header_color_256)
-    status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
-    await _draw_community_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
+    await _draw_community_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
     while True:
         choice = (await session.read_key()).lower()
 
@@ -16339,24 +16276,21 @@ async def _community_menu(session: Session, lane: DatabaseLane, actor: User) -> 
         elif choice == "c":
             await session.write_line("")
             await _community_screen(session, lane, actor)
-            status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
-            await _draw_community_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
+            await _draw_community_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == "l":
             await session.write_line("")
             await _list_communities_screen(session, lane, actor)
-            status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
-            await _draw_community_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
+            await _draw_community_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         else:
             await session.write(reject_unhandled_key(choice))
 
 
 async def _draw_community_menu(
     session: Session, description_level: str, redraw_in_place: bool, unicode_style: bool, collapsed: bool,
-    header_color: int | tuple[int, int, int] = HEADER_COLOR, *, status_line: str,
+    header_color: int | tuple[int, int, int] = HEADER_COLOR,
 ) -> None:
     await session.write_line("\r\n" + screen_title("Communities",
             breadcrumb=(session.node_display_name,), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, header_color=header_color, node_name_gradient=session.node_name_gradient))
-    await session.write_line(status_line)
     await session.write_line(
         _menu_row(
             [
@@ -16587,10 +16521,9 @@ async def _community_detail_screen(session: Session, lane: DatabaseLane, actor: 
     async def _redraw() -> tuple[int, int]:
         order = [c.id for c in await lane.run(list_communities)]
         place = order.index(community.id) if community.id in order else 0
-        status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
         await _draw_community_detail(
             session, community, description_level, redraw_in_place, unicode_style, collapsed, header_color,
-            status_line=status_line, place=place, total=len(order),
+            place=place, total=len(order),
         )
         return place, len(order)
 
@@ -16627,7 +16560,6 @@ async def _draw_community_detail(
     collapsed: bool,
     header_color: int | tuple[int, int, int] = HEADER_COLOR,
     *,
-    status_line: str,
     place: int = 0,
     total: int = 1,
 ) -> None:
@@ -16636,7 +16568,6 @@ async def _draw_community_detail(
             breadcrumb=(session.node_display_name,), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
             header_color=header_color, node_name_gradient=session.node_name_gradient)
     )
-    await session.write_line(status_line)
     panel_rows = await _write_sections(session, [
         Section("Community", [
             _description_field(community.description),
@@ -16710,8 +16641,7 @@ async def _board_menu(
     collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
     redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
     header_color = await lane.run(effective_header_color_256)
-    status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
-    await _draw_board_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
+    await _draw_board_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
     while True:
         choice = (await session.read_key()).lower()
 
@@ -16721,24 +16651,21 @@ async def _board_menu(
         elif choice == "c":
             await session.write_line("")
             await _board_screen(session, lane, actor)
-            status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
-            await _draw_board_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
+            await _draw_board_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == "l":
             await session.write_line("")
             await _list_boards_screen(session, lane, actor, link_context=link_context)
-            status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
-            await _draw_board_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
+            await _draw_board_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         else:
             await session.write(reject_unhandled_key(choice))
 
 
 async def _draw_board_menu(
     session: Session, description_level: str, redraw_in_place: bool, unicode_style: bool, collapsed: bool,
-    header_color: int | tuple[int, int, int] = HEADER_COLOR, *, status_line: str,
+    header_color: int | tuple[int, int, int] = HEADER_COLOR,
 ) -> None:
     await session.write_line("\r\n" + screen_title("Message boards",
             breadcrumb=(session.node_display_name,), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, header_color=header_color, node_name_gradient=session.node_name_gradient))
-    await session.write_line(status_line)
     await session.write_line(
         _menu_row(
             [
@@ -17833,7 +17760,6 @@ async def _draw_board_detail(
             breadcrumb=(session.node_display_name,), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
             header_color=await lane.run(effective_header_color_256), node_name_gradient=session.node_name_gradient)
     )
-    await session.write_line(await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width))
     # Dogfood follow-up: nothing on this screen (or the board-list picker)
     # ever showed how many posts actually exist or when the last one was
     # made -- a SysOp trying to spot a dead board versus an active one had
@@ -18331,12 +18257,6 @@ async def _post_action_screen(
     collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
     redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
     header_color = await lane.run(effective_header_color_256)
-    # The node's health line is the SysOp's; a board moderator reaching this
-    # from the board's own [Q]ueue (issue #678) is shown the post alone.
-    status_line = (
-        await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
-        if actor.user_level >= SYSOP_LEVEL else None
-    )
     display_format, display_timezone = await lane.run(resolve_display_preferences)
     when = _when_or_raw(post.created_at, override_format=display_format, override_timezone=display_timezone)
     body_mode = post_body_mode(
@@ -18418,7 +18338,6 @@ async def _post_action_screen(
         choice, page = await show_detail(
             session, title=title, sections=sections, actions=actions,
             redraw_in_place=redraw_in_place, unicode_style=unicode_style, page=page,
-            preamble=[status_line] if status_line else [],
         )
         if choice == "b":
             return
@@ -18470,8 +18389,7 @@ async def _area_menu(
     collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
     redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
     header_color = await lane.run(effective_header_color_256)
-    status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
-    await _draw_area_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
+    await _draw_area_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
     while True:
         choice = (await session.read_key()).lower()
 
@@ -18481,29 +18399,25 @@ async def _area_menu(
         elif choice == "c":
             await session.write_line("")
             await _area_screen(session, lane, actor)
-            status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
-            await _draw_area_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
+            await _draw_area_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == "l":
             await session.write_line("")
             await _list_areas_screen(session, lane, actor, link_context=link_context, transfers=transfers)
-            status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
-            await _draw_area_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
+            await _draw_area_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == "g":
             await session.write_line("")
             await _gc_screen(session, lane, actor)
-            status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
-            await _draw_area_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
+            await _draw_area_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         else:
             await session.write(reject_unhandled_key(choice))
 
 
 async def _draw_area_menu(
     session: Session, description_level: str, redraw_in_place: bool, unicode_style: bool, collapsed: bool,
-    header_color: int | tuple[int, int, int] = HEADER_COLOR, *, status_line: str,
+    header_color: int | tuple[int, int, int] = HEADER_COLOR,
 ) -> None:
     await session.write_line("\r\n" + screen_title("File areas",
             breadcrumb=(session.node_display_name,), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, header_color=header_color, node_name_gradient=session.node_name_gradient))
-    await session.write_line(status_line)
     await session.write_line(
         menu_grid(
             [(
@@ -18935,7 +18849,6 @@ async def _draw_area_detail(
             breadcrumb=(session.node_display_name,), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
             header_color=await lane.run(effective_header_color_256), node_name_gradient=session.node_name_gradient)
     )
-    await session.write_line(await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width))
     file_count, last_file_at = await lane.run(count_visible_files, area)
     order = [a.id for a in await lane.run(file_area_siblings, area)]
     place, total = (order.index(area.id) if area.id in order else 0), len(order)
@@ -19158,13 +19071,12 @@ async def _write_file_record(
     session: Session, entry: FileEntry, *,
     heading: str,
     fields: list[Field],
-    status_line: str,
     redraw_in_place: bool,
     unicode_style: bool,
     collapsed: bool,
     header_color: int | tuple[int, int, int],
 ) -> int:
-    """Title, status line, the file's panel and its description -- what
+    """Title, the file's panel and its description -- what
     the pending review and the expired-file recovery screens both show
     above their action bars. Returns the rows used, for `_fitted_menu`."""
     await session.write_line(
@@ -19172,7 +19084,6 @@ async def _write_file_record(
             breadcrumb=(session.node_display_name,), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
             header_color=header_color, node_name_gradient=session.node_name_gradient)
     )
-    await session.write_line(status_line)
     panel_rows = await _write_sections(session, [Section(heading, fields)], unicode_style=unicode_style)
     # Line by line (issue #463): a description may be a FILE_ID.DIZ
     # block now, and running its ten lines together into one is exactly
@@ -19194,7 +19105,6 @@ async def _draw_file_action(
     collapsed: bool,
     header_color: int | tuple[int, int, int] = HEADER_COLOR,
     *,
-    status_line: str,
     when: str,
     can_download: bool = False,
     area_name: str | None = None,
@@ -19213,7 +19123,7 @@ async def _draw_file_action(
             Field("Pinned", _yes_no(entry.pinned)),
             Field("Exempt from expiry", _yes_no(entry.exempt_from_expiry)),
         ],
-        status_line=status_line, redraw_in_place=redraw_in_place, unicode_style=unicode_style,
+        redraw_in_place=redraw_in_place, unicode_style=unicode_style,
         collapsed=collapsed, header_color=header_color,
     )
     entries = [
@@ -19256,12 +19166,8 @@ async def _file_action_screen(
     collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
     redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
     header_color = await lane.run(effective_header_color_256)
-    # As on the pending-post screen: the node's health line is the SysOp's,
-    # and pinning or keeping takes EDIT, which an approver need not hold.
-    status_line = (
-        await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
-        if actor.user_level >= SYSOP_LEVEL else ""
-    )
+    # As on the pending-post screen: pinning or keeping takes EDIT, which an
+    # approver need not hold.
     can_flag = await lane.run(lambda db: has_permission(
         db, actor, object_type="file_area", object_id=area.id, permission=BoardPermission.EDIT
     ))
@@ -19282,7 +19188,7 @@ async def _file_action_screen(
     async def _draw() -> None:
         await _draw_file_action(
             session, entry, description_level, redraw_in_place, unicode_style, collapsed, header_color,
-            status_line=status_line, when=when, can_download=can_download, area_name=area.name,
+            when=when, can_download=can_download, area_name=area.name,
             can_flag=can_flag,
         )
 
@@ -19386,7 +19292,6 @@ async def _expired_file_screen(
     collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
     redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
     header_color = await lane.run(effective_header_color_256)
-    status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
     display_format, display_timezone = await lane.run(resolve_display_preferences)
     when = format_for_display(entry.created_at, override_format=display_format, override_timezone=display_timezone)
     purge_at = await lane.run(expired_file_purge_at, area, entry)
@@ -19407,7 +19312,7 @@ async def _expired_file_screen(
                 Field("Size", f"{_format_bytes(entry.size_bytes)} ({entry.size_bytes} bytes)"),
                 Field("SHA-256", entry.sha256, color=METADATA_COLOR),
             ],
-            status_line=status_line, redraw_in_place=redraw_in_place, unicode_style=unicode_style,
+            redraw_in_place=redraw_in_place, unicode_style=unicode_style,
             collapsed=collapsed, header_color=header_color,
         )
         entries = []
@@ -19451,8 +19356,7 @@ async def _door_menu(session: Session, lane: DatabaseLane, actor: User, *, door_
     collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
     redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
     header_color = await lane.run(effective_header_color_256)
-    status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
-    await _draw_door_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
+    await _draw_door_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
     while True:
         choice = (await session.read_key()).lower()
 
@@ -19462,41 +19366,35 @@ async def _door_menu(session: Session, lane: DatabaseLane, actor: User, *, door_
         elif choice == "c":
             await session.write_line("")
             await _door_screen(session, lane, actor)
-            status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
-            await _draw_door_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
+            await _draw_door_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == "g":
             await session.write_line("")
             await _door_gallery_screen(session, lane, actor, description_level, redraw_in_place, unicode_style, collapsed,
                                        door_services=door_services, backup_identity_dir=backup_identity_dir)
-            status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
-            await _draw_door_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
+            await _draw_door_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == "f":
             await session.write_line("")
             await _door_filesystem_screen(session, lane, actor, description_level, redraw_in_place, unicode_style, collapsed,
                                           door_services=door_services, backup_identity_dir=backup_identity_dir)
-            status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
-            await _draw_door_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
+            await _draw_door_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == "u":
             await session.write_line("")
             await _upload_door_file_screen(session, lane, actor)
-            status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
-            await _draw_door_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
+            await _draw_door_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == "l":
             await session.write_line("")
             await _list_doors_screen(session, lane, actor, door_services=door_services, backup_identity_dir=backup_identity_dir)
-            status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
-            await _draw_door_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
+            await _draw_door_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         else:
             await session.write(reject_unhandled_key(choice))
 
 
 async def _draw_door_menu(
     session: Session, description_level: str, redraw_in_place: bool, unicode_style: bool, collapsed: bool,
-    header_color: int | tuple[int, int, int] = HEADER_COLOR, *, status_line: str,
+    header_color: int | tuple[int, int, int] = HEADER_COLOR,
 ) -> None:
     await session.write_line("\r\n" + screen_title("Doors",
             breadcrumb=(session.node_display_name,), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, header_color=header_color, node_name_gradient=session.node_name_gradient))
-    await session.write_line(status_line)
     await session.write_line(
         menu_grid(
             [(
@@ -20025,7 +19923,6 @@ async def _draw_door_detail(
             breadcrumb=(session.node_display_name,), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
             header_color=await lane.run(effective_header_color_256), node_name_gradient=session.node_name_gradient)
     )
-    await session.write_line(await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width))
     sections = [
         Section("Door", [
             _description_field(door.description),
@@ -20863,8 +20760,7 @@ async def _channel_menu(
     collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
     redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
     header_color = await lane.run(effective_header_color_256)
-    status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
-    await _draw_channel_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
+    await _draw_channel_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
     while True:
         choice = (await session.read_key()).lower()
 
@@ -20874,24 +20770,21 @@ async def _channel_menu(
         elif choice == "c":
             await session.write_line("")
             await _channel_screen(session, lane, actor)
-            status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
-            await _draw_channel_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
+            await _draw_channel_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == "l":
             await session.write_line("")
             await _list_channels_screen(session, lane, actor, link_context=link_context, mrc_bridge=mrc_bridge, chat_hub=chat_hub)
-            status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
-            await _draw_channel_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
+            await _draw_channel_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         else:
             await session.write(reject_unhandled_key(choice))
 
 
 async def _draw_channel_menu(
     session: Session, description_level: str, redraw_in_place: bool, unicode_style: bool, collapsed: bool,
-    header_color: int | tuple[int, int, int] = HEADER_COLOR, *, status_line: str,
+    header_color: int | tuple[int, int, int] = HEADER_COLOR,
 ) -> None:
     await session.write_line("\r\n" + screen_title("Chat channels",
             breadcrumb=(session.node_display_name,), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, header_color=header_color, node_name_gradient=session.node_name_gradient))
-    await session.write_line(status_line)
     await session.write_line(
         _menu_row(
             [
@@ -21293,7 +21186,6 @@ async def _draw_channel_detail(
             breadcrumb=(session.node_display_name,), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
             header_color=await lane.run(effective_header_color_256), node_name_gradient=session.node_name_gradient)
     )
-    await session.write_line(await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width))
     sections = [
         Section("Chat channel", [
             _description_field(channel.description),
@@ -21776,8 +21668,7 @@ async def _category_menu(session: Session, lane: DatabaseLane, actor: User) -> N
     collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
     redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
     header_color = await lane.run(effective_header_color_256)
-    status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
-    await _draw_category_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
+    await _draw_category_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
     while True:
         choice = (await session.read_key()).lower()
 
@@ -21787,8 +21678,7 @@ async def _category_menu(session: Session, lane: DatabaseLane, actor: User) -> N
         elif choice == HELP_KEY:
             await session.write_line("")
             await _categories_help_screen(session, header_color=header_color, unicode_style=unicode_style)
-            status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
-            await _draw_category_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
+            await _draw_category_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == "m":
             await session.write_line("")
             await _generic_category_screen(
@@ -21798,8 +21688,7 @@ async def _category_menu(session: Session, lane: DatabaseLane, actor: User) -> N
                 update=update_board_category, move=move_board_category,
                 error_type=CategoryError, title="Message board categories",
             )
-            status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
-            await _draw_category_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
+            await _draw_category_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == "f":
             await session.write_line("")
             await _generic_category_screen(
@@ -21809,8 +21698,7 @@ async def _category_menu(session: Session, lane: DatabaseLane, actor: User) -> N
                 update=update_file_category, move=move_file_category,
                 error_type=FileCategoryError, title="File-area categories",
             )
-            status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
-            await _draw_category_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
+            await _draw_category_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == "c":
             await session.write_line("")
             await _generic_category_screen(
@@ -21820,8 +21708,7 @@ async def _category_menu(session: Session, lane: DatabaseLane, actor: User) -> N
                 update=update_channel_category, move=move_channel_category,
                 error_type=ChannelCategoryError, title="Chat channel categories",
             )
-            status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
-            await _draw_category_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
+            await _draw_category_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         else:
             await session.write(reject_unhandled_key(choice))
 
@@ -21852,11 +21739,10 @@ async def _categories_help_screen(
 
 async def _draw_category_menu(
     session: Session, description_level: str, redraw_in_place: bool, unicode_style: bool, collapsed: bool,
-    header_color: int | tuple[int, int, int] = HEADER_COLOR, *, status_line: str,
+    header_color: int | tuple[int, int, int] = HEADER_COLOR,
 ) -> None:
     await session.write_line("\r\n" + screen_title("Categories",
             breadcrumb=(session.node_display_name,), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, header_color=header_color, node_name_gradient=session.node_name_gradient))
-    await session.write_line(status_line)
     await session.write_line(
         _menu_row(
             [
@@ -21883,8 +21769,7 @@ async def _generic_category_screen(
     collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
     redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
     header_color = await lane.run(effective_header_color_256)
-    status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
-    await _draw_generic_category_menu(session, title, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
+    await _draw_generic_category_menu(session, title, description_level, redraw_in_place, unicode_style, collapsed, header_color)
     while True:
         choice = (await session.read_key()).lower()
 
@@ -21896,8 +21781,7 @@ async def _generic_category_screen(
             await _create_category_screen(
                 session, lane, actor, create=create, list_top_level=list_top_level, error_type=error_type,
             )
-            status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
-            await _draw_generic_category_menu(session, title, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
+            await _draw_generic_category_menu(session, title, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == "l":
             await session.write_line("")
             await _list_categories_screen(
@@ -21905,8 +21789,7 @@ async def _generic_category_screen(
                 list_subcategories=list_subcategories, delete=delete,
                 update=update, move=move, create=create, error_type=error_type,
             )
-            status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
-            await _draw_generic_category_menu(session, title, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
+            await _draw_generic_category_menu(session, title, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         else:
             await session.write(reject_unhandled_key(choice))
 
@@ -21916,12 +21799,9 @@ async def _draw_generic_category_menu(
     unicode_style: bool,
     collapsed: bool,
     header_color: int | tuple[int, int, int] = HEADER_COLOR,
-    *,
-    status_line: str,
 ) -> None:
     await session.write_line("\r\n" + screen_title(title,
             breadcrumb=(session.node_display_name,), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, header_color=header_color, node_name_gradient=session.node_name_gradient))
-    await session.write_line(status_line)
     await session.write_line(
         _menu_row(
             [

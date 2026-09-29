@@ -1207,7 +1207,8 @@ magically reappear during restore.
 
 War Dialer has separate world capture and restore rules; see the
 [door guide](NetBBS-door-guide.md). Third-party installation directories are
-excluded unless **Backup → Door installations** is enabled. That option copies
+excluded unless **Backup → Door installations** is enabled. The Backup screen
+shows the door sections, and that option, only once a door is set up. That option copies
 them without stopping their writers and does not automatically restore them.
 Stop games/services first. A missing or unreadable requested installation fails
 the backup. Symlinks are copied as links, not followed to external data.

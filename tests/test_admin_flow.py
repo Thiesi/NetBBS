@@ -6131,9 +6131,9 @@ def test_theme_colors_menu_shows_default_status_for_all_three_slots(db, lane, sy
     _run(session, lane, sysop)
     text = _visible(_written_text(session))  # the editor colors each field label separately
     assert "Accent: " in text and "Header: " in text and "Clock: " in text
-    # Issue #206's backup-only condensed status line stays on this nested
-    # screen; update status belongs only on its three actionable surfaces.
-    assert "Backup: " in text
+    # Neither backup nor update status follows the SysOp onto a nested
+    # screen (issue #845, F034).
+    assert "Backup: " not in text
     assert "Update: " not in text
     assert text.count("default") >= 3
 
@@ -6787,87 +6787,37 @@ def test_settings_panel_sanitizes_the_timestamp_example(db, lane, sysop):
     assert "[31mFAKE" in text
 
 
-# -- condensed status line on nested screens (issue #206) --------------------
+# -- backup state lives on the dashboard, not on every screen (issue #845) ---
 
 
-def test_link_status_screen_shows_the_condensed_status_line(db, lane, sysop):
-    # GitHub issue #206's "broader scope" half: screens nested deeper than
-    # the five top-level submenus don't have node_controls/link_context
-    # available to show the richer full panel those already have, so they
-    # get this lighter backup-context line instead -- confirms
-    # a Shape-A site (the function already had `lane` in scope, so the line
-    # is computed and written inline, no caller threading needed).
-    from netbbs.backup import create_backup
+def test_dashboard_shows_the_backup_state(db, lane, sysop):
+    session = FakeSession(["b"])
+    _run(session, lane, sysop)
+    assert re.search(r"BACKUP +never", _visible(_written_text(session)))
 
-    identity_dir = db.path.parent / "netbbs_identity"
-    create_backup(db_path=db.path, identity_dir=identity_dir, destination=db.path.parent / "backup1")
 
+@pytest.mark.parametrize("keys", [
+    ["c", "d", "b", "b", "b"],       # Content > Doors
+    ["c", "m", "b", "b", "b"],       # Content > Message boards
+    ["c", "o", "b", "b", "b"],       # Content > Communities
+])
+def test_nested_screens_do_not_repeat_the_backup_line(db, lane, sysop, keys):
+    # F034: "Backup: never" followed a first-day SysOp onto every submenu,
+    # and she couldn't tell whether it was an error.
+    session = FakeSession(keys)
+    _run(session, lane, sysop)
+    text = _visible(_written_text(session))
+    nested = text[text.index("Choice:") :]  # past the dashboard's own panel
+    assert "Backup:" not in nested
+
+
+def test_link_status_screen_does_not_repeat_the_backup_line(db, lane, sysop):
     link_context = _link_context()
     session = FakeSession(["s", "l", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
     text = _visible(_written_text(session))
-    assert "Backup: " in text
-    assert "Update:" not in text
-
-
-def test_door_menu_shows_the_condensed_status_line(db, lane, sysop):
-    # A Shape-B site: _draw_door_menu takes no `lane` of its own -- the
-    # line is computed once in _door_menu (which has `lane`) and threaded
-    # through as a new `status_line` parameter, same as every other
-    # _draw_*_menu/_draw_*_detail/_draw_*_action screen in this rollout.
-    session = FakeSession(["c", "d", "b", "b", "b"])
-    _run(session, lane, sysop)
-    text = _visible(_written_text(session))
-    assert "Backup: never" in text
-    assert "Update:" not in text
-
-
-def test_nested_status_line_does_not_repeat_an_update_warning(db, lane, sysop):
-    from netbbs.selfupdate import record_check_outcome
-
-    record_check_outcome(db, "newer release available: v999.0.0")
-    session = FakeSession(["c", "d", "b", "b", "b"])
-    _run(session, lane, sysop)
-    text = _visible(_written_text(session))
-
-    assert "Backup: never" in text
-    assert "Update:" not in text
-    nested_status_lines = [line for line in text.split("\r\n") if "Backup:" in line]
-    assert nested_status_lines
-    assert all("newer release available" not in line for line in nested_status_lines)
-
-
-def test_condensed_status_line_formats_the_backup_time_per_display_preferences(db, lane, sysop):
-    # Code review follow-up (PR #216): this was the one place in the
-    # module still concatenating a stored timestamp raw (with its
-    # always-6-decimal storage precision and trailing "Z") instead of
-    # resolving the node's configured format/timezone through
-    # format_for_display like every other timestamp -- inconsistent with
-    # the Backup status screen and everywhere else a timestamp appears.
-    from netbbs.backup import create_backup
-
-    identity_dir = db.path.parent / "netbbs_identity"
-    create_backup(db_path=db.path, identity_dir=identity_dir, destination=db.path.parent / "backup1")
-
-    session = FakeSession(["c", "d", "b", "b", "b"])
-    _run(session, lane, sysop)
-    text = _written_text(session)
-    assert ".Z" not in text  # raw storage suffix never leaks through
-    assert re.search(r"Backup: \d{2}\.\d{2}\.\d{4} \d{2}:\d{2}", text), (
-        f"no display-formatted backup time found in {text!r}"
-    )
-
-
-def test_condensed_status_line_fits_a_narrow_terminal(db, lane, sysop):
-    # The backup-only nested line must still respect the terminal width.
-    session = FakeSession(["c", "d", "b", "b", "b"])
-    session.terminal_width = 40
-    _run(session, lane, sysop)
-    status_lines = [
-        line for line in _visible(_written_text(session)).split("\r\n") if "Backup:" in line
-    ]
-    assert status_lines, "condensed status line not found in output"
-    assert len(status_lines[0]) <= 40, f"condensed status line exceeded terminal width: {status_lines[0]!r}"
+    link_screen = text[text.index("Link status") :]
+    assert "Backup:" not in link_screen
 
 
 def test_user_picker_page_size_reserves_a_line_for_the_condensed_status_line(lane):
@@ -7006,13 +6956,32 @@ def test_timestamp_settings_screen_setting_a_timezone_fixes_the_chat_status_line
 
 
 def test_backup_status_shows_no_backup_yet_message(db, lane, sysop):
-    # A paged panel on an 80x24 terminal: the door-data section is a page on.
     session = FakeSession(["s", "k", "PAGE_DOWN", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _visible(_written_text(session))
     assert "NO BACKUP RECORDED" in text
     assert "No backup has been taken on this node yet." in text
+
+
+def test_backup_page_on_a_node_without_doors_says_so_in_one_line(db, lane, sysop):
+    # F066: page 1 was mostly Voidrunner, War Dialer and door-installation
+    # text on a node with no doors.
+    session = FakeSession(["s", "k", "PAGE_DOWN", "PAGE_DOWN", "b", "b", "b"])
+    _run(session, lane, sysop)
+    text = _visible(_written_text(session))
+    assert "No doors are set up, so backups hold no door data." in text
+    assert "Voidrunner" not in text
+    assert "DOOR INSTALLATION DIRECTORIES" not in text
+    assert "oor installations:" not in text
+
+
+def test_backup_page_puts_the_schedule_before_door_data(db, lane, sysop, isolated_door_career_directory):
+    isolated_door_career_directory.mkdir()
+    session = FakeSession(["s", "k", "PAGE_DOWN", "PAGE_DOWN", "PAGE_DOWN", "b", "b", "b"])
+    _run(session, lane, sysop)
+    text = _visible(_written_text(session))
     assert "Voidrunner source:" in text
+    assert text.index("SCHEDULE") < text.index("DOOR DATA IN A BACKUP")
 
 
 def test_backup_status_pauses_for_a_keypress_before_returning(db, lane, sysop):
@@ -7090,7 +7059,7 @@ def test_backup_status_hides_history_section_with_only_one_backup(db, lane, syso
     _run(session, lane, sysop)
 
     text = _visible(_written_text(session))
-    assert "LAST BACKUP" in text and "DOOR INSTALLATION DIRECTORIES" in text
+    assert "LAST BACKUP" in text and "DOORS" in text
     assert "RECENT BACKUPS" not in text
 
 
@@ -9418,34 +9387,6 @@ def test_user_picker_keeps_an_active_search_across_a_sort(db, lane, sysop):
     after = _last_render(text, marker)
     assert "alice" in after and "alina" in after
     assert "bob" not in after, "the search survived the re-sort"
-
-
-def test_user_picker_status_line_is_re_read_on_every_render(db, lane, sysop):
-    """Captured once, it kept reporting the backup state the screen
-    opened with -- while another session completed a backup, on a screen
-    that advertises Ctrl-R as the way to see current reality (issue
-    #537, Codex review)."""
-    import netbbs.net.admin_flow as admin
-
-    reads = []
-    original = admin._load_condensed_status_line
-
-    async def counting(lane_, *, unicode_style, terminal_width):
-        reads.append(len(reads) + 1)
-        return f"Status read {len(reads)}"
-
-    admin._load_condensed_status_line = counting
-    try:
-        create_user(db, "alice", password="hunter2", user_level=10)
-        # Open the list, press a live key (which redraws), then leave.
-        session = FakeSession(["u", "l", "l", "b", "b", "b"])
-        _run(session, lane, sysop)
-    finally:
-        admin._load_condensed_status_line = original
-
-    assert len(reads) >= 2, f"read {len(reads)} time(s); a redraw must re-read it"
-    text = _visible(_written_text(session))
-    assert f"Status read {len(reads)}" in text, "and the newest read is what is shown"
 
 
 def test_user_picker_forgets_a_search_that_found_nothing(db, lane, sysop):
