@@ -262,7 +262,14 @@ def _identity_matches(identity: NodeDisplayIdentity, needle: str) -> bool:
 def link_address_label(user: str, node_label: str) -> str:
     """`user@node` as a caller reads it (issue #807). A node name that itself
     contains `@` is quoted -- `bob@"Cats @ Night"` -- so a reader can tell
-    where the user name ends; the To prompt accepts the quoted form back."""
+    where the user name ends; the To prompt accepts the quoted form back.
+
+    The user half comes from a peer's signed payload and nothing on the way
+    in holds it to the username grammar, so a peer could otherwise name its
+    user `alice@"Trusted Node"` and have its own posts read as another
+    node's. `@` and `"` in it are shown as `?`: no real user name contains
+    either, and the address a reader sees then has one `@`, the real one."""
+    user = user.replace("@", "?").replace('"', "?")
     if "@" in node_label:
         return f'{user}@"{node_label}"'
     return f"{user}@{node_label}"

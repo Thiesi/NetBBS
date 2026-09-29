@@ -146,6 +146,17 @@ def test_a_node_is_found_by_the_label_screens_show_and_by_its_quoted_name(db, tm
     assert link_address_label("bob", "Farpoint") == "bob@Farpoint"
 
 
+def test_a_peer_cannot_name_its_user_to_read_as_another_node(db, tmp_path):
+    """A remote user name carrying `@` or `"` must not move where the
+    rendered address's node begins (#807 review)."""
+    evil = _peer(tmp_path, "evil", "Evil", "evil.example.org")
+    save_peer(db, evil)
+
+    rendered = present_link_author_label(db, f'alice@"Trusted Node"@{evil.fingerprint}')
+    assert rendered == "alice??Trusted Node?@Evil · evil.example.org"
+    assert link_address_label('x"@y', "Farpoint") == "x??y@Farpoint"
+
+
 def test_a_carried_author_on_a_node_named_with_an_at_sign_is_quoted(db, tmp_path):
     cats = _peer(tmp_path, "cats", "Cats@Night", "cats.example.org")
     save_peer(db, cats)

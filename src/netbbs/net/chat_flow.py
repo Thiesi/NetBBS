@@ -70,6 +70,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 import json
+import re
 import sqlite3
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Awaitable, Callable, Sequence
@@ -2065,6 +2066,12 @@ async def _deliver_private_message(ctx: ChatCommandContext, target: User, body: 
     )
 
 
+#: `/msg bob@"Cats @ Night" text`: the quoted-node address form
+#: `link_address_label` shows for a node name containing `@` (issue #807),
+#: typed back as it is read.
+_QUOTED_NODE_TARGET = re.compile(r'([^\s"@]+@"[^"]+")\s+(\S.*)', re.DOTALL)
+
+
 async def _handle_msg(ctx: ChatCommandContext, args: str) -> None:
     """
     `/msg <user> <text>` (design doc): a one-off,
@@ -2072,7 +2079,10 @@ async def _handle_msg(ctx: ChatCommandContext, args: str) -> None:
     matching every other chat command — no parallel main-menu entry point.
     """
     args = args.lstrip()
-    if args.startswith('"'):
+    quoted_node = _QUOTED_NODE_TARGET.fullmatch(args)
+    if quoted_node is not None:
+        parts = [quoted_node.group(1), quoted_node.group(2).strip()]
+    elif args.startswith('"'):
         closing_quote = args.find('"', 1)
         parts = (
             [args[1:closing_quote], args[closing_quote + 1:].strip()]
