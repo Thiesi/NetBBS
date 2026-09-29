@@ -43,11 +43,12 @@ from netbbs.auth.users import (
     touch_last_login,
 )
 from netbbs.auth.signup_answers import get_registration_question, save_signup_answer
-from netbbs.chat import ChatHub, DirectChatInvites, MessageMailbox, PresenceRegistry, list_pending_invitations_for_user
+from netbbs.chat import ChatHub, DirectChatInvites, MessageMailbox, PresenceRegistry
 from netbbs.config import RegistrationMode, get_node_display_name, get_registration_mode
 from netbbs.link.boards import LinkContext
 from netbbs.moderation import is_blocked
 from netbbs.mrc.bridge import MrcBridge
+from netbbs.net.admin_flow import _TrailingOutput
 from netbbs.net.char_input import InputHistory
 from netbbs.net.confirm import prompt_yes_no
 from netbbs.net.logoff_banner import load_logoff_banner
@@ -714,29 +715,10 @@ async def run_authenticated_session(
     ):
         welcome += " (Maintenance mode is ON.)"
     await session.write_line(welcome)
-    await _announce_pending_invitations(session, db, user)
-    # Design doc -- node management, Thiesi's own report: drain never
-    # persisted any state before, so a user who wasn't connected when it
-    # was scheduled -- or who reconnects after being disconnected by an
-    # earlier drain pass -- had no way to know one was still in
-    # progress until it disconnected them again with no warning at all.
-    # Non-SysOp only (reaching this point at all already implies
-    # lockdown isn't active for this account, see the rejection branch
-    # above) -- a SysOp is exempt from drain by design and would never
-    # actually be disconnected by it.
-    if (
-        node_controls is not None
-        and not meets_level(user, SYSOP_LEVEL)
-        and node_controls.drain_scheduler.is_scheduled()
-    ):
-        remaining = node_controls.drain_scheduler.remaining_seconds()
-        await session.write_line(
-            colored(
-                f"\r\nNote: this node is currently being drained for maintenance -- "
-                f"you will be disconnected in about {format_remaining_seconds(remaining)}.",
-                fg_color=ALERT_COLOR, bold=True,
-            )
-        )
+    # Issue #923: the pending-invitation count and the drain warning are
+    # not written here. The main menu's redraw-in-place clear came next
+    # and wiped them unseen; the first main menu tells them above its
+    # prompt instead (`netbbs.net.main_menu`, `first_draw`).
 
     # Design doc §16 (issues #219 Decision 7 and #201 Decision 1): the
     # fallback anchor for the first-run screen (reliable-node
@@ -795,8 +777,14 @@ async def run_authenticated_session(
         # announced, live in chat and at the next screen elsewhere.
         mail_watch_task = asyncio.create_task(watch_for_mail(session, db, user))
     try:
+        # Issue #923: what these two write after their last question (a
+        # first-run choice's "(Saved. ...)", "Switched to plain ASCII
+        # style") is held and carried above the first main menu's prompt,
+        # which would otherwise clear it unseen. Anything they still ask
+        # is asked under the text that explains it, as in the console.
+        first_run = _TrailingOutput(session)
         if lane is not None and meets_level(user, SYSOP_LEVEL):
-            await offer_onboarding(session, lane)
+            await offer_onboarding(first_run, lane)
 
         # Deliberately after the watcher task above, not alongside the
         # other post-login notices earlier in this function: unlike
@@ -805,7 +793,8 @@ async def run_authenticated_session(
         # never answers -- placing it before the watcher existed would
         # leave a revoked account's session completely unprotected for
         # as long as it sat here (GitHub issue #29's whole point).
-        await _confirm_unicode_style(session, db, user)
+        await _confirm_unicode_style(first_run, db, user)
+        first_run.announce_rest()
         await _show_previous_callers_screen(
             session, db, user, current_history_id=history_id
         )
@@ -1055,39 +1044,6 @@ async def handle_ssh_session(
     finally:
         session_registry.leave(session)
         mailbox.discard(session)
-
-
-async def _announce_pending_invitations(session: Session, db: Database, user: User) -> None:
-    """
-    A one-time-per-login notice (GitHub issue #42) if `user` has any
-    pending channel invitations — the actual discoverability fix: an
-    offline invitee previously had no notification mechanism at all
-    (`_deliver_private_message`'s mailbox is session-addressed and
-    ephemeral, see its own docstring, so it silently reached nobody
-    with no active session at `/invite` time), even though the durable
-    `channel_invitations` row was always created regardless.
-
-    Deliberately brief (a count, not the full list with channel names/
-    inviters) -- `[I]nvitations` on the main menu (see
-    `netbbs.net.main_menu._draw_main_menu`/`_show_pending_invitations`) shows full detail
-    and reappears on every redraw for as long as anything's still
-    pending, so this only needs to point there, not duplicate it.
-    Called once, right after login (`run_authenticated_session`), not
-    from `_draw_main_menu` itself -- that function redraws on every
-    return from a submenu, which would repeat this same notice far more
-    often than the one genuinely new moment it's meant to mark.
-    """
-    pending = list_pending_invitations_for_user(db, user)
-    if not pending:
-        return
-    plural = "s" if len(pending) != 1 else ""
-    await session.write_line(
-        colored(
-            f"\r\n*** You have {len(pending)} pending chat channel invitation{plural}. "
-            "See [I]nvitations on the main menu. ***",
-            fg_color=MUTED_COLOR,
-        )
-    )
 
 
 async def _login(

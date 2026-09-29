@@ -3731,7 +3731,7 @@ async def _handle_invite(ctx: ChatCommandContext, args: str) -> None:
     The durable `channel_invitations` row `create_invitation` writes is
     the actual notification mechanism now (GitHub issue #42) —
     discoverable by the invitee at their own next login/main-menu visit
-    (`netbbs.net.login_flow._announce_pending_invitations`/
+    (`netbbs.net.main_menu.pending_invitations_notice`/
     `_show_pending_invitations`) regardless of whether they're online
     right now. Live delivery through the mailbox/push mechanism
     (`_deliver_private_message`) remains a *convenience* on top of that

@@ -2349,7 +2349,9 @@ for a caller mail is open to (`caller_mail_refusal`):
   unread, above its prompt. The main menu's mail notices are told together
   in one order: that count, then the cap's eviction count (#818), then the
   caller's own Link mail that bounced or expired (#806). Moderation outcomes
-  come before them.
+  come before them, and a drain warning (§13.8) before those; the count of
+  pending chat channel invitations and any queued `/msg` lines follow them
+  (issue #923).
 - *In New scan.* A `Mail: N unread` line heads the summary above the list,
   and `[E]-mail` opens the mailbox from there. A line with a key, like the
   replies to the caller, not a row: the list is places, and a mailbox row
@@ -6911,11 +6913,12 @@ one-off broadcast alone never could.** Before this round, drain state was
 purely a one-shot broadcast — a user not connected at the moment it fired
 (including one reconnecting *after* an earlier drain pass already
 disconnected them) had no way to know a drain was still in progress until
-it silently disconnected them again. Now: `netbbs.net.login_flow.
-run_authenticated_session` tells a non-SysOp, once, right after login
-(the same one-time-notice convention `_announce_pending_invitations`
-already established), that a drain is scheduled and roughly how long until
-disconnection — SysOp-exempt, since drain never actually affects them.
+it silently disconnected them again. Now the first main menu after login
+tells a non-SysOp, once, above its prompt, that a drain is scheduled and
+roughly how long until disconnection — SysOp-exempt, since drain never
+actually affects them. It is told there, with the pending chat
+invitation count, and not written during login, because the menu's
+redraw-in-place clear would wipe it unseen (issue #923).
 Separately, `netbbs.net.maintenance.LOCKDOWN_NOTICE` (deliberately
 distinct wording from `LOCKDOWN_MESSAGE`, the actual non-SysOp rejection)
 is shown to *every* connecting client right after the welcome banner,
