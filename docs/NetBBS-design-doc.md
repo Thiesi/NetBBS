@@ -2280,6 +2280,42 @@ Mail about Link delivery (#806's bounces) is told at the main menu and on the
 sent message's Delivery line, not by a system message; a bounce letter in
 the Inbox could use this sender later.
 
+**Blocked senders** (issue #817). An account can refuse mail from one
+sender. A block names a local account by id, so it survives a rename, or a
+Link sender by the `user@<home-node-fingerprint>` address its mail came
+from (user part compared case-insensitively), never by the node's display
+name, which can change. Blocks live in `mail_blocks`; deleting the blocking
+account or the blocked local account removes the row. A caller blocks from
+a received letter's view (`Bloc[k] sender`, a toggle labelled by what it
+will do) or by name from Profile > Blocked mail senders, which lists the
+blocks and unblocks them. A block affects mail from then on; mail already
+received stays.
+
+- The sender is told. Local mail from a blocked sender is refused at the
+  To prompt and by `send_mail` (`MailSenderBlocked`) with "<name> does not
+  accept mail from you"; Link mail bounces `blocked_by_recipient` (§10.3).
+  Accepting and silently dropping the letter was rejected: mail promises
+  nothing is lost without a word (§10.5), a silent drop would be the one
+  refusal the sender never hears of, and it would split local and Link mail,
+  whose refusal is a signed bounce either way. Being told reveals the block
+  to the blocked person; that is the price of the honest answer, and the
+  blocker loses nothing by it.
+- `netbbs.mail.mail_sender_refusal` is the one sender-specific check, made
+  beside `mail_recipient_refusal` (which says whether the account takes mail
+  at all) by `send_mail`, the To prompt and `deliver_link_message`.
+- Two senders cannot be blocked. System mail (`send_system_mail`) has no
+  sender and never consults blocks. A SysOp of this node (a usable level-255
+  account) cannot be blocked either: the SysOp answers for the node's
+  accounts and has to reach them, and a block would buy no privacy from the
+  person who runs the database it is stored in. The check reads the sender's
+  current level, so a blocked account that later becomes SysOp gets through
+  (the Blocked senders list marks the block as not applied),
+  and is blocked again if it stops being one. Staff below 255 are blockable.
+- Blocking covers mail only. Live direct messages keep their own opt-out
+  (Profile's direct-message setting), which today gates Who's online, `/dm`
+  and inbound Link direct messages but not `/msg`; one block list across both
+  would first need those paths made consistent, which is its own change.
+
 **The mailbox is a list; a message is read on its own screen** (issue #810),
 the shape the board post list has (§6.1, issue #679). `[E]-mail` opens the
 Inbox directly. Before #810 it opened a four-option menu (Inbox, Sent,
@@ -4559,7 +4595,12 @@ Separate signed events represent:
 - bounced because of unknown recipient, full mailbox, blocking, a letter the
   recipient node cannot decrypt, a malformed letter, a recipient that takes no
   mail (`no_mailbox`: the node's shared guest account, issue #816, §6.4), or
-  another defined terminal failure;
+  another defined terminal failure. Blocking has two codes:
+  `blocked_sender` is the recipient *node's* trust policy refusing the
+  sender or its node (§12.4), and `blocked_by_recipient` is the recipient
+  *person* having blocked this sender (issue #817, §6.4). The sender is told
+  which: "that BBS does not accept mail from you or from this BBS" against
+  "the recipient does not accept mail from you";
 - future expiry where retry policy requires it.
 
 Outbound messages remain pending until an accepted or bounced event arrives.
@@ -4602,7 +4643,8 @@ signed bounce rather than an exception that would lose the letter in silence:
   or not base64 at all, bounces `undecryptable`. It used to bounce
   `unknown_recipient`, which sent the sender looking for a typo.
 
-`undecryptable` and `malformed` are bounce reasons added after v7.13.0. Every
+`undecryptable`, `malformed`, `no_mailbox` and `blocked_by_recipient` are
+bounce reasons added after v7.13.0. Every
 earlier release keeps a received bounce's reason without checking it (v7.13
 and older ignore it entirely and just mark the message bounced), so a new code
 reaches an older sender as a plain bounce and costs it nothing but the
