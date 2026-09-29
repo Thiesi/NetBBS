@@ -93,9 +93,10 @@ FORWARD_RULE = "---------- Forwarded message ----------"
 
 
 def forward_body(body: str, *, sender: str, recipient: str, date: str, subject: str) -> str:
-    """`body` as a forward carries it (issue #822): a header naming whom
-    it was from and to, when and under what subject, then a blank line and
-    the body itself, whole.
+    """`body` as a forward carries it (issue #822): an empty line for the
+    forwarder's note, then a header naming whom it was from and to, when
+    and under what subject, then a blank line and the body itself, whole.
+    `sign_forward` tidies the note line away when nothing was written on it.
 
     Verbatim, not quoted: a forward passes a letter on for someone else to
     read, so it is not marked as text being answered, and nothing is cut --
@@ -114,4 +115,29 @@ def forward_body(body: str, *, sender: str, recipient: str, date: str, subject: 
         f"Date: {sanitize_text(date)}",
         f"Subject: {sanitize_text(subject)}",
     ]
-    return "\n".join([*header, "", text])
+    return "\n".join(["", *header, "", text])
+
+
+def sign_forward(body: str, signature: str | None) -> str:
+    """A written forward, ready to send (issue #822): the forwarder's note,
+    signed with `signature` if they have one, a blank line, then the
+    forwarded letter from its `FORWARD_RULE` on. The signature closes the
+    note -- appended at the end it would read as the forwarded letter's
+    writer's. Blank lines around the note go, so a forward with none
+    starts at its rule.
+
+    Idempotent, as `netbbs.signature.append_signature` is: a resumed
+    forward that already carries the signature does not get it twice. A
+    body whose rule the forwarder deleted is signed at its end."""
+    sig = (signature or "").strip("\n")
+    block = f"-- \n{sig}" if sig.strip() else ""
+    at = body.find(FORWARD_RULE)
+    if at < 0:
+        text = body.strip("\n")
+        if block and not text.endswith(block):
+            text = f"{text}\n{block}"
+        return text
+    note, rest = body[:at].strip("\n"), body[at:]
+    if block and not note.endswith(block):
+        note = f"{note}\n{block}" if note else block
+    return f"{note}\n\n{rest}" if note else rest

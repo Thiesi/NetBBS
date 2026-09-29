@@ -14,7 +14,7 @@ from netbbs.auth.users import create_user
 from netbbs.link.node_identity import bootstrap_node_identity
 from netbbs.mail import MAX_MAIL_BODY_BYTES, list_inbox, list_sent, send_mail, send_system_mail
 from netbbs.net.mail_flow import browse_mail
-from netbbs.quoting import FORWARD_RULE, forward_body, forward_subject
+from netbbs.quoting import FORWARD_RULE, forward_body, forward_subject, sign_forward
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 from tests.test_mail_flow import (
@@ -54,8 +54,9 @@ def test_forward_subject_at_the_limit_stays_within_it():
 def test_forward_body_carries_the_letter_whole_under_a_header():
     body = "\n".join(f"line {i}" for i in range(60)) + "\n-- \nAlice"
     text = forward_body(body, sender="alice", recipient="bob", date="2026-01-01 12:00", subject="Hello")
+    # An empty line on top, where the forwarder's note goes.
     assert text.startswith(
-        f"{FORWARD_RULE}\nFrom: alice\nTo: bob\nDate: 2026-01-01 12:00\nSubject: Hello\n\nline 0\n"
+        f"\n{FORWARD_RULE}\nFrom: alice\nTo: bob\nDate: 2026-01-01 12:00\nSubject: Hello\n\nline 0\n"
     )
     # Nothing is cut and nothing is quoted: not the 41st line, not the signature.
     assert text.endswith("line 59\n-- \nAlice")
@@ -71,6 +72,28 @@ def test_forward_body_sanitizes_what_another_node_sent_and_keeps_color_codes():
     assert "From: bob[2J@Far" in text
     assert "Subject: Hi\n" in text
     assert text.endswith("|04red|07\nnext")
+
+
+_LETTER = f"{FORWARD_RULE}\nFrom: alice\n\nHi\n-- \nAlice"
+
+
+@pytest.mark.parametrize(
+    ("body", "signature", "expected"),
+    [
+        # No note, no signature: the forward starts at its rule.
+        (f"\n{_LETTER}", None, _LETTER),
+        (f"\n\n{_LETTER}", "  ", _LETTER),
+        # The signature closes the note, above the letter passed on.
+        (f"FYI\n\n\n{_LETTER}", "Bob", f"FYI\n-- \nBob\n\n{_LETTER}"),
+        (f"\n{_LETTER}", "Bob\n", f"-- \nBob\n\n{_LETTER}"),
+        # Already signed (a resumed forward): not signed twice.
+        (f"FYI\n-- \nBob\n\n{_LETTER}", "Bob\n", f"FYI\n-- \nBob\n\n{_LETTER}"),
+        # The rule deleted: signed at the end, as any letter.
+        ("Just a note\n", "Bob", "Just a note\n-- \nBob"),
+    ],
+)
+def test_sign_forward(body, signature, expected):
+    assert sign_forward(body, signature) == expected
 
 
 # -- the Inbox and Sent views -------------------------------------------------
@@ -112,6 +135,44 @@ def test_forward_from_the_inbox_sends_the_letter_on_to_the_typed_recipient(peopl
     assert head.startswith(f"{FORWARD_RULE}\nFrom: alice\nTo: bob\nDate: ")
     assert head.endswith("\nSubject: Hello")
     assert rest == "How are you?\n-- \nAlice"
+
+
+def test_a_note_typed_in_the_line_editor_goes_above_the_letter_signed(people):
+    from netbbs.signature import set_signature
+
+    db_path, db, alice, bob, carol = people
+    set_signature(db, bob, "Bob")
+    send_mail(db, alice, bob, "Hello", "How are you?\n-- \nAlice")
+    session = FakeSession(keys=["1", "f", "s", "b", "b"], lines=["carol", "", "FYI, see below.", "/done"])
+    session.terminal_width = 200
+    _run(db_path, session, bob)
+
+    assert "(new lines go here -- /end to write at the end)" in _visible_text(session)
+    [letter] = list_inbox(db, carol)
+    assert letter.body.startswith(f"FYI, see below.\n-- \nBob\n\n{FORWARD_RULE}\nFrom: alice\n")
+    # The letter passed on ends as its writer ended it.
+    assert letter.body.endswith("\n\nHow are you?\n-- \nAlice")
+
+
+def test_a_note_typed_in_the_fullscreen_editor_goes_above_the_letter(people):
+    from netbbs.net import mail_flow
+    from netbbs.net.editor_preference import set_fullscreen_editor_enabled
+    from tests.test_login_flow_fullscreen_editor import FakeSession as FullscreenSession
+    from tests.test_login_flow_fullscreen_editor import _type
+
+    db_path, db, alice, bob, carol = people
+    set_fullscreen_editor_enabled(db, bob, True)
+    message = send_mail(db, alice, bob, "Hello", "How are you?")
+    session = FullscreenSession(["carol", "", *_type("FYI"), "CTRL+O", "s"])
+    lane = DatabaseLane(db_path)
+    try:
+        asyncio.run(mail_flow._forward_message(session, lane, bob, message, sent=False, link_context=None))
+    finally:
+        lane.close()
+
+    [letter] = list_inbox(db, carol)
+    assert letter.body.startswith(f"FYI\n\n{FORWARD_RULE}\nFrom: alice\nTo: bob\n")
+    assert letter.body.endswith("\n\nHow are you?")
 
 
 def test_forward_from_sent_names_the_caller_as_sender(people):

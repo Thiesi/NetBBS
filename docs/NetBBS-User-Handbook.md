@@ -207,7 +207,9 @@ To pass a letter on, open it -- in the Inbox or in Sent -- and press
 **[F]orward**. Type whom it is for at the To prompt, a name here or an
 address on a linked node. The subject gets `Fwd:` in front, and the letter
 goes whole under a short header saying whom it was from and to, when, and
-under what subject. You can write a note above it before you send. A letter
+under what subject. What you type goes above it, as a note, and your
+signature goes under the note; in the line editor, `/end` writes at the end
+instead. A letter
 already at the size limit is too long to forward as it is: the review screen
 says by how much, and **[B]ody** lets you shorten it. Mail from **System**
 can be forwarded too.

@@ -121,7 +121,7 @@ from netbbs.net.picker import pick_item
 from netbbs.net.notices import announce, announce_styled, pending_notice_rows, take_notices, write_notices
 from netbbs.net.session import Session, write_prompt
 from netbbs.rendering.detail import Section, Styled
-from netbbs.quoting import forward_body, forward_subject, quote_body, reply_subject
+from netbbs.quoting import forward_body, forward_subject, quote_body, reply_subject, sign_forward
 from netbbs.signature import append_signature, get_signature
 from netbbs.rendering import (
     ERROR_COLOR,
@@ -1852,6 +1852,7 @@ async def _compose_mail(
     body = await _compose_mail_body(
         session, lane, user, initial_text=prefill_body,
         cursor_at_end=prefill_body is not None and not fresh_forward,
+        start_at_top=fresh_forward,
         header=editor_header(), draft_path=draft_path,
     )
     if body is None or not body.strip():
@@ -1868,7 +1869,10 @@ async def _compose_mail(
     # mail client's compose buffer already works. Idempotent, so a
     # resumed letter that already carries it does not get it twice.
     signature = await lane.run(get_signature, user)
-    if signature:
+    if forward_key is not None:
+        # Under the note, above the letter passed on (issue #822).
+        body = sign_forward(body, signature)
+    elif signature:
         body = append_signature(body, signature)
 
     while True:
@@ -2240,9 +2244,13 @@ def _too_long_to_send(subject: str, body: str) -> str | None:
 
 async def _compose_mail_body(
     session: Session, lane: DatabaseLane, user: User, *, initial_text: str | None, draft_path: Path,
-    cursor_at_end: bool = False, header: EditorHeader | None = None,
+    cursor_at_end: bool = False, header: EditorHeader | None = None, start_at_top: bool = False,
 ) -> str | None:
     """Enter or revise one mail body through the user's chosen editor.
+
+    `start_at_top` (a fresh forward, issue #822) has the line editor write
+    typed lines above `initial_text`, as the fullscreen editor's cursor
+    starts there; `/end` moves to the end.
 
     Both paths accept the current draft and only return text/explicit cancel;
     the caller owns review and persistence. `header` is what the fullscreen
@@ -2272,4 +2280,5 @@ async def _compose_mail_body(
         draft_path=draft_path,
         offer_recovery=False,
         keep_pasted_color=True,
+        start_at=0 if start_at_top else None,
     )
