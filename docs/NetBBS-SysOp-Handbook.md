@@ -461,6 +461,21 @@ The **Privileges** group on an account's detail screen shows its staff
 permissions, the identity-verifier permission, and every moderator grant it
 holds, such as `board "News": approve`.
 
+A staff member sees **[S]taff** on their main menu instead of [S]ysOp. It
+opens a reduced console that counts what waits for them and offers only what
+their permissions reach: **Accounts waiting** with approve accounts,
+**Users** with manage accounts, and **Moderation** when they moderate
+anything. These are your own screens with fewer actions: a staff member can
+open your account or another staff member's, but only to look.
+
+Whoever can approve accounts, you included, is told on the main menu when
+signups are waiting ("2 accounts awaiting approval"). A moderator who may
+approve posts or uploads anywhere sees **Moderation (n)** on the main menu,
+with how many wait, and it opens one queue across every board and file area
+their grants cover. To make someone a moderator of everything local in one
+step, grant a moderator with the scope **blanket across everything**: it
+writes the board, file area and channel grants together.
+
 ### Verified age and names
 
 A SysOp, or an account explicitly granted **Identity verification**, records
