@@ -399,6 +399,7 @@ async def run_shutdown_sequence(
     delay_seconds: float,
     shutdown_event: asyncio.Event,
     message: str | None = None,
+    stop_early_when_empty: bool = False,
 ) -> None:
     """
     What a signal -- or the in-session `[N]ode` admin menu -- actually
@@ -438,6 +439,12 @@ async def run_shutdown_sequence(
     back, matching `MaintenanceMode.activate()`'s own documented "no way
     back" claim from that point onward.
 
+    `stop_early_when_empty` (issue #845, F089) ends a graceful countdown
+    as soon as nobody is connected -- for a service-manager stop or
+    restart, whose delay is the configured default nobody chose for this
+    occasion. A SysOp's own [S]hutdown keeps the delay they picked even if
+    everyone, themselves included, leaves: they may be back to cancel it.
+
     Callers triggering this from *within* a live session (the admin
     menu) must not `await` it inline from that session's own call
     stack: the calling session's own task is one of the ones
@@ -461,7 +468,7 @@ async def run_shutdown_sequence(
                 message=message,
                 default_text=lambda phrase: f"\r\n*** This node is going down {phrase}. ***",
                 exclude_sysops=False,
-                nobody_left=lambda: len(session_registry) == 0,
+                nobody_left=(lambda: len(session_registry) == 0) if stop_early_when_empty else None,
             )
         except asyncio.CancelledError:
             maintenance.deactivate()

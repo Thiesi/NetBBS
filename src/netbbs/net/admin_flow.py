@@ -11952,7 +11952,7 @@ def _delay_seconds_field(key: str = "delay_seconds") -> Callable[[Session, Datab
             session, colored(f"Delay in seconds ({_EDIT_HINT}):", fg_color=MUTED_COLOR), hint=_EDIT_HINT,
         )
         try:
-            raw = (await _read_seeded_line(session, initial=f"{draft[key]:g}")).strip()
+            raw = (await _read_seeded_line(session, initial=_seconds_text(draft[key]))).strip()
         except InputCancelled:
             return
         if not raw:
@@ -15865,6 +15865,12 @@ _CLEAR_HINT = "Enter saves, blank clears, Esc keeps"
 #: change" rather than turned into an error a caller would only ever see
 #: by deleting a value on purpose.
 _EDIT_HINT = "Enter saves, Esc cancels"
+
+
+def _seconds_text(value: float) -> str:
+    """A delay as the SysOp would type it: `60`, not `60.0`, and never the
+    6-significant-digit rounding `:g` would seed and save back."""
+    return str(int(value)) if float(value).is_integer() else repr(float(value))
 
 
 async def _read_seeded_line(session: Session, *, initial: str) -> str:
