@@ -80,7 +80,7 @@ def parse_address(address: str) -> Address:
 
 def is_valid_user_part(user: str) -> bool:
     """Whether `user` can stand before the `@` of a Link address."""
-    return bool(_USER_PART_RE.match(user))
+    return isinstance(user, str) and bool(_USER_PART_RE.fullmatch(user))
 
 
 def user_part_problem(user: str) -> str:
@@ -103,5 +103,5 @@ def _validate_user_part(user: str) -> None:
 
 
 def _validate_fingerprint(fingerprint: str) -> None:
-    if not _FINGERPRINT_RE.match(fingerprint):
+    if not _FINGERPRINT_RE.fullmatch(fingerprint):
         raise AddressError(f"invalid node fingerprint {fingerprint!r}")

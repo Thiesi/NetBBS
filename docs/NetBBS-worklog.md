@@ -1097,6 +1097,19 @@ messages.
 - Recipient quotas evict the oldest read mail; if all retained mail is unread,
   sending fails clearly rather than silently dropping unread content.
 - Read receipts are not part of the current model.
+- `created_at` is when a letter was written, not when it arrived: received
+  Link mail keeps its sender's signed time (issue #808). Anything ordering a
+  mailbox -- the lists, quota eviction -- orders by row id (arrival), never by
+  `created_at`, or late Link mail sinks below mail already read.
+- `netbbs.mail.validate_mail_fields` is the one subject/body check; local
+  sends, Link composition and Link receipt all go through it.
+- Link bounce reasons are an open vocabulary on receipt: no release checks a
+  received `link_message_bounced`'s `reason` (v7.13.0 and older ignore it), so
+  a new code is wire-safe as long as `_BOUNCE_REASON_TEXT` gains its words.
+  Only `build_link_message_bounced` restricts what this node *sends*.
+- `deliver_link_message` runs after the envelope is saved and marked known,
+  so an exception there loses the letter with no answer to anyone; every
+  failure must end in a bounce.
 
 ### Signature auto-append: idempotency, not a "first compose only" flag
 

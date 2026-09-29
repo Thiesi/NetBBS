@@ -46,7 +46,7 @@ from netbbs.link.enforcement import (
 )
 from netbbs.link.events import ChannelMessage as LinkChannelMessage
 from netbbs.link.node_identity import NodeIdentity
-from netbbs.link.node_profiles import identity_for_fingerprint
+from netbbs.link.node_profiles import identity_for_fingerprint, link_address_label
 from netbbs.link.protocol import (
     LinkNode,
     LinkProtocolError,
@@ -191,7 +191,7 @@ def _accept_scrollback_snapshot(
                 continue
         if authored:
             home_label = identity_for_fingerprint(db, entry["author_node_fingerprint"]).label
-            author_label = f"{entry['author_user_id']}@{home_label}"
+            author_label = link_address_label(entry["author_user_id"], home_label)
         else:
             author_label = entry["author_label"]
         messages.append(LocalChannelMessage(
@@ -546,7 +546,7 @@ class LiveChannelBridge:
         node_label = (await self._lane.run(identity_for_fingerprint, session.remote_fingerprint)).label
         message = LocalChannelMessage(
             id=-1, channel_id=channel.id, kind="message",
-            author_label=f"{frame.payload['user_id']}@{node_label}",
+            author_label=link_address_label(frame.payload["user_id"], node_label),
             # The authenticated Noise peer is the technical identity behind
             # this ephemeral assertion. Keep it for collision warnings while
             # continuing to render the friendly label by default.
@@ -564,7 +564,7 @@ class LiveChannelBridge:
         node_label = (await self._lane.run(identity_for_fingerprint, session.remote_fingerprint)).label
         message = LocalChannelMessage(
             id=-1, channel_id=channel.id, kind=kind,
-            author_label=f"{frame.payload['user_id']}@{node_label}",
+            author_label=link_address_label(frame.payload["user_id"], node_label),
             author_fingerprint=session.remote_fingerprint, body=None, created_at=utc_now_iso(),
         )
         await self._hub.broadcast(channel.name, message)

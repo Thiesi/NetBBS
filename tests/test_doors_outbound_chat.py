@@ -480,6 +480,17 @@ def test_a_peers_door_line_is_marked_too(db, bob, channel):
     assert "» <blacksite.door@Elsewhere>" in chat_flow._render_channel_message(db, channel, bob, message)
 
 
+def test_a_peers_door_line_is_marked_behind_a_node_name_with_an_at_sign(db, bob, channel):
+    """Issue #808: a live label quotes a node name holding `@`, and its user
+    half cannot hold one, so the name ends at the first `@`."""
+    from netbbs.chat.scrollback import ChannelMessage
+
+    message = ChannelMessage(id=-1, channel_id=channel.id, kind="message",
+                             author_label='blacksite.door@"Cats @ Night"', author_fingerprint=None,
+                             body="hi", created_at="2026-09-26T00:00:00.000000Z")
+    assert chat_flow._is_door_line(db, message)
+
+
 def test_a_person_is_never_styled_as_a_door(db, bob, channel):
     from netbbs.chat.scrollback import record_message
 
