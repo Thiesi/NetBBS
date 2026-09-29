@@ -149,6 +149,7 @@ from netbbs.link.mail import (
     bounce_link_message,
     deliver_link_message,
 )
+from netbbs.link.mail_refusals import VIA_DIRECT, record_link_mail_refusal
 from netbbs.link.node_identity import NodeIdentity, resolve_current_operational_key, rotate_operational_key
 from netbbs.identity.encryption import derive_encryption_private_key
 from netbbs.link.protocol import (
@@ -397,6 +398,7 @@ async def persist_accepted_events(
     max_carried_file_areas: int | None = None,
     max_remote_files_per_area: int | None = None,
     enforce_trust_policy: bool = False,
+    mail_via: str = VIA_DIRECT,
 ) -> None:
     """
     Persist and follow up on every content_id `LinkNode.handle_events`
@@ -422,9 +424,13 @@ async def persist_accepted_events(
     for content_id in accepted:
         envelope = node.events[content_id]
         object_type = envelope["envelope"]["object_type"]
-        if enforce_trust_policy and object_type == LINK_MESSAGE_OBJECT_TYPE and not (await lane.run(
-            decide_event_authorship, envelope, transport_peer_fingerprint=sender_fingerprint,
-        )).allowed:
+        mail_decision = (
+            await lane.run(
+                decide_event_authorship, envelope, transport_peer_fingerprint=sender_fingerprint,
+            )
+            if enforce_trust_policy and object_type == LINK_MESSAGE_OBJECT_TYPE else None
+        )
+        if mail_decision is not None and not mail_decision.allowed:
             # A direct push is decided before acceptance and refused with a
             # 403 the sender turns into a bounce. Mail picked up from a relay
             # mailbox has no such answer, so the same rule applies here and
@@ -434,6 +440,11 @@ async def persist_accepted_events(
             # quarantined or blocked here is not answered at all: this node
             # sends it nothing, so a bounce queued for it could only pile up.
             home = envelope["envelope"]["payload"]["sender"]["home_node_fingerprint"]
+            # Kept for the SysOp (issue #820): the letter itself is verified
+            # by now, so its sender is who it says.
+            await lane.run(
+                record_link_mail_refusal, envelope, mail_decision.reason_code or "blocked_sender", via=mail_via,
+            )
             if await lane.run(node_transport_state, home) not in {TrustState.BLOCKED, TrustState.QUARANTINED}:
                 await lane.run(bounce_link_message, envelope, "blocked_sender", node_identity=node.identity)
             continue
@@ -585,7 +596,9 @@ async def persist_accepted_events(
         # this node was only a bystander to the transfer, not a party
         # to it (see record_board_origin_change's own docstring).
         if object_type == LINK_MESSAGE_OBJECT_TYPE:
-            await lane.run(deliver_link_message, envelope, node_identity=node.identity)
+            answer = await lane.run(deliver_link_message, envelope, node_identity=node.identity)
+            if isinstance(answer, LinkMessageBounced):
+                await lane.run(record_link_mail_refusal, envelope, answer.payload["reason"], via=mail_via)
         elif object_type == LINK_MESSAGE_ACCEPTED_OBJECT_TYPE:
             await lane.run(apply_link_message_accepted, envelope)
         elif object_type == LINK_MESSAGE_BOUNCED_OBJECT_TYPE:
@@ -1920,6 +1933,35 @@ class LinkServer:
             status=400,
         )
 
+    async def _record_refused_mail(
+        self, raw_events: list, decision: LinkPolicyDecision, fingerprint: str
+    ) -> None:
+        """Keep each letter in a refused push for the SysOp (issue #820).
+
+        The push is refused before `handle_events` has verified anything, and
+        the `fingerprint` it names is only its URL. So a letter is kept only
+        once its own signature verifies against that node's keys
+        (`LinkNode.is_signed_letter_from`): anyone can reach this endpoint, and
+        a record anyone can forge would put a node the SysOp never heard from
+        on the refused list with Establish beside it. Only mail addressed to
+        this node is kept: a push that reached it at an address its intended
+        recipient no longer has is not mail refused here."""
+        own = self._node.identity.fingerprint
+        for raw in raw_events:
+            try:
+                envelope = raw["envelope"]
+                is_mail_for_us = (
+                    envelope["object_type"] == LINK_MESSAGE_OBJECT_TYPE
+                    and envelope["payload"]["recipient"]["home_node_fingerprint"] == own
+                )
+            except (KeyError, TypeError):
+                continue
+            if is_mail_for_us and self._node.is_signed_letter_from(raw, fingerprint):
+                await self._lane.run(
+                    record_link_mail_refusal, raw, decision.reason_code or "refused", via=VIA_DIRECT,
+                    sender_node_fingerprint=fingerprint,
+                )
+
     @staticmethod
     def _policy_rejection(decision: LinkPolicyDecision) -> web.Response:
         return web.json_response(
@@ -1982,6 +2024,7 @@ class LinkServer:
             )
             decision = await self._lane.run(decide_node_action, fingerprint, action)
             if not decision.allowed:
+                await self._record_refused_mail(raw_events, decision, fingerprint)
                 return self._policy_rejection(decision)
             if action != LinkPolicyAction.KEY_LIFECYCLE:
                 for raw in raw_events:
@@ -1989,6 +2032,7 @@ class LinkServer:
                         decide_event_authorship, raw, transport_peer_fingerprint=fingerprint
                     )
                     if not author_decision.allowed:
+                        await self._record_refused_mail([raw], author_decision, fingerprint)
                         return self._policy_rejection(author_decision)
 
         try:

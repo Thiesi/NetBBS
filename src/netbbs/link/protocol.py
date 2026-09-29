@@ -3069,6 +3069,26 @@ class LinkNode:
             raise LinkProtocolError(f"rejected {kind} from {sender_fingerprint}: no currently-authorized signing key")
         return nacl.signing.VerifyKey(base64.b64decode(signing_key_b64))
 
+    def is_signed_letter_from(self, raw: dict, sender_fingerprint: str) -> bool:
+        """Whether `raw` is a `link_message` its claimed home node, a peer
+        this node has met, really signed -- checked without accepting it.
+
+        For a refusal worth recording (issue #820): a push names its sender
+        only in its URL, so a letter refused before `handle_events` verified
+        it proves nothing about who sent it until this says so. Any failure
+        is `False`; nothing here raises."""
+        sender = self.peers.get(sender_fingerprint)
+        if sender is None:
+            return False
+        try:
+            message = LinkMessage.from_dict(raw)
+            if message.payload["sender"]["home_node_fingerprint"] != sender_fingerprint:
+                return False
+            keys = self._resolve_sender_content_keys(sender, sender_fingerprint, "link_message")
+            return any(verify_link_message(message, key) for key in keys)
+        except Exception:  # noqa: BLE001 -- unverified input
+            return False
+
     def _resolve_sender_content_keys(
         self, sender: "PeerRecord", sender_fingerprint: str, kind: str
     ) -> list[nacl.signing.VerifyKey]:

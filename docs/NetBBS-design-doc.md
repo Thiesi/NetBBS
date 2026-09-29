@@ -2266,6 +2266,16 @@ look-alike could imitate. A NULL sender plus a flag fits the table's
 existing "no local sender" shape. Mail from before the change that a
 moderator's account sent stays theirs.
 
+**SysOp tools, and what they do not show (issue #820).** Operations → Mail
+shows how full each inbox is -- letters, unread, read and system notices per
+account, against `MAX_MAIL_PER_RECIPIENT`, fullest first -- and the Link mail
+this node refused (§12.4). Both show counts, account names, senders and reasons
+only: no SysOp screen shows a letter's subject or body, and a refused letter's
+record does not name its recipient. Mail is private between its writer and its
+reader. The home node can technically read tier-1 Link mail and local mail in
+its database (§4.5); the console does not turn that into a feature, and the
+SysOp Handbook says so.
+
 Mail about Link delivery (#806's bounces) is told at the main menu and on the
 sent message's Delivery line, not by a system message; a bounce letter in
 the Inbox could use this sender later.
@@ -4065,7 +4075,13 @@ shows *never heard from* and, labelled as such, when a peer list first
 named it; and
 quarantined and blocked nodes, with the state of each dimension. Each row adds the Link
 addresses, relay roles and reliability. It replaces the peer list behind the
-Link status screen.
+Link status screen. A node that is a trust subject here (issue #820) has trust
+actions on its own screen, the same code as the subject's screen under Policy
+trust: `[E]stablish` and `Bloc[k]` open the override editor with every
+dimension and the state already chosen (the reason, the audited-deviation
+confirmation and the audit are unchanged), `[C]lear override` can clear all of
+a subject's overrides at once, and `[T]rust details` opens the subject's full
+trust screen. A peer-list candidate has none: nothing about it is verified.
 
 **Who may open it.** A node-wide minimum level set in the SysOp console,
 defaulting to 0. A guest is an account (§4.6), so a SysOp who wants the map
@@ -5103,6 +5119,27 @@ find and establish them; a node refused as a whole is already a subject from
 its hello, and establishing that node is what opens its users' mail. A
 recipient's own control over who may write to them is a per-user block list
 (issue #817), not probation.
+
+**The receiving SysOp sees what was refused (issue #820).** A bounce tells the
+sender; until #820 nothing told the SysOp whose policy refused the letter. Every
+letter addressed to this node that it refuses -- by policy on a direct push or a
+relay pickup, or by a delivery bounce (no such account, a full mailbox, a
+malformed or undecryptable letter) -- is kept in `link_mail_refusals`: the
+sender's home node and user name, the reason code, how it arrived, when it was
+first and last refused, and how many times. One row per letter (its
+`content_id`), so a sender retrying by another route counts up rather than
+adding rows; bounded to the 500 most recent, and 50 from any one node,
+because the sender decides how many letters arrive. A direct push is refused
+before `handle_events` has verified anything, and the node it names is only its
+URL, so a pushed letter is recorded only once its own signature verifies
+against the keys of that node, a peer this node has met
+(`LinkNode.is_signed_letter_from`); otherwise anyone could put a node on the
+refused list, with Establish beside it. A push that reached this node for
+another node (a stale address) is not kept. The record never holds the recipient, subject, body or ciphertext: the
+console's mail tools (§6.4) show senders and reasons only. The console's
+refused-letter screen leads to the node's and the sender's trust screen, where
+establishing or blocking happens; a refused sender whose node was refused as a
+whole was never registered (above), so its node is what the SysOp acts on.
 
 The sending node applies its own policy before anything is queued: a caller
 addressing a peer this node still holds on probation is told at the To prompt

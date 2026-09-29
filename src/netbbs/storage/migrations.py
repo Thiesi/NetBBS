@@ -3580,4 +3580,27 @@ MIGRATIONS = [
             CHECK (from_system IN (0, 1));
         """,
     ),
+    Migration(
+        description=(
+            "Issue #820: `link_mail_refusals` -- the Link mail this node refused (trust policy, "
+            "or a delivery bounce), for the SysOp console: the sender's home node and user name, "
+            "the reason, how it arrived, when, and how often. One row per letter "
+            "(`message_content_id`), bounded by `netbbs.link.mail_refusals`. Never the recipient, "
+            "subject or body. Empty on upgrade: refusals before it were not kept."
+        ),
+        sql="""
+        CREATE TABLE link_mail_refusals (
+            id                      INTEGER PRIMARY KEY,
+            message_content_id      TEXT NOT NULL UNIQUE,
+            sender_node_fingerprint TEXT NOT NULL,
+            sender_user             TEXT,
+            reason                  TEXT NOT NULL,
+            via                     TEXT NOT NULL CHECK (via IN ('direct', 'relay')),
+            first_refused_at        TEXT NOT NULL,
+            last_refused_at         TEXT NOT NULL,
+            attempts                INTEGER NOT NULL DEFAULT 1
+        );
+        CREATE INDEX idx_link_mail_refusals_last ON link_mail_refusals(last_refused_at);
+        """,
+    ),
 ]
