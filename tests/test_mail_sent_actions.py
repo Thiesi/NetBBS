@@ -239,7 +239,7 @@ def test_resend_checks_the_recipient_again_at_send(linked, monkeypatch):
     calls = []
 
     def check(db, address, **kwargs):
-        calls.append(address)
+        calls.append(kwargs.get("reply", True))
         if len(calls) == 1:
             return real(db, address, **kwargs)
         return "Mail to Farpoint is closed on this BBS."
@@ -253,7 +253,8 @@ def test_resend_checks_the_recipient_again_at_send(linked, monkeypatch):
     text = _visible_text(session)
     assert "Mail to Farpoint is closed on this BBS." in text
     assert "Message sent." not in text
-    assert len(calls) == 2
+    # Both checks word it as mail, not as a reply (a resend answers no one).
+    assert calls == [False, False]
     assert len(_remote_rows(db)) == 1
 
 

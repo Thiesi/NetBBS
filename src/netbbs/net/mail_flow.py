@@ -2079,7 +2079,12 @@ async def _compose_mail(
             # edited from the review screen since, and a peer's standing
             # can change while the message is written.
             if reply_address is not None:
-                checked = await lane.run(_check_link_reply_address, reply_address)
+                # Worded for what the letter is: a reply, or a letter to
+                # someone met elsewhere or sent again (issue #825).
+                is_reply = reply_key is not None
+                checked = await lane.run(
+                    lambda db: _check_link_reply_address(db, reply_address, reply=is_reply)
+                )
             else:
                 checked = await lane.run(_check_link_recipient, recipient_text)
             if isinstance(checked, str):
