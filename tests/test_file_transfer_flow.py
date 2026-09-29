@@ -656,3 +656,26 @@ def test_a_link_from_an_empty_area_comes_back_to_that_area(db, lane, alice, gran
     after_link_screen = session.visible_output.split("Browser transfer", 1)[1]
     assert "has no files yet" in after_link_screen
     assert "press Ctrl-L here to see it" in after_link_screen
+
+
+def test_holding_ctrl_l_on_an_empty_area_does_not_stack_screens(db, lane, alice, grants):
+    """Each Ctrl-L on a still-empty area redraws in place (Claude review):
+    a screen per keypress would end the session in a RecursionError."""
+    area = create_file_area(db, "Practice pages", creator=alice)
+    session = FakeSession(keys=["\x0c"] * 1500 + ["b"])
+
+    asyncio.run(_show_area(session, lane, area, alice, transfers=grants))
+
+    assert session.visible_output.count("has no files yet") == 1
+
+
+def test_ctrl_l_offers_to_describe_an_upload_that_now_waits(db, lane, alice, grants):
+    sysop = create_user(db, "sysop", password="hunter2", user_level=255)
+    area = create_file_area(db, "critique", creator=sysop, moderated=True)
+    session = _ArrivingSession(lambda: upload_file(db, area, alice, "page.png", b"ink"), keys=["b"])
+
+    asyncio.run(_show_area(session, lane, area, alice, transfers=grants))
+
+    after = session.visible_output.split("has no files yet", 1)[1]
+    assert "[E]dit description" not in session.visible_output.split("has no files yet", 1)[0]
+    assert "[E]dit description" in after

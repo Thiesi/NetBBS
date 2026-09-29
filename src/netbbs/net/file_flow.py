@@ -1288,19 +1288,16 @@ async def _show_area(
                 brief="Send a file via Zmodem" if supports_zmodem(session) else "Send a file from your browser",
             )
         )
-    if describable_pending:
-        hints.append(
-            MenuEntry(label=menu_key("E", "dit description"), brief="Describe your waiting upload")
-        )
+    after_upload = []
     if transfers is not None and supports_zmodem(session):
         # The same key the listing offers (Codex review): an empty area
         # is exactly where a caller whose emulator has no Zmodem needs
         # to put the first file.
-        hints.append(
+        after_upload.append(
             MenuEntry(label=menu_key("W", "eb transfer"), brief="Get a browser upload link")
         )
     if show_remote_hint:
-        hints.append(
+        after_upload.append(
             MenuEntry(
                 label=menu_key("L", "ink catalogue"),
                 brief="Fetch files other nodes offer",
@@ -1319,7 +1316,15 @@ async def _show_area(
             if follows["on"]
             else MenuEntry(label=menu_key("F", "ollow"), brief="List this area first in New scan")
         )
-        return [*hints, *([_queue_entry(queued)] if queued else []), follow_entry, back]
+        # [E] is decided at each draw: an upload arriving while this
+        # screen is up can be the caller's own, waiting (issue #842).
+        describe = (
+            [MenuEntry(label=menu_key("E", "dit description"), brief="Describe your waiting upload")]
+            if describable_pending else []
+        )
+        return [
+            *hints, *describe, *after_upload, *([_queue_entry(queued)] if queued else []), follow_entry, back,
+        ]
 
     # Keystrokes and `[B]ack`, like the listing above it and like every
     # other menu (design doc §3.5) -- this used to be a typed
@@ -1353,9 +1358,25 @@ async def _show_area(
             # Ctrl-L looks again (issue #842), which is also what the
             # browser page sends once an upload finishes: the area's first
             # file used to arrive while this screen went on saying it had
-            # none. Drawn afresh, so what the upload announced shows too.
-            await _show_area(session, lane, area, user, link_context=link_context, transfers=transfers)
-            return
+            # none.
+            if (await lane.run(count_visible_files, area))[0]:
+                await _show_area(session, lane, area, user, link_context=link_context, transfers=transfers)
+                return
+            # Still empty: this bar again, in this loop rather than a fresh
+            # screen (Claude review), so a caller holding Ctrl-L cannot
+            # stack one screen per keypress. What an upload announced -- a
+            # file that waits for approval -- shows above the prompt.
+            pending_uploads = await lane.run(lambda db: list_pending_files(db, area, requesting_user=user))
+            describable_pending = [entry for entry in pending_uploads if _may_describe(entry)]
+            queued = await _queue_count()
+            await session.write_line(
+                _menu_row(
+                    _empty_hints(), width=session.terminal_width, height=session.terminal_height,
+                    description_level=description_level,
+                )
+            )
+            await _write_choice_prompt(session)
+            continue
         if choice == "u" and can_write:
             await session.write_line("")
             if await _handle_upload(
