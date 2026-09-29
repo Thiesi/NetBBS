@@ -1188,8 +1188,11 @@ class _TrailingOutput:
         await self._release()
         return await self._session.read_byte()
 
-    def announce_rest(self) -> None:
-        """Queue the flow's outcome: the last paragraph of what is still held.
+    def announce_rest(self, *, last_paragraph: bool = True) -> None:
+        """Queue the flow's outcome: the last paragraph of what is still held,
+        or all of it with `last_paragraph=False` -- for login's first-run
+        questions, whose closing lines can be two paragraphs ("Node name set
+        to ...", then "(Saved. ...)") and write no screen title (issue #923).
 
         Not everything still held is an outcome. `send_file_to_caller` writes a
         screen title (with its clear) and "Starting Zmodem send..." and only
@@ -1203,7 +1206,7 @@ class _TrailingOutput:
         held, self._held = self._held, []
         start = 0
         for index, text in enumerate(held):
-            if not text.strip() or _LEADING_BREAK.match(text):
+            if last_paragraph and (not text.strip() or _LEADING_BREAK.match(text)):
                 start = index
         for text in held[start:]:
             if text.strip() and _CLEAR_SEQUENCE not in text:

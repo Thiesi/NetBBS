@@ -274,3 +274,31 @@ def test_a_first_run_onboarding_outcome_is_carried_to_the_menu(db):
     assert "Join NetBBS Link" in session.before_first_menu()  # the question is still asked in place
     assert "(Noted." in session.first_menu()
     assert session.output.count("(Noted.") == 1
+
+
+def test_every_line_after_the_last_first_run_question_is_carried(db):
+    """Naming the node and accepting write two paragraphs after the last
+    question: the name's confirmation, then what accepting did. Both reach
+    the menu, not only the last one (review on #933)."""
+    sysop = _caller(db, "sysop", level=SYSOP_LEVEL)
+    set_opt_in(db, OptIn.DECLINED)
+    set_previous_callers_enabled(db, False)
+
+    async def scenario():
+        lane = DatabaseLane(db.path)
+        try:
+            # "y" joins NetBBS Link, then the node name, then "y" for Log off.
+            session = FakeSession(lines=["y", "Lighthouse", "y"])
+            await run_authenticated_session(
+                session, db, ChatHub(), PresenceRegistry(), MessageMailbox(), sysop, lane=lane,
+            )
+            return session
+        finally:
+            lane.close()
+
+    session = asyncio.run(scenario())
+
+    assert get_participation(db) is Participation.ACCEPTED
+    menu = session.first_menu()
+    assert menu.index("Node name set to 'Lighthouse'") < menu.index("(Saved.")
+    assert session.output.count("Node name set to") == 1

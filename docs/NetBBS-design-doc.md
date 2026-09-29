@@ -2351,7 +2351,9 @@ for a caller mail is open to (`caller_mail_refusal`):
   caller's own Link mail that bounced or expired (#806). Moderation outcomes
   come before them, and a drain warning (§13.8) before those; the count of
   pending chat channel invitations and any queued `/msg` lines follow them
-  (issue #923).
+  (issue #923). Ahead of all of these is the outcome of a question answered
+  during login (the Unicode-style check, a first-run choice), which answers
+  the last thing the caller did.
 - *In New scan.* A `Mail: N unread` line heads the summary above the list,
   and `[E]-mail` opens the mailbox from there. A line with a key, like the
   replies to the caller, not a row: the list is places, and a mailbox row

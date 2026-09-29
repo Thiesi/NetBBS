@@ -778,10 +778,12 @@ async def run_authenticated_session(
         mail_watch_task = asyncio.create_task(watch_for_mail(session, db, user))
     try:
         # Issue #923: what these two write after their last question (a
-        # first-run choice's "(Saved. ...)", "Switched to plain ASCII
-        # style") is held and carried above the first main menu's prompt,
-        # which would otherwise clear it unseen. Anything they still ask
-        # is asked under the text that explains it, as in the console.
+        # first-run choice's "Node name set to ..." and "(Saved. ...)",
+        # "Switched to plain ASCII style") is held and carried above the
+        # first main menu's prompt, which would otherwise clear it unseen.
+        # Anything they still ask is asked under the text that explains
+        # it, as in the console. Carried ahead of the menu's own notices:
+        # it answers the last thing the caller did.
         first_run = _TrailingOutput(session)
         if lane is not None and meets_level(user, SYSOP_LEVEL):
             await offer_onboarding(first_run, lane)
@@ -794,7 +796,7 @@ async def run_authenticated_session(
         # leave a revoked account's session completely unprotected for
         # as long as it sat here (GitHub issue #29's whole point).
         await _confirm_unicode_style(first_run, db, user)
-        first_run.announce_rest()
+        first_run.announce_rest(last_paragraph=False)
         await _show_previous_callers_screen(
             session, db, user, current_history_id=history_id
         )
