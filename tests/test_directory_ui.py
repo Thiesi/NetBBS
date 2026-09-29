@@ -145,7 +145,8 @@ def test_browse_directory_loops_back_to_the_listing_after_viewing_someone(tmp_pa
     set_bio(db, bob, "Retro computing enthusiast")
     set_bio_visible(db, bob, True)
     # alice sorts before bob -> "01" is alice, "02" is bob.
-    session = FakeSession(keys=["0", "2", "0", "1", "b"])
+    # Each card is left with [B]ack (issue #821), then the listing with another.
+    session = FakeSession(keys=["0", "2", "b", "0", "1", "b", "b"])
 
     asyncio.run(_browse_directory(session, db, viewer))
 
@@ -164,7 +165,7 @@ def test_selecting_a_directory_entry_shows_their_vcard(tmp_path):
     # Trailing "b": viewing a vcard now loops back to the listing
     # (dogfood follow-up) instead of returning straight to the caller,
     # so a second "back" is needed to actually leave.
-    session = FakeSession(keys=["0", "2", "b"])
+    session = FakeSession(keys=["0", "2", "b", "b"])
 
     asyncio.run(_browse_directory(session, db, viewer))
 
@@ -181,7 +182,7 @@ def test_selecting_a_directory_entry_hides_private_bio(tmp_path):
     bob = create_user(db, "bob", password="hunter2", user_level=10)
     set_bio(db, bob, "Secret hobby list")
     # Trailing "b": see the loop-back comment in the sibling test above.
-    session = FakeSession(keys=["0", "2", "b"])
+    session = FakeSession(keys=["0", "2", "b", "b"])
 
     asyncio.run(_browse_directory(session, db, viewer))
 
