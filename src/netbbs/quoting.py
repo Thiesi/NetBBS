@@ -65,6 +65,7 @@ def quote_body(body: str, *, author: str) -> str:
     replier sends, and a control sequence in it would reach both."""
     text = sanitize_text(body.replace("\r\n", "\n").replace("\r", "\n"), allow_newlines=True)
     author = sanitize_text(author)
+    text = _drop_forwarders_signature(text)
     if _SIGNATURE_DELIMITER in text:
         text = text.rsplit(_SIGNATURE_DELIMITER, 1)[0]
     lines = text.split("\n")
@@ -116,6 +117,26 @@ def forward_body(body: str, *, sender: str, recipient: str, date: str, subject: 
         f"Subject: {sanitize_text(subject)}",
     ]
     return "\n".join(["", *header, "", text])
+
+
+def _drop_forwarders_signature(text: str) -> str:
+    """A forward's note without the signature `sign_forward` put under it,
+    so `quote_body` quotes a reply to a forward as it quotes any letter:
+    up to one signature, the forwarded letter's writer's, found last. Left
+    in, the forwarder's signature would be the one found when the letter
+    passed on is unsigned, and the quote would stop at the note."""
+    at = text.find(FORWARD_RULE)
+    if at < 0:
+        return text
+    note = text[:at]
+    if note.startswith(_SIGNATURE_DELIMITER[1:]):
+        note = ""
+    elif _SIGNATURE_DELIMITER in note:
+        note = note.split(_SIGNATURE_DELIMITER, 1)[0]
+    else:
+        return text
+    note = note.strip("\n")
+    return f"{note}\n\n{text[at:]}" if note else text[at:]
 
 
 def sign_forward(body: str, signature: str | None) -> str:

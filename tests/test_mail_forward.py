@@ -96,6 +96,27 @@ def test_sign_forward(body, signature, expected):
     assert sign_forward(body, signature) == expected
 
 
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        # The forwarded letter unsigned: quoted whole, not cut at the note.
+        (
+            f"FYI\n-- \nBob\n\n{FORWARD_RULE}\nFrom: alice\n\nHi",
+            f"bob wrote:\n> FYI\n>\n> {FORWARD_RULE}\n> From: alice\n>\n> Hi\n",
+        ),
+        # Signed: cut at its writer's signature, as any quote is.
+        (
+            f"-- \nBob\n\n{FORWARD_RULE}\nFrom: alice\n\nHi\n-- \nAlice",
+            f"bob wrote:\n> {FORWARD_RULE}\n> From: alice\n>\n> Hi\n",
+        ),
+    ],
+)
+def test_a_reply_to_a_forward_quotes_the_letter_it_carried(body, expected):
+    from netbbs.quoting import quote_body
+
+    assert quote_body(body, author="bob") == expected
+
+
 # -- the Inbox and Sent views -------------------------------------------------
 
 

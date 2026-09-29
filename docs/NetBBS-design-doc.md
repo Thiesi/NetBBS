@@ -2467,7 +2467,9 @@ every check a new letter's does, so any letter goes to a local account or a
 Link address alike. Both editors start above the letter, where a note goes
 (the line editor as after `/insert 1`; `/end` leaves it), and the forwarder's
 signature closes that note, above the rule (`netbbs.quoting.sign_forward`):
-appended at the end, it would read as the forwarded letter's writer's.
+appended at the end, it would read as the forwarded letter's writer's. A
+reply to a forward quotes it without that signature, so the quote still stops
+only at the forwarded letter's own.
 - The body is carried verbatim, not quoted. A forward passes a letter on for
   someone else to read: `>` would mark it as text being answered, and the
   quote's bounds (40 lines, 8,000 bytes, stop at the signature) would cut what
