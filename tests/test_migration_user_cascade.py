@@ -87,8 +87,8 @@ def test_delete_user_cascades_and_nulls_correctly_across_every_table(tmp_path):
     conn.execute("INSERT INTO user_preferences (user_id, key, value) VALUES (?, 'k', 'v')", (alice.id,))
 
     # alice as sender (content survives via the denormalized label, only
-    # the live FK goes NULL) and alice as recipient (CASCADEs -- unlike a
-    # post, a message has no meaning independent of its one recipient).
+    # the live FK goes NULL) and alice as recipient (also SET NULL since
+    # issue #818: the sender's Sent copy stays, naming alice).
     conn.execute(
         """
         INSERT INTO mail_messages (sender_user_id, sender_label, recipient_user_id, subject, body, created_at)
@@ -139,9 +139,12 @@ def test_delete_user_cascades_and_nulls_correctly_across_every_table(tmp_path):
     ).fetchone()
     assert sent["sender_user_id"] is None
     assert sent["sender_label"] == "alice"
-    assert (
-        conn.execute("SELECT COUNT(*) FROM mail_messages WHERE subject = 'to alice'").fetchone()[0] == 0
-    )
+    received = conn.execute(
+        "SELECT recipient_user_id, recipient_label, recipient_deleted_at FROM mail_messages WHERE subject = 'to alice'"
+    ).fetchone()
+    assert received["recipient_user_id"] is None
+    assert received["recipient_label"] == "alice"
+    assert received["recipient_deleted_at"] is not None
 
     # Administrative rows tied to the account are cascade-removed.
     assert conn.execute("SELECT COUNT(*) FROM moderator_grants WHERE user_id = ?", (alice.id,)).fetchone()[0] == 0
