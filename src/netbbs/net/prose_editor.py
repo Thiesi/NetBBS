@@ -308,6 +308,7 @@ async def edit_prose(
                         "  Ctrl+W         delete a word back (browser: Alt+Backspace)",
                         "  Ctrl+K         cut the line; again adds the next line",
                         "  Ctrl+Y         paste the cut lines",
+                        "  Ctrl+E         erase all the text (Ctrl+Y brings it back)",
                         "  Ctrl+R         rewrap the quoted (>) paragraph",
                         "  Ctrl+O         save and finish",
                         "  Ctrl+X         exit -- Save, Keep draft & exit, Discard, or Cancel",
@@ -355,6 +356,21 @@ async def edit_prose(
                 # record of it and leaves it sitting on screen. A full
                 # clear-and-repaint is the only redraw that actually
                 # erases it.
+                previous = await _full_redraw()
+                continue
+
+            if key.kind == EditorKeyKind.CTRL and key.char == "e":
+                # Erase all (issue #837): clearing a bio meant holding
+                # Delete. Asked first, and the text goes where Ctrl+K puts
+                # a cut, so Ctrl+Y undoes it.
+                if state.buffer.to_text():
+                    if await _confirm_erase(session):
+                        state.cut_lines = list(state.buffer.lines)
+                        state.buffer = ProseBuffer.from_text("")
+                        state.scroll_row = 0
+                        state.dirty = True
+                else:
+                    await session.write("\a")
                 previous = await _full_redraw()
                 continue
 
@@ -617,6 +633,12 @@ async def _flush(session: Session, state: _EditorState, width: int, height: int)
     await session.write(clear_line())
     await session.write(colored(status, fg_color=MUTED_COLOR))
     await session.write(move_cursor(top + max(1, screen_row + 1), display_col + 1))
+
+
+async def _confirm_erase(session: Session) -> bool:
+    """Ctrl+E's question (issue #837): one keystroke, Y erases."""
+    await write_prompt(session, "\r\nErase all the text? Ctrl+Y brings it back. [Y]es or [N]o? ")
+    return (await session.read_key()).lower() == "y"
 
 
 async def _confirm_quit(session: Session) -> str:

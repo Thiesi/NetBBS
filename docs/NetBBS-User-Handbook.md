@@ -76,7 +76,9 @@ The text editor shows its commands. In the line editor, a blank line starts
 a new paragraph; press Enter on an empty line twice, or type `/done`, to
 finish. `/insert N` writes the next lines before line N until you type
 `/end`, which is how you answer between the quoted lines of a reply; `/list`
-shows every line and where you are writing. `/exit` or `/quit` keeps a draft
+shows every line and where you are writing. A reply opens with the post
+quoted: `/unquote` removes the whole quote, and `/delete N-M` removes lines N
+to M, so you can keep only the part you answer. `/exit` or `/quit` keeps a draft
 for later; `/cancel` discards it. In the fullscreen editor, **Ctrl+G** shows
 help and **Ctrl+X** opens the exit choices, including **Keep draft & exit**.
 Both editors keep what you have typed if the connection drops.
@@ -87,6 +89,7 @@ The fullscreen editor also has these keys:
 | --- | --- |
 | **Ctrl+K** | Cut the line. Press it again to add the next line. |
 | **Ctrl+Y** | Paste the cut lines. |
+| **Ctrl+E** | Erase all the text, after a yes. **Ctrl+Y** brings it back. |
 | **Ctrl+W** | Delete the word before the cursor. In a browser, which closes the tab on Ctrl+W, use **Alt+Backspace**. |
 | **Ctrl+R** | Rewrap the quoted (`>`) paragraph under the cursor to fit the screen, keeping its `>`. |
 
