@@ -106,7 +106,7 @@ async def _join_and_wait(lane, hub, presence, channel, user, session):
 
 def test_nick_sets_alias_and_announces_it(lane, hub, presence, alice, channel):
     session = asyncio.run(_run(lane, hub, presence, channel, alice, ["/nick DeepParse", "/quit"]))
-    assert "is now known as DeepParse|alice" in _written_text(session)
+    assert "is now known as DeepParse (alice)" in _written_text(session)
 
 
 def test_nick_off_is_a_literal_alias_not_a_magic_clear_keyword(db, lane, hub, presence, alice, channel):
@@ -116,7 +116,7 @@ def test_nick_off_is_a_literal_alias_not_a_magic_clear_keyword(db, lane, hub, pr
     # (if unlikely) choice for zero benefit, now that a bare /nick
     # already clears it.
     session = asyncio.run(_run(lane, hub, presence, channel, alice, ["/nick off", "/quit"]))
-    assert "is now known as off|alice" in _written_text(session)
+    assert "is now known as off (alice)" in _written_text(session)
     assert get_nick(db, alice) == "off"
 
 
@@ -172,7 +172,7 @@ def test_alias_shown_on_join(db, lane, hub, presence, alice, bob, channel):
     # Issue #843: the alias with the username beside it, never the alias
     # alone. Compared without ANSI: the alias carries its own color.
     text = strip_ansi(_written_text(watcher))
-    assert "DeepParse|alice has joined the channel." in text
+    assert "DeepParse (alice) has joined the channel." in text
 
 
 def test_alias_shown_on_leave(db, lane, hub, presence, alice, bob, channel):
@@ -199,14 +199,14 @@ def test_alias_shown_on_leave(db, lane, hub, presence, alice, bob, channel):
 
     watcher = asyncio.run(scenario())
     text = strip_ansi(_written_text(watcher))
-    assert "Bobby|bob has left the channel." in text
+    assert "Bobby (bob) has left the channel." in text
 
 
 def test_alias_shown_in_regular_message(db, lane, hub, presence, alice, channel):
     set_nick(db, alice, "DeepParse")
     session = asyncio.run(_run(lane, hub, presence, channel, alice, ["hello", "/quit"]))
     text = strip_ansi(_written_text(session))
-    assert "<DeepParse|alice>" in text
+    assert "<DeepParse (alice)>" in text
     assert "<alice>" not in text
 
 
@@ -214,7 +214,7 @@ def test_alias_shown_in_me_action(db, lane, hub, presence, alice, channel):
     set_nick(db, alice, "DeepParse")
     session = asyncio.run(_run(lane, hub, presence, channel, alice, ["/me waves", "/quit"]))
     text = strip_ansi(_written_text(session))
-    assert "DeepParse|alice waves" in text
+    assert "DeepParse (alice) waves" in text
 
 
 def test_alias_shown_on_scrollback_replay(db, lane, hub, presence, alice, channel):
@@ -223,7 +223,7 @@ def test_alias_shown_on_scrollback_replay(db, lane, hub, presence, alice, channe
     # A second session replays scrollback -- current alias should show,
     # not whatever was canonical-only at storage time.
     session = asyncio.run(_run(lane, hub, presence, channel, alice, ["/quit"]))
-    assert "<DeepParse|alice>" in strip_ansi(_written_text(session))
+    assert "<DeepParse (alice)>" in strip_ansi(_written_text(session))
 
 
 def test_names_still_shows_both_forms(db, lane, hub, presence, alice, channel):
@@ -232,13 +232,13 @@ def test_names_still_shows_both_forms(db, lane, hub, presence, alice, channel):
     # visible there, matching display_label exactly as before.
     set_nick(db, alice, "DeepParse")
     session = asyncio.run(_run(lane, hub, presence, channel, alice, ["/names", "/quit"]))
-    assert "DeepParse|alice" in _written_text(session)
+    assert "DeepParse (alice)" in _written_text(session)
 
 
 def test_who_still_shows_both_forms(db, lane, hub, presence, alice, channel):
     set_nick(db, alice, "DeepParse")
     session = asyncio.run(_run(lane, hub, presence, channel, alice, ["/who", "/quit"]))
-    assert "DeepParse|alice" in _written_text(session)
+    assert "DeepParse (alice)" in _written_text(session)
 
 
 def test_whois_identity_header_is_canonical_only(db, lane, hub, presence, alice, bob, channel):
@@ -249,7 +249,7 @@ def test_whois_identity_header_is_canonical_only(db, lane, hub, presence, alice,
     # not just assumed.
     set_nick(db, bob, "Bobby")
     session = asyncio.run(_run(lane, hub, presence, channel, alice, ["/whois bob", "/quit"]))
-    assert "Bobby|bob" not in _written_text(session)
+    assert "Bobby (bob)" not in _written_text(session)
     assert "bob" in _written_text(session)
 
 
@@ -314,5 +314,5 @@ def test_moderation_notices_stay_canonical_only(db, lane, hub, presence, alice, 
     session = asyncio.run(scenario())
     # The moderator's own alias must not appear in the kick notice --
     # moderation/auditing always shows canonical identity only.
-    assert "by DeepParse|alice" not in _written_text(session)
+    assert "by DeepParse (alice)" not in _written_text(session)
     assert "by alice" in _written_text(session)

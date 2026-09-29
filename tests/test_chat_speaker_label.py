@@ -138,9 +138,9 @@ def test_an_alias_leads_and_the_username_is_muted(db, lobby, alice, sysop):
 
     rendered = chat_flow._render_channel_message(db, lobby, sysop, message)
 
-    assert "<Quill|alice> hi" in strip_ansi(rendered)
+    assert "<Quill (alice)> hi" in strip_ansi(rendered)
     assert (
-        colored("Quill", fg_color=NICK_COLOR) + colored("|alice", fg_color=MUTED_COLOR)
+        colored("Quill", fg_color=NICK_COLOR) + colored(" (alice)", fg_color=MUTED_COLOR)
     ) in rendered
 
 
@@ -153,7 +153,7 @@ def test_own_alias_takes_the_self_color(db, lobby, alice):
     rendered = chat_flow._render_channel_message(db, lobby, alice, message, self_message=True)
 
     assert (
-        colored("Quill", fg_color=SELF_COLOR, bold=True) + colored("|alice", fg_color=MUTED_COLOR)
+        colored("Quill", fg_color=SELF_COLOR, bold=True) + colored(" (alice)", fg_color=MUTED_COLOR)
     ) in rendered
 
 

@@ -75,7 +75,7 @@ def test_set_nick_allows_own_username(db, alice):
     assert get_nick(db, alice) == "alice"
 
 
-@pytest.mark.parametrize("nick", ["Deep|Parse", "InkWell[sysop]", "<bob>", "*** notice", "~Deep~", "|"])
+@pytest.mark.parametrize("nick", ["Deep|Parse", "InkWell[sysop]", "<bob>", "*** notice", "~Deep~", "|", "Ann (bob)", "(", ")", "Ann （bob）", "Ann ⁽bob⁾", "Ann ❨bob❩", "{x}"])
 def test_set_nick_rejects_characters_the_chat_screen_frames_names_with(db, alice, nick):
     # Issue #843: the separator, a status-bar tag's brackets, a speaker's
     # angle brackets, the "*" of /me and notices, the old "~" marker.
@@ -136,7 +136,7 @@ def test_display_label_is_bare_username_when_no_nick(db, alice):
 
 def test_display_label_combines_nick_and_username(db, alice):
     set_nick(db, alice, "DeepParse")
-    assert display_label(db, alice) == "DeepParse|alice"
+    assert display_label(db, alice) == "DeepParse (alice)"
 
 
 def test_display_label_reverts_after_clearing(db, alice):
@@ -156,7 +156,7 @@ def test_chat_stream_label_colors_the_nick_and_shows_the_username(db, alice):
     # Issue #843: never the alias alone in the live stream.
     set_nick(db, alice, "DeepParse")
     label = chat_stream_label(db, alice)
-    assert strip_ansi(label) == "DeepParse|alice"
+    assert strip_ansi(label) == "DeepParse (alice)"
     assert "\x1b[" in label  # actually colored, not plain text
 
 
@@ -167,4 +167,16 @@ def test_chat_stream_label_no_nick_case_has_no_color_codes(db, alice):
 def test_chat_stream_label_reverts_after_clearing(db, alice):
     set_nick(db, alice, "DeepParse")
     set_nick(db, alice, "")
+    assert chat_stream_label(db, alice) == "alice"
+
+
+def test_an_alias_set_before_parentheses_were_reserved_is_not_shown(db, alice):
+    # Issue #899: parentheses now hold the account, so an old "Ann (bob)"
+    # would read as two accounts, one of them forged.
+    from netbbs.user_preferences import set_user_preference
+
+    set_user_preference(db, alice, "nick", "Ann (bob)")
+
+    assert get_nick(db, alice) is None
+    assert display_label(db, alice) == "alice"
     assert chat_stream_label(db, alice) == "alice"

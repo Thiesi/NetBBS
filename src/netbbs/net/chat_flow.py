@@ -94,6 +94,7 @@ from netbbs.auth.users import (
 )
 from netbbs.chat import (
     Channel,
+    account_suffix,
     ChannelError,
     ChannelMessage,
     ChatHub,
@@ -104,7 +105,6 @@ from netbbs.chat import (
     DurationError,
     MembershipError,
     MessageMailbox,
-    NICK_SEPARATOR,
     NickError,
     ParticipantId,
     PresenceRegistry,
@@ -1541,7 +1541,7 @@ def _local_speaker_name(
     if nick is not None:
         name = colored(
             sanitize_text(nick), fg_color=color if self_message else NICK_COLOR, bold=self_message
-        ) + colored(f"{NICK_SEPARATOR}{sanitize_text(author.username)}", fg_color=MUTED_COLOR)
+        ) + colored(account_suffix(sanitize_text(author.username)), fg_color=MUTED_COLOR)
     else:
         primary = (get_display_name(db, author) or author.username) if verified_unit else author.username
         name = colored(sanitize_text(primary), fg_color=color, bold=self_message)
@@ -3127,7 +3127,7 @@ async def _handle_nick(ctx: ChatCommandContext, args: str) -> None:
 async def _announce_nick_change(ctx: ChatCommandContext, *, new_nick: str | None) -> None:
     username = sanitize_text(ctx.user.username)
     if new_nick is not None:
-        body = f"is now known as {sanitize_text(new_nick)}|{username}"
+        body = f"is now known as {sanitize_text(new_nick)}{account_suffix(username)}"
     else:
         body = "is no longer using an alias"
     notice = colored(f"*** {username} {body}", fg_color=MUTED_COLOR)
@@ -3584,7 +3584,9 @@ async def _handle_names(ctx: ChatCommandContext, args: str) -> None:
 
     labels = await ctx.lane.run(_labels)
     labels.extend(label for label, _fingerprint in remote_entries)
-    labels.extend(f"{name} (MRC)" for name in _mrc_roster_entries(ctx))
+    # "(on MRC)", as /who says it: "bob (MRC)" would read as an alias
+    # for a local account named MRC (issue #899).
+    labels.extend(f"{name} (on MRC)" for name in _mrc_roster_entries(ctx))
     await ctx.session.write_line(", ".join(labels))
 
 
@@ -3888,7 +3890,7 @@ _COMMAND_INFO: dict[str, tuple[str, str]] = {
     "dm": ("/dm <user>", "Invite an online user to a live, fullscreen direct chat."),
     "help": ("/help [command]", "List available commands, or show detail for one."),
     "me": ("/me <action>", 'Send an action message (e.g. "* alice waves").'),
-    "nick": ("/nick [name]", "Set a display alias, shown as alias|username; a bare /nick clears it."),
+    "nick": ("/nick [name]", "Set a display alias, shown as alias (username); a bare /nick clears it."),
     "clear": ("/clear", "Clear your own screen (alias: /cls). Cosmetic only, nothing else changes."),
     "away": ("/away [message]", "Mark yourself away, or clear away status."),
     "timestamps": ("/timestamps [on|off]", "Toggle chat timestamps, or set them on/off explicitly."),
@@ -4272,16 +4274,22 @@ def _check_ban(db: Database, channel: Channel, user: User) -> str | None:
 @dataclass
 class _StatusSpan:
     """One colored run of text within a status-line field group -- e.g.
-    the identity group splits into a bold `SELF_COLOR` "alice" span
-    (bold, not a "you:" label -- `SELF_COLOR` already reads as "this is
-    you" on its own), an optional `NICK_COLOR` "(nick)" span, and a
-    `MUTED_COLOR` "[mod]" indicator span, concatenated with no gap
+    the identity group splits into a bold `SELF_COLOR` name span (bold,
+    not a "you:" label -- `SELF_COLOR` already reads as "this is you" on
+    its own) -- the alias, followed by a muted " (username)" span, when
+    one is set -- and a "[mod]" indicator span, concatenated with no gap
     between them so they read as one field while still each getting
-    their own color."""
+    their own color.
+
+    `core` is what the span reads as when its group is cut back to it
+    alone (`_compose_status_line`), if not `text`: an alias leading the
+    identity group falls back to the username, never to the alias
+    standing alone (issue #843)."""
 
     text: str
     fg_color: int | None = None
     bold: bool = False
+    core: str | None = None
 
 
 # A "group" is one status-line field: a list of `_StatusSpan`s
@@ -4412,9 +4420,17 @@ def _render_chat_status_line(
         groups.append([_StatusSpan(f'"{sanitize_text(topic_text)}"', fg_color=TOPIC_COLOR, bold=True)])
 
     nick = get_nick(db, user)
-    identity: _StatusGroup = [_StatusSpan(sanitize_text(user.username), fg_color=SELF_COLOR, bold=True)]
+    # `alias (username)`, as the stream shows it: the parentheses hold the
+    # account (issue #899), so `alice (Quill)` would read backwards.
     if nick:
-        identity.append(_StatusSpan(f"({sanitize_text(nick)})", fg_color=NICK_COLOR))
+        identity: _StatusGroup = [
+            _StatusSpan(
+                sanitize_text(nick), fg_color=SELF_COLOR, bold=True, core=sanitize_text(user.username)
+            ),
+            _StatusSpan(account_suffix(sanitize_text(user.username)), fg_color=MUTED_COLOR),
+        ]
+    else:
+        identity = [_StatusSpan(sanitize_text(user.username), fg_color=SELF_COLOR, bold=True)]
 
     privileges = _own_channel_privileges(db, channel, user)
     if privileges is not None:
@@ -4487,10 +4503,10 @@ def _compose_status_line(groups: list[_StatusGroup], width: int, *, active: bool
         # nickname or badge pushed the line over budget -- reported by
         # Thiesi as "setting a nickname made my name disappear entirely".
         if len(group) > 1:
-            core_text = group[0].text
-            if running + sep_len + len(core_text) <= width:
-                running += sep_len + len(core_text)
-                kept.append(group[:1])
+            core = group[0] if group[0].core is None else replace(group[0], text=group[0].core, core=None)
+            if running + sep_len + len(core.text) <= width:
+                running += sep_len + len(core.text)
+                kept.append([core])
                 continue
 
         break

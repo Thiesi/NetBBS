@@ -186,7 +186,7 @@ to speak. `/help` lists the commands available there.
 | `/nick name` | Set a chat alias; a bare `/nick` clears it |
 | `/dm user` | Invite someone online to a private direct chat |
 
-An alias is always shown with the username beside it, as `Quill|Copperplate`,
+An alias is always shown with the username beside it, as `Quill (Copperplate)`,
 so everyone can see who is speaking: the alias first and in color, the
 username after it in gray. An alias that reads like someone else's
 username, or like a staff title such as "SysOp", is refused.

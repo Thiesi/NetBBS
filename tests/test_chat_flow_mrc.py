@@ -313,7 +313,7 @@ def test_who_names_and_mrc_show_the_hub_roster_and_link_state(db, lane, hub, pre
             text = _text(session)
             assert "bob@other (on MRC)" in text
             assert "carol@third (on MRC)" in text
-            assert "bob@other (MRC), carol@third (MRC)" in text
+            assert "bob@other (on MRC), carol@third (on MRC)" in text
             assert "MRC room #lobby via 127.0.0.1:" in text
             assert "CONNECTED" in text
             assert "2 MRC users here: bob@other, carol@third" in text
