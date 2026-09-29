@@ -47,6 +47,7 @@ from netbbs.attestation import meets_age
 from netbbs.auth.users import User
 from netbbs.communities import get_effective_min_age, meets_read_gate
 from netbbs.config import get_node_display_name
+from netbbs.rendering.sanitize import sanitize_text
 from netbbs.storage.database import Database
 
 if TYPE_CHECKING:
@@ -175,23 +176,31 @@ def attachable_files(db: Database, user: User, area: FileArea) -> list[FileEntry
 
 def sender_ref_problem(db: Database, sender: User, refs: list[FileRef]) -> str | None:
     """Why `sender` cannot send a letter pointing at `refs`, or `None`: too
-    many, or one they cannot open (any more) themselves."""
+    many, or one they cannot open (any more) themselves. Sanitized, like
+    `recipient_ref_problem`: a name can come from another BBS."""
     if len(refs) > MAX_FILE_REFS:
         return f"A letter can point at {MAX_FILE_REFS} files at most; this one has {len(refs)}."
     for ref in refs:
         if open_ref(db, sender, ref).state != AVAILABLE:
-            return f"{ref.filename} is no longer available to you. [R]emove it from the letter, then send it."
+            return (
+                f"{sanitize_text(ref.filename)} is no longer available to you. "
+                "[R]emove it from the letter, then send it."
+            )
     return None
 
 
 def recipient_ref_problem(db: Database, recipient: User, refs: list[FileRef]) -> str | None:
     """Why `recipient` cannot be sent a letter pointing at `refs`, or `None`:
     one of them is in a file area they may not read. Named by the area, which
-    the sender can read."""
+    the sender can read.
+
+    Returned sanitized, ready for the terminal: a carried file area's name,
+    and a file's, come from another BBS, and a refusal is shown as it is
+    (review on #912)."""
     for ref in refs:
         opened = open_ref(db, recipient, ref)
         if opened.state == NO_ACCESS:
-            return (
+            return sanitize_text(
                 f"{recipient.username} can't open file area {ref.area_name!r}, so they couldn't "
                 f"download {ref.filename}."
             )

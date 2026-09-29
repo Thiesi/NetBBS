@@ -124,6 +124,15 @@ def test_a_recipient_who_cannot_read_the_area_is_refused_with_the_area_named(db)
     assert list_inbox(db, bob) == [] and _ref_rows(db) == []
 
 
+def test_a_refusal_naming_a_file_or_area_is_sanitized_for_the_terminal(db):
+    alice, bob = _user(db, "alice", user_level=50), _user(db, "bob")
+    _area, _entry, ref = _file(db, alice, area_name="Evil\x1b[2J", filename="x\x1b[31m.zip", min_read_level=50)
+
+    problem = recipient_ref_problem(db, bob, [ref])
+
+    assert problem is not None and "\x1b" not in problem
+
+
 def test_a_sender_cannot_point_at_a_file_they_cannot_open(db):
     root, alice, bob = _user(db, "root", user_level=255), _user(db, "alice"), _user(db, "bob")
     _area, _entry, ref = _file(db, root, area_name="Staff", min_read_level=50)

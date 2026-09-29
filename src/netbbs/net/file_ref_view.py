@@ -113,7 +113,7 @@ async def choose_file_to_attach(
             stable_id_of=lambda item: item.id,
             description_of=lambda item: f"{file_size_text(item.size_bytes)}"
             + (f" -- {item.description.splitlines()[0]}" if item.description else ""),
-            title=f"Attach a file from {area.name}",
+            title=f"Attach a file from {sanitize_text(area.name)}",
             breadcrumb=breadcrumb,
             empty_message=f"{area.name} has no files to attach.",
             **style,
