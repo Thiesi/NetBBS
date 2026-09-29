@@ -291,7 +291,7 @@ def _render_previous_callers_panel(
         subtitle = "SIGNALS RECENTLY RECEIVED BY THIS NODE"
     rendered: list[str] = [
         _rule(top_left, top_right),
-        _framed(_centered(title, gradient=True, bold=True)),
+        _framed(_centered(title, gradient=not plain, bold=True)),
         _framed(_centered(subtitle, gradient=use_truecolor)),
         _rule(middle_left, middle_right),
     ]

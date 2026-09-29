@@ -50,34 +50,49 @@ def decode_ansi_bytes(data: bytes) -> str:
 
 
 _CSI = re.compile(r"\x1b\[([0-9;?]*)([@-~])")
-# SGR parameters that make a space visible: a background colour (40-48,
-# 100-107) or reverse video (7).
-_VISIBLE_BLANK_SGR = {7, *range(40, 49), *range(100, 108)}
 
 
-def _row_is_blank(row: str) -> bool:
-    """Whether `row` shows nothing: only spaces once its escape sequences
-    are removed, and no background colour or reverse video that would
-    paint those spaces."""
-    if _CSI.sub("", row).strip(" \t\r"):
-        return False
-    for params, final in _CSI.findall(row):
-        if final != "m":
+def _sgr_paints_spaces(params: str, painting: bool) -> bool:
+    """Whether spaces are visible after the SGR sequence `params`, given
+    whether they were before: a background colour or reverse video paints
+    them, a reset or the default background (49) / no-reverse (27) stops
+    that. Background and reverse are tracked as one flag, which errs
+    towards keeping a row."""
+    values = params.split(";") if params else ["0"]
+    index = 0
+    while index < len(values):
+        value = int(values[index]) if values[index].isdigit() else 0
+        if value in (38, 48):
+            # 38/48;5;n and 38/48;2;r;g;b carry their own arguments.
+            if value == 48:
+                painting = True
+            index += 3 if index + 1 < len(values) and values[index + 1] == "5" else 5
             continue
-        values = params.split(";")
-        index = 0
-        while index < len(values):
-            value = values[index]
-            if value.isdigit() and int(value) in (38, 48):
-                # 38/48;5;n and 38/48;2;r;g;b carry their own arguments.
-                if int(value) == 48:
-                    return False
-                index += 3 if index + 1 < len(values) and values[index + 1] == "5" else 5
-                continue
-            if value.isdigit() and int(value) in _VISIBLE_BLANK_SGR:
-                return False
-            index += 1
-    return True
+        if value == 0:
+            painting = False
+        elif value == 7 or 40 <= value <= 47 or 100 <= value <= 107:
+            painting = True
+        elif value in (27, 49):
+            painting = False
+        index += 1
+    return painting
+
+
+def _blank_rows(rows: list[str]) -> list[bool]:
+    """For each row, whether it shows nothing: only spaces once its escape
+    sequences are removed, and never painted by a background colour or
+    reverse video -- including one set on an earlier row and still in
+    force, as art from TheDraw or PabloDraw leaves it (review on #889)."""
+    blank: list[bool] = []
+    painting = False
+    for row in rows:
+        painted = painting
+        for params, final in _CSI.findall(row):
+            if final == "m":
+                painting = _sgr_paints_spaces(params, painting)
+                painted = painted or painting
+        blank.append(not painted and not _CSI.sub("", row).strip(" \t\r"))
+    return blank
 
 
 def trim_trailing_blank_rows(text: str) -> str:
@@ -90,7 +105,8 @@ def trim_trailing_blank_rows(text: str) -> str:
     paint nothing (no background colour, no reverse video). Rows inside the
     art are kept, however empty: only the tail goes."""
     rows = text.split("\n")
-    while rows and _row_is_blank(rows[-1]):
+    blank = _blank_rows(rows)
+    while rows and blank[len(rows) - 1]:
         rows.pop()
     return "\n".join(rows).rstrip("\r")
 

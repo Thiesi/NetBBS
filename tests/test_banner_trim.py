@@ -44,6 +44,19 @@ def test_foreground_only_styling_on_spaces_is_still_blank(sgr):
     assert trim_trailing_blank_rows(text) == "PEN"
 
 
+def test_a_background_set_on_an_earlier_row_still_paints_the_rows_below():
+    # Review on #889: TheDraw-style art writes a colour only when it
+    # changes, so a blue bar under the title is rows of plain spaces.
+    text = "TITLE" + ESC + "[44m\r\n      \r\n      \r\n" + ESC + "[0m\r\n   \r\n"
+    rows = trim_trailing_blank_rows(text).split("\n")
+    assert len(rows) == 4  # title, two painted rows, and the row holding the reset
+
+
+def test_a_reset_ends_the_carried_background():
+    text = ESC + "[44mBAR" + ESC + "[0m\r\n      \r\n"
+    assert trim_trailing_blank_rows(text) == ESC + "[44mBAR" + ESC + "[0m"
+
+
 def test_all_blank_art_trims_to_nothing():
     assert trim_trailing_blank_rows("   \r\n   \r\n") == ""
 

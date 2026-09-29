@@ -633,6 +633,7 @@ from netbbs.net.welcome_banner import (
     MAX_BANNER_SIZE_BYTES,
     banner_path,
     load_welcome_banner,
+    pre_login_unicode_style,
     set_welcome_banner_enabled,
     welcome_banner_status,
 )
@@ -12743,7 +12744,9 @@ async def _preview_welcome_banner_screen(session: Session, lane: DatabaseLane, a
 
     def _load(db: Database) -> tuple:
         truecolor = effective_truecolor(session, db, actor)
-        return welcome_banner_status(db), load_welcome_banner(db, truecolor=truecolor), truecolor
+        # As the connecting caller on this transport gets it (issue #841).
+        banner = load_welcome_banner(db, truecolor=truecolor, unicode_style=pre_login_unicode_style(session))
+        return welcome_banner_status(db), banner, truecolor
 
     status, banner_text, _truecolor = await lane.run(_load)
     await session.write_line(colored("\r\nPreviewing the welcome banner callers see when they connect:", fg_color=MUTED_COLOR))

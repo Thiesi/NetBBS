@@ -226,8 +226,12 @@ def test_previous_callers_screen_plain_style_drops_the_neon(tmp_path):
     assert "SIGNALS" not in text
     assert "P R E V I O U S" not in text
     assert "bob" in text
-    # The frame and heading keep to one colour: no gradient.
-    assert len(set(re.findall(r"\x1b\[38;2;\d+;\d+;\d+m", _written_text(session)))) <= 3
+    # The frame and heading keep to one colour: no gradient, in truecolor
+    # or in 256 colours (review on #889).
+    output = _written_text(session)
+    assert len(set(re.findall(r"\x1b\[38;2;\d+;\d+;\d+m", output))) <= 3
+    heading_line = next(line for line in output.split("\r\n") if "Previous callers" in _ANSI_ESCAPE_RE.sub("", line))
+    assert len(set(re.findall(r"\x1b\[38;5;\d+m", heading_line))) <= 2
     database.close()
 
 

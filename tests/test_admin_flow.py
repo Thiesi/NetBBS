@@ -4507,6 +4507,19 @@ def test_preview_of_a_saved_but_disabled_banner_shows_the_saved_art(db, lane, sy
     assert "(Saved, but switched off: callers see the default NetBBS banner. [E]nable turns it on.)" in text
 
 
+def test_welcome_preview_over_telnet_shows_the_ascii_default_callers_get(db, lane, sysop):
+    # Review on #889: Telnet callers get the default banner in ASCII
+    # before sign-in, so a Telnet SysOp's preview shows that too.
+    session = FakeSession(["s", "m", "n", "w", "p", "x", "b", "b", "b", "b", "b"])
+    session.transport_name = "telnet"
+    _run(session, lane, sysop)
+    text = _written_text(session)
+    start = text.index("Previewing the welcome banner")
+    preview = text[start:text.index("Press any key", start)]
+    assert "+====" in preview
+    assert "╔" not in preview
+
+
 def test_preview_of_an_oversized_saved_banner_says_why_it_is_not_shown(db, lane, sysop):
     from netbbs.net.welcome_banner import MAX_BANNER_SIZE_BYTES, banner_path
 
