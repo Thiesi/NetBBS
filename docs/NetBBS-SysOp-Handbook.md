@@ -401,6 +401,14 @@ account change that would leave no enabled, approved SysOp. Disabling an account
 revokes its access; deletion is permanent and requires its exact name. Existing
 content retains its recorded author label.
 
+A disabled account, and a signup still awaiting approval, receive no mail:
+callers here are told so at the To prompt, and Link mail bounces with "that
+account is not taking mail at the moment", which does not tell the other node
+the account is disabled. Mail already in a disabled account stays there until
+you enable it again. Deleting an account removes its own mail, but letters it
+sent or received stay in the other person's Sent or Inbox; their Sent shows
+the deleted recipient as, for example, `bob (deleted account)`.
+
 A level change, a granted or revoked identity-verifier permission, or a change
 to staff permissions reaches a caller who is already logged in without them
 reconnecting. This also applies to a change made with `python -m
@@ -748,7 +756,11 @@ this node refused, and how full your callers' mailboxes are.
   switches to by name): letters, unread, read, notices from the BBS itself, and
   how much of the 500-letter cap that is. A full inbox makes room by dropping
   its oldest read letter; an inbox full of unread mail refuses new mail, and a
-  Link sender gets a "mailbox full" bounce.
+  Link sender gets a "mailbox full" bounce. Callers see the same count in their
+  own Inbox header, a warning from 450, and a main-menu line when old read
+  mail was removed to make room.
+- In **Refused Link mail**, "the recipient's account is disabled or still
+  awaiting approval" is mail for an account that takes none at the moment.
 
 These screens never show what a letter says. Mail is private: you see counts,
 account names, senders and reasons, never a subject or a body, and a refused

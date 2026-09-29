@@ -53,11 +53,12 @@ from netbbs.directory import (
     set_bio_visible,
 )
 from netbbs.files.categories import get_category_by_id as get_file_area_category_by_id
+from netbbs.link.boards import LinkContext
 from netbbs.link.onboarding import link_is_outgoing_only
 from netbbs.link.remote_attestation import count_attestation_recipients
 from netbbs.mail import list_mail_blocks
 from netbbs.messaging_preferences import accepts_direct_messages, set_accepts_direct_messages
-from netbbs.net.char_input import reject_unhandled_key
+from netbbs.net.char_input import InputCancelled, reject_unhandled_key
 from netbbs.net.breadcrumb_preference import breadcrumb_collapsed_enabled, set_breadcrumb_collapsed_enabled
 from netbbs.net.color_depth_preference import (
     color_depth_override,
@@ -68,7 +69,9 @@ from netbbs.net.composition import edit_line_body
 from netbbs.net.confirm import prompt_yes_no
 from netbbs.net.draft_storage import drafts_directory
 from netbbs.net.editor_preference import fullscreen_editor_enabled, set_fullscreen_editor_enabled
+from netbbs.net.mail_flow import mail_open_to, mail_someone
 from netbbs.net.menu_description_preference import menu_description_level, set_menu_description_level
+from netbbs.net.notices import announce, pending_notice_rows, write_notices
 from netbbs.net.node_theme import (
     effective_accent_color,
     effective_accent_color_256,
@@ -90,6 +93,7 @@ from netbbs.net.mrc_nick_color_preference import mrc_nick_color, set_mrc_nick_co
 from netbbs.net.mrc_lastseen_preference import mrc_lastseen_recorded, set_mrc_lastseen_recorded
 from netbbs.net.mrc_private_preference import mrc_private_messages_enabled, set_mrc_private_messages_enabled
 from netbbs.rendering.pipe_codes import CGA_COLOR_NAMES
+from netbbs.rendering.reflow import wrap_terminal_text
 from netbbs.net.unicode_style_preference import set_unicode_style_enabled, unicode_style_enabled
 from netbbs.permissions import meets_level
 from netbbs.rendering import (
@@ -155,6 +159,11 @@ _LOGOFF_SUMMARY_GRADIENT = [
 ]
 
 
+# What a row shows for a caller whose name is hidden -- and so, being
+# compared against, what keeps that row from being mailed (issue #821).
+_NAME_HIDDEN = "(name hidden)"
+
+
 def _session_history_display_name(
     db: Database, entry: SessionHistoryEntry, *, viewer_is_sysop: bool
 ) -> str:
@@ -183,11 +192,11 @@ def _session_history_display_name(
     if viewer_is_sysop:
         return entry.username_label
     if entry.user_id is None:
-        return entry.username_label if entry.name_visible_fallback else "(name hidden)"
+        return entry.username_label if entry.name_visible_fallback else _NAME_HIDDEN
     target = get_user_by_id(db, entry.user_id)
     if target is None or session_history_name_visible(db, target):
         return entry.username_label
-    return "(name hidden)"
+    return _NAME_HIDDEN
 
 
 def _previous_caller_entries(
@@ -334,7 +343,7 @@ def _render_previous_callers_panel(
     # malformed, and ambiguous about whether the name is hidden or just
     # long. A deliberately shorter label is substituted instead, so the
     # row still says plainly what it is.
-    _HIDDEN = "(name hidden)"
+    _HIDDEN = _NAME_HIDDEN
     _HIDDEN_SHORT = "(hidden)"
 
     # The timestamp is not a fixed width: a 12-hour display format
@@ -383,8 +392,8 @@ def _render_previous_callers_panel(
         )
         name_color = (
             (lambda text: _gradient(text, bold=True))
-            if use_truecolor and name != "(name hidden)"
-            else MUTED_COLOR if name == "(name hidden)" else accent_color
+            if use_truecolor and name != _NAME_HIDDEN
+            else MUTED_COLOR if name == _NAME_HIDDEN else accent_color
         )
         name_text, name_padding = _fit(name, name_width)
         connected_text, connected_padding = _fit(connected, connected_width)
@@ -469,12 +478,35 @@ async def _show_previous_callers_screen(
     return True
 
 
+def _previous_caller_mail_target(
+    db: Database, entry: SessionHistoryEntry, viewer: User, *, viewer_is_sysop: bool
+) -> User | str:
+    """The account to write to from one row of the roll (issue #821), or
+    why there is none, in words for the caller.
+
+    A row whose name the roll hides is not mailable: the compose screen
+    would show the name in To. That is the same decision
+    `_session_history_display_name` makes for the row itself, so the two
+    cannot disagree -- a SysOp, who sees every name, may write to any."""
+    name = _session_history_display_name(db, entry, viewer_is_sysop=viewer_is_sysop)
+    if name == _NAME_HIDDEN:
+        return "That caller keeps their name private, so they can't be written to from here."
+    target = get_user_by_id(db, entry.user_id) if entry.user_id is not None else None
+    if target is None:
+        return f"{name}'s account no longer exists."
+    if target.id == viewer.id:
+        return "That call was yours."
+    return target
+
+
 async def _previous_callers_screen(
     session: Session,
     db: Database,
     user: User,
     *,
     current_history_id: int | None = None,
+    lane: DatabaseLane | None = None,
+    link_context: LinkContext | None = None,
 ) -> None:
     """The same caller roll, reached deliberately from the main menu
     (issue #592).
@@ -493,53 +525,115 @@ async def _previous_callers_screen(
     the viewer's own live session is already on `[W]ho's online`, and
     listing it here as `ONLINE NOW` would spend one of ten scarce rows
     telling the viewer they are connected.
-    """
-    entry_limit = max(
-        1,
-        min(
-            _PREVIOUS_CALLERS_DISPLAY_LIMIT,
-            session.terminal_height - _PREVIOUS_CALLERS_MENU_FIXED_ROWS,
-        ),
-    )
-    frame_width = min(session.terminal_width, 78)
 
-    await session.write_line(
-        "\r\n" + screen_title(
-            "Previous callers",
-            breadcrumb=(session.node_display_name,),
-            width=session.terminal_width,
-            clear=redraw_in_place_enabled(db, user),
-            unicode_style=unicode_style_enabled(db, user),
-            collapsed=breadcrumb_collapsed_enabled(db, user),
-            header_color=effective_header_color(session, db),
-            node_name_gradient=session.node_name_gradient,
-        )
-    )
-    entries = _previous_caller_entries(
-        db,
-        limit=_PREVIOUS_CALLERS_DISPLAY_LIMIT,
-        exclude_history_id=current_history_id,
-    )[:entry_limit]
-    if frame_width < 4:
-        # The splash simply skips itself here; this screen was asked
-        # for, so it says why nothing is drawn rather than looking
-        # broken. A frame needs two corners and something between them.
+    Issue #821: `[M]ail a caller` asks for a row's number and opens the
+    compose screen addressed to that caller (`netbbs.net.mail_flow.
+    mail_someone`), then comes back here with the outcome above the
+    prompt. Offered only with a `lane` and while mail is open to the
+    viewer; otherwise the roll is dismissed with any key, as before. A
+    row whose name is hidden, your own call, and a deleted account are
+    refused with the reason.
+    """
+    viewer_is_sysop = meets_level(user, SYSOP_LEVEL)
+    while True:
+        offer_mail = lane is not None and await mail_open_to(session, lane, user)
+        frame_width = min(session.terminal_width, 78)
+
         await session.write_line(
-            colored("Your terminal is too narrow for this list.", fg_color=MUTED_COLOR)
+            "\r\n" + screen_title(
+                "Previous callers",
+                breadcrumb=(session.node_display_name,),
+                width=session.terminal_width,
+                clear=redraw_in_place_enabled(db, user),
+                unicode_style=unicode_style_enabled(db, user),
+                collapsed=breadcrumb_collapsed_enabled(db, user),
+                header_color=effective_header_color(session, db),
+                node_name_gradient=session.node_name_gradient,
+            )
         )
-    elif not entries:
-        await session.write_line(
-            colored("Nobody else has called this node yet.", fg_color=MUTED_COLOR)
+        # One packed row, whatever the description level: the roll is what
+        # this screen is for, and on a short terminal every row the bar
+        # took would be a caller fewer (the 40x12 floor has two to spare).
+        bar = (
+            action_bar([menu_key("M", "ail a caller"), menu_key("B", "ack")], width=session.terminal_width)
+            if offer_mail else None
         )
-    else:
-        rendered = _render_previous_callers_panel(
-            session, db, user, entries, frame_width=frame_width
+        # The budget counts the bar's rows beyond the one line "Press any
+        # key" took, and the outcome carried above the prompt.
+        extra_rows = pending_notice_rows(session)
+        if bar is not None:
+            extra_rows += wrap_terminal_text(bar, max(1, session.terminal_width)).count("\r\n")
+        entry_limit = max(
+            1,
+            min(
+                _PREVIOUS_CALLERS_DISPLAY_LIMIT,
+                session.terminal_height - _PREVIOUS_CALLERS_MENU_FIXED_ROWS - extra_rows,
+            ),
         )
-        await session.write_line("\r\n".join(rendered))
-    await session.write_line(
-        colored("\r\nPress any key to continue...", fg_color=MUTED_COLOR)
-    )
-    await session.read_any_key()
+        entries = _previous_caller_entries(
+            db,
+            limit=_PREVIOUS_CALLERS_DISPLAY_LIMIT,
+            exclude_history_id=current_history_id,
+        )[:entry_limit]
+        if frame_width < 4:
+            # The splash simply skips itself here; this screen was asked
+            # for, so it says why nothing is drawn rather than looking
+            # broken. A frame needs two corners and something between them.
+            await session.write_line(
+                colored("Your terminal is too narrow for this list.", fg_color=MUTED_COLOR)
+            )
+            bar = None
+        elif not entries:
+            await session.write_line(
+                colored("Nobody else has called this node yet.", fg_color=MUTED_COLOR)
+            )
+            bar = None
+        else:
+            rendered = _render_previous_callers_panel(
+                session, db, user, entries, frame_width=frame_width
+            )
+            await session.write_line("\r\n".join(rendered))
+        if bar is None:
+            await write_notices(session)
+            await session.write_line(
+                colored("\r\nPress any key to continue...", fg_color=MUTED_COLOR)
+            )
+            await session.read_any_key()
+            return
+
+        await session.write_line("\r\n" + bar)
+        await write_notices(session)
+        await write_prompt(session, "Choice: ")
+        while True:
+            action = (await session.read_key()).lower()
+            if action in ("m", "b"):
+                await session.write_line("")
+                break
+            await session.write(reject_unhandled_key(action))
+        if action == "b":
+            return
+
+        # A hotkey followed by a line prompt: an Enter typed right behind
+        # the "m" is not an answer (same guard as mail's compose).
+        discard_buffered_enter = getattr(session, "discard_buffered_enter", None)
+        if discard_buffered_enter is not None:
+            await discard_buffered_enter()
+        await write_prompt(session, f"Mail which caller (1-{len(entries)})? ")
+        try:
+            typed = (await session.read_line(cancellable=True)).strip()
+        except InputCancelled:
+            typed = ""
+        if not typed:
+            continue
+        if not typed.isdigit() or not 1 <= int(typed) <= len(entries):
+            announce(session, f"There is no caller {typed} on this list.", tone="error")
+            continue
+        target = _previous_caller_mail_target(db, entries[int(typed) - 1], user, viewer_is_sysop=viewer_is_sysop)
+        if isinstance(target, str):
+            announce(session, target, tone="error")
+            continue
+        assert lane is not None  # offer_mail's own condition
+        await mail_someone(session, lane, user, recipient=target, link_context=link_context)
 
 
 def _format_call_duration(connected_at: str, disconnected_at: str) -> str:
