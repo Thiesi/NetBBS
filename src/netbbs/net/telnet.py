@@ -106,6 +106,11 @@ DEFAULT_TERMINAL_TYPE_WAIT_SECONDS = 1.0
 # many names, stopping when the client repeats itself.
 _MAX_TERMINAL_TYPES = 3
 
+# Keystrokes kept while the first screen waits for TTYPE. Nobody types a
+# screenful before the first screen; a client that sends more ends the
+# wait early instead of growing the buffer (review on #942).
+_MAX_EARLY_INPUT = 1024
+
 
 class TelnetSession(Session):
     transport_name = "telnet"
@@ -247,9 +252,16 @@ class TelnetSession(Session):
                 first = await asyncio.wait_for(self._read_raw_byte(), timeout=remaining)
             except asyncio.TimeoutError:
                 break
-            value = await self._interpret_byte(first)
+            # The rest of a command is bounded too: a client that sends IAC
+            # and then nothing must not hold the connection open forever.
+            try:
+                value = await asyncio.wait_for(self._interpret_byte(first), timeout=_SUBNEGOTIATION_TIMEOUT)
+            except asyncio.TimeoutError as exc:
+                raise SessionClosedError("Telnet command timed out during negotiation") from exc
             if value is not None:
                 self._early_input.append(value)
+                if len(self._early_input) >= _MAX_EARLY_INPUT:
+                    break
         self._ttype_state = "done"
         charset, certain = classify_terminal_types(self.terminal_types)
         self.output_charset = charset if charset is not None else ASCII

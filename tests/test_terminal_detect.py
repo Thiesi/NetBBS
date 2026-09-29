@@ -206,3 +206,60 @@ class _Process:
 def test_ssh_uses_the_pty_terminal_type(terminal_type, charset, certain):
     session = SSHSession(_Process(terminal_type))
     assert (session.output_charset, session.charset_certain) == (charset, certain)
+
+
+def test_a_half_sent_command_during_the_wait_ends_the_connection():
+    # Review on #942: IAC WILL and then silence must not hang the session.
+    reached = []
+
+    async def handler(session: Session):
+        reached.append(True)
+
+    async def scenario():
+        server = TelnetServer(host="127.0.0.1", port=0, session_handler=handler, terminal_type_wait_seconds=5.0)
+        await server.start()
+        try:
+            reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
+            await reader.readexactly(_FULL_NEGOTIATION_LEN)
+            writer.write(bytes([IAC, WILL]))
+            await writer.drain()
+            started = time.monotonic()
+            assert await asyncio.wait_for(reader.read(), timeout=5.0) == b""  # closed by the server
+            elapsed = time.monotonic() - started
+            writer.close()
+            return elapsed
+        finally:
+            await server.stop()
+
+    elapsed = asyncio.run(scenario())
+    assert reached == [] and elapsed < 4.0
+
+
+def test_a_flood_during_the_wait_ends_the_wait_early():
+    seen = {}
+
+    async def handler(session: Session):
+        seen["charset"] = session.output_charset
+        seen["line"] = await session.read_line()
+
+    async def scenario():
+        server = TelnetServer(host="127.0.0.1", port=0, session_handler=handler, terminal_type_wait_seconds=30.0)
+        await server.start()
+        try:
+            reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
+            await reader.readexactly(_FULL_NEGOTIATION_LEN)
+            started = time.monotonic()
+            writer.write(b"x" * 5000 + bytes([13]))
+            await writer.drain()
+            for _ in range(500):
+                if "line" in seen:
+                    break
+                await asyncio.sleep(0.01)
+            writer.close()
+            return time.monotonic() - started
+        finally:
+            await server.stop()
+
+    elapsed = asyncio.run(scenario())
+    assert seen["charset"] == ASCII
+    assert elapsed < 10.0
