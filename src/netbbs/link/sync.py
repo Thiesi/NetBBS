@@ -187,6 +187,7 @@ from netbbs.link.enforcement import (
     node_transport_state,
     LinkPolicyAction,
 )
+from netbbs.link.mail_refusals import VIA_RELAY
 from netbbs.link.mail import (
     EXPIRED_BY_OWN_POLICY,
     expire_link_message_delivery,
@@ -2321,7 +2322,7 @@ async def _pickup_relay_mail(
                     lane, node, accepted, sender_fingerprint=claimed_sender,
                     max_carried_boards=None, max_carried_channels=None,
                     max_carried_file_areas=None, max_remote_files_per_area=None,
-                    enforce_trust_policy=enforce_trust_policy,
+                    enforce_trust_policy=enforce_trust_policy, mail_via=VIA_RELAY,
                 )
                 # Mail a relay held for us, possibly for days: the sender's
                 # record grows, but this node has not heard from it (#766).

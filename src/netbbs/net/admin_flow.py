@@ -314,8 +314,10 @@ from netbbs.link.dial_in import (
 )
 from netbbs.link.key_rotation import KeyRotationError
 from netbbs.link.node_identity import operational_key_history
+from netbbs.link.enforcement import decide_user_authorship, node_transport_state
 from netbbs.link.node_profiles import (
     dismiss_identity_observation, identity_for_fingerprint, identity_for_peer,
+    link_address_label,
     is_node_fingerprint, latest_identity_observation, list_identity_observations,
     name_key, own_canonical_dns_name, resolve_stored_peer_reference,
 )
@@ -399,6 +401,7 @@ from netbbs.link.trust import (
     configure_trust_domain,
     configure_trusted_reporter,
     get_effective_trust_state,
+    is_registered_subject,
     list_sole_authorities,
     list_trust_anchors,
     list_trust_config_audit,
@@ -413,6 +416,14 @@ from netbbs.link.trust import (
     set_trust_override,
 )
 from netbbs.link.mail import unexpire_link_message_delivery
+from netbbs.link.mail_refusals import (
+    TRUST_REASONS,
+    VIA_RELAY,
+    LinkMailRefusal,
+    list_link_mail_refusals,
+    refusal_reason_text,
+)
+from netbbs.mail import MAX_MAIL_PER_RECIPIENT, InboxSize, inbox_sizes
 from netbbs.link.work_items import (
     KIND_LINK_MAIL_DELIVERY,
     WorkItem,
@@ -2593,6 +2604,7 @@ async def _operations_menu(
             MenuEntry(label=menu_key("S", "earch indexes"), brief="Check and rebuild Find's indexes"),
             MenuEntry(label=menu_key("A", "udit log"), brief="Moderation action history"),
             MenuEntry(label=menu_key("g", prefix="Node lo"), brief="Warnings and errors in netbbs.log"),
+            MenuEntry(label=menu_key("M", "ail"), brief="Mailbox sizes, refused Link mail"),
         ]
         if node_controls is not None:
             options.insert(0, MenuEntry(label=menu_key("N", "ode and sessions"), brief="Sessions, shutdown, and drain"))
@@ -2671,6 +2683,9 @@ async def _operations_menu(
             state = await lane.run(_load_ops)
         elif choice == "g":
             await _node_log_screen(session, lane, actor)
+            state = await lane.run(_load_ops)
+        elif choice == "m":
+            await _mail_tools_screen(session, lane, actor, link_context=link_context)
             state = await lane.run(_load_ops)
         else:
             await session.write(reject_unhandled_key(choice))
@@ -3845,7 +3860,22 @@ async def _trust_subjects_screen(
     )
     if selected is None:
         return
-    subject_name = _trust_subject_name(selected, labels.get(selected.node_fingerprint))
+    await _trust_subject_screen(session, lane, actor, selected, link_context=link_context)
+
+
+async def _trust_subject_screen(
+    session: Session, lane: DatabaseLane, actor: User, selected: TrustSubject, *,
+    link_context: LinkContext | None,
+    breadcrumb: Sequence[str] = ("Settings", "Policy trust", "Subjects"),
+) -> None:
+    """One trust subject: its state per dimension, and every action on it.
+
+    Reached from Policy trust -> Subjects, and from wherever else the SysOp
+    meets a node or a remote user (issue #820): a peer's screen on the node
+    map, a refused letter's sender. One screen, so an action is never built
+    twice."""
+    label = (await lane.run(identity_for_fingerprint, selected.node_fingerprint)).label
+    subject_name = _trust_subject_name(selected, label)
     listing = _Listing()
     while True:
         chrome = await _load_chrome(lane, actor)
@@ -3918,6 +3948,7 @@ async def _trust_subjects_screen(
             sections.append(Section("Remote identity attestations", attestations))
 
         actions = [
+            *_TRUST_QUICK_ACTIONS,
             ("o", menu_key("O", "verride")),
             ("c", menu_key("C", "lear override")),
         ]
@@ -3927,13 +3958,17 @@ async def _trust_subjects_screen(
         choice, listing.page = await show_detail(
             session,
             title=_detail_title(
-                session, chrome, sanitize_text(subject_name), breadcrumb=("Settings", "Policy trust", "Subjects"),
+                session, chrome, sanitize_text(subject_name), breadcrumb=breadcrumb,
             ),
             sections=sections, actions=actions, page=listing.page, message=listing.take_message(),
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
         )
         if choice == "b":
             return
+        if await _trust_quick_action(
+            session, lane, actor, selected, choice, name=subject_name, listing=listing, link_context=link_context,
+        ):
+            continue
         if choice == "o":
             await _set_trust_override_screen(session, lane, actor, selected, listing)
             _retry_deferred_events(link_context, selected)
@@ -3948,26 +3983,39 @@ async def _trust_subjects_screen(
             await _remote_attestation_override_screen(session, lane, actor, selected, listing)
 
 
-async def _pick_trust_dimension(session: Session) -> TrustDimension | None:
+# The override editor's "every dimension" choice (issue #820): what
+# establishing or blocking a subject means, one override per dimension.
+_ALL_DIMENSIONS = "all"
+
+
+async def _pick_trust_dimension(session: Session, *, allow_all: bool = False) -> TrustDimension | str | None:
     await session.write_line("Dimension:")
-    await session.write_line(
-        action_bar(
-            [
-                menu_key("I", "dentity integrity"),
-                menu_key("R", "esource behavior"),
-                menu_key("C", "ontent conduct"),
-                menu_key("B", "ack"),
-            ],
-            width=session.terminal_width,
-        )
-    )
+    entries = [
+        menu_key("I", "dentity integrity"),
+        menu_key("R", "esource behavior"),
+        menu_key("C", "ontent conduct"),
+    ]
+    if allow_all:
+        entries.append(menu_key("A", "ll three"))
+    entries.append(menu_key("B", "ack"))
+    await session.write_line(action_bar(entries, width=session.terminal_width))
     await _choice_prompt(session)
     choice = (await session.read_key()).lower()
+    if allow_all and choice == "a":
+        return _ALL_DIMENSIONS
     return {
         "i": TrustDimension.IDENTITY_INTEGRITY,
         "r": TrustDimension.RESOURCE_BEHAVIOR,
         "c": TrustDimension.CONTENT_CONDUCT,
     }.get(choice)
+
+
+def _dimension_text(dimension: TrustDimension | str | None) -> str:
+    if dimension is None:
+        return "(not chosen)"
+    if dimension == _ALL_DIMENSIONS:
+        return "all three"
+    return dimension.value
 
 
 def _stable_id_for(key: str) -> int:
@@ -4176,9 +4224,17 @@ async def _trust_list_choice(
 
 async def _set_trust_override_screen(
     session: Session, lane: DatabaseLane, actor: User, subject: TrustSubject,
-    listing: "_Listing | None" = None,
+    listing: "_Listing | None" = None, *, state: TrustState | None = None,
+    all_dimensions: bool = False, title: str = "Trust override",
 ) -> None:
     """
+    Issue #820: `state` and `all_dimensions` open the editor already filled
+    in, which is all `[E]stablish` and `Bloc[k]` are -- the same editor, the
+    same reason, the same confirmations, the same audit. `S[t]ate` and
+    `[D]imension` stay editable, so a preset is a starting point, not a
+    different path.
+
+
     Issue #282: was a fixed five-step chain (dimension, state, reason,
     then up to two confirmations) with no way back -- an invalid key
     anywhere cancelled everything. Now a draft editor: `[D]imension`
@@ -4188,10 +4244,10 @@ async def _set_trust_override_screen(
     ESTABLISHED, and the changed-identity re-check loop) before
     applying the override. Declining either leaves the draft intact.
     """
-    draft: dict = {"dimension": None, "state": None, "reason": ""}
+    draft: dict = {"dimension": _ALL_DIMENSIONS if all_dimensions else None, "state": state, "reason": ""}
 
     async def _dimension_prompt(session: Session, lane: DatabaseLane, draft: dict) -> None:
-        dimension = await _pick_trust_dimension(session)
+        dimension = await _pick_trust_dimension(session, allow_all=True)
         if dimension is not None:
             draft["dimension"] = dimension
 
@@ -4220,10 +4276,13 @@ async def _set_trust_override_screen(
     fields = [
         FieldSpec(
             key="dimension", hotkey="d", menu_text=menu_key("D", "imension"), label="Dimension",
-            render=lambda d: d["dimension"].value if d["dimension"] is not None else "(not chosen)",
+            render=lambda d: _dimension_text(d["dimension"]),
             prompt=_dimension_prompt,
             brief="Which trust dimension to force",
-            help="Identity integrity, resource behavior, or content conduct -- each is tracked separately.",
+            help=(
+                "Identity integrity, resource behavior, or content conduct -- each is tracked separately. "
+                "All three sets one override per dimension: what establishing or blocking means."
+            ),
         ),
         FieldSpec(
             key="state", hotkey="t", menu_text=menu_key("t", "ate", prefix="S"), label="State",
@@ -4284,32 +4343,78 @@ async def _set_trust_override_screen(
                 or refreshed_notice.id == identity_notice.id
             ):
                 break
+        dimensions = list(TrustDimension) if dimension == _ALL_DIMENSIONS else [dimension]
+
+        def _apply(db: Database) -> None:
+            for each in dimensions:
+                set_trust_override(db, subject, each, state, reason=reason, actor_user_id=actor.id)
+
         try:
-            await lane.run(
-                set_trust_override, subject, dimension, state,
-                reason=reason, actor_user_id=actor.id,
-            )
+            await lane.run(_apply)
         except ValueError as exc:
             await _say_or_write(session, listing, f"Trust state changed concurrently: {exc}", error=True)
             return None
-        await _say_or_write(session, listing, "Trust override applied and audited.")
+        if len(dimensions) > 1:
+            await _say_or_write(session, listing, f"Set to {state.value} in all three dimensions; audited.")
+        else:
+            await _say_or_write(session, listing, "Trust override applied and audited.")
         return True
 
     await _trust_editor(
-        session, lane, actor, title="Trust override", fields=fields, draft=draft, save=save,
+        session, lane, actor, title=title, fields=fields, draft=draft, save=save,
     )
+
+
+# Issue #820: what a SysOp does to a subject most often, one key away wherever
+# it is shown. Each opens the override editor above with the dimension and
+# state already chosen; nothing is applied before its `[S]ave`.
+_TRUST_QUICK_ACTIONS = (
+    ("e", menu_key("E", "stablish")),
+    ("k", menu_key("k", prefix="Bloc")),
+)
+
+
+async def _trust_quick_action(
+    session: Session, lane: DatabaseLane, actor: User, subject: TrustSubject, choice: str, *,
+    name: str, listing: "_Listing | None", link_context: LinkContext | None,
+) -> bool:
+    """Run `[E]stablish` or `Bloc[k]` if that is what `choice` is; `False`
+    for any other key, which the calling screen handles itself."""
+    presets = {"e": (TrustState.ESTABLISHED, "Establish"), "k": (TrustState.BLOCKED, "Block")}
+    if choice not in presets:
+        return False
+    state, verb = presets[choice]
+    await _set_trust_override_screen(
+        session, lane, actor, subject, listing, state=state, all_dimensions=True,
+        title=f"{verb} {sanitize_text(name)}",
+    )
+    _retry_deferred_events(link_context, subject)
+    return True
+
+
+# The "every override" row of `_clear_trust_override_screen`'s picker.
+_ALL_OVERRIDES = object()
 
 
 async def _clear_trust_override_screen(
     session: Session, lane: DatabaseLane, actor: User, subject: TrustSubject,
     listing: "_Listing | None" = None,
 ) -> None:
-    overrides = await lane.run(list_trust_overrides, subject)
+    overrides: list = list(await lane.run(list_trust_overrides, subject))
+    if len(overrides) > 1:
+        # Issue #820: what `[E]stablish` or `Bloc[k]` set is one override per
+        # dimension, and undoing it should not take three trips.
+        overrides.insert(0, _ALL_OVERRIDES)
     selected = await pick_item(
         session, overrides,
-        name_of=lambda item: f"{item.dimension.value}: {item.state.value}",
-        stable_id_of=lambda item: item.override_id,
-        description_of=lambda item: item.reason,
+        name_of=lambda item: (
+            f"All {len(overrides) - 1} overrides" if item is _ALL_OVERRIDES
+            else f"{item.dimension.value}: {item.state.value}"
+        ),
+        stable_id_of=lambda item: -1 if item is _ALL_OVERRIDES else item.override_id,
+        description_of=lambda item: (
+            "back to what policy computes, in every dimension" if item is _ALL_OVERRIDES else item.reason
+        ),
         title="Active trust overrides",
         empty_message="No active trust overrides.",
         redraw_in_place=await lane.run(redraw_in_place_enabled, actor),
@@ -4320,12 +4425,22 @@ async def _clear_trust_override_screen(
     )
     if selected is None:
         return
+    chosen = [item for item in overrides if item is not _ALL_OVERRIDES] if selected is _ALL_OVERRIDES else [selected]
+
+    def _clear(db: Database) -> None:
+        for item in chosen:
+            clear_trust_override(db, item.override_id, actor_user_id=actor.id)
+
     try:
-        await lane.run(clear_trust_override, selected.override_id, actor_user_id=actor.id)
+        await lane.run(_clear)
     except ValueError as exc:
         await _say_or_write(session, listing, f"Trust state changed concurrently: {exc}", error=True)
         return
-    await _say_or_write(session, listing, "Override cleared; recovery policy was recomputed.")
+    await _say_or_write(
+        session, listing,
+        "Overrides cleared; recovery policy was recomputed." if len(chosen) > 1
+        else "Override cleared; recovery policy was recomputed.",
+    )
 
 
 async def _trust_decision_history_screen(
@@ -9648,18 +9763,58 @@ async def _node_map_sysop_screen(
                 selected.first_named.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
                 override_format=display_format, override_timezone=display_timezone,
             )
-        await show_detail(
-            session,
-            title=_detail_title(
-                session, chrome, selected.friendly_name,
-                breadcrumb=("SysOp", "Operations", "Link status", title),
-            ),
-            sections=node_map_sections(
-                selected, carried=carried, now=now, sysop=True, first_named=first_named,
-            ),
-            actions=[_BACK_ACTION],
-            redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
-        )
+        # Issue #820: the trust rows used to be all this screen offered. A node
+        # that is a trust subject here -- every node that has said hello, or
+        # been introduced -- now has the subject screen's actions on its own;
+        # a peer-list candidate has none, since nothing about it is verified.
+        subject = TrustSubject.node(selected.fingerprint)
+        registered = await lane.run(is_registered_subject, subject)
+        listing = _Listing()
+        while True:
+            actions: list[tuple[str, str]] = []
+            if registered:
+                actions.extend([
+                    *_TRUST_QUICK_ACTIONS,
+                    ("c", menu_key("C", "lear override")),
+                    ("t", menu_key("T", "rust details")),
+                ])
+            actions.append(_BACK_ACTION)
+            choice, listing.page = await show_detail(
+                session,
+                title=_detail_title(
+                    session, chrome, selected.friendly_name,
+                    breadcrumb=("SysOp", "Operations", "Link status", title),
+                ),
+                sections=node_map_sections(
+                    selected, carried=carried, now=now, sysop=True, first_named=first_named,
+                ),
+                actions=actions, page=listing.page, message=listing.take_message(),
+                redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+            )
+            if choice == "b":
+                break
+            if await _trust_quick_action(
+                session, lane, actor, subject, choice, name=f"node:{selected.friendly_name}",
+                listing=listing, link_context=link_context,
+            ):
+                pass
+            elif choice == "c":
+                await _clear_trust_override_screen(session, lane, actor, subject, listing)
+                _retry_deferred_events(link_context, subject)
+            elif choice == "t":
+                await _trust_subject_screen(
+                    session, lane, actor, subject, link_context=link_context,
+                    breadcrumb=("SysOp", "Operations", "Link status", title),
+                )
+            # Drawn again from the database: the trust rows are what changed.
+            refreshed = next(
+                (entry for entry in (await lane.run(_load))["entries"] if entry.fingerprint == selected.fingerprint),
+                None,
+            )
+            if refreshed is None:
+                break
+            selected = refreshed
+            chrome = await _load_chrome(lane, actor)
 
 
 async def _node_map_has_rows(lane: DatabaseLane, link_context: LinkContext) -> bool:
@@ -10382,6 +10537,356 @@ async def _outbox_item_screen(
         cancelled = await lane.run(_cancel)
         return colored(f"Cancelled -- status is now {cancelled.status!r}.", fg_color=SUCCESS_COLOR)
     return None
+
+
+# -- mail: mailbox sizes and refused Link mail (issue #820) ------------------
+#
+# Mail is private, and these screens are built so that it stays so: they show
+# counts, accounts, senders and reasons, and never a letter's subject or body --
+# nor, for a refused letter, whom it was for.
+
+_MAIL_PRIVACY_NOTE = (
+    "Mail is private: these screens show counts, senders and reasons, never a subject or a body."
+)
+
+# A mailbox this full is flagged: at the cap, a letter can arrive only by
+# evicting the oldest read one, and not at all once every letter is unread.
+_NEAR_MAIL_CAP = MAX_MAIL_PER_RECIPIENT * 9 // 10
+
+_REFUSAL_VIA_TEXT = {
+    VIA_RELAY: "picked up from a relay that held it",
+}
+
+
+def _inbox_color(size: InboxSize) -> int:
+    if size.total >= MAX_MAIL_PER_RECIPIENT:
+        return ALERT_COLOR if size.unread >= MAX_MAIL_PER_RECIPIENT else WARNING_COLOR
+    return WARNING_COLOR if size.total >= _NEAR_MAIL_CAP else VALUE_COLOR
+
+
+def _refusal_sender(refusal: LinkMailRefusal, node_label: str) -> str:
+    if refusal.sender_user is None:
+        return node_label
+    return link_address_label(refusal.sender_user, node_label)
+
+
+def _load_mail_tools(db: Database) -> dict:
+    refusals = list_link_mail_refusals(db)
+    return {
+        "sizes": inbox_sizes(db),
+        "refusals": refusals,
+        "labels": {
+            fingerprint: identity_for_fingerprint(db, fingerprint).label
+            for fingerprint in {refusal.sender_node_fingerprint for refusal in refusals}
+        },
+        "display": resolve_display_preferences(db),
+    }
+
+
+async def _mail_tools_screen(
+    session: Session, lane: DatabaseLane, actor: User, *, link_context: LinkContext | None,
+) -> None:
+    """Operations -> Mail (issue #820): how full the mailboxes are, and what
+    Link mail this node refused. Before this the Outbox of Link work items was
+    the only mail screen a SysOp had. Reads only; the one thing it leads to
+    that writes is a sender's trust, on the trust screen itself."""
+    while True:
+        state = await lane.run(_load_mail_tools)
+        chrome = await _load_chrome(lane, actor)
+        display_format, display_timezone = state["display"]
+        sizes: list[InboxSize] = state["sizes"]
+        refusals: list[LinkMailRefusal] = state["refusals"]
+
+        boxes: list[Field | Note | Table] = []
+        if sizes:
+            fullest = sizes[0]
+            near = sum(1 for size in sizes if size.total >= _NEAR_MAIL_CAP)
+            boxes.extend([
+                Field("Accounts with mail", str(len(sizes))),
+                Field(
+                    "Letters kept",
+                    f"{sum(size.total for size in sizes)}, {sum(size.unread for size in sizes)} unread",
+                ),
+                Field(
+                    "Fullest", f"{fullest.username}, {fullest.total} of {MAX_MAIL_PER_RECIPIENT}",
+                    color=_inbox_color(fullest),
+                ),
+                Field(
+                    f"{_NEAR_MAIL_CAP}+ letters", str(near), color=WARNING_COLOR if near else VALUE_COLOR,
+                ),
+            ])
+        else:
+            boxes.append(Note("No account has mail."))
+
+        refused: list[Field | Note | Table] = []
+        if refusals:
+            latest = refusals[0]
+            label = state["labels"].get(latest.sender_node_fingerprint, "")
+            when = format_for_display(
+                latest.last_refused_at, override_format=display_format, override_timezone=display_timezone,
+            )
+            refused.extend([
+                Field("Letters refused", str(len(refusals))),
+                Field(
+                    "Latest", _refusal_sender(latest, label),
+                    note=f"{when}: {refusal_reason_text(latest.reason)}",
+                ),
+            ])
+        else:
+            refused.append(Note(
+                "None recorded. Mail this node refuses -- a sender or node it does not trust yet, or "
+                "one it blocks, a full mailbox, no such account -- is listed here."
+            ))
+
+        actions: list[tuple[str, str]] = []
+        if sizes:
+            actions.append(("m", menu_key("M", "ailboxes")))
+        if refusals:
+            actions.append(("r", menu_key("R", "efused Link mail")))
+        actions.append(_BACK_ACTION)
+        choice, _page = await show_detail(
+            session,
+            title=_detail_title(
+                session, chrome, "Mail", breadcrumb=("SysOp", "Operations"),
+                subtitle="Mailbox sizes and the Link mail this node refused.",
+            ),
+            sections=[
+                Section("Mailboxes", boxes, paired=True),
+                Section("Refused Link mail", refused),
+                Section(None, [Note(_MAIL_PRIVACY_NOTE)]),
+            ],
+            actions=actions,
+            redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+        )
+        if choice == "b":
+            return
+        if choice == "m":
+            await _mailboxes_screen(session, lane, actor)
+        elif choice == "r":
+            await _refused_link_mail_screen(session, lane, actor, link_context=link_context)
+
+
+async def _mailboxes_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
+    """Every account with mail and how full its inbox is, the fullest first
+    (issue #820). Counts only -- what counts toward the cap, system notices
+    included -- and never a sender, a subject or a body. `[O]rder` switches to
+    the accounts by name and back."""
+    listing = _Listing()
+    by_name = False
+    while True:
+        sizes = await lane.run(inbox_sizes)
+        chrome = await _load_chrome(lane, actor)
+        if by_name:
+            sizes = sorted(sizes, key=lambda size: size.username.casefold())
+        rows: list[Field | Note | Table] = [Table(
+            ("Account", "Letters", "Unread", "Read", "System", "Of the cap"),
+            [
+                [
+                    (size.username, ACCENT_COLOR),
+                    (str(size.total), _inbox_color(size)),
+                    str(size.unread), str(size.read), str(size.system),
+                    (f"{size.total * 100 // MAX_MAIL_PER_RECIPIENT}%", _inbox_color(size)),
+                ]
+                for size in sizes
+            ],
+            right_aligned=frozenset({1, 2, 3, 4, 5}),
+        )] if sizes else [Note("No account has mail.")]
+        choice, listing.page = await show_detail(
+            session,
+            title=_detail_title(
+                session, chrome, "Mailboxes", breadcrumb=("SysOp", "Operations", "Mail"),
+                subtitle=(
+                    f"By account name. Each inbox keeps up to {MAX_MAIL_PER_RECIPIENT} letters."
+                    if by_name else
+                    f"Fullest first. Each inbox keeps up to {MAX_MAIL_PER_RECIPIENT} letters."
+                ),
+            ),
+            sections=[
+                Section(None, rows),
+                Section(None, [Note(
+                    "System counts the BBS's own notices, which are part of Letters. A full inbox makes room "
+                    "by dropping its oldest read letter; one full of unread mail refuses new mail. "
+                    + _MAIL_PRIVACY_NOTE
+                )]),
+            ],
+            actions=[
+                ("o", menu_key("O", "rder: fullest first" if by_name else "rder: by name")),
+                _BACK_ACTION,
+            ],
+            page=listing.page, message=listing.take_message(),
+            redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+        )
+        if choice == "b":
+            return
+        if choice == "o":
+            by_name = not by_name
+            listing.page = 0
+
+
+async def _refused_link_mail_screen(
+    session: Session, lane: DatabaseLane, actor: User, *, link_context: LinkContext | None,
+) -> None:
+    """The Link mail this node refused, the most recent first (issue #820):
+    who sent it, why it was refused, and how often that sender tried. Each
+    sender told as a bounce; this is the receiving side's record of the same
+    refusals, which nothing kept before. `[O]pen` shows one refusal and leads
+    to its node's and its sender's trust, where establishing or blocking
+    happens."""
+    listing = _Listing()
+    reopen_at: int | None = None
+    while True:
+        state = await lane.run(_load_mail_tools)
+        chrome = await _load_chrome(lane, actor)
+        display_format, display_timezone = state["display"]
+        refusals: list[LinkMailRefusal] = state["refusals"]
+        labels: dict[str, str] = state["labels"]
+
+        def _when(value: str) -> str:
+            return format_for_display(value, override_format=display_format, override_timezone=display_timezone)
+
+        rows: list[Field | Note | Table] = [Table(
+            ("Last refused", "Sender", "Reason", "Tries"),
+            [
+                [
+                    (_when(refusal.last_refused_at), DATE_COLOR),
+                    (_refusal_sender(refusal, labels.get(refusal.sender_node_fingerprint, "")), ACCENT_COLOR),
+                    (refusal_reason_text(refusal.reason), METADATA_COLOR),
+                    str(refusal.attempts),
+                ]
+                for refusal in refusals
+            ],
+            flex=2, right_aligned=frozenset({3}),
+        )] if refusals else [Note("None recorded.")]
+        choice, listing.page = await show_detail(
+            session,
+            title=_detail_title(
+                session, chrome, "Refused Link mail", breadcrumb=("SysOp", "Operations", "Mail"),
+                subtitle="Mail from other nodes not delivered here, and why; each sender got a bounce.",
+            ),
+            sections=[Section(None, rows), Section(None, [Note(_MAIL_PRIVACY_NOTE)])],
+            actions=[("o", menu_key("O", "pen"))] + [_BACK_ACTION] if refusals else [_BACK_ACTION],
+            page=listing.page, message=listing.take_message(),
+            redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+        )
+        if choice == "b":
+            return
+        selected = await pick_item(
+            session, refusals,
+            name_of=lambda refusal: _refusal_sender(refusal, labels.get(refusal.sender_node_fingerprint, "")),
+            stable_id_of=lambda refusal: refusal.id,
+            description_of=lambda refusal: (
+                f"{_when(refusal.last_refused_at)} -- {refusal_reason_text(refusal.reason)}"
+            ),
+            title="Which refused letter?",
+            empty_message="None recorded.",
+            start_stable_id=reopen_at,
+            redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+            collapsed=chrome.collapsed, accent_color=chrome.accent_color, header_color=chrome.header_color,
+        )
+        if selected is None:
+            continue
+        reopen_at = selected.id
+        await _refused_letter_screen(
+            session, lane, actor, selected, node_label=labels.get(selected.sender_node_fingerprint, ""),
+            when=_when, link_context=link_context,
+        )
+
+
+async def _refused_letter_screen(
+    session: Session, lane: DatabaseLane, actor: User, refusal: LinkMailRefusal, *,
+    node_label: str, when, link_context: LinkContext | None,
+) -> None:
+    """One refused letter's sender and reason, with the trust standing of its
+    node and its sender, and the way to each one's trust screen."""
+    node_subject = TrustSubject.node(refusal.sender_node_fingerprint)
+    user_subject = (
+        TrustSubject.user(refusal.sender_node_fingerprint, refusal.sender_user)
+        if refusal.sender_user is not None else None
+    )
+    listing = _Listing()
+    while True:
+        chrome = await _load_chrome(lane, actor)
+
+        def _standing(db: Database) -> tuple[TrustState | None, TrustState | None]:
+            node_state = (
+                node_transport_state(db, node_subject.node_fingerprint)
+                if is_registered_subject(db, node_subject) else None
+            )
+            user_state = (
+                decide_user_authorship(db, user_subject.node_fingerprint, user_subject.opaque_user_id or "").state
+                if user_subject is not None and is_registered_subject(db, user_subject) else None
+            )
+            return node_state, user_state
+
+        node_state, user_state = await lane.run(_standing)
+
+        def _badge(state: TrustState) -> str:
+            return status_badge(state.value, tone=_TRUST_STATE_TONE[state], unicode_style=chrome.unicode_style)
+
+        letter: list[Field | Note | Table] = [
+            Field("From", _refusal_sender(refusal, node_label), bold=True),
+            Field("Node", node_label),
+            Field("Technical identity", refusal.sender_node_fingerprint, color=METADATA_COLOR),
+            Field("Reason", refusal_reason_text(refusal.reason), note=refusal.reason),
+            Field("Arrived", _REFUSAL_VIA_TEXT.get(refusal.via, "pushed here by its node")),
+            Field("First refused", when(refusal.first_refused_at), color=DATE_COLOR),
+            Field("Last refused", when(refusal.last_refused_at), color=DATE_COLOR),
+            Field("Tries", str(refusal.attempts)),
+        ]
+        if refusal.sender_user is None:
+            letter.append(Note(
+                "Refused for its node before the letter was read, so its sender's name is not known here."
+            ))
+        standing: list[Field | Note | Table] = []
+        if node_state is not None:
+            standing.append(Field("Node", _badge(node_state), styled=True))
+        else:
+            standing.append(Note(
+                "Its node is not a trust subject here yet: it becomes one when it links with this node."
+            ))
+        if user_subject is not None:
+            if user_state is not None:
+                standing.append(Field("Sender", _badge(user_state), styled=True))
+            else:
+                standing.append(Note(
+                    "The sender is not a trust subject here yet: once their node is established, their "
+                    "first delivered letter makes them one. Mail follows node trust, so establishing the "
+                    "node is what opens it."
+                ))
+        if refusal.reason not in TRUST_REASONS:
+            standing.append(Note("This refusal was not about trust, so no trust change would have delivered it."))
+
+        actions: list[tuple[str, str]] = []
+        if node_state is not None:
+            actions.append(("n", menu_key("N", "ode trust")))
+        if user_state is not None:
+            actions.append(("u", menu_key("U", "ser trust")))
+        actions.append(_BACK_ACTION)
+        choice, listing.page = await show_detail(
+            session,
+            title=_detail_title(
+                session, chrome, "Refused letter",
+                breadcrumb=("SysOp", "Operations", "Mail", "Refused Link mail"),
+            ),
+            sections=[
+                Section("The letter", letter),
+                Section("Trust here", standing),
+                Section(None, [Note(_MAIL_PRIVACY_NOTE)]),
+            ],
+            actions=actions, page=listing.page, message=listing.take_message(),
+            redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+        )
+        if choice == "b":
+            return
+        breadcrumb = ("SysOp", "Operations", "Mail", "Refused Link mail")
+        if choice == "n":
+            await _trust_subject_screen(
+                session, lane, actor, node_subject, link_context=link_context, breadcrumb=breadcrumb,
+            )
+        elif choice == "u" and user_subject is not None:
+            await _trust_subject_screen(
+                session, lane, actor, user_subject, link_context=link_context, breadcrumb=breadcrumb,
+            )
 
 
 def _diagnostic_level_color(level: str) -> int:

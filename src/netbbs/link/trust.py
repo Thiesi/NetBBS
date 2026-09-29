@@ -1090,6 +1090,13 @@ def get_effective_trust_state(
     )
 
 
+def is_registered_subject(db: Database, subject: TrustSubject) -> bool:
+    """Whether `subject` is a trust subject here -- what an override needs."""
+    return db.connection.execute(
+        "SELECT 1 FROM link_trust_subjects WHERE subject_id = ?", (subject.subject_id,)
+    ).fetchone() is not None
+
+
 def list_trust_subjects(db: Database) -> list[TrustSubject]:
     rows = db.connection.execute(
         """SELECT subject_kind, node_fingerprint, opaque_user_id

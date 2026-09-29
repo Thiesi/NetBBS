@@ -703,9 +703,9 @@ private messages require a working live session; a failed live message is not
 silently converted to mail. Link mail is encrypted to the recipient's home
 node for ordinary accounts; the home-node operator can read it.
 
-Link mail follows node trust. Once you establish a node under **Settings →
-Policy trust → Subjects** (identity integrity and resource behavior), mail
-from all its callers is delivered here, even from callers still on probation;
+Link mail follows node trust. Once you establish a node -- **Establish** on
+its screen under **Link status → Peers**, or under **Settings → Policy trust →
+Subjects** -- mail from all its callers is delivered here, even from callers still on probation;
 their posts still wait in the approval queue. Mail from a node you have not
 established yet, or from a caller or node you quarantined or blocked, is
 refused and bounced back to its sender. The same holds the other way: your
@@ -716,6 +716,30 @@ a space or other punctuation cannot send Link mail, because no reply could
 reach it; rename it if its owner needs to. Mail already waiting in the **Outbox** for a
 node goes out on the next Link pass after you establish it, and expires if
 the node is not established before its retries run out.
+
+**Operations → Mail** shows the other side: mail other nodes sent here that
+this node refused, and how full your callers' mailboxes are.
+
+- **Refused Link mail** lists each refused letter with its sender, the reason
+  in plain words (its node is still on probation here, the sender or node is
+  blocked, no such account, a mailbox full of unread mail, ...), when it was
+  last refused and how many times its sender tried. **Open** one to see its
+  node's and its sender's trust here, and **Node trust** or **User trust**
+  takes you to that subject's trust screen to establish or block it. A letter
+  refused because its node is on probation is the common case: establish the
+  node, and the sender's next attempt is delivered. The list keeps the 500 most
+  recent refusals.
+- **Mailboxes** lists every account with mail, fullest first (**Order**
+  switches to by name): letters, unread, read, notices from the BBS itself, and
+  how much of the 500-letter cap that is. A full inbox makes room by dropping
+  its oldest read letter; an inbox full of unread mail refuses new mail, and a
+  Link sender gets a "mailbox full" bounce.
+
+These screens never show what a letter says. Mail is private: you see counts,
+account names, senders and reasons, never a subject or a body, and a refused
+letter does not even record whom it was for. Keep in mind that Link mail is
+encrypted to the recipient's *node*, not to the person, so a SysOp with access
+to the database could read it there; NetBBS gives you no screen for doing so.
 
 Your callers see each Link message's state in their **Sent** mail: pending,
 delivered, bounced (with the other node's reason in plain words) or expired.
@@ -796,6 +820,16 @@ screen adds its Link addresses, relay roles and reliability. Last heard is your
 own last contact with the node, or the time its newest descriptor says it was
 signed, never later than when you first stored it; a node not heard of for 30
 days is marked stale, not removed.
+
+A node's screen also acts on its trust, when it is a trust subject here (every
+node that has exchanged a hello with yours, or been introduced to it; not a
+peer-list candidate): **Establish** and **Block** open the override editor with
+all three dimensions and the state already chosen, so you only give a reason
+and save; **Clear override** removes one override, or all of them at once;
+**Trust details** opens the node's full trust screen from Policy trust. The same
+**Establish** and **Block** are on every subject's screen under **Settings →
+Policy trust → Subjects**, and **Override**'s **Dimension** offers **All
+three**.
 
 **Link status → Dial-in** sets the addresses other nodes show callers on their
 node maps: up to four, each `telnet://host:port`, `ssh://host:port` or an
