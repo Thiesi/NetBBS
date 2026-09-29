@@ -633,7 +633,8 @@ async def _find_screen(
 
     The caller's own mail is searched too (issue #824) -- their Inbox and
     Sent, never anyone else's (`netbbs.search.search_mail`) -- unless mail
-    is closed to them (`caller_mail_refusal`, issue #816), and a letter
+    is closed to them (`caller_mail_refusal`, issue #816). Mail results
+    come first, ahead of posts, files and chat (issue #918), and a letter
     opens in the mailbox's own message view (`open_letter`).
     """
     mail_open = await lane.run(lambda db: caller_mail_refusal(session, db, user)) is None
@@ -665,6 +666,24 @@ async def _find_screen(
         next_index = 1
         items: list[_SearchResultItem] = []
         truncated = False
+
+        # The caller's own letters (issue #824), for a caller mail is open
+        # to: no guest and nobody below the mail level (issue #816). Listed
+        # first (issue #918): the caller's own mail is often what they are
+        # looking for.
+        if mail_open:
+            mail_hits = search_mail(db, user, query, limit=_SEARCH_RESULT_LIMIT + 1)
+            truncated = truncated or len(mail_hits) > _SEARCH_RESULT_LIMIT
+            for hit in mail_hits[:_SEARCH_RESULT_LIMIT]:
+                where = f"to {hit.label}" if hit.sent else f"from {hit.label}"
+                items.append(
+                    _SearchResultItem(
+                        kind="mail", name=hit.message.subject,
+                        description=f"[MAIL] {where}: {_search_snippet(plain_post_body(hit.message.body))}",
+                        result_index=next_index, mail=hit,
+                    )
+                )
+                next_index += 1
 
         post_hits = search_posts(db, user, query, limit=_SEARCH_RESULT_LIMIT + 1)
         truncated = truncated or len(post_hits) > _SEARCH_RESULT_LIMIT
@@ -707,21 +726,6 @@ async def _find_screen(
             )
             next_index += 1
 
-        # The caller's own letters (issue #824), for a caller mail is open
-        # to: no guest and nobody below the mail level (issue #816).
-        if mail_open:
-            mail_hits = search_mail(db, user, query, limit=_SEARCH_RESULT_LIMIT + 1)
-            truncated = truncated or len(mail_hits) > _SEARCH_RESULT_LIMIT
-            for hit in mail_hits[:_SEARCH_RESULT_LIMIT]:
-                where = f"to {hit.label}" if hit.sent else f"from {hit.label}"
-                items.append(
-                    _SearchResultItem(
-                        kind="mail", name=hit.message.subject,
-                        description=f"[MAIL] {where}: {_search_snippet(plain_post_body(hit.message.body))}",
-                        result_index=next_index, mail=hit,
-                    )
-                )
-                next_index += 1
         return items, truncated
 
     items, truncated = await lane.run(_load)

@@ -3386,10 +3386,12 @@ capability from the item picker's simple, per-call substring name match
   local recipient is looked up by id — so they are matched at query time,
   word by word the way FTS5's `unicode61` tokenizer matches, rather than
   indexed; the subject and body come from `mail_search`. Mail results are
-  listed after the others under `[MAIL]`, "from" or "to" the name, newest
-  first, capped like every other kind. Nobody mail is closed to (issue
-  #816: the guest, including a session that came in as the guest, and
-  callers below the mail level) gets mail results, and the main menu's
+  listed first, ahead of posts, files and chat (issue #918: the caller's
+  own mail is often what they are looking for), under `[MAIL]`, "from" or
+  "to" the name, newest first, capped at 20 like every other kind, with the
+  same "top 20 per category" notice when more matched. Nobody mail is
+  closed to (issue #816: the guest, including a session that came in as the
+  guest, and callers below the mail level) gets mail results, and the main menu's
   Find entry then names only posts, files and chat. A letter opens in the
   mailbox's own message view with all its actions, and opening an Inbox
   letter marks it read as in the mailbox; `[B]ack` returns to the results,

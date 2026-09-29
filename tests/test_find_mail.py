@@ -11,16 +11,21 @@ view, and Back returns to the results.
 from __future__ import annotations
 
 import asyncio
+import re
 
 import pytest
 
 from netbbs.auth.users import create_user
 from netbbs.boards.boards import create_board
 from netbbs.boards.posts import create_post
+from netbbs.chat.channels import create_channel
 from netbbs.chat.hub import ChatHub
 from netbbs.chat.mailbox import MessageMailbox
 from netbbs.chat.presence import PresenceRegistry
+from netbbs.chat.scrollback import record_message
 from netbbs.config import set_mail_min_level
+from netbbs.files.areas import create_file_area
+from netbbs.files.entries import upload_file
 from netbbs.guest import set_guest_user
 from netbbs.link.node_identity import bootstrap_node_identity
 from netbbs.mail import (
@@ -228,14 +233,56 @@ def test_find_lists_mail_with_posts_under_its_own_tag(db, lane, alice, bob):
     assert "your own mail" in text
 
 
+def _result_rows(text):
+    return [line for line in text.splitlines() if re.match(r"^(> |  )\d\d\. ", line)]
+
+
+def test_find_lists_mail_first_ahead_of_posts_files_and_chat(db, lane, alice, bob):
+    """Issue #918: the caller's own mail is often what they are looking for."""
+    board = create_board(db, "general", creator=alice)
+    create_post(db, board, alice, "zeppelin post", "body")
+    area = create_file_area(db, "downloads", creator=alice)
+    upload_file(db, area, alice, "zeppelin.txt", b"data", description="zeppelin plans")
+    channel = create_channel(db, "lobby", creator=alice)
+    record_message(db, channel, kind="message", author_label="alice", body="zeppelin chat")
+    send_mail(db, bob, alice, "zeppelin letter", "body")
+
+    session = _run_main_menu(db, lane, alice, ["/", "zeppelin", "b", "l", "y"])
+    rows = _result_rows(_visible_text(session))
+
+    tags = [re.search(r"\[(MAIL|POST|FILE|CHAT)\]", row).group(1) for row in rows]
+    assert tags == ["MAIL", "POST", "FILE", "CHAT"]
+    assert rows[0].lstrip("> ").startswith("01. zeppelin letter")
+
+
+def test_mail_first_keeps_its_cap_the_notice_and_the_numbering(db, lane, alice, bob):
+    """Twenty letters at most, the notice when more matched, and the post
+    after them still numbered on its own page and still opening."""
+    board = create_board(db, "general", creator=alice)
+    create_post(db, board, alice, "zeppelin post", "zeppelin " + "pad " * 10 + "postviewmarker")
+    for i in range(21):
+        send_mail(db, bob, alice, f"zeppelin letter {i:02d}", "body")
+
+    # Page 1 holds the first letters, page 2 the rest and then the post.
+    session = _run_main_menu(db, lane, alice, ["/", "zeppelin", "n", "0", "5", "\r", "b", "b", "b", "l", "y"])
+    text = _visible_text(session)
+    rows = _result_rows(text.split("postviewmarker")[0])
+
+    assert "Showing the top 20 matches per category -- narrow your search terms for a complete list." in text
+    assert sum("[MAIL]" in row for row in rows) == 20
+    assert "zeppelin letter 00" not in text  # the oldest, past the cap
+    assert "[POST]" in rows[-1] and rows[-1].lstrip("> ").startswith("05. ")
+    assert "postviewmarker" in text
+
+
 def test_find_opens_a_letter_marks_it_read_and_back_returns_to_the_results(db, lane, alice, bob):
     board = create_board(db, "general", creator=alice)
     create_post(db, board, alice, "zeppelin post", "body")
     letter = send_mail(db, bob, alice, "zeppelin letter", "zeppelin " + "pad " * 10 + "bodyviewmarker")
 
-    # Post is result 1, the letter result 2: open it, Back, open it again,
-    # Back, and leave the results.
-    session = _run_main_menu(db, lane, alice, ["/", "zeppelin", "0", "2", "b", "0", "2", "b", "b", "l", "y"])
+    # Mail comes first (issue #918): the letter is result 1, the post
+    # result 2. Open the letter, Back, open it again, Back, and leave.
+    session = _run_main_menu(db, lane, alice, ["/", "zeppelin", "0", "1", "b", "0", "1", "b", "b", "l", "y"])
     text = _visible_text(session)
 
     assert text.count("bodyviewmarker") == 2
