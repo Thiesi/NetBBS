@@ -31,7 +31,7 @@ import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
-from netbbs.auth.users import SYSOP_LEVEL, User
+from netbbs.auth.users import SYSOP_LEVEL, StaffPermission, User
 from netbbs.boards.content_id import compute_content_id
 from netbbs.boards.posts import PENDING_ORDER_SQL
 from netbbs.config import get_expiry_grace_period_days
@@ -773,7 +773,9 @@ def list_node_pending_files(db: Database, *, requesting_user: User, limit: int) 
     """The oldest `limit` held uploads in every area, for the SysOp's
     node-wide queue -- `netbbs.boards.posts.list_node_pending_posts`'
     counterpart."""
-    require_level(requesting_user, SYSOP_LEVEL)
+    if not requesting_user.has_staff(StaffPermission.MODERATE_ALL):
+        # Moderate everything (design doc §5.6) decides on every one too.
+        require_level(requesting_user, SYSOP_LEVEL)
     rows = db.connection.execute(
         f"""
         SELECT * FROM files WHERE status = 'pending'

@@ -98,7 +98,7 @@ def test_picker_shows_the_current_sort_mode_by_default(db, lane, alice):
     create_file_area(db, "downloads", creator=alice)
     session = FakeSession(["b"])
     asyncio.run(file_flow.browse_file_areas(session, lane, alice))
-    assert "Sort: Activity" in _written_text(session)
+    assert "Sort: SysOp's order" in _written_text(session)
 
 
 def test_order_command_resorts_the_flat_area_list_and_persists_globally(db, lane, alice):
@@ -123,7 +123,7 @@ def test_order_command_choosing_just_this_time_does_not_persist(db, lane, alice)
 
     session = FakeSession(["o", "l", "j", "b"])
     asyncio.run(file_flow.browse_file_areas(session, lane, alice))
-    assert get_effective_sort_mode(db, alice, "file_area") == "activity"  # unchanged
+    assert get_effective_sort_mode(db, alice, "file_area") == "sysop"  # unchanged
 
 
 def test_order_command_in_the_mixed_categories_view_only_reorders_areas(db, lane, alice):
@@ -157,4 +157,4 @@ def test_community_scoped_order_offers_a_whole_community_save_option(db, lane, a
     text = _written_text(session)
     assert "hole Community (Retro Computing)" in text
     assert get_effective_sort_mode(db, alice, "file_area", community_id=community.id) == "alphabetical"
-    assert get_effective_sort_mode(db, alice, "file_area") == "activity"  # global untouched
+    assert get_effective_sort_mode(db, alice, "file_area") == "sysop"  # global untouched

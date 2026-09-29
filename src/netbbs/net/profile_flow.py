@@ -75,7 +75,7 @@ from netbbs.net.node_theme import (
     effective_header_color_256,
 )
 from netbbs.net.picker import pick_item
-from netbbs.net.prose_editor import edit_prose
+from netbbs.net.prose_editor import EditorHeader, edit_prose
 from netbbs.net.redraw_preference import redraw_in_place_enabled, set_redraw_in_place_enabled
 from netbbs.net.resource_editor import Draft, FieldSpec, edit_resource_draft, live_choice_field
 from netbbs.net.session import Session, write_prompt
@@ -1430,6 +1430,8 @@ async def _edit_bio(session: Session, lane: DatabaseLane, user: User) -> None:
         result = await edit_prose(
             session, initial_text=current, draft_path=await lane.run(_bio_draft_path, user), max_bytes=MAX_BIO_BYTES,
             unicode_style=await lane.run(unicode_style_enabled, user),
+            # What is being written, above the text (issue #813).
+            header=EditorHeader("Your bio", color=await lane.run(effective_header_color_256)),
         )
         if result is None:
             return
@@ -1481,6 +1483,7 @@ async def _edit_signature(session: Session, lane: DatabaseLane, user: User) -> N
             session, initial_text=current, draft_path=await lane.run(_signature_draft_path, user),
             max_bytes=MAX_SIGNATURE_BYTES,
             unicode_style=await lane.run(unicode_style_enabled, user),
+            header=EditorHeader("Your signature", color=await lane.run(effective_header_color_256)),
         )
         if result is None:
             return

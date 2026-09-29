@@ -48,9 +48,9 @@ def other_community(db, alice):
     return create_community(db, "Other", creator=alice)
 
 
-def test_default_is_activity_for_boards_and_file_areas_when_nothing_is_ever_set(db, alice):
-    assert get_effective_sort_mode(db, alice, "board") == DEFAULT_SORT_MODE_BY_KIND["board"] == "activity"
-    assert get_effective_sort_mode(db, alice, "file_area") == DEFAULT_SORT_MODE_BY_KIND["file_area"] == "activity"
+def test_default_is_the_sysop_order_for_boards_and_file_areas_when_nothing_is_ever_set(db, alice):
+    assert get_effective_sort_mode(db, alice, "board") == DEFAULT_SORT_MODE_BY_KIND["board"] == "sysop"
+    assert get_effective_sort_mode(db, alice, "file_area") == DEFAULT_SORT_MODE_BY_KIND["file_area"] == "sysop"
 
 
 def test_default_is_alphabetical_for_channels_when_nothing_is_ever_set(db, alice):
@@ -73,7 +73,7 @@ def test_global_preference_is_per_resource_kind(db, alice):
     channels sorted by activity might not want boards sorted the same
     way -- each resource_kind's global default is independent."""
     set_sort_preference(db, alice, "channel", "alphabetical")
-    assert get_effective_sort_mode(db, alice, "board") == "activity"
+    assert get_effective_sort_mode(db, alice, "board") == "sysop"
 
 
 def test_global_preference_upserts_rather_than_erroring_on_a_second_set(db, alice):

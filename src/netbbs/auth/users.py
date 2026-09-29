@@ -11,6 +11,7 @@ import re
 import sqlite3
 import weakref
 from dataclasses import dataclass
+from enum import IntFlag, auto
 from typing import Callable, TypeVar
 
 import nacl.signing
@@ -138,6 +139,43 @@ class User:
     # verifying a real-world fact about a person isn't authority over
     # any specific board/area/channel. See netbbs.attestation.
     can_verify_identity: bool = False
+    # `StaffPermission` bits (design doc §5.6, issue #836): day-to-day node
+    # work a SysOp hands to an account below 255. 0 for everyone else.
+    staff_permissions: int = 0
+
+    def has_staff(self, permission: "StaffPermission") -> bool:
+        return bool(self.staff_permissions & int(permission))
+
+
+class StaffPermission(IntFlag):
+    """Account-wide staff permissions (design doc §5.6, issue #836).
+
+    Granted by a SysOp to an account below level 255, independent of its
+    level. A holder acts only on accounts below 255 that hold none of
+    these bits (`_require_account_authority`), so no staff member can
+    reach the SysOp, another staff member, or themselves.
+    """
+
+    APPROVE_ACCOUNTS = auto()
+    MANAGE_ACCOUNTS = auto()
+    MODERATE_ALL = auto()
+
+
+#: The Co-SysOp preset (design doc §5.6): every staff permission. A preset,
+#: not a role -- the account then holds exactly these bits.
+CO_SYSOP_PRESET = StaffPermission.APPROVE_ACCOUNTS | StaffPermission.MANAGE_ACCOUNTS | StaffPermission.MODERATE_ALL
+
+STAFF_PERMISSION_LABELS: dict[StaffPermission, str] = {
+    StaffPermission.APPROVE_ACCOUNTS: "approve accounts",
+    StaffPermission.MANAGE_ACCOUNTS: "manage accounts",
+    StaffPermission.MODERATE_ALL: "moderate everything",
+}
+
+
+def describe_staff_permissions(mask: int) -> str:
+    """`mask` in words, in the fixed order above; `"none"` for 0."""
+    names = [label for flag, label in STAFF_PERMISSION_LABELS.items() if mask & int(flag)]
+    return ", ".join(names) if names else "none"
 
 
 class UsernameRetiredError(AuthError):
@@ -844,6 +882,9 @@ def _row_to_user(row: sqlite3.Row) -> User:
         disabled_at=row["disabled_at"],
         pending_approval=bool(row["pending_approval"]),
         can_verify_identity=bool(row["can_verify_identity"]),
+        # Absent only while an upgrade test builds its fixture on an older
+        # schema; every running node has the column (issue #836).
+        staff_permissions=row["staff_permissions"] if "staff_permissions" in row.keys() else 0,
     )
 
 
@@ -901,6 +942,50 @@ def _refuse_if_last_sysop(db: Database, target: User, *, removes_active_sysop: b
         )
 
 
+def is_usable_sysop(user: User) -> bool:
+    """Level 255, not disabled, not pending (design doc §4.3) -- the same
+    test `count_sysops` counts by."""
+    return user.user_level >= SYSOP_LEVEL and user.disabled_at is None and not user.pending_approval
+
+
+def _require_sysop(db: Database, actor: User) -> None:
+    """Refuse unless `actor`, read fresh, is a usable SysOp. For what staff
+    can never do (design doc §5.6): grant permissions, delete accounts,
+    raise anyone to 255."""
+    fresh = get_user_by_id(db, actor.id)
+    if fresh is None or not is_usable_sysop(fresh):
+        raise UserManagementError("only a SysOp can do that")
+
+
+def _require_account_authority(db: Database, actor: User, target: User, permission: StaffPermission) -> None:
+    """
+    Refuse an account action unless `actor` may take it on `target`
+    (design doc §5.6, issue #836).
+
+    A usable SysOp may. Otherwise `actor` must hold `permission`, and
+    `target` must be below 255 and hold no staff permission: that is what
+    keeps a helper from demoting, disabling or locking out the SysOp,
+    another staff member, or -- since they hold a staff permission
+    themselves -- widening their own account.
+
+    `actor` is read fresh, inside the caller's transaction, so a
+    permission revoked a moment ago stops the next action even from a
+    screen opened before. `target` must already be the caller's fresh
+    row. Every other account is refused: which screen reached these
+    functions used to be the only check, and a plain account reaching
+    one is a bug to stop here, not an action to audit.
+    """
+    fresh = get_user_by_id(db, actor.id)
+    if fresh is not None and is_usable_sysop(fresh):
+        return
+    if fresh is None or fresh.disabled_at is not None or fresh.pending_approval or not fresh.has_staff(permission):
+        raise UserManagementError("only a SysOp can do that")
+    if target.user_level >= SYSOP_LEVEL or target.staff_permissions:
+        raise UserManagementError(
+            f"{target.username!r} is a SysOp or holds staff permissions -- only a SysOp can change that account"
+        )
+
+
 def set_user_level(db: Database, target: User, new_level: int, *, changed_by: User) -> User:
     """
     Promote or demote `target` to `new_level`, refusing a demotion
@@ -934,6 +1019,10 @@ def set_user_level(db: Database, target: User, new_level: int, *, changed_by: Us
         if new_level == current.user_level:
             db.connection.rollback()
             return current
+        _require_account_authority(db, changed_by, current, StaffPermission.MANAGE_ACCOUNTS)
+        if new_level >= SYSOP_LEVEL:
+            # Design doc §5.6: 255 is given only by a SysOp.
+            _require_sysop(db, changed_by)
         if new_level >= SYSOP_LEVEL and current.pending_approval:
             # GitHub issue #44: a pending account promoted straight to
             # SysOp level would satisfy the "last SysOp" check below
@@ -984,6 +1073,7 @@ def set_user_disabled(db: Database, target: User, disabled: bool, *, changed_by:
         if disabled == currently_disabled:
             db.connection.rollback()
             return current
+        _require_account_authority(db, changed_by, current, StaffPermission.MANAGE_ACCOUNTS)
         _refuse_if_last_sysop(db, current, removes_active_sysop=disabled)
         new_value = utc_now_iso() if disabled else None
         db.connection.execute("UPDATE users SET disabled_at = ? WHERE id = ?", (new_value, current.id))
@@ -1008,16 +1098,29 @@ def approve_pending_user(db: Database, target: User, *, approved_by: User) -> Us
     `set_user_level`'s own no-op-if-unchanged shape rather than logging
     a meaningless audit row.
     """
-    from netbbs.moderation.log import record_action
+    from netbbs.moderation.log import record_action_without_commit
 
     if not target.pending_approval:
         return target
-    db.connection.execute("UPDATE users SET pending_approval = 0 WHERE id = ?", (target.id,))
-    # The signup answer was given for this one decision (issue #835); see
-    # `netbbs.auth.signup_answers`.
-    db.connection.execute("DELETE FROM signup_answers WHERE user_id = ?", (target.id,))
-    db.connection.commit()
-    record_action(db, actor=approved_by, action="approve_registration", target_user_id=target.id)
+    db.connection.execute("BEGIN IMMEDIATE")
+    try:
+        current = _get_user_by_id(db, target.id)
+        if not current.pending_approval:
+            db.connection.rollback()
+            return current
+        _require_account_authority(db, approved_by, current, StaffPermission.APPROVE_ACCOUNTS)
+        db.connection.execute("UPDATE users SET pending_approval = 0 WHERE id = ?", (current.id,))
+        # The signup answer was given for this one decision (issue #835); see
+        # `netbbs.auth.signup_answers`.
+        db.connection.execute("DELETE FROM signup_answers WHERE user_id = ?", (current.id,))
+        record_action_without_commit(
+            db, actor=approved_by, action="approve_registration", target_user_id=current.id
+        )
+    except BaseException:
+        db.connection.rollback()
+        raise
+    else:
+        db.connection.commit()
     return _get_user_by_id(db, target.id)
 
 
@@ -1112,18 +1215,18 @@ def set_password_hash(db: Database, target: User, password_hash: str | None, *, 
     Persist an already-computed hash as `target`'s password, or `None`
     to clear it.
 
-    Whoever is allowed to call this has already been decided by the
-    caller: the account itself after proving its current password
-    (`netbbs.net.password_screen`), a SysOp from the user detail screen,
-    or the local admin CLI, for which filesystem access to the database
-    is the trust boundary. This function only enforces what must hold
-    regardless of who asks: clearing is refused while the account has no
-    SSH/public key, the same "never leave an account with no way back
-    in" rule `remove_ssh_key` applies from the other direction. The
-    check runs inside `BEGIN IMMEDIATE`, against the current row, for
-    the same reason that function's docstring gives: two concurrent
-    removals each reading "the other credential still exists" is how a
-    CHECK constraint gets defeated without ever firing.
+    The account itself may call it after proving its current password
+    (`netbbs.net.password_screen`); that proof is the caller's job. Anyone
+    else -- a SysOp from the user detail screen or the local admin CLI, a
+    staff member with manage accounts -- is checked here by
+    `_require_account_authority` (issue #836). Beyond who asks, clearing
+    is refused while the account has no SSH/public key, the same "never
+    leave an account with no way back in" rule `remove_ssh_key` applies
+    from the other direction. Both checks run inside `BEGIN IMMEDIATE`,
+    against the current row, for the same reason that function's
+    docstring gives: two concurrent removals each reading "the other
+    credential still exists" is how a CHECK constraint gets defeated
+    without ever firing.
 
     Re-fetches by `target.id`, as every setter in this module does. A
     deleted-and-recreated account can in principle inherit a SQLite
@@ -1142,6 +1245,10 @@ def set_password_hash(db: Database, target: User, password_hash: str | None, *, 
     db.connection.execute("BEGIN IMMEDIATE")
     try:
         current = _get_user_by_id(db, target.id)
+        if changed_by.id != current.id:
+            # The account itself has already proven its current password
+            # (`netbbs.net.password_screen`); anyone else is resetting it.
+            _require_account_authority(db, changed_by, current, StaffPermission.MANAGE_ACCOUNTS)
         if new_hash is None:
             key_count = db.connection.execute(
                 "SELECT COUNT(*) FROM user_ssh_keys WHERE user_id = ?", (current.id,)
@@ -1388,6 +1495,8 @@ def set_can_verify_identity(db: Database, target: User, can_verify: bool, *, cha
 
     if target.can_verify_identity == can_verify:
         return target
+    # Design doc §5.6: staff cannot grant anything.
+    _require_sysop(db, changed_by)
     db.connection.execute(
         "UPDATE users SET can_verify_identity = ? WHERE id = ?", (int(can_verify), target.id)
     )
@@ -1396,6 +1505,56 @@ def set_can_verify_identity(db: Database, target: User, can_verify: bool, *, cha
         db, actor=changed_by, action="set_can_verify_identity", target_user_id=target.id,
         detail=f"can_verify_identity={can_verify}",
     )
+    return _get_user_by_id(db, target.id)
+
+
+def set_staff_permissions(
+    db: Database, target: User, permissions: StaffPermission | int, *, changed_by: User
+) -> User:
+    """
+    Replace `target`'s staff permissions (design doc §5.6, issue #836) --
+    the whole set, so the Co-SysOp preset and a single toggle are the same
+    call. Only a usable SysOp may, and only on an account below 255 that is
+    not awaiting approval; clearing is always allowed, so a SysOp can tidy
+    an account that has since been raised to 255.
+
+    Read and written inside one `BEGIN IMMEDIATE`, like the level and
+    disable setters: the staff checks in `_require_account_authority` read
+    this column, and a grant racing a staff action must not interleave.
+    """
+    from netbbs.moderation.log import record_action_without_commit
+
+    new_mask = int(permissions)
+    if new_mask & ~int(CO_SYSOP_PRESET):
+        raise ValueError(f"unknown staff permission bits in {permissions!r}")
+    db.connection.execute("BEGIN IMMEDIATE")
+    try:
+        current = _get_user_by_id(db, target.id)
+        if new_mask == current.staff_permissions:
+            db.connection.rollback()
+            return current
+        _require_sysop(db, changed_by)
+        if new_mask and current.user_level >= SYSOP_LEVEL:
+            raise UserManagementError(
+                f"{current.username!r} is a SysOp already -- staff permissions are for accounts below 255"
+            )
+        if new_mask and current.pending_approval:
+            raise UserManagementError(
+                f"{current.username!r} is still awaiting approval -- approve the account first"
+            )
+        db.connection.execute("UPDATE users SET staff_permissions = ? WHERE id = ?", (new_mask, current.id))
+        record_action_without_commit(
+            db, actor=changed_by, action="set_staff_permissions", target_user_id=current.id,
+            detail=(
+                f"{describe_staff_permissions(current.staff_permissions)} -> "
+                f"{describe_staff_permissions(new_mask)}"
+            ),
+        )
+    except BaseException:
+        db.connection.rollback()
+        raise
+    else:
+        db.connection.commit()
     return _get_user_by_id(db, target.id)
 
 
@@ -1537,6 +1696,12 @@ def delete_user(db: Database, target: User, *, deleted_by: User, declining: bool
             raise UserManagementError(
                 f"{current.username!r} is no longer awaiting approval -- someone approved it meanwhile"
             )
+        if declining:
+            _require_account_authority(db, deleted_by, current, StaffPermission.APPROVE_ACCOUNTS)
+        elif deleted_by.id != current.id:
+            # Design doc §5.6: deleting, and so retiring a name, stays with
+            # the SysOp. Deleting one's own account is not staff work.
+            _require_sysop(db, deleted_by)
         _refuse_if_last_sysop(db, current, removes_active_sysop=True)
         # Issue #531, Codex review. Guest login keys its designation on
         # `(id, created_at)`, and neither is unique on its own -- rowids
