@@ -713,7 +713,17 @@ async def _push_own_events(
             await push_events(node, session, seed_url, to_push[index:index + MAX_EVENTS_PER_REQUEST])
         except LinkPolicyRefused as exc:
             exchange.refused_reason = exc.reason_code
-            _logger.warning("Link sync: could not push events to seed %s: %s", seed_url, exc)
+            if exc.reason_code == REASON_NODE_PROBATIONARY:
+                # The peer's ordinary state for a node it has just met, not a
+                # fault: said once, like probation here (issue #834).
+                _log_once(
+                    node, f"probation-there:{peer_fingerprint}",
+                    "Link: node %s holds this node on probation, so it does not take what this "
+                    "node sends yet. Its SysOp has to establish this node; see Link status.",
+                    peer_fingerprint,
+                )
+            else:
+                _logger.warning("Link sync: could not push events to seed %s: %s", seed_url, exc)
             return
         except LinkTransportError as exc:
             _logger.warning("Link sync: could not push events to seed %s: %s", seed_url, exc)

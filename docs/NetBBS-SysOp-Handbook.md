@@ -1387,8 +1387,9 @@ The application's `netbbs.log` rotates at 10 MiB with five retained backups
 Some lines are routine and need nothing from you. A caller who hangs up is one
 `INFO` line naming their address. Every node yours meets on NetBBS Link starts
 on probation here, and the log says once per node, since the node started,
-that its content is held back; a relay candidate that cannot be reached is
-also mentioned once. A `WARNING` or `ERROR` line, and any traceback, is worth
+that its content is held back. Your node is on probation at each peer in the
+same way, and the log says once per peer when one does not take what yours
+sends yet. A relay candidate that cannot be reached is also mentioned once. A `WARNING` or `ERROR` line, and any traceback, is worth
 reading.
 
 **Operations → Node log** reads that file from inside NetBBS, including from

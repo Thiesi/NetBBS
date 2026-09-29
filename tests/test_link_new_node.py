@@ -5,6 +5,7 @@ offers while it waits, and where this node's own linked content has got to."""
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import datetime, timezone
 
 import aiohttp
@@ -129,7 +130,7 @@ def test_a_sync_pass_names_what_a_probationary_peer_offers(tmp_path):
 # -- whether a peer takes this node's own content ------------------------------------
 
 
-def test_a_push_refused_for_probation_is_recorded(tmp_path):
+def test_a_push_refused_for_probation_is_recorded(tmp_path, caplog):
     dialer_identity = bootstrap_node_identity("dialer")
     seed_identity = bootstrap_node_identity("seed")
     dialer_node = LinkNode(identity=dialer_identity)
@@ -153,10 +154,15 @@ def test_a_push_refused_for_probation_is_recorded(tmp_path):
             await server.stop()
 
     try:
-        asyncio.run(scenario())
+        with caplog.at_level(logging.INFO, logger="netbbs.link.sync"):
+            asyncio.run(scenario())
         exchange = dialer_node.peer_exchange[seed_identity.fingerprint]
         assert exchange.refused_reason == REASON_NODE_PROBATIONARY
         assert exchange.holds == set()
+        # Routine, so said once at INFO, never as a push failure.
+        said = [r for r in caplog.records if "holds this node on probation" in r.getMessage()]
+        assert len(said) == 1 and said[0].levelno == logging.INFO
+        assert not [r for r in caplog.records if "could not push events" in r.getMessage()]
     finally:
         dialer.close()
         seed.close()
