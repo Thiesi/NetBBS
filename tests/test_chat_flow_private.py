@@ -169,6 +169,24 @@ def test_msg_resolves_a_friendly_node_name_containing_spaces(
     assert sent == [("bob@The Rusty Anchor", "hello there")]
 
 
+def test_msg_accepts_the_quoted_node_form_it_shows(lane, hub, presence, mailbox, alice, channel, monkeypatch):
+    """#807 review: `bob@"Cats @ Night"` is how a node name containing @ is
+    shown, so /msg takes it back as typed."""
+    context = LinkContext(link_node=LinkNode(identity=bootstrap_node_identity("own")))
+    sent = []
+
+    async def fake_send(session, lane_arg, user, address, body, *, link_context):
+        sent.append((address, body))
+
+    monkeypatch.setattr("netbbs.net.link_direct.send_live_direct_message", fake_send)
+    asyncio.run(_run(
+        lane, hub, presence, mailbox, channel, alice,
+        ['/msg bob@"Cats @ Night · cats.example.org"  hello there', "/quit"], link_context=context,
+    ))
+
+    assert sent == [('bob@"Cats @ Night · cats.example.org"', "hello there")]
+
+
 # -- /msg: delivery -----------------------------------------------------------
 
 
@@ -600,7 +618,7 @@ def test_private_with_an_unknown_remote_node_is_refused(lane, hub, presence, mai
         lane, hub, presence, mailbox, channel, alice, ["/private bob@nope", "/quit"],
         link_context=_FakeLinkContext("remote-node-fingerprint-abc123", _FakeDirectChat()),
     ))
-    assert "No linked node this board knows as 'nope'" in _written(session)
+    assert 'No BBS linked with this one goes by "nope".' in _written(session)
 
 
 def test_private_with_a_remote_target_survives_a_rejected_line(lane, hub, presence, mailbox, alice, channel, db):

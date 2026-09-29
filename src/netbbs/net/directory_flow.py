@@ -17,7 +17,7 @@ from netbbs.auth.users import AuthError, User, get_user_by_username, list_users
 from netbbs.chat import ChatHub, DirectChatInvites, PresenceRegistry
 from netbbs.directory import get_vcard, has_bio, is_bio_visible
 from netbbs.link.boards import LinkContext
-from netbbs.link.node_profiles import identity_for_fingerprint, name_key
+from netbbs.link.node_profiles import identity_for_fingerprint, link_address_label, name_key
 from netbbs.doors import list_doors
 from netbbs.messaging_preferences import accepts_direct_messages
 from netbbs.net.breadcrumb_preference import breadcrumb_collapsed_enabled
@@ -367,7 +367,7 @@ async def _caller_who_screen(
             # (minus the chat invite, which stays local-only).
             await session.write_line(
                 "\r\n" + screen_title(
-                    f"{sanitize_text(selected.username)}@{sanitize_text(node_label)}",
+                    link_address_label(sanitize_text(selected.username), sanitize_text(node_label)),
                     breadcrumb=(session.node_display_name, "Who's online"),
                     subtitle="Connected to a different linked node -- a live one-off message is available.",
                     width=session.terminal_width,
@@ -398,7 +398,7 @@ async def _caller_who_screen(
             if action == "b":
                 return False
             await write_prompt(
-                session, f"Message to {sanitize_text(selected.username)}@{sanitize_text(node_label)}: "
+                session, f"Message to {link_address_label(sanitize_text(selected.username), sanitize_text(node_label))}: "
             )
             message = (await session.read_line()).strip()
             if not message:

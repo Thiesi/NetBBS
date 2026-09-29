@@ -25,10 +25,16 @@ from netbbs.chat.channels import list_channels
 from netbbs.chat.nick import display_label
 from netbbs.link.protocol import LinkProtocolError, RealtimeProtocolVersionError
 from netbbs.link.node_profiles import (
+    ambiguous_node_guidance,
+    fingerprint_prefix_matches,
     identity_for_fingerprint,
     identity_for_peer,
     latest_identity_observation,
+    link_address_label,
+    reference_needle,
     resolve_peer_reference,
+    unknown_node_guidance,
+    unquote_reference,
 )
 from netbbs.link.realtime_direct import DirectChatUnreachable, IncomingDirectMessage
 from netbbs.link.transport import LinkTransportError
@@ -85,7 +91,7 @@ def parse_remote_address(text: str) -> tuple[str, str] | None:
 
 def resolve_node_fingerprint(link_context: LinkContext, node_prefix: str) -> str | list[str]:
     """Resolve a DNS name, unique friendly name, or legacy fingerprint prefix."""
-    needle = node_prefix.strip().lower()
+    needle = reference_needle(node_prefix)
     exact = {
         fingerprint for fingerprint in link_context.link_node.peers
         if fingerprint.lower() == needle
@@ -104,13 +110,13 @@ def resolve_node_fingerprint(link_context: LinkContext, node_prefix: str) -> str
     candidates = [peer.fingerprint for peer in peer_result]
     seen = set(candidates)
     for fingerprint in link_context.link_node.peers:
-        if fingerprint.lower().startswith(node_prefix.lower()) and fingerprint not in seen:
+        if fingerprint_prefix_matches(fingerprint, needle) and fingerprint not in seen:
             candidates.append(fingerprint)
             seen.add(fingerprint)
     if link_context.realtime_registry is not None:
         for active in link_context.realtime_registry.all_sessions():
             fingerprint = active.remote_fingerprint
-            if fingerprint.lower().startswith(node_prefix.lower()) and fingerprint not in seen:
+            if fingerprint_prefix_matches(fingerprint, needle) and fingerprint not in seen:
                 candidates.append(fingerprint)
                 seen.add(fingerprint)
     if len(candidates) == 1:
@@ -150,26 +156,25 @@ async def check_live_reachability(
     if isinstance(resolved, list):
         if not resolved:
             await session.write_line(
-                colored(f"No linked node this board knows as {sanitize_text(node_prefix)!r}.", fg_color=MUTED_COLOR)
+                colored(unknown_node_guidance(sanitize_text(unquote_reference(node_prefix))), fg_color=MUTED_COLOR)
             )
         else:
-            shown = ", ".join(
-                f"{sanitize_text(_node_label(link_context, fingerprint))} "
-                f"[{sanitize_text(fingerprint)}]"
-                for fingerprint in resolved[:5]
-            )
             await session.write_line(
                 colored(
-                    f"{sanitize_text(node_prefix)!r} matches more than one node. "
-                    f"Candidate technical identities: {shown}. Address the node as "
-                    "user@technical-identity.",
+                    ambiguous_node_guidance(
+                        sanitize_text(unquote_reference(node_prefix)), sanitize_text(target_user),
+                        [
+                            (sanitize_text(fingerprint), sanitize_text(_node_label(link_context, fingerprint)))
+                            for fingerprint in resolved[:5]
+                        ],
+                    ),
                     fg_color=MUTED_COLOR,
                 )
             )
         return None
     fingerprint = resolved
     node_label = _node_label(link_context, fingerprint)
-    label = f"{sanitize_text(target_user)}@{sanitize_text(node_label)}"
+    label = link_address_label(sanitize_text(target_user), sanitize_text(node_label))
     direct_chat = link_context.direct_chat
     bridge = link_context.realtime_bridge
     try:
@@ -233,7 +238,7 @@ async def send_live_direct_message(
     if fingerprint is None:
         return SendOutcome.UNREACHABLE
     assert link_context is not None and link_context.direct_chat is not None
-    label = f"{sanitize_text(target_user)}@{sanitize_text(_node_label(link_context, fingerprint))}"
+    label = link_address_label(sanitize_text(target_user), sanitize_text(_node_label(link_context, fingerprint)))
     identity_notice = await lane.run(latest_identity_observation, fingerprint)
     if identity_notice is not None:
         if identity_notice.severity == "security":
@@ -308,7 +313,7 @@ def build_direct_message_deliverer(
         target, live, node_identity, identity_notice = await lane.run(_lookup)
         if target is None or not presence.is_online(target.username):
             return False
-        origin = f"{sanitize_text(message.from_display_label)}@{sanitize_text(node_identity.label)}"
+        origin = link_address_label(sanitize_text(message.from_display_label), sanitize_text(node_identity.label))
         notice = colored(
             f"*** Private message from {origin}: {sanitize_text(message.body)}", fg_color=MUTED_COLOR, bold=True,
         )

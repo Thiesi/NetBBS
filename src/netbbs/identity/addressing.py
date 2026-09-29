@@ -15,11 +15,14 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-# User-part rules: kept deliberately conservative for a first pass —
-# lowercase alphanumerics, underscore, hyphen, period. Easy to relax
-# later if it turns out to be too strict for how people actually pick
-# usernames; much harder to tighten after addresses are already in use.
-_USER_PART_RE = re.compile(r"^[a-z0-9_.\-]{1,32}$")
+# User-part rules: exactly the local username grammar
+# (`netbbs.auth.users._USERNAME_PATTERN`, at most 32 characters), so every
+# account is addressable as it is displayed (issue #807). Capitals are kept:
+# the recipient node looks the name up case-insensitively, so `OldNib@Q` and
+# `oldnib@Q` reach the same account, and a sender's name goes out spelled
+# the way it is shown.
+_USER_PART_MAX_LENGTH = 32
+_USER_PART_RE = re.compile(r"^[A-Za-z0-9_.\-]{1,32}$")
 
 # Fingerprints are lowercase base32 (see identity/keys.py's
 # _encode_fingerprint) — this pattern intentionally matches that
@@ -75,11 +78,28 @@ def parse_address(address: str) -> Address:
     return Address(user=user, node_fingerprint=node_fingerprint)
 
 
-def _validate_user_part(user: str) -> None:
-    if not _USER_PART_RE.match(user):
-        raise AddressError(
-            f"invalid user part {user!r}: expected 1-32 chars from [a-z0-9_.-]"
+def is_valid_user_part(user: str) -> bool:
+    """Whether `user` can stand before the `@` of a Link address."""
+    return bool(_USER_PART_RE.match(user))
+
+
+def user_part_problem(user: str) -> str:
+    """Why `user` cannot be the user half of an address, and what to type
+    instead -- in words for a caller."""
+    if len(user) > _USER_PART_MAX_LENGTH:
+        return (
+            f"{user!r} is longer than a user name can be. Type the name as their "
+            f"BBS shows it, at most {_USER_PART_MAX_LENGTH} characters."
         )
+    return (
+        f"{user!r} is not a user name. Type the name as their BBS shows it: "
+        "letters, digits, '.', '_' and '-' only."
+    )
+
+
+def _validate_user_part(user: str) -> None:
+    if not is_valid_user_part(user):
+        raise AddressError(user_part_problem(user))
 
 
 def _validate_fingerprint(fingerprint: str) -> None:

@@ -11,7 +11,7 @@ import json
 
 import pytest
 
-from netbbs.auth.users import create_user
+from netbbs.auth.users import create_user, get_user_by_id
 from netbbs.identity.encryption import decrypt_with, encrypt_for
 from netbbs.link.events import (
     LinkMessage,
@@ -170,6 +170,53 @@ def test_compose_link_message_rejects_blank_subject(db, alice, node_identity, re
         )
 
 
+def test_compose_link_message_keeps_capitals_in_both_addresses(db, node_identity, remote_node_identity):
+    """Issue #807: a name is addressed as it is displayed. The recipient's
+    capitals are kept, and the sender's name goes out spelled as shown, in
+    the grammar a caller can type back."""
+    _seed_peer(db, remote_node_identity)
+    old_nib = create_user(db, "OldNib", password="hunter2pw")
+
+    message = compose_link_message(
+        db, old_nib, f"BobCase@{remote_node_identity.fingerprint}", "hello", "world",
+        node_identity=node_identity,
+    )
+
+    assert message.payload["sender"]["local_user_id"] == "OldNib"
+    assert message.payload["recipient"]["local_user_id"] == "BobCase"
+    row = db.connection.execute("SELECT recipient_remote_address FROM mail_messages").fetchone()
+    assert row["recipient_remote_address"] == f"BobCase@{remote_node_identity.fingerprint}"
+
+
+def test_compose_link_message_refuses_a_sender_name_nobody_could_type_back(
+    db, node_identity, remote_node_identity,
+):
+    """An account older than the username rules may hold a name the
+    address grammar refuses; mail from it could never be answered."""
+    _seed_peer(db, remote_node_identity)
+    legacy = create_user(db, "legacy", password="hunter2pw")
+    db.connection.execute("UPDATE users SET username = 'old name' WHERE id = ?", (legacy.id,))
+    db.connection.commit()
+    legacy = get_user_by_id(db, legacy.id)
+
+    with pytest.raises(LinkMailError, match="Ask the SysOp to rename the account"):
+        compose_link_message(
+            db, legacy, f"bob@{remote_node_identity.fingerprint}", "hello", "world",
+            node_identity=node_identity,
+        )
+    assert db.connection.execute("SELECT COUNT(*) FROM mail_messages").fetchone()[0] == 0
+
+
+def test_compose_link_message_to_an_unlinked_node_says_what_to_do(db, alice, node_identity, remote_node_identity):
+    with pytest.raises(LinkMailError) as excinfo:
+        compose_link_message(
+            db, alice, f"bob@{remote_node_identity.fingerprint}", "hello", "world",
+            node_identity=node_identity,
+        )
+    assert "hello" not in str(excinfo.value)
+    assert "Address a node it is linked with" in str(excinfo.value)
+
+
 # -- deliver_link_message ------------------------------------------------------
 
 
@@ -201,6 +248,19 @@ def test_deliver_link_message_lands_in_the_local_recipients_mailbox(db, bob, nod
     assert row["body"] == "world"
     assert row["link_source_event_id"] == message.content_id
     assert result.payload["message_content_id"] == message.content_id
+
+
+def test_deliver_link_message_finds_the_recipient_whatever_the_capitals(db, node_identity, remote_node_identity):
+    """Issue #807: `OldNib@Q` and `oldnib@Q` reach the same account."""
+    old_nib = create_user(db, "OldNib", password="hunter2pw")
+    for spelling in ("OldNib", "oldnib", "OLDNIB"):
+        message = _incoming_message(node_identity, remote_node_identity, recipient=spelling, subject=spelling)
+        deliver_link_message(db, message.to_dict(), node_identity=node_identity)
+
+    rows = db.connection.execute(
+        "SELECT recipient_user_id FROM mail_messages ORDER BY id"
+    ).fetchall()
+    assert [row["recipient_user_id"] for row in rows] == [old_nib.id] * 3
 
 
 def test_deliver_link_message_queues_an_accepted_acknowledgement_for_the_origin_node(

@@ -50,7 +50,7 @@ import nacl.signing
 
 import netbbs.mail as mail_module
 from netbbs.auth.users import AuthError, User, get_user_by_username
-from netbbs.identity.addressing import AddressError, parse_address
+from netbbs.identity.addressing import AddressError, is_valid_user_part, parse_address
 from netbbs.identity.encryption import EncryptionError, decrypt_with, encrypt_for
 from netbbs.link.events import (
     KeyTransition,
@@ -99,6 +99,15 @@ def compose_link_message(
         address = parse_address(recipient_address)
     except AddressError as exc:
         raise LinkMailError(str(exc)) from exc
+    # The sender's name goes out as the user half of its address, which the
+    # recipient reads and replies to (issue #807). A name the address
+    # grammar refuses -- only an account older than the username rules can
+    # hold one -- would be an address nobody could type back.
+    if not is_valid_user_part(sender.username):
+        raise LinkMailError(
+            f"your user name {sender.username!r} cannot be written as a Link address, so "
+            "a reply could never reach you. Ask the SysOp to rename the account."
+        )
 
     subject = subject.strip()
     if not subject:
@@ -162,8 +171,8 @@ def _resolve_peer_signing_key(db: Database, node_fingerprint: str) -> nacl.signi
     ).fetchone()
     if peer_row is None:
         raise LinkMailError(
-            f"this node has never exchanged a hello with {node_fingerprint!r} yet -- "
-            "cannot compose a message to it"
+            f"this BBS is not linked with {node_fingerprint} yet. Address a node it is "
+            "linked with, or ask the SysOp to link with that one."
         )
     root_verify_key = nacl.signing.VerifyKey(base64.b64decode(peer_row["root_public_key"]))
     transitions = tuple(KeyTransition.from_dict(t) for t in json.loads(peer_row["transitions_json"]))
@@ -173,8 +182,8 @@ def _resolve_peer_signing_key(db: Database, node_fingerprint: str) -> nacl.signi
     )
     if signing_key_b64 is None:
         raise LinkMailError(
-            f"{node_fingerprint!r} has no currently-authorized signing key -- cannot "
-            "compose a message to it"
+            f"the keys on file for {node_fingerprint} are no longer valid. Try again once "
+            "that node has linked with this BBS again."
         )
     return nacl.signing.VerifyKey(base64.b64decode(signing_key_b64))
 

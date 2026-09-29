@@ -70,6 +70,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 import json
+import re
 import sqlite3
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Awaitable, Callable, Sequence
@@ -147,6 +148,7 @@ from netbbs.link.node_profiles import (
     identity_for_fingerprint,
     identity_for_peer,
     latest_identity_observation,
+    link_address_label,
 )
 from netbbs.chat.channels import OPEN_ROOM_NAME_PREFIX
 from netbbs.rendering.pipe_codes import cga_to_xterm
@@ -1450,7 +1452,7 @@ def _message_author_label(db: Database, channel: Channel, message: ChannelMessag
     if durable_author is not None:
         local_user_id, fingerprint = durable_author
         node_label = identity_for_fingerprint(db, fingerprint).label
-        return sanitize_text(f"{local_user_id}@{node_label}")
+        return sanitize_text(link_address_label(local_user_id, node_label))
     author = _resolve_message_author(db, message.author_label)
     if author is None:
         return sanitize_text(message.author_label)
@@ -1808,7 +1810,7 @@ class RemotePrivateTarget:
 
     @property
     def label(self) -> str:
-        return f"{self.username}@{self.node_label}"
+        return link_address_label(self.username, self.node_label)
 
 
 @dataclass(frozen=True)
@@ -2061,6 +2063,12 @@ async def _deliver_private_message(ctx: ChatCommandContext, target: User, body: 
     )
 
 
+#: `/msg bob@"Cats @ Night" text`: the quoted-node address form
+#: `link_address_label` shows for a node name containing `@` (issue #807),
+#: typed back as it is read.
+_QUOTED_NODE_TARGET = re.compile(r'([^\s"@]+@"[^"]+")\s+(\S.*)', re.DOTALL)
+
+
 async def _handle_msg(ctx: ChatCommandContext, args: str) -> None:
     """
     `/msg <user> <text>` (design doc): a one-off,
@@ -2068,7 +2076,10 @@ async def _handle_msg(ctx: ChatCommandContext, args: str) -> None:
     matching every other chat command — no parallel main-menu entry point.
     """
     args = args.lstrip()
-    if args.startswith('"'):
+    quoted_node = _QUOTED_NODE_TARGET.fullmatch(args)
+    if quoted_node is not None:
+        parts = [quoted_node.group(1), quoted_node.group(2).strip()]
+    elif args.startswith('"'):
         closing_quote = args.find('"', 1)
         parts = (
             [args[1:closing_quote], args[closing_quote + 1:].strip()]

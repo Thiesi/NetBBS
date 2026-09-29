@@ -88,9 +88,13 @@ message for later; it is NetBBS mail, not an Internet email account. If live
 contact fails, send mail explicitly—chat does not silently turn it into mail.
 
 On a linked node, addresses can use a known, unambiguous name such as
-`alice@OtherNode`. Use the address offered by the directory or Who screen.
-If a name is ambiguous, NetBBS asks for a more specific identity. Check an
-unexpected node-identity warning with your SysOp. A node that has only just
+`alice@OtherNode`. Use the address offered by the directory or Who screen,
+or the one on the From line of their mail: type it exactly as shown,
+capitals included. A node name that itself contains `@` is shown in quotes,
+like `bob@"Cats @ Night"`; type the quotes too. Mail checks the address as
+you type it and asks again if it can't be used. If more than one linked node
+goes by the name you typed, it lists the exact address to type for each.
+Check an unexpected node-identity warning with your SysOp. A node that has only just
 linked with this one cannot be written to yet: the To prompt says so, and mail
 opens once your SysOp establishes that node.
 
