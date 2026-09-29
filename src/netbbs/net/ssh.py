@@ -177,7 +177,8 @@ class SSHSession(Session):
         # internally, and Session.write_line only appends '\r\n' once at
         # the end.
         normalized = text.replace("\r\n", "\n").replace("\n", "\r\n")
-        data = normalized.encode("utf-8", errors="replace")
+        # Already mapped to the session's character set by `Session.write`.
+        data = normalized.encode(self.output_charset, errors="replace")
         try:
             self._process.stdout.write(data)
             await self._process.stdout.drain()

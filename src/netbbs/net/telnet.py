@@ -54,6 +54,7 @@ from netbbs.net.session import (
     clamp_terminal_size,
     wait_until_drained,
 )
+from netbbs.rendering.charset import CP437
 from netbbs.rendering.pipe_codes import PastedColor
 
 # Telnet protocol constants (RFC 854, plus NAWS from RFC 1073 and
@@ -215,10 +216,13 @@ class TelnetSession(Session):
         # whether the input already used '\r\n', bare '\n', or a mix.
         normalized = text.replace("\r\n", "\n").replace("\n", "\r\n")
 
-        # No IAC-escaping needed here: text is UTF-8 encoded, and byte
-        # value 0xFF (== IAC) never appears in valid UTF-8 output — bytes
-        # 0xF5-0xFF are unused by the UTF-8 encoding scheme entirely.
-        data = normalized.encode("utf-8", errors="replace")
+        # `Session.write` has already mapped the text to the session's
+        # character set. In UTF-8 and ASCII byte 0xFF (== IAC) never
+        # appears -- UTF-8 leaves 0xF5-0xFF unused -- but in CP437 it is a
+        # real character (non-breaking space) and must be doubled, RFC 854.
+        data = normalized.encode(self.output_charset, errors="replace")
+        if self.output_charset == CP437:
+            data = data.replace(bytes([IAC]), bytes([IAC, IAC]))
         try:
             self._writer.write(data)
             await self._writer.drain()
