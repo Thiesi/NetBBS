@@ -2099,6 +2099,20 @@ upgraded from before this keep the alphabetical order they showed. The first
 field test's SysOp named a Community "The Clubhouse -- Start here" and watched
 it sort last, with nothing she could do about it.
 
+Boards and file areas have a SysOp order too (issue #839), and it is what a
+caller's list shows unless the caller picks another under `[O]rder`. The old
+default re-sorted by latest activity on every visit, so the field test's
+caller found another board at the "03" he remembered a minute later. A new
+board or area goes last, including one carried over the Link. The console's
+`[U]p`/`[D]own` move it among the boards or areas that share its category,
+Community and pinned flag -- a swap with any of those shows in every caller's
+list that holds both, where a swap with a board of another Community would
+change nothing in that Community's list -- and its screen shows its place; `[R]emove` deletes it, as on a
+Community's or a category's screen. The console's own lists follow the same
+order. Activity, name, newest and volume stay available as a caller's
+`[O]rder` choice. Channels keep their alphabetical default: they have no
+stored order to follow.
+
 Categories (for boards, file areas and chat channels, each kind independent)
 are at most two levels deep. The SysOp orders them: every listing follows a
 category's `position` among its siblings, not its name (issue #681). The
