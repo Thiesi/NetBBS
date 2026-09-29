@@ -2672,13 +2672,13 @@ def test_edit_and_delete_board_flow(db, lane, sysop):
     create_board(db, "General", creator=sysop)
 
     # list -> pick(01) -> e(dit) -> rename via the field menu -> [S]ave
-    # -> back to detail -> d(elete) -> retype new name -> back x3.
+    # -> back to detail -> r(emove) -> retype new name -> back x3.
     # Every other field is left untouched (no keystroke needed to
     # "keep" it, unlike the old linear wizard).
     inputs = [
         "m", "m", "l", "0", "1", "e",
         "n", "General2", "s",
-        "d", "General2",
+        "r", "General2",
         "b", "b", "b",
     ]
     session = FakeSession(inputs)
@@ -3479,7 +3479,7 @@ def test_create_and_delete_area_flow(db, lane, sysop):
         "n", "Docs",
         "d", "Documents area",
         "s",
-        "l", "0", "1", "d", "Docs",
+        "l", "0", "1", "r", "Docs",
         "b", "b", "b",
     ]
     session = FakeSession(inputs)

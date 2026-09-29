@@ -32,7 +32,8 @@ immediately, without Enter. When typing text, use Enter to submit it.
 **Ctrl+U** clears the line you are typing, and at a field that allows it,
 Esc leaves it without changing anything.
 Follow the action bar on the current screen: letters can mean different
-things in different places. **[B]ack** leaves most screens.
+things in different places. **[B]ack** leaves most screens and goes one level
+up: from a board to the list you picked it from, and from there to the menu.
 
 | Main-menu choice | What it does |
 | --- | --- |
@@ -41,13 +42,18 @@ things in different places. **[B]ack** leaves most screens.
 | **Files** | Every file area |
 | **Games** | Door games, when the SysOp has set some up |
 | **Communities** (key **O**) | Topics the SysOp set up, each with its own boards, chat channels, file areas and games |
-| **New scan** | See unread activity and resources you have not visited |
+| **New scan** | See unread activity and resources you have not visited; Back from each one brings you back with the next new one ready for Enter, and **[R]eplies** opens the replies to your posts |
 | **Find** (key **/**) | Search content available on this node |
 | **E-mail** | Read and send persistent NetBBS mail |
 | **Who's online** | See callers and available ways to contact them |
 | **Profile** | Change your public profile and personal preferences |
 | **Moderation** (key **A**) | Posts and uploads waiting for your decision, if the SysOp made you a moderator |
 | **Staff** | Your staff console, if the SysOp gave you staff permissions |
+
+Lists of boards and file areas keep the SysOp's order, so the number you
+remember for a board still picks it next time. **[O]rder** in a list sorts it
+another way, by activity, name, newest or size, just this once or from then
+on; **[S]ysOp's order** there puts it back.
 
 Some choices appear only when they have something to show or you have
 permission to use them. Search covers content held by this node, including
@@ -64,6 +70,15 @@ keeps a post draft for later; `/cancel` discards it. In the fullscreen
 editor, **Ctrl+G** shows help and **Ctrl+X** opens the exit choices, including
 **Keep draft & exit**. A saved post draft is offered when you return to
 that board. A draft is not a published post.
+
+Writing a message or a post opens a screen of its own. Mail asks who it is
+for first: a user name, or `name@TheirBBS` for someone on a linked BBS. An
+empty line or Esc there cancels. The fullscreen editor shows what you are
+writing above the text: the recipient or board, and the subject. Nothing is
+sent or posted until you choose to on the review screen, which keeps To and
+Subject at the top and shows a long message a page at a time. Turn the
+pages with PgUp/PgDn or **[N]ext page**/**[P]rev page**. On a board, where
+**P** posts, the page keys are **[>]** and **[<]**.
 
 A post or message needs a subject. Leave it empty and mail asks again;
 press Esc there to cancel the message. A subject that is too long is caught
@@ -99,6 +114,12 @@ goes by the name you typed, it lists the exact address to type for each.
 Check an unexpected node-identity warning with your SysOp. A node that has only just
 linked with this one cannot be written to yet: the To prompt says so, and mail
 opens once your SysOp establishes that node.
+
+**Reply** works on mail from another node too: the reply goes back to the
+address on its From line, with the same `Re:` subject and quote a local reply
+gets. If that node can't be written to any more, Reply says why instead of
+opening the message. **Sent** shows each message's recipient, with the full
+address for mail that went to another node.
 
 Channels marked **MRC** connect to a separate public chat network. Your handle
 and messages are visible there. MRC private messages are optional in your

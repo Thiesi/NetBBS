@@ -69,7 +69,7 @@ class SendOutcome(str, Enum):
 
 UNREACHABLE_NOTE = (
     "can't be reached for live chat right now. Link mail still works: "
-    "[M]ail from the main menu, addressed user@node-name-or-dns."
+    "[M]ail from the main menu, addressed name@TheirBBS."
 )
 # The wire bounds (netbbs.link.protocol's direct_message validator), checked
 # here first so a caller gets a plain notice instead of a protocol error
@@ -143,7 +143,7 @@ async def check_live_reachability(
     conversation is viable *before* it tells the caller it has begun."""
     parsed = parse_remote_address(address)
     if parsed is None:
-        await session.write_line(colored("Address a linked node's user as user@node-name-or-dns.", fg_color=MUTED_COLOR))
+        await session.write_line(colored("Address someone on a linked BBS as name@TheirBBS.", fg_color=MUTED_COLOR))
         return None
     target_user, node_prefix = parsed
     if link_context is None or link_context.direct_chat is None or link_context.realtime_bridge is None:
@@ -220,7 +220,7 @@ async def send_live_direct_message(
     `session` and returns it (see `SendOutcome`)."""
     parsed = parse_remote_address(address)
     if parsed is None:
-        await session.write_line(colored("Address a linked node's user as user@node-name-or-dns.", fg_color=MUTED_COLOR))
+        await session.write_line(colored("Address someone on a linked BBS as name@TheirBBS.", fg_color=MUTED_COLOR))
         return SendOutcome.LINE_REJECTED
     target_user, _node_prefix = parsed
     if not body.strip():

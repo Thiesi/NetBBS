@@ -41,6 +41,7 @@ PersistSortChoice = Callable[[str, dict[str, int]], Awaitable[None]]
 # their own copy with "volume" relabeled to "Participants" (see
 # prompt_sort_change's own volume_label docstring for why).
 SORT_MODE_LABELS: dict[str, str] = {
+    "sysop": "SysOp's order",
     "activity": "Activity",
     "alphabetical": "Alphabetical",
     "recent": "Recently added",
@@ -57,6 +58,7 @@ async def prompt_sort_change(
     category_id: int | None = None,
     category_name: str | None = None,
     volume_label: str = "Volume",
+    sysop_order: bool = False,
 ) -> str | None:
     """
     Prompts for a new sort mode, then (unless the user picks "just this
@@ -80,11 +82,18 @@ async def prompt_sort_change(
     something other than a stored-content count -- channels pass
     "Participants" (live headcount, not persisted chat history; see
     `netbbs.net.chat_flow._pick_channel`'s own docstring).
+
+    `sysop_order` offers `[S]ysOp's order` first (issue #839): boards and
+    file areas, which have a SysOp-set `position`, pass it; channels do
+    not have one.
     """
     volume_hotkey = volume_label[0].lower()
     mode_keys = {"a": "activity", "l": "alphabetical", "r": "recent", volume_hotkey: "volume"}
+    if sysop_order:
+        mode_keys["s"] = "sysop"
     mode_nav = "  ".join(
         [
+            *([menu_key("S", "ysOp's order")] if sysop_order else []),
             menu_key("A", "ctivity"),
             menu_key("L", "phabetical", prefix="A"),
             menu_key("R", "ecent"),

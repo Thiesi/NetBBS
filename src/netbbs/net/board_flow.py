@@ -88,6 +88,7 @@ from netbbs.net.composition import (
     edit_line_body,
     read_subject,
     review_composition,
+    show_compose_screen,
     too_long_message,
 )
 from netbbs.net.confirm import prompt_yes_no
@@ -99,7 +100,7 @@ from netbbs.net.menu_description_preference import menu_description_level
 from netbbs.net.node_theme import effective_accent_color, effective_header_color, effective_header_color_256
 from netbbs.net.notices import announce, pending_notice_rows, take_notices, write_notices
 from netbbs.net.picker import ListColumn, pick_item
-from netbbs.net.prose_editor import edit_prose
+from netbbs.net.prose_editor import EditorHeader, edit_prose
 from netbbs.net.ansi_editor import edit_ansi_art
 from netbbs.net.post_color_preference import post_colors_enabled
 from netbbs.net.redraw_preference import redraw_in_place_enabled
@@ -298,7 +299,6 @@ async def _browse_boards_in_category(
     current_mode = get_effective_sort_mode(
         db, user, "board", community_id=effective_community_id, category_id=category_id
     )
-    boards_here, categories_here = _load(current_mode)
     category_name = get_board_category_by_id(db, category_id).name if category_id is not None else None
     # Where the caller came from, carried onto the board's own screens
     # (issue #679): the Community, if any, and the category.
@@ -320,7 +320,7 @@ async def _browse_boards_in_category(
         return await prompt_sort_change(
             session, persist=_persist_sort_choice,
             community_id=effective_community_id, community_name=community_name,
-            category_id=category_id, category_name=category_name,
+            category_id=category_id, category_name=category_name, sysop_order=True,
         )
 
     def _sort_label() -> str:
@@ -371,20 +371,72 @@ async def _browse_boards_in_category(
         activity, _ = _activity(item)
         return about_separator.join(part for part in (activity, _about(item)) if part) or None
 
-    if not categories_here:
-        async def on_sort_flat() -> list[Board] | None:
+    # Back from a board or a category comes back to this list, on the row
+    # left (issue #839): it used to return past it, to the menu the list
+    # was opened from. Reloaded each time, since reading changes what is new.
+    reopen_at: int | None = None
+    while True:
+        boards_here, categories_here = _load(mode_box["mode"])
+        if not categories_here:
+            async def on_sort_flat() -> list[Board] | None:
+                new_mode = await _run_sort_prompt()
+                if new_mode is None:
+                    return None
+                mode_box["mode"] = new_mode
+                new_boards, _ = _load(new_mode)
+                return new_boards
+
+            board = await pick_item(
+                session,
+                boards_here,
+                name_of=lambda b: b.name,
+                stable_id_of=lambda b: b.id,
+                description_of=_prose_of,
+                columns=_BOARD_LIST_COLUMNS,
+                column_values_of=_columns_of,
+                description_level=description_level,
+                title=title,
+                breadcrumb=picker_breadcrumb,
+                empty_message="No message boards are available to you yet.",
+                on_sort=on_sort_flat,
+                sort_label=_sort_label,
+                redraw_in_place=redraw_in_place,
+                unicode_style=unicode_style,
+                collapsed=collapsed,
+                accent_color=accent_color,
+                header_color=header_color,
+                masthead=board_masthead,
+                start_stable_id=reopen_at,
+            )
+            if board is None:
+                return
+            reopen_at = board.id
+            await _show_board(session, db, board, user, link_context=link_context, breadcrumb=board_breadcrumb)
+            continue
+
+        mixed: list[Category | Board] = [*categories_here, *boards_here]
+
+        def render_name(item: Category | Board) -> str:
+            return f"[{item.name}]" if isinstance(item, Category) else item.name
+
+        def stable_id(item: Category | Board) -> int:
+            return item.id if isinstance(item, Board) else -item.id
+
+        async def on_sort_mixed() -> list[Category | Board] | None:
             new_mode = await _run_sort_prompt()
             if new_mode is None:
                 return None
             mode_box["mode"] = new_mode
             new_boards, _ = _load(new_mode)
-            return new_boards
+            return [*categories_here, *new_boards]
 
-        board = await pick_item(
+        selected = await pick_item(
             session,
-            boards_here,
-            name_of=lambda b: b.name,
-            stable_id_of=lambda b: b.id,
+            mixed,
+            name_of=render_name,
+            stable_id_of=stable_id,
+            on_sort=on_sort_mixed,
+            sort_label=_sort_label,
             description_of=_prose_of,
             columns=_BOARD_LIST_COLUMNS,
             column_values_of=_columns_of,
@@ -392,67 +444,26 @@ async def _browse_boards_in_category(
             title=title,
             breadcrumb=picker_breadcrumb,
             empty_message="No message boards are available to you yet.",
-            on_sort=on_sort_flat,
-            sort_label=_sort_label,
             redraw_in_place=redraw_in_place,
             unicode_style=unicode_style,
             collapsed=collapsed,
             accent_color=accent_color,
             header_color=header_color,
             masthead=board_masthead,
+            start_stable_id=reopen_at,
         )
-        if board is not None:
-            await _show_board(session, db, board, user, link_context=link_context, breadcrumb=board_breadcrumb)
-        return
+        if selected is None:
+            return
+        reopen_at = stable_id(selected)
 
-    mixed: list[Category | Board] = [*categories_here, *boards_here]
-
-    def render_name(item: Category | Board) -> str:
-        return f"[{item.name}]" if isinstance(item, Category) else item.name
-
-    def stable_id(item: Category | Board) -> int:
-        return item.id if isinstance(item, Board) else -item.id
-
-    async def on_sort_mixed() -> list[Category | Board] | None:
-        new_mode = await _run_sort_prompt()
-        if new_mode is None:
-            return None
-        mode_box["mode"] = new_mode
-        new_boards, _ = _load(new_mode)
-        return [*categories_here, *new_boards]
-
-    selected = await pick_item(
-        session,
-        mixed,
-        name_of=render_name,
-        stable_id_of=stable_id,
-        on_sort=on_sort_mixed,
-        sort_label=_sort_label,
-        description_of=_prose_of,
-        columns=_BOARD_LIST_COLUMNS,
-        column_values_of=_columns_of,
-        description_level=description_level,
-        title=title,
-        breadcrumb=picker_breadcrumb,
-        empty_message="No message boards are available to you yet.",
-        redraw_in_place=redraw_in_place,
-        unicode_style=unicode_style,
-        collapsed=collapsed,
-        accent_color=accent_color,
-        header_color=header_color,
-        masthead=board_masthead,
-    )
-    if selected is None:
-        return
-
-    if isinstance(selected, Category):
-        await _browse_boards_in_category(
-            session, db, user, category_id=selected.id,
-            community_id=community_id, community_scoped=community_scoped, title_prefix=title_prefix,
-            link_context=link_context,
-        )
-    else:
-        await _show_board(session, db, selected, user, link_context=link_context, breadcrumb=board_breadcrumb)
+        if isinstance(selected, Category):
+            await _browse_boards_in_category(
+                session, db, user, category_id=selected.id,
+                community_id=community_id, community_scoped=community_scoped, title_prefix=title_prefix,
+                link_context=link_context,
+            )
+        else:
+            await _show_board(session, db, selected, user, link_context=link_context, breadcrumb=board_breadcrumb)
 
 
 def _can_edit_post(db: Database, post: Post, user: User) -> bool:
@@ -1255,7 +1266,10 @@ async def _show_board(
             if (key == "e" and can_edit) or (key == "t" and can_tombstone) or (key in ("i", "k") and can_pin):
                 root = post.root_post_id
                 if key == "e":
-                    await _edit_existing_post(session, db, board, post, user, link_context=link_context)
+                    await _edit_existing_post(
+                        session, db, board, post, user, link_context=link_context,
+                        breadcrumb=(*breadcrumb, board_name),
+                    )
                 elif key == "t":
                     await _tombstone_existing_post(session, db, board, post, user, link_context=link_context)
                 else:
@@ -1300,6 +1314,13 @@ async def _show_board(
                 page = _refetch_current_page()
                 return None
 
+    async def _compose_screen(title: str) -> None:
+        await show_compose_screen(
+            session, title=title, breadcrumb=(*breadcrumb, board_name),
+            redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
+            header_color=effective_header_color(session, db), accent_color=effective_accent_color(session, db),
+        )
+
     async def _compose_new_post(*, initial_body: str | None = None, reply_to: Post | None = None) -> bool:
         """[P]ost, or with `reply_to` a reply to that post (issue #675): the
         subject starts as "Re: ...", the body as the post quoted, with the
@@ -1310,7 +1331,9 @@ async def _show_board(
         discard_buffered_enter = getattr(session, "discard_buffered_enter", None)
         if discard_buffered_enter is not None:
             await discard_buffered_enter()
-        await session.write_line("")
+        compose_title = "Reply" if reply_to is not None else "New post"
+        # Its own screen, not a prompt under the post list (issue #813).
+        await _compose_screen(compose_title)
         # Checked as it is typed, not at Publish (issue #812).
         subject = await read_subject(
             session, max_bytes=MAX_SUBJECT_BYTES, blank_cancels=True,
@@ -1347,6 +1370,7 @@ async def _show_board(
         body = await _compose_body(
             session, db, user, initial_text=initial_body, draft_path=draft_path,
             keep_pasted_color=board.allow_color, cursor_at_end=reply_to is not None,
+            header=_editor_header(session, db, board, compose_title, subject),
         )
         if body is not None:
             # `append_signature` is idempotent (its own docstring): a
@@ -1372,6 +1396,7 @@ async def _show_board(
         await _review_and_commit(
             session, db, user, board, subject=subject, body=body, draft_path=draft_path,
             commit_key="p", commit_label="ost", commit_brief="Publish this reply" if reply_to else "Publish this post",
+            title=compose_title, breadcrumb=(*breadcrumb, board_name),
             cancelled_notice=cancelled_notice,
             draft_saved_notice=draft_saved_notice,
             commit=_commit,
@@ -1396,7 +1421,7 @@ async def _show_board(
         # typed for nothing (Codex review on #753). The draft stays.
         if _art_canvas(session, resumed) is None:
             return False
-        await session.write_line("")
+        await _compose_screen("New art post")
         subject = await read_subject(session, max_bytes=MAX_SUBJECT_BYTES, blank_cancels=True)
         if not subject:
             announce(session, "Post cancelled.", tone="muted")
@@ -1415,6 +1440,7 @@ async def _show_board(
         await _review_and_commit(
             session, db, user, board, subject=subject, body=body, draft_path=draft_path,
             commit_key="p", commit_label="ost", commit_brief="Publish this post",
+            title="New art post", breadcrumb=(*breadcrumb, board_name),
             cancelled_notice="Post cancelled.",
             draft_saved_notice="Draft saved -- the art editor offers it the next time you draw here.",
             commit=lambda subject, body: _publish(subject, body, layout="art"),
@@ -1532,6 +1558,31 @@ async def _show_board(
         # board is empty and (worse) prompt to compose the first post.
         page_anchor = None
         page = list_posts_page(db, board, user, limit=_page_limit(), with_pinned=True, pinned_block_rows=_PINNED_BLOCK_ROWS)
+    # A [N]ew scan or [/] Find jump puts the cursor on the post it came for.
+    # When that post is on the newest page, the jump opens that page, the
+    # one an ordinary visit shows, rather than a page starting at the post:
+    # that page left out every read post and numbered the rest from 01, so
+    # the number a caller remembered picked nothing (issue #839, F095).
+    jump_highlight: int | None = None
+    if page_anchor is not None and page.posts:
+        target = page.posts[0].root_post_id
+        newest = list_posts_page(
+            db, board, user, limit=_page_limit(), with_pinned=True, pinned_block_rows=_PINNED_BLOCK_ROWS
+        )
+        # In the dated rows only: a pinned target is also listed in the
+        # pinned block, and taking that match could skip the unread posts
+        # between it and the newest page's rows (review on #869).
+        on_newest = next(
+            (
+                i for i, listed in enumerate(newest.posts)
+                if i >= newest.pinned_count and listed.root_post_id == target
+            ),
+            None,
+        )
+        if on_newest is not None:
+            page, page_anchor, jump_highlight = newest, None, on_newest
+        else:
+            jump_highlight = 0
     if not page.posts:
         # Dogfood report: this used to skip straight to composing the
         # first post whenever the caller could write, with no [P]ost/
@@ -1635,9 +1686,9 @@ async def _show_board(
                 continue
             await session.write(reject_unhandled_key(choice))
 
-    # A [N]ew scan or [/] Find jump opens the list with its target at the top;
-    # the cursor starts on it, so Enter reads what the caller came for.
-    highlighted: int | None = 0 if page_anchor is not None else None
+    # A [N]ew scan or [/] Find jump starts with the cursor on its target, so
+    # Enter reads what the caller came for.
+    highlighted: int | None = jump_highlight
     await _render_fresh(page, highlighted)
     while True:
         key, echoed = await _read_list_key(session)
@@ -1764,6 +1815,7 @@ async def _edit_existing_post(
     user: User,
     *,
     link_context: LinkContext | None = None,
+    breadcrumb: tuple[str, ...] = ("Message boards",),
 ) -> None:
     """
     Edit `post`, the one the reader is showing (issue #679: actions live
@@ -1805,13 +1857,23 @@ async def _edit_existing_post(
         if _art_canvas(session, split_signature(initial_body)[0]) is None:
             return  # said why; the draft stays
 
+    # Its own screen (issue #813); `breadcrumb` ends at the board.
+    await show_compose_screen(
+        session, title="Edit post", breadcrumb=breadcrumb,
+        redraw_in_place=redraw_in_place_enabled(db, user), unicode_style=unicode_style_enabled(db, user),
+        collapsed=breadcrumb_collapsed_enabled(db, user),
+        header_color=effective_header_color(session, db), accent_color=effective_accent_color(session, db),
+    )
     subject = await read_subject(session, max_bytes=MAX_SUBJECT_BYTES, current=post.subject)
 
     edit_draft_path = _post_draft_path(
         db, kind="art_edit" if art else "edit", board=board, user=user, root_post_id=post.root_post_id
     )
     draft_saved_notice = "Draft saved -- you'll be offered it next time you edit this post."
-    editor = _draw_body if art else partial(_compose_body, keep_pasted_color=board.allow_color)
+    editor = _draw_body if art else partial(
+        _compose_body, keep_pasted_color=board.allow_color,
+        header=_editor_header(session, db, board, "Edit post", subject),
+    )
     body = await editor(session, db, user, initial_text=initial_body, draft_path=edit_draft_path)
     if body is None:
         # Issue #149: /exit or /quit leaves this revision's draft on
@@ -1855,6 +1917,7 @@ async def _edit_existing_post(
     await _review_and_commit(
         session, db, user, board, subject=subject, body=body, draft_path=edit_draft_path, layout=post.layout,
         commit_key="s", commit_label="ave", commit_brief="Save this edit",
+        title="Edit post", breadcrumb=breadcrumb,
         cancelled_notice="Edit cancelled.",
         draft_saved_notice=draft_saved_notice,
         commit=_save,
@@ -1877,6 +1940,8 @@ async def _review_and_commit(
     draft_saved_notice: str,
     commit: Callable[[str, str], Awaitable[bool]],
     layout: str = "prose",
+    title: str = "New post",
+    breadcrumb: tuple[str, ...] = ("Message boards",),
 ) -> None:
     """The review screen a new post and an edit both pass through
     before anything is stored: the draft is shown whole, its subject and
@@ -1889,7 +1954,11 @@ async def _review_and_commit(
     loop is the only copy left.
 
     The draft is previewed as `board`'s readers will see it: in color
-    where the board allows it and the caller wants it (issue #711)."""
+    where the board allows it and the caller wants it (issue #711).
+
+    `title` names the composition ("New post", "Reply", "Edit post") and
+    `breadcrumb` is the path to the board: the review screen is under
+    both, and the fullscreen editor's header shows the title (issue #813)."""
     body_mode = post_body_mode(
         board_allows_color=board.allow_color, reader_wants_color=post_colors_enabled(db, user)
     )
@@ -1917,6 +1986,7 @@ async def _review_and_commit(
             truecolor=effective_truecolor(session, db, user),
             body_mode=body_mode,
             body_layout=layout,
+            breadcrumb=(*breadcrumb, title),
         )
         if action is ReviewAction.CANCEL:
             announce(session, cancelled_notice, tone="muted")
@@ -1925,7 +1995,10 @@ async def _review_and_commit(
             subject = await read_subject(session, max_bytes=MAX_SUBJECT_BYTES, current=subject)
             continue
         if action is ReviewAction.EDIT_BODY:
-            editor = _draw_body if layout == "art" else partial(_compose_body, keep_pasted_color=board.allow_color)
+            editor = _draw_body if layout == "art" else partial(
+                _compose_body, keep_pasted_color=board.allow_color,
+                header=_editor_header(session, db, board, title, subject),
+            )
             revised = await editor(session, db, user, initial_text=body, draft_path=draft_path)
             if revised is not None:
                 body = revised
@@ -2172,6 +2245,14 @@ async def _draw_body(
     return f"{drawn}\x1b[0m{signature_block}" if signature_block else drawn
 
 
+def _editor_header(session: Session, db: Database, board: Board, title: str, subject: str) -> EditorHeader:
+    """What the fullscreen editor shows above a post (issue #813): the
+    composition, the board it goes to and its subject."""
+    return EditorHeader(
+        title, (("Board", board.name), ("Subject", subject)), color=effective_header_color(session, db),
+    )
+
+
 async def _compose_body(
     session: Session,
     db: Database,
@@ -2181,6 +2262,7 @@ async def _compose_body(
     draft_path: Path,
     keep_pasted_color: bool = False,
     cursor_at_end: bool = False,
+    header: EditorHeader | None = None,
 ) -> str | None:
     """The single place a post body (or an edit of one) is actually
     entered: the fullscreen prose editor if `user` has opted in,
@@ -2199,7 +2281,7 @@ async def _compose_body(
         return await edit_prose(
             session, initial_text=initial_text, draft_path=draft_path, max_bytes=MAX_BODY_BYTES,
             unicode_style=unicode_style_enabled(db, user), keep_pasted_color=keep_pasted_color,
-            cursor_at_end=cursor_at_end,
+            cursor_at_end=cursor_at_end, header=header,
         )
     return await edit_line_body(
         session,

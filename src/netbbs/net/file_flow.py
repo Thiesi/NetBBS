@@ -119,7 +119,7 @@ from netbbs.net.file_area_banner import load_file_area_banner
 from netbbs.net.node_theme import effective_accent_color_256, effective_header_color_256
 from netbbs.net.notices import announce, announce_styled, write_notices
 from netbbs.net.picker import pick_item
-from netbbs.net.prose_editor import edit_prose
+from netbbs.net.prose_editor import EditorHeader, edit_prose
 from netbbs.net.session import Session
 from netbbs.net.session_activity import records_activity
 from netbbs.net.sort_ui import SORT_MODE_LABELS, prompt_sort_change
@@ -309,7 +309,7 @@ async def _browse_areas_in_category(
     current_mode = await lane.run(
         get_effective_sort_mode, user, "file_area", community_id=effective_community_id, category_id=category_id
     )
-    areas_here, categories_here, category_name, community_name = await lane.run(_load, current_mode)
+    _, _, category_name, community_name = await lane.run(_load, current_mode)
     description_level = await lane.run(menu_description_level, user)
     redraw_in_place = await lane.run(redraw_in_place_enabled, user)
     unicode_style = await lane.run(unicode_style_enabled, user)
@@ -329,7 +329,7 @@ async def _browse_areas_in_category(
         return await prompt_sort_change(
             session, persist=_persist_sort_choice,
             community_id=effective_community_id, community_name=community_name,
-            category_id=category_id, category_name=category_name,
+            category_id=category_id, category_name=category_name, sysop_order=True,
         )
 
     def _sort_label() -> str:
@@ -338,26 +338,78 @@ async def _browse_areas_in_category(
     title = "File areas" if title_prefix is not None else "Available file areas"
     picker_breadcrumb = (title_prefix,) if title_prefix is not None else ()
 
-    if not categories_here:
-        async def on_sort_flat() -> list[FileArea] | None:
+    # Back from an area or a category comes back to this list, on the row
+    # left (issue #839), as the board list does.
+    reopen_at: int | None = None
+    while True:
+        areas_here, categories_here, _, _ = await lane.run(_load, mode_box["mode"])
+        if not categories_here:
+            async def on_sort_flat() -> list[FileArea] | None:
+                new_mode = await _run_sort_prompt()
+                if new_mode is None:
+                    return None
+                mode_box["mode"] = new_mode
+                new_areas, _, _, _ = await lane.run(_load, new_mode)
+                return new_areas
+
+            area = await pick_item(
+                session,
+                areas_here,
+                name_of=lambda a: a.name,
+                stable_id_of=lambda a: a.id,
+                description_of=lambda a: a.description,
+                title=title,
+                breadcrumb=picker_breadcrumb,
+                empty_message="No file areas are available to you yet.",
+                on_sort=on_sort_flat,
+                sort_label=_sort_label,
+                description_level=description_level,
+                redraw_in_place=redraw_in_place,
+                unicode_style=unicode_style,
+                collapsed=collapsed,
+                accent_color=await lane.run(effective_accent_color_256),
+                header_color=await lane.run(effective_header_color_256),
+                masthead=area_masthead,
+                start_stable_id=reopen_at,
+            )
+            if area is None:
+                return
+            reopen_at = area.id
+            await _show_area(session, lane, area, user, link_context=link_context, transfers=transfers)
+            continue
+
+        mixed: list[FileAreaCategory | FileArea] = [*categories_here, *areas_here]
+
+        def render_name(item: FileAreaCategory | FileArea) -> str:
+            return f"[{item.name}]" if isinstance(item, FileAreaCategory) else item.name
+
+        def render_description(item: FileAreaCategory | FileArea) -> str | None:
+            if isinstance(item, FileAreaCategory):
+                return item.description or "(category)"
+            return item.description
+
+        def stable_id(item: FileAreaCategory | FileArea) -> int:
+            return item.id if isinstance(item, FileArea) else -item.id
+
+        async def on_sort_mixed() -> list[FileAreaCategory | FileArea] | None:
             new_mode = await _run_sort_prompt()
             if new_mode is None:
                 return None
             mode_box["mode"] = new_mode
             new_areas, _, _, _ = await lane.run(_load, new_mode)
-            return new_areas
+            return [*categories_here, *new_areas]
 
-        area = await pick_item(
+        selected = await pick_item(
             session,
-            areas_here,
-            name_of=lambda a: a.name,
-            stable_id_of=lambda a: a.id,
-            description_of=lambda a: a.description,
+            mixed,
+            name_of=render_name,
+            stable_id_of=stable_id,
+            on_sort=on_sort_mixed,
+            sort_label=_sort_label,
+            description_of=render_description,
             title=title,
             breadcrumb=picker_breadcrumb,
             empty_message="No file areas are available to you yet.",
-            on_sort=on_sort_flat,
-            sort_label=_sort_label,
             description_level=description_level,
             redraw_in_place=redraw_in_place,
             unicode_style=unicode_style,
@@ -365,62 +417,20 @@ async def _browse_areas_in_category(
             accent_color=await lane.run(effective_accent_color_256),
             header_color=await lane.run(effective_header_color_256),
             masthead=area_masthead,
+            start_stable_id=reopen_at,
         )
-        if area is not None:
-            await _show_area(session, lane, area, user, link_context=link_context, transfers=transfers)
-        return
+        if selected is None:
+            return
+        reopen_at = stable_id(selected)
 
-    mixed: list[FileAreaCategory | FileArea] = [*categories_here, *areas_here]
-
-    def render_name(item: FileAreaCategory | FileArea) -> str:
-        return f"[{item.name}]" if isinstance(item, FileAreaCategory) else item.name
-
-    def render_description(item: FileAreaCategory | FileArea) -> str | None:
-        if isinstance(item, FileAreaCategory):
-            return item.description or "(category)"
-        return item.description
-
-    def stable_id(item: FileAreaCategory | FileArea) -> int:
-        return item.id if isinstance(item, FileArea) else -item.id
-
-    async def on_sort_mixed() -> list[FileAreaCategory | FileArea] | None:
-        new_mode = await _run_sort_prompt()
-        if new_mode is None:
-            return None
-        mode_box["mode"] = new_mode
-        new_areas, _, _, _ = await lane.run(_load, new_mode)
-        return [*categories_here, *new_areas]
-
-    selected = await pick_item(
-        session,
-        mixed,
-        name_of=render_name,
-        stable_id_of=stable_id,
-        on_sort=on_sort_mixed,
-        sort_label=_sort_label,
-        description_of=render_description,
-        title=title,
-        breadcrumb=picker_breadcrumb,
-        empty_message="No file areas are available to you yet.",
-        description_level=description_level,
-        redraw_in_place=redraw_in_place,
-        unicode_style=unicode_style,
-        collapsed=collapsed,
-        accent_color=await lane.run(effective_accent_color_256),
-        header_color=await lane.run(effective_header_color_256),
-        masthead=area_masthead,
-    )
-    if selected is None:
-        return
-
-    if isinstance(selected, FileAreaCategory):
-        await _browse_areas_in_category(
-            session, lane, user, category_id=selected.id,
-            community_id=community_id, community_scoped=community_scoped, title_prefix=title_prefix,
-            link_context=link_context, transfers=transfers,
-        )
-    else:
-        await _show_area(session, lane, selected, user, link_context=link_context, transfers=transfers)
+        if isinstance(selected, FileAreaCategory):
+            await _browse_areas_in_category(
+                session, lane, user, category_id=selected.id,
+                community_id=community_id, community_scoped=community_scoped, title_prefix=title_prefix,
+                link_context=link_context, transfers=transfers,
+            )
+        else:
+            await _show_area(session, lane, selected, user, link_context=link_context, transfers=transfers)
 
 
 def _format_size(size_bytes: int) -> str:
@@ -851,6 +861,8 @@ async def _show_area(
     own to re-check.
     """
     area_name = sanitize_text(area.name)
+    # Where a jump's cursor starts, set by `_load` (issue #839).
+    jump: dict[str, int | None] = {"highlight": None}
 
     def _load(
         db: Database,
@@ -867,6 +879,25 @@ async def _show_area(
             # Nothing newer than the cursor -- caught up, not a
             # genuinely empty area; fall back to the newest page.
             page = list_files_page(db, area, user, with_pinned=True)
+        elif initial_cursor:
+            # The jump's target on the newest page, when it is there: that
+            # page, the one an ordinary visit shows, with the cursor on it,
+            # as a board does (issue #839, F095).
+            newest = list_files_page(db, area, user, with_pinned=True)
+            target = page.entries[0].file_id
+            # In the dated rows only, as a board does: a match in the
+            # pinned block would record the files between it and the newest
+            # rows as seen without ever showing them (review on #869).
+            on_newest = next(
+                (
+                    i for i, listed in enumerate(newest.entries)
+                    if i >= newest.pinned_count and listed.file_id == target
+                ),
+                None,
+            )
+            jump["highlight"] = 0 if on_newest is None else on_newest
+            if on_newest is not None:
+                page = newest
         effective_name_requirement = get_effective_name_requirement(db, area)
         can_write = (
             meets_level(user, get_effective_min_write_level(db, area))
@@ -989,7 +1020,8 @@ async def _show_area(
         )
         await session.write_line(f"\r\n{state}")
     else:
-        highlighted: int | None = None
+        # A [N]ew scan or [/] Find jump starts with the cursor on its target.
+        highlighted: int | None = jump["highlight"]
         await _render_and_advance_cursor(page, highlighted=highlighted)
         while True:
             kind, target, new_h = await _read_file_choice(session, page, highlighted)
@@ -1826,6 +1858,11 @@ async def _compose_description(
         return await edit_prose(
             session, initial_text=initial_text, draft_path=draft_path,
             max_bytes=MAX_DESCRIPTION_BYTES, unicode_style=await lane.run(unicode_style_enabled, user),
+            # What is being written, above the text (issue #813).
+            header=EditorHeader(
+                "File description", (("File", entry.filename),),
+                color=await lane.run(effective_header_color_256),
+            ),
         )
     return await edit_line_body(
         session, initial_text=initial_text, max_bytes=MAX_DESCRIPTION_BYTES,

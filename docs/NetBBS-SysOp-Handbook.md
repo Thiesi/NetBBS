@@ -507,6 +507,12 @@ draft and save it explicitly.
 - **File areas:** set access, upload policy, size/retention rules, and moderation.
   Uploads may include a description extracted from `FILE_ID.DIZ`. A remote
   catalogue entry is metadata; fetching its bytes is a separate action.
+- **Order of boards and file areas:** callers' lists follow your order, not
+  the latest activity, so the number a caller remembers keeps its board. A
+  new board or area goes last. **Up** and **Down** on its screen move it among
+  the others in the same category and Community; pinned ones stay first and
+  move among themselves. **Remove** deletes it. A caller can still sort a list by
+  activity with **[O]rder**.
 - **Chat channels:** set join gates, visibility, invitations, and moderation.
   Hidden or invite-only channels need more than a sufficient account level.
 - **Communities:** group related resources and provide inherited defaults.
