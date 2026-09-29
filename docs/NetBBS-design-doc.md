@@ -1889,13 +1889,26 @@ parent, listed on the board like any other post. There is no threaded view.
 - **Body:** starts as the post quoted, with the cursor under the quote:
   "<author> wrote:", then each line of the post before its signature with
   `> ` in front. A line that was already quoted becomes `> > `.
-- **Attribution line:** the board reader, which reflows prose, shows a line
-  ending in " wrote:" (not itself quoted) as a line of its own, never joined
-  to the text around it. A replier who trims the quote and writes straight
-  under "<author> wrote:" would otherwise have their words read as the
-  quoted author's (#837). This holds for any such line, not just ones the
-  quote wrote, since a reader cannot tell them apart. Mail keeps every line
-  anyway.
+- **Attribution line:** "<author> wrote:" is always a line of its own. The
+  board reader used to reflow prose, and joined the text a replier wrote
+  straight under a trimmed quote onto it, so their words read as the quoted
+  author's (#837). Posts now keep their lines (see **How a post reads**),
+  which keeps the attribution apart for any author, as mail always did.
+- **How a post reads** (issue #837): a board post keeps the lines its author
+  wrote, as a letter does (issue #809): the reader, the review screen, the
+  pending-post screen and a post's history show every line as written and
+  wrap only a line wider than the terminal, at a word
+  (`netbbs.rendering.post_body.lined_body_rows`), in every display mode and
+  for posts carried over Link alike. Posts used to be reflowed into
+  paragraphs, which merged bullet lists, sign-offs ("73, Harold") and short
+  separate lines into one, in both editors' output. The line editor's blank
+  line is a paragraph break and the fullscreen editor's lines are the
+  author's, so neither needs a reader to rejoin lines. A post written before
+  this that relied on reflow -- a paragraph typed as several short lines --
+  shows those lines as typed. Rejected: reflowing only posts from the line
+  editor (the reader cannot tell the editors apart, and a carried post has
+  no editor at all) and a per-post "keep lines" flag (a second layout for
+  the same text).
 - **Quote limits:** a quote is at most 40 lines and 8 KB, and a cut quote
   ends with `> [...]`, so a reply to a long post stays writable in the line
   editor.
@@ -1930,8 +1943,9 @@ carried exactly as written and filtered on output
 - **Who sees what:** where color is allowed, a reader with "Post colors" on
   (Profile, on by default) sees it; with it off, plain text without the codes.
   Where it is not allowed, a body shows as text, pipe codes as typed.
-- **Layout:** a colored body reflows like any other. Every row restates the
-  color it inherits and ends with a reset, because the reader pages by rows.
+- **Layout:** a colored body keeps its lines like any other. Every row
+  restates the color it inherits and ends with a reset, because the reader
+  pages by rows.
   The state is kept normalized, so a flood of codes costs each row one short
   prefix. The review screen and the SysOp's pending-post screen show a body
   the same way.
@@ -2448,10 +2462,11 @@ and `Date:`, as a sent message's view has `To:`.
 message view, Sent's view and the review screen show every line as written,
 and wrap only a line wider than the terminal, at a word
 (`netbbs.rendering.post_body.lined_body_rows`). Mail used to reflow a body the
-way a board post reflows. That ran a greeting into the first sentence, a list
+way a board post then reflowed. That ran a greeting into the first sentence, a list
 into one line and a signature into `-- Alice of Q Pen club treasurer`. A
 letter's short lines are its form, not text to rewrap. `>` quote lines are
-muted and keep their marker when they wrap, as in a post.
+muted and keep their marker when they wrap. Board posts read the same way
+since issue #837.
 
 A body is filtered exactly as a post on a board that allows color (§6.1,
 "Color in posts"): pipe codes and SGR color show, and every other escape

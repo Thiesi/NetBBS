@@ -72,6 +72,9 @@ On a moderated board, your post may wait for approval before others see it.
 You are told at the main menu when it is approved or rejected; a rejection
 also arrives as mail from **System**, with the reason and what you wrote.
 
+A post keeps the lines you write: a list, a short line or your sign-off stays
+as you typed it, and only a line too wide for the reader's screen wraps.
+
 The text editor shows its commands. In the line editor, a blank line starts
 a new paragraph; press Enter on an empty line twice, or type `/done`, to
 finish. `/insert N` writes the next lines before line N until you type
