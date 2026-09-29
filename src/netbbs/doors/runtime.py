@@ -28,7 +28,7 @@ from pathlib import Path
 from netbbs.doors.endpoints import NodeLease, StreamEndpoint, pty_endpoint, socket_endpoint
 from netbbs.doors.dropfiles import write_drop_files
 from netbbs.doors.outbound import OUTBOUND_DIRNAME, door_info_block, drain as drain_outbound
-from netbbs.doors.profiles import preflight
+from netbbs.doors.profiles import preflight, terminal_too_small
 from netbbs.net.color_depth_preference import effective_truecolor
 from netbbs.timeutil import resolve_display_preferences
 from netbbs.net.unicode_style_preference import unicode_style_enabled
@@ -60,6 +60,10 @@ _RESIZE_POLL_SECONDS = 0.5
 #: appears, and the cap keeps each pick-up a short job on the shared lane.
 _OUTBOUND_TICK_SECONDS = 2.0
 _OUTBOUND_TICK_LIMIT = 16
+
+
+class _TerminalTooSmall(Exception):
+    """The caller's terminal is smaller than the door's fixed geometry (issue #956)."""
 
 
 @dataclass(frozen=True)
@@ -815,9 +819,13 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
     mode_entered = False
     handled_failure = False
     try:
-        problems = await asyncio.to_thread(preflight, door, session)
+        problems = await asyncio.to_thread(preflight, door, session, check_terminal=False)
         if problems:
             raise ValueError("\n".join(problems))
+        # Checked after setup, so a door that is broken as well says so first.
+        if profile and terminal_too_small(profile, session):
+            raise _TerminalTooSmall(f"Terminal is {session.terminal_width}x{session.terminal_height}; "
+                                    f"the door needs at least {profile.width}x{profile.height}.")
         world_path = await lane.run(war_dialer_world_path, door)
         if problem := await asyncio.to_thread(war_dialer_path_problem, door, world_path):
             raise ValueError(problem)
@@ -992,6 +1000,10 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
         raise
     except SessionClosedError:
         reason = "caller_disconnected"
+    except _TerminalTooSmall as exc:
+        reason = "terminal_too_small"
+        handled_failure = True
+        tail.extend(str(exc).encode())
     except BlockingIOError as exc:
         reason = "busy"
         handled_failure = True

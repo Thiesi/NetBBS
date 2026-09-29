@@ -736,3 +736,21 @@ def test_metadata_forwards_the_existing_unicode_choice_to_every_door(db, player,
     assert unrelated['unicode_style'] is unicode_enabled
     assert 'war_dialer_owner' not in unrelated
     assert set(info) - set(unrelated) == {'war_dialer_owner'}
+
+
+def test_a_terminal_too_small_is_its_own_outcome_not_a_setup_failure(db, lane, player, tmp_path):
+    """Issue #956: the refusal is recorded with the sizes, as the caller's
+    problem, and a door that is also broken reports the setup problem first."""
+    from netbbs.doors.profiles import DoorProfile
+    script = _write_script(tmp_path, "never_runs.py", "raise SystemExit(3)")
+    fixed = DoorProfile(width=80, height=25)
+    door = create_door(db, "Fixed", sys.executable, args=(str(script),), creator=player, profile=fixed)
+    broken = create_door(db, "Broken fixed", "/no/such/executable-netbbs-test", creator=player, profile=fixed)
+    session = FakeSession()
+    session.terminal_width, session.terminal_height = 80, 24
+
+    result = asyncio.run(_run(session, lane, door, player))
+    assert result.reason == "terminal_too_small"
+    assert result.exit_code is None
+    assert result.diagnostic == "Terminal is 80x24; the door needs at least 80x25."
+    assert asyncio.run(_run(session, lane, broken, player)).reason == "failed_to_start"

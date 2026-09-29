@@ -207,6 +207,11 @@ async def _report_door_result(session: Session, door: Door, result: DoorRunResul
         message = f"{door.name} was ended -- it ran too long."
     elif result.reason == "relay_failed":
         message = f"{door.name} stopped because its terminal stream failed -- ask a SysOp to check the log."
+    elif result.reason == "terminal_too_small":
+        # The caller's to fix, so it is not sent to the SysOp (issue #956).
+        message = (f"{door.name} needs a terminal of at least {door.profile.width}x{door.profile.height}; "
+                   f"yours is {session.terminal_width}x{session.terminal_height}. "
+                   "Enlarge your window and try again.")
     elif result.reason == "busy":
         message = f"{door.name} is in use. Please try again when another caller has finished."
     else:

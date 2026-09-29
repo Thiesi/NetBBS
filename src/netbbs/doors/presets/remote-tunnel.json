@@ -3,7 +3,7 @@
   "executable_path": "remote",
   "args": [],
   "profile": {
-    "version": 1, "adapter": "rlogin", "encoding": "cp437", "width": 80, "height": 25,
+    "version": 1, "adapter": "rlogin", "encoding": "cp437", "width": 80, "height": 24,
     "max_sessions": 1,
     "options": {
       "service_name": "Your provider's service name",
