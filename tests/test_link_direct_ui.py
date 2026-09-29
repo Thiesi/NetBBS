@@ -198,7 +198,7 @@ def test_send_explains_unknown_and_ambiguous_nodes_and_off_link_nodes(tmp_path):
     ok, text = _send(rig, "bob@nope", "hi")
     assert not ok and 'No BBS linked with this one goes by "nope".' in text
     ok, text = _send(rig, "bob", "hi")
-    assert not ok and "user@node-name-or-dns" in text
+    assert not ok and "name@TheirBBS" in text
     ok, text = _send(rig, "bob@abc", "hi", context=LinkContext(link_node=rig.link_node))
     assert not ok and "isn't on NetBBS Link" in text
     rig.close()

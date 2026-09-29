@@ -877,7 +877,7 @@ def test_compose_refuses_a_peer_still_on_probation_at_the_to_prompt(tmp_path):
 
     text = _visible_text(session)
     assert "Farpoint · farpoint.example.org is newly linked; mail opens once the SysOp establishes it." in text
-    assert text.count("To (username or user@node-name-or-dns): ") == 2
+    assert text.count("To: ") == 2
     assert "Subject:" not in text
     assert "Message sent." not in text
     assert db.connection.execute("SELECT COUNT(*) FROM mail_messages").fetchone()[0] == 0
@@ -899,6 +899,7 @@ def test_compose_refuses_a_probationary_peer_chosen_from_the_review_screen(tmp_p
         keys=["c", "t", "s", "c", "b"],
         lines=["bob@Farpoint", "Hello", "Body", "", "bob@Newcomer"],
     )
+    session.terminal_width = 200
     lane = DatabaseLane(db_path)
     asyncio.run(browse_mail(session, lane, alice, link_context=link_context))
 
@@ -921,7 +922,8 @@ def test_compose_prompt_mentions_link_address_option_when_link_context_given(tmp
     lane = DatabaseLane(db_path)
     asyncio.run(browse_mail(session, lane, alice, link_context=link_context))
 
-    assert "node-name-or-dns" in _written_text(session)
+    assert "name@TheirBBS for someone on a linked BBS" in _written_text(session)
+    assert "node-name-or-dns" not in _written_text(session)
     lane.close()
     db.close()
 
@@ -941,7 +943,7 @@ def test_compose_rejects_a_link_address_for_a_node_never_seen(tmp_path):
 
     text = _visible_text(session)
     assert 'No BBS linked with this one goes by "nowhere". Check the name after the @' in text
-    assert text.count("To (username or user@node-name-or-dns): ") == 2
+    assert text.count("To: ") == 2
     assert "Subject:" not in text
     assert db.connection.execute("SELECT COUNT(*) FROM mail_messages").fetchone()[0] == 0
     lane.close()
@@ -1032,7 +1034,7 @@ def test_compose_asks_again_for_a_malformed_link_address(tmp_path):
     assert "Type the name of their BBS after the @, like bob@TheirBBS." in text
     assert "is longer than a user name can be" in text
     assert "[a-z0-9_.-]" not in text
-    assert text.count("To (username or user@node-name-or-dns): ") == 5
+    assert text.count("To: ") == 5
     assert "Subject:" not in text
     lane.close()
     db.close()
@@ -1384,5 +1386,194 @@ def test_sent_shows_the_remote_address_of_link_mail_in_the_list_and_the_view(tmp
     assert f"to {shown}" in text
     assert f"To: {shown}" in text
     assert "(deleted account)" not in text
+    lane.close()
+    db.close()
+
+
+# -- the compose screen (issue #813) ---------------------------------------------
+
+
+def _screens(session: FakeSession) -> list[str]:
+    """Each screen drawn after a clear, visible text only."""
+    from netbbs.rendering import clear_screen
+
+    return [_ANSI_ESCAPE_RE.sub("", chunk) for chunk in _written_text(session).split(clear_screen())]
+
+
+def test_compose_is_a_screen_of_its_own_with_plain_wording(tmp_path):
+    from netbbs.net.redraw_preference import set_redraw_in_place_enabled
+
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
+    alice = create_user(db, "alice", password="hunter2pw", user_level=10)
+    set_redraw_in_place_enabled(db, alice, True)
+    link_context = LinkContext(link_node=LinkNode(identity=bootstrap_node_identity("roanoke")))
+    session = FakeSession(keys=["c", "b"], lines=[""])
+    lane = DatabaseLane(db_path)
+    asyncio.run(browse_mail(session, lane, alice, link_context=link_context))
+
+    # The To prompt is on a cleared screen under its own title, not under
+    # the mail menu.
+    screen = next(s for s in _screens(session) if "To: " in s)
+    assert "Mail › New message" in screen
+    assert "[C]ompose" not in screen
+    assert "Type their user name, or name@TheirBBS for someone on a linked BBS." in screen
+    assert screen.index("New message") < screen.index("To: ")
+    assert "node-name-or-dns" not in _written_text(session)
+    lane.close()
+    db.close()
+
+
+def test_compose_esc_at_the_to_prompt_cancels(tmp_path):
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
+    alice = create_user(db, "alice", password="hunter2pw", user_level=10)
+    session = FakeSession(keys=["c", "b"], lines=[ESC])
+    lane = DatabaseLane(db_path)
+    asyncio.run(browse_mail(session, lane, alice))
+
+    assert "Cancelled." in _visible_text(session)
+    assert "Subject:" not in _visible_text(session)
+    lane.close()
+    db.close()
+
+
+def test_compose_review_names_the_account_not_the_text_as_typed(tmp_path):
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
+    bob = create_user(db, "bob", password="hunter2pw", user_level=10)
+    alice = create_user(db, "Alice", password="hunter2pw", user_level=10)
+    session = FakeSession(keys=["c", "s", "b"], lines=["ALICE", "Hello", "Body", ""])
+    lane = DatabaseLane(db_path)
+    asyncio.run(browse_mail(session, lane, bob))
+
+    text = _visible_text(session)
+    assert "To: Alice" in text
+    assert "ALICE" not in text
+    assert list_inbox(db, alice)[0].subject == "Hello"
+    lane.close()
+    db.close()
+
+
+def test_compose_review_names_a_link_recipient_by_its_nodes_name(tmp_path):
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
+    alice = create_user(db, "alice", password="hunter2pw", user_level=10)
+    node_identity = bootstrap_node_identity("roanoke")
+    remote_identity = bootstrap_node_identity("farpoint")
+    link_context = _link_context_with_known_peer(db, node_identity, remote_identity)
+    typed = f"bob@{remote_identity.fingerprint[:8]}"
+    session = FakeSession(keys=["c", "s", "b"], lines=[typed, "Hello", "Body", ""])
+    lane = DatabaseLane(db_path)
+    asyncio.run(browse_mail(session, lane, alice, link_context=link_context))
+
+    text = _visible_text(session)
+    assert "To: bob@Farpoint · farpoint.example.org" in text
+    assert "Message sent." in text
+    lane.close()
+    db.close()
+
+
+def test_reply_opens_on_a_reply_screen_that_names_the_recipient(tmp_path):
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
+    alice = create_user(db, "Alice", password="hunter2pw", user_level=10)
+    bob = create_user(db, "bob", password="hunter2pw", user_level=10)
+    send_mail(db, alice, bob, "Hello", "body")
+    session = FakeSession(keys=["i", "0", "1", "r", "c", "b", "b", "b"], lines=["", "Reply text", ""])
+    lane = DatabaseLane(db_path)
+    asyncio.run(browse_mail(session, lane, bob))
+
+    text = _visible_text(session)
+    assert "Mail › Reply" in text
+    assert text.index("Mail › Reply") < text.index("To: Alice") < text.index("Subject: ")
+    lane.close()
+    db.close()
+
+
+def test_review_pages_a_long_letter_and_keeps_to_and_subject_on_every_page(tmp_path):
+    from netbbs.net.redraw_preference import set_redraw_in_place_enabled
+
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
+    alice = create_user(db, "alice", password="hunter2pw", user_level=10)
+    bob = create_user(db, "bob", password="hunter2pw", user_level=10)
+    set_redraw_in_place_enabled(db, alice, True)
+    body_lines = [f"item {n}" for n in range(1, 31)]
+    session = FakeSession(keys=["c", "n", "n", "s", "b"], lines=["bob", "Shopping", *body_lines, ""])
+    lane = DatabaseLane(db_path)
+    asyncio.run(browse_mail(session, lane, alice))
+
+    reviews = [s for s in _screens(session) if "Review composition" in s]
+    assert len(reviews) == 3
+    for screen in reviews:
+        assert "To: bob" in screen
+        assert "Subject: Shopping" in screen
+        assert "[S]end" in screen
+        # The whole screen fits the terminal: FakeSession writes a row per
+        # write_line, and the prompt takes the last one.
+        assert screen[: screen.index("Choice: ")].count("\n") < session.terminal_height
+    assert "Page 1 of" in reviews[0] and "item 1\n" in reviews[0] and "item 30" not in reviews[0]
+    assert "Page 2 of" in reviews[1] and "item 1\n" not in reviews[1]
+    assert "[N]ext page" in reviews[0]
+    # Paged, the menu is the packed bar: a described one would take the
+    # body's rows.
+    assert "Send this message" not in reviews[0]
+    assert list_inbox(db, bob)[0].body.splitlines() == body_lines
+    lane.close()
+    db.close()
+
+
+def test_a_short_letter_is_not_paged(tmp_path):
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
+    alice = create_user(db, "alice", password="hunter2pw", user_level=10)
+    create_user(db, "bob", password="hunter2pw", user_level=10)
+    session = FakeSession(keys=["c", "n", "s", "b"], lines=["bob", "Hi", "Short", ""])
+    lane = DatabaseLane(db_path)
+    asyncio.run(browse_mail(session, lane, alice))
+
+    text = _visible_text(session)
+    assert "Page 1 of" not in text
+    assert "ext page" not in text
+    assert "Message sent." in text
+    lane.close()
+    db.close()
+
+
+def test_the_fullscreen_editor_shows_what_the_letter_is(tmp_path):
+    from netbbs.net.editor_preference import set_fullscreen_editor_enabled
+    from netbbs.rendering.terminal_emulator import TerminalEmulator
+    from tests.test_login_flow_fullscreen_editor import FakeSession as FullscreenSession
+    from tests.test_login_flow_fullscreen_editor import _type
+
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
+    alice = create_user(db, "alice", password="hunter2pw", user_level=10)
+    create_user(db, "Bob", password="hunter2pw", user_level=10)
+    set_fullscreen_editor_enabled(db, alice, True)
+    session = FullscreenSession(["c", "BOB", "Plans"] + _type("See you") + ["CTRL+O", "s", "b"])
+    lane = DatabaseLane(db_path)
+    screens: list[list[str]] = []
+    original_write = session.write
+
+    async def write(text: str) -> None:
+        await original_write(text)
+        # The editor's first paint: everything since the last clear.
+        if "Ctrl+O save" in text and not screens:
+            written = "".join(session.written)
+            emulator = TerminalEmulator(session.terminal_width, session.terminal_height)
+            emulator.feed(written[written.rindex("\x1b[2J"):])
+            screens.append([row.rstrip() for row in emulator.text_rows()])
+
+    session.write = write
+    asyncio.run(browse_mail(session, lane, alice))
+
+    rows = screens[0]
+    assert rows[0] == "New message"
+    assert rows[1] == "To: Bob"
+    assert rows[2] == "Subject: Plans"
+    assert rows[3] and not rows[3].strip("-─")
+    assert any("Ctrl+O save" in row for row in rows)
     lane.close()
     db.close()

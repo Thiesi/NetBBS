@@ -68,6 +68,15 @@ editor, **Ctrl+G** shows help and **Ctrl+X** opens the exit choices, including
 **Keep draft & exit**. A saved post draft is offered when you return to
 that board. A draft is not a published post.
 
+Writing a message or a post opens a screen of its own. Mail asks who it is
+for first: a user name, or `name@TheirBBS` for someone on a linked BBS. An
+empty line or Esc there cancels. The fullscreen editor shows what you are
+writing above the text: the recipient or board, and the subject. Nothing is
+sent or posted until you choose to on the review screen, which keeps To and
+Subject at the top and shows a long message a page at a time. Turn the
+pages with PgUp/PgDn or **[N]ext page**/**[P]rev page**. On a board, where
+**P** posts, the page keys are **[>]** and **[<]**.
+
 A post or message needs a subject. Leave it empty and mail asks again;
 press Esc there to cancel the message. A subject that is too long is caught
 as soon as you press Enter, with how many characters to remove, and the
