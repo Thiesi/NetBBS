@@ -155,3 +155,17 @@ def test_a_door_below_the_callers_level_is_not_offered(db, lane, player, tmp_pat
     session = FakeSession(inputs=[])
     asyncio.run(browse_doors(session, lane, player))
     assert "No doors are available" in _text(session) + "".join(pending_notices(session))
+
+
+def test_a_terminal_too_small_for_the_door_is_the_callers_to_fix(db, lane, player, tmp_path):
+    """Issue #956: an 80x24 caller refused by an 80x25 door was told to ask a
+    SysOp, whose setup was fine. They are told the sizes instead."""
+    from netbbs.doors.profiles import DoorProfile
+    script = _quick_exit_script(tmp_path)
+    create_door(db, "Fixed", sys.executable, args=(str(script),), creator=player,
+                profile=DoorProfile(width=80, height=25))
+    session = FakeSession(inputs=["0", "1", "x", "b"])
+    asyncio.run(browse_doors(session, lane, player))
+    text = _text(session)
+    assert "Fixed needs a terminal of at least 80x25; yours is 80x24." in text
+    assert "ask a SysOp" not in text

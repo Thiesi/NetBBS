@@ -616,7 +616,9 @@ escape sequences and uses an incremental UTF-8 decoder; classic fixed-size
 screens return to browser-fit geometry after play. Telnet/SSH terminals must
 already be at least the configured size; a smaller browser viewport is allowed
 because web door mode sets the requested terminal geometry. NetBBS does not
-resize Telnet/SSH windows.
+resize Telnet/SSH windows. A caller whose terminal is too small is told both
+sizes and asked to enlarge the window; it is not reported as a setup failure,
+and the play log records it as `reason=terminal_too_small`.
 A caller who resizes their terminal mid-game is followed, on POSIX hosts,
 for native doors whose profile leaves columns and rows at 0. A PTY door's
 own terminal is resized and its process group gets `SIGWINCH`, which is what
