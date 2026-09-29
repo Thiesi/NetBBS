@@ -34,7 +34,7 @@ from netbbs.boards import Board, Post, list_boards
 from netbbs.boards.posts import count_listed_posts
 from netbbs.chat import ChatHub, MessageMailbox, PresenceRegistry
 from netbbs.chat.channels import Channel
-from netbbs.communities import get_effective_min_age, get_effective_min_read_level
+from netbbs.communities import get_effective_min_age, meets_read_gate
 from netbbs.files.areas import FileArea, list_file_areas
 from netbbs.files.entries import count_listed_files
 from netbbs.link.boards import LinkContext
@@ -56,7 +56,6 @@ from netbbs.rendering import GATE_COLOR, MenuEntry, SegmentColor, menu_key
 from netbbs.net.redraw_preference import redraw_in_place_enabled
 from netbbs.net.session import Session
 from netbbs.net.unicode_style_preference import unicode_style_enabled
-from netbbs.permissions import meets_level
 from netbbs.rendering import MUTED_COLOR, colored, sanitize_text, screen_title
 from netbbs.search import (
     ChannelMessageSearchHit,
@@ -183,7 +182,7 @@ async def _new_scan_screen(
         for board in list_boards(db):
             boards_by_id[board.id] = board
             if not (
-                meets_level(user, get_effective_min_read_level(db, board))
+                meets_read_gate(db, user, board)
                 and meets_age(db, user, get_effective_min_age(db, board))
             ):
                 continue
@@ -207,7 +206,7 @@ async def _new_scan_screen(
 
         for area in list_file_areas(db):
             if not (
-                meets_level(user, get_effective_min_read_level(db, area))
+                meets_read_gate(db, user, area)
                 and meets_age(db, user, get_effective_min_age(db, area))
             ):
                 continue

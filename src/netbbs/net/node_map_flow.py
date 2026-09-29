@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from netbbs.attestation import meets_age
 from netbbs.auth.users import User
 from netbbs.boards.boards import list_boards
-from netbbs.communities import get_effective_min_age, get_effective_min_read_level
+from netbbs.communities import get_effective_min_age, meets_read_gate
 from netbbs.config import get_node_display_name, get_node_map_min_level
 from netbbs.files.areas import list_file_areas
 from netbbs.link.boards import LinkContext
@@ -102,13 +102,13 @@ def openable_carried_names(db: Database, user: User, fingerprint: str) -> Carrie
     boards = tuple(
         board.name for board in list_boards(db, order_by="alphabetical")
         if board.board_id in carried["boards"]
-        and meets_level(user, get_effective_min_read_level(db, board))
+        and meets_read_gate(db, user, board)
         and meets_age(db, user, get_effective_min_age(db, board))
     )
     areas = tuple(
         area.name for area in list_file_areas(db, order_by="alphabetical")
         if area.area_id in carried["file_areas"]
-        and meets_level(user, get_effective_min_read_level(db, area))
+        and meets_read_gate(db, user, area)
         and meets_age(db, user, get_effective_min_age(db, area))
     )
     channels = tuple(

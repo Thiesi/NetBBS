@@ -458,10 +458,12 @@ async def _caller_who_screen(
             return False
         if action == "i":
             assert direct_invites is not None and lane is not None  # offer_invite's own condition
-            await run_direct_chat_invite_flow(
+            # Issue #843: a direct chat that ran cleared the screen on its
+            # way out; a pause there would sit on a blank screen.
+            chatted = await run_direct_chat_invite_flow(
                 session, lane, hub, presence, direct_invites, node_controls.session_registry, user, target,
             )
-            return True
+            return not chatted
 
         await write_prompt(session, f"Message to {selected.username}: ")
         message = (await session.read_line()).strip()

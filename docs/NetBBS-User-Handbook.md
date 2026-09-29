@@ -99,6 +99,16 @@ to speak. `/help` lists the commands available there.
 | `/quit` | Leave chat |
 | `/msg user text` | Send a live private message |
 | `/away text` | Set an away message |
+| `/nick name` | Set a chat alias; a bare `/nick` clears it |
+| `/dm user` | Invite someone online to a private direct chat |
+
+An alias is always shown with the username beside it, as `Quill|Copperplate`,
+so everyone can see who is speaking. An alias that reads like someone else's
+username, or like a staff title such as "SysOp", is refused.
+
+A direct-chat invitation opens on your main menu. If you are somewhere else
+on the board, a line tells you who invited you; go back to the main menu
+within a minute to answer.
 
 Live private messages need the recipient to be online. **E-mail** keeps a
 message for later; it is NetBBS mail, not an Internet email account. If live
