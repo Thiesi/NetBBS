@@ -281,8 +281,15 @@ No screen has to know which set a caller has. The mapping is in three layers:
   wide character becomes two cells, zero-width marks are dropped, and control
   characters and escape sequences are never mapped. Width is still measured
   on the Unicode text (§3.2's wrapping, §3.6's columns), so no layout moves
-  when a caller's set changes. `truncate_to_width` asks for the set's own
-  ellipsis: `…` in UTF-8 and `...` in CP437 and ASCII.
+  when a caller's set changes. That makes `…` a single `.` in CP437 and ASCII,
+  which reads as a full stop, so a screen that cuts text picks its marker
+  with `ellipsis_for(session)`: `…` on a UTF-8 terminal, `...` elsewhere.
+- A box-drawing character the table does not list is worked out from the
+  directions its Unicode name says it draws: CP437 gets the light line of
+  that shape (it has no heavy, dashed or mixed light/heavy lines), and ASCII
+  gets `+`, `|`, `-` or `=`. That covers CP437's own mixed single/double
+  corners and tees too, so a CP437 door or CP437 art shown on an ASCII
+  session keeps its frames.
 
 ASCII is true 7-bit: nothing above 0x7F reaches an ASCII session, including
 accented letters in posts, which become their base letters. CP437 is one byte
@@ -309,6 +316,12 @@ CP437 or ASCII, and an explicit choice always wins over detection. Auto means:
   sends `syncterm` over SSH too. The pre-authentication banner goes out before
   any channel exists, so it is always ASCII.
 - The browser terminal is always UTF-8.
+
+Each Telnet and SSH connection logs one INFO line with the terminal types the
+client reported, how the exchange ended (answered, refused, no answer, or the
+SSH PTY request) and the character set chosen, so a SysOp can read what a
+client calls itself. Reported names are kept to printable ASCII and 40
+characters before they are stored or logged.
 
 After login, a caller whose set was not settled -- an unknown terminal, or one
 that reported only `ansi` -- is asked once which of two sample lines looks

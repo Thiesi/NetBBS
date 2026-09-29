@@ -55,7 +55,7 @@ from netbbs.net.session import (
     clamp_terminal_size,
     wait_until_drained,
 )
-from netbbs.net.terminal_detect import classify_terminal_types
+from netbbs.net.terminal_detect import classify_terminal_types, clean_terminal_type, describe_detection
 from netbbs.rendering.charset import ASCII, CP437
 from netbbs.rendering.pipe_codes import PastedColor
 
@@ -131,6 +131,8 @@ class TelnetSession(Session):
         # TTYPE: "idle" until requested, then "requested" (DO sent),
         # "asking" (the client said WILL; SEND sent), "done".
         self._ttype_state = "idle"
+        # How the TTYPE exchange ended, for the connection's log line.
+        self._ttype_outcome: str | None = None
         # Keystrokes that arrived while the first screen waited for TTYPE:
         # real caller input, served before anything read later.
         self._early_input: deque[int] = deque()
@@ -266,6 +268,11 @@ class TelnetSession(Session):
         charset, certain = classify_terminal_types(self.terminal_types)
         self.output_charset = self.detected_charset = charset if charset is not None else ASCII
         self.charset_certain = certain
+        outcome = self._ttype_outcome or ("answered" if self.terminal_types else "no answer")
+        _logger.info(describe_detection(
+            "telnet", self.peer_address, names=self.terminal_types, outcome=outcome,
+            charset=self.output_charset, certain=certain,
+        ))
 
     async def _send_terminal_type_request(self) -> None:
         try:
@@ -282,6 +289,7 @@ class TelnetSession(Session):
             await self._send_terminal_type_request()
         elif command == WONT:
             self._ttype_state = "done"
+            self._ttype_outcome = "refused"
 
     async def _on_terminal_type(self, name: str) -> None:
         if self._ttype_state != "asking":
@@ -574,7 +582,7 @@ class TelnetSession(Session):
             if height > 0:
                 _, self.terminal_height = clamp_terminal_size(self.terminal_width, height)
         elif option == TTYPE and body[:1] == bytes([TTYPE_IS]):
-            await self._on_terminal_type(body[1:].decode("ascii", errors="replace").strip()[:64])
+            await self._on_terminal_type(clean_terminal_type(body[1:].decode("ascii", errors="replace")))
         elif option == NEW_ENVIRON and body[:1] == bytes([NEW_ENVIRON_IS]):
             # Tolerant of malformed bodies -- worst case, `variables`
             # ends up empty and supports_truecolor simply stays at its

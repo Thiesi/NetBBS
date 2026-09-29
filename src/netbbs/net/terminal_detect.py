@@ -32,6 +32,39 @@ UTF8_TERMINAL_PREFIXES = (
 )
 
 
+#: Longest terminal type kept or logged; RFC 1091 names are short.
+MAX_TERMINAL_TYPE_LENGTH = 40
+
+
+def clean_terminal_type(raw: str) -> str:
+    """A client-reported terminal type fit to keep and log: printable ASCII
+    only, trimmed and bounded. It comes from the client, so nothing else
+    of it reaches the log."""
+    kept = "".join(c for c in raw if " " <= c <= "~").strip()
+    return kept[:MAX_TERMINAL_TYPE_LENGTH]
+
+
+def describe_detection(
+    transport: str,
+    peer: str | None,
+    *,
+    names: Iterable[str],
+    outcome: str,
+    charset: Charset,
+    certain: bool,
+) -> str:
+    """One log line saying what a connecting terminal reported and the
+    character set chosen from it, so a SysOp can read a client's terminal
+    type from the log. `outcome` is how the exchange ended, such as
+    "answered", "refused" or "no answer"."""
+    reported = ", ".join(repr(clean_terminal_type(name)) for name in names) or "none"
+    certainty = "certain" if certain else "uncertain, asked after login"
+    return (
+        f"{transport} caller {peer or '?'} terminal type: {reported} ({outcome}); "
+        f"character set {charset} ({certainty})"
+    )
+
+
 def classify_terminal_types(names: Iterable[str]) -> tuple[Charset | None, bool]:
     """The character set the first recognised name means, and whether
     that is certain. `(None, False)` if no name is recognised."""

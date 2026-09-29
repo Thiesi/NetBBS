@@ -130,6 +130,7 @@ from netbbs.net.menu_description_preference import menu_description_level
 from netbbs.net.redraw_preference import redraw_in_place_enabled
 from netbbs.net.breadcrumb_preference import breadcrumb_collapsed_enabled
 from netbbs.net.unicode_style_preference import unicode_style_enabled
+from netbbs.rendering.charset import ellipsis_for
 from netbbs.rendering import (
     ERROR_COLOR,
     HEADER_COLOR,
@@ -1674,7 +1675,10 @@ async def _fetch_remote_file(
                 if transfer.status != "in_progress":
                     break
                 await session.write_line(
-                    colored(f"  … {transfer.bytes_received}/{transfer.total_size} bytes", fg_color=MUTED_COLOR)
+                    colored(
+                        f"  {ellipsis_for(session)} {transfer.bytes_received}/{transfer.total_size} bytes",
+                        fg_color=MUTED_COLOR,
+                    )
                 )
     except RemoteFileWithdrawnError:
         # Design doc §11.2, issue #479: the origin no longer has the file
@@ -1826,7 +1830,7 @@ async def _render_file_page(
         if entry.pinned:
             # Pinned files are listed first (issue #675); this says why.
             name_clean = f"pin {name_clean}"
-        name_cut = cut_filename(name_clean, name_w, ellipsis="…" if unicode_style else "...")
+        name_cut = cut_filename(name_clean, name_w, ellipsis=ellipsis_for(session, unicode_style=unicode_style))
         if visible_width(name_cut) < name_w:
             name_padded = name_cut + " " * (name_w - visible_width(name_cut))
         else:

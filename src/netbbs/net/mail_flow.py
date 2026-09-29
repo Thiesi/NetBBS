@@ -199,6 +199,7 @@ from netbbs.rendering import (
     wrap_to_width,
 )
 from netbbs.rendering.post_body import plain_post_body, post_body_mode, post_body_rows, post_body_text
+from netbbs.rendering.charset import ellipsis_for
 from netbbs.rendering.reflow import wrap_terminal_text
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
@@ -1091,7 +1092,7 @@ class _MailboxScreen:
         (`netbbs.mail.delete_letters`)."""
         targets = self._targets()
         if len(targets) == 1 and not self.marked:
-            subject = truncate_to_width(targets[0].subject, 40, ellipsis="…" if self.unicode_style else "...")
+            subject = truncate_to_width(targets[0].subject, 40, ellipsis=ellipsis_for(self.session, unicode_style=self.unicode_style))
             question = f"Delete \"{subject}\"?"
         else:
             question = f"Delete the {_count(len(targets), 'marked message')}?"
@@ -1379,7 +1380,9 @@ class _MailboxScreen:
             # the others say is still on screen in brief -- the [D]raft key,
             # the "N of 500" count, a row's "!".
             _urgency, text, color = min(pending, key=lambda item: item[0])
-            text = truncate_to_width(text, max(1, width - 1), ellipsis="…" if self.unicode_style else "...")
+            text = truncate_to_width(
+                text, max(1, width - 1), ellipsis=ellipsis_for(self.session, unicode_style=self.unicode_style)
+            )
             notes.append(colored(text, fg_color=color))
         else:
             for _urgency, text, color in pending:
@@ -1459,7 +1462,7 @@ class _MailboxScreen:
                 page_rows, width=width, first_number=1, number_width=number_width, widths=widths,
                 highlighted=self.highlighted - top if self.highlighted is not None else None,
                 sent=self.sent, show_status=show_status, accent=self.accent,
-                ellipsis="…" if self.unicode_style else "...", marked=self.marked,
+                ellipsis=ellipsis_for(self.session, unicode_style=self.unicode_style), marked=self.marked,
             ))
             if roomy:
                 lines.append(rule)
