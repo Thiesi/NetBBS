@@ -47,7 +47,7 @@ up: from a board to the list you picked it from, and from there to the menu.
 | **Games** | Door games, when the SysOp has set some up |
 | **Communities** (key **O**) | Topics the SysOp set up, each with its own boards, chat channels, file areas and games |
 | **New scan** | See unread activity and resources you have not visited; Back from each one brings you back with the next new one ready for Enter, **[R]eplies** opens the replies to your posts, and **[E]-mail** opens your mailbox, whose unread count is shown above the list |
-| **Find** (key **/**) | Search posts, files and retained chat on this node, and your own mail: your Inbox and Sent, never anyone else's. A letter opens as it does in the mailbox, and Back returns to the results. Mail is left out where the SysOp has not opened mail to you |
+| **Find** (key **/**) | Search your own mail (your Inbox and Sent, never anyone else's) and the posts, files and retained chat on this node. Mail results come first, up to 20 of each kind. A letter opens as it does in the mailbox, and Back returns to the results. Mail is left out where the SysOp has not opened mail to you |
 | **E-mail** | Read and send persistent NetBBS mail, from the level the SysOp chose; not offered to the guest account |
 | **Who's online** | See callers and available ways to contact them |
 | **Profile** | Change your public profile and personal preferences |
