@@ -681,3 +681,23 @@ def test_a_header_is_sanitized_and_cut_to_the_width(tmp_path):
     assert rows[1].startswith("Subject: ") and "red" in rows[1]
     assert "\x1b[31m" not in "".join(session.written)
     assert len(rows[1]) == 40
+
+
+def test_without_recovery_a_draft_on_disk_is_neither_offered_nor_deleted(tmp_path):
+    """Issue #814: a letter's caller already offered its draft and passes it
+    in as the text -- the editor does not ask again, and the draft stays
+    until something replaces it."""
+    draft = tmp_path / "d.draft"
+    draft.write_text("kept letter", encoding="utf-8")
+
+    async def scenario():
+        session = FakeSession(["CTRL+X"])
+        result = await edit_prose(
+            session, initial_text="kept letter", draft_path=draft, max_bytes=100_000, offer_recovery=False,
+        )
+        return result, _written_text(session)
+
+    result, text = asyncio.run(scenario())
+    assert result is None
+    assert "draft from a previous session" not in text
+    assert draft.read_text(encoding="utf-8") == "kept letter"

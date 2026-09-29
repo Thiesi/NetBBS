@@ -158,7 +158,7 @@ def test_a_subject_prompt_edits_in_a_one_row_window():
 
 
 def test_the_line_editor_refuses_growth_in_characters():
-    session = FakeSession(["é" * 6, ""])
+    session = FakeSession(["é" * 6, "/done"])
     body = asyncio.run(edit_line_body(session, initial_text="ab", max_bytes=10, max_lines=10))
     assert body == "ab"
     # "ab\n" is 3 bytes and six two-byte letters 12 more: 15 of 10, so
@@ -175,7 +175,7 @@ def test_a_board_post_subject_is_checked_at_its_prompt(tmp_path, monkeypatch):
     db = Database(tmp_path / "node.db")
     user = create_user(db, "alice", password="hunter2", user_level=10)
     board = create_board(db, "general", creator=user)
-    session = FakeSession(["Much too long", "Short", "Body", ""], keys=["p", "p", "b"])
+    session = FakeSession(["Much too long", "Short", "Body", "/done"], keys=["p", "p", "b"])
 
     asyncio.run(_show_board(session, db, board, user))
 
@@ -195,7 +195,7 @@ def test_a_board_post_over_the_limit_is_said_on_review_and_not_published(tmp_pat
     user = create_user(db, "alice", password="hunter2", user_level=10)
     board = create_board(db, "general", creator=user)
     set_signature(db, user, "A signature of some length")
-    session = FakeSession(["Hello", "Body", ""], keys=["p", "p", "c", "b"])
+    session = FakeSession(["Hello", "Body", "/done"], keys=["p", "p", "c", "b"])
 
     asyncio.run(_show_board(session, db, board, user))
 

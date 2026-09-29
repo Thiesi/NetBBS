@@ -403,20 +403,57 @@ them, review re-checks subject and body on arrival, says what is over, and
 refuses the commit until it is fixed. The domain's byte checks remain the
 backstop for every other caller.
 
-Board post composition (new posts and edits) additionally distinguishes
-discarding from saving: `/cancel` (line editor) or discarding (fullscreen
-editor) always deletes any in-progress draft; `/exit`/`/quit` (line editor)
-or "Keep draft & exit" (fullscreen editor) instead save it to the same
-per-caller autosave target the fullscreen editor already used for crash
-recovery, and return without committing. A board with a saved new-post draft
-for the caller shows a notice and a `[D]raft` entry on its own menu (resume,
-discard, or leave it) instead of interrupting entry with a question; `[P]ost`
-while such a draft exists goes through the same resume/discard choice, since
-there is one autosave slot per caller and board. Re-opening a specific post
-for edit offers to resume its own saved draft the same way the pre-existing
-crash-recovery prompt already did. Mail composition and other callers that
-never opt into a draft target keep exactly the old discard-only behavior --
-`/exit`/`/quit` are not recognized there at all.
+The line editor writes paragraphs (issue #814). A blank line is a paragraph
+break; a second blank line in a row, or `/done`, finishes into review, and
+that closing blank is not kept. `/insert N` moves where typed lines go --
+before line N -- and they keep going there, one after another, until `/end`;
+the prompt numbers the line being written and `/list` marks the spot. Before
+#814 the first blank line finished, so a paragraph cost an `/insert` and so
+did every line of an answer written between a reply's quoted lines. Rejected:
+ending only on `/done` (a blank line would never finish, against the gesture
+callers already use) and a separate "answer mode" for quotes (a second
+concept for what one sticky insertion point already does).
+
+Board posts and mail distinguish discarding from saving. `/cancel` (line
+editor) or discarding (fullscreen editor) always deletes any in-progress
+draft; `/exit`/`/quit` (line editor) or "Keep draft & exit" (fullscreen
+editor) instead keep it, and return without committing. Both editors keep a
+draft as it is typed -- the fullscreen editor by its autosave, the line
+editor on every change -- so a dropped connection keeps the text too.
+
+Every draft slot belongs to one composition, and a draft is only ever
+offered for the composition it belongs to (issue #814): a board's new post
+(one per caller and board), a reply to one post, an edit of one post, a
+caller's new letter (one per caller), a reply to one message. A caller that
+offers its draft itself -- a board's `[D]raft`, mail's `[D]raft`, `[C]ompose`
+or `[R]eply` -- passes the draft in as the text with `offer_recovery` off, so
+the editor neither asks again nor deletes the draft before something replaces
+it. Before #814 mail had one body-only draft per user, which the fullscreen
+editor offered in place of any later letter's text: a reply to someone else
+lost its quote to it, and "Keep draft & exit" answered "Message cancelled."
+
+A letter's To and Subject are kept beside its text in a `.fields` file (JSON:
+`to`, `reply_address`, `subject`), written before the editor opens and again
+before review's `[B]ody` reopens it, so the letter resumes addressed as it was
+left -- a Link reply to its stored `user@<fingerprint>`. The mail screen shows a
+kept new letter ("You have an unfinished letter to bob: Lunch?") and a
+`[D]raft` entry (resume, delete, or leave it); `[C]ompose` while one exists,
+and `[R]eply` to a message with a kept reply, offer the same choice before
+asking anything, `[D]iscard` there deleting the draft and starting afresh.
+A resumed letter opens on the compose screen with To and Subject shown and
+the editor on its text. A body-only `mail_<id>.draft` from before #814 becomes
+the caller's new letter and asks for To and Subject when resumed. A board
+post's draft keeps only its text; its subject is asked again.
+
+A board with a saved new-post draft for the caller shows a notice and a
+`[D]raft` entry on its own menu (resume, discard, or leave it) instead of
+interrupting entry with a question; `[P]ost` while such a draft exists goes
+through the same resume/discard choice. Re-opening a specific post for edit,
+or replying to the same post again, offers to resume its own saved draft
+through the editor's recovery prompt. Callers that never opt into a draft
+target keep the discard-only behavior -- `/exit`/`/quit` are not recognized
+there at all. The fullscreen editor's Ctrl+G help says where a kept draft is
+offered again.
 
 In-context help is a single shared rendering primitive
 (`netbbs.net.help_overlay.show_help`) reused by two different key
@@ -440,8 +477,8 @@ wired in screen-by-screen wherever an existing cancel affordance
 prompt at once. Deliberately does not touch `read_line()`'s editable
 path in this pass -- unlike Backspace's byte, Ctrl-C during real
 free-text entry has no single safe meaning across every caller (a bare
-blank line already means something different per caller, e.g. "finish
-and review" in the line editor, not "cancel"), so real-text-entry
+blank line already means something different per caller, e.g. a
+paragraph break in the line editor, not "cancel"), so real-text-entry
 cancellation is left for a later, separately-scoped increment. A
 screen with no cancel affordance at all, or one that hasn't adopted
 this yet, simply bells for Ctrl-C like any other unrecognized key.

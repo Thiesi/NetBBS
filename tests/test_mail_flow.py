@@ -549,7 +549,7 @@ def test_compose_update_subject_refuses_a_long_subject_and_esc_keeps_the_old_one
     bob = create_user(db, "bob", password="hunter2pw", user_level=10)
 
     session = FakeSession(
-        keys=["c", "u", "s", "b"], lines=["bob", "Hello", "Body", "", "x" * 229, ESC],
+        keys=["c", "u", "s", "b"], lines=["bob", "Hello", "Body", "/done", "x" * 229, ESC],
     )
     lane = DatabaseLane(db_path)
     asyncio.run(browse_mail(session, lane, alice))
@@ -577,7 +577,7 @@ def test_compose_a_signature_that_overflows_the_body_is_caught_before_send(tmp_p
 
     session = FakeSession(
         keys=["c", "s", "b", "s", "b"],
-        lines=["bob", "Hello", "Twenty characters!!", "", "/delete 1", "/list", ""],
+        lines=["bob", "Hello", "Twenty characters!!", "/done", "/delete 1", "/list", "/done"],
     )
     lane = DatabaseLane(db_path)
     asyncio.run(browse_mail(session, lane, alice))
@@ -638,8 +638,8 @@ def test_compose_review_can_revise_recipient_subject_and_submitted_body_lines(tm
     session = FakeSession(
         keys=["c", "t", "u", "b", "s", "b"],
         lines=[
-            "bob", "Original subject", "first", "second", "",
-            "carol", "Revised subject", "/edit 1", "FIRST", "/delete 2", "",
+            "bob", "Original subject", "first", "second", "/done",
+            "carol", "Revised subject", "/edit 1", "FIRST", "/delete 2", "/done",
         ],
     )
     lane = DatabaseLane(db_path)
@@ -682,7 +682,7 @@ def test_delivery_failure_returns_to_review_and_can_retarget(tmp_path, monkeypat
     send_mail(db, alice, bob, "Already full", "body")
     session = FakeSession(
         keys=["c", "s", "t", "s", "b"],
-        lines=["bob", "Recoverable", "draft body", "", "carol"],
+        lines=["bob", "Recoverable", "draft body", "/done", "carol"],
     )
     lane = DatabaseLane(db_path)
 
@@ -897,7 +897,7 @@ def test_compose_refuses_a_probationary_peer_chosen_from_the_review_screen(tmp_p
 
     session = FakeSession(
         keys=["c", "t", "s", "c", "b"],
-        lines=["bob@Farpoint", "Hello", "Body", "", "bob@Newcomer"],
+        lines=["bob@Farpoint", "Hello", "Body", "/done", "bob@Newcomer"],
     )
     session.terminal_width = 200
     lane = DatabaseLane(db_path)
@@ -1055,7 +1055,7 @@ def test_compose_checks_an_address_changed_from_the_review_screen(tmp_path):
         ("Bob Case@Farpoint", "'Bob Case' is not a user name."),
     ):
         session = FakeSession(
-            keys=["c", "t", "s", "c", "b"], lines=["bob@Farpoint", "Hello", "Body", "", changed],
+            keys=["c", "t", "s", "c", "b"], lines=["bob@Farpoint", "Hello", "Body", "/done", changed],
         )
         session.terminal_width = 200
         lane = DatabaseLane(db_path)
@@ -1330,7 +1330,7 @@ def test_reply_to_link_mail_can_be_readdressed_from_the_review_screen(tmp_path):
     _receive_link_mail(db, alice, f"bob@{remote_identity.fingerprint}")
 
     session = FakeSession(
-        keys=["i", "0", "1", "r", "t", "s", "b", "b", "b"], lines=["", "Forwarding", "", "carol"]
+        keys=["i", "0", "1", "r", "t", "s", "b", "b", "b"], lines=["", "Forwarding", "/done", "carol"]
     )
     lane = DatabaseLane(db_path)
     asyncio.run(browse_mail(session, lane, alice, link_context=link_context))

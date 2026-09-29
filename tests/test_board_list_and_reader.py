@@ -682,7 +682,7 @@ def test_mark_all_read_is_not_offered_with_nothing_unread(db, alice, monkeypatch
 
 def test_a_callers_own_new_post_is_not_new_to_them(db, alice):
     board = create_board(db, "general", creator=alice)
-    session = FakeSession(["p", "Hello", "Body", "", "p", "b"])
+    session = FakeSession(["p", "Hello", "Body", "/done", "p", "b"])
 
     asyncio.run(board_flow._show_board(session, db, board, alice))
 
@@ -734,7 +734,7 @@ def test_publishing_recounts_when_the_cap_gives_posts_up(db, alice, monkeypatch)
     posts = _posts(db, board, alice, 3, monkeypatch)
     record_post_opened(db, alice, board, posts[2])  # 0 and 1 unread
     monkeypatch.setattr(posts_module, "utc_now_iso", lambda: "2026-01-02T00:00:00.000000Z")
-    session = FakeSession(["p", "Hello", "Body", "", "p", "b"])
+    session = FakeSession(["p", "Hello", "Body", "/done", "p", "b"])
 
     asyncio.run(board_flow._show_board(session, db, board, alice))
 
@@ -807,7 +807,7 @@ def test_a_board_without_color_shows_codes_as_typed(db, alice):
 
 def test_the_review_screen_previews_the_color(db, alice):
     board = create_board(db, "general", creator=alice, allow_color=True)
-    session = FakeSession(["p", "Hello", "|12Red body", "", "p", "b"])
+    session = FakeSession(["p", "Hello", "|12Red body", "/done", "p", "b"])
 
     asyncio.run(board_flow._show_board(session, db, board, alice))
 
