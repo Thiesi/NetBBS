@@ -2560,16 +2560,19 @@ Mail about Link delivery (#806's bounces) is told at the main menu and on the
 sent message's Delivery line, not by a system message; a bounce letter in
 the Inbox could use this sender later.
 
-**Blocked senders** (issue #817). An account can refuse mail from one
-sender. A block names a local account by id, so it survives a rename, or a
+**Blocked people** (issues #817, #925). An account can refuse mail and
+live messages from one person. A block names a local account by id, so it survives a rename, or a
 Link sender by the `user@<home-node-fingerprint>` address its mail came
 from (user part compared case-insensitively), never by the node's display
 name, which can change. Blocks live in `mail_blocks`; deleting the blocking
-account or the blocked local account removes the row. A caller blocks from
-a received letter's view (`Bloc[k] sender`, a toggle labelled by what it
-will do) or by name from Profile > Blocked mail senders, which lists the
-blocks and unblocks them. A block affects mail from then on; mail already
-received stays.
+account or the blocked local account removes the row; the table keeps its
+#817 name although it now holds the one block list. A caller blocks from a
+received letter's view (`Bloc[k] sender`, a toggle labelled by what it will
+do), from a caller picked on Who's online (`Bloc[k]`, the same toggle, for a
+local caller by account and for one on a linked node by
+`user@<fingerprint>`), or by name from Profile > Blocked people, which lists
+the blocks and unblocks them. A block affects mail from then on; mail
+already received stays.
 
 - The sender is told. Local mail from a blocked sender is refused at the
   To prompt and by `send_mail` (`MailSenderBlocked`) with "<name> does not
@@ -2589,12 +2592,34 @@ received stays.
   accounts and has to reach them, and a block would buy no privacy from the
   person who runs the database it is stored in. The check reads the sender's
   current level, so a blocked account that later becomes SysOp gets through
-  (the Blocked senders list marks the block as not applied),
+  (the Blocked people list marks the block as not applied),
   and is blocked again if it stops being one. Staff below 255 are blockable.
-- Blocking covers mail only. Live direct messages keep their own opt-out
-  (Profile's direct-message setting), which today gates Who's online, `/dm`
-  and inbound Link direct messages but not `/msg`; one block list across both
-  would first need those paths made consistent, which is its own change.
+- One list covers mail and live messages (issue #925). Before it a block
+  stopped mail only, and the one tool against someone harassing a caller
+  live was the direct-message opt-out, which silences everyone.
+  `netbbs.messaging_preferences.live_message_refusal` is the one check every
+  live path makes before delivering: `/msg`, `/private` (at entry and again
+  for each line, so a block made mid-conversation ends it), `/dm` and Who's
+  online's `[I]nvite to chat` (`run_direct_chat_invite_flow`), Who's online's
+  one-off `[M]essage`, and an inbound Link direct message
+  (`build_direct_message_deliverer`, by the sender's `user@<fingerprint>`).
+  It answers the opt-out first -- the recipient's general choice, which says
+  nothing about the sender -- and then the block, with the same SysOp
+  exemption as mail. `/msg` and `/private` now respect the opt-out too;
+  before #925 they were the one live path that did not.
+- A blocked live sender on this node is told, as a blocked letter's sender
+  is: "<name> does not accept messages from you". An inbound Link direct
+  message from a blocked sender is dropped without an answer, as one to an
+  opted-out or offline recipient already was (§8.10.3): the
+  `direct_message` frame has no reply on the wire, and adding one is a
+  protocol change this does not make. The remote sender sees their usual
+  "(sent to ...)"; their mail, which does have a bounce, tells them.
+- What a block does not cover. Public chat channels: a block does not hide a
+  blocked person's lines in a shared room, and there is no per-caller ignore
+  in chat; channel moderation (mute, kick, ban) is the tool there. MRC
+  private messages come from another network's users, not accounts or Link
+  addresses, and are not covered. SysOp messages (the console's message to a
+  caller) and system notices never pass the check.
 
 **The mailbox is a list; a message is read on its own screen** (issue #810),
 the shape the board post list has (§6.1, issue #679). `[E]-mail` opens the
@@ -4625,7 +4650,8 @@ channel message (§8.10.2): never stored, never a canonical event. The
 receiving node re-checks the sending node's `REALTIME` policy at delivery,
 then delivers exactly as a local `/msg` does (live chat sessions via the
 hub, every other session via the mailbox); an unknown, opted-out, or
-offline recipient is dropped silently -- the sender already checked the
+offline recipient, or one who blocks the sender's `user@<fingerprint>`
+(§6.4 Blocked people, issue #925), is dropped silently -- the sender already checked the
 peer's node-wide presence (a node that has not yet pushed its presence
 gets "couldn't confirm who is online there", never a blind send), which
 the peer pushes the moment the session is tracked -- and receiving a

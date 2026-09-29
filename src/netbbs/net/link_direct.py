@@ -38,7 +38,7 @@ from netbbs.link.node_profiles import (
 )
 from netbbs.link.realtime_direct import DirectChatUnreachable, IncomingDirectMessage
 from netbbs.link.transport import LinkTransportError
-from netbbs.messaging_preferences import accepts_direct_messages
+from netbbs.messaging_preferences import live_message_refusal
 from netbbs.net.session import Session
 from netbbs.net.session_registry import ActiveSessionRegistry
 from netbbs.rendering import MUTED_COLOR, colored, sanitize_text
@@ -285,7 +285,14 @@ def build_direct_message_deliverer(
     queued in the mailbox for every other session. Returns whether any
     session received it; an unknown, opted-out, or offline recipient is
     dropped -- the sender already checked presence and is told nothing
-    more (§12: a remote node's user list is not a caller's to probe)."""
+    more (§12: a remote node's user list is not a caller's to probe).
+
+    So is a message from a sender the recipient blocks (issue #925), by
+    the sender's stable `user@<home-node-fingerprint>` address, as a
+    blocked letter is: the `direct_message` frame has no answer on the
+    wire, so the sender's node cannot be told, and a new frame for it
+    would be a protocol change. The sender sees "(sent to ...)" as for
+    an opted-out recipient."""
     # Imported here, not at module top: chat_flow imports this module
     # lazily for /msg, and importing it eagerly back would be a cycle.
     from netbbs.net.chat_flow import _TimestampedNotice
@@ -296,7 +303,8 @@ def build_direct_message_deliverer(
                 target = get_user_by_username(db, message.to_user_id)
             except AuthError:
                 return None, [], "linked node", None
-            if not accepts_direct_messages(db, target):
+            sender_address = f"{message.from_user_id}@{message.from_node_fingerprint}"
+            if live_message_refusal(db, target, sender_address=sender_address) is not None:
                 return None, [], "linked node", None
             live = [
                 (channel.name, pid)

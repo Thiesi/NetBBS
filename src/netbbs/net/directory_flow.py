@@ -19,11 +19,12 @@ from netbbs.directory import get_vcard, has_bio, is_bio_visible
 from netbbs.link.boards import LinkContext
 from netbbs.link.node_profiles import identity_for_fingerprint, link_address_label, presentations_confusable
 from netbbs.doors import list_doors
-from netbbs.messaging_preferences import accepts_direct_messages
+from netbbs.mail import sender_unblockable_reason
+from netbbs.messaging_preferences import accepts_direct_messages, live_message_refusal
 from netbbs.net.breadcrumb_preference import breadcrumb_collapsed_enabled
 from netbbs.net.char_input import reject_unhandled_key
 from netbbs.net.chat_flow import run_direct_chat_invite_flow
-from netbbs.net.mail_flow import mail_open_to, mail_someone
+from netbbs.net.mail_flow import BlockTarget, is_blocked, mail_open_to, mail_someone, toggle_block
 from netbbs.net.menu_description_preference import menu_description_level
 from netbbs.net.node_map_flow import (
     MAP_HOTKEY,
@@ -33,7 +34,7 @@ from netbbs.net.node_map_flow import (
     node_map_screen,
 )
 from netbbs.net.node_theme import effective_accent_color, effective_header_color
-from netbbs.net.notices import write_notices
+from netbbs.net.notices import announce, write_notices
 from netbbs.net.picker import pick_item
 from netbbs.net.redraw_preference import redraw_in_place_enabled
 from netbbs.net.session import Session, write_prompt
@@ -362,13 +363,17 @@ async def _caller_who_screen(
     isn't built yet (issue #168) -- selecting one says so plainly
     instead of silently doing nothing or pretending the action exists.
 
-    A target who has opted out (`netbbs.messaging_preferences.
-    accepts_direct_messages`, default `True`) still appears in the list
-    -- this screen answers "who's online", not "who's reachable" -- but
-    neither live action is offered for them, with a plain explanation
-    rather than a silently swallowed attempt. Choosing not to receive
-    unsolicited direct messages reasonably also means not receiving
-    direct-chat invites -- one check gates both, not two independent ones.
+    A target who has opted out, or who blocks the caller
+    (`netbbs.messaging_preferences.live_message_refusal`, issue #925),
+    still appears in the list -- this screen answers "who's online", not
+    "who's reachable" -- but neither live action is offered for them,
+    with a plain explanation rather than a silently swallowed attempt.
+    Choosing not to receive unsolicited direct messages reasonably also
+    means not receiving direct-chat invites -- one check gates both, not
+    two independent ones. `Bloc[k]` (issue #925) blocks or unblocks the
+    selected caller -- the same list, and the same toggle, as a received
+    letter's `Bloc[k] sender` -- and is not offered for this BBS's SysOp
+    or the caller's own account.
     It does not close mail (issue #821): `[E]-mail` is offered to anyone
     listed, local or on a linked node, while mail is open to the caller,
     and opens the compose screen addressed to them.
@@ -405,6 +410,21 @@ async def _caller_who_screen(
             await session.write(reject_unhandled_key(action))
 
     _E_MAIL = ("e", MenuEntry(label=menu_key("E", "-mail"), brief="Write them a letter"))
+
+    async def _block_option(target: BlockTarget) -> tuple[str, MenuEntry]:
+        """`Bloc[k]`/`Unbloc[k]`, labelled by what it will do (issue #925)."""
+        assert lane is not None
+        blocked = await lane.run(is_blocked, user, target)
+        return ("k", MenuEntry(
+            label=menu_key("k", "", prefix="Unbloc" if blocked else "Bloc"),
+            brief="Accept their mail and messages again" if blocked else "Refuse their mail and messages",
+        ))
+
+    async def _toggle(target: BlockTarget) -> None:
+        assert lane is not None
+        text, tone = await lane.run(toggle_block, user, target)
+        announce(session, text, tone=tone)
+
     _BACK = ("b", MenuEntry(label=menu_key("B", "ack"), brief="Return to Who's online"))
 
     async def _act_on(selected: _WhoEntry) -> bool:
@@ -424,7 +444,7 @@ async def _caller_who_screen(
             # Link mail goes to their stable `user@<fingerprint>`, checked
             # like a Link reply's address (issue #805).
             offer_mail = mail_open and link_context is not None
-            if not live and not offer_mail:
+            if not live and not offer_mail and lane is None:
                 await session.write_line(
                     colored(
                         f"{sanitize_text(selected.username)} is connected to a different linked node -- live "
@@ -455,14 +475,21 @@ async def _caller_who_screen(
                     node_name_gradient=session.node_name_gradient,
                 )
             )
+            # Blocked by their address there, as a letter's sender is (#925).
+            remote_block = BlockTarget(user_id=None, address=f"{selected.username}@{selected.node_fingerprint}")
             options = []
             if live:
                 options.append(("m", MenuEntry(label=menu_key("M", "essage"), brief="Send a one-off live message")))
             if offer_mail:
                 options.append(_E_MAIL)
+            if lane is not None:
+                options.append(await _block_option(remote_block))
             options.append(_BACK)
             action = await _choose(options)
             if action == "b":
+                return False
+            if action == "k":
+                await _toggle(remote_block)
                 return False
             if action == "e":
                 assert lane is not None  # offer_mail's own condition
@@ -497,23 +524,29 @@ async def _caller_who_screen(
         offer_mail = mail_open and target.id != user.id
         # Opting out of direct messages (and so of chat invites) is not
         # opting out of mail (issue #821): such a caller is still offered
-        # [E]-mail, and told why nothing else is.
-        live = accepts_direct_messages(db, target)
-        if not live and not offer_mail:
-            await session.write_line(
-                colored(f"{target.username} has opted out of receiving direct messages.", fg_color=MUTED_COLOR)
-            )
+        # [E]-mail, and told why nothing else is. A block (issue #925) stops
+        # both; [E]-mail then says so itself, as the To prompt does.
+        refusal = live_message_refusal(db, target, sender=user)
+        live = refusal is None
+        offer_block = (
+            lane is not None and target.id != user.id and sender_unblockable_reason(db, user, target) is None
+        )
+        if not live and not offer_mail and not offer_block:
+            await session.write_line(colored(sanitize_text(refusal or ""), fg_color=MUTED_COLOR))
             return True
 
         offer_invite = live and direct_invites is not None and lane is not None
+        if live:
+            subtitle = "Choose how you would like to connect."
+        elif offer_mail and not accepts_direct_messages(db, target):
+            subtitle = f"{target.username} has opted out of direct messages; e-mail still reaches them."
+        else:
+            subtitle = refusal
         await session.write_line(
             "\r\n" + screen_title(
                 target.username,
                 breadcrumb=(session.node_display_name, "Who's online"),
-                subtitle=(
-                    "Choose how you would like to connect." if live
-                    else f"{target.username} has opted out of direct messages; e-mail still reaches them."
-                ),
+                subtitle=subtitle,
                 width=session.terminal_width,
                 clear=redraw_in_place_enabled(db, user),
                 unicode_style=unicode_style_enabled(db, user),
@@ -528,10 +561,16 @@ async def _caller_who_screen(
             options.append(("i", MenuEntry(label=menu_key("I", "nvite to chat"), brief="Invite them to a direct chat")))
         if offer_mail:
             options.append(_E_MAIL)
+        local_block = BlockTarget(user_id=target.id, address=None)
+        if offer_block:
+            options.append(await _block_option(local_block))
         options.append(_BACK)
         action = await _choose(options)
 
         if action == "b":
+            return False
+        if action == "k":
+            await _toggle(local_block)
             return False
         if action == "e":
             assert lane is not None  # offer_mail's own condition
@@ -550,6 +589,12 @@ async def _caller_who_screen(
         message = (await session.read_line()).strip()
         if not message:
             await session.write_line(colored("Cancelled: message cannot be blank.", fg_color=MUTED_COLOR))
+            return True
+        # Checked again as it goes: a block or opt-out may have come while
+        # the message was typed.
+        refusal = live_message_refusal(db, target, sender=user)
+        if refusal is not None:
+            await session.write_line(colored(sanitize_text(refusal), fg_color=MUTED_COLOR))
             return True
 
         delivered = await node_controls.session_registry.notify_one(

@@ -246,9 +246,9 @@ def test_k_on_a_letter_blocks_its_sender_and_again_unblocks(node):
 
     screens = session.screens()
     assert "Bloc[k] sender" in screens[1]
-    assert "Blocked alice: mail from them is refused from now on" in " ".join(screens[2].split())
+    assert "Blocked alice: their mail and live messages are refused from now on" in " ".join(screens[2].split())
     assert "Unbloc[k] sender" in screens[2]
-    assert "Unblocked alice: their mail is accepted again." in " ".join(screens[3].split())
+    assert "Unblocked alice: their mail and live messages are accepted again." in " ".join(screens[3].split())
     assert not blocks_local_sender(db, bob, alice)
 
 
@@ -289,7 +289,7 @@ def test_the_list_adds_by_name_and_unblocks(node):
 
     screens = session.screens()
     assert "You block no one." in screens[0]
-    assert "Blocked alice: mail from them is refused from now on" in " ".join(screens[1].split())
+    assert "Blocked alice: their mail and live messages are refused from now on" in " ".join(screens[1].split())
     assert "alice" in screens[1] and "on this BBS" in screens[1]
     assert "Unblocked alice" in screens[-1]
     assert list_mail_blocks(db, bob) == []
