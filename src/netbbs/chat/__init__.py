@@ -33,6 +33,7 @@ from netbbs.chat.membership import (
     is_member,
     list_members,
     list_pending_invitations_for_user,
+    may_invite,
     remove_member,
     revoke_invitation,
 )
@@ -100,6 +101,7 @@ __all__ = [
     "is_member",
     "list_members",
     "list_pending_invitations_for_user",
+    "may_invite",
     "remove_member",
     "revoke_invitation",
     "MAX_NICK_LENGTH",

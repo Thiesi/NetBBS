@@ -2455,8 +2455,14 @@ for a caller mail is open to (`caller_mail_refusal`):
   come before them, and a drain warning (§13.8) before those; the count of
   pending chat channel invitations and any queued `/msg` lines follow them
   (issue #923). Ahead of all of these is the outcome of a question answered
-  during login (the Unicode-style check, a first-run choice), which answers
-  the last thing the caller did.
+  during login (the character-set check, a first-run choice), which answers
+  the last thing the caller did. First of all is the login line itself,
+  "Welcome, <name> › level N › Ctrl-L redraws" (issue #949). Like every
+  notice there it is shown once and not again after Ctrl-L, and it is
+  written nowhere before the menu, in either redraw mode: with
+  redraw-in-place on the menu's clear wiped it unseen, and with it off it
+  would be shown twice. It is built after the login questions, so the
+  character-set answer decides its separator.
 - *In New scan.* A `Mail:` line heads the summary above the list with the
   login notice's two counts ("Mail: 3 new since your last call, 7 unread
   in all"; on a first call `Mail: N unread`), counted from the same
@@ -2574,8 +2580,8 @@ Mail about Link delivery (#806's bounces) is told at the main menu and on the
 sent message's Delivery line, not by a system message; a bounce letter in
 the Inbox could use this sender later.
 
-**Blocked people** (issues #817, #925). An account can refuse mail and
-live messages from one person. A block names a local account by id, so it survives a rename, or a
+**Blocked people** (issues #817, #925, #948). An account can refuse mail,
+live messages and chat channel invitations from one person. A block names a local account by id, so it survives a rename, or a
 Link sender by the `user@<home-node-fingerprint>` address its mail came
 from (user part compared case-insensitively), never by the node's display
 name, which can change. Blocks live in `mail_blocks`; deleting the blocking
@@ -2628,9 +2634,30 @@ already received stays.
   `direct_message` frame has no reply on the wire, and adding one is a
   protocol change this does not make. The remote sender sees their usual
   "(sent to ...)"; their mail, which does have a bounce, tells them.
+- A block stops a chat channel invitation too (issue #948). `/invite` to
+  someone who has blocked the inviter writes no `channel_invitations` row
+  and sends no live notice, and tells the inviter "<name> does not accept
+  messages from you", `/msg`'s words
+  (`netbbs.messaging_preferences.invitation_refusal`). The inviter's right
+  to invite is answered first, so a caller who may not invite anyone hears
+  that rather than learning of a block. The direct-message opt-out does not
+  stop an invitation, as it never has: an invitation waits in the invitee's
+  pending list and asks nothing of them, where a live message interrupts.
+  The SysOp exemption is the same as mail's. `/invite` is the only path that
+  creates an invitation; Link carries none. An invitation made before the
+  block stays pending until it expires or is revoked.
+- Who's online offers only what can succeed (issue #948, after #920's
+  picker). For a local caller who has blocked the viewer it offers neither
+  live action nor `[E]-mail`, since the letter would be refused, and its
+  subtitle says "<name> does not accept messages or mail from you." The
+  screen is still drawn, with `Bloc[k]` where the viewer may block them back
+  (their block does not stop their own mail) and `[B]ack`. A caller on a
+  linked node keeps `[E]-mail`: their node's block list is not known here,
+  and the To prompt or the bounce answers.
 - What a block does not cover. Public chat channels: a block does not hide a
   blocked person's lines in a shared room, and there is no per-caller ignore
-  in chat; channel moderation (mute, kick, ban) is the tool there. MRC
+  in chat; channel moderation (mute, kick, ban) is the tool there. An
+  invitation into a channel is covered (above). MRC
   private messages come from another network's users, not accounts or Link
   addresses, and are not covered. SysOp messages (the console's message to a
   caller) and system notices never pass the check.
@@ -2932,7 +2959,8 @@ writer who typed `|12` meant color.
 the screen where they found them, without typing an address:
 - the Directory's member card, `[M]ail`;
 - Who's online, `[E]-mail` on a selected caller (`[M]` there is the live
-  message), for a local caller and for one on a linked node;
+  message), for a local caller and for one on a linked node, but not for a
+  local caller who has blocked the viewer (§6.4 Blocked people, issue #948);
 - Previous callers, `[M]ail a caller`, which asks for the row's number;
 - the board reader, `[M]ail author`: a private reply to the post's author, with
   the post's `Re:` subject and quote, as a board reply has (§6.1). It is offered
@@ -2947,7 +2975,8 @@ address gets (issue #805) -- the address is their stable
 `user@<home-node-fingerprint>` (Who's online's presence, a carried post's
 author label), shown by the node's current name. The action is not offered
 while mail is closed to the caller, on the caller's own card, post or call,
-for a deleted account, or for a carried post's author while Link is off; a
+for a deleted account, for a carried post's author while Link is off, or on
+Who's online for a local caller who has blocked the viewer; a
 recipient-side refusal (the guest account, a peer on probation, a node this one
 is not linked with) is said when the key is pressed. Opting out of direct
 messages (§6.3) does not close mail: Who's online still offers `[E]-mail` for

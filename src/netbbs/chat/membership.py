@@ -145,6 +145,18 @@ def _expiry_timestamp(days: int) -> str:
     return future.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
+def may_invite(db: Database, channel: Channel, user: User) -> bool:
+    """Whether `user` may invite anyone to `channel` at all: they hold
+    `MANAGE_MEMBERS`, or the channel allows member invites and they are a
+    member. `create_invitation` enforces it; `/invite` asks it first so a
+    caller without the right is told that, not whether the invitee has
+    blocked them (issue #948)."""
+    return has_permission(
+        db, user, object_type="channel", object_id=channel.id,
+        permission=ChannelPermission.MANAGE_MEMBERS,
+    ) or (channel.allow_member_invites and is_member(db, channel, user))
+
+
 def create_invitation(db: Database, channel: Channel, target: User, *, invited_by: User) -> ChannelInvitation:
     """
     Create (or upsert, same `ON CONFLICT` pattern as `channel_
@@ -164,13 +176,7 @@ def create_invitation(db: Database, channel: Channel, target: User, *, invited_b
     `None` remains available (an operator can configure indefinite
     invitations) — see that config function's own docstring.
     """
-    if not (
-        has_permission(
-            db, invited_by, object_type="channel", object_id=channel.id,
-            permission=ChannelPermission.MANAGE_MEMBERS,
-        )
-        or (channel.allow_member_invites and is_member(db, channel, invited_by))
-    ):
+    if not may_invite(db, channel, invited_by):
         raise MembershipError(f"{invited_by.username!r} may not invite users to this channel")
 
     created_at = utc_now_iso()

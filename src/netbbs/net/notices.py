@@ -49,9 +49,16 @@ def announce(session: Session, text: str, *, tone: str = "success", color: int |
     _pending.setdefault(_owner(session), []).append(line)
 
 
-def announce_styled(session: Session, line: str) -> None:
-    """Queue a line that is already sanitized and styled."""
-    _pending.setdefault(_owner(session), []).append(_LEADING_BREAK.sub(r"\1", line))
+def announce_styled(session: Session, line: str, *, first: bool = False) -> None:
+    """Queue a line that is already sanitized and styled; with `first`,
+    ahead of whatever is already queued (login's Welcome line, issue #949,
+    which mail arriving during the login questions must not precede)."""
+    queue = _pending.setdefault(_owner(session), [])
+    line = _LEADING_BREAK.sub(r"\1", line)
+    if first:
+        queue.insert(0, line)
+    else:
+        queue.append(line)
 
 
 def has_notices(session: Session) -> bool:
