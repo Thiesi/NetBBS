@@ -98,7 +98,7 @@ def set_display_name(db: Database, user: User, name: str) -> None:
     if RESERVED_DISPLAY_NAME_MARKER in name:
         raise ProfileFieldError(
             f"display name cannot contain {RESERVED_DISPLAY_NAME_MARKER!r} "
-            "(reserved for verified real-name display, design doc)"
+            "(reserved for verified real names)"
         )
     byte_count = len(name.encode("utf-8"))
     if byte_count > MAX_DISPLAY_NAME_BYTES:

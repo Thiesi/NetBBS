@@ -1456,7 +1456,7 @@ def test_admin_can_attach_a_public_key_to_an_existing_password_account(db, lane,
     verify_key = nacl.signing.SigningKey.generate().verify_key
     raw_b64 = base64.b64encode(bytes(verify_key)).decode()
 
-    session = FakeSession(["u", "e", "0", "1", "k", "a", "phone", raw_b64, "b", "b", "b", "b"])
+    session = FakeSession(["u", "e", "0", "1", "k", "a", raw_b64, "phone", "b", "b", "b", "b"])
     _run(session, lane, sysop)
 
     updated = next(u for u in list_users(db) if u.username == "alice")
@@ -1470,7 +1470,7 @@ def test_attaching_a_duplicate_public_key_is_refused(db, lane, sysop):
     create_user(db, "bob", verify_key=verify_key, user_level=10)
     alice = create_user(db, "alice", password="hunter2", user_level=10)
 
-    session = FakeSession(["u", "e", "0", "1", "k", "a", "phone", raw_b64, "b", "b", "b", "b"])
+    session = FakeSession(["u", "e", "0", "1", "k", "a", raw_b64, "phone", "b", "b", "b", "b"])
     _run(session, lane, sysop)
 
     updated = next(u for u in list_users(db) if u.username == "alice")

@@ -688,17 +688,11 @@ class NodeConfig:
             warnings.append(
                 f"NetBBS Link is configured as a full peer, advertising "
                 f"{self.link.advertised_host}:{self.link.advertised_port or self.link.port} to other "
-                "nodes -- design doc §15/§12: Phase 3 remains a private, invite-your-friends federation, "
-                "not a public one (issue #55). Local trust/probation/quarantine enforcement across Link "
-                "boundaries is implemented and validated against adversarial scenarios (issues "
-                "#126-131), not merely planned -- but an externally reachable Link listener still "
-                "accepts a hello from any node that dials it (by design: a stranger has to be seen "
-                "before it can be evaluated), and a freshly-seen node stays PROBATIONARY, with only "
-                "bounded access, until your own configured trust signals/reporters or a manual SysOp "
-                "decision quarantines or blocks it. There is no public, shared reputation network to "
-                "lean on yet, and issue #83's independently-administered dogfood -- the remaining step "
-                "before any public-readiness claim -- has not happened. Prefer outgoing_only (the "
-                "default) for anything but a small, trusted, invite-your-friends deployment."
+                "nodes. Any node that dials this address is accepted for a first hello: a stranger has "
+                "to be seen before it can be judged. A node seen for the first time stays on probation, "
+                "with limited access, until your trust settings or you yourself decide otherwise. There "
+                "is no shared reputation network to lean on yet. Unless you run a small network among "
+                "people you know, keep outgoing_only = true (the default)."
             )
         return warnings
 

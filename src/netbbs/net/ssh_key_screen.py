@@ -110,11 +110,17 @@ async def manage_ssh_keys_screen(session: Session, lane: DatabaseLane, target: U
             # place, but that promotion carries no cryptographic proof
             # of continuity, a real, disclosed limitation, not a bug.
             primary_note = colored("  (primary)", fg_color=LABEL_COLOR) if key.fingerprint == target.fingerprint else ""
+            # Two lines per key (issue #845, F109): label on the first, the
+            # fingerprint and date beneath it, so a long label never wraps
+            # the three into one run-on line.
             await session.write_line(
                 f"  {position}. "
                 + colored(sanitize_text(key.label), fg_color=METADATA_COLOR)
-                + colored(f"  {key.fingerprint[:12]}…  added {added}", fg_color=MUTED_COLOR)
                 + primary_note
+            )
+            await session.write_line(
+                " " * (len(str(position)) + 4)
+                + colored(f"{key.fingerprint[:12]}…  added {added}", fg_color=MUTED_COLOR)
             )
 
         options = [menu_key("A", "dd a key"), menu_key("B", "ack")]
@@ -133,12 +139,30 @@ async def manage_ssh_keys_screen(session: Session, lane: DatabaseLane, target: U
             await session.write_line("")
 
 
+def _key_comment(text: str) -> str:
+    """The comment an OpenSSH public-key line carries ("ssh-ed25519 AAAA...
+    kai@laptop" -> "kai@laptop"), or "" -- offered as the label."""
+    fields = text.split(maxsplit=2)
+    return fields[2].strip() if len(fields) == 3 and fields[0] == "ssh-ed25519" else ""
+
+
+def _looks_like_key(label: str) -> bool:
+    """Whether a label is really a pasted key. Every other tool asks for the
+    key first, so a caller who expects that pastes it into whatever comes
+    first (issue #845, F109)."""
+    if label.startswith("ssh-"):
+        return True
+    try:
+        parse_verify_key(label)
+    except IdentityError:
+        return False
+    return True
+
+
 async def _add_key(session: Session, lane: DatabaseLane, target: User, *, changed_by: User) -> User:
+    # The key first, then its label (issue #845, F109): the order every
+    # other tool uses, so a pasted key lands where it belongs.
     await session.write_line("")
-    await write_prompt(session, 'Label for this key (e.g. "phone", "laptop", blank to cancel): ')
-    label = (await session.read_line()).strip()
-    if not label:
-        return target
     await write_prompt(session, "Public key (base64, or an ssh-ed25519 line, blank to cancel): ")
     text = (await session.read_line()).strip()
     if not text:
@@ -147,6 +171,15 @@ async def _add_key(session: Session, lane: DatabaseLane, target: User, *, change
         verify_key: nacl.signing.VerifyKey = parse_verify_key(text)
     except IdentityError as exc:
         await session.write_line(colored(f"Could not parse key: {exc}", fg_color=ERROR_COLOR))
+        return target
+    await write_prompt(session, 'Label for this key (e.g. "phone", "laptop", blank to cancel): ')
+    label = (await session.read_line(initial=sanitize_text(_key_comment(text)))).strip()
+    if not label:
+        return target
+    if _looks_like_key(label):
+        await session.write_line(colored(
+            "That looks like a key, not a label. Nothing was added.", fg_color=ERROR_COLOR,
+        ))
         return target
     try:
         target = await lane.run(add_ssh_key, target, verify_key, label=label, changed_by=changed_by)
