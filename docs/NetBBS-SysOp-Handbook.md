@@ -356,6 +356,8 @@ expiry. The node's upload limit and any lower proxy limit both apply.
 Log in as a level-255 account and press **[S]ysOp**. The dashboard shows
 node mode, active sessions, pending approvals, backup/update status, and
 NetBBS Link health when enabled. Refresh it after making changes elsewhere.
+Helpers you give staff permissions get a smaller **[S]taff** console instead
+([Sharing the work](#sharing-the-work-staff-permissions)).
 
 | Area | Purpose |
 | --- | --- |
@@ -363,6 +365,24 @@ NetBBS Link health when enabled. Refresh it after making changes elsewhere.
 | Content | Message boards, file areas, chat channels, Communities, doors, moderation |
 | Operations | Sessions, maintenance, audit log, backups, Link diagnostics |
 | Settings | Branding, timestamps, node name, network participation, update checks, limits and retention |
+
+**A first day, in order.** Most first-time SysOps get furthest by doing these
+before telling anyone the address:
+
+1. Choose who may sign up under **Users → Registration**
+   ([Accounts](#accounts-permissions-and-identity)).
+2. Decide what, if anything, levels will mean on your node
+   ([Levels](#levels)). Everyone starts at 0, which is enough for a club
+   where every member sees everything.
+3. Create a few message boards, a chat channel and a file area under
+   **Content**. Add Communities only if your node has separate topics, and
+   categories only once a list gets long
+   ([Content and Communities](#content-and-communities)).
+4. Give the node its look under **Settings** and
+   [Mastheads & banners](#custom-banners-and-mastheads).
+5. Set up backups ([Create and verify a backup](#create-and-verify-a-backup)).
+6. Join NetBBS Link later, if at all, once the node works on its own
+   ([Join and share](#join-and-share)).
 
 Quick actions lead to the same screens. Use the displayed keys rather than
 old menu letters from release notes. **Back** leaves a screen. Draft editors
@@ -397,13 +417,47 @@ Choose registration mode under **Users → Registration**:
 A caller cannot register a reserved name (`sysop`, `admin`, `root`,
 `moderator`, `guest` and a few more), a name containing "sysop", or a name
 that reads like a SysOp's own (`lnkwell` for `InkWell`). You can still create
-such an account yourself under **Users → Create**.
+such an account yourself under **Users → Create user**.
 
-An account's numeric level controls level-based access. Level 255 grants SysOp
-administration; ordinary levels express your local policy. NetBBS refuses an
-account change that would leave no enabled, approved SysOp. Disabling an account
-revokes its access; deletion is permanent and requires its exact name. Existing
-content retains its recorded author label.
+### Levels
+
+Every account has a level from 0 to 255. A new account starts at **0**,
+whether a caller signed up or you created it, and approving a pending account
+leaves it at 0. **255** is SysOp: the whole console and power over every
+account. Levels 1 to 254 grant nothing by themselves. They matter only where
+you set a minimum, and every minimum starts at 0:
+
+- a message board's or file area's **Min read level** and **Min write
+  level**, which a Community can supply as defaults;
+- a chat channel's single **Min level**, to join it;
+- a door's **Min play level**;
+- node-wide minimums under **Settings**, such as the Mail level and the Node
+  map level.
+
+A channel's and a door's level are always set on the channel or door itself,
+never inherited from a Community. Raise an account's level from its detail
+screen under **Users**.
+
+A small club rarely needs more than this:
+
+| Level | Who | Example use |
+| --- | --- | --- |
+| 0 | Everyone, including new callers | General boards, file areas, chat channels and games, every level left at 0 |
+| 10 | Members you know | A members' lounge board with read and write level 10, and a members' channel with Min level 10 |
+| 255 | You | An announcements board with read level 0 and write level 255 |
+
+Be careful with 255 as a minimum. An announcements board with write level
+255 shuts out everyone who is not a full SysOp, including a helper you trust
+later. Do not raise that helper to 255, which hands them the whole node,
+your own account included. Give them a **Read and post** grant on that board
+instead ([Content and Communities](#content-and-communities)), and staff
+permissions for account work ([Sharing the work](#sharing-the-work-staff-permissions)).
+
+NetBBS refuses an account change that would leave no enabled, approved
+SysOp. Disabling an account revokes its access; deletion is permanent and
+requires its exact name. Existing content retains its recorded author label.
+
+### Account lifecycle
 
 A disabled account, and a signup still awaiting approval, receive no mail:
 callers here are told so at the To prompt, and Link mail bounces with "that
@@ -503,6 +557,23 @@ A notice with a date ends by itself after that day; one without a date stays
 until you end it, reads "away since" the day you set it, and your landing
 screen reminds you of it each time. Being away changes nobody's permissions.
 
+**Moderator, staff member or second SysOp?** Pick the smallest that does the
+job:
+
+- A **moderator grant** (**Content → Grant moderator**) covers one board,
+  file area or chat channel, or, with a blanket scope, every one of a kind in
+  a Community or on the node. On boards and file areas it can allow editing,
+  deleting and approving what callers post or upload; in a channel, changing
+  the topic, muting or banning, and managing an invite-only channel's
+  members. It opens no console, no accounts and no settings.
+- **Staff permissions** add account work: approving signups, and with
+  **Manage accounts**, disabling accounts, resetting passwords and setting
+  levels up to 254. A staff member can never touch your account.
+- A **second SysOp at level 255** can do everything you can, to your account
+  too: demote it, disable it, reset its password or delete it. The only
+  guard is that NetBBS never leaves the node without an enabled, approved
+  SysOp. Make someone a second SysOp only if you would hand them the node.
+
 ### Verified age and names
 
 A SysOp, or an account explicitly granted **Identity verification**, records
@@ -561,7 +632,10 @@ description, because that is what callers read first.
 **Categories and Communities are different things.** A category groups the
 list of one kind (board categories group boards) and shows up as a folder in
 that list. A Community is a topic that holds every kind at once. A resource
-can have both. Ctrl-H on the Categories screen says the same.
+can have both. Create categories under **Content → Categories** and pick one
+in a board's, area's or channel's **Category** field; Communities are under
+**Content → Communities**. Ctrl-H on the Categories screen says the same. A
+node with a handful of boards needs neither.
 
 Until the node has a board, chat channel or file area, your own main menu
 shows where to create one.
