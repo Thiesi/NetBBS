@@ -22,7 +22,13 @@ from netbbs.net.char_input import EditorKey, EditorKeyKind
 from netbbs.net.composition import ReviewAction, review_composition
 from netbbs.net.help_overlay import show_help
 from netbbs.net.board_flow import _post_list_rows
-from netbbs.rendering.post_body import quoted_body as _render_quoted_body
+from netbbs.rendering.post_body import post_body_rows
+
+
+def _render_quoted_body(raw: str, *, width: int) -> str:
+    """A text-mode board post as the reader lays it out (issue #837: its
+    lines kept), rows joined as `quoted_body` used to return them."""
+    return "\r\n".join(post_body_rows(raw, width, "text", truecolor=False))
 from netbbs.net.mail_flow import _show_message
 from netbbs.rendering.width import display_width
 from netbbs.net.picker import pick_item
@@ -102,7 +108,7 @@ def test_quoted_body_plain_text():
 def test_quoted_body_single_line_quote_colored():
     raw = "> This is a quote."
     result = _render_quoted_body(raw, width=80)
-    expected = colored("> This is a quote.", fg_color=MUTED_COLOR)
+    expected = colored("> ", fg_color=MUTED_COLOR) + colored("This is a quote.", fg_color=MUTED_COLOR)
     assert expected in result
 
 
@@ -126,7 +132,7 @@ def test_quoted_body_quote_then_reply_no_blank_line():
     result = _render_quoted_body(raw, width=80)
     lines = result.split("\r\n")
     assert len(lines) == 2
-    assert colored("> quoted line", fg_color=MUTED_COLOR) == lines[0]
+    assert colored("> ", fg_color=MUTED_COLOR) + colored("quoted line", fg_color=MUTED_COLOR) == lines[0]
     assert "my unquoted reply" == lines[1]
 
 
@@ -136,7 +142,7 @@ def test_quoted_body_reply_then_quote_no_blank_line():
     lines = result.split("\r\n")
     assert len(lines) == 2
     assert "my unquoted reply" == lines[0]
-    assert colored("> quoted line", fg_color=MUTED_COLOR) == lines[1]
+    assert colored("> ", fg_color=MUTED_COLOR) + colored("quoted line", fg_color=MUTED_COLOR) == lines[1]
 
 
 def test_quoted_body_blank_lines_preserved_at_boundaries():
@@ -145,7 +151,7 @@ def test_quoted_body_blank_lines_preserved_at_boundaries():
     result = _render_quoted_body(raw, width=80)
     lines = result.split("\r\n")
     assert len(lines) == 3
-    assert colored("> quoted line", fg_color=MUTED_COLOR) == lines[0]
+    assert colored("> ", fg_color=MUTED_COLOR) + colored("quoted line", fg_color=MUTED_COLOR) == lines[0]
     assert lines[1] == ""
     assert "my unquoted reply" == lines[2]
 

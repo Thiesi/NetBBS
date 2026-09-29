@@ -10,7 +10,7 @@ import re
 import pytest
 
 from netbbs.rendering.post_body import (
-    colored_body_rows,
+    lined_body_rows,
     plain_post_body,
     post_body_mode,
     post_body_rows,
@@ -139,7 +139,7 @@ def test_modes():
 @pytest.mark.parametrize("width", [40, 80])
 def test_colored_rows_fit_and_stand_alone(width):
     body = "|12" + " ".join(f"word{i}" for i in range(80)) + "|07 tail\n\n> quoted |10green " + "q " * 60
-    rows = colored_body_rows(styled_post_body(body), width)
+    rows = lined_body_rows(styled_post_body(body), width)
 
     assert len(rows) > 3
     for row in rows:
@@ -154,7 +154,7 @@ def test_colored_rows_fit_and_stand_alone(width):
 
 def test_a_color_flood_costs_each_row_one_short_prefix():
     body = "".join(f"|{i % 16:02d}x " for i in range(5000))
-    rows = colored_body_rows(styled_post_body(body), 40)
+    rows = lined_body_rows(styled_post_body(body), 40)
 
     for row in rows[1:]:
         prefix = _SGR.match(row)
@@ -196,8 +196,8 @@ def test_an_art_post_keeps_its_lines():
     rows = art_body_rows(styled_post_body(body), 80)
 
     assert [_SGR.sub("", row) for row in rows] == ["short", "lines stay", "as drawn"]
-    # The same body as prose is one reflowed paragraph.
-    assert len(post_body_rows(body, 80, "color", truecolor=True)) == 1
+    # A prose post keeps its lines too (issue #837).
+    assert len(post_body_rows(body, 80, "color", truecolor=True)) == 3
 
 
 def test_a_wide_art_line_wraps_at_the_column_with_its_color():
@@ -218,15 +218,17 @@ def test_an_art_post_keeps_its_lines_without_color(mode):
 # -- Codex review on #750 ---------------------------------------------------------
 
 
-def test_a_color_code_between_spaces_is_not_a_word():
-    rows = colored_body_rows(styled_post_body("hello |12 world |07 again"), 80)
+def test_a_color_code_between_spaces_leaves_the_spaces_as_typed():
+    # Lines are no longer re-flowed (issue #837), so the spaces around a
+    # color code are the author's, not collapsed into one.
+    rows = lined_body_rows(styled_post_body("hello |12 world |07 again"), 80)
 
-    assert _SGR.sub("", rows[0]) == "hello world again"
+    assert _SGR.sub("", rows[0]) == "hello  world  again"
 
 
 @pytest.mark.parametrize("body", [" |12> quoted", "|12 > quoted", f" {ESC}[31m > quoted"])
 def test_a_quote_marker_behind_indentation_and_color_is_drawn_once(body):
-    rows = colored_body_rows(styled_post_body(body), 80)
+    rows = lined_body_rows(styled_post_body(body), 80)
 
     assert _SGR.sub("", rows[0]) == "> quoted"
 
@@ -237,17 +239,17 @@ def test_an_overlong_sgr_parameter_is_dropped_not_raised():
     for rendered in (styled_post_body(body), plain_post_body(body)):
         assert "before" in rendered and "after" in rendered
     assert _only_allowed_sgr(styled_post_body(body))
-    colored_body_rows(styled_post_body(body), 40)
+    lined_body_rows(styled_post_body(body), 40)
 
 
 def test_a_quote_marker_behind_unicode_indentation_is_drawn_once():
-    rows = colored_body_rows(styled_post_body("\u00a0\u2003|12> quoted"), 80)
+    rows = lined_body_rows(styled_post_body("\u00a0\u2003|12> quoted"), 80)
 
     assert _SGR.sub("", rows[0]) == "> quoted"
 
 
 def test_quote_text_stays_muted_around_an_authors_color():
-    rows = colored_body_rows(styled_post_body("> plain |12red|07 back\x1b[0m after"), 80)
+    rows = lined_body_rows(styled_post_body("> plain |12red|07 back\x1b[0m after"), 80)
 
     muted = ESC + "[38;5;248m"
     row = rows[0]
@@ -337,7 +339,7 @@ def test_a_trimmed_quote_keeps_the_attribution_on_its_own_line(mode):
     rows = [_SGR.sub("", row) for row in post_body_rows(_trimmed_reply("lena_h"), 80, mode, truecolor=False)]
 
     assert rows[0] == "lena_h wrote:"
-    assert rows[1] == "Hello Lena, welcome! Your nib is almost certainly fine."
+    assert rows[1:3] == ["Hello Lena, welcome!", "Your nib is almost certainly fine."]
 
 
 @pytest.mark.parametrize("mode", ["color", "plain", "text"])
@@ -356,11 +358,40 @@ def test_text_above_an_attribution_does_not_swallow_it(mode):
 
 
 @pytest.mark.parametrize("mode", ["color", "plain", "text"])
-def test_wrote_inside_a_sentence_is_still_prose(mode):
+def test_wrote_inside_a_sentence_is_ordinary_text(mode):
     body = "She wrote: the ink\nwas dry by then."
     rows = [_SGR.sub("", row) for row in post_body_rows(body, 80, mode, truecolor=False)]
 
-    assert rows[0] == "She wrote: the ink was dry by then."
+    assert rows[:2] == ["She wrote: the ink", "was dry by then."]
+
+
+# -- a board post's lines (issue #837) ------------------------------------------
+
+
+@pytest.mark.parametrize("mode", ["color", "plain", "text"])
+def test_a_post_keeps_its_lists_and_sign_off(mode):
+    body = "Inks I use:\n- Iroshizuku\n- Diamine\n\n73,\nHarold"
+    rows = [_SGR.sub("", row) for row in post_body_rows(body, 80, mode, truecolor=False)]
+
+    assert rows == ["Inks I use:", "- Iroshizuku", "- Diamine", "", "73,", "Harold"]
+
+
+@pytest.mark.parametrize("mode", ["color", "plain", "text"])
+def test_a_post_line_wider_than_the_screen_wraps_at_a_word(mode):
+    body = " ".join(["nib"] * 30)
+    rows = [_SGR.sub("", row) for row in post_body_rows(body, 40, mode, truecolor=False)]
+
+    assert len(rows) > 1
+    assert all(display_width(row) <= 40 for row in rows)
+    assert " ".join(rows).split() == body.split()
+
+
+@pytest.mark.parametrize("mode", ["color", "plain", "text"])
+def test_a_post_and_a_letter_are_laid_out_alike(mode):
+    body = "lena_h wrote:\n> Is my nib ruined?\nNo.\n\n73,\nHarold"
+    assert post_body_rows(body, 60, mode, truecolor=False) == post_body_rows(
+        body, 60, mode, truecolor=False, layout="lines"
+    )
 
 
 # -- a mail body's lines (issue #809) ------------------------------------------
