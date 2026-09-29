@@ -79,9 +79,11 @@ from netbbs.net.throttle import LoginThrottle
 # a few sentences, which lose nothing by being narrow.
 _PRE_NEGOTIATION_WIDTH = 40
 from netbbs.net.unicode_style_preference import (
-    set_unicode_style_enabled,
+    apply_charset_preference,
+    charset_preference,
+    charset_preference_ever_set,
+    set_charset_preference,
     unicode_style_enabled,
-    unicode_style_ever_set,
 )
 from netbbs.guest import guest_is_eligible, guest_login_for, pre_login_notice
 from netbbs.net.welcome_banner import load_welcome_banner, pre_login_unicode_style
@@ -565,49 +567,44 @@ def _apply_access_change(session: Session, current: User, session_registry: Acti
         changed.set()
 
 
-async def _confirm_unicode_style(session: Session, db: Database, user: User) -> None:
-    """One-time post-login check (dogfood feature request): shows a
-    live sample of the Unicode breadcrumb style and asks whether it
-    rendered cleanly, since -- unlike `netbbs.net.color_depth_
-    preference`'s own COLORTERM signal -- there's no reliable way to
-    detect real UTF-8 terminal support ahead of time. The sample is
-    built with the actual `screen_title(..., unicode_style=True)`, not
-    a hand-typed copy, so what's shown always matches what real screens
-    will actually look like.
+_CHARSET_SAMPLE = "\u250c\u2500\u2500 caf\u00e9 \u2500\u2500\u2510"
 
-    Fires exactly once per account, gated on `unicode_style_ever_set`.
-    Answering either way -- including keeping it on -- writes the
-    preference, which itself counts as "touched" and prevents asking
-    again (`netbbs.net.unicode_style_preference`'s own established
-    contract, shared with `redraw_preference`)."""
-    if unicode_style_ever_set(db, user):
+
+async def _confirm_charset(session: Session, db: Database, user: User, *, apply_to: Session | None = None) -> None:
+    """Ask once which sample line looks right, when the terminal did not
+    say for certain which character set it reads (design doc §3.2, issue
+    #929): it reported no known terminal type, or only `ansi`. The same
+    frame goes out once as UTF-8 and once as CP437, byte for byte,
+    whatever the session is using; "neither" means ASCII. The answer
+    becomes the caller's preference and applies at once.
+
+    A caller who has already chosen -- in Profile, here before, or by
+    switching the old Unicode style off -- is not asked."""
+    if getattr(session, "charset_certain", True) or charset_preference_ever_set(db, user):
         return
-    if getattr(session, "transport_name", None) == "web":
-        # The browser terminal always draws them, so the question only
-        # puzzled callers there (issue #840, F090/F112). Nothing is saved:
-        # the same account dialling in with an ASCII-only client later is
-        # still asked (review on #871).
-        return
+    await session.write_line("")
+    await session.write_line("Which of these lines looks right on your screen?")
+    await session.write_raw(b"  [1] " + _CHARSET_SAMPLE.encode("utf-8") + b"\r\n")
+    await session.write_raw(b"  [2] " + _CHARSET_SAMPLE.encode("cp437") + b"\r\n")
+    await session.write_line("  [3] Neither of them")
+    await write_prompt(session, "Your choice [1/2/3]: ")
+    choice = ""
+    while choice not in ("1", "2", "3"):
+        choice = await session.read_key(echo=False)
+    # A caller who types the digit and then Enter must not have that Enter
+    # dismiss the next screen (review on #943).
+    discard_buffered_enter = getattr(session, "discard_buffered_enter", None)
+    if discard_buffered_enter is not None:
+        await discard_buffered_enter()
+    await session.write_line(choice)
+    preference = {"1": "unicode", "2": "cp437", "3": "ascii"}[choice]
+    set_charset_preference(db, user, preference)
+    apply_charset_preference(apply_to if apply_to is not None else session, preference)
+    label = {"unicode": "Unicode", "cp437": "CP437", "ascii": "plain ASCII"}[preference]
     await session.write_line(
-        colored("\r\nNetBBS can use a few Unicode characters for a cleaner look, like this:", fg_color=METADATA_COLOR)
+        colored(f"Using {label}. You can change this later in Your profile, under Character set.",
+                fg_color=MUTED_COLOR)
     )
-    await session.write_line(
-        screen_title(
-            "Example", breadcrumb=(session.node_display_name, "System"), width=session.terminal_width,
-            unicode_style=True, header_color=effective_header_color_256(db),
-        node_name_gradient=session.node_name_gradient).split("\r\n")[0]
-    )
-    switch_off = await prompt_yes_no(
-        session, "Does that look garbled or wrong? Switch to plain ASCII instead?", default=False
-    )
-    set_unicode_style_enabled(db, user, not switch_off)
-    if switch_off:
-        await session.write_line(
-            colored(
-                "Switched to plain ASCII style. You can change this later in Your profile.",
-                fg_color=MUTED_COLOR,
-            )
-        )
 
 
 async def run_authenticated_session(
@@ -668,6 +665,9 @@ async def run_authenticated_session(
     # node-name-gradient section docstring for why).
     session.node_display_name = get_node_display_name(db)
     session.node_name_gradient = effective_node_name_gradient(db)
+    # The caller's character set preference replaces what was detected at
+    # connect time, from the first screen after login on (issue #929).
+    apply_charset_preference(session, charset_preference(db, user))
     # Issue #611: the self-service password change re-verifies the
     # current password from inside this session, and that check charges
     # the node's login throttle rather than opening a second, unbounded
@@ -795,7 +795,9 @@ async def run_authenticated_session(
         # never answers -- placing it before the watcher existed would
         # leave a revoked account's session completely unprotected for
         # as long as it sat here (GitHub issue #29's whole point).
-        await _confirm_unicode_style(first_run, db, user)
+        # The answer is applied to the real session: `first_run` only
+        # holds the outcome line for the first main menu (issue #923).
+        await _confirm_charset(first_run, db, user, apply_to=session)
         first_run.announce_rest(last_paragraph=False)
         await _show_previous_callers_screen(
             session, db, user, current_history_id=history_id

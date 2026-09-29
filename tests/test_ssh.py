@@ -753,10 +753,7 @@ def test_ssh_password_login_reaches_main_menu_without_a_second_prompt(db):
             async with asyncssh.connect(
                 "127.0.0.1", server.port, username="alice", password="hunter2", known_hosts=None
             ) as conn:
-                async with conn.create_process(term_type="ansi", term_size=(80, 24), encoding=None) as proc:
-                    # Enter accepts the one-time post-login Unicode-
-                    # style confirmation's default (keep it on).
-                    proc.stdin.write(b"\r")
+                async with conn.create_process(term_type="xterm", term_size=(80, 24), encoding=None) as proc:
                     output = await _read_until(proc.stdout, "Choice:")
                     return output
         finally:
@@ -785,10 +782,7 @@ def test_ssh_public_key_login_reaches_main_menu_without_any_password_prompt(db):
             async with asyncssh.connect(
                 "127.0.0.1", server.port, username="bob", client_keys=[key], known_hosts=None
             ) as conn:
-                async with conn.create_process(term_type="ansi", term_size=(80, 24), encoding=None) as proc:
-                    # Enter accepts the one-time post-login Unicode-
-                    # style confirmation's default (keep it on).
-                    proc.stdin.write(b"\r")
+                async with conn.create_process(term_type="xterm", term_size=(80, 24), encoding=None) as proc:
                     output = await _read_until(proc.stdout, "Choice:")
                     return output
         finally:

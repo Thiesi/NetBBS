@@ -268,17 +268,28 @@ def test_profile_redraw_in_place_toggle_switches_on_and_off(db, lane, alice):
     assert "In-place redraw: off" in squeezed(text)
 
 
-def test_profile_unicode_style_toggle_switches_on_and_off(db, lane, alice):
-    from netbbs.net.unicode_style_preference import unicode_style_enabled
+def test_profile_character_set_cycles_and_applies_at_once(db, lane, alice):
+    # Issue #929: Auto -> Unicode -> CP437 -> ASCII, each saved and
+    # applied to the session as it is chosen.
+    from netbbs.net.unicode_style_preference import charset_preference
 
-    assert unicode_style_enabled(db, alice) is True  # default
-    session = FakeSession(["u", "u", "b"])
+    assert charset_preference(db, alice) == "auto"  # default
+    session = FakeSession(["u", "u", "u", "b"])
     asyncio.run(profile_flow._edit_profile(session, lane, alice))
-    # First "u" turns it off, second turns it back on.
-    assert unicode_style_enabled(db, alice) is True
-    text = _visible(session)
-    assert "Unicode decorative style: off" in squeezed(text)
-    assert "Unicode decorative style: on" in squeezed(text)
+    assert charset_preference(db, alice) == "ascii"
+    assert session.output_charset == "ascii"
+    text = squeezed(_visible(session))
+    assert "Character set: Unicode" in text
+    assert "Character set: CP437" in text
+    assert "Character set: ASCII" in text
+
+
+def test_profile_shows_what_auto_resolves_to():
+    class _S:
+        output_charset = "cp437"
+
+    assert profile_flow._charset_label("auto", _S()) == "Auto (now CP437)"
+    assert profile_flow._charset_label("ascii", _S()) == "ASCII"
 
 
 # -- SSH public key self-service --------------------------------------------

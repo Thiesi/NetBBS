@@ -1117,7 +1117,7 @@ class _TrailingOutput:
     Whatever is still held when the flow returns was written after its last
     question: that is its outcome, and `announce_rest` queues it for the screen
     the console draws next instead of letting that screen's clear erase it.
-    Login uses it the same way for first-run onboarding and the Unicode-style
+    Login uses it the same way for first-run onboarding and the character-set
     question, whose outcome the first main menu shows (issue #923).
 
     Only ever handed to a flow that uses the session to read and write. It is

@@ -18,11 +18,11 @@ from netbbs.chat.presence import PresenceRegistry
 from netbbs.net import char_input
 from netbbs.net.char_input import InputHistory
 from netbbs.net.confirm import prompt_yes_no
-from netbbs.net.login_flow import _confirm_unicode_style
+from netbbs.net.login_flow import _confirm_charset
 from netbbs.net.mail_flow import resolve_sysop_alias
 from netbbs.net.main_menu import _main_menu
 from netbbs.net.picker import pick_item
-from netbbs.net.unicode_style_preference import unicode_style_enabled, unicode_style_ever_set
+from netbbs.net.unicode_style_preference import charset_preference_ever_set, unicode_style_enabled
 from netbbs.storage.database import Database
 from tests.test_new_scan import FakeSession, _visible_text
 
@@ -159,11 +159,11 @@ def test_a_letter_at_the_main_menu_arms_the_word_guard(db):
 def test_the_browser_is_not_asked_about_plain_ascii(db):
     lena = create_user(db, "lena_h", password="hunter2", user_level=10)
     session = _MenuSession([], transport_name="web")
-    asyncio.run(_confirm_unicode_style(session, db, lena))
+    asyncio.run(_confirm_charset(session, db, lena))
 
-    assert "Switch to plain ASCII" not in _visible_text(session)
-    # Not saved: the same account on an ASCII-only client is still asked.
-    assert not unicode_style_ever_set(db, lena) and unicode_style_enabled(db, lena)
+    assert "looks right" not in _visible_text(session)
+    # Not saved: the same account on an unknown terminal is still asked.
+    assert not charset_preference_ever_set(db, lena) and unicode_style_enabled(db, lena)
 
 
 def test_sysop_as_an_address_names_the_first_sysop(db):

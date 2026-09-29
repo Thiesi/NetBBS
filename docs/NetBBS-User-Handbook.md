@@ -532,9 +532,18 @@ Your SysOp controls the time allowed and can help with a missing or locked save.
 ## Preferences and help
 
 Use **Profile** for display, editor, and chat preferences, your SSH keys, and
-your password. If lines and arrows look wrong, switch **Profile → [U]nicode
-style** off; if
-colors are poor, change the color preference. **Ctrl+L** redraws ordinary NetBBS screens after a display problem.
+your password. **Profile → [U]nicode or CP437** sets the characters NetBBS sends
+your terminal:
+
+- **Auto**, the default, follows what your terminal reports when you connect.
+- **Unicode** suits modern terminals and the browser.
+- **CP437** suits classic BBS terminals such as SyncTERM, and shows ANSI art as
+  it was drawn.
+- **ASCII** is plain text that any terminal shows.
+
+If your terminal did not say which it is, NetBBS asks once after you log in
+which of two sample lines looks right. If lines and arrows look wrong later,
+change this setting. If colors are poor, change the color preference. **Ctrl+L** redraws ordinary NetBBS screens after a display problem.
 Games may use different controls.
 
 Some resources require an account level, verified age, or verified name.

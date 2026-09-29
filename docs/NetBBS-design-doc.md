@@ -317,8 +317,9 @@ ASCII. The answer becomes their preference. Profile changes it later. The
 earlier yes/no "Does that look garbled?" question and its Unicode/ASCII style
 preference are replaced by this; an account that had switched to ASCII keeps
 ASCII, and every other account moves to Auto. Screens that still vary their
-decoration by style ask for the Unicode style only when the session's set is
-UTF-8 or CP437.
+decoration by style use the decorated variant unless the caller's preference is
+ASCII; a CP437 session gets it mapped. An undetected terminal gets ASCII only
+until the question after login settles it.
 
 A SysOp may override three of the node's branding colors -- accent (board/
 channel/user names and other navigable-item branding), header (section
@@ -799,7 +800,7 @@ laying out the new dimensions.
 Anything gathering more than two values goes through the draft field editor or
 a picker and persists nothing before `[S]ave`. The deliberate exceptions are
 once-only first-run decisions (Link participation, node name, managed DNS,
-the Unicode-style probe), type-the-name confirmations before deletes, and
+the character-set question after login, issue #929), type-the-name confirmations before deletes, and
 masked credential entry (issue #611): a password is typed twice because the
 caller cannot see it, preceded by the current one where the account acts on
 itself, and a draft editor would have to hold the plaintext across redraws to
