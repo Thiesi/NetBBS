@@ -156,9 +156,10 @@ another BBS can't download from here: their copy ends with a line naming each
 file, its size, its file area and this BBS, as in
 `File: report.zip (12.3 KiB) in file area "Uploads" on Farpoint`. A forward
 takes the files of the letter it passes on along, and the draft of a letter
-keeps them. The
-fullscreen editor shows what you are
-writing above the text: the recipient or board, and the subject. Nothing is
+keeps them.
+
+The fullscreen editor shows what you are writing above the text: the
+recipient or board, and the subject. Nothing is
 sent or posted until you choose to on the review screen, which keeps To and
 Subject at the top and shows a long message a page at a time. Turn the
 pages with PgUp/PgDn or **[N]ext page**/**[P]rev page**. On a board, where
@@ -189,7 +190,8 @@ to speak. `/help` lists the commands available there.
 An alias is always shown with the username beside it, as `Quill (Copperplate)`,
 so everyone can see who is speaking: the alias first and in color, the
 username after it in gray. An alias that reads like someone else's
-username, or like a staff title such as "SysOp", is refused.
+username, or like a staff title such as "SysOp", is refused, and so is one
+with any of `( ) | [ ] < > * ~` in it.
 
 Someone on a linked BBS is shown as `name@TheirBBS`, with their BBS in a color
 of its own. If two BBSes you are linked with share a name, the name gets its
@@ -488,7 +490,8 @@ Your SysOp controls the time allowed and can help with a missing or locked save.
 ## Preferences and help
 
 Use **Profile** for display, editor, and chat preferences, your SSH keys, and
-your password. If characters look wrong, try the Unicode-style preference; if
+your password. If lines and arrows look wrong, switch **Profile → [U]nicode
+style** off; if
 colors are poor, change the color preference. **Ctrl+L** redraws ordinary NetBBS screens after a display problem.
 Games may use different controls.
 

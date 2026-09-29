@@ -361,7 +361,7 @@ Helpers you give staff permissions get a smaller **[S]taff** console instead
 
 | Area | Purpose |
 | --- | --- |
-| Users | Accounts, registration, levels, approval, identity-verifier grants |
+| Users | Accounts, registration, levels, approval, staff permissions, identity-verifier grants |
 | Content | Message boards, file areas, chat channels, Communities, doors, moderation |
 | Operations | Sessions, maintenance, audit log, backups, Link diagnostics |
 | Settings | Branding, timestamps, node name, network participation, update checks, limits and retention |
@@ -381,7 +381,10 @@ before telling anyone the address:
 4. Give the node its look under **Settings** and
    [Mastheads & banners](#custom-banners-and-mastheads).
 5. Set up backups ([Create and verify a backup](#create-and-verify-a-backup)).
-6. Join NetBBS Link later, if at all, once the node works on its own
+6. When someone offers to help, give them staff permissions or a moderator
+   grant, not level 255
+   ([Sharing the work](#sharing-the-work-staff-permissions)).
+7. Join NetBBS Link later, if at all, once the node works on its own
    ([Join and share](#join-and-share)).
 
 Quick actions lead to the same screens. Use the displayed keys rather than
@@ -1159,8 +1162,10 @@ account.
 
 ## Daily operation
 
-Check pending registrations/posts/files, backup recency, free disk space,
-and recent errors. Choose welcome/masthead/banner presets through Settings;
+Check the dashboard's pending registrations, posts and files, backup
+recency, free disk space, and recent errors. Staff and moderators see what
+waits for them under **Moderation (n)** and on the Staff console, so a queue
+can empty while you are away. Choose welcome/masthead/banner presets through Settings;
 preview before applying, or place your own files as described under
 [Custom banners and mastheads](#custom-banners-and-mastheads). Timestamp format and display timezone are node-wide.
 Until you choose a timezone under **Settings → Timestamp format**, times are
@@ -1533,7 +1538,7 @@ DNS registration, or backups is a separate, deliberate operator action.
 | Terminal offers no file-transfer link | Enable/configure the web listener and its public URL, or use a Zmodem-capable client. |
 | Link will not start | Check the `web` extra, effective participation setting, and a non-placeholder node name. |
 | **Find** misses content callers can open, or lists removed content | **Operations → Search indexes**: check, then **Rebuild** if it reports drift. |
-| Peers connect but content is missing | Check carry/subscription decisions, trust state, Outbox, and Diagnostics. Use Repair carried posts only for local materialization repair. |
+| Peers connect but content is missing | Check **Link status → Offered** and **Excluded**, trust state, Outbox, and Diagnostics. Use Repair carried posts only for local materialization repair. |
 | Game is busy, fails, or loses state | Check its session limit, Compatibility setup, Last diagnostic, service state, and actual persistent paths. |
 | Backup says `Voidrunner: NOT CAPTURED` | The node has not started since v7.4.1, so it has recorded no save directory and the CLI fell back to your shell's home. Start the node once, or rerun with explicit `--voidrunner-save-dir`. |
 | Backup says `Voidrunner: no saves at ...` | The node named that directory itself and there is nothing in it -- nobody has played. Nothing to do. |
