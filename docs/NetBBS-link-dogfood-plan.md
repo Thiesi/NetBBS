@@ -78,8 +78,8 @@ fits your own availability.
 - [ ] Configure A and B as mutual seeds (`seeds = [...]` pointing at
       each other); configure C to seed off A (or B). *(Deviation: see
       the actual ring topology noted above instead.)*
-- [x] Confirm all three complete hellos: `[S]ysOp` → `[S]ystem` →
-      `[L]ink status` on each node should list the other two as
+- [x] Confirm all three complete hellos: `[S]ysOp` → `[L]ink status`
+      on each node should list the other two as
       verified peers within one sync interval. Confirmed directly via
       each node's `link_peers` table.
 - [x] Create a handful of real user accounts on each node (not just
@@ -212,12 +212,35 @@ The operator of the receiving node owns its local policy and must not share
 private reporter configuration, notes, or evidence with ordinary callers.
 Use test identities and non-sensitive evidence.
 
-- [ ] On node A, create a test node/user subject and record its current
+**First run: 2026-09-26 to 2026-09-29.** R was ReLink (full node, relay).
+A was OutBound and B was The Emptiness Machine, both outgoing-only; B
+reached the network only through its site's HTTP proxy. R was operated from
+the development machine, and A and B by a separate session inside the
+corporate network. Rows 1–8 ran on v7.11.x (R moved to v7.13.0 during row 8's recovery hold) and row 9 on v7.13.0 everywhere. The record
+is the ops repository's `exercises/phase4-2026-09/LOG.md`, and its summary is
+in issue #131. The notes under each row are that run's results, and the
+instructions include what the run taught.
+
+Two rules apply to every row:
+
+- **Establish peers in every direction the exercise uses,** not only on B.
+  Every node refuses a probationary peer's content and requests, so A must
+  establish R (it takes R's boards), and R must establish A and B (it relays
+  for A and answers their trust pulls).
+- **Linked boards carry by themselves.** A board that an established peer
+  creates and links reaches the other nodes within one sync pass, and nothing
+  holds it back. A row that needs a node to see a board only *after* some
+  event has to keep that node stopped until then.
+
+- [x] On node A, create a test node/user subject and record its current
       effective state. On node B, configure two independent trust domains and
-      their narrowly scoped reporters through `[S]ysOp` → `[S]ystem` →
+      their narrowly scoped reporters through `[S]ysOp` → `[S]ettings` →
       `[P]olicy trust`. Record the node fingerprints, category scopes, and
-      configuration times.
-- [ ] Two nodes that never meet. With the full node R originating a linked
+      configuration times. **Name each scope's category concretely,** for
+      example `identity_integrity:signed_equivocation`. A `*` category is
+      accepted but matches nothing, and the reporter's objects are then
+      silently discarded (issue #745).
+- [x] Two nodes that never meet. With the full node R originating a linked
       board that both outgoing-only nodes A and B carry, post on A. On B,
       confirm R's own posts keep arriving, that A appears under `[S]ubjects`
       with the note that it was learned from R, and that A's post is absent.
@@ -226,74 +249,112 @@ Use test identities and non-sensitive evidence.
       board's approval queue because its author is a probationary remote
       user. Check B's log over several passes before establishing A: the
       refusal is recorded once an hour, not on every pass.
-- [ ] Propagate a vouch from an outgoing-only node. On A, vouch for an
-      identity; confirm the vouch screen says it is handed to the node that
+- [x] Propagate a vouch from an outgoing-only node. On A, vouch for an
+      identity that A does not host (a node cannot vouch for its own
+      callers); confirm the vouch screen says it is handed to the node that
       relays for A. On B, name A a trusted reporter for node vouches by its
       technical identity; after B's next pass A is listed under `[S]ubjects`,
       where you establish it. A's first hello precedes R's consent to relay and
       names no relay, so B needs a pass after A's second one; if B asked in
       between and was told nothing had changed, it asks again an hour later.
-      Confirm
-      B holds the vouch and that R's own trust state does not. Withdraw it on
-      A and confirm B records the revocation.
-- [ ] Propagate a vouch end to end, which needs nothing outside the product.
-      On node A, open the test subject under `[P]olicy trust` → `[S]ubjects`,
-      choose `[V]ouch`, give a reason and confirm. On node B, name A a trusted
-      reporter allowed to vouch for that kind of subject, and establish A
-      under `[S]ubjects` → A → `[O]verride` for identity integrity and resource
-      behavior: a reporter still on probation is neither pulled nor counted.
-      After one sync pass on each, confirm B's explanation for the subject
-      lists A's trust domain under `vouch_domains`. Withdraw the vouch on A under `[V]ouches` and
-      confirm B records the revocation and the domain disappears. Then grant A
-      only node vouches on B, vouch for a *user* on A, and confirm B's
-      subscription keeps moving: a later node vouch still arrives.
-- [ ] The signal rows below cannot be run from the product yet: no node can
+      Confirm B holds the vouch and that R's own trust state does not.
+      Withdraw it on A and confirm B records the revocation. *(2026-09: the
+      vouch was for R itself. B held on to a stale in-memory copy of A's
+      descriptor for an hour and needed a restart, issue #700.)*
+- [x] Propagate a vouch end to end, which needs nothing outside the product.
+      On node A, open a subject A does not host under `[P]olicy trust` →
+      `[S]ubjects`, choose `[V]ouch`, give a reason and confirm. On node B,
+      name A a trusted reporter allowed to vouch for that kind of subject, and
+      establish A under `[S]ubjects` → A → `[O]verride` for identity integrity
+      and resource behavior: a reporter still on probation is neither pulled
+      nor counted. After one sync pass on each, confirm B's explanation for
+      the subject lists A's trust domain under `vouch_domains`. Withdraw the
+      vouch on A under `[V]ouches` and confirm B records the revocation and
+      the domain disappears. Then grant A only node vouches on B, vouch for a
+      *user* on A, and confirm B's subscription keeps moving: a later node
+      vouch still arrives. *(2026-09: the subject was R's SysOp account.)*
+- [x] The signal rows below cannot be run from the product yet: no node can
       issue a trust signal (issue #589). They need a signal minted outside it,
-      and should say so in the record.
-- [ ] Introduce one scoped signal. Confirm the subject does not cross the
+      and should say so in the record. *(2026-09: minted with the ops tool
+      `tools/mint_trust_object.py`, the revocation too.)*
+- [x] Introduce one scoped signal. Confirm the subject does not cross the
       two-domain threshold and record the explanation shown by node B,
       including counted domains/weight and the stated release condition.
-- [ ] Introduce the second independent signal. Confirm node B quarantines
+      *(2026-09: not crossed, as expected. But below the threshold the
+      explanation shows no counted domains, weight or release condition, only
+      `active_trigger_count`, issue #752.)*
+- [x] Introduce the second independent signal. Confirm node B quarantines
       only the affected dimension, ordinary transport/content behavior matches
       the documented enforcement boundary, and already accepted objects remain
-      stored.
-- [ ] Partition B from its reporter/peer path. During the partition, confirm
+      stored. *(2026-09: `identity_integrity` quarantined with
+      `remote_domain_threshold`, two domains at weight 2.0. A new post by the
+      subject was refused with `link_policy_user_quarantined`, not held for
+      approval. After recovery the same post arrived pending.)*
+- [x] Partition B from its reporter/peer path. During the partition, confirm
       absence and failed dials create no new evidence and do not silently alter
       the decision. Restart B while still partitioned; confirm the same
       effective state and explanation reconstruct from SQLite.
-- [ ] Heal the partition, then revoke the second signal or remove the
+- [x] Heal the partition, then revoke the second signal or remove the
       deliberately compromised reporter. Confirm the trigger disappears but
       the signed object and audit history remain. Record the recovery-hold
-      start and required release time.
-- [ ] Exercise a mandatory-reason SysOp override and clear it again. Confirm
+      start and required release time. *(2026-09: the move from
+      `remote_domain_threshold` to `recovery_hold` stays within `quarantined`,
+      so it writes no row in the trust decision audit. The hold's times are
+      kept on the effective state.)*
+- [x] Exercise a mandatory-reason SysOp override and clear it again. Confirm
       the action is scoped, audited, restart-safe, and visibly distinct from
       automatic policy. Do not use an override to skip observing automatic
-      recovery.
-- [ ] After the recovery hold elapses, confirm the subject leaves quarantine
+      recovery: put it on a dimension the recovery does not concern.
+- [x] After the recovery hold elapses, confirm the subject leaves quarantine
       on node B, the explanation names automatic recovery, and a restart does
-      not restore the old restriction.
-- [ ] Repeat the explanation check using an ordinary caller account. Confirm
+      not restore the old restriction. *(2026-09: the hold ended but the
+      subject stayed quarantined until B restarted. Nothing re-checks an
+      elapsed hold on a running node, issue #802. After the restart the
+      explanation named `automatic_recovery`, and a second restart kept it.)*
+- [x] Repeat the explanation check using an ordinary caller account. Confirm
       it reports a local restriction without exposing reporter identities,
       private evidence, configuration notes, or a network-wide verdict.
+      *(2026-09: an ordinary caller sees nothing of a remote subject at all.
+      It is not in the directory, and its pending posts are invisible.)*
 
-- [ ] Rotate a signing key routinely. On node A, open **Link status → Keys →
-      Signing key**, choose **Rotate** and confirm. Record the retired and new
-      key fingerprints the screen reports; the node fingerprint must not
-      change. After one pass on each node, confirm B still carries A's
-      boards, that a post A made *before* the rotation reaches a node that
-      subscribes to that board only now, and that any vouch A issued was
-      renewed (the Link log names `signing_key_rotated`).
-- [ ] Rotate a transport key. On a node holding live sessions, rotate its
+- [x] Rotate a signing key routinely. First create a board on A **with A
+      stopped**, and start A immediately before rotating, so no peer can carry
+      it early. On node A, open **Link status → Keys → Signing key**, choose
+      **Rotate** and confirm. Record the retired and new key fingerprints the
+      screen reports; the node fingerprint must not change. After one pass on
+      each node, confirm B still carries A's boards, that the board's
+      pre-rotation genesis and post reach nodes that first fetch them after
+      the rotation (their `received_at` is later than the `rotate_node_key`
+      audit entry), and that any vouch A issued was renewed (the Link log
+      names `signing_key_rotated`). *(2026-09, on R: first fetched 33 s and
+      4 min after the rotation, and accepted. R had issued no vouch.)*
+- [x] Rotate a transport key. On a node holding live sessions, rotate its
       transport key and confirm the sessions end and reconnect on their own,
-      and that live chat and `/msg` work again afterwards.
-- [ ] Respond to a compromise, offline. Stop node A, run `python -m
-      netbbs.admin rotate-key signing --compromised --db … --identity-dir …`,
-      confirm, and record how many objects it re-signed. Start A. Confirm B
-      still accepts A's content after its next pass. Then point a node that
-      has never carried A's board at a node that carries it (not at A itself),
-      and confirm its log says the stale copies were skipped for a compromised
-      key rather than refusing the whole response; the node must still take
-      the rest. Record both audit entries (`rotate_node_key`).
+      and that live chat and `/msg` work again afterwards. A node behind a
+      proxy that refuses `CONNECT` to the real-time port never holds a live
+      session, so leave it out of this row. Test chat with a caller on each
+      side **in the channel at the same moment**: live chat is not stored,
+      and a node's history shows only its own callers' lines. Use callers who
+      are not probationary on the other node, because their chat events are
+      refused and block that node's whole event push (issue #897). *(2026-09,
+      on R: A was back 17 s after the rotation. Chat from the channel's
+      origin A reached R live. R's replies never reached A, live or later:
+      issue #860. `/msg` was not tried.)*
+- [ ] Respond to a compromise, offline. First create a board on A and let R
+      carry it for one pass, with the node doing the check (B) **stopped**, so
+      its first look at the board comes after the rotation. Stop node A, back
+      it up, run `python -m netbbs.admin rotate-key signing --compromised
+      --db … --identity-dir …` (it needs a terminal), confirm, and record how
+      many objects it re-signed. Start A. Confirm the nodes still accept A's
+      content after their next pass. Then start B and let it take the board
+      from R, which kept its copies signed by the compromised key. Confirm
+      B's log says the stale copies were skipped for a compromised key rather
+      than refusing the whole response; B must still take the rest. Record
+      the `rotate_node_key` audit entries. *(2026-09: re-signing and the new
+      content worked, and R holds A's compromise revoke. **B accepted the
+      stale copy.** B knows A only through an introduced bundle from before
+      the compromise, where the old key is still current, so the skip never
+      fires: issue #914.)*
 
 For each row, record node/operator roles, UTC timestamps, software commit,
 subject and dimension, pre/post effective states, public reason code, whether
