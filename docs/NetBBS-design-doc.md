@@ -1106,7 +1106,11 @@ Peers retain authenticated observations of all three values. A friendly-name
 change under the same fingerprint is an informational continuity notice. A DNS
 change under the same fingerprint is a more prominent routing notice. Reuse of
 a familiar friendly or DNS name by a different fingerprint is a strong
-cryptographic-identity warning: the UI explains that recovery/replacement may
+cryptographic-identity warning. A friendly name counts as familiar when it reads
+as one -- compared by §4.2's skeleton as §6.3 extends it for aliases, the key they are
+checked with, so "0utBound", "Out Bound" and "OutBоund" with a Cyrillic о are
+all "OutBound" (issue #900) -- while a DNS name must match exactly: it is unique
+by registration, and folding would equate different real hosts. The UI explains that recovery/replacement may
 be legitimate but impersonation is possible, and it does not prevent the user
 from continuing. Presentation names never transfer trust or reputation between
 fingerprints.
@@ -13091,7 +13095,7 @@ name is the only thing marking where a caller comes from, which #843 Decision 3
 relies on, so a name another known node or this BBS also uses keeps its
 qualifier, in the form the node map already used. The existing caution for an
 undismissed cryptographic-identity observation stays in front of the line.
-Look-alike names that are not exactly equal are issue #900.
+"The same name" includes one that reads the same (issue #900).
 
 **Decision 2 — `Name · abc123` replaces `Name abc123`.** The node map's form
 without a DNS name could not be typed back; with the reserved `·` it can, and it
@@ -13107,6 +13111,32 @@ text, and so #843's rule that no alias stands alone, is unchanged. Rejected:
 restricting node friendly names to the alias character set, which would make
 this node refuse the hello of any existing peer whose name uses one, and would
 undo #807's quoting of names containing `@`.
+
+### Issue #900 — look-alike node names — decided
+
+Friendly names were compared by Unicode form and case only, so "0utBound" beside
+a known "OutBound" raised no warning and needed no qualifier. With #899 dropping
+the DNS name from chat lines, that left the friendly name as the only anchor in
+exactly the place where passing for a familiar node pays. Normative description:
+§4.4.
+
+**Decision 1 — two keys for two questions.** "Could a reader confuse these?"
+uses the presentation skeleton (`look_alike_key`): the cryptographic-identity
+warning, and every screen that qualifies a shared name (chat, node map, Who,
+the board-origin picker). "Is this the same name?" keeps the exact key: a rename
+under one fingerprint, the claim history's deduplication, and resolving a typed
+reference. Rejected: resolving typed references by skeleton, which would let a
+look-alike node receive what a caller addressed to the real one.
+
+**Decision 2 — DNS names are not folded.** Registration already makes them
+unique, and `presentation_skeleton` drops `-` and `.`, so `out-bound.example.org`
+and `outbound.example.org` would become one. Screens that show a DNS name show
+all of it.
+
+**Decision 3 — this node's own look-alike name is a warning, not a refusal.** A
+SysOp who renames their node to read like a node it knows is told so and the
+name is kept: two hobbyists choosing one name is harmless, and the nodes that
+know both already flag whichever arrived second.
 
 ### SFTP over the SSH transport — declined
 
