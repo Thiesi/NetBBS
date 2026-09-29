@@ -55,6 +55,7 @@ from netbbs.directory import (
 from netbbs.files.categories import get_category_by_id as get_file_area_category_by_id
 from netbbs.link.onboarding import link_is_outgoing_only
 from netbbs.link.remote_attestation import count_attestation_recipients
+from netbbs.mail import list_mail_blocks
 from netbbs.messaging_preferences import accepts_direct_messages, set_accepts_direct_messages
 from netbbs.net.char_input import reject_unhandled_key
 from netbbs.net.breadcrumb_preference import breadcrumb_collapsed_enabled, set_breadcrumb_collapsed_enabled
@@ -74,6 +75,7 @@ from netbbs.net.node_theme import (
     effective_header_color,
     effective_header_color_256,
 )
+from netbbs.net.mail_flow import blocked_senders_screen
 from netbbs.net.picker import pick_item
 from netbbs.net.prose_editor import EditorHeader, edit_prose
 from netbbs.net.redraw_preference import redraw_in_place_enabled, set_redraw_in_place_enabled
@@ -926,6 +928,7 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
         "signature": await lane.run(get_signature, user) or "",
         "fullscreen_editor": await lane.run(fullscreen_editor_enabled, user),
         "accepts_dm": await lane.run(accepts_direct_messages, user),
+        "blocked_sender_count": len(await lane.run(list_mail_blocks, user)),
         "mrc_private": await lane.run(mrc_private_messages_enabled, user),
         "mrc_lastseen": await lane.run(mrc_lastseen_recorded, user),
         "history_name_visible": await lane.run(session_history_name_visible, user),
@@ -952,6 +955,10 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
 
     async def _identity_details_prompt(session: Session, lane: DatabaseLane, draft: Draft) -> None:
         await _identity_details_screen(session, lane, user)
+
+    async def _blocked_senders_prompt(session: Session, lane: DatabaseLane, draft: Draft) -> None:
+        await blocked_senders_screen(session, lane, user)
+        draft["blocked_sender_count"] = len(await lane.run(list_mail_blocks, user))
 
     async def _sort_preferences_prompt(session: Session, lane: DatabaseLane, draft: Draft) -> None:
         await _sort_preferences_screen(session, lane, user)
@@ -1149,6 +1156,21 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
                 "Whether other callers can send you a direct/private chat message from the "
                 "Who's online screen. Doesn't affect linked-channel chat -- only direct, "
                 "one-to-one messages."
+            ),
+            section="Communication",
+        ),
+        FieldSpec(
+            key="blocked_senders", hotkey="o", menu_text=menu_key("o", "cked senders", prefix="Bl"),
+            label="Blocked mail senders",
+            render=lambda d: f"{d['blocked_sender_count']} blocked" if d["blocked_sender_count"] else "(none)",
+            prompt=_blocked_senders_prompt,
+            brief="Refuse mail from someone",
+            help=(
+                "Lists the senders whose mail you refuse, on this BBS and on linked BBSes, and lets "
+                "you block someone by name or unblock them. A blocked sender is told their letter "
+                "was refused. You can also block a sender from a letter they sent you. Mail from "
+                "the system and from this BBS's SysOp can't be blocked. Mail only: direct chat "
+                "messages have their own setting above."
             ),
             section="Communication",
         ),

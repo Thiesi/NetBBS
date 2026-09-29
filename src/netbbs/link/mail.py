@@ -282,6 +282,10 @@ def deliver_link_message(
     # caller would read what arrived there.
     if mail_module.mail_recipient_refusal(db, recipient) is not None:
         return _bounce("no_mailbox")
+    # The recipient blocked this sender (issue #817), by the address the
+    # letter came from, never by the node's changeable display name.
+    if mail_module.mail_sender_refusal(db, recipient, sender_address=sender_address) is not None:
+        return _bounce("blocked_by_recipient")
 
     try:
         ciphertext = base64.b64decode(message.payload["ciphertext"], validate=True)
@@ -539,6 +543,7 @@ _BOUNCE_REASON_TEXT = {
     "unknown_recipient": "there is no user by that name on that BBS",
     "mailbox_full": "the recipient's mailbox is full of unread mail",
     "blocked_sender": "that BBS does not accept mail from you or from this BBS",
+    "blocked_by_recipient": "the recipient does not accept mail from you",
     "undecryptable": "that BBS could not decrypt it, so it may have been sealed to a key that BBS no longer holds",
     "malformed": "that BBS could not accept it as a letter (a bad sender name, subject or body)",
     "no_mailbox": "that account takes no mail (it is the BBS's shared guest account)",

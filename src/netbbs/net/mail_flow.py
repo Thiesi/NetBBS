@@ -62,18 +62,30 @@ from netbbs.mail import (
     MAX_MAIL_BODY_BYTES,
     MAX_MAIL_SUBJECT_BYTES,
     SYSTEM_SENDER_LABEL,
+    MailBlock,
+    MailBlockError,
     MailboxFullError,
     MailError,
     MailMessage,
+    block_link_sender,
+    block_local_sender,
+    blocks_link_sender,
+    blocks_local_sender,
     delete_for_recipient,
     delete_for_sender,
     list_inbox,
+    list_mail_blocks,
     list_sent,
     mail_access_refusal,
     mail_recipient_refusal,
+    mail_sender_refusal,
     mark_read,
     mark_unread,
     send_mail,
+    sender_unblockable_reason,
+    unblock,
+    unblock_link_sender,
+    unblock_local_sender,
 )
 from netbbs.net.char_input import (
     HELP_KEY, REDRAW_KEY, EditorKey, EditorKeyKind, InputCancelled, reject_unhandled_key,
@@ -103,6 +115,7 @@ from netbbs.net.help_overlay import show_help
 from netbbs.net.post_color_preference import post_colors_enabled
 from netbbs.net.prose_editor import EditorHeader, edit_prose
 from netbbs.net.detail_view import show_detail
+from netbbs.net.picker import pick_item
 from netbbs.net.notices import announce, announce_styled, pending_notice_rows, take_notices, write_notices
 from netbbs.net.session import Session, write_prompt
 from netbbs.rendering.detail import Section, Styled
@@ -1137,19 +1150,28 @@ async def _show_inbox_message(
     *, link_context: LinkContext | None = None,
 ) -> None:
     message = await lane.run(mark_read, user, message)
-    # Mail the BBS sent has nobody to answer (issue #819): no Reply key,
-    # and the view says why.
-    actions = [] if message.from_system else [("r", menu_key("R", "eply"))]
-    actions += [
-        ("u", menu_key("U", "nread")),
-        ("d", menu_key("D", "elete")),
-        ("b", menu_key("B", "ack")),
-    ]
+    block_target = await lane.run(_block_target, user, message)
     page = 0
     while True:
+        # Mail the BBS sent has nobody to answer (issue #819): no Reply key,
+        # and the view says why.
+        actions = [] if message.from_system else [("r", menu_key("R", "eply"))]
+        actions += [
+            ("u", menu_key("U", "nread")),
+            ("d", menu_key("D", "elete")),
+        ]
+        if block_target is not None:
+            # Issue #817: a toggle, labelled by what it will do.
+            blocked = await lane.run(_is_blocked, user, block_target)
+            actions.append(("k", menu_key("k", " sender", prefix="Unbloc" if blocked else "Bloc")))
+        actions.append(("b", menu_key("B", "ack")))
         choice, page = await _show_message(session, lane, user, message, to_label=None, actions=actions, page=page)
         if choice == "b":
             return
+        if choice == "k":
+            text, tone = await lane.run(_toggle_block, user, block_target)
+            announce(session, text, tone=tone)
+            continue
         if choice == "u":
             # Opening a message is what marks it read; this takes that back
             # (issue #810), and the list shows it "new" again.
@@ -1206,6 +1228,191 @@ async def _show_inbox_message(
             prefill_body=quote_body(plain_post_body(message.body), author=message.sender_label) or None,
             reply_key=_reply_key(message),
         )
+
+
+# -- blocked senders (issue #817) ---------------------------------------------
+#
+# A caller blocks a sender from a letter they received (`Bloc[k] sender` on
+# its view, a toggle) or by name from Profile > Blocked senders, which lists
+# them and unblocks. Local senders are blocked by account id, Link senders by
+# the `user@<fingerprint>` address their mail came from. The rules --
+# who cannot be blocked, what the sender is told -- are `netbbs.mail`'s.
+
+_BLOCKED_NOTICE = "Blocked {name}: mail from them is refused from now on, and they are told so."
+_UNBLOCKED_NOTICE = "Unblocked {name}: their mail is accepted again."
+
+
+@dataclass(frozen=True)
+class _BlockTarget:
+    """Who `Bloc[k] sender` on a received letter acts on: a local account
+    by id, or a Link sender by address."""
+    user_id: int | None
+    address: str | None
+
+
+def _block_target(db: Database, reader: User, message: MailMessage) -> _BlockTarget | None:
+    """The sender a received letter's view can block, or `None`: system
+    mail, a deleted account, the reader's own mail, and a SysOp of this
+    node offer no block (`netbbs.mail.sender_unblockable_reason`)."""
+    if message.from_system:
+        return None
+    if message.sender_user_id is not None:
+        sender = get_user_by_id(db, message.sender_user_id)
+        if sender is None or sender_unblockable_reason(db, reader, sender) is not None:
+            return None
+        return _BlockTarget(user_id=sender.id, address=None)
+    if _split_link_address(message.sender_label) is not None:
+        return _BlockTarget(user_id=None, address=message.sender_label)
+    return None
+
+
+def _link_sender_name(db: Database, address: str) -> str:
+    split = _split_link_address(address)
+    if split is None:
+        return address
+    user_part, fingerprint = split
+    return link_address_label(user_part, identity_for_fingerprint(db, fingerprint).label)
+
+
+def _is_blocked(db: Database, reader: User, target: _BlockTarget) -> bool:
+    if target.user_id is not None:
+        sender = get_user_by_id(db, target.user_id)
+        return sender is not None and blocks_local_sender(db, reader, sender)
+    assert target.address is not None
+    return blocks_link_sender(db, reader, target.address)
+
+
+def _toggle_block(db: Database, reader: User, target: _BlockTarget) -> tuple[str, str]:
+    """Block the sender if they are not blocked, else unblock them. Returns
+    the outcome line and its tone."""
+    if target.user_id is not None:
+        sender = get_user_by_id(db, target.user_id)
+        if sender is None:
+            return "That sender's account no longer exists.", "error"
+        if blocks_local_sender(db, reader, sender):
+            unblock_local_sender(db, reader, sender.id)
+            return _UNBLOCKED_NOTICE.format(name=sender.username), "success"
+        try:
+            block_local_sender(db, reader, sender)
+        except MailBlockError as exc:
+            return str(exc), "error"
+        return _BLOCKED_NOTICE.format(name=sender.username), "success"
+    assert target.address is not None
+    name = _link_sender_name(db, target.address)
+    if blocks_link_sender(db, reader, target.address):
+        unblock_link_sender(db, reader, target.address)
+        return _UNBLOCKED_NOTICE.format(name=name), "success"
+    block_link_sender(db, reader, target.address)
+    return _BLOCKED_NOTICE.format(name=name), "success"
+
+
+@dataclass(frozen=True)
+class _BlockedRow:
+    block: MailBlock
+    name: str
+    where: str
+
+
+def _load_blocked_rows(db: Database, user: User) -> list[_BlockedRow]:
+    display_format, display_timezone = resolve_display_preferences(db)
+    rows = []
+    for block in list_mail_blocks(db, user):
+        since = format_for_display(block.created_at, override_format=display_format, override_timezone=display_timezone)
+        if block.blocked_user_id is not None:
+            account = get_user_by_id(db, block.blocked_user_id)
+            name = account.username if account is not None else "(deleted account)"
+            where = f"on this BBS; blocked {since}"
+        else:
+            assert block.blocked_address is not None
+            name = _link_sender_name(db, block.blocked_address)
+            where = f"on a linked BBS; blocked {since}"
+        rows.append(_BlockedRow(block=block, name=name, where=where))
+    return rows
+
+
+def _block_by_name(db: Database, user: User, text: str) -> tuple[str, str]:
+    """Block the sender `text` names: a local user name, or `name@TheirBBS`
+    for someone on a linked BBS. Returns the outcome line and its tone."""
+    if "@" in text:
+        resolved = _resolve_link_address(db, text)
+        if isinstance(resolved, str):
+            return resolved, "error"
+        name = link_address_label(resolved.user, identity_for_fingerprint(db, resolved.fingerprint).label)
+        if not block_link_sender(db, user, f"{resolved.user}@{resolved.fingerprint}"):
+            return f"{name} is already blocked.", "muted"
+        return _BLOCKED_NOTICE.format(name=name), "success"
+    try:
+        sender = get_user_by_username(db, text)
+    except AuthError:
+        return f"No such user: {text!r}", "error"
+    try:
+        added = block_local_sender(db, user, sender)
+    except MailBlockError as exc:
+        return str(exc), "error"
+    if not added:
+        return f"{sender.username} is already blocked.", "muted"
+    return _BLOCKED_NOTICE.format(name=sender.username), "success"
+
+
+def _unblock_row(db: Database, user: User, row: _BlockedRow) -> tuple[str, str]:
+    unblock(db, user, row.block)
+    return _UNBLOCKED_NOTICE.format(name=row.name), "success"
+
+
+async def blocked_senders_screen(session: Session, lane: DatabaseLane, user: User) -> None:
+    """Profile > Blocked senders (issue #817): everyone `user` refuses mail
+    from, newest first. `[A]dd` blocks someone by name -- a local user, or
+    `name@TheirBBS` for someone on a linked BBS -- and `[U]nblock`, or
+    picking a row, unblocks it. Each outcome is carried into the redraw."""
+
+    async def _reload() -> list[_BlockedRow]:
+        return await lane.run(_load_blocked_rows, user)
+
+    async def _add() -> list[_BlockedRow] | None:
+        await session.write_line("")
+        await write_prompt(session, "Block mail from (a user name, or name@TheirBBS; empty cancels): ")
+        try:
+            text = (await session.read_line(cancellable=True)).strip()
+        except InputCancelled:
+            text = ""
+        if not text:
+            return None
+        outcome, tone = await lane.run(_block_by_name, user, text)
+        announce(session, outcome, tone=tone)
+        return await _reload()
+
+    async def _unblock(row: _BlockedRow) -> list[_BlockedRow]:
+        outcome, tone = await lane.run(_unblock_row, user, row)
+        announce(session, outcome, tone=tone)
+        return await _reload()
+
+    rows = await _reload()
+    while True:
+        selected = await pick_item(
+            session, rows,
+            name_of=lambda row: row.name,
+            stable_id_of=lambda row: row.block.id,
+            description_of=lambda row: row.where,
+            title="Blocked senders",
+            breadcrumb=("Profile",),
+            empty_message="You block no one. Mail from anyone reaches you.",
+            refresh=_reload,
+            live_keys={"a": _add},
+            item_keys={"u": _unblock},
+            live_nav=[
+                MenuEntry(label=menu_key("A", "dd"), brief="Block mail from someone by name"),
+                MenuEntry(label=menu_key("U", "nblock"), brief="Accept their mail again"),
+            ],
+            description_level=await lane.run(menu_description_level, user),
+            redraw_in_place=await lane.run(redraw_in_place_enabled, user),
+            unicode_style=await lane.run(unicode_style_enabled, user),
+            collapsed=await lane.run(breadcrumb_collapsed_enabled, user),
+            accent_color=await lane.run(effective_accent_color_256),
+            header_color=await lane.run(effective_header_color_256),
+        )
+        if selected is None:
+            return
+        rows = await _unblock(selected)
 
 
 async def _show_sent_message(session: Session, lane: DatabaseLane, user: User, message: MailMessage) -> None:
@@ -1395,6 +1602,10 @@ async def _compose_mail(
             # The guest account takes no mail (issue #816): said here, before
             # anything is written, and asked again.
             refused = await lane.run(mail_recipient_refusal, typed)
+            if refused is None:
+                # Nor does one that blocked this caller (issue #817): said
+                # before the letter is written, not after.
+                refused = await lane.run(lambda db: mail_sender_refusal(db, typed, sender=user))
             if refused is not None:
                 await session.write_line(colored(sanitize_text(refused), fg_color=ERROR_COLOR))
                 continue
@@ -1699,7 +1910,20 @@ def _check_link_recipient(db, recipient_text: str) -> _LinkRecipient | str:
     """Check a typed `user@node` address (issue #807): its form, that it
     names exactly one node this BBS is linked with, and that this node will
     send that node mail (issue #804). Returns the recipient, or why not in
-    words that say what to type instead.
+    words that say what to type instead."""
+    resolved = _resolve_link_address(db, recipient_text)
+    if isinstance(resolved, str):
+        return resolved
+    refusal = _link_mail_refusal(db, resolved.fingerprint)
+    if refusal is not None:
+        return refusal
+    return resolved
+
+
+def _resolve_link_address(db, recipient_text: str) -> _LinkRecipient | str:
+    """The form and node half of `_check_link_recipient`, without asking
+    whether this node sends that node mail: what blocking a Link sender by
+    name needs too (issue #817).
 
     The user half ends at the first `@`: a user name cannot contain one,
     and a node's friendly name can. The node half may be quoted, the way
@@ -1726,9 +1950,6 @@ def _check_link_recipient(db, recipient_text: str) -> _LinkRecipient | str:
                 for fingerprint in resolved[:5]
             ],
         )
-    refusal = _link_mail_refusal(db, resolved)
-    if refusal is not None:
-        return refusal
     return _LinkRecipient(user=user, fingerprint=resolved)
 
 

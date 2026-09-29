@@ -216,6 +216,24 @@ When mail bounces or expires you are told at the main menu, once, even if it
 happened while you were away. Opening the message in Sent counts as being
 told. To try again, send it anew.
 
+To stop someone's mail, open a letter from them and press **Bloc[k]
+sender**; the same key, now **Unbloc[k] sender**, takes it back. It works
+for someone on this board and for someone on a linked node, who is blocked
+by their address there, so a node changing its name does not undo it.
+**Profile → Blocked mail senders** lists everyone you block, blocks
+someone by name (`alice`, or `alice@OtherNode`) before they have written,
+and unblocks with **[U]nblock** or by picking a row. Mail already in your
+Inbox stays there.
+
+A blocked sender is told: on this board the To prompt and Send say that
+you do not accept mail from them, and mail from another node bounces with
+that reason. It is never taken and quietly thrown away. The same works the
+other way: if you are told a recipient does not accept mail from you, they
+have blocked you. Two senders cannot be blocked: **System**, and this
+board's SysOp, who has to be able to reach every account on the board.
+Blocking covers mail only; live direct messages have their own setting in
+Profile.
+
 Channels marked **MRC** connect to a separate public chat network. Your handle
 and messages are visible there. MRC private messages are optional in your
 profile; they are not confidential from that network. Use `/mrc` for its help

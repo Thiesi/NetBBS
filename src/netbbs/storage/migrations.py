@@ -3580,4 +3580,28 @@ MIGRATIONS = [
             CHECK (from_system IN (0, 1));
         """,
     ),
+    Migration(
+        description=(
+            "Issue #817: `mail_blocks` -- the senders an account refuses mail from. A row names "
+            "either a local account (`blocked_user_id`, so the block survives a rename) or a "
+            "Link sender by its `user@<home-node-fingerprint>` address (never by the node's "
+            "display name, which can change). Both sides go with their account: deleting the "
+            "blocker or the blocked local account removes the row."
+        ),
+        sql="""
+        CREATE TABLE mail_blocks (
+            id               INTEGER PRIMARY KEY,
+            user_id          INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            blocked_user_id  INTEGER REFERENCES users(id) ON DELETE CASCADE,
+            blocked_address  TEXT COLLATE NOCASE,
+            created_at       TEXT NOT NULL,
+            CHECK ((blocked_user_id IS NULL) != (blocked_address IS NULL))
+        );
+        CREATE UNIQUE INDEX idx_mail_blocks_local
+            ON mail_blocks(user_id, blocked_user_id) WHERE blocked_user_id IS NOT NULL;
+        CREATE UNIQUE INDEX idx_mail_blocks_link
+            ON mail_blocks(user_id, blocked_address) WHERE blocked_address IS NOT NULL;
+        CREATE INDEX idx_mail_blocks_blocked_user ON mail_blocks(blocked_user_id);
+        """,
+    ),
 ]
