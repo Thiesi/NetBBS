@@ -126,8 +126,9 @@ from netbbs.file_refs import (
 from netbbs.mail_groups import LetterRecipient, LetterRefused, send_letter, too_many_recipients_text
 from netbbs.net.file_ref_view import (
     attached_rows,
-    choose_file_to_attach,
-    download_ref,
+    change_attached_files,
+    file_actions,
+    get_referenced_file,
     open_refs,
     ref_rows,
 )
@@ -1817,7 +1818,10 @@ async def _show_inbox_message(
             await _forward_message(session, lane, user, message, sent=False, link_context=link_context)
             continue
         if choice == "g":
-            await _get_referenced_file(session, lane, user, refs, transfers=transfers)
+            await get_referenced_file(
+                session, lane, user, refs, noun="letter", breadcrumb=("Mail",),
+                style=await _picker_style(lane, user), transfers=transfers,
+            )
             continue
         if choice == "a":
             shown = await _display_sender_label(lane, message)
@@ -1891,35 +1895,6 @@ async def _show_inbox_message(
         )
 
 
-async def _get_referenced_file(
-    session: Session, lane: DatabaseLane, user: User, refs: list[FileRef], *, transfers: TransferGrants | None,
-) -> None:
-    """`[G]et file` on a letter's view (issue #830): download the file it
-    points at, or with several, the one the reader picks. Only a file they
-    can open now is offered."""
-    opened = await open_refs(lane, user, refs)
-    available = [item.ref for item in opened if item.state == AVAILABLE]
-    if not available:
-        announce(session, "None of the files in this letter is available to you.", tone="error")
-        return
-    ref = available[0]
-    if len(available) > 1:
-        chosen = await pick_item(
-            session, available,
-            name_of=lambda item: item.filename,
-            stable_id_of=lambda item: available.index(item),
-            description_of=lambda item: f"in {item.area_name}",
-            title="Download which file?",
-            breadcrumb=("Mail",),
-            empty_message="None of the files in this letter is available to you.",
-            **await _picker_style(lane, user),
-        )
-        if chosen is None:
-            return
-        ref = chosen
-    await download_ref(session, lane, user, ref, transfers=transfers)
-
-
 async def _picker_style(lane: DatabaseLane, user: User) -> dict:
     return {
         "description_level": await lane.run(menu_description_level, user),
@@ -1935,20 +1910,9 @@ async def _picker_style(lane: DatabaseLane, user: User) -> dict:
 #
 # The review screen of a letter has `[A]ttach file`, and `[R]emove file` once
 # one is attached: a file in a file area here, chosen from the areas and files
-# the writer can open (`netbbs.net.file_ref_view.choose_file_to_attach`). The
-# letter points at it; nothing is copied. Who it goes to is checked at Send.
-
-_ATTACH_KEY = "a"
-_REMOVE_KEY = "r"
-
-
-def _file_actions(files: list[FileRef]) -> list[tuple[str, str, str | None]]:
-    actions: list[tuple[str, str, str | None]] = [
-        (_ATTACH_KEY, menu_key("A", "ttach file"), "Point the letter at a file in a file area"),
-    ]
-    if files:
-        actions.append((_REMOVE_KEY, menu_key("R", "emove file"), "Take a file off the letter"))
-    return actions
+# the writer can open (`netbbs.net.file_ref_view.change_attached_files`, shared
+# with board posts since issue #924). The letter points at it; nothing is
+# copied. Who it goes to is checked at Send.
 
 
 def _file_rows(files: list[FileRef], *, accent: int, to_another_bbs: bool) -> list[str]:
@@ -1960,45 +1924,6 @@ def _file_rows(files: list[FileRef], *, accent: int, to_another_bbs: bool) -> li
             fg_color=MUTED_COLOR,
         ))
     return rows
-
-
-async def _change_files(
-    session: Session, lane: DatabaseLane, user: User, files: list[FileRef], key: str, *,
-    breadcrumb: tuple[str, ...], style: dict,
-) -> list[FileRef]:
-    """`[A]ttach file` or `[R]emove file` on the review screen: the letter's
-    files afterwards, with what happened carried to the review screen."""
-    if key == _ATTACH_KEY:
-        if len(files) >= MAX_FILE_REFS:
-            announce(session, f"A letter can point at {MAX_FILE_REFS} files at most.", tone="error")
-            return files
-        ref = await choose_file_to_attach(session, lane, user, breadcrumb=breadcrumb, **style)
-        if ref is None:
-            return files
-        if any(attached.file_id == ref.file_id for attached in files):
-            announce(session, f"{ref.filename} is already attached.", tone="muted")
-            return files
-        announce(session, f"Attached {ref.filename}.", tone="muted")
-        return [*files, ref]
-    if not files:
-        return files
-    removed = files[0]
-    if len(files) > 1:
-        chosen = await pick_item(
-            session, files,
-            name_of=lambda item: item.filename,
-            stable_id_of=lambda item: files.index(item),
-            description_of=lambda item: f"in {item.area_name}",
-            title="Remove which file?",
-            breadcrumb=breadcrumb,
-            empty_message="No files are attached.",
-            **style,
-        )
-        if chosen is None:
-            return files
-        removed = chosen
-    announce(session, f"Removed {removed.filename}.", tone="muted")
-    return [ref for ref in files if ref is not removed]
 
 
 def _files_field(files: list[FileRef]) -> dict[str, str]:
@@ -2679,11 +2604,11 @@ async def write_to_all_callers(
             header_color=header_color, truecolor=truecolor, body_mode=body_mode, body_layout="lines",
             breadcrumb=("SysOp", "Mail", title),
             extra_rows=_file_rows(files, accent=accent_color, to_another_bbs=False),
-            extra_actions=_file_actions(files),
+            extra_actions=file_actions(files, noun="letter"),
         )
         if isinstance(action, str):
-            files = await _change_files(
-                session, lane, user, files, action, breadcrumb=("SysOp", "Mail", title),
+            files = await change_attached_files(
+                session, lane, user, files, action, noun="letter", breadcrumb=("SysOp", "Mail", title),
                 style=await _picker_style(lane, user),
             )
             keep_fields()
@@ -3169,11 +3094,12 @@ async def _compose_mail(
             body_layout="lines",
             breadcrumb=("Mail", title),
             extra_rows=_file_rows(files, accent=accent_color, to_another_bbs=to_another_bbs),
-            extra_actions=_file_actions(files),
+            extra_actions=file_actions(files, noun="letter"),
         )
         if isinstance(action, str):
-            files = await _change_files(
-                session, lane, user, files, action, breadcrumb=("Mail", title), style=picker_style(),
+            files = await change_attached_files(
+                session, lane, user, files, action, noun="letter", breadcrumb=("Mail", title),
+                style=picker_style(),
             )
             keep_fields()
             continue
