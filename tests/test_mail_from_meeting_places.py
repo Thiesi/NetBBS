@@ -16,7 +16,7 @@ import re
 
 import pytest
 
-from netbbs.auth.users import create_user
+from netbbs.auth.users import SYSOP_LEVEL, create_user, get_user_by_id
 from netbbs.boards.boards import create_board
 from netbbs.boards.posts import create_post
 from netbbs.chat import ChatHub, PresenceRegistry
@@ -74,6 +74,15 @@ def alice(db):
 @pytest.fixture
 def bob(db):
     return create_user(db, "bob", password="hunter2pw", user_level=10)
+
+
+def _promoted_after_block(db, blocker, user):
+    """`user`, blocked by `blocker` and then made this node's SysOp: a SysOp
+    can't be blocked, but a block made before the promotion stays."""
+    block_local_sender(db, blocker, user)
+    db.connection.execute("UPDATE users SET user_level = ? WHERE id = ?", (SYSOP_LEVEL, user.id))
+    db.connection.commit()
+    return get_user_by_id(db, user.id)
 
 
 def _sent_rows(db):
@@ -137,16 +146,50 @@ def test_the_guest_account_is_refused_on_its_card_with_the_reason(db, lane, alic
     assert _sent_rows(db) == []
 
 
-def test_a_member_who_blocked_the_caller_is_refused_before_anything_is_written(db, lane, alice, bob):
+def test_the_card_of_a_member_who_blocked_the_caller_offers_no_mail_and_says_why(db, lane, alice, bob):
+    """Issue #953, as Who's online since #948: the letter would be refused,
+    so `[M]ail` is not offered, and "m" does nothing."""
     block_local_sender(db, bob, alice)
     session = FakeSession(keys=["0", "2", "m", "b", "b"])
 
     asyncio.run(_browse_directory(session, db, alice, lane=lane))
 
     card = [screen for screen in _screens(session) if "Member profile" in screen][-1]
-    assert "bob does not accept mail from you." in card
+    assert "bob does not accept messages or mail from you." in " ".join(card.split())
+    assert "[M]ail" not in card
+    assert "[B]ack" in card
     assert "Subject" not in _visible(session)
     assert _sent_rows(db) == []
+
+
+def test_a_sysop_is_offered_mail_on_the_card_of_a_member_who_blocked_them(db, lane, bob):
+    """Nobody can block this node's SysOp (`mail_sender_refusal`)."""
+    sysop = _promoted_after_block(db, bob, create_user(db, "carrier", password="hunter2pw", user_level=10))
+    set_redraw_in_place_enabled(db, sysop, True)
+    # bob sorts before carrier: "01" is bob.
+    session = FakeSession(keys=["0", "1", "b", "b"])
+
+    asyncio.run(_browse_directory(session, db, sysop, lane=lane))
+
+    card = [screen for screen in _screens(session) if "Member profile" in screen][-1]
+    assert "[M]ail" in card
+    assert "does not accept" not in card
+
+
+def test_the_blocked_card_is_no_taller_than_a_mailable_one(db, lane, alice, bob):
+    """The sentence takes the blank row above the action bar and `[M]ail`'s
+    row goes with the key, so the card does not grow."""
+    def card_rows():
+        session = FakeSession(keys=["0", "2", "b", "b"])
+        asyncio.run(_browse_directory(session, db, alice, lane=lane))
+        card = [screen for screen in _screens(session) if "Member profile" in screen][-1]
+        return card.rstrip("\n").split("\n")
+
+    mailable = card_rows()
+    block_local_sender(db, bob, alice)
+    blocked = card_rows()
+
+    assert len(blocked) <= len(mailable)
 
 
 def test_cancelling_the_letter_comes_back_to_the_card(db, lane, alice, bob):
@@ -315,6 +358,40 @@ def test_previous_callers_refuses_a_hidden_name_and_your_own_call(db, lane, alic
     assert _sent_rows(db) == []
 
 
+def test_previous_callers_refuses_the_row_of_a_caller_who_blocked_you(db, lane, alice, bob):
+    """Issue #953: the key belongs to the roll, so it stays; that row is
+    refused in Who's online's words, and another row is still mailable."""
+    carol = create_user(db, "carol", password="hunter2pw", user_level=10)
+    _called(db, bob)
+    _called(db, carol)
+    block_local_sender(db, bob, alice)
+    # Newest first: 1 is carol, 2 is bob.
+    session = FakeSession(keys=["m", "m", "s", "b"], lines=["2", "1", "Hi", "Hello", "", ""])
+
+    asyncio.run(_previous_callers_screen(session, db, alice, lane=lane))
+
+    screens = _screens(session)
+    assert "[M]ail a caller" in screens[0]
+    assert "bob does not accept messages or mail from you." in " ".join(screens[1].split())
+    assert "[M]ail a caller" in screens[1]
+    assert list_inbox(db, bob) == []
+    [letter] = list_inbox(db, carol)
+    assert letter.subject == "Hi"
+
+
+def test_previous_callers_does_not_reveal_a_hidden_caller_who_blocked_you(db, lane, alice, bob):
+    """The hidden-name refusal answers first: the block would name them."""
+    _called(db, bob)
+    set_session_history_name_visible(db, bob, False)
+    block_local_sender(db, bob, alice)
+    session = FakeSession(keys=["m", "b"], lines=["1"])
+
+    asyncio.run(_previous_callers_screen(session, db, alice, lane=lane))
+
+    assert "That caller keeps their name private" in _screens(session)[1]
+    assert "bob" not in _screens(session)[1]
+
+
 def test_previous_callers_refuses_a_superscript_digit_instead_of_crashing(db, lane, alice, bob):
     """`"²".isdigit()` is True but `int("²")` raises: typing it (AltGr+2 on
     a German keyboard) at the number prompt ended the session (#928)."""
@@ -389,6 +466,34 @@ def test_the_board_reader_offers_no_mail_on_your_own_post_or_with_mail_closed(db
 
     assert "Bob's post" in _visible(session)
     assert "ail author" not in _visible(session)
+
+
+def test_the_board_reader_offers_no_mail_to_an_author_who_blocked_you(db, alice, bob):
+    """Issue #953: the letter would be refused, so `[M]ail author` is not
+    offered; replying on the board still is."""
+    board = create_board(db, "general", creator=bob)
+    create_post(db, board, bob, "Modems", "Who still has a 2400 baud modem?")
+    block_local_sender(db, bob, alice)
+    session = FakeSession(keys=["1", "m", "b", "b"])
+
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+
+    reader = [screen for screen in _screens(session) if "2400 baud" in screen][-1]
+    assert "ail author" not in reader
+    assert "[R]eply" in reader
+    assert "To: bob" not in re.sub(r" {2,}", " ", _visible(session))
+    assert _sent_rows(db) == []
+
+
+def test_the_board_reader_offers_a_sysop_mail_to_an_author_who_blocked_them(db, bob):
+    sysop = _promoted_after_block(db, bob, create_user(db, "carrier", password="hunter2pw", user_level=10))
+    board = create_board(db, "general", creator=bob)
+    create_post(db, board, bob, "Modems", "Who still has a 2400 baud modem?")
+    session = FakeSession(keys=["1", "b", "b"])
+
+    asyncio.run(board_flow._show_board(session, db, board, sysop))
+
+    assert "ail author" in _visible(session)
 
 
 def test_the_board_reader_mails_a_carried_posts_author_over_link(db, alice, bob):

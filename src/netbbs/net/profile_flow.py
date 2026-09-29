@@ -69,7 +69,7 @@ from netbbs.net.composition import edit_line_body
 from netbbs.net.confirm import prompt_yes_no
 from netbbs.net.draft_storage import drafts_directory
 from netbbs.net.editor_preference import fullscreen_editor_enabled, set_fullscreen_editor_enabled
-from netbbs.net.mail_flow import mail_open_to, mail_someone
+from netbbs.net.mail_flow import mail_blocked_notice, mail_open_to, mail_someone
 from netbbs.net.menu_description_preference import menu_description_level, set_menu_description_level
 from netbbs.net.notices import announce, pending_notice_rows, write_notices
 from netbbs.net.node_theme import (
@@ -511,6 +511,12 @@ def _previous_caller_mail_target(
         return f"{name}'s account no longer exists."
     if target.id == viewer.id:
         return "That call was yours."
+    # Someone who has blocked the viewer is refused on this row, in Who's
+    # online's words (issue #953). The key stays: the roll's other callers
+    # can still be written to.
+    blocked = mail_blocked_notice(db, target, sender=viewer)
+    if blocked is not None:
+        return blocked
     return target
 
 
@@ -546,8 +552,11 @@ async def _previous_callers_screen(
     mail_someone`), then comes back here with the outcome above the
     prompt. Offered only with a `lane` and while mail is open to the
     viewer; otherwise the roll is dismissed with any key, as before. A
-    row whose name is hidden, your own call, and a deleted account are
-    refused with the reason.
+    row whose name is hidden, your own call, a deleted account, and a
+    caller who has blocked you (issue #953: "<name> does not accept
+    messages or mail from you.") are refused with the reason. The key is
+    not hidden for a caller who blocked you, as Who's online's `[E]-mail`
+    is: it is the roll's, not one caller's.
     """
     viewer_is_sysop = meets_level(user, SYSOP_LEVEL)
     while True:
