@@ -1375,6 +1375,10 @@ async def _show_area(
                 FileEntryPage(entries=[], has_older=False, has_newer=False),
                 highlighted=None, can_write=can_write, transfers=transfers,
             )
+            # Back to this area, not the list above it (issue #842): an
+            # upload link says "press Ctrl-L here to see it", and "here"
+            # is where the area's first file will appear.
+            await _show_area(session, lane, area, user, link_context=link_context, transfers=transfers)
             return
         if choice == "e" and describable_pending:
             await session.write_line("")

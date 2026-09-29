@@ -267,7 +267,7 @@ def test_an_empty_area_still_offers_a_browser_upload_link(db, lane, alice, grant
     """An empty area is exactly where a caller whose emulator has no
     Zmodem needs to put the first file (Codex review)."""
     area = create_file_area(db, "downloads", creator=alice)
-    session = FakeSession(keys=["w", "u"])
+    session = FakeSession(keys=["w", "u", "b"])
 
     asyncio.run(_show_area(session, lane, area, alice, transfers=grants))
 
@@ -642,3 +642,17 @@ def test_file_screen_briefs_fit_a_menu_column():
                 if isinstance(value, ast.Constant) and isinstance(value.value, str) and len(value.value) > room:
                     too_long.append(value.value)
     assert too_long == []
+
+
+def test_a_link_from_an_empty_area_comes_back_to_that_area(db, lane, alice, grants):
+    """`[W]` then `[U]pload link` on an empty area says "press Ctrl-L here
+    to see it"; "here" has to be the area, not the list above it."""
+    area = create_file_area(db, "Practice pages", creator=alice)
+    session = FakeSession(keys=["w", "u", "b"])
+
+    asyncio.run(_show_area(session, lane, area, alice, transfers=grants))
+
+    # The empty area is drawn a second time, after the link screen.
+    after_link_screen = session.visible_output.split("Browser transfer", 1)[1]
+    assert "has no files yet" in after_link_screen
+    assert "press Ctrl-L here to see it" in after_link_screen
