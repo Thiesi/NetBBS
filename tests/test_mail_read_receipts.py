@@ -252,6 +252,44 @@ def test_letters_already_read_before_the_upgrade_keep_their_reading(tmp_path, mo
         upgraded.close()
 
 
+def test_the_backfill_does_not_count_a_reading_as_shared_by_a_caller_opted_out_now(tmp_path, monkeypatch):
+    # A database that ran the unreleased #829 code may hold readings made
+    # while opted out; the current setting is the only proxy (issue #922).
+    from netbbs.storage import database as database_module
+    from netbbs.storage.migrations import MIGRATIONS
+
+    index = next(i for i, m in enumerate(MIGRATIONS) if "Issue #922" in m.description)
+    monkeypatch.setattr(database_module, "MIGRATIONS", MIGRATIONS[:index])
+    old = Database(tmp_path / "node.db")
+    alice, bob, carol = _user(old, "alice"), _user(old, "bob"), _user(old, "carol")
+    # Raw rows: today's `netbbs.mail` reads the column this migration adds.
+    for recipient in (bob, carol):
+        old.connection.execute(
+            "INSERT INTO mail_messages (sender_user_id, sender_label, recipient_user_id, subject, body, created_at, "
+            "read_at, first_read_at) VALUES (?, 'alice', ?, ?, 'x', '2026-09-28T09:00:00.000Z', ?, ?)",
+            (alice.id, recipient.id, f"To {recipient.username}", "2026-09-28T10:00:00.000Z", "2026-09-28T10:00:00.000Z"),
+        )
+    old.connection.commit()
+    set_shares_read_receipts(old, carol, False)
+    old.close()
+
+    monkeypatch.setattr(database_module, "MIGRATIONS", MIGRATIONS)
+    upgraded = Database(tmp_path / "node.db")
+    try:
+        rows = upgraded.connection.execute(
+            "SELECT subject, first_read_shared FROM mail_messages ORDER BY id"
+        ).fetchall()
+        assert [tuple(row) for row in rows] == [("To bob", 1), ("To carol", 0)]
+        # Carol opting back in does not turn that reading into a receipt.
+        carol_now = get_user_by_id(upgraded, carol.id)
+        set_shares_read_receipts(upgraded, carol_now, True)
+        alice_now = get_user_by_id(upgraded, alice.id)
+        receipts = read_receipts(upgraded, alice_now, list_sent(upgraded, alice_now))
+        assert sorted(receipt.state for receipt in receipts.values()) == [RECEIPT_NOT_READ, RECEIPT_READ]
+    finally:
+        upgraded.close()
+
+
 # -- Sent --------------------------------------------------------------------------
 
 

@@ -2691,7 +2691,11 @@ each recipient first opened it.
   #829 model) was rejected for exactly that peek. Letters read before the
   upgrade keep their reading as their receipt: the migrations copy
   `read_at` and count it as shared, as receipts were on for everyone by
-  default, and a caller who minds turns them off.
+  default, and a caller who minds turns them off. (A reading whose sender or
+  recipient has receipts off at the upgrade is not counted as shared: only
+  a database that ran the unreleased #829 code can hold one, and it keeps
+  no record of when the switch was made, so the backfill errs toward not
+  showing.)
 - **Local mail only.** Link mail carries no receipt (nothing goes over
   Link), and neither does mail from the system, which has no sender to tell.
 - **Sent.** A letter to one person has a `Read:` line under its To. A
