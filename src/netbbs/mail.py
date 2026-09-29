@@ -20,7 +20,7 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass
 
-from netbbs.auth.users import User
+from netbbs.auth.users import User, is_usable_sysop
 from netbbs.config import get_mail_min_level
 from netbbs.guest import guest_is_eligible
 from netbbs.permissions.levels import meets_level
@@ -109,6 +109,154 @@ def mail_recipient_refusal(db: Database, recipient: User) -> str | None:
     return None
 
 
+# -- blocked senders (issue #817) -----------------------------------------------
+#
+# A block is the recipient's: one account refusing mail from one sender. It is
+# checked beside `mail_recipient_refusal`, which says whether an account takes
+# mail at all, by `mail_sender_refusal`, which says whether it takes mail from
+# *this* sender: `send_mail` and the To prompt for local mail, and
+# `netbbs.link.mail.deliver_link_message` for Link mail, which bounces
+# `blocked_by_recipient`.
+#
+# The sender is told. A blocked letter is refused at the To prompt and at Send
+# with "<name> does not accept mail from you", and a Link letter bounces with
+# the same words, rather than being accepted and dropped. Mail promises that
+# nothing is lost in silence (§6.4, §10.5), and a silent drop would make the
+# one kind of refusal a sender can do something about -- stop writing -- the
+# only one they never hear of.
+#
+# Two senders cannot be blocked. Mail from the system (`send_system_mail`) is
+# the BBS telling an account about itself and has no sender to block. And a
+# SysOp of this node is not blockable either: the SysOp answers for the
+# accounts on the node and must be able to reach them, and a block would buy
+# no privacy from the person who runs the database it is stored in.
+
+SENDER_BLOCK_REFUSAL = "{name} does not accept mail from you."
+
+
+class MailSenderBlocked(MailRecipientRefused):
+    """Raised by `send_mail` when the recipient has blocked the sender
+    (issue #817)."""
+
+
+class MailBlockError(MailError):
+    """A block that cannot be made: the sender is the caller, the system or
+    one of this node's SysOps (issue #817)."""
+
+
+@dataclass(frozen=True)
+class MailBlock:
+    """One blocked sender: a local account by id, or a Link sender by its
+    `user@<home-node-fingerprint>` address."""
+    id: int
+    blocked_user_id: int | None
+    blocked_address: str | None
+    created_at: str
+
+
+def sender_unblockable_reason(db: Database, blocker: User, sender: User) -> str | None:
+    """Why `blocker` may not block local `sender`, or `None` when they may."""
+    if sender.id == blocker.id:
+        return "You can't block your own mail."
+    if is_usable_sysop(sender):
+        return f"{sender.username} runs this BBS; mail from its SysOp can't be blocked."
+    return None
+
+
+def block_local_sender(db: Database, blocker: User, sender: User) -> bool:
+    """Refuse `sender`'s mail to `blocker` from now on. `False` if it was
+    already blocked. Mail already in the inbox stays where it is."""
+    reason = sender_unblockable_reason(db, blocker, sender)
+    if reason is not None:
+        raise MailBlockError(reason)
+    cursor = db.connection.execute(
+        "INSERT OR IGNORE INTO mail_blocks (user_id, blocked_user_id, created_at) VALUES (?, ?, ?)",
+        (blocker.id, sender.id, utc_now_iso()),
+    )
+    db.connection.commit()
+    return cursor.rowcount > 0
+
+
+def block_link_sender(db: Database, blocker: User, address: str) -> bool:
+    """Refuse mail from the Link sender `address` (`user@<fingerprint>`) to
+    `blocker` from now on. `False` if it was already blocked."""
+    cursor = db.connection.execute(
+        "INSERT OR IGNORE INTO mail_blocks (user_id, blocked_address, created_at) VALUES (?, ?, ?)",
+        (blocker.id, address, utc_now_iso()),
+    )
+    db.connection.commit()
+    return cursor.rowcount > 0
+
+
+def unblock_local_sender(db: Database, blocker: User, sender_user_id: int) -> bool:
+    cursor = db.connection.execute(
+        "DELETE FROM mail_blocks WHERE user_id = ? AND blocked_user_id = ?", (blocker.id, sender_user_id)
+    )
+    db.connection.commit()
+    return cursor.rowcount > 0
+
+
+def unblock_link_sender(db: Database, blocker: User, address: str) -> bool:
+    cursor = db.connection.execute(
+        "DELETE FROM mail_blocks WHERE user_id = ? AND blocked_address = ?", (blocker.id, address)
+    )
+    db.connection.commit()
+    return cursor.rowcount > 0
+
+
+def unblock(db: Database, blocker: User, block: MailBlock) -> bool:
+    if block.blocked_user_id is not None:
+        return unblock_local_sender(db, blocker, block.blocked_user_id)
+    assert block.blocked_address is not None
+    return unblock_link_sender(db, blocker, block.blocked_address)
+
+
+def list_mail_blocks(db: Database, blocker: User) -> list[MailBlock]:
+    """`blocker`'s blocked senders, most recently blocked first."""
+    rows = db.connection.execute(
+        "SELECT id, blocked_user_id, blocked_address, created_at FROM mail_blocks "
+        "WHERE user_id = ? ORDER BY id DESC",
+        (blocker.id,),
+    ).fetchall()
+    return [
+        MailBlock(
+            id=row["id"], blocked_user_id=row["blocked_user_id"],
+            blocked_address=row["blocked_address"], created_at=row["created_at"],
+        )
+        for row in rows
+    ]
+
+
+def blocks_local_sender(db: Database, recipient: User, sender: User) -> bool:
+    return db.connection.execute(
+        "SELECT 1 FROM mail_blocks WHERE user_id = ? AND blocked_user_id = ?", (recipient.id, sender.id)
+    ).fetchone() is not None
+
+
+def blocks_link_sender(db: Database, recipient: User, address: str) -> bool:
+    return db.connection.execute(
+        "SELECT 1 FROM mail_blocks WHERE user_id = ? AND blocked_address = ?", (recipient.id, address)
+    ).fetchone() is not None
+
+
+def mail_sender_refusal(
+    db: Database, recipient: User, *, sender: User | None = None, sender_address: str | None = None,
+) -> str | None:
+    """Why `recipient` takes no mail from this sender -- a local account
+    (`sender`) or a Link sender (`sender_address`, `user@<fingerprint>`) --
+    or `None`. The sender-specific half of the recipient check (issue
+    #817), made wherever `mail_recipient_refusal` is made for a letter
+    with a sender: `send_mail`, the To prompt, and Link delivery. System
+    mail has no sender and is never refused by it; neither is a SysOp of
+    this node."""
+    if sender is not None:
+        if is_usable_sysop(sender) or not blocks_local_sender(db, recipient, sender):
+            return None
+    elif sender_address is None or not blocks_link_sender(db, recipient, sender_address):
+        return None
+    return SENDER_BLOCK_REFUSAL.format(name=recipient.username)
+
+
 class MailboxFullError(Exception):
     """
     Raised when `send_mail` would otherwise have to silently destroy an
@@ -185,14 +333,18 @@ def send_mail(db: Database, sender: User, recipient: User, subject: str, body: s
     acceptance criterion.
 
     Raises `MailRecipientRefused` for a recipient that takes no mail (the
-    guest account, issue #816). The sender is not checked here: whether a
-    caller may write mail is the mail screen's gate (`mail_access_refusal`),
-    and a moderator's rejection notice is sent on the moderator's behalf.
+    guest account, issue #816), and `MailSenderBlocked` for one that has
+    blocked `sender` (issue #817). Whether the sender may write mail at all
+    is not checked here: that is the mail screen's gate
+    (`mail_access_refusal`).
     """
     subject = validate_mail_fields(subject, body)
     refusal = mail_recipient_refusal(db, recipient)
     if refusal is not None:
         raise MailRecipientRefused(refusal)
+    blocked = mail_sender_refusal(db, recipient, sender=sender)
+    if blocked is not None:
+        raise MailSenderBlocked(blocked)
 
     _make_room_if_needed(db, recipient)
 
@@ -232,7 +384,8 @@ def send_system_mail(db: Database, recipient: User, subject: str, body: str) -> 
     message evicted to make room (`make_room`), and a mailbox full of
     unread mail raises `MailboxFullError` rather than lose anything. A
     recipient that takes no mail raises `MailRecipientRefused`, as in
-    `send_mail` (issue #816).
+    `send_mail` (issue #816). A recipient's blocked senders are not
+    consulted (issue #817): system mail has no sender to block.
     """
     subject = validate_mail_fields(subject, body)
     refusal = mail_recipient_refusal(db, recipient)

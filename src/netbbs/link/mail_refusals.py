@@ -65,6 +65,7 @@ _REASON_TEXT = {
     "malformed": "it was not a valid letter (sender name, subject or body)",
     "undecryptable": "it could not be decrypted with this node's key",
     "no_mailbox": "it was addressed to the guest account, which takes no mail",
+    "blocked_by_recipient": "the recipient blocked its sender",
 }
 
 #: Reasons a SysOp answers with trust: establishing, or lifting a block.
