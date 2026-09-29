@@ -317,8 +317,9 @@ ASCII. The answer becomes their preference. Profile changes it later. The
 earlier yes/no "Does that look garbled?" question and its Unicode/ASCII style
 preference are replaced by this; an account that had switched to ASCII keeps
 ASCII, and every other account moves to Auto. Screens that still vary their
-decoration by style ask for the Unicode style only when the session's set is
-UTF-8 or CP437.
+decoration by style use the decorated variant unless the caller's preference is
+ASCII; a CP437 session gets it mapped. An undetected terminal gets ASCII only
+until the question after login settles it.
 
 A SysOp may override three of the node's branding colors -- accent (board/
 channel/user names and other navigable-item branding), header (section

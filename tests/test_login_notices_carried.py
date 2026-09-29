@@ -58,6 +58,9 @@ class FakeSession:
     async def write_line(self, text: str = "") -> None:
         self.written.append(text + "\n")
 
+    async def write_raw(self, data: bytes) -> None:
+        await self.write(data.decode("utf-8", errors="replace"))
+
     async def read_key(self, echo: bool = True) -> str:
         key = next(self._keys, None)
         if key is None:
@@ -234,7 +237,7 @@ def test_login_notices_keep_the_main_menu_order(db):
 
 
 @pytest.mark.parametrize("roll", [False, True])
-def test_the_unicode_style_outcome_is_carried_to_the_menu(db, roll):
+def test_the_character_set_outcome_is_carried_to_the_menu(db, roll):
     bob = create_user(db, "bob", password="hunter2", user_level=10)
     set_redraw_in_place_enabled(db, bob, True)
     if roll:
@@ -242,12 +245,17 @@ def test_the_unicode_style_outcome_is_carried_to_the_menu(db, roll):
     else:
         set_previous_callers_enabled(db, False)
 
-    # "y" switches to plain ASCII; the second "y" confirms Log off.
-    session = _login(db, bob, FakeSession(lines=["y", "y"]))
+    # A terminal that did not say which character set it reads is asked
+    # (issue #929): "3" chooses plain ASCII, "l" and "y" log off.
+    session = FakeSession(keys=["3", "l"], lines=["y"])
+    session.charset_certain = False
+    session = _login(db, bob, session)
 
-    assert "Does that look garbled" in session.before_first_menu()  # still asked first
-    assert "Switched to plain ASCII style" in session.first_menu()
-    assert session.output.count("Switched to plain ASCII style") == 1
+    assert "looks right" in session.before_first_menu()  # still asked first
+    assert "Using plain ASCII" in session.first_menu()
+    assert session.output.count("Using plain ASCII") == 1
+    # Applied to the real session, not the wrapper holding the outcome.
+    assert session.output_charset == "ascii"
 
 
 def test_a_first_run_onboarding_outcome_is_carried_to_the_menu(db):
