@@ -56,7 +56,7 @@ from netbbs.files.categories import get_category_by_id as get_file_area_category
 from netbbs.link.boards import LinkContext
 from netbbs.link.onboarding import link_is_outgoing_only
 from netbbs.link.remote_attestation import count_attestation_recipients
-from netbbs.mail import list_mail_blocks
+from netbbs.mail import list_mail_blocks, set_shares_read_receipts, shares_read_receipts
 from netbbs.messaging_preferences import accepts_direct_messages, set_accepts_direct_messages
 from netbbs.net.char_input import InputCancelled, reject_unhandled_key
 from netbbs.net.breadcrumb_preference import breadcrumb_collapsed_enabled, set_breadcrumb_collapsed_enabled
@@ -1031,6 +1031,7 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
         "fullscreen_editor": await lane.run(fullscreen_editor_enabled, user),
         "accepts_dm": await lane.run(accepts_direct_messages, user),
         "blocked_sender_count": len(await lane.run(list_mail_blocks, user)),
+        "read_receipts": await lane.run(shares_read_receipts, user),
         "mrc_private": await lane.run(mrc_private_messages_enabled, user),
         "mrc_lastseen": await lane.run(mrc_lastseen_recorded, user),
         "history_name_visible": await lane.run(session_history_name_visible, user),
@@ -1273,6 +1274,26 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
                 "was refused. You can also block a sender from a letter they sent you. Mail from "
                 "the system and from this BBS's SysOp can't be blocked. Mail only: direct chat "
                 "messages have their own setting above."
+            ),
+            section="Communication",
+        ),
+        FieldSpec(
+            key="read_receipts", hotkey="x", menu_text=menu_key("x", "change read receipts", prefix="E"),
+            label="Let senders see when I've read their mail",
+            render=lambda d: "yes" if d["read_receipts"] else "no",
+            prompt=live_choice_field(
+                "read_receipts", [False, True],
+                persist=lambda lane, v: lane.run(set_shares_read_receipts, user, v),
+            ),
+            brief="Mail read receipts, both ways",
+            help=(
+                "On (the default): someone who sends you mail on this BBS sees in their Sent "
+                "folder when you first opened it, and you see the same for mail you send. It "
+                "works both ways: turn it off and no one sees when you read their mail, and you "
+                "no longer see when anyone reads yours. Off also hides the receipts already given; "
+                "turning it on again shows them again. A sender is told that you don't share "
+                "receipts, so your unread-looking letter isn't taken for one you haven't read. "
+                "Mail to and from other BBSes never has read receipts."
             ),
             section="Communication",
         ),
