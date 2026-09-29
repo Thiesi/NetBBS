@@ -1343,6 +1343,30 @@ async def _show_area(
         f"\r\n{_menu_row(_empty_hints(), width=session.terminal_width, height=session.terminal_height, description_level=description_level)}"
     )
     await _write_choice_prompt(session)
+
+    async def _still_empty() -> bool:
+        """Look at the area again after something that may have given it a
+        file (issue #842): Ctrl-L, a browser link, a failed or browser-side
+        upload. `False` means it has one now, and the caller opens the
+        listing once. Otherwise this screen is drawn again *in this loop*
+        (Claude review), never as a fresh `_show_area`: repeating any of
+        those keys would stack one screen per keypress until the session
+        died of a RecursionError. What an upload announced shows above the
+        prompt, and [E] offers an upload of the caller's that now waits."""
+        nonlocal describable_pending, queued
+        if (await lane.run(count_visible_files, area))[0]:
+            return False
+        pending_uploads = await lane.run(lambda db: list_pending_files(db, area, requesting_user=user))
+        describable_pending = [entry for entry in pending_uploads if _may_describe(entry)]
+        queued = await _queue_count()
+        await session.write_line(f"\r\n{heading}")
+        await session.write_line(f"\r\n{state}")
+        await session.write_line(
+            f"\r\n{_menu_row(_empty_hints(), width=session.terminal_width, height=session.terminal_height, description_level=description_level)}"
+        )
+        await _write_choice_prompt(session)
+        return True
+
     while True:
         # `read_key`, so Enter is discarded with no effect -- the same
         # on this action bar as on every other hotkey menu in NetBBS
@@ -1359,35 +1383,22 @@ async def _show_area(
             # browser page sends once an upload finishes: the area's first
             # file used to arrive while this screen went on saying it had
             # none.
-            if (await lane.run(count_visible_files, area))[0]:
-                await _show_area(session, lane, area, user, link_context=link_context, transfers=transfers)
-                return
-            # Still empty: this bar again, in this loop rather than a fresh
-            # screen (Claude review), so a caller holding Ctrl-L cannot
-            # stack one screen per keypress. What an upload announced -- a
-            # file that waits for approval -- shows above the prompt.
-            pending_uploads = await lane.run(lambda db: list_pending_files(db, area, requesting_user=user))
-            describable_pending = [entry for entry in pending_uploads if _may_describe(entry)]
-            queued = await _queue_count()
-            await session.write_line(
-                _menu_row(
-                    _empty_hints(), width=session.terminal_width, height=session.terminal_height,
-                    description_level=description_level,
-                )
-            )
-            await _write_choice_prompt(session)
-            continue
+            if await _still_empty():
+                continue
+            await _show_area(session, lane, area, user, link_context=link_context, transfers=transfers)
+            return
         if choice == "u" and can_write:
             await session.write_line("")
             if await _handle_upload(
                 session, lane, area, user, link_context=link_context, transfers=transfers
             ) is False:
-                # The browser is uploading the area's first file; staying
-                # here is the whole point, since this is the screen it will
-                # appear on (Codex review).
-                await _show_area(
-                    session, lane, area, user, link_context=link_context, transfers=transfers,
-                )
+                # The browser is uploading the area's first file, or a
+                # Zmodem upload failed; staying here is the whole point,
+                # since this is the screen the file will appear on (Codex
+                # review).
+                if await _still_empty():
+                    continue
+                await _show_area(session, lane, area, user, link_context=link_context, transfers=transfers)
             return
         if choice == "w" and transfers is not None and supports_zmodem(session):
             await session.write_line("")
@@ -1399,6 +1410,8 @@ async def _show_area(
             # Back to this area, not the list above it (issue #842): an
             # upload link says "press Ctrl-L here to see it", and "here"
             # is where the area's first file will appear.
+            if await _still_empty():
+                continue
             await _show_area(session, lane, area, user, link_context=link_context, transfers=transfers)
             return
         if choice == "e" and describable_pending:

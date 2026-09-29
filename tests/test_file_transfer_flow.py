@@ -666,7 +666,8 @@ def test_holding_ctrl_l_on_an_empty_area_does_not_stack_screens(db, lane, alice,
 
     asyncio.run(_show_area(session, lane, area, alice, transfers=grants))
 
-    assert session.visible_output.count("has no files yet") == 1
+    # Drawn again for each press, in the same loop.
+    assert session.visible_output.count("has no files yet") == 1501
 
 
 def test_ctrl_l_offers_to_describe_an_upload_that_now_waits(db, lane, alice, grants):
@@ -679,3 +680,23 @@ def test_ctrl_l_offers_to_describe_an_upload_that_now_waits(db, lane, alice, gra
     after = session.visible_output.split("has no files yet", 1)[1]
     assert "[E]dit description" not in session.visible_output.split("has no files yet", 1)[0]
     assert "[E]dit description" in after
+
+
+def test_repeating_the_link_screen_on_an_empty_area_does_not_stack_screens(db, lane, alice, grants):
+    """[W] then [B], over and over (Claude review): each round comes back
+    to this screen in the same loop, not in a fresh one per round."""
+    area = create_file_area(db, "Practice pages", creator=alice)
+    session = FakeSession(keys=["w", "b"] * 700 + ["b"])
+
+    asyncio.run(_show_area(session, lane, area, alice, transfers=grants))
+
+    assert session.visible_output.count("has no files yet") == 701
+
+
+def test_repeated_failed_zmodem_uploads_on_an_empty_area_do_not_stack_screens(db, lane, alice, grants):
+    area = create_file_area(db, "Practice pages", creator=alice)
+    session = _NoZmodemClient(keys=["u"] * 700 + ["b"])
+
+    asyncio.run(_show_area(session, lane, area, alice, transfers=grants))
+
+    assert session.visible_output.count("Upload failed") == 700
