@@ -325,7 +325,7 @@ async def _bootstrap_first_sysop(session: Session, lane: DatabaseLane) -> User:
 
 
 async def _prompt_password(session: Session) -> str | None:
-    await session.write("Password (leave blank to skip): ")
+    await session.write("Password: ")
     first = await session.read_line(echo=False)
     if not first:
         return None
@@ -338,7 +338,7 @@ async def _prompt_password(session: Session) -> str | None:
 
 
 async def _prompt_pubkey(session: Session) -> nacl.signing.VerifyKey | None:
-    await write_prompt(session, "Public key, base64 or ssh-ed25519 line (leave blank to skip): ")
+    await write_prompt(session, "Public key (base64, or an ssh-ed25519 line): ")
     text = (await session.read_line()).strip()
     if not text:
         return None
