@@ -36,10 +36,8 @@ from netbbs.timeutil import utc_now_iso
 
 #: At most this many refused letters are kept; the oldest go first.
 MAX_LINK_MAIL_REFUSALS_KEPT = 500
-#: And at most this many from any one node, so that one node sending letters
-#: by the hundred -- a direct push is refused before its letters' signatures
-#: are checked, so they cost it nothing to invent -- cannot push every other
-#: node's refusals out of the log.
+#: And at most this many from any one node, so that one node signing letters
+#: by the hundred cannot push every other node's refusals out of the log.
 MAX_LINK_MAIL_REFUSALS_PER_NODE = 50
 
 #: How the refused letter reached this node.
@@ -98,10 +96,10 @@ def record_link_mail_refusal(
     """Keep one refused letter. A letter refused again (a sender retrying the
     same message by another route) updates its row rather than adding one.
 
-    `sender_node_fingerprint` overrides the home node the letter names: a
-    direct push is refused before the letter's own signature is checked, so
-    there the node on record is the one that authenticated the push, and the
-    letter's claim is taken only when it names that same node.
+    `sender_node_fingerprint` is the node a direct push came from; the letter's
+    sender is taken only when it names that same node. The caller verifies
+    the letter's signature first (`LinkNode.is_signed_letter_from`): a push
+    is refused before `handle_events` has checked anything.
 
     Never raises for a letter it cannot read: a record of a refusal must not be
     what breaks the refusal."""

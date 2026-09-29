@@ -5129,12 +5129,13 @@ sender's home node and user name, the reason code, how it arrived, when it was
 first and last refused, and how many times. One row per letter (its
 `content_id`), so a sender retrying by another route counts up rather than
 adding rows; bounded to the 500 most recent, and 50 from any one node,
-because the sender decides how many letters arrive and a pushed letter is
-recorded before its signature is checked. A direct push is refused before its letters' signatures
-are checked, so there the node on record is the one that authenticated the
-push, and a letter naming another home node is not believed about its sender's
-name; a push that reached this node for another node (a stale address) is not
-kept. The record never holds the recipient, subject, body or ciphertext: the
+because the sender decides how many letters arrive. A direct push is refused
+before `handle_events` has verified anything, and the node it names is only its
+URL, so a pushed letter is recorded only once its own signature verifies
+against the keys of that node, a peer this node has met
+(`LinkNode.is_signed_letter_from`); otherwise anyone could put a node on the
+refused list, with Establish beside it. A push that reached this node for
+another node (a stale address) is not kept. The record never holds the recipient, subject, body or ciphertext: the
 console's mail tools (§6.4) show senders and reasons only. The console's
 refused-letter screen leads to the node's and the sender's trust screen, where
 establishing or blocking happens; a refused sender whose node was refused as a

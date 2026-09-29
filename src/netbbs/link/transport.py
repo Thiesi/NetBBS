@@ -1938,11 +1938,14 @@ class LinkServer:
     ) -> None:
         """Keep each letter in a refused push for the SysOp (issue #820).
 
-        The push is refused before any event's signature is checked, so the
-        node on record is the one that authenticated the request, and a letter
-        naming another home node is not believed about its sender's name. Only
-        mail addressed to this node is kept: a push that reached it at an
-        address its intended recipient no longer has is not mail refused here."""
+        The push is refused before `handle_events` has verified anything, and
+        the `fingerprint` it names is only its URL. So a letter is kept only
+        once its own signature verifies against that node's keys
+        (`LinkNode.is_signed_letter_from`): anyone can reach this endpoint, and
+        a record anyone can forge would put a node the SysOp never heard from
+        on the refused list with Establish beside it. Only mail addressed to
+        this node is kept: a push that reached it at an address its intended
+        recipient no longer has is not mail refused here."""
         own = self._node.identity.fingerprint
         for raw in raw_events:
             try:
@@ -1953,7 +1956,7 @@ class LinkServer:
                 )
             except (KeyError, TypeError):
                 continue
-            if is_mail_for_us:
+            if is_mail_for_us and self._node.is_signed_letter_from(raw, fingerprint):
                 await self._lane.run(
                     record_link_mail_refusal, raw, decision.reason_code or "refused", via=VIA_DIRECT,
                     sender_node_fingerprint=fingerprint,

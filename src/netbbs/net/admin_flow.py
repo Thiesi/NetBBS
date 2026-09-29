@@ -4433,7 +4433,13 @@ async def _clear_trust_override_screen(
 
     def _clear(db: Database) -> None:
         for item in chosen:
-            clear_trust_override(db, item.override_id, actor_user_id=actor.id)
+            try:
+                clear_trust_override(db, item.override_id, actor_user_id=actor.id)
+            except ValueError:
+                # Cleared meanwhile from another session: already what was
+                # asked for, so "all" still ends with every one of them gone.
+                if len(chosen) == 1:
+                    raise
 
     try:
         await lane.run(_clear)

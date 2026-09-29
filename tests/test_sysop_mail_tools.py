@@ -258,6 +258,63 @@ def test_a_push_refused_by_policy_is_recorded_on_the_receiving_node(tmp_path):
         recipient.close()
 
 
+def test_only_a_letter_its_node_really_signed_counts_as_from_it():
+    sender, message = _mail()
+    recipient = LinkNode(identity=bootstrap_node_identity("recipient"))
+    raw = message.to_dict()
+    # A node never met: its URL is all a push has, and that proves nothing.
+    assert not recipient.is_signed_letter_from(raw, sender.fingerprint)
+    recipient.peers[sender.fingerprint] = _record(sender, name="Sender")
+    assert recipient.is_signed_letter_from(raw, sender.fingerprint)
+    forged = message.to_dict()
+    forged["envelope"]["payload"]["sender"]["local_user_id"] = "mallory"
+    assert not recipient.is_signed_letter_from(forged, sender.fingerprint)
+    stranger = bootstrap_node_identity("stranger")
+    recipient.peers[stranger.fingerprint] = _record(stranger, name="Stranger")
+    assert not recipient.is_signed_letter_from(raw, stranger.fingerprint)
+
+
+def test_a_forged_push_is_refused_and_not_recorded(tmp_path):
+    """Anyone can reach the events endpoint and name any node in its URL: a
+    letter that node never signed must not appear as refused mail from it."""
+    import aiohttp
+
+    from netbbs.link.transport import LINK_PATH_PREFIX, LinkServer
+
+    sender = bootstrap_node_identity("sender")
+    recipient_identity = bootstrap_node_identity("recipient")
+    recipient_node = LinkNode(identity=recipient_identity)
+    recipient_node.peers[sender.fingerprint] = _record(sender, name="Sender")
+    recipient = _NodeDb(tmp_path, "recipient")
+    forger = bootstrap_node_identity("forger")
+    forged = _signed_mail(forger, recipient_identity).to_dict()
+    forged["envelope"]["payload"]["sender"]["home_node_fingerprint"] = sender.fingerprint
+
+    async def scenario():
+        server = LinkServer(
+            host="127.0.0.1", port=0, node=recipient_node,
+            own_hello_provider=lambda: recipient_node.build_hello(
+                addresses=None, outgoing_only=True, created_at="2026-01-01T00:00:00+00:00",
+            ),
+            lane=recipient.lane, enforce_trust_policy=True,
+        )
+        await server.start()
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"http://127.0.0.1:{server.port}{LINK_PATH_PREFIX}/events/{sender.fingerprint}", json=[forged],
+                ) as response:
+                    return response.status
+        finally:
+            await server.stop()
+
+    try:
+        assert asyncio.run(scenario()) == 403
+        assert list_link_mail_refusals(recipient.db) == []
+    finally:
+        recipient.close()
+
+
 # -- mailbox sizes ---------------------------------------------------------------
 
 
