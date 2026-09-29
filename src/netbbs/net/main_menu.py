@@ -47,7 +47,7 @@ from netbbs.net.confirm import prompt_yes_no
 from netbbs.net.directory_flow import _browse_directory, _caller_who_screen
 from netbbs.net.door_flow import _visible_doors, browse_doors, has_visible_doors
 from netbbs.net.file_flow import browse_file_areas, visible_areas
-from netbbs.net.mail_arrivals import arrival_event, login_mail_notice, notice_color, waiting_mail_counts
+from netbbs.net.mail_arrivals import NOTICE_COLOR as NEW_MAIL_COLOR, arrival_event, login_mail_notice, waiting_mail_counts
 from netbbs.net.mail_flow import browse_mail, caller_mail_refusal
 from netbbs.net.main_menu_banner import load_main_menu_banner
 from netbbs.net.menu_description_preference import menu_description_level
@@ -336,10 +336,10 @@ async def _draw_main_menu(
     # own header (now the mailbox's, `_MailboxScreen`) settled this wording as
     # "message(s)"; matching it here fixes both the missing pluralization
     # and a term the app wasn't even using consistently with itself.
-    # The unread count in the highlight colour, the accent beside the
-    # caller's name (issue #917): news, not a warning.
+    # The unread count in the good-news green (issues #917, #944): news,
+    # not a warning, and not the gold of the caller's name beside it.
     mail_status = (
-        (f"{unread} unread message{'' if unread == 1 else 's'}", effective_accent_color(session, db))
+        (f"{unread} unread message{'' if unread == 1 else 's'}", NEW_MAIL_COLOR)
         if unread
         else ("mail caught up", SUCCESS_COLOR)
     )
@@ -680,7 +680,7 @@ async def _main_menu_loop(
                         *waiting_mail_counts(db, user, current_history_id=current_history_id)
                     )
                     if waiting is not None:
-                        announce(session, waiting, color=notice_color(db))
+                        announce(session, waiting, color=NEW_MAIL_COLOR)
                 # Read mail the mailbox cap removed to make room, counted
                 # and told once (issue #818) -- never which messages. Held
                 # for a caller mail is closed to, who has no Inbox to see.

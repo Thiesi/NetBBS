@@ -42,10 +42,9 @@ from dataclasses import dataclass, field
 
 from netbbs.auth.users import User, current_account
 from netbbs.mail import MailKey, get_inbox_letters, inbox_mail_keys, unread_count, unread_count_since
-from netbbs.net.node_theme import effective_accent_color_256
 from netbbs.net.notices import announce
 from netbbs.net.session import Session, SessionClosedError
-from netbbs.rendering import colored, sanitize_text
+from netbbs.rendering import GOOD_NEWS_COLOR, colored, sanitize_text
 from netbbs.session_history import previous_call_started_at
 from netbbs.storage.database import Database
 
@@ -59,15 +58,13 @@ MAX_NAMED = 3
 
 
 
-def notice_color(db: Database) -> int:
-    """What news of mail is drawn in (issue #917): the node's accent, its
-    highlight colour, and never the warning colour -- new mail is good
-    news, not a problem. The same colour on every line that counts or
-    names waiting mail: the live "New mail from ..." lines, the login
-    notice, New scan's Mail line, the main menu's and the mailbox's unread
-    counts. At the 256-colour depth, like chat, which shows the live line
-    to a whole screen of callers at once."""
-    return effective_accent_color_256(db)
+#: What news of mail is drawn in (issues #917, #944): the good-news green,
+#: never the warning colour -- new mail is good news, not a problem -- and
+#: not the node's accent, which reads as the old amber. The same colour on
+#: every line that counts or names waiting mail: the live "New mail from ..."
+#: lines, the login notice, New scan's Mail line, the main menu's and the
+#: mailbox's unread counts.
+NOTICE_COLOR = GOOD_NEWS_COLOR
 
 
 @dataclass(eq=False)
@@ -203,7 +200,7 @@ async def watch_for_mail(session: Session, db: Database, user: User, *, poll_sec
             arrivals = _arrivals(session, db, user, known)
             if arrivals:
                 try:
-                    await _tell(session, watch, new_mail_notice_lines(arrivals), notice_color(db))
+                    await _tell(session, watch, new_mail_notice_lines(arrivals), NOTICE_COLOR)
                 except SessionClosedError:
                     return
     finally:

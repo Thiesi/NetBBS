@@ -53,6 +53,22 @@ RULE_COLOR = 240  # dark gray — a horizontal rule or column divider, which is
                   # MUTED_COLOR as "the dimmest value this palette has", which
                   # stopped being true when MUTED_COLOR was raised for legibility
 SUCCESS_COLOR = 82  # vivid green — completed user actions and healthy states
+GOOD_NEWS_COLOR = SUCCESS_COLOR  # vivid green — news a caller is glad of:
+                                 # mail waiting or just arrived (issue #944).
+                                 # Its own name for its own meaning, but
+                                 # SUCCESS_COLOR's green on purpose rather
+                                 # than a second green: "green is good" is
+                                 # already what the palette says, and good
+                                 # news is exactly that. Not ACCENT_COLOR
+                                 # (#917 tried it: gold 220 beside the old
+                                 # amber 214 changed nothing on screen, and
+                                 # the unread count sits next to the gold
+                                 # username) and never WARNING_COLOR, which
+                                 # stays for what is a problem -- a mailbox
+                                 # near its cap, bounced mail. Semantic, so
+                                 # not a SysOp branding slot
+                                 # (`netbbs.net.node_theme`): a node's accent
+                                 # override never recolours it
 ERROR_COLOR = 196  # red — failed actions and unavailable/error states
 MENU_KEY_COLOR = 46  # bright green — the actual valid keystroke in a menu option
 SELF_COLOR = 201  # bright magenta — the user's own name/messages in chat, distinct

@@ -164,7 +164,7 @@ from netbbs.net.post_color_preference import post_colors_enabled
 from netbbs.net.prose_editor import EditorHeader, edit_prose
 from netbbs.net.detail_view import show_detail
 from netbbs.net.picker import pick_item
-from netbbs.net.mail_arrivals import arrival_event, nudge
+from netbbs.net.mail_arrivals import NOTICE_COLOR as NEW_MAIL_COLOR, arrival_event, nudge
 from netbbs.net.mail_recipients import (
     RecipientCompleter,
     choose_recipient,
@@ -1254,13 +1254,13 @@ class _MailboxScreen:
             if self.kept:
                 parts.append(colored(_count(total, "kept message") if not narrow else f"{total} kept", fg_color=VALUE_COLOR))
                 if unread:
-                    parts.append(colored(f"{unread} unread", fg_color=self.accent))
+                    parts.append(colored(f"{unread} unread", fg_color=NEW_MAIL_COLOR))
             else:
-                # Unread counts in the highlight colour, as on the main menu
-                # and in the new-mail notices (issue #917): news, not a
-                # warning. The cap nearing full stays a warning.
+                # Unread counts in the good-news green, as on the main menu
+                # and in the new-mail notices (issues #917, #944): news, not
+                # a warning. The cap nearing full stays a warning.
                 parts.append(
-                    colored(_count(unread, "unread message") if not narrow else f"{unread} unread", fg_color=self.accent)
+                    colored(_count(unread, "unread message") if not narrow else f"{unread} unread", fg_color=NEW_MAIL_COLOR)
                     if unread else colored("Inbox caught up", fg_color=SUCCESS_COLOR)
                 )
             # Counted against the folder's own limit, read or not, whatever
@@ -1282,7 +1282,7 @@ class _MailboxScreen:
                     # The main menu counts these as unread too (review on
                     # #908): said at any width, or the Inbox would read
                     # "caught up" while the main menu says otherwise.
-                    parts.append(colored(f"{kept_unread} unread in Kept", fg_color=self.accent))
+                    parts.append(colored(f"{kept_unread} unread in Kept", fg_color=NEW_MAIL_COLOR))
                 elif kept and not narrow:
                     parts.append(colored(f"{len(kept)} in Kept", fg_color=MUTED_COLOR))
         order = self._effective_order()

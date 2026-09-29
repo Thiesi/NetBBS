@@ -1,11 +1,13 @@
-"""Mail notices count what is new since the last call, in the highlight
-colour (issue #917).
+"""Mail notices count what is new since the last call, in the good-news
+colour (issues #917, #944).
 
 #823 told a caller at login how many letters were unread, and drew that --
 like every other line about waiting mail -- in the warning colour. The
 operator decided both: the login notice (and New scan's Mail line) also says
 how many arrived since the caller's last call, and news of mail is drawn in
 the node's accent, since new mail is good news rather than a problem.
+The accent's gold turned out to read as the old amber, so #944 gave good news
+a colour of its own: the palette's green, which no SysOp branding changes.
 """
 
 from __future__ import annotations
@@ -18,14 +20,14 @@ from netbbs.boards.boards import create_board
 from netbbs.chat.hub import ChatHub
 from netbbs.chat.mailbox import MessageMailbox
 from netbbs.chat.presence import PresenceRegistry
-from netbbs.mail import mark_read, send_mail, unread_count_since
+from netbbs.mail import mark_read, send_mail, set_kept, unread_count_since
 from netbbs.net import mail_arrivals, main_menu, scan_and_find
 from netbbs.net.char_input import InputHistory
 from netbbs.net.mail_flow import browse_mail
 from netbbs.net.main_menu import _main_menu
 from netbbs.net.node_theme import set_accent_color_override
 from netbbs.net.notices import pending_notices
-from netbbs.rendering import ACCENT_COLOR, WARNING_COLOR, nearest_256
+from netbbs.rendering import ACCENT_COLOR, GOOD_NEWS_COLOR, MENU_KEY_COLOR, WARNING_COLOR, nearest_256
 from netbbs.session_history import previous_call_started_at, record_session_start
 from tests.test_mail_arrivals import Session, _scan, _stop, _until, _watching, node  # noqa: F401
 
@@ -174,15 +176,15 @@ def test_nothing_unread_no_line_even_after_a_previous_call(node):
     assert "You have" not in text
 
 
-def test_the_login_notice_and_the_menus_unread_count_are_in_the_highlight_colour(node):
+def test_the_login_notice_and_the_menus_unread_count_are_in_the_good_news_colour(node):
     db, lane, alice, bob = node
     _letter(db, bob, alice, "New", LATE)
     _call(db, alice, LAST_CALL)
     current = _call(db, alice, NOW)
 
     raw = _raw(_first_menu(db, lane, alice, current))
-    assert _color_of(raw, "1 new since your last call") == f"38;5;{ACCENT_COLOR}"
-    assert _color_of(raw, "1 unread message") == f"38;5;{ACCENT_COLOR}"
+    assert _color_of(raw, "1 new since your last call") == f"38;5;{GOOD_NEWS_COLOR}"
+    assert _color_of(raw, "1 unread message") == f"38;5;{GOOD_NEWS_COLOR}"
     assert f"38;5;{WARNING_COLOR}m" not in raw
 
 
@@ -195,13 +197,13 @@ def test_the_eviction_count_stays_a_warning(node, monkeypatch):
 
     raw = _raw(_first_menu(db, lane, alice, current))
     assert _color_of(raw, "EVICTED LINE") == f"38;5;{WARNING_COLOR}"
-    assert _color_of(raw, "You have 1 unread message") == f"38;5;{ACCENT_COLOR}"
+    assert _color_of(raw, "You have 1 unread message") == f"38;5;{GOOD_NEWS_COLOR}"
 
 
 # -- New scan -----------------------------------------------------------------
 
 
-def test_new_scan_shows_the_same_two_counts_in_the_highlight_colour(node):
+def test_new_scan_shows_the_same_two_counts_in_the_good_news_colour(node):
     db, lane, alice, bob = node
     _letter(db, bob, alice, "Old", EARLY)
     _letter(db, bob, alice, "New", LATE)
@@ -222,7 +224,7 @@ def test_new_scan_shows_the_same_two_counts_in_the_highlight_colour(node):
     session = asyncio.run(scenario())
     line = "Mail: 1 new since your last call, 2 unread in all -- [E]-mail to read them"
     assert line in session.visible()
-    assert _color_of(_raw(session), line) == f"38;5;{ACCENT_COLOR}"
+    assert _color_of(_raw(session), line) == f"38;5;{GOOD_NEWS_COLOR}"
 
 
 def test_new_scan_on_a_first_call_counts_unread_alone(node):
@@ -240,7 +242,7 @@ def test_new_scan_on_a_first_call_counts_unread_alone(node):
 # -- live notices and the mailbox ----------------------------------------------
 
 
-def test_live_new_mail_lines_are_in_the_highlight_colour(node):
+def test_live_new_mail_lines_are_in_the_good_news_colour(node):
     db, _lane, alice, bob = node
 
     async def scenario():
@@ -263,22 +265,43 @@ def test_live_new_mail_lines_are_in_the_highlight_colour(node):
 
     queued, shown = asyncio.run(scenario())
     for line in (*queued, *shown):
-        assert _color_of(line, "New mail from bob") == f"38;5;{ACCENT_COLOR}"
+        assert _color_of(line, "New mail from bob") == f"38;5;{GOOD_NEWS_COLOR}"
 
 
-def test_a_sysop_accent_override_is_the_highlight(node):
+def test_a_sysop_accent_override_leaves_good_news_green(node):
+    """Good news is a semantic colour, like success and warnings: a node's
+    branding moves the caller's name, never the unread count beside it."""
     db, lane, alice, bob = node
-    set_accent_color_override(db, (10, 200, 30))
-    accent = nearest_256((10, 200, 30))
+    set_accent_color_override(db, (200, 40, 160))
+    accent = nearest_256((200, 40, 160))
     _letter(db, bob, alice, "New", LATE)
     current = _call(db, alice, NOW)
 
     raw = _raw(_first_menu(db, lane, alice, current))
-    assert _color_of(raw, "You have 1 unread message") == f"38;5;{accent}"
-    assert mail_arrivals.notice_color(db) == accent
+    assert _color_of(raw, "alice") == f"38;5;{accent}"
+    assert _color_of(raw, "You have 1 unread message") == f"38;5;{GOOD_NEWS_COLOR}"
+    assert _color_of(raw, "1 unread message ") == f"38;5;{GOOD_NEWS_COLOR}"
 
 
-def test_the_mailbox_header_counts_unread_in_the_highlight_colour(node):
+def test_good_news_is_its_own_colour_in_the_default_theme():
+    """#917's gold was a shade off the warning amber; the two have to read
+    apart at a glance, and good news apart from the gold name beside it and
+    from a menu's hotkeys."""
+    assert GOOD_NEWS_COLOR not in {ACCENT_COLOR, WARNING_COLOR, MENU_KEY_COLOR}
+    # Green, not another yellow: its RGB has green well above red and blue.
+    r, g, b = _xterm_rgb(GOOD_NEWS_COLOR)
+    assert g > 2 * max(r, b)
+
+
+def _xterm_rgb(index: int) -> tuple[int, int, int]:
+    """The xterm 256-colour cube's RGB for a cube index (16-231)."""
+    assert 16 <= index <= 231
+    steps = (0, 95, 135, 175, 215, 255)
+    index -= 16
+    return steps[index // 36], steps[(index // 6) % 6], steps[index % 6]
+
+
+def test_the_mailbox_header_counts_unread_in_the_good_news_colour(node):
     db, lane, alice, bob = node
     _letter(db, bob, alice, "One", LATE)
     _letter(db, bob, alice, "Two", LATE)
@@ -289,7 +312,7 @@ def test_the_mailbox_header_counts_unread_in_the_highlight_colour(node):
         return session
 
     raw = _raw(asyncio.run(scenario()))
-    assert _color_of(raw, "2 unread messages") == f"38;5;{ACCENT_COLOR}"
+    assert _color_of(raw, "2 unread messages") == f"38;5;{GOOD_NEWS_COLOR}"
 
 
 def test_a_nearly_full_mailbox_stays_a_warning(node, monkeypatch):
@@ -307,4 +330,18 @@ def test_a_nearly_full_mailbox_stays_a_warning(node, monkeypatch):
 
     raw = _raw(asyncio.run(scenario()))
     assert _color_of(raw, f"2 of {mail_module.MAX_MAIL_PER_RECIPIENT}") == f"38;5;{WARNING_COLOR}"
-    assert _color_of(raw, "2 unread messages") == f"38;5;{ACCENT_COLOR}"
+    assert _color_of(raw, "2 unread messages") == f"38;5;{GOOD_NEWS_COLOR}"
+
+
+def test_unread_in_kept_is_good_news_too(node):
+    db, lane, alice, bob = node
+    kept = _letter(db, bob, alice, "Keep me", LATE)
+    set_kept(db, alice, [kept.id], kept=True)
+
+    async def scenario():
+        session = Session(["b"])
+        await browse_mail(session, lane, alice)
+        return session
+
+    raw = _raw(asyncio.run(scenario()))
+    assert _color_of(raw, "1 unread in Kept") == f"38;5;{GOOD_NEWS_COLOR}"

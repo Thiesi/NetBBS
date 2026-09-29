@@ -13,8 +13,8 @@ docstring calls itself "part one" of (the main-menu masthead, issue
 Deliberately narrow: only `ACCENT_COLOR`, `HEADER_COLOR`, and
 `CLOCK_COLOR` -- the "branding" colors -- are ever overridable here.
 Every semantic/status color in `netbbs.rendering.theme` (`ERROR_COLOR`,
-`SUCCESS_COLOR`, `WARNING_COLOR`, `PRIVILEGE_COLOR`, `ALERT_COLOR`,
-`VERIFIED_COLOR`) is intentionally absent from this module and always
+`SUCCESS_COLOR`, `GOOD_NEWS_COLOR`, `WARNING_COLOR`, `PRIVILEGE_COLOR`,
+`ALERT_COLOR`, `VERIFIED_COLOR`) is intentionally absent from this module and always
 stays exactly as `theme.py` defines it, everywhere -- a caller who has
 used several NetBBS nodes can keep trusting "red always means failure,
 green always means verified/success" regardless of what any node's
