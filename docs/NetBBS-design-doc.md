@@ -1788,7 +1788,7 @@ parent, listed on the board like any other post. There is no threaded view.
 - **Mail:** mail's Reply starts its body with the same quote and its subject
   with the same rule (`netbbs.quoting`).
 - The mail message view and the SysOp's pending-post review use the same
-  reader.
+  reader. Mail keeps its writer's lines (§6.4).
 
 The board picker adds an activity column ("N new", "caught up", "not visited
 yet", in §6.6's terms) and an "about" column that leads with `[LINK]` and a
@@ -2104,6 +2104,28 @@ Recipient mailboxes are bounded. When full:
 
 Local mail is the domain extended by Link messages; Link mail does not create a
 parallel mailbox UI.
+
+**How a body reads** (issue #809). A letter keeps its writer's lines: the
+message view, Sent's view and the review screen show every line as written,
+and wrap only a line wider than the terminal, at a word
+(`netbbs.rendering.post_body.lined_body_rows`). Mail used to reflow a body the
+way a board post reflows. That ran a greeting into the first sentence, a list
+into one line and a signature into `-- Alice of Q Pen club treasurer`. A
+letter's short lines are its form, not text to rewrap. `>` quote lines are
+muted and keep their marker when they wrap, as in a post.
+
+A body is filtered exactly as a post on a board that allows color (§6.1,
+"Color in posts"): pipe codes and SGR color show, and every other escape
+sequence is removed whole. Local mail and mail carried from another node take
+the same path, so a peer can no more clear a reader's screen through mail than
+through a post. There is no SysOp switch for mail: a letter is between its
+writer and its reader, and the filter is what makes color safe to show. The
+reader's own "Post colors" preference covers mail too. With it off, a letter
+shows as plain text, the codes removed. Both mail editors keep pasted color
+as pipe codes, as a board that allows color does. A reply quotes the plain
+text, without codes, as a board reply does. Stripping codes on display was the
+alternative. It was rejected because boards already show them safely, and a
+writer who typed `|12` meant color.
 
 ### 6.5 Communities
 
