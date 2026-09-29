@@ -815,6 +815,10 @@ async def run_authenticated_session(
             current_history_id=history_id,
         )
     finally:
+        if mail_watch_task is not None:
+            # First, before anything here can raise: nothing else stops it,
+            # and it would poll for a session that is gone (review on #898).
+            mail_watch_task.cancel()
         presence.leave(user.username)
         if (
             not presence.is_online(user.username)
@@ -823,11 +827,6 @@ async def run_authenticated_session(
         ):
             await link_context.realtime_bridge.broadcast_node_presence_live(change="leave", username=user.username)
         completed_history_entry = record_session_end(db, history_id)
-        if mail_watch_task is not None:
-            # Its failure, if it had one, must not mask how the session
-            # ended; it is retrieved here and dropped.
-            mail_watch_task.cancel()
-            await asyncio.gather(mail_watch_task, return_exceptions=True)
         if watcher_task is not None:
             # Same cancel-then-await-swallowing-CancelledError shape
             # editor autosave tasks already use (GitHub issue #43) --
@@ -841,6 +840,11 @@ async def run_authenticated_session(
                 await watcher_task
             except asyncio.CancelledError:
                 pass
+        if mail_watch_task is not None:
+            # Retrieved last, so it adds no wait before the account watcher
+            # is stopped; a failure of its own must not mask how the
+            # session ended.
+            await asyncio.gather(mail_watch_task, return_exceptions=True)
 
     # GitHub issue #177: only reached when `_main_menu` returns normally,
     # not when it (or anything nested under it) raises -- which covers
