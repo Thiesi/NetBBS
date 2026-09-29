@@ -2298,7 +2298,8 @@ received stays.
   account) cannot be blocked either: the SysOp answers for the node's
   accounts and has to reach them, and a block would buy no privacy from the
   person who runs the database it is stored in. The check reads the sender's
-  current level, so a blocked account that later becomes SysOp gets through,
+  current level, so a blocked account that later becomes SysOp gets through
+  (the Blocked senders list marks the block as not applied),
   and is blocked again if it stops being one. Staff below 255 are blockable.
 - Blocking covers mail only. Live direct messages keep their own opt-out
   (Profile's direct-message setting), which today gates Who's online, `/dm`

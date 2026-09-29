@@ -1321,7 +1321,11 @@ def _load_blocked_rows(db: Database, user: User) -> list[_BlockedRow]:
         if block.blocked_user_id is not None:
             account = get_user_by_id(db, block.blocked_user_id)
             name = account.username if account is not None else "(deleted account)"
-            where = f"on this BBS; blocked {since}"
+            if account is not None and is_usable_sysop(account):
+                # Kept, but not applied while they run the board (#817).
+                where = f"a SysOp now, so not applied; blocked {since}"
+            else:
+                where = f"on this BBS; blocked {since}"
         else:
             assert block.blocked_address is not None
             name = _link_sender_name(db, block.blocked_address)

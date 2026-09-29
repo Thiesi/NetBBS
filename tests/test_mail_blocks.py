@@ -313,3 +313,15 @@ def test_the_list_says_why_the_sysop_cannot_be_added(node):
     assert "sysop runs this BBS; mail from its SysOp can't be blocked." in text
     assert "No such user: 'nobody'" in text
     assert list_mail_blocks(db, bob) == []
+
+
+def test_the_list_says_a_block_on_a_sysop_is_not_applied(node):
+    db, lane, bob, alice = node
+    sysop = create_user(db, "sysop", password="hunter2pw", user_level=SYSOP_LEVEL)
+    block_local_sender(db, bob, alice)
+    set_user_level(db, alice, SYSOP_LEVEL, changed_by=sysop)
+    session = FakeSession(["b"])
+
+    asyncio.run(blocked_senders_screen(session, lane, bob))
+
+    assert "a SysOp now, so not applied" in " ".join(session.screens()[-1].split())
