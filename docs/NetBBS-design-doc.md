@@ -2629,11 +2629,12 @@ each recipient first opened it.
 - **The opted-out marker.** A recipient who does not share receipts is
   always named as such in the sender's view (`Read: not shown, as bob
   doesn't share read receipts`, or on a letter to several people `Don't
-  share read receipts: bob`), and Sent's list says `no receipt` -- also to
-  a sender who has opted out themselves. It reveals only a setting, and
-  without it a letter never reported as read would be taken for one not read
-  yet. Everything else a sender who does not share receipts is told only
-  that it is not shown.
+  share read receipts: bob`) -- also to a sender who has opted out
+  themselves -- and Sent's list says `no receipt`. It reveals only a
+  setting, and without it a letter never reported as read would be taken for
+  one not read yet. A sender who does not share receipts is told everything
+  else only as "not shown" in the view, and their list has no read states at
+  all (the list's column would otherwise say nothing but `no receipt`).
 - **What a receipt says**: the time of the *first* reading
   (`mail_messages.first_read_at`, set by `mark_read`, kept through Mark
   unread and later readings -- a receipt once given is not taken back by

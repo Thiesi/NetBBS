@@ -1409,7 +1409,7 @@ class _MailboxScreen:
             if widths is not None:
                 lines.append(_mail_list_heading(
                     widths, number_width=number_width, sent=self.sent, show_status=show_status,
-                    status_heading=_status_heading(page_rows),
+                    status_heading=_status_heading(self.all_rows),
                 ))
             if roomy:
                 lines.append(rule)
