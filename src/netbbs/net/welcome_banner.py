@@ -43,7 +43,7 @@ from netbbs.rendering import (
     HEADER_COLOR,
     RESET,
     colored,
-    decode_ansi_bytes,
+    decode_banner_bytes,
     gradient_color,
     gradient_text,
     nearest_256,
@@ -256,7 +256,24 @@ def welcome_banner_status(db: Database) -> WelcomeBannerStatus:
     )
 
 
-def load_welcome_banner(db: Database, *, truecolor: bool = False) -> str:
+# The default banner's box and arrow characters, as plain ASCII.
+_ASCII_BANNER = str.maketrans({"╔": "+", "╗": "+", "╚": "+", "╝": "+", "═": "=", "║": "|", "›": ">"})
+
+
+def pre_login_unicode_style(session: object) -> bool:
+    """Whether the screens a caller sees before signing in may use
+    Unicode box, rule and arrow characters (issue #841, F073).
+
+    Not over Telnet: that is where classic BBS terminals such as SyncTERM
+    call from, and they read bytes as CP437, so a UTF-8 rule arrived as
+    three characters of noise, before the caller had any chance to ask
+    for plain ASCII (that question comes after login, per account). The
+    browser and SSH clients read UTF-8. After login the caller's own
+    preference applies everywhere."""
+    return getattr(session, "transport_name", None) != "telnet"
+
+
+def load_welcome_banner(db: Database, *, truecolor: bool = False, unicode_style: bool = True) -> str:
     """
     Resolve the banner to show at login: the SysOp's custom file if
     enabled and usable, the default banner otherwise. Synchronous
@@ -264,6 +281,9 @@ def load_welcome_banner(db: Database, *, truecolor: bool = False) -> str:
     `netbbs.net.ssh.ensure_host_key`) of plain blocking local disk/DB
     calls made directly from async functions; a sub-256KB read isn't
     worth `asyncio.to_thread`.
+
+    `unicode_style` False draws the *default* banner's box in plain ASCII
+    (`pre_login_unicode_style`); a SysOp's own file is shown as authored.
 
     `truecolor` (default `False`, the safe universal choice) selects
     whether the *default* banner's "NetBBS" name is rendered with a
@@ -284,13 +304,17 @@ def load_welcome_banner(db: Database, *, truecolor: bool = False) -> str:
     against them independently anyway, since it runs unattended on
     every login regardless of how the flag got set.
     """
+    def default() -> str:
+        text = _default_welcome_banner(db, truecolor=truecolor)
+        return text if unicode_style else text.translate(_ASCII_BANNER)
+
     if not is_welcome_banner_enabled(db):
-        return _default_welcome_banner(db, truecolor=truecolor)
+        return default()
 
     path = banner_path(db)
     if not path.exists():
         _logger.warning("welcome banner enabled but missing at %s -- using default", path)
-        return _default_welcome_banner(db, truecolor=truecolor)
+        return default()
 
     try:
         size = path.stat().st_size
@@ -299,12 +323,12 @@ def load_welcome_banner(db: Database, *, truecolor: bool = False) -> str:
                 "welcome banner at %s is %d bytes, over the %d byte limit -- using default",
                 path, size, MAX_BANNER_SIZE_BYTES,
             )
-            return _default_welcome_banner(db, truecolor=truecolor)
+            return default()
         data = path.read_bytes()
     except OSError:
         _logger.warning("could not read welcome banner at %s -- using default", path, exc_info=True)
-        return _default_welcome_banner(db, truecolor=truecolor)
+        return default()
 
     # decode_ansi_bytes cannot raise (see its own docstring) -- no
     # decode-failure fallback is needed here, by construction.
-    return decode_ansi_bytes(data) + RESET
+    return decode_banner_bytes(data) + RESET

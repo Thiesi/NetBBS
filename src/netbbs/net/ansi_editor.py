@@ -223,6 +223,14 @@ async def edit_ansi_art(
                 _delete_draft(draft_path)
                 return result
 
+            if key.kind == EditorKeyKind.CTRL and key.char == "l":
+                # Ctrl+L repaints everything, as it does at every picker
+                # and menu (issue #841: it did nothing here).
+                previous = buffer.snapshot()
+                await session.write(full_render_ansi(previous))
+                await _flush(session, state)
+                continue
+
             if key.kind == EditorKeyKind.CTRL and key.char == "g":
                 # help_overlay's own docstring contract for a cursor-
                 # addressed caller: clear first, full-redraw afterward --
@@ -240,6 +248,8 @@ async def edit_ansi_art(
                         "  Page Up/Down   jump to the top / bottom row",
                         "  Enter          move to the start of the next row",
                         "  Backspace/Del  clear before / at the cursor",
+                        "  Ctrl+K         clear from the cursor to the end of the row",
+                        "  Ctrl+L         repaint the screen",
                         "  Ctrl+T         pick a CP437 block/line-drawing glyph",
                         "  Ctrl+P         pick the foreground color",
                         "  Ctrl+B         pick the background color",
@@ -247,9 +257,11 @@ async def edit_ansi_art(
                         "  Ctrl+X         quit -- Save, Discard, or Cancel",
                         "  Ctrl+G         this help",
                         "",
-                        "Typing a normal character paints it at the cursor with the",
-                        "current foreground/background, then advances to the next",
-                        "cell, wrapping to the next row like a typewriter.",
+                        "Typing a character (a space too) paints it over whatever is",
+                        "at the cursor, in the current colors, and moves one cell right.",
+                        "At the end of a row the cursor stays put: press Enter for the",
+                        "next row. Retyping a shorter line leaves the old line's end",
+                        "in place; Ctrl+K clears it.",
                         "",
                         "Work is autosaved periodically -- a dropped connection or",
                         "crash offers to resume the draft the next time this same",
@@ -275,7 +287,7 @@ async def edit_ansi_art(
                 )
                 if choice is not None:
                     _paint(state, choice)
-                previous = await _redraw(session, state, previous)
+                previous = await _repaint(session, state)
                 continue
 
             if key.kind == EditorKeyKind.CTRL and key.char == "p":
@@ -285,7 +297,7 @@ async def edit_ansi_art(
                 )
                 if choice != "unchanged":
                     state.current_fg = choice
-                previous = await _redraw(session, state, previous)
+                previous = await _repaint(session, state)
                 continue
 
             if key.kind == EditorKeyKind.CTRL and key.char == "b":
@@ -295,7 +307,7 @@ async def edit_ansi_art(
                 )
                 if choice != "unchanged":
                     state.current_bg = choice
-                previous = await _redraw(session, state, previous)
+                previous = await _repaint(session, state)
                 continue
 
             _dispatch(state, key)
@@ -353,7 +365,9 @@ def _dispatch(state: _EditorState, key: EditorKey) -> None:
     elif key.kind == EditorKeyKind.HOME:
         state.col = 0
     elif key.kind == EditorKeyKind.END:
-        state.col = buffer.width - 1
+        # The cell after the row's last painted one, as in a text editor
+        # (issue #841: End always went to the last column).
+        state.col = min(_row_end(buffer, state.row), buffer.width - 1)
     elif key.kind == EditorKeyKind.PAGE_UP:
         state.row = 0
     elif key.kind == EditorKeyKind.PAGE_DOWN:
@@ -371,6 +385,10 @@ def _dispatch(state: _EditorState, key: EditorKey) -> None:
             state.row -= 1
             state.col = buffer.width - 1
         buffer.write_cell(state.row, state.col, " ", fg=None, bg=None, bold=False)
+        state.dirty = True
+    elif key.kind == EditorKeyKind.CTRL and key.char == "k":
+        for col in range(state.col, buffer.width):
+            buffer.write_cell(state.row, col, " ", fg=None, bg=None, bold=False)
         state.dirty = True
     elif key.kind == EditorKeyKind.CHAR and key.char is not None and _savable(key.char):
         _paint(state, key.char)
@@ -390,19 +408,42 @@ def _savable(char: str) -> bool:
 
 def _paint(state: _EditorState, char: str) -> None:
     """Writes `char` at the cursor with the current fg/bg, then
-    advances the cursor (wrapping to the next row, typewriter-style,
-    clamped at the bottom-right corner rather than wrapping past the
-    canvas). Shared by ordinary typing and a glyph picker selection --
-    the latter behaves exactly like typing that glyph would, since
-    that's the whole reason the picker exists (see its call site)."""
+    advances the cursor one cell. Shared by ordinary typing and a glyph
+    picker selection -- the latter behaves exactly like typing that
+    glyph would, since that's the whole reason the picker exists (see
+    its call site).
+
+    At the last column the cursor stays where it is (issue #841): it used
+    to wrap to the next row, typewriter-style, so the 81st letter of a
+    line landed silently at the start of the row below, where it broke
+    that row's art. Staying put overwrites the last cell instead, which
+    the status line's column shows, and Enter is how to go on."""
     buffer = state.buffer
     buffer.write_cell(state.row, state.col, char, fg=state.current_fg, bg=state.current_bg, bold=False)
     state.dirty = True
     if state.col < buffer.width - 1:
         state.col += 1
-    elif state.row < buffer.height - 1:
-        state.col = 0
-        state.row += 1
+
+
+def _row_end(buffer: ScreenBuffer, row: int) -> int:
+    """The column just after the last cell on `row` that shows anything:
+    a character other than a space, or a coloured background."""
+    for col in range(buffer.width - 1, -1, -1):
+        cell = buffer.get_cell(row, col)
+        if cell.char not in (" ", "") or cell.bg is not None:
+            return col + 1
+    return 0
+
+
+async def _repaint(session: Session, state: _EditorState) -> Snapshot:
+    """Clears the screen and draws the whole canvas again. A picker draws
+    its own list over the canvas, which the cell diff in `_redraw` knows
+    nothing about, so after one only a full repaint puts the drawing back
+    (issue #841: the picker's rows stayed on screen instead)."""
+    current = state.buffer.snapshot()
+    await session.write(full_render_ansi(current))
+    await _flush(session, state)
+    return current
 
 
 async def _redraw(session: Session, state: _EditorState, previous: Snapshot) -> Snapshot:
@@ -432,7 +473,8 @@ async def _flush(session: Session, state: _EditorState) -> None:
         status = f"^G help ^O save ^X quit  {state.row + 1},{state.col + 1}"
     else:
         status = (
-            f"Row {state.row + 1}/{state.buffer.height}  Col {state.col + 1}/{state.buffer.width}  "
+            f"Row {state.row + 1}/{state.buffer.height}  Col {state.col + 1}/{state.buffer.width}"
+            f"{' (end)' if state.col == state.buffer.width - 1 else ''}  "
             f"fg={fg_label} bg={bg_label}  "
             f"Ctrl+G help  Ctrl+O save  Ctrl+X quit  Ctrl+T glyph  Ctrl+P fg  Ctrl+B bg"
         )

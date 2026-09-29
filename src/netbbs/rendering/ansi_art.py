@@ -16,6 +16,8 @@ strip every escape sequence and destroy the art.
 
 from __future__ import annotations
 
+import re
+
 from netbbs.rendering.ansi import BOLD, RESET
 from netbbs.rendering.ansi import bg as ansi_bg
 from netbbs.rendering.ansi import bg_rgb as ansi_bg_rgb
@@ -45,6 +47,58 @@ def decode_ansi_bytes(data: bytes) -> str:
         return data.decode("utf-8")
     except UnicodeDecodeError:
         return data.decode("cp437")
+
+
+_CSI = re.compile(r"\x1b\[([0-9;?]*)([@-~])")
+# SGR parameters that make a space visible: a background colour (40-48,
+# 100-107) or reverse video (7).
+_VISIBLE_BLANK_SGR = {7, *range(40, 49), *range(100, 108)}
+
+
+def _row_is_blank(row: str) -> bool:
+    """Whether `row` shows nothing: only spaces once its escape sequences
+    are removed, and no background colour or reverse video that would
+    paint those spaces."""
+    if _CSI.sub("", row).strip(" \t\r"):
+        return False
+    for params, final in _CSI.findall(row):
+        if final != "m":
+            continue
+        values = params.split(";")
+        index = 0
+        while index < len(values):
+            value = values[index]
+            if value.isdigit() and int(value) in (38, 48):
+                # 38/48;5;n and 38/48;2;r;g;b carry their own arguments.
+                if int(value) == 48:
+                    return False
+                index += 3 if index + 1 < len(values) and values[index + 1] == "5" else 5
+                continue
+            if value.isdigit() and int(value) in _VISIBLE_BLANK_SGR:
+                return False
+            index += 1
+    return True
+
+
+def trim_trailing_blank_rows(text: str) -> str:
+    """`text` without the empty rows at its end (issue #841).
+
+    The art editor saves its whole canvas, 24 rows, blank ones included, so
+    a seven-line signup banner arrived with 17 empty rows under it and
+    scrolled its own text off an 80x25 screen before the caller could read
+    it. A row is empty when it holds only spaces and escape sequences that
+    paint nothing (no background colour, no reverse video). Rows inside the
+    art are kept, however empty: only the tail goes."""
+    rows = text.split("\n")
+    while rows and _row_is_blank(rows[-1]):
+        rows.pop()
+    return "\n".join(rows).rstrip("\r")
+
+
+def decode_banner_bytes(data: bytes) -> str:
+    """`decode_ansi_bytes` for art shown as a banner or masthead: decoded,
+    then trimmed of the empty rows at its end (`trim_trailing_blank_rows`)."""
+    return trim_trailing_blank_rows(decode_ansi_bytes(data))
 
 
 def encode_ansi_bytes(buffer: ScreenBuffer) -> bytes:
