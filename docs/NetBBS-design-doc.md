@@ -2419,17 +2419,37 @@ parallel mailbox UI.
 **Telling a caller that mail arrived** (issue #823). Three places, all only
 for a caller mail is open to (`caller_mail_refusal`):
 
-- *At login.* The first main menu after login says how many messages are
-  unread, above its prompt. The main menu's mail notices are told together
-  in one order: that count, then the cap's eviction count (#818), then the
+- *At login.* The first main menu after login says what waits, above its
+  prompt, with two counts (issue #917): the unread letters that arrived
+  since the caller's last call, and every unread letter -- "3 new since
+  your last call, 7 unread in all -- [E]-mail to read them.", short enough
+  to stay on one row at 80 columns. Both are given even when they are
+  equal, which says that nothing older waits; with nothing new it reads
+  "Nothing new since your last call, 7 unread in all". "The last call" is the start of the caller's previous
+  session: the newest of their `session_history` rows before the current
+  one (by id, so a second session of the same account open meanwhile
+  counts). A caller with no earlier row -- a first call, or one whose rows
+  the bounded table has pruned (twenty per account within a node-wide
+  budget) -- gets the unread count alone, "You have 7 unread messages".
+  Nothing unread, no line. A letter's arrival is when this node stored it:
+  `created_at` for local and system mail, and for Link mail the receipt
+  time kept in `sender_deleted_at`, since its `created_at` is the sender's
+  signed time (#808) and a letter a relay held for a day is still new to
+  its reader. The main menu's mail notices are told together in one order:
+  that count, then the cap's eviction count (#818), then the
   caller's own Link mail that bounced or expired (#806). Moderation outcomes
   come before them, and a drain warning (§13.8) before those; the count of
   pending chat channel invitations and any queued `/msg` lines follow them
   (issue #923). Ahead of all of these is the outcome of a question answered
   during login (the Unicode-style check, a first-run choice), which answers
   the last thing the caller did.
-- *In New scan.* A `Mail: N unread` line heads the summary above the list,
-  and `[E]-mail` opens the mailbox from there. A line with a key, like the
+- *In New scan.* A `Mail:` line heads the summary above the list with the
+  login notice's two counts ("Mail: 3 new since your last call, 7 unread
+  in all"; on a first call `Mail: N unread`), counted from the same
+  previous call, so the scan -- which
+  is "activity since your last visit" -- and the login notice never
+  disagree; `[E]-mail` opens the mailbox from there, and the counts are
+  brought up to date on the way back. A line with a key, like the
   replies to the caller, not a row: the list is places, and a mailbox row
   would renumber every board beneath it.
 - *While online.* A per-session watcher (`netbbs.net.mail_arrivals`, started
@@ -2447,6 +2467,15 @@ for a caller mail is open to (`caller_mail_refusal`):
   Letters are told apart by `(id, created_at)`, not by id, because the table
   has no AUTOINCREMENT; a letter marked unread again is not new. Up to three
   arrivals are named ("New mail from bob: Lunch?"), more are counted.
+
+News of mail is drawn in the highlight colour, the node's accent (issue
+#917; a SysOp's accent override applies): the live "New mail from ..."
+lines, the login notice, New scan's `Mail:` line, and the unread counts in
+the main menu's header and the mailbox's. New mail is good news, not a
+problem, so none of these uses the warning colour; that stays for what is
+one -- a mailbox nearly at its cap, the cap's eviction count, and bounced
+or expired Link mail (in the error colour). In a session without colour
+the lines read the same, uncoloured.
 
 There is no preference to turn the live notice off: it is one line per
 letter, and callers already choose who may write to them (blocked senders,
@@ -3443,7 +3472,9 @@ capability from the item picker's simple, per-call substring name match
   listed first, ahead of posts, files and chat (issue #918: the caller's
   own mail is often what they are looking for), under `[MAIL]`, "from" or
   "to" the name, newest first, capped at 20 like every other kind, with the
-  same "top 20 per category" notice when more matched. Nobody mail is
+  same "top 20 per category" notice when more matched. The main menu's
+  Find entry and the Find screen's subtitle name mail first too ("Search
+  mail, posts, files, chat"), in the order the results come. Nobody mail is
   closed to (issue #816: the guest, including a session that came in as the
   guest, and callers below the mail level) gets mail results, and the main menu's
   Find entry then names only posts, files and chat. A letter opens in the

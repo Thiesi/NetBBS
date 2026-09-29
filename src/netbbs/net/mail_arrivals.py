@@ -41,10 +41,12 @@ import weakref
 from dataclasses import dataclass, field
 
 from netbbs.auth.users import User, current_account
-from netbbs.mail import MailKey, get_inbox_letters, inbox_mail_keys
+from netbbs.mail import MailKey, get_inbox_letters, inbox_mail_keys, unread_count, unread_count_since
+from netbbs.net.node_theme import effective_accent_color_256
 from netbbs.net.notices import announce
 from netbbs.net.session import Session, SessionClosedError
-from netbbs.rendering import WARNING_COLOR, colored, sanitize_text
+from netbbs.rendering import colored, sanitize_text
+from netbbs.session_history import previous_call_started_at
 from netbbs.storage.database import Database
 
 #: How often a watcher looks at the Inbox when nothing woke it. Mail is not
@@ -55,9 +57,17 @@ POLL_SECONDS = 5.0
 #: counted in one line instead.
 MAX_NAMED = 3
 
-#: What the new-mail notice is drawn in: the colour of the main menu's
-#: "N unread messages".
-NOTICE_COLOR = WARNING_COLOR
+
+
+def notice_color(db: Database) -> int:
+    """What news of mail is drawn in (issue #917): the node's accent, its
+    highlight colour, and never the warning colour -- new mail is good
+    news, not a problem. The same colour on every line that counts or
+    names waiting mail: the live "New mail from ..." lines, the login
+    notice, New scan's Mail line, the main menu's and the mailbox's unread
+    counts. At the 256-colour depth, like chat, which shows the live line
+    to a whole screen of callers at once."""
+    return effective_accent_color_256(db)
 
 
 @dataclass(eq=False)
@@ -99,15 +109,51 @@ def new_mail_notice_lines(labels_and_subjects: list[tuple[str, str]]) -> list[st
     ]
 
 
-def login_mail_notice(unread: int) -> str | None:
+def waiting_mail_counts(db: Database, user: User, *, current_history_id: int | None) -> tuple[int, int | None]:
+    """`(unread, new)` for the login notice and New scan (issue #917):
+    every unread letter, and those among them that arrived since the
+    caller's previous call began (`netbbs.session_history.
+    previous_call_started_at`) -- `None` when there is no previous call on
+    record. `current_history_id` is the session the caller is in now."""
+    unread = unread_count(db, user)
+    since = previous_call_started_at(db, user, current_history_id=current_history_id)
+    if since is None:
+        return unread, None
+    return unread, (unread_count_since(db, user, since) if unread else 0)
+
+
+def _read_them(unread: int) -> str:
+    return f"[E]-mail to read {'it' if unread == 1 else 'them'}"
+
+
+def _since_last_call(unread: int, new: int) -> str:
+    """Both counts (issue #917), in the operator's words: "3 new since your
+    last call, 7 unread in all". Both even when they are equal, which also
+    says that nothing older waits. Short enough, with the key after it, to
+    stay on one row at 80 columns."""
+    return f"{new or 'nothing'} new since your last call, {unread} unread in all"
+
+
+def login_mail_notice(unread: int, new: int | None = None) -> str | None:
     """The line the first main menu after login shows about waiting mail
-    (issue #823), or `None` when nothing is unread."""
+    (issues #823, #917), or `None` when nothing is unread. `new` counts
+    the unread letters that arrived since the caller's last call began,
+    `None` when there is no last call on record (a first call, or one
+    whose earlier calls the bounded session history no longer holds):
+    then the unread count stands alone."""
     if not unread:
         return None
-    return (
-        f"You have {unread} unread message{'' if unread == 1 else 's'} -- "
-        f"[E]-mail to read {'it' if unread == 1 else 'them'}."
-    )
+    if new is None:
+        return f"You have {unread} unread message{'' if unread == 1 else 's'} -- {_read_them(unread)}."
+    counts = _since_last_call(unread, new)
+    return f"{counts[0].upper()}{counts[1:]} -- {_read_them(unread)}."
+
+
+def new_scan_mail_line(unread: int, new: int | None) -> str:
+    """New scan's Mail line when something is unread (issues #823, #917):
+    the login notice's counts under a `Mail:` label."""
+    counts = f"{unread} unread" if new is None else _since_last_call(unread, new)
+    return f"Mail: {counts} -- {_read_them(unread)}"
 
 
 def _arrivals(session: Session, db: Database, user: User, known: set[MailKey]) -> list[tuple[str, str]]:
@@ -129,14 +175,14 @@ def _arrivals(session: Session, db: Database, user: User, known: set[MailKey]) -
     return [(sender_display_label(db, letter), letter.subject) for letter in letters]
 
 
-async def _tell(session: Session, watch: _Watch, lines: list[str]) -> None:
+async def _tell(session: Session, watch: _Watch, lines: list[str], color: int) -> None:
     hook = getattr(session, "pinned_notice_hook", None)
     if hook is not None and not getattr(session, "door_active", False):
         for line in lines:
-            await hook(colored(line, fg_color=NOTICE_COLOR))
+            await hook(colored(line, fg_color=color))
         return
     for line in lines:
-        announce(session, line, color=NOTICE_COLOR)
+        announce(session, line, color=color)
     watch.arrived.set()
 
 
@@ -157,7 +203,7 @@ async def watch_for_mail(session: Session, db: Database, user: User, *, poll_sec
             arrivals = _arrivals(session, db, user, known)
             if arrivals:
                 try:
-                    await _tell(session, watch, new_mail_notice_lines(arrivals))
+                    await _tell(session, watch, new_mail_notice_lines(arrivals), notice_color(db))
                 except SessionClosedError:
                     return
     finally:

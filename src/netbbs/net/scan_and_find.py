@@ -50,8 +50,8 @@ from netbbs.net.chat_flow import (
     list_visible_channels_for,
 )
 from netbbs.net.file_flow import enter_file_area
-from netbbs.mail import unread_count as unread_mail_count
 from netbbs.net.mail_flow import browse_mail, caller_mail_refusal, open_letter
+from netbbs.net.mail_arrivals import new_scan_mail_line, waiting_mail_counts
 from netbbs.net.notices import announce, announce_styled
 from netbbs.net.node_theme import effective_accent_color, effective_header_color, effective_header_color_256
 from netbbs.net.picker import pick_item
@@ -147,6 +147,9 @@ async def _new_scan_screen(
     # route does.
     transfers=None,
     mrc_bridge: MrcBridge | None = None,
+    # Issue #917: the session the caller is in, so the Mail line counts
+    # what arrived since the call before it.
+    current_history_id: int | None = None,
 ) -> None:
     """
     Issue #56's activity summary: every board/channel/file area `user`
@@ -181,7 +184,9 @@ async def _new_scan_screen(
     entering one from here is just the ordinary join.
     """
 
-    def _load(db: Database) -> tuple[list[_ScanItem], list[Post], dict[int, Board], int | None]:
+    def _load(
+        db: Database,
+    ) -> tuple[list[_ScanItem], list[Post], dict[int, Board], tuple[int, int | None] | None]:
         items: list[_ScanItem] = []
         boards_by_id: dict[int, Board] = {}
 
@@ -234,8 +239,12 @@ async def _new_scan_screen(
         readable = {item.board.id for item in items if item.board is not None}
         replies = [reply for reply in unread_replies_to(db, user) if reply.board_id in readable]
         # Issue #823: the caller's unread mail, `None` for a caller mail is
-        # closed to (issue #816), who is told nothing about it.
-        mail = unread_mail_count(db, user) if caller_mail_refusal(session, db, user) is None else None
+        # closed to (issue #816), who is told nothing about it; with what
+        # arrived since their last call, as at login (issue #917).
+        mail = (
+            waiting_mail_counts(db, user, current_history_id=current_history_id)
+            if caller_mail_refusal(session, db, user) is None else None
+        )
         return items, replies, boards_by_id, mail
 
     items, replies, boards_by_id, mail = await lane.run(_load)
@@ -245,12 +254,15 @@ async def _new_scan_screen(
         """The caller's mail, the first line above the list (issue #823):
         like the replies, it is theirs rather than a place, so it is a line
         with a key and not a row."""
-        unread = state["mail"]
-        if unread is None:
+        counts = state["mail"]
+        if counts is None:
             return None
+        unread, new = counts
         if not unread:
             return colored("Mail: nothing unread.", fg_color=MUTED_COLOR)
-        return f"Mail: {unread} unread -- [E]-mail to read {'it' if unread == 1 else 'them'}"
+        # The login notice's counts and colour (issue #917): the highlight,
+        # since waiting mail is news rather than a problem.
+        return colored(new_scan_mail_line(unread, new), fg_color=accent)
 
     async def _replies_summary() -> str:
         """Replies to the caller, above the list on every redraw: the
@@ -643,7 +655,7 @@ async def _find_screen(
             "Search",
             breadcrumb=(session.node_display_name,),
             subtitle=(
-                "Find posts, files, retained chat, and your own mail on this node." if mail_open
+                "Find your own mail, posts, files, and retained chat on this node." if mail_open
                 else "Find posts, files, and retained chat on this node."
             ),
             width=session.terminal_width,
