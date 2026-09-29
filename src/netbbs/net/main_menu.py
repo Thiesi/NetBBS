@@ -257,7 +257,14 @@ async def _draw_main_menu(
                 brief="Activity since your last visit",
                 detailed="Scan every accessible message board/chat channel/file area for activity since your last visit.",
             ),
-            MenuEntry(label=menu_key("/", " Find"), brief="Search boards, files, and mail"),
+            # Issue #811: Find searches posts, files and retained chat --
+            # not mail, which only the mailbox's own folder-local [F]ind
+            # filters. Say so rather than promise a mail search.
+            MenuEntry(
+                label=menu_key("/", " Find"),
+                brief="Search posts, files, and chat",
+                detailed="Find posts, files, and retained chat on this node.",
+            ),
             # Issue #840 (F116): the main menu had no help at all.
             MenuEntry(label=menu_key("?", " Help"), brief="How this board works"),
         ]
