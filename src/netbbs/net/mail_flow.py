@@ -121,7 +121,7 @@ from netbbs.net.picker import pick_item
 from netbbs.net.notices import announce, announce_styled, pending_notice_rows, take_notices, write_notices
 from netbbs.net.session import Session, write_prompt
 from netbbs.rendering.detail import Section, Styled
-from netbbs.quoting import quote_body, reply_subject
+from netbbs.quoting import forward_body, forward_subject, quote_body, reply_subject, sign_forward
 from netbbs.signature import append_signature, get_signature
 from netbbs.rendering import (
     ERROR_COLOR,
@@ -143,7 +143,7 @@ from netbbs.rendering import (
     truncate_to_width,
     wrap_to_width,
 )
-from netbbs.rendering.post_body import plain_post_body, post_body_mode, post_body_rows
+from netbbs.rendering.post_body import plain_post_body, post_body_mode, post_body_rows, post_body_text
 from netbbs.rendering.reflow import wrap_terminal_text
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
@@ -771,7 +771,7 @@ class _MailboxScreen:
         self.highlighted = index
         message = self.rows[index].message
         if self.sent:
-            await _show_sent_message(self.session, self.lane, self.user, message)
+            await _show_sent_message(self.session, self.lane, self.user, message, link_context=self.link_context)
         else:
             await _show_inbox_message(self.session, self.lane, self.user, message, link_context=self.link_context)
         await self._reload(keep=message.id)
@@ -1207,6 +1207,9 @@ async def _show_inbox_message(
         # and the view says why.
         actions = [] if message.from_system else [("r", menu_key("R", "eply"))]
         actions += [
+            # Offered on system mail too (issue #822): passing a notice on
+            # to someone -- the SysOp, say -- harms no one.
+            ("f", menu_key("F", "orward")),
             ("u", menu_key("U", "nread")),
             ("d", menu_key("D", "elete")),
         ]
@@ -1221,6 +1224,9 @@ async def _show_inbox_message(
         if choice == "k":
             text, tone = await lane.run(_toggle_block, user, block_target)
             announce(session, text, tone=tone)
+            continue
+        if choice == "f":
+            await _forward_message(session, lane, user, message, sent=False, link_context=link_context)
             continue
         if choice == "u":
             # Opening a message is what marks it read; this takes that back
@@ -1469,17 +1475,23 @@ async def blocked_senders_screen(session: Session, lane: DatabaseLane, user: Use
         rows = await _unblock(selected)
 
 
-async def _show_sent_message(session: Session, lane: DatabaseLane, user: User, message: MailMessage) -> None:
+async def _show_sent_message(
+    session: Session, lane: DatabaseLane, user: User, message: MailMessage,
+    *, link_context: LinkContext | None = None,
+) -> None:
     to_label = await _display_recipient_label(lane, message)
     if message.link_delivery_status in ("bounced", "expired"):
         # Seen here, so the main menu need not tell it again (issue #806).
         await lane.run(acknowledge_delivery_notices, [message.id])
-    actions = [("d", menu_key("D", "elete")), ("b", menu_key("B", "ack"))]
+    actions = [("f", menu_key("F", "orward")), ("d", menu_key("D", "elete")), ("b", menu_key("B", "ack"))]
     page = 0
     while True:
         choice, page = await _show_message(session, lane, user, message, to_label=to_label, actions=actions, page=page)
         if choice == "b":
             return
+        if choice == "f":
+            await _forward_message(session, lane, user, message, sent=True, link_context=link_context)
+            continue
         if not await prompt_yes_no(session, "Delete this message?", default=False):
             continue
         await lane.run(delete_for_sender, user, message)
@@ -1579,6 +1591,52 @@ async def mail_someone(
     )
 
 
+# -- forwarding (issue #822) ---------------------------------------------------
+
+
+async def _forward_message(
+    session: Session, lane: DatabaseLane, user: User, message: MailMessage,
+    *, sent: bool, link_context: LinkContext | None,
+) -> None:
+    """[F]orward on a letter's view, Inbox or Sent: a new letter under
+    "Fwd:" whose body is the letter itself, whole, under a header saying
+    whom it was from and to, when, and under what subject
+    (`netbbs.quoting.forward_body`). The caller writes a note above it if
+    they like, and types the recipient at the To prompt, which makes every
+    check it makes for a new letter -- a local name or, on a linked node, a
+    Link address, whatever the original was.
+
+    The header names people as the view does: a Link address by
+    `link_address_label`, system mail by `SYSTEM_SENDER_LABEL`, the date
+    in the caller's own format. A forward of a letter at the size limit is
+    over it once the header is added; the review screen says by how much
+    and refuses Send until it is shortened (issue #812).
+
+    Refused, as every way into mail is, while the caller's mail is closed
+    (`caller_mail_refusal`): the SysOp can close it while a letter is open.
+    Each letter's forward keeps its own draft slot (`_forward_key`)."""
+    refusal = await lane.run(lambda db: caller_mail_refusal(session, db, user))
+    if refusal is not None:
+        announce(session, refusal, tone="error")
+        return
+    if sent:
+        sender_label, recipient_label = user.username, await _display_recipient_label(lane, message)
+    else:
+        sender_label, recipient_label = await _display_sender_label(lane, message), user.username
+    display_format, display_timezone = await lane.run(resolve_display_preferences)
+    date = format_for_display(message.created_at, override_format=display_format, override_timezone=display_timezone)
+    body = forward_body(
+        # Escape sequences out, color pipe codes kept (issue #809).
+        post_body_text(message.body),
+        sender=sender_label, recipient=recipient_label, date=date, subject=message.subject,
+    )
+    await _compose_mail(
+        session, lane, user,
+        prefill_subject=forward_subject(message.subject, max_bytes=MAX_MAIL_SUBJECT_BYTES),
+        prefill_body=body, link_context=link_context, forward_key=_forward_key(message),
+    )
+
+
 async def _compose_mail(
     session: Session,
     lane: DatabaseLane,
@@ -1590,6 +1648,7 @@ async def _compose_mail(
     prefill_body: str | None = None,
     link_context: LinkContext | None = None,
     reply_key: str | None = None,
+    forward_key: str | None = None,
     resume: bool = False,
 ) -> None:
     """
@@ -1610,8 +1669,13 @@ async def _compose_mail(
     fullscreen editor and the review screen both showing whom the letter
     is for and under what subject.
 
-    Each letter has its own draft slot (issue #814): the new letter, and a
-    reply to one message (`reply_key`, see `_reply_key`). Either editor keeps the text there as
+    `forward_key` (issue #822, see `_forward_key`) makes the letter a
+    forward: titled "Forward", with To asked for as a new letter's is, and
+    the editor opening at the top of `prefill_body`, where a note goes.
+
+    Each letter has its own draft slot (issue #814): the new letter, a
+    reply to one message (`reply_key`, see `_reply_key`), and a forward
+    of one (`forward_key`). Either editor keeps the text there as
     it is typed, with its To and Subject beside it, and "Keep draft &
     exit" or `/exit` leaves it for later. A letter found in its slot is
     offered before anything is asked -- resume it, delete it and start
@@ -1640,10 +1704,10 @@ async def _compose_mail(
     header_color = await lane.run(effective_header_color_256)
     truecolor = await lane.run(lambda db: effective_truecolor(session, db, user))
     body_mode = await lane.run(_mail_body_mode, user)
-    title = "Reply" if reply_key is not None else "New message"
+    title = "Forward" if forward_key is not None else "Reply" if reply_key is not None else "New message"
     link_enabled = link_context is not None
 
-    draft_path = _letter_draft_path(lane, user, reply_key)
+    draft_path = _letter_draft_path(lane, user, reply_key, forward_key=forward_key)
     resumed = _load_letter_draft(draft_path)
     if resumed is not None and not resume:
         outcome = await _letter_draft_choice(session, lane, user, resumed, starting_new=True)
@@ -1659,11 +1723,12 @@ async def _compose_mail(
         prefill_body = resumed.body
         if resumed.subject is not None:
             prefill_subject = resumed.subject
-    kept_notice = (
-        "Draft saved -- you'll be offered it when you reply to this message again."
-        if reply_key is not None
-        else "Draft saved -- it is under [D]raft on the mail screen."
-    )
+    if forward_key is not None:
+        kept_notice = "Draft saved -- you'll be offered it when you forward this message again."
+    elif reply_key is not None:
+        kept_notice = "Draft saved -- you'll be offered it when you reply to this message again."
+    else:
+        kept_notice = "Draft saved -- it is under [D]raft on the mail screen."
 
     async def compose_screen(fields: list[tuple[str, str]], hint: str | None = None) -> None:
         await show_compose_screen(
@@ -1781,9 +1846,13 @@ async def _compose_mail(
 
     keep_fields()
     # A reply starts on the quote, with the cursor under it (issue #675); a
-    # resumed letter where it was left off.
+    # resumed letter where it was left off. A fresh forward starts above
+    # the letter it carries, where a note to its new reader goes (#822).
+    fresh_forward = forward_key is not None and resumed is None
     body = await _compose_mail_body(
-        session, lane, user, initial_text=prefill_body, cursor_at_end=prefill_body is not None,
+        session, lane, user, initial_text=prefill_body,
+        cursor_at_end=prefill_body is not None and not fresh_forward,
+        start_at_top=fresh_forward,
         header=editor_header(), draft_path=draft_path,
     )
     if body is None or not body.strip():
@@ -1800,7 +1869,10 @@ async def _compose_mail(
     # mail client's compose buffer already works. Idempotent, so a
     # resumed letter that already carries it does not get it twice.
     signature = await lane.run(get_signature, user)
-    if signature:
+    if forward_key is not None:
+        # Under the note, above the letter passed on (issue #822).
+        body = sign_forward(body, signature)
+    elif signature:
         body = append_signature(body, signature)
 
     while True:
@@ -1932,6 +2004,13 @@ def _reply_key(message: MailMessage) -> str:
     return f"{message.id}_{digest}"
 
 
+def _forward_key(message: MailMessage) -> str:
+    """The message a forward carries, for its draft slot's name (issue
+    #822): the same id and digest a reply's slot uses, in a slot of its
+    own, so a kept reply and a kept forward of one letter do not meet."""
+    return _reply_key(message)
+
+
 def post_reply_key(root_post_id: str) -> str:
     """The draft slot of a private reply to a board post's author (issue
     #821), apart from any reply to a mail message: a digest of the post's
@@ -1939,13 +2018,18 @@ def post_reply_key(root_post_id: str) -> str:
     return "post_" + hashlib.sha256(root_post_id.encode("utf-8")).hexdigest()[:16]
 
 
-def _letter_draft_path(lane: DatabaseLane, user: User, reply_key: str | None = None) -> Path:
+def _letter_draft_path(
+    lane: DatabaseLane, user: User, reply_key: str | None = None, *, forward_key: str | None = None,
+) -> Path:
     """One slot per letter (issue #814): the caller's new letter, and one
-    per message they are replying to. Before #814 every letter shared one
-    body-only file, so a kept letter was offered in place of the next
-    one's text -- a reply to someone else lost its quote to it."""
+    per message they are replying to or forwarding (issue #822). Before
+    #814 every letter shared one body-only file, so a kept letter was
+    offered in place of the next one's text -- a reply to someone else
+    lost its quote to it."""
     directory = lane.path.parent / f"{lane.path.name}_drafts"
     directory.mkdir(parents=True, exist_ok=True)
+    if forward_key is not None:
+        return directory / f"mail_forward_{user.id}_{forward_key}.draft"
     if reply_key is not None:
         return directory / f"mail_reply_{user.id}_{reply_key}.draft"
     return directory / f"mail_new_{user.id}.draft"
@@ -2160,9 +2244,13 @@ def _too_long_to_send(subject: str, body: str) -> str | None:
 
 async def _compose_mail_body(
     session: Session, lane: DatabaseLane, user: User, *, initial_text: str | None, draft_path: Path,
-    cursor_at_end: bool = False, header: EditorHeader | None = None,
+    cursor_at_end: bool = False, header: EditorHeader | None = None, start_at_top: bool = False,
 ) -> str | None:
     """Enter or revise one mail body through the user's chosen editor.
+
+    `start_at_top` (a fresh forward, issue #822) has the line editor write
+    typed lines above `initial_text`, as the fullscreen editor's cursor
+    starts there; `/end` moves to the end.
 
     Both paths accept the current draft and only return text/explicit cancel;
     the caller owns review and persistence. `header` is what the fullscreen
@@ -2192,4 +2280,5 @@ async def _compose_mail_body(
         draft_path=draft_path,
         offer_recovery=False,
         keep_pasted_color=True,
+        start_at=0 if start_at_top else None,
     )
