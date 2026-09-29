@@ -188,12 +188,14 @@ def test_repaint_input_row_renders_prompt_and_typed_buffer():
     written = "".join(session.written)
 
     # Drawn at row 24
-    expected_start = move_cursor(24, 1) + clear_line() + prompt + "test input"
+    # The line editor's window draws the text (issue #926), clearing ahead of it.
+    expected_start = move_cursor(24, 1) + clear_line() + prompt + "\x1b[K" + "test input"
     assert expected_start in written
 
 
-def test_repaint_input_row_truncation_accounts_for_prompt_width():
-    """_repaint_input_row truncates typed text to terminal_width - 2 columns (prompt size)."""
+def test_repaint_input_row_scrolls_within_the_width_after_the_prompt():
+    """_repaint_input_row shows a window of the typed text that fits in
+    terminal_width - 2 columns (prompt size), around the cursor (#926)."""
     session = FakeSession()
     session.terminal_height = 24
     session.terminal_width = 12  # width 12 -> avail = 10 columns for typed text
@@ -208,9 +210,10 @@ def test_repaint_input_row_truncation_accounts_for_prompt_width():
         )
     )
     written = "".join(session.written)
-    # Prompt is '> ' (2 columns), avail is 10, total visible width <= 12
+    # Prompt is '> ' (2 columns), avail is 10, one column kept free at the
+    # edge: the last nine characters, ending at the cursor.
     assert "0123456789abcdefghij" not in written
-    assert "..." in written
+    assert written.endswith("\x1b[K" + "bcdefghij")
 
 
 # =========================================================================

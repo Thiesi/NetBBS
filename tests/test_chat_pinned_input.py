@@ -141,10 +141,10 @@ def test_input_row_is_redrawn_empty_after_a_command(lane, hub, presence, mailbox
     assert text.count(expected_prompt) >= 2
 
 
-def test_input_row_repaint_reflects_a_long_line_via_truncation(db, hub, presence, mailbox, channel, alice):
-    """A pure-function check on `_repaint_input_row`'s own truncation
-    behavior -- doesn't need a real `_chat_loop` at all, just a
-    `LiveInputBuffer` with more text than an narrow terminal can show."""
+def test_input_row_repaint_shows_a_window_around_the_cursor(db, hub, presence, mailbox, channel, alice):
+    """A pure-function check on `_repaint_input_row` with more text than a
+    narrow terminal can show (issue #926): the part around the cursor,
+    with the cursor put back on it -- not the head of the line."""
 
     class _NarrowSession:
         def __init__(self):
@@ -162,9 +162,10 @@ def test_input_row_repaint_reflects_a_long_line_via_truncation(db, hub, presence
     session = _NarrowSession()
     asyncio.run(chat_flow._repaint_input_row(session, live_buffer, session.terminal_height))
     text = "".join(session.written)
-    # Truncated to fit -- never the full, untruncated string.
     assert "this is a very long in-progress message" not in text
-    assert "..." in text
+    # Cursor at 10 ("this is a |very"): the eight columns after the prompt
+    # hold " is a v", and the caret steps back one onto "v".
+    assert text.endswith("\x1b[K" + " is a v" + "\x1b[1D")
 
 
 def test_pinned_ui_min_height_requires_four_rows(lane, hub, presence, mailbox, channel, alice):
@@ -241,11 +242,11 @@ class _LiveTypingSession(Session):
 
     async def read_line(
         self, echo: bool = True, history=None, completer=None, *,
-        live_buffer=None, lock=None, list_candidates=None,
+        live_buffer=None, lock=None, list_candidates=None, viewport=None, **_ignored,
     ) -> str:
         return await char_input.read_line(
             self, self.write, echo, history, completer,
-            live_buffer=live_buffer, lock=lock, list_candidates=list_candidates,
+            live_buffer=live_buffer, lock=lock, list_candidates=list_candidates, viewport=viewport,
         )
 
     async def read_key(self, echo: bool = True) -> str:
@@ -323,7 +324,7 @@ def test_in_progress_typing_survives_an_incoming_message(lane, hub, presence, ma
     assert "hello there" in text
     # The input row was redrawn showing alice's in-progress text intact
     # -- not silently dropped or corrupted by the interruption.
-    prompt_hel = f"{chat_flow._input_prompt(accent_color=chat_flow.ACCENT_COLOR, unicode_style=True)}hel"
+    prompt_hel = f"{chat_flow._input_prompt(accent_color=chat_flow.ACCENT_COLOR, unicode_style=True)}\x1b[Khel"
     assert prompt_hel in text
     # The interruption's redraw happens strictly *after* alice's own
     # first three keystrokes were echoed, and *before* she resumes --
