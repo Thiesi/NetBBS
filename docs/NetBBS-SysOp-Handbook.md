@@ -860,6 +860,18 @@ own last contact with the node, or the time its newest descriptor says it was
 signed, never later than when you first stored it; a node not heard of for 30
 days is marked stale, not removed.
 
+**Link status** also shows what your node holds as a relay. When it relays
+for outgoing-only nodes, mail and delivery answers for them wait here until
+they dial in and collect them. The **Relay mailbox** line counts what is held,
+and a table below it lists each node held for, with how many envelopes it has
+(at most 50) and how long the oldest has waited, oldest first. Anything left
+uncollected for 30 days is dropped on the next sync pass, and the diagnostic
+log gets a warning naming the node and how many went. Neither end is told by
+your node, which cannot read or sign that mail; the sender's own node gives up
+on a letter handed to a relay after 14 days and tells its writer that no
+answer came back. A node whose count stays at 50 for weeks is most likely not
+coming back; the time limit clears it without you doing anything.
+
 A node's screen also acts on its trust, when it is a trust subject here (every
 node that has exchanged a hello with yours, or been introduced to it; not a
 peer-list candidate): **Establish** and **Block** open the override editor with

@@ -320,12 +320,14 @@ from netbbs.link.key_rotation import KeyRotationError
 from netbbs.link.node_identity import operational_key_history
 from netbbs.link.enforcement import REASON_NODE_PROBATIONARY, decide_user_authorship, node_transport_state
 from netbbs.link.node_profiles import (
-    dismiss_identity_observation, identity_for_fingerprint, identity_for_peer,
+    UNKNOWN_NODE_NAME, dismiss_identity_observation, identity_for_fingerprint, identity_for_peer,
     link_address_label,
     is_node_fingerprint, latest_identity_observation, list_identity_observations,
     name_key, own_canonical_dns_name, resolve_stored_peer_reference,
 )
-from netbbs.link.relay_mailbox import mailbox_sizes
+from netbbs.link.relay_mailbox import (
+    MAX_MAILBOX_ENVELOPES_PER_RECIPIENT, RELAY_MAILBOX_RETENTION_DAYS, mailbox_holdings,
+)
 from netbbs.link.remote_attestation import (
     clear_remote_attestation_override,
     configure_attestation_authority,
@@ -375,7 +377,9 @@ from netbbs.link.onboarding import (
 from netbbs.link.reliable_nodes import effective_reliable_nodes, reliable_nodes_source
 from netbbs.link.store import load_peer_last_contact
 from netbbs.link.node_map import CANDIDATE as NODE_MAP_CANDIDATE
-from netbbs.link.node_map import NodeMapEntry, build_node_map, has_known_nodes
+from netbbs.link.node_map import (
+    NodeMapEntry, build_node_map, has_known_nodes, relative_time, unknown_node_label,
+)
 from netbbs.net.node_map_flow import NODE_MAP_COLUMNS, all_carried_names
 from netbbs.net.node_map_flow import exchange_sections as node_map_exchange_sections
 from netbbs.net.node_map_flow import own_content_at_peer, probation_rows
@@ -778,6 +782,7 @@ from netbbs.storage.execution import DatabaseLane
 from netbbs.timeutil import (
     _parse_stored_timestamp,
     format_for_display,
+    parse_utc_iso,
     resolve_display_preferences,
     set_display_format,
     set_display_timezone,
@@ -9751,12 +9756,37 @@ async def _link_status_sections(
             ))
     relays.append(Field("Relays serving this node", str(len(node.relays_serving_me))))
     relays.append(Field("Own consent requests", f"{len(node.pending_own_relay_requests)} outstanding"))
-    mailbox_by_recipient = await lane.run(mailbox_sizes)
-    if mailbox_by_recipient:
-        held = sum(mailbox_by_recipient.values())
+    holdings = await lane.run(_relay_mailbox_rows)
+    if holdings:
+        held = sum(count for _, count, _ in holdings)
         relays.append(Field(
-            "Relay mailbox", f"{held} envelope(s) held for {len(mailbox_by_recipient)} recipient(s)"
+            "Relay mailbox",
+            f"{held} envelope(s) held for {len(holdings)} recipient(s), "
+            f"each kept up to {RELAY_MAILBOX_RETENTION_DAYS} days",
         ))
+        # Issue #891: per recipient, oldest deposit first -- the one closest
+        # to being dropped, and the likeliest to belong to a node that is
+        # not coming back.
+        now = datetime.datetime.now(datetime.timezone.utc)
+        shown = holdings[:_RELAY_MAILBOX_ROWS_SHOWN]
+        relays.append(Table(
+            ("Held for", "Envelopes", "Oldest"),
+            [
+                (
+                    label,
+                    (
+                        f"{count}/{MAX_MAILBOX_ENVELOPES_PER_RECIPIENT}",
+                        WARNING_COLOR if count >= MAX_MAILBOX_ENVELOPES_PER_RECIPIENT else VALUE_COLOR,
+                    ),
+                    relative_time(oldest, now=now),
+                )
+                for label, count, oldest in shown
+            ],
+            flex=0,
+            right_aligned=frozenset({1}),
+        ))
+        if len(holdings) > len(shown):
+            relays.append(Note(f"... and {len(holdings) - len(shown)} more recipient(s)."))
     else:
         relays.append(Field("Relay mailbox", "empty", color=MUTED_COLOR))
     sections.append(Section("Relays", relays))
@@ -9788,6 +9818,32 @@ async def _link_status_sections(
     ))
     sections.append(Section("Content", content))
     return sections, identity_notices
+
+
+# Issue #891: how many recipients the Link status screen lists under the
+# relay mailbox line; the rest are counted, not listed.
+_RELAY_MAILBOX_ROWS_SHOWN = 10
+
+
+def _relay_mailbox_rows(db: Database) -> list[tuple[str, int, datetime.datetime | None]]:
+    """What this node holds as a relay, per recipient, oldest deposit first:
+    the recipient's name as this node knows it, the envelope count and when
+    the oldest was deposited."""
+    rows = []
+    for holding in mailbox_holdings(db):
+        try:
+            oldest = parse_utc_iso(holding.oldest_received_at)
+        except ValueError:
+            oldest = None
+        identity = identity_for_fingerprint(db, holding.recipient_fingerprint)
+        # Named the way the node map names it, so a node this one has no
+        # profile for reads the same on both screens and keeps the table narrow.
+        label = (
+            unknown_node_label(holding.recipient_fingerprint)
+            if identity.friendly_name == UNKNOWN_NODE_NAME else identity.label
+        )
+        rows.append((label, holding.count, oldest))
+    return rows
 
 
 async def _probation_summary(lane: DatabaseLane, link_context: LinkContext) -> list[Field | Note]:

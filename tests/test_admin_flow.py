@@ -7849,6 +7849,47 @@ def test_link_status_screen_shows_summary_counts(db, lane, sysop):
     assert "[P]eers" not in text  # no node on the map to pick from
 
 
+def test_link_status_screen_lists_relay_mail_per_recipient_with_its_oldest_deposit(db, lane, sysop):
+    """Issue #891: the relay view shows, per recipient, how much this node
+    holds for it and how long the oldest envelope has waited -- the only way
+    a SysOp can see a recipient that is not coming back before its mail is
+    dropped."""
+    from datetime import datetime, timedelta, timezone
+
+    from netbbs.link.events import build_link_message
+    from netbbs.link.node_identity import bootstrap_node_identity
+    from netbbs.link.relay_mailbox import deposit_relay_mailbox_envelope
+
+    sender = bootstrap_node_identity("sender")
+    recipient = "f" * 64
+
+    def _message(user):
+        return build_link_message(
+            signing_identity=sender.signing_key, home_node_fingerprint=sender.fingerprint,
+            local_user_id=user, recipient_home_node_fingerprint=recipient,
+            recipient_local_user_id="someone", confidentiality_tier="tier1_home_node_key",
+            ciphertext=b"opaque", created_at="2026-01-01T00:00:00+00:00",
+        )
+
+    oldest = _message("first")
+    deposit_relay_mailbox_envelope(db, recipient, oldest)
+    deposit_relay_mailbox_envelope(db, recipient, _message("second"))
+    twelve_days_ago = datetime.now(timezone.utc) - timedelta(days=12, hours=1)
+    db.connection.execute(
+        "UPDATE link_relay_mailbox SET received_at = ? WHERE content_id = ?",
+        (twelve_days_ago.strftime("%Y-%m-%dT%H:%M:%S.%fZ"), oldest.content_id),
+    )
+    db.connection.commit()
+
+    session = FakeSession(["s", "l", "PAGE_DOWN", "b", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop, link_context=_link_context()))
+
+    text = _normalized_visible(_written_text(session))
+    assert "Relay mailbox: 2 envelope(s) held for 1 recipient(s), each kept up to 30 days" in text
+    assert "Held for Envelopes Oldest" in text
+    assert "Unknown node ffffff 2/50 12 days ago" in text
+
+
 def test_link_status_screen_reads_the_current_node_name(db, lane, sysop):
     from netbbs.config import set_node_display_name
 
