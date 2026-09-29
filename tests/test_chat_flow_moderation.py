@@ -50,7 +50,7 @@ class FakeSession(Session):
 
     async def read_line(
         self, echo: bool = True, history=None, completer=None, *,
-        live_buffer=None, lock=None, list_candidates=None,
+        live_buffer=None, lock=None, list_candidates=None, viewport=None, **_ignored,
     ) -> str:
         # `history`/`completer`/`live_buffer`/`lock`/`list_candidates`
         # accepted only to satisfy the Session ABC signature -- this fake

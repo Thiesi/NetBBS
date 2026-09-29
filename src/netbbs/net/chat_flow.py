@@ -155,7 +155,7 @@ from netbbs.link.node_profiles import (
 )
 from netbbs.chat.channels import OPEN_ROOM_NAME_PREFIX
 from netbbs.rendering.pipe_codes import cga_to_xterm
-from netbbs.mrc.protocol import MAX_ARGUMENT, display_roster_entry
+from netbbs.mrc.protocol import MAX_ARGUMENT, display_roster_entry, mrc_sender
 from netbbs.mrc.bridge import MrcBridge, MrcNotice, MrcStatus
 from netbbs.mrc.settings import (
     MrcChannelMapping,
@@ -171,7 +171,7 @@ from netbbs.rendering.pipe_codes import render_pipe_codes, strip_pipe_codes
 from netbbs.timeutil import utc_now_iso
 from netbbs.messaging_preferences import accepts_direct_messages
 from netbbs.moderation import ChannelPermission, has_permission
-from netbbs.net.char_input import Completer, InputHistory, LiveInputBuffer, reject_unhandled_key
+from netbbs.net.char_input import Completer, InputHistory, LineViewport, LiveInputBuffer, reject_unhandled_key
 from netbbs.net.char_input import move_cursor as relative_move_cursor
 from netbbs.net.chat_channel_picker_banner import load_chat_channel_picker_banner
 from netbbs.net.color_depth_preference import effective_truecolor
@@ -197,6 +197,7 @@ from netbbs.rendering import (
     MENU_KEY_COLOR,
     MUTED_COLOR,
     RULE_COLOR,
+    MRC_SITE_COLOR,
     NICK_COLOR,
     NODE_COLOR,
     PRIVILEGE_COLOR,
@@ -1631,10 +1632,10 @@ def _render_channel_message(
     """
     link_speaker = _link_speaker(db, message)
     author_label = _message_author_label(db, channel, message, link_speaker)
-    mrc_nick_color = (
-        message.mrc_nick_color
-        if message.external_source == "mrc" and mrc_colors_enabled(db, viewer) else None
-    )
+    from_mrc = message.external_source == "mrc"
+    if from_mrc:
+        author_label = mrc_sender(author_label)
+    mrc_nick_color = message.mrc_nick_color if from_mrc and mrc_colors_enabled(db, viewer) else None
     if message.kind == "join":
         line = _colored_around("*** ", author_label, " has joined the channel.", fg_color=MUTED_COLOR)
     elif message.kind == "leave":
@@ -1657,13 +1658,13 @@ def _render_channel_message(
     else:  # "message"
         color = SELF_COLOR if self_message else effective_accent_color_256(db)
         label = _speaker_label(db, channel, message, link_speaker, color=color, self_message=self_message)
-        if message.external_source == "mrc":
-            if mrc_nick_color is not None:
-                label = (
-                    colored("<", fg_color=MUTED_COLOR)
-                    + _mrc_styled_author(author_label, cga_to_xterm(mrc_nick_color))
-                    + colored(">", fg_color=MUTED_COLOR)
-                )
+        if from_mrc:
+            nick_style = cga_to_xterm(mrc_nick_color) if mrc_nick_color is not None else color
+            label = (
+                colored("<", fg_color=MUTED_COLOR)
+                + _mrc_styled_author(author_label, nick_style)
+                + colored(">", fg_color=MUTED_COLOR)
+            )
             line = f"{label} {_mrc_body(db, viewer, message.body)}"
         elif _is_door_line(db, message):
             # Issue #520: a door's line reads as the game talking, not as a
@@ -1683,6 +1684,8 @@ def _render_channel_message(
             # terminates the span, so it composes beside the label
             # without nesting, the same way the MRC branch above does.
             line = f"{label} " + colored(sanitize_text(message.body), fg_color=CHAT_BODY_COLOR)
+    if from_mrc:
+        line = colored(_MRC_BADGE, fg_color=MUTED_COLOR) + line
     durable_author = _durable_link_author(db, message)
     author_fingerprint = (
         message.author_fingerprint
@@ -3319,11 +3322,20 @@ async def _relay_to_mrc(session: Session, mrc_bridge: MrcBridge, channel: Channe
 
 
 def _mrc_styled_author(author: str, foreground: int) -> str:
-    """Keep the sender prominent and the network provenance quieter."""
-    nick, separator, provenance = author.rpartition("@")
+    """`nick@site` in parts, as a linked speaker is (issue #899): the nick
+    in `foreground`, the `@` muted, the site in `MRC_SITE_COLOR`."""
+    nick, separator, site = author.rpartition("@")
     if not separator:
         return colored(author, fg_color=foreground)
-    return colored(nick, fg_color=foreground) + colored("@" + provenance, fg_color=MUTED_COLOR)
+    return (
+        colored(nick, fg_color=foreground) + colored("@", fg_color=MUTED_COLOR)
+        + colored(site, fg_color=MRC_SITE_COLOR)
+    )
+
+
+#: In front of every chat line from MRC, as on the network's own notices
+#: (`_render_mrc_notice`), in place of the `(MRC)` after the name.
+_MRC_BADGE = "[MRC] "
 
 
 def _mrc_body(db: Database, viewer: User, body: str | None) -> str:
@@ -4180,6 +4192,18 @@ _REMOTE_SCROLLBACK_POLL_INTERVAL_SECONDS = 0.1
 _REMOTE_SCROLLBACK_POLL_ATTEMPTS = 20
 
 
+#: Columns `_input_prompt` takes: its glyph and a space.
+_INPUT_PROMPT_WIDTH = 2
+
+
+def _input_viewport(session: Session) -> Callable[[], int]:
+    """The width a chat line scrolls within (issue #926): the input row
+    after the prompt, re-read on every render so a resize is followed.
+    Without it a line wider than the terminal soft-wrapped on the pinned
+    last row, which has no row below it, and overwrote itself."""
+    return lambda: max(1, session.terminal_width - _INPUT_PROMPT_WIDTH)
+
+
 def _input_prompt(accent_color: int = ACCENT_COLOR, unicode_style: bool = False) -> str:
     # U+203A, not U+276F (dogfood report: the prompt was a hollow
     # rectangle in PuTTY, and fine in Termux). Not PuTTY's own
@@ -4569,23 +4593,27 @@ async def _repaint_input_row(
     """
     Redraws the pinned input row in place from `live_buffer`'s current
     text/cursor (design doc). Shows styled input prompt (GitHub issue #183).
+
+    The text is drawn by the line editor's own window (issue #926): the
+    same stretch of a long line around the cursor, with the same `<`/`>`
+    markers, and the cursor left where the next keystroke acts. It used to
+    draw the head of the line and, for one wider than the row, leave the
+    cursor at the right edge, away from the edit position. A read that
+    does not scroll gets a window of its own, so both are drawn one way.
     """
     if height < _PINNED_UI_MIN_HEIGHT:
         return
     scroll_bottom = height - _PINNED_ROWS
     input_row = height
     prompt_str = _input_prompt(accent_color=accent_color, unicode_style=unicode_style)
-    prompt_width = 2
-    avail = max(0, session.terminal_width - prompt_width)
-    displayed_body = truncate(live_buffer.text, avail)
-    displayed = prompt_str + displayed_body
+    avail = _input_viewport(session)()
+    window = live_buffer.window if live_buffer.window is not None else LineViewport(avail)
+    window.resize(avail)
     await session.write(
-        set_scroll_region(1, scroll_bottom) + move_cursor(input_row, 1) + clear_line() + displayed
+        set_scroll_region(1, scroll_bottom) + move_cursor(input_row, 1) + clear_line() + prompt_str
     )
-    if len(live_buffer.text) <= avail:
-        trailing = len(live_buffer.text) - live_buffer.cursor
-        if trailing > 0:
-            await session.write(relative_move_cursor(trailing, forward=False))
+    window.at_left_edge()
+    await window.render(session.write, list(live_buffer.text), live_buffer.cursor)
 
 
 async def _print_and_redraw_input(
@@ -5251,6 +5279,7 @@ async def _chat_loop(
                 raw_line = await session.read_line(
                     history=history, completer=completer, live_buffer=live_buffer, lock=lock,
                     list_candidates=list_candidates if pinned_ui.active else None,
+                    viewport=_input_viewport(session),
                 )
                 line = raw_line.strip()
 
@@ -6132,7 +6161,9 @@ async def run_direct_chat_loop(
 
         async def send_loop() -> None:
             while True:
-                line = (await session.read_line(live_buffer=live_buffer, lock=lock)).strip()
+                line = (
+                    await session.read_line(live_buffer=live_buffer, lock=lock, viewport=_input_viewport(session))
+                ).strip()
 
                 async with lock:
                     pinned_height = await pinned_ui.sync(session, user, other_user, presence, live_buffer)
