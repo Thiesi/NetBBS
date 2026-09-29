@@ -20,7 +20,9 @@ from __future__ import annotations
 import logging
 
 from netbbs.auth.users import User, get_user_by_username
-from netbbs.mail import MAX_MAIL_BODY_BYTES, MAX_MAIL_SUBJECT_BYTES, MailboxFullError, MailError, send_mail
+from netbbs.mail import (
+    MAX_MAIL_BODY_BYTES, MAX_MAIL_SUBJECT_BYTES, MailboxFullError, MailError, mail_recipient_refusal, send_mail,
+)
 from netbbs.rendering.post_body import plain_post_body
 from netbbs.rendering.width import cut_to_width
 from netbbs.storage.database import Database
@@ -141,6 +143,10 @@ def _mail_rejection(db: Database, post, author_row, *, moderator: User, reason: 
     wrote. A full mailbox or an oversized subject is not a reason to undo
     the rejection: the notice still tells them."""
     author = get_user_by_username(db, author_row["username"])
+    if mail_recipient_refusal(db, author) is not None:
+        # The shared guest account has no mailbox (issue #816); the notice
+        # on its next main menu is all it gets, and that is not a failure.
+        return
     board_name = db.connection.execute("SELECT name FROM boards WHERE id = ?", (post.board_id,)).fetchone()["name"]
     what = "edit" if post.post_id != post.root_post_id else "post"
     subject = f'Your {what} "{_short(post.subject)}" was rejected'

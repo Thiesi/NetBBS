@@ -31,7 +31,7 @@ from netbbs.chat import (
 from netbbs.communities import Community, list_communities
 from netbbs.link.boards import LinkContext
 from netbbs.link.mail import acknowledge_delivery_notices, pending_delivery_notices
-from netbbs.mail import unread_count as unread_mail_count
+from netbbs.mail import mail_access_refusal, unread_count as unread_mail_count
 from netbbs.net.admin_flow import admin_menu, moderation_queue, staff_list_screen, staff_menu
 from netbbs.boards import list_boards
 from netbbs.chat.channels import list_channels
@@ -184,10 +184,13 @@ async def _draw_main_menu(
     current truth on every redraw.
 
     `[E]-mail` (design doc, `netbbs.mail`/
-    `netbbs.net.mail_flow`) is always shown, unlike `[I]nvitations` --
-    it's a core always-available feature, not a transient notification --
-    but grows an "(N unread)" suffix the same "re-query on every redraw,
-    no separate seen-tracking" way. Deliberately a different letter and a
+    `netbbs.net.mail_flow`) is shown to every caller mail is open to,
+    unlike `[I]nvitations` -- it's a core feature, not a transient
+    notification -- and grows an "(N unread)" suffix the same "re-query on
+    every redraw, no separate seen-tracking" way. Mail is open to everyone
+    but the guest account and callers below the SysOp's mail level (issue
+    #816, `netbbs.mail.mail_access_refusal`); for them neither the entry
+    nor the header's mail count is shown. Deliberately a different letter and a
     different persistence model from `/msg`: `E` (for "E-mail") is the
     closest thing to a ready-made convention BBS users already have
     muscle memory for.
@@ -230,7 +233,8 @@ async def _draw_main_menu(
     for text, created_at in mailbox.flush(session):
         await session.write_line(format_with_preference(db, user, text, created_at))
 
-    unread = unread_mail_count(db, user)
+    has_mail = mail_access_refusal(db, user) is None
+    unread = unread_mail_count(db, user) if has_mail else 0
     mail_label = f"-mail ({unread} unread)" if unread else "-mail"
     # Brief descriptions are kept to roughly 34 characters or less --
     # the actual available width once this renders in two columns at
@@ -269,7 +273,7 @@ async def _draw_main_menu(
                 brief="Your bio and preferences",
                 detailed="Edit your bio, visibility, and preferences -- including these menu descriptions.",
             ),
-            MenuEntry(label=menu_key("E", mail_label), brief="Read and send private mail"),
+            *([MenuEntry(label=menu_key("E", mail_label), brief="Read and send private mail")] if has_mail else []),
             MenuEntry(label=menu_key("H", "istory"), brief="Your recent sessions"),
             MenuEntry(
                 label=menu_key("R", "evious callers", prefix="P"),
@@ -323,19 +327,17 @@ async def _draw_main_menu(
         if unread
         else ("mail caught up", SUCCESS_COLOR)
     )
+    header_fields = [
+        (sanitize_text(user.username), effective_accent_color(session, db)),
+        (f"level {user.user_level}", VALUE_COLOR),
+        *([mail_status] if has_mail else []),
+    ]
     masthead = load_main_menu_banner(db)
     redraw = redraw_in_place_enabled(db, user)
     title = screen_title(
         "Main menu",
         breadcrumb=(session.node_display_name,),
-        subtitle=field_row(
-            [
-                (sanitize_text(user.username), effective_accent_color(session, db)),
-                (f"level {user.user_level}", VALUE_COLOR),
-                mail_status,
-            ],
-            unicode_style=unicode_style,
-        ),
+        subtitle=field_row(header_fields, unicode_style=unicode_style),
         width=session.terminal_width,
         # `clear` stays False here whenever a masthead is shown -- it
         # must land *after* any clear-screen sequence but *before* this
@@ -824,6 +826,9 @@ async def _main_menu_loop(
                     )
                 redraw = True
             elif choice == "e":
+                # Not gated here: `browse_mail` refuses a caller mail is
+                # closed to (issue #816) and says why, which a menu drawn
+                # before the SysOp changed the mail level still needs.
                 await session.write_line("")
                 # design doc, issue #57: mail is one of the features
                 # migrated onto the two-lane database execution model --
@@ -1058,10 +1063,7 @@ async def _how_this_board_works(session: Session, db: Database, user: User) -> N
         "[B]ack goes one level up. [N]ew scan shows what is new since your last visit, one place after another.",
         "Ctrl-H or ? shows help on most screens.",
         "",
-        (
-            "This board is run by " + ", ".join(sysops) + ". Send them E-mail (To: sysop reaches them)."
-            if sysops else "Send the SysOp E-mail: To: sysop reaches them."
-        ),
+        _contact_line(sysops, mail_access_refusal(db, user)),
         "",
         "The User Handbook explains the rest: " + _USER_HANDBOOK_URL,
     ]
@@ -1069,6 +1071,17 @@ async def _how_this_board_works(session: Session, db: Database, user: User) -> N
         session, "How this board works", lines,
         header_color=effective_header_color_256(db), unicode_style=unicode_style_enabled(db, user),
     )
+
+
+def _contact_line(sysops: list[str], mail_refusal: str | None) -> str:
+    """Who runs the board, and how to reach them: by mail, or -- for a
+    caller mail is closed to (issue #816) -- why not."""
+    if mail_refusal is None:
+        return (
+            "This board is run by " + ", ".join(sysops) + ". Send them E-mail (To: sysop reaches them)."
+            if sysops else "Send the SysOp E-mail: To: sysop reaches them."
+        )
+    return ("This board is run by " + ", ".join(sysops) + ". " if sysops else "") + mail_refusal
 
 
 def _has_visible_communities(db: Database, user: User) -> bool:
