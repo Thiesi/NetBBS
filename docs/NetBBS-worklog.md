@@ -4947,6 +4947,28 @@ must not misreport: only "asyncssh is genuinely absent" may produce the
 or the actual cause — a linker search-path gap, not a missing package — is
 undiagnosable from the log alone.
 
+### No `os.sendfile`: asyncio's sendfile fallback corrupts files for slow readers (issue #961)
+
+NetBSD's Python has no `os.sendfile`. aiohttp's `FileResponse` still calls
+`loop.sendfile()`, and on a selector loop that falls back to asyncio's own
+`_sendfile_fallback`. That fallback reads into one reused 16 KiB buffer and
+calls `transport.write()` with a memoryview of it. Since Python 3.12 the
+selector transport queues unsent data as that memoryview, without a copy.
+`drain()` returns once the buffer is under the low-water mark, not when it is
+empty, so the next read can overwrite bytes still waiting to go out. A reader on
+loopback keeps up and gets a clean file. A remote caller gets a file of the
+right length with other chunks spliced in on 16 KiB boundaries.
+
+`WebServer.start()` therefore sets aiohttp's `web_fileresponse.NOSENDFILE`
+wherever `os.sendfile` is missing. That flag switches `FileResponse` to aiohttp's
+own chunked fallback, which writes fresh `bytes`. The flag is read on every
+response, so setting it after import works. The `AIOHTTP_NOSENDFILE`
+environment variable is only read when aiohttp is imported. Anything else that
+serves a file must also stay off `loop.sendfile()`: stream `bytes` chunks, as
+`file_transfer._stream_file` does, or go through `FileResponse` with the flag
+set. The regression test in `tests/test_web.py` removes `os.sendfile`, forces a
+selector loop and reads slowly, so it reproduces the bug on any platform.
+
 ### NetBSD has no supervisor: rc.subr reports success for a `$command` it cannot find (issue #312)
 
 Two independent traps, both of which produce a *silently* unstarted node, and
