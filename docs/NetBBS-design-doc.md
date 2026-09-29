@@ -455,6 +455,43 @@ target keep the discard-only behavior -- `/exit`/`/quit` are not recognized
 there at all. The fullscreen editor's Ctrl+G help says where a kept draft is
 offered again.
 
+The fullscreen editor is one preference for every long text a caller writes
+-- mail, posts, bio, signature and file descriptions -- and its Profile label
+says so: "Fullscreen editor (all writing)". Its keys beyond
+nano's Ctrl+O/Ctrl+X/Ctrl+G (issue #815):
+
+- **Ctrl+K** cuts the cursor's line; pressed again straight after, it adds
+  the next line to what was cut. **Ctrl+Y** pastes the cut lines above the
+  cursor's line (mid-line, it ends the line there), as often as wanted.
+  Cutting the last line empties it. Paste is readline's Ctrl+Y rather than
+  nano's Ctrl+U because Ctrl+U clears the line at every other prompt
+  (issue #812), and a key that erases there must not insert here.
+- **Ctrl+W** deletes the word before the cursor and the spaces between
+  them; at the start of a line it joins the line to the one above.
+  **Alt+Backspace** (ESC then 0x7F or 0x08, `EditorKeyKind.WORD_BACKSPACE`)
+  does the same, because a browser keeps Ctrl+W for closing the tab and
+  never delivers it to the web terminal. Ctrl+Backspace is not offered:
+  most terminals send it as 0x08, the byte many BBS clients send for a
+  plain Backspace, so it cannot be told apart.
+- **Ctrl+R** rewraps the quoted paragraph under the cursor -- the run of
+  lines at the same `>` depth, ended by an empty `>` line, a line at another
+  depth, an unquoted line or the `[...]` of a cut quote -- to the screen's
+  width, at most 72 columns, every line keeping the quote's prefix. The
+  editor never hard-wraps otherwise; a quote is the exception because a
+  quoted line wider than the screen shows its continuation without `>`.
+  Long words such as URLs are kept whole. Off a quote, Ctrl+R rings the
+  bell. nano's justify key, Ctrl+J, is the byte of Enter (LF) and cannot be
+  used.
+- The status line counts **characters used/limit**, never bytes (issue
+  #812): the limit is how many characters the text holds if the rest is
+  plain letters, so it drops by one for each two-byte character typed and
+  reaches the count when not even a plain letter fits. It stands before the
+  key hints, so a 40-column screen cuts the hints, not the count.
+
+A cut, paste, word delete or rewrap is an ordinary edit: autosave and
+"Keep draft & exit" write the resulting text to the draft, and a paste or
+rewrap that would pass the limit is refused whole with the bell.
+
 In-context help is a single shared rendering primitive
 (`netbbs.net.help_overlay.show_help`) reused by two different key
 conventions rather than one universal key: Ctrl+G inside the fullscreen

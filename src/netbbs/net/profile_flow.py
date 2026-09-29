@@ -1120,7 +1120,7 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
         ),
         FieldSpec(
             key="fullscreen_editor", hotkey="f", menu_text=menu_key("F", "ullscreen editor"),
-            label="Fullscreen editor for posts/bio",
+            label="Fullscreen editor (all writing)",
             render=lambda d: "on" if d["fullscreen_editor"] else "off",
             prompt=live_choice_field(
                 "fullscreen_editor", [False, True],
@@ -1128,8 +1128,9 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
             ),
             brief="Toggle the fullscreen editor",
             help=(
-                "On: composing a post/bio opens the cursor-addressed fullscreen editor (arrow "
-                "keys, Ctrl-based commands, like a simple nano). Off: a plain line-by-line "
+                "On: writing mail, a post, your bio or signature, or a file description opens "
+                "the cursor-addressed fullscreen editor (arrow keys, Ctrl-based commands, like "
+                "a simple nano). Off: a plain line-by-line "
                 "editor instead -- the safer default for a client that can't reliably position "
                 "the cursor."
             ),
