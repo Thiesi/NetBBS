@@ -120,6 +120,7 @@ from netbbs.session_history import (
     SessionHistoryEntry,
     list_recent_sessions,
     previous_callers_enabled,
+    previous_callers_plain,
     session_history_name_visible,
     set_session_history_name_visible,
 )
@@ -228,7 +229,10 @@ def _render_previous_callers_panel(
     name-visibility policy and the column measurement below can never
     drift between the two.
     """
-    use_truecolor = effective_truecolor(session, db, user)
+    plain = previous_callers_plain(db)
+    # The plain style (issue #841) keeps to the node's header colour, so
+    # the truecolor gradient is never used for its frame or heading.
+    use_truecolor = effective_truecolor(session, db, user) and not plain
     unicode_style = unicode_style_enabled(db, user)
     viewer_is_sysop = meets_level(user, SYSOP_LEVEL)
     header_color = effective_header_color(session, db)
@@ -288,11 +292,15 @@ def _render_previous_callers_panel(
             + colored(f" {right}", fg_color=right_bar_color, bold=True)
         )
 
-    title = f"{marker}  P R E V I O U S   C A L L E R S  {marker}"
-    subtitle = "SIGNALS RECENTLY RECEIVED BY THIS NODE"
+    if plain:
+        title = "Previous callers"
+        subtitle = "Who has called in lately"
+    else:
+        title = f"{marker}  P R E V I O U S   C A L L E R S  {marker}"
+        subtitle = "SIGNALS RECENTLY RECEIVED BY THIS NODE"
     rendered: list[str] = [
         _rule(top_left, top_right),
-        _framed(_centered(title, gradient=True, bold=True)),
+        _framed(_centered(title, gradient=not plain, bold=True)),
         _framed(_centered(subtitle, gradient=use_truecolor)),
         _rule(middle_left, middle_right),
     ]

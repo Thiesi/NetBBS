@@ -638,6 +638,7 @@ from netbbs.net.welcome_banner import (
     MAX_BANNER_SIZE_BYTES,
     banner_path,
     load_welcome_banner,
+    pre_login_unicode_style,
     set_welcome_banner_enabled,
     welcome_banner_status,
 )
@@ -737,7 +738,7 @@ from netbbs.rendering import (
     cut_to_width,
     display_width,
     GRADIENTS,
-    decode_ansi_bytes,
+    decode_banner_bytes,
     double_frame,
     gradient_text,
     menu_grid,
@@ -766,7 +767,12 @@ from netbbs.guest import (
     set_pre_login_notice_without_commit,
 )
 from netbbs.search import SearchIndexIntegrityReport, check_index_integrity, rebuild_indexes
-from netbbs.session_history import previous_callers_enabled, set_previous_callers_enabled
+from netbbs.session_history import (
+    previous_callers_enabled,
+    previous_callers_plain,
+    set_previous_callers_enabled,
+    set_previous_callers_plain,
+)
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 from netbbs.timeutil import (
@@ -2760,6 +2766,7 @@ async def _system_menu(
                 utc_now_iso(), override_format=display_format, override_timezone=display_timezone
             ),
             "previous_callers_enabled": previous_callers_enabled(db),
+            "previous_callers_plain": previous_callers_plain(db),
             "guest_username": (lambda u: u.username if u is not None else None)(guest_user(db)),
             "trust_exceptions": len(list_sole_authorities(db)),
             "description_level": menu_description_level(db, actor),
@@ -2824,8 +2831,17 @@ async def _system_menu(
             await _draw_system_menu(session, node_controls, link_context, stats=stats)
         elif choice == "v":
             def _toggle_previous_callers(db: Database) -> None:
-                enabled = not previous_callers_enabled(db)
+                # Three steps (issue #841): shown in the default neon style,
+                # shown plain, hidden, and round again.
+                enabled, plain = previous_callers_enabled(db), previous_callers_plain(db)
+                if enabled and not plain:
+                    set_previous_callers_plain(db, True)
+                    record_action(db, actor=actor, action="set_previous_callers_plain", detail="plain=true")
+                    return
+                enabled = not enabled
                 set_previous_callers_enabled(db, enabled)
+                if enabled:
+                    set_previous_callers_plain(db, False)
                 record_action(
                     db,
                     actor=actor,
@@ -2969,7 +2985,12 @@ async def _draw_system_menu(
             + colored(sanitize_text(_fit(timestamp_value, 2 + len(timestamp_label))), fg_color=VALUE_COLOR),
             "  " + colored(callers_label, fg_color=LABEL_COLOR)
             + colored(
-                "shown after login" if stats["previous_callers_enabled"] else "hidden",
+                _fit(
+                    ("shown after login, plain" if stats["previous_callers_plain"] else "shown after login, neon")
+                    if stats["previous_callers_enabled"]
+                    else "hidden",
+                    2 + len(callers_label),
+                ),
                 fg_color=SUCCESS_COLOR if stats["previous_callers_enabled"] else MUTED_COLOR,
             ),
             "  " + colored(trust_label, fg_color=LABEL_COLOR)
@@ -3009,9 +3030,11 @@ async def _draw_system_menu(
         MenuEntry(
             label=menu_key("V", "ious callers", prefix="Pre"),
             brief=(
-                "Shown after login; press to hide"
-                if stats["previous_callers_enabled"]
-                else "Hidden after login; press to show"
+                "Hidden after login; press to show (neon)"
+                if not stats["previous_callers_enabled"]
+                else "Plain; press to hide"
+                if stats["previous_callers_plain"]
+                else "Neon; press for plain"
             ),
         ),
         MenuEntry(label=menu_key("I", "nter-BBS chat (MRC)"), brief="Bridge channels to the MRC network"),
@@ -12767,6 +12790,51 @@ async def _draw_welcome_banner_menu(
     await _choice_prompt(session)
 
 
+# Every banner and masthead file has the same 256 KiB limit.
+_SAVED_BANNER_READ_LIMIT = MAX_BANNER_SIZE_BYTES
+
+
+def _saved_banner_art(status) -> str | None:
+    """The art in a banner's saved file, whether or not it is switched on,
+    or `None` when there is no readable file within the size limit."""
+    if not status.exists or (status.size_bytes or 0) > _SAVED_BANNER_READ_LIMIT:
+        return None
+    try:
+        data = status.path.read_bytes()
+    except OSError:
+        return None
+    return decode_banner_bytes(data) + RESET
+
+
+async def _write_banner_not_live(session: Session, status, *, callers_see: str) -> bool:
+    """A preview's answer when callers are not seeing the SysOp's own art
+    here (issue #841). A saved file that is switched off is shown anyway,
+    because right after saving it the SysOp wants to see their work, not
+    what callers get instead; the line under it says it is off and what
+    callers see meanwhile. Returns whether saved art was shown.
+
+    This replaces lines like "(no banner -- enabled=False, file
+    exists=True)", which read as developer output."""
+    art = _saved_banner_art(status)
+    if art is not None and not status.enabled:
+        await write_preformatted_line(session, art)
+        await session.write_line(
+            colored(
+                f"(Saved, but switched off: callers see {callers_see}. [E]nable turns it on.)",
+                fg_color=MUTED_COLOR,
+            )
+        )
+        return True
+    if status.exists and art is None:
+        message = f"(The saved file is over 256 KiB or can't be read: callers see {callers_see}.)"
+    elif status.enabled:
+        message = f"(Switched on, but no file is saved: callers see {callers_see}.)"
+    else:
+        message = f"(Nothing saved yet: callers see {callers_see}.)"
+    await session.write_line(colored(message, fg_color=MUTED_COLOR))
+    return False
+
+
 async def _preview_welcome_banner_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
     """Renders the exact banner `netbbs.net.login_flow` would show at
     login right now -- the same `load_welcome_banner` call, used as a
@@ -12783,33 +12851,18 @@ async def _preview_welcome_banner_screen(session: Session, lane: DatabaseLane, a
 
     def _load(db: Database) -> tuple:
         truecolor = effective_truecolor(session, db, actor)
-        return welcome_banner_status(db), load_welcome_banner(db, truecolor=truecolor), truecolor
+        # As the connecting caller on this transport gets it (issue #841).
+        banner = load_welcome_banner(db, truecolor=truecolor, unicode_style=pre_login_unicode_style(session))
+        return welcome_banner_status(db), banner, truecolor
 
-    status, banner_text, truecolor = await lane.run(_load)
-    await session.write_line(colored("\r\nPreviewing welcome banner as shown at login:", fg_color=MUTED_COLOR))
-    await session.write_line(
-        colored("Capability: ", fg_color=LABEL_COLOR)
-        + colored(
-            getattr(session, "truecolor_diagnostic", "capability report unavailable"),
-            fg_color=METADATA_COLOR,
-        )
-    )
-    await write_preformatted_line(session, banner_text)
+    status, banner_text, _truecolor = await lane.run(_load)
+    await session.write_line(colored("\r\nPreviewing the welcome banner callers see when they connect:", fg_color=MUTED_COLOR))
     if status.enabled and status.exists and (status.size_bytes or 0) <= MAX_BANNER_SIZE_BYTES:
-        await session.write_line(
-            colored(
-                "(showing your custom file) -- generated truecolor/256-color showcase is intentionally bypassed",
-                fg_color=MUTED_COLOR,
-            )
-        )
-    else:
-        depth = "truecolor gradient" if truecolor else "256-color fallback"
-        await session.write_line(
-            colored(
-                f"(showing the DEFAULT banner -- rendering: {depth}; enabled={status.enabled}, file exists={status.exists})",
-                fg_color=MUTED_COLOR,
-            )
-        )
+        await write_preformatted_line(session, banner_text)
+        await session.write_line(colored("(Your banner, as callers see it.)", fg_color=MUTED_COLOR))
+    elif not await _write_banner_not_live(session, status, callers_see="the default NetBBS banner"):
+        # Nothing of the SysOp's own to show: show what callers do see.
+        await write_preformatted_line(session, banner_text)
     # Dogfood report: this screen used to fall straight through to the
     # menu's own immediate redraw, which -- with redraw_in_place on
     # (the default for new accounts, issue #160's own follow-up)
@@ -12948,7 +13001,7 @@ async def _welcome_banner_gallery_screen(
         preset = selection[1]
         data = load_welcome_banner_preset(preset)
         await session.write_line(colored(f"\r\nPreviewing {preset.name!r}:", fg_color=MUTED_COLOR))
-        await session.write_line(decode_ansi_bytes(data) + RESET)
+        await session.write_line(decode_banner_bytes(data) + RESET)
 
         if not await _preview_apply_choice(session, f"Apply {preset.name!r} as the welcome banner"):
             continue
@@ -13282,7 +13335,7 @@ async def _welcome_banner_filesystem_screen(
 
         data = path.read_bytes()
         await session.write_line(colored(f"\r\nPreviewing {path.name!r}:", fg_color=MUTED_COLOR))
-        await session.write_line(decode_ansi_bytes(data) + RESET)
+        await session.write_line(decode_banner_bytes(data) + RESET)
 
         if not await _preview_apply_choice(session, f"Load {path.name!r} as the welcome banner"):
             continue
@@ -13411,12 +13464,7 @@ async def _preview_main_menu_banner_screen(session: Session, lane: DatabaseLane,
     status, masthead = await lane.run(_load)
     await session.write_line(colored("\r\nPreviewing the masthead as shown above the main menu:", fg_color=MUTED_COLOR))
     if not masthead:
-        await session.write_line(
-            colored(
-                f"(no masthead would be shown -- enabled={status.enabled}, file exists={status.exists})",
-                fg_color=MUTED_COLOR,
-            )
-        )
+        await _write_banner_not_live(session, status, callers_see="no masthead")
     else:
         await write_preformatted_line(session, masthead)
         await session.write_line(
@@ -13518,7 +13566,7 @@ async def _main_menu_banner_gallery_screen(
         preset = selection[1]
         data = load_main_menu_banner_preset(preset)
         await session.write_line(colored(f"\r\nPreviewing {preset.name!r}:", fg_color=MUTED_COLOR))
-        await session.write_line(decode_ansi_bytes(data) + RESET)
+        await session.write_line(decode_banner_bytes(data) + RESET)
 
         if not await _preview_apply_choice(session, f"Apply {preset.name!r} as the masthead"):
             continue
@@ -13591,7 +13639,7 @@ async def _main_menu_banner_filesystem_screen(
 
         data = path.read_bytes()
         await session.write_line(colored(f"\r\nPreviewing {path.name!r}:", fg_color=MUTED_COLOR))
-        await session.write_line(decode_ansi_bytes(data) + RESET)
+        await session.write_line(decode_banner_bytes(data) + RESET)
 
         if not await _preview_apply_choice(session, f"Load {path.name!r} as the masthead"):
             continue
@@ -13675,7 +13723,7 @@ async def _draw_banners_menu(
     await session.write_line(
         "\r\n" + _menu_row(
             [
-                MenuEntry(label=menu_key("W", "elcome banner"), brief="First-login greeting text"),
+                MenuEntry(label=menu_key("W", "elcome banner"), brief="Art shown when a caller connects"),
                 MenuEntry(label=menu_key("L", "ogoff banner"), brief="Shown on an intentional Log off"),
                 MenuEntry(label=menu_key("e", "fore signup", prefix="B"), brief="Shown once, before Create account"),
                 MenuEntry(label=menu_key("f", "ter signup", prefix="A"), brief="Shown once signup succeeds"),
@@ -13787,11 +13835,7 @@ async def _preview_logoff_banner_screen(session: Session, lane: DatabaseLane) ->
     if banner_text:
         await write_preformatted_line(session, banner_text)
     else:
-        await session.write_line(
-            colored(
-                f"(no banner -- enabled={status.enabled}, file exists={status.exists})", fg_color=MUTED_COLOR
-            )
-        )
+        await _write_banner_not_live(session, status, callers_see="no banner")
     await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
     await session.read_any_key()
 
@@ -13877,7 +13921,7 @@ async def _logoff_banner_gallery_screen(
         preset = selection[1]
         data = load_logoff_banner_preset(preset)
         await session.write_line(colored(f"\r\nPreviewing {preset.name!r}:", fg_color=MUTED_COLOR))
-        await session.write_line(decode_ansi_bytes(data) + RESET)
+        await session.write_line(decode_banner_bytes(data) + RESET)
 
         if not await _preview_apply_choice(session, f"Apply {preset.name!r} as the logoff banner"):
             continue
@@ -13948,7 +13992,7 @@ async def _logoff_banner_filesystem_screen(
 
         data = path.read_bytes()
         await session.write_line(colored(f"\r\nPreviewing {path.name!r}:", fg_color=MUTED_COLOR))
-        await session.write_line(decode_ansi_bytes(data) + RESET)
+        await session.write_line(decode_banner_bytes(data) + RESET)
 
         if not await _preview_apply_choice(session, f"Load {path.name!r} as the logoff banner"):
             continue
@@ -14066,11 +14110,7 @@ async def _preview_new_account_banner_before_screen(session: Session, lane: Data
     if banner_text:
         await write_preformatted_line(session, banner_text)
     else:
-        await session.write_line(
-            colored(
-                f"(no banner -- enabled={status.enabled}, file exists={status.exists})", fg_color=MUTED_COLOR
-            )
-        )
+        await _write_banner_not_live(session, status, callers_see="no banner")
     await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
     await session.read_any_key()
 
@@ -14156,7 +14196,7 @@ async def _new_account_banner_before_gallery_screen(
         preset = selection[1]
         data = load_new_account_banner_before_preset(preset)
         await session.write_line(colored(f"\r\nPreviewing {preset.name!r}:", fg_color=MUTED_COLOR))
-        await session.write_line(decode_ansi_bytes(data) + RESET)
+        await session.write_line(decode_banner_bytes(data) + RESET)
 
         if not await _preview_apply_choice(session, f"Apply {preset.name!r} as the new-account (before) banner"):
             continue
@@ -14229,7 +14269,7 @@ async def _new_account_banner_before_filesystem_screen(
 
         data = path.read_bytes()
         await session.write_line(colored(f"\r\nPreviewing {path.name!r}:", fg_color=MUTED_COLOR))
-        await session.write_line(decode_ansi_bytes(data) + RESET)
+        await session.write_line(decode_banner_bytes(data) + RESET)
 
         if not await _preview_apply_choice(session, f"Load {path.name!r} as the new-account (before) banner"):
             continue
@@ -14349,11 +14389,7 @@ async def _preview_new_account_banner_after_screen(session: Session, lane: Datab
     if banner_text:
         await write_preformatted_line(session, banner_text)
     else:
-        await session.write_line(
-            colored(
-                f"(no banner -- enabled={status.enabled}, file exists={status.exists})", fg_color=MUTED_COLOR
-            )
-        )
+        await _write_banner_not_live(session, status, callers_see="no banner")
     await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
     await session.read_any_key()
 
@@ -14439,7 +14475,7 @@ async def _new_account_banner_after_gallery_screen(
         preset = selection[1]
         data = load_new_account_banner_after_preset(preset)
         await session.write_line(colored(f"\r\nPreviewing {preset.name!r}:", fg_color=MUTED_COLOR))
-        await session.write_line(decode_ansi_bytes(data) + RESET)
+        await session.write_line(decode_banner_bytes(data) + RESET)
 
         if not await _preview_apply_choice(session, f"Apply {preset.name!r} as the new-account (after) banner"):
             continue
@@ -14512,7 +14548,7 @@ async def _new_account_banner_after_filesystem_screen(
 
         data = path.read_bytes()
         await session.write_line(colored(f"\r\nPreviewing {path.name!r}:", fg_color=MUTED_COLOR))
-        await session.write_line(decode_ansi_bytes(data) + RESET)
+        await session.write_line(decode_banner_bytes(data) + RESET)
 
         if not await _preview_apply_choice(session, f"Load {path.name!r} as the new-account (after) banner"):
             continue
@@ -14705,9 +14741,7 @@ async def _preview_board_list_masthead_screen(session: Session, lane: DatabaseLa
     if masthead_text:
         await write_preformatted_line(session, masthead_text)
     else:
-        await session.write_line(
-            colored(f"(no masthead -- enabled={status.enabled}, file exists={status.exists})", fg_color=MUTED_COLOR)
-        )
+        await _write_banner_not_live(session, status, callers_see="no masthead")
     await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
     await session.read_any_key()
 
@@ -14793,7 +14827,7 @@ async def _board_list_masthead_gallery_screen(
         preset = selection[1]
         data = load_board_list_masthead_preset(preset)
         await session.write_line(colored(f"\r\nPreviewing {preset.name!r}:", fg_color=MUTED_COLOR))
-        await session.write_line(decode_ansi_bytes(data) + RESET)
+        await session.write_line(decode_banner_bytes(data) + RESET)
 
         if not await _preview_apply_choice(session, f"Apply {preset.name!r} as the board list masthead"):
             continue
@@ -14866,7 +14900,7 @@ async def _board_list_masthead_filesystem_screen(
 
         data = path.read_bytes()
         await session.write_line(colored(f"\r\nPreviewing {path.name!r}:", fg_color=MUTED_COLOR))
-        await session.write_line(decode_ansi_bytes(data) + RESET)
+        await session.write_line(decode_banner_bytes(data) + RESET)
 
         if not await _preview_apply_choice(session, f"Load {path.name!r} as the board list masthead"):
             continue
@@ -14980,9 +15014,7 @@ async def _preview_file_area_masthead_screen(session: Session, lane: DatabaseLan
     if masthead_text:
         await write_preformatted_line(session, masthead_text)
     else:
-        await session.write_line(
-            colored(f"(no masthead -- enabled={status.enabled}, file exists={status.exists})", fg_color=MUTED_COLOR)
-        )
+        await _write_banner_not_live(session, status, callers_see="no masthead")
     await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
     await session.read_any_key()
 
@@ -15068,7 +15100,7 @@ async def _file_area_masthead_gallery_screen(
         preset = selection[1]
         data = load_file_area_masthead_preset(preset)
         await session.write_line(colored(f"\r\nPreviewing {preset.name!r}:", fg_color=MUTED_COLOR))
-        await session.write_line(decode_ansi_bytes(data) + RESET)
+        await session.write_line(decode_banner_bytes(data) + RESET)
 
         if not await _preview_apply_choice(session, f"Apply {preset.name!r} as the file area masthead"):
             continue
@@ -15139,7 +15171,7 @@ async def _file_area_masthead_filesystem_screen(
 
         data = path.read_bytes()
         await session.write_line(colored(f"\r\nPreviewing {path.name!r}:", fg_color=MUTED_COLOR))
-        await session.write_line(decode_ansi_bytes(data) + RESET)
+        await session.write_line(decode_banner_bytes(data) + RESET)
 
         if not await _preview_apply_choice(session, f"Load {path.name!r} as the file area masthead"):
             continue
@@ -15257,9 +15289,7 @@ async def _preview_chat_channel_picker_masthead_screen(session: Session, lane: D
     if masthead_text:
         await write_preformatted_line(session, masthead_text)
     else:
-        await session.write_line(
-            colored(f"(no masthead -- enabled={status.enabled}, file exists={status.exists})", fg_color=MUTED_COLOR)
-        )
+        await _write_banner_not_live(session, status, callers_see="no masthead")
     await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
     await session.read_any_key()
 
@@ -15345,7 +15375,7 @@ async def _chat_channel_picker_masthead_gallery_screen(
         preset = selection[1]
         data = load_chat_channel_picker_masthead_preset(preset)
         await session.write_line(colored(f"\r\nPreviewing {preset.name!r}:", fg_color=MUTED_COLOR))
-        await session.write_line(decode_ansi_bytes(data) + RESET)
+        await session.write_line(decode_banner_bytes(data) + RESET)
 
         if not await _preview_apply_choice(session, f"Apply {preset.name!r} as the chat channel picker masthead"):
             continue
@@ -15418,7 +15448,7 @@ async def _chat_channel_picker_masthead_filesystem_screen(
 
         data = path.read_bytes()
         await session.write_line(colored(f"\r\nPreviewing {path.name!r}:", fg_color=MUTED_COLOR))
-        await session.write_line(decode_ansi_bytes(data) + RESET)
+        await session.write_line(decode_banner_bytes(data) + RESET)
 
         if not await _preview_apply_choice(session, f"Load {path.name!r} as the chat channel picker masthead"):
             continue

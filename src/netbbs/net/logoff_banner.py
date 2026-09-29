@@ -35,7 +35,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from netbbs.config import get_config, set_config
-from netbbs.rendering import RESET, decode_ansi_bytes
+from netbbs.rendering import RESET, decode_banner_bytes
 from netbbs.storage.database import Database
 
 _logger = logging.getLogger(__name__)
@@ -124,4 +124,4 @@ def load_logoff_banner(db: Database) -> str:
     # this banner is followed immediately by the real "Signed out" /
     # "Goodbye!" message, which must never inherit color state left open
     # by the banner's own art.
-    return decode_ansi_bytes(data) + RESET
+    return decode_banner_bytes(data) + RESET

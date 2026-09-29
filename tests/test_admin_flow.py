@@ -4476,20 +4476,59 @@ def test_preview_screen_renders_resolved_banner_content(db, lane, sysop):
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "MY DISTINCTIVE BANNER TEXT" in text
-    assert "(showing your custom file)" in text
-    assert "generated truecolor/256-color showcase is intentionally bypassed" in _normalized_visible(text)
+    assert "(Your banner, as callers see it.)" in text
+    # Issue #841: no developer diagnostics on this screen.
+    assert "Capability:" not in text
 
 
-def test_preview_screen_when_disabled_shows_default_and_says_so(db, lane, sysop):
+def test_preview_screen_with_nothing_saved_shows_the_default_and_says_so(db, lane, sysop):
     # Trailing "x" dismisses the preview's own "Press any key to
     # continue..." wait (dogfood fix: the preview used to be cleared by
     # the menu's own immediate redraw before it could be read).
     session = FakeSession(["s", "m", "n", "w", "p", "x", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
+    text = _normalized_visible(_written_text(session))
+    assert "N E T B B S" in text
+    assert "(Nothing saved yet: callers see the default NetBBS banner.)" in text
+    assert "enabled=" not in text
+
+
+def test_preview_of_a_saved_but_disabled_banner_shows_the_saved_art(db, lane, sysop):
+    # Issue #841 (F037): right after "Saved ... Use [P]review", the preview
+    # showed the default NetBBS banner, someone else's art.
+    from netbbs.net.welcome_banner import banner_path
+
+    banner_path(db).write_bytes(b"MY SAVED PEN ART")
+    session = FakeSession(["s", "m", "n", "w", "p", "x", "b", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    text = _normalized_visible(_written_text(session))
+    assert "MY SAVED PEN ART" in text
+    assert "N E T B B S" not in text
+    assert "(Saved, but switched off: callers see the default NetBBS banner. [E]nable turns it on.)" in text
+
+
+def test_welcome_preview_over_telnet_shows_the_ascii_default_callers_get(db, lane, sysop):
+    # Review on #889: Telnet callers get the default banner in ASCII
+    # before sign-in, so a Telnet SysOp's preview shows that too.
+    session = FakeSession(["s", "m", "n", "w", "p", "x", "b", "b", "b", "b", "b"])
+    session.transport_name = "telnet"
+    _run(session, lane, sysop)
     text = _written_text(session)
-    assert "showing the DEFAULT banner" in text
-    assert "rendering: 256-color fallback" in text
-    assert "enabled=False" in text
+    start = text.index("Previewing the welcome banner")
+    preview = text[start:text.index("Press any key", start)]
+    assert "+====" in preview
+    assert "╔" not in preview
+
+
+def test_preview_of_an_oversized_saved_banner_says_why_it_is_not_shown(db, lane, sysop):
+    from netbbs.net.welcome_banner import MAX_BANNER_SIZE_BYTES, banner_path
+
+    banner_path(db).write_bytes(b"x" * (MAX_BANNER_SIZE_BYTES + 1))
+    session = FakeSession(["s", "m", "n", "w", "p", "x", "b", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    text = _normalized_visible(_written_text(session))
+    assert "(The saved file is over 256 KiB or can't be read: callers see the default NetBBS banner.)" in text
+    assert "N E T B B S" in text
 
 
 def test_preview_screen_color_depth_override_forces_truecolor(db, lane, sysop):
@@ -4508,8 +4547,7 @@ def test_preview_screen_color_depth_override_forces_truecolor(db, lane, sysop):
     session = FakeSession(["s", "m", "n", "w", "p", "x", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
-    assert "rendering: truecolor gradient" in text
-    assert "\x1b[38;2;" in text  # a real truecolor escape, not just the label
+    assert "\x1b[38;2;" in text  # a real truecolor escape
 
 
 def test_preview_screen_color_depth_override_forces_256_color(db, lane, sysop):
@@ -4525,7 +4563,7 @@ def test_preview_screen_color_depth_override_forces_256_color(db, lane, sysop):
     session.supports_truecolor = True
     _run(session, lane, sysop)
     text = _written_text(session)
-    assert "rendering: 256-color fallback" in text
+    assert "\x1b[38;5;" in text
     assert "\x1b[38;2;" not in text
 
 
@@ -4931,8 +4969,8 @@ def test_masthead_preview_screen_when_disabled_says_no_masthead_shown(db, lane, 
     session = FakeSession(["s", "m", "m", "m", "p", "x", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
-    assert "no masthead would be shown" in text
-    assert "enabled=False" in text
+    assert "(Nothing saved yet: callers see no masthead.)" in text
+    assert "enabled=" not in text
 
 
 def test_masthead_edit_option_opens_the_ansi_editor_and_a_save_round_trips_into_banner_path(db, lane, sysop):
@@ -5567,8 +5605,8 @@ def test_logoff_banner_preview_when_disabled_says_no_banner(db, lane, sysop):
     session = FakeSession(["s", "m", "n", "l", "p", "x", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
-    assert "no banner" in text.lower()
-    assert "enabled=False" in text
+    assert "(Nothing saved yet: callers see no banner.)" in text
+    assert "enabled=" not in text
 
 
 def test_logoff_banner_edit_round_trips_into_logoff_banner_path(db, lane, sysop):
@@ -6703,12 +6741,16 @@ def test_settings_shows_a_current_values_panel(db, lane, sysop):
 def test_settings_previous_callers_toggle_is_node_wide_and_audited(db, lane, sysop):
     from netbbs.session_history import previous_callers_enabled
 
+    from netbbs.session_history import previous_callers_plain
+
     assert previous_callers_enabled(db) is True
-    session = FakeSession(["s", "v", "b", "b"])
+    # Issue #841: neon, then plain, then hidden.
+    session = FakeSession(["s", "v", "v", "b", "b"])
     _run(session, lane, sysop)
 
     assert previous_callers_enabled(db) is False
     text = _visible(_written_text(session))
+    assert "Previous callers: shown after login, plain" in _normalized_visible(text)
     assert "Previous callers: hidden" in _normalized_visible(text)
     assert "vious callers" in text
     row = db.connection.execute(
@@ -6717,6 +6759,12 @@ def test_settings_previous_callers_toggle_is_node_wide_and_audited(db, lane, sys
     ).fetchone()
     assert row["actor_user_id"] == sysop.id
     assert row["detail"] == "enabled=false"
+
+    # A third press shows it again, in the default neon style.
+    session = FakeSession(["s", "v", "b", "b"])
+    _run(session, lane, sysop)
+    assert previous_callers_enabled(db) is True
+    assert previous_callers_plain(db) is False
 
 
 def test_settings_panel_reflects_a_changed_node_name(db, lane, sysop):

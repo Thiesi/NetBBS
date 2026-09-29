@@ -574,7 +574,11 @@ all 10 rows together with its title, frame, and pause; an empty history skips
 the splash rather than stopping the first caller at an empty screen. Confirmed
 truecolor is a progressive visual enhancement with a deliberately polished
 256-color fallback. The SysOp can toggle the splash node-wide from Settings;
-new and upgraded nodes default to showing it.
+new and upgraded nodes default to showing it. The same setting also offers a
+plain style (issue #841): the node's header colour, no gradient, and the
+heading "Previous callers" / "Who has called in lately" instead of the neon
+"signals received" wording, for a node whose tone the neon clashes with. It
+applies to the splash and the menu screen alike.
 
 The same roll is a home-menu screen of its own, `P[r]evious callers`, rendered
 by the one renderer the splash uses so the two can never disagree about who is
@@ -7131,9 +7135,13 @@ Completed product work informed by dogfood includes:
   values, metadata, success, and failure through shared theme roles; colored
   narrow output is truncated by visible width rather than raw ANSI length.
   The default web login banner visibly exercises truecolor while the
-  256-color rendering remains equivalent and readable. Profile and banner-
-  preview diagnostics state the transport's detected capability or limitation;
-  a custom SysOp banner explicitly bypasses the generated showcase. Both
+  256-color rendering remains equivalent and readable. Profile diagnostics
+  state the transport's detected capability or limitation; the banner preview
+  no longer does, since a SysOp read it as developer output (issue #841). A
+  custom SysOp banner bypasses the generated showcase. Before sign-in the
+  node's own chrome is plain ASCII over Telnet, where CP437 terminals such as
+  SyncTERM call from, and Unicode on the web and SSH; a custom banner is sent
+  as authored either way (issue #841). Both
   Telnet's and SSH's initial banners are shown before capability negotiation
   completes -- Telnet's can precede NEW-ENVIRON, and SSH's own pre-auth
   banner (asyncssh's `send_auth_banner`, sent from `begin_auth` before any
