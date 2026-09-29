@@ -335,6 +335,18 @@ def test_a_node_name_with_a_comma_is_quoted_and_survives_the_to_field(db, lane):
     assert remote["recipient_remote_address"] == f"carol@{farpoint.fingerprint}"
 
 
+def test_one_person_named_twice_is_a_letter_to_one_person(db, lane):
+    alice = _user(db, "alice")
+    root = _user(db, "root", user_level=255)
+    session = FakeSession(keys=["c", "s", "b"], lines=["sysop, Root", "Hi", "x", ""])
+
+    asyncio.run(browse_mail(session, lane, alice))
+
+    assert "Message sent." in _written_text(session)
+    [copy] = list_inbox(db, root)
+    assert copy.mail_group_id is None and copy.mail_group_to is None
+
+
 # -- reading ------------------------------------------------------------------
 
 

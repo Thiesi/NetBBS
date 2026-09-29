@@ -2508,7 +2508,16 @@ async def _compose_mail(
         Several addresses (issue #827) are each settled so."""
         entries = split_recipients(text)
         if len(entries) > 1:
-            settled = [await settle_one(entry) for entry in entries]
+            settled: list[tuple[str, str]] = []
+            for entry in entries:
+                kept, label = await settle_one(entry)
+                # One person named twice -- `bob, Bob`, or `sysop` and the
+                # SysOp's own name -- is one recipient (review on #910), and
+                # a list that comes down to one is a letter to one person.
+                if kept.casefold() not in {other.casefold() for other, _label in settled}:
+                    settled.append((kept, label))
+            if len(settled) == 1:
+                return settled[0]
             return join_recipients([kept for kept, _label in settled]), join_recipients(
                 [label for _kept, label in settled]
             )
