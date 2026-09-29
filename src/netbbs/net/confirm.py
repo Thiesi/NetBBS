@@ -78,6 +78,12 @@ async def read_confirmation_choice(session: Session) -> bool | None:
         if key.kind is EditorKeyKind.CHAR and key.char is not None:
             answer = key.char.lower()
             if answer in ("y", "n"):
+                # "no" or "yes" typed out: the rest of the word must not
+                # answer the next screen (issue #840, F112). Armed first, so
+                # an Enter right behind the letter ends it at once.
+                arm_word_guard = getattr(session, "arm_word_guard", None)
+                if arm_word_guard is not None:
+                    arm_word_guard()
                 discard_buffered_enter = getattr(session, "discard_buffered_enter", None)
                 if discard_buffered_enter is not None:
                     await discard_buffered_enter()

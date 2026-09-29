@@ -58,7 +58,7 @@ from netbbs.net.new_account_banner_after import load_new_account_banner_after
 from netbbs.net.new_account_banner_before import load_new_account_banner_before
 from netbbs.net.node_theme import effective_accent_color, effective_header_color_256, effective_node_name_gradient
 from netbbs.net.nodeconfig import ThrottleConfig
-from netbbs.net.redraw_preference import set_redraw_in_place_enabled
+from netbbs.net.redraw_preference import start_new_account_redrawing_in_place
 from netbbs.net.session import Session, SessionClosedError, write_preformatted_line, write_prompt
 from netbbs.net.signup_text import pending_approval_notice, username_problem_line
 from netbbs.staff import approvers_away_line
@@ -575,6 +575,12 @@ async def _confirm_unicode_style(session: Session, db: Database, user: User) -> 
     again (`netbbs.net.unicode_style_preference`'s own established
     contract, shared with `redraw_preference`)."""
     if unicode_style_ever_set(db, user):
+        return
+    if getattr(session, "transport_name", None) == "web":
+        # The browser terminal always draws them, so the question only
+        # puzzled callers there (issue #840, F090/F112). Nothing is saved:
+        # the same account dialling in with an ASCII-only client later is
+        # still asked (review on #871).
         return
     await session.write_line(
         colored("\r\nNetBBS can use a few Unicode characters for a cleaner look, like this:", fg_color=METADATA_COLOR)
@@ -1561,7 +1567,7 @@ async def _register_new_account(
         # flipping `redraw_in_place_enabled`'s own resolve default,
         # which would silently change behavior for every existing
         # account with an unset preference too, not just new ones.
-        set_redraw_in_place_enabled(db, new_user, True)
+        start_new_account_redrawing_in_place(db, new_user)
 
         # GitHub issue #177: covers both successful outcomes below (an
         # account created and immediately usable, or created but pending

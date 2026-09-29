@@ -681,3 +681,39 @@ def test_a_header_is_sanitized_and_cut_to_the_width(tmp_path):
     assert rows[1].startswith("Subject: ") and "red" in rows[1]
     assert "\x1b[31m" not in "".join(session.written)
     assert len(rows[1]) == 40
+
+
+def test_without_recovery_a_draft_on_disk_is_neither_offered_nor_deleted(tmp_path):
+    """Issue #814: a letter's caller already offered its draft and passes it
+    in as the text -- the editor does not ask again, and the draft stays
+    until something replaces it."""
+    draft = tmp_path / "d.draft"
+    draft.write_text("kept letter", encoding="utf-8")
+
+    async def scenario():
+        session = FakeSession(["CTRL+X"])
+        result = await edit_prose(
+            session, initial_text="kept letter", draft_path=draft, max_bytes=100_000, offer_recovery=False,
+        )
+        return result, _written_text(session)
+
+    result, text = asyncio.run(scenario())
+    assert result is None
+    assert "draft from a previous session" not in text
+    assert draft.read_text(encoding="utf-8") == "kept letter"
+
+
+def test_a_draft_handed_in_as_the_text_gets_no_second_blank_line(tmp_path):
+    """A resumed reply ending in an empty line is the caller's own text: the
+    cursor goes to its end without the blank line a fresh quote gets."""
+    draft = tmp_path / "d.draft"
+    draft.write_text("bob wrote:\n> hi\n\nmy answer\n", encoding="utf-8")
+
+    async def scenario():
+        session = FakeSession(_type("more") + ["CTRL+O"])
+        return await edit_prose(
+            session, initial_text="bob wrote:\n> hi\n\nmy answer\n", draft_path=draft, max_bytes=100_000,
+            offer_recovery=False, cursor_at_end=True,
+        )
+
+    assert asyncio.run(scenario()) == "bob wrote:\n> hi\n\nmy answer\nmore"

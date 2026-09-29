@@ -2024,7 +2024,7 @@ def test_nav_trailer_wraps_instead_of_losing_text_on_an_ordinary_terminal():
             for line in text.split("\r\n"):
                 assert len(line) <= 80, f"line exceeds 80 columns: {line!r}"
             assert "Ctrl-H: help" in text, "trailer boilerplate was lost, not wrapped"
-            assert "or type a 2-digit number to select" in text
+            assert "or type a number to select" in text
 
             writer.write(b"b")
             await writer.drain()

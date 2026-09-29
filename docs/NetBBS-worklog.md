@@ -1110,11 +1110,8 @@ signature (saved before compose ever completed) or already has it
 cheaply tell which apart from string inspection, so `append_signature`
 itself is idempotent (a `body` already ending in the exact signature
 block is returned unchanged) and is simply called unconditionally
-every time. Mail has no equivalent draft-resume entry point (its own
-draft file is crash-recovery only, never offered back to the caller as
-a resumable draft the way `_show_board` does for posts), so this
-edge case is specific to board posts, but the idempotent design is
-applied uniformly rather than special-cased per caller.
+every time. A resumed letter (issue #814) hits the same case, which the
+idempotent design already covers.
 
 ### Chat state and rendering
 
@@ -2302,9 +2299,17 @@ model. Both editor paths must return a draft to a review/commit boundary; they
 must not persist or dispatch merely because editing ended.
 
 The shared line composer owns logical lines and uses explicit `/list`,
-`/insert N`, `/edit N`, `/delete N`, `/done`, and `/cancel` operations; a blank
-line retains the familiar finish gesture but now enters review rather than
-committing. `//` escapes a literal leading slash. Enforce domain byte and line
+`/insert N`, `/end`, `/edit N`, `/delete N`, `/done`, and `/cancel`
+operations. It keeps an insertion point (issue #814): `/insert N` moves it and
+it stays until `/end`; `/delete` above it moves it up with the text. A blank
+line is a paragraph break and a second one in a row finishes into review,
+removing that closing blank -- scripted tests that ended a body with one `""`
+followed by more input now need `/done` (a `FakeSession` that returns `""` when
+exhausted still ends it, with two). With a `draft_path` every accepted change
+is written to the draft, and `offer_recovery=False` (also on `edit_prose`)
+loads the caller's text without asking about or deleting a draft already
+there: a caller that offered the draft itself must pass it, or the editor
+asks a second time and deletes it on "no". `//` escapes a literal leading slash. Enforce domain byte and line
 limits against each candidate buffer mutation so an invalid edit never
 destroys the last valid draft.
 

@@ -225,27 +225,32 @@ def _body_bytes(lines: list[str]) -> int:
 
 async def _show_line_editor_help(session: Session, *, can_save_draft: bool) -> None:
     await session.write_line(colored("Line editor commands:", fg_color=HEADER_COLOR, bold=True))
-    await session.write_line("  /done       finish editing and review the draft")
-    await session.write_line("  /list       show all submitted lines")
-    await session.write_line("  /insert N   insert a new line before line N")
+    await session.write_line("  /done       finish editing and review the draft (so do two blank lines)")
+    await session.write_line("  /list       show all lines")
+    await session.write_line("  /insert N   write the next lines before line N")
+    await session.write_line("  /end        write the next lines at the end again")
     await session.write_line("  /edit N     replace line N")
     await session.write_line("  /delete N   delete line N")
     await session.write_line("  /cancel     discard the composition")
     if can_save_draft:
         # Dogfood feature request, issue #149: distinct from /cancel --
-        # only offered when the caller passed a `draft_path` (persisted
-        # posts, not e.g. mail, which has no resume mechanism to offer).
+        # only offered when the caller passed a `draft_path`.
         await session.write_line("  /exit, /quit  save as a draft and leave -- resume it later")
     await session.write_line("  /help, /?   show these commands")
     await session.write_line("  //text      add a line beginning with /")
+    await session.write_line("  A blank line starts a new paragraph.")
 
 
-async def _show_lines(session: Session, lines: list[str]) -> None:
+async def _show_lines(session: Session, lines: list[str], *, point: int | None = None) -> None:
+    """Every line, numbered; `point` (issue #814) marks where the next typed
+    line goes when that is not the end."""
     if not lines:
         await session.write_line(colored("(body is empty)", fg_color=MUTED_COLOR))
         return
     width = max(1, session.terminal_width - 6)
     for number, line in enumerate(lines, start=1):
+        if point is not None and number - 1 == point:
+            await session.write_line(colored("     (new lines go here -- /end to write at the end)", fg_color=MUTED_COLOR))
         safe = sanitize_text(line)
         wrapped = reflow(safe, width=width).splitlines() or [""]
         await session.write_line(f"{number:>3}: {wrapped[0]}")
@@ -271,49 +276,67 @@ async def edit_line_body(
     max_lines: int,
     draft_path: Path | None = None,
     keep_pasted_color: bool = False,
+    offer_recovery: bool = True,
 ) -> str | None:
     """Edit a logical-line body without cursor-addressed terminal UI.
 
-    Ordinary non-empty input appends one line; a blank line (or ``/done``)
-    finishes into review. Blank paragraph lines remain expressible through
-    ``/insert N``. Slash commands operate on the retained buffer; command
-    follow-up prompts use ordinary ``read_line`` too, so behavior is identical
-    on Telnet, SSH, and web sessions. ``None`` means either ``/cancel``
-    (draft discarded) or ``/exit``/``/quit`` (draft saved) -- callers that
-    need to tell the two apart check whether `draft_path` still exists.
+    Ordinary input adds one line where the caller is writing: at the end,
+    or before line N after ``/insert N`` until ``/end`` (issue #814). A
+    blank line is a paragraph break; a second blank line in a row, or
+    ``/done``, finishes into review, and that closing blank is not kept.
+    Before #814 the first blank line finished, so a paragraph needed
+    ``/insert N`` and so did every answer written between a reply's quoted
+    lines, one line per command. Slash commands operate on the retained
+    buffer; command follow-up prompts use ordinary ``read_line`` too, so
+    behavior is identical on Telnet, SSH, and web sessions. ``None`` means
+    either ``/cancel`` (draft discarded) or ``/exit``/``/quit`` (draft
+    saved) -- callers that need to tell the two apart check whether
+    `draft_path` still exists.
 
     `draft_path` (dogfood feature request, issue #149), if given, is the
     same kind of caller-owned persistence target
     `netbbs.net.prose_editor.edit_prose` already uses for its own
-    crash-recovery autosave -- see `netbbs.net.draft_storage`. A
-    pre-existing draft there is offered for recovery on entry, same
-    wording as the fullscreen editor; declining deletes it. `/cancel`
+    crash-recovery autosave -- see `netbbs.net.draft_storage`. Every change
+    to the text is written there (issue #814), so a dropped connection
+    keeps what was typed. A pre-existing draft there is offered for
+    recovery on entry, same wording as the fullscreen editor; declining
+    deletes it. `offer_recovery` False leaves that decision to a caller
+    that made it with its own Resume/Discard choice (a letter, issue
+    #814): nothing is asked, `initial_text` is loaded, and the draft on
+    disk stays until this session's first change replaces it. `/cancel`
     always deletes it (nothing to keep). `/exit`/`/quit` are only
-    recognized as commands at all when `draft_path` is given -- a
-    caller with no resume mechanism to offer (e.g. mail composition)
-    simply doesn't gain these two commands, same as before this
-    parameter existed. Finishing normally (`/done`/blank line) deletes
-    the draft too: the body is being handed back for real persistence,
-    so the temporary autosave has nothing left to recover.
+    recognized as commands at all when `draft_path` is given -- a caller
+    with no resume mechanism to offer simply doesn't gain these two
+    commands. Finishing normally (`/done`/two blank lines) deletes the
+    draft too: the body is being handed back for real persistence, so the
+    temporary autosave has nothing left to recover.
 
     `keep_pasted_color` (issue #754) -- as for
     `netbbs.net.prose_editor.edit_prose`: pasted SGR color is typed in
     as pipe codes. One translator serves the whole body, so a color
     pasted on one line still counts on the next.
     """
-    if draft_path is not None and draft_path.exists():
+    if offer_recovery and draft_path is not None and draft_path.exists():
         if await offer_draft_recovery(session):
             initial_text = load_draft(draft_path)
         else:
             delete_draft(draft_path)
     lines = initial_text.split("\n") if initial_text is not None else []
+    # Where the next typed line goes: the end, or before a line `/insert`
+    # named (issue #814).
+    point = len(lines)
+    # The line just typed was blank: another one finishes.
+    blank_pending = False
+    # ...and whether that blank went into the text (the cap may refuse it).
+    blank_added = False
+    paragraph_hint_shown = False
     # Passed only when asked for, so a Session that predates the option
     # still reads lines here.
     read_options = {"pasted_color": PastedColor()} if keep_pasted_color else {}
     exit_hint = " /exit or /quit saves it as a draft;" if draft_path is not None else ""
     await session.write_line(
-        f"Enter message text. Blank line or /done reviews the draft;{exit_hint} "
-        "/help or /? shows editing commands."
+        "Enter message text. A blank line starts a new paragraph; two blank lines or /done "
+        f"review the draft;{exit_hint} /help or /? shows editing commands."
     )
     if lines:
         await _show_lines(session, lines)
@@ -337,15 +360,48 @@ async def edit_line_body(
             )
             return False
         lines[:] = candidate
+        if draft_path is not None:
+            # Kept as it is typed (issue #814): a dropped connection loses
+            # nothing, as the fullscreen editor's autosave already did.
+            save_draft(draft_path, "\n".join(lines))
+        return True
+
+    async def add_line(text: str) -> bool:
+        nonlocal point
+        candidate = list(lines)
+        candidate.insert(point, text)
+        if not await apply(candidate):
+            return False
+        point += 1
         return True
 
     while True:
-        await session.write(f"{len(lines) + 1}> ")
+        await session.write(f"{point + 1}> ")
         raw = await session.read_line(**read_options)
         command = raw.strip()
         lowered = command.lower()
 
+        if raw == "" and not blank_pending and "\n".join(lines).strip():
+            # A paragraph break; the next blank line finishes. At the line or
+            # size cap the break is refused, said by `apply`, and the next
+            # blank line still finishes (review on #873): the refusal is not
+            # followed straight by review.
+            blank_added = await add_line("")
+            blank_pending = True
+            if not paragraph_hint_shown:
+                paragraph_hint_shown = True
+                await session.write_line(
+                    colored("(New paragraph. A second blank line, or /done, finishes.)", fg_color=MUTED_COLOR)
+                )
+            continue
         if raw == "" or lowered == "/done":
+            if blank_pending and blank_added and (raw == "" or point == len(lines)):
+                # The blank that asked to finish is not part of the text --
+                # unless /done follows a blank typed mid-text, which is a
+                # paragraph break the caller meant (review on #873).
+                del lines[point - 1]
+                point -= 1
+                blank_pending = False
             body = "\n".join(lines)
             if not body.strip():
                 await session.write_line(colored("Body cannot be blank.", fg_color=MUTED_COLOR))
@@ -353,6 +409,7 @@ async def edit_line_body(
             if draft_path is not None:
                 delete_draft(draft_path)
             return body
+        blank_pending = False
         if lowered == "/cancel":
             if draft_path is not None:
                 delete_draft(draft_path)
@@ -370,18 +427,28 @@ async def edit_line_body(
             await _show_line_editor_help(session, can_save_draft=draft_path is not None)
             continue
         if lowered == "/list":
-            await _show_lines(session, lines)
+            await _show_lines(session, lines, point=point if point < len(lines) else None)
+            continue
+        if lowered == "/end":
+            point = len(lines)
             continue
         if lowered.startswith("/insert"):
             number = _parse_line_number(command, len(lines), allow_end=True)
             if number is None:
                 await session.write_line(colored(f"Usage: /insert N (1-{len(lines) + 1})", fg_color=MUTED_COLOR))
                 continue
-            await session.write(f"New line {number}: ")
-            text = await session.read_line(**read_options)
-            candidate = list(lines)
-            candidate.insert(number - 1, text)
-            await apply(candidate)
+            # Stays there for the lines after it too (issue #814): answering
+            # between a reply's quoted lines is one command per answer, not
+            # one per line.
+            point = number - 1
+            if point < len(lines):
+                await session.write_line(
+                    colored(
+                        f"Writing before line {number}: {sanitize_text(lines[point])} "
+                        "-- /end goes back to the end.",
+                        fg_color=MUTED_COLOR,
+                    )
+                )
             continue
         if lowered.startswith("/edit"):
             number = _parse_line_number(command, len(lines))
@@ -408,6 +475,8 @@ async def edit_line_body(
             candidate = list(lines)
             deleted = candidate.pop(number - 1)
             if await apply(candidate):
+                if number - 1 < point:
+                    point -= 1
                 await session.write_line(
                     colored(f"Deleted line {number}: {sanitize_text(deleted)}", fg_color=MUTED_COLOR)
                 )
@@ -423,7 +492,7 @@ async def edit_line_body(
             )
             continue
 
-        await apply([*lines, raw])
+        await add_line(raw)
 
 
 # As on `show_detail`: a body squeezed below this many rows a page is no

@@ -345,3 +345,34 @@ def test_reopening_an_edited_post_offers_recovery_of_its_saved_draft(db, alice):
     asyncio.run(board_flow._show_board(reopen_session, db, board, alice))
     assert "Post updated" in _written_text(reopen_session)
     assert list_posts_page(db, board, alice).posts[0].body == "Original body\nA line added before leaving"
+
+
+def test_a_resumed_draft_survives_leaving_its_subject_empty(db, alice):
+    """Issue #814: [R]esume used to delete the draft before the subject was
+    asked, so an empty subject -- or a dropped connection before the first
+    keystroke -- lost it. It stays until the editor replaces it."""
+    board = create_board(db, "general", creator=alice)
+    asyncio.run(board_flow._show_board(FakeSession(["p", "Subject", "saved body", "/exit", "b"]), db, board, alice))
+
+    resume_session = FakeSession(["d", "r", "", "b"])
+    asyncio.run(board_flow._show_board(resume_session, db, board, alice))
+
+    text = _written_text(resume_session)
+    assert "Your draft is still saved" in text
+    assert "Post cancelled" not in text
+    draft = board_flow._post_draft_path(db, kind="new", board=board, user=alice)
+    assert draft.read_text(encoding="utf-8") == "saved body"
+
+
+def test_a_resumed_draft_is_not_asked_about_again_in_the_editor(db, alice):
+    set_fullscreen_editor_enabled(db, alice, True)
+    board = create_board(db, "general", creator=alice)
+    asyncio.run(board_flow._show_board(
+        FakeSession(["p", "Subject"] + _type("kept") + ["CTRL+X", "k", "b"]), db, board, alice,
+    ))
+
+    session = FakeSession(["d", "r", "Subject"] + _type("!") + ["CTRL+O", "p", "b"])
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+
+    assert "draft from a previous session" not in _written_text(session)
+    assert list_posts_page(db, board, alice).posts[0].body == "!kept"

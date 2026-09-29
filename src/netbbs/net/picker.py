@@ -1110,7 +1110,7 @@ async def pick_item(
             standing = sanitize_text(live_label())
             if standing:
                 trailer = f"{trailer}, {standing}" if trailer else standing
-        boilerplate = "or type a 2-digit number to select; Ctrl-L: redraw"
+        boilerplate = "or type a number to select; Ctrl-L: redraw"
         if refresh is not None:
             boilerplate += ", Ctrl-R: refresh"
         boilerplate += ", Ctrl-H: help"
@@ -1123,7 +1123,7 @@ async def pick_item(
         # the shared line -- but on an ordinary 80-column terminal with
         # a sort label active, that budget is often under 40 columns,
         # nowhere near enough for the full boilerplate ("or type a
-        # 2-digit number to select; Ctrl-L: redraw, Ctrl-H: help"),
+        # number to select; Ctrl-L: redraw, Ctrl-H: help"),
         # silently deleting real instructions -- including the Ctrl-H
         # hint pointing at the one screen that explains all of this --
         # every time, not just in some rare edge case. Wrap instead of
@@ -1472,6 +1472,15 @@ async def pick_item(
             second_char = (
                 second.char if second.kind == EditorKeyKind.CHAR and second.char is not None else None
             )
+            if second.kind == EditorKeyKind.ENTER or second_char in ("\r", "\n"):
+                # One digit and Enter picks that row too (issue #840, F115):
+                # a first-time caller typed "3" and Enter where "03" was
+                # wanted, and nothing happened, not even an error.
+                if 1 <= int(char) <= len(page_items):
+                    await session.write_line("")
+                    return page_items[int(char) - 1]
+                await session.write(reject_keystroke(1))
+                continue
             if second_char is not None:
                 await session.write(second_char)
             if second_char is None or not _is_ascii_number(second_char):
@@ -1564,12 +1573,12 @@ async def _show_picker_help(
         "",
         colored("Up / Down / Enter", fg_color=header_color, bold=True),
         "  Move a highlight up or down one row, then Enter selects it -- a lighter-weight "
-        "alternative to typing the 2-digit number below. Purely optional: nothing is "
+        "alternative to typing the number below. Purely optional: nothing is "
         "highlighted until the first press.",
         "",
-        colored("A 2-digit number", fg_color=header_color, bold=True),
-        "  Selects that item on the current page directly (e.g. '05') -- always exactly "
-        "two digits, zero-padded.",
+        colored("A number", fg_color=header_color, bold=True),
+        "  Selects that item on the current page directly: two digits ('05') at once, "
+        "or one digit and Enter ('5' Enter).",
         "",
         colored("Search", fg_color=header_color, bold=True),
         "  Filters the list to items whose name contains the text you type. A single "
@@ -1874,7 +1883,7 @@ def _trailer_text(sort_label_text: str, has_refresh: bool) -> str:
     see `pick_item`'s own per-render cache.
     """
     text = f"Sort: {sort_label_text}" if sort_label_text else ""
-    boilerplate = "or type a 2-digit number to select; Ctrl-L: redraw"
+    boilerplate = "or type a number to select; Ctrl-L: redraw"
     if has_refresh:
         boilerplate += ", Ctrl-R: refresh"
     boilerplate += ", Ctrl-H: help"

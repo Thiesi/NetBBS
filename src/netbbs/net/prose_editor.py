@@ -143,6 +143,7 @@ async def edit_prose(
     keep_pasted_color: bool = False,
     cursor_at_end: bool = False,
     header: EditorHeader | None = None,
+    offer_recovery: bool = True,
 ) -> str | None:
     """
     Run a fullscreen prose editing session against `session`, returning
@@ -186,6 +187,14 @@ async def edit_prose(
     `header` (issue #813) is drawn above the text on every repaint: what is
     being written and, for a letter, to whom and under what subject. Its
     rows come out of the text's own, never the status line's.
+
+    `offer_recovery` False (issue #814) leaves the draft decision to a
+    caller that made it with its own Resume/Discard choice -- a letter,
+    whose draft slot belongs to that one letter: nothing is asked,
+    `initial_text` is loaded, and the draft on disk stays until this
+    session's autosave or save replaces it. With it True, a draft found
+    there is offered *instead of* `initial_text`, which is only right
+    when `draft_path` names this one composition and nothing else.
     """
     width = max(_MIN_WIDTH, session.terminal_width)
     rows = max(_MIN_HEIGHT, session.terminal_height) - _STATUS_ROW_OFFSET - 1
@@ -194,13 +203,20 @@ async def edit_prose(
 
     loaded_text: str | None
     recovered = False
-    if draft_path.exists() and await offer_draft_recovery(session):
+    if offer_recovery and draft_path.exists() and await offer_draft_recovery(session):
         loaded_text = draft_path.read_text(encoding="utf-8")
         recovered = True
     else:
-        if draft_path.exists():
+        if offer_recovery and draft_path.exists():
             draft_path.unlink()
         loaded_text = initial_text
+        if not offer_recovery and initial_text is not None and draft_path.exists():
+            # The caller handed in the draft itself (a resumed letter, issue
+            # #814): it is the caller's own words, kept line for line below.
+            try:
+                recovered = draft_path.read_text(encoding="utf-8") == initial_text
+            except (OSError, UnicodeDecodeError):
+                pass
 
     state = _EditorState(buffer=ProseBuffer.from_text(loaded_text or ""), max_bytes=max_bytes, header=header_rows)
     if cursor_at_end:
@@ -267,10 +283,10 @@ async def edit_prose(
                         "  Ctrl+G         this help",
                         "",
                         '"Keep draft & exit" saves what you have typed so far without',
-                        "submitting it, then leaves -- nothing is lost. You'll be offered",
-                        "the choice to resume, delete, or ignore it the next time you're",
-                        "somewhere this draft can come back (e.g. next time you visit the",
-                        "board it belongs to).",
+                        "sending or posting it, then leaves -- nothing is lost. It is",
+                        "offered again where you started it: a new letter at Mail's",
+                        "[C]ompose, a reply when you reply to the same message or post",
+                        "again, a new post when you next visit its board.",
                     ],
                     unicode_style=unicode_style,
                 )

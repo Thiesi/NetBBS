@@ -204,7 +204,7 @@ class ByteSession(Session):
 def test_line_editor_keeps_pasted_color_only_when_asked(keep, body):
     # One translator for the whole body: the bold on line two knows the
     # red from line one.
-    session = ByteSession(b"\x1b[31mred\rstill red, \x1b[1mbright\r\r")
+    session = ByteSession(b"\x1b[31mred\rstill red, \x1b[1mbright\r\r\r")
     result = asyncio.run(
         edit_line_body(session, initial_text=None, max_bytes=1_000, max_lines=20, keep_pasted_color=keep)
     )

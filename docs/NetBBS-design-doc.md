@@ -403,20 +403,57 @@ them, review re-checks subject and body on arrival, says what is over, and
 refuses the commit until it is fixed. The domain's byte checks remain the
 backstop for every other caller.
 
-Board post composition (new posts and edits) additionally distinguishes
-discarding from saving: `/cancel` (line editor) or discarding (fullscreen
-editor) always deletes any in-progress draft; `/exit`/`/quit` (line editor)
-or "Keep draft & exit" (fullscreen editor) instead save it to the same
-per-caller autosave target the fullscreen editor already used for crash
-recovery, and return without committing. A board with a saved new-post draft
-for the caller shows a notice and a `[D]raft` entry on its own menu (resume,
-discard, or leave it) instead of interrupting entry with a question; `[P]ost`
-while such a draft exists goes through the same resume/discard choice, since
-there is one autosave slot per caller and board. Re-opening a specific post
-for edit offers to resume its own saved draft the same way the pre-existing
-crash-recovery prompt already did. Mail composition and other callers that
-never opt into a draft target keep exactly the old discard-only behavior --
-`/exit`/`/quit` are not recognized there at all.
+The line editor writes paragraphs (issue #814). A blank line is a paragraph
+break; a second blank line in a row, or `/done`, finishes into review, and
+that closing blank is not kept. `/insert N` moves where typed lines go --
+before line N -- and they keep going there, one after another, until `/end`;
+the prompt numbers the line being written and `/list` marks the spot. Before
+#814 the first blank line finished, so a paragraph cost an `/insert` and so
+did every line of an answer written between a reply's quoted lines. Rejected:
+ending only on `/done` (a blank line would never finish, against the gesture
+callers already use) and a separate "answer mode" for quotes (a second
+concept for what one sticky insertion point already does).
+
+Board posts and mail distinguish discarding from saving. `/cancel` (line
+editor) or discarding (fullscreen editor) always deletes any in-progress
+draft; `/exit`/`/quit` (line editor) or "Keep draft & exit" (fullscreen
+editor) instead keep it, and return without committing. Both editors keep a
+draft as it is typed -- the fullscreen editor by its autosave, the line
+editor on every change -- so a dropped connection keeps the text too.
+
+Every draft slot belongs to one composition, and a draft is only ever
+offered for the composition it belongs to (issue #814): a board's new post
+(one per caller and board), a reply to one post, an edit of one post, a
+caller's new letter (one per caller), a reply to one message. A caller that
+offers its draft itself -- a board's `[D]raft`, mail's `[D]raft`, `[C]ompose`
+or `[R]eply` -- passes the draft in as the text with `offer_recovery` off, so
+the editor neither asks again nor deletes the draft before something replaces
+it. Before #814 mail had one body-only draft per user, which the fullscreen
+editor offered in place of any later letter's text: a reply to someone else
+lost its quote to it, and "Keep draft & exit" answered "Message cancelled."
+
+A letter's To and Subject are kept beside its text in a `.fields` file (JSON:
+`to`, `reply_address`, `subject`), written before the editor opens and again
+before review's `[B]ody` reopens it, so the letter resumes addressed as it was
+left -- a Link reply to its stored `user@<fingerprint>`. The mail screen shows a
+kept new letter ("You have an unfinished letter to bob: Lunch?") and a
+`[D]raft` entry (resume, delete, or leave it); `[C]ompose` while one exists,
+and `[R]eply` to a message with a kept reply, offer the same choice before
+asking anything, `[D]iscard` there deleting the draft and starting afresh.
+A resumed letter opens on the compose screen with To and Subject shown and
+the editor on its text. A body-only `mail_<id>.draft` from before #814 becomes
+the caller's new letter and asks for To and Subject when resumed. A board
+post's draft keeps only its text; its subject is asked again.
+
+A board with a saved new-post draft for the caller shows a notice and a
+`[D]raft` entry on its own menu (resume, discard, or leave it) instead of
+interrupting entry with a question; `[P]ost` while such a draft exists goes
+through the same resume/discard choice. Re-opening a specific post for edit,
+or replying to the same post again, offers to resume its own saved draft
+through the editor's recovery prompt. Callers that never opt into a draft
+target keep the discard-only behavior -- `/exit`/`/quit` are not recognized
+there at all. The fullscreen editor's Ctrl+G help says where a kept draft is
+offered again.
 
 In-context help is a single shared rendering primitive
 (`netbbs.net.help_overlay.show_help`) reused by two different key
@@ -440,8 +477,8 @@ wired in screen-by-screen wherever an existing cancel affordance
 prompt at once. Deliberately does not touch `read_line()`'s editable
 path in this pass -- unlike Backspace's byte, Ctrl-C during real
 free-text entry has no single safe meaning across every caller (a bare
-blank line already means something different per caller, e.g. "finish
-and review" in the line editor, not "cancel"), so real-text-entry
+blank line already means something different per caller, e.g. a
+paragraph break in the line editor, not "cancel"), so real-text-entry
 cancellation is left for a later, separately-scoped increment. A
 screen with no cancel affordance at all, or one that hasn't adopted
 this yet, simply bells for Ctrl-C like any other unrecognized key.
@@ -587,6 +624,17 @@ area, channel or user's detail, the Settings overview, a banner menu, the
 landing page) can still be taller than the terminal. Paged screens are not
 affected.
 
+A menu too short for a description under each entry puts each one on its
+entry's own line, cut to fit, before it hides them (issue #840): at 80x24 the
+first field test's SysOp read "Descriptions hidden" on the console landing,
+exactly where one-word entries such as Content and Operations needed them.
+Only when even one line per entry does not fit are they hidden, with the note.
+
+Every new account starts with redraw-in-place on, however it was made:
+signed up, created in the console, or the first SysOp created at install
+(issue #840). The first SysOp was the one left out, so a node's own SysOp saw
+screens scroll that every one of her callers saw redrawn.
+
 The outcome of an action is carried into the next redraw; it is never written
 somewhere that redraw erases, and the console never asks for a keypress just to
 keep a result on screen. With redraw-in-place on, a line printed just before
@@ -661,7 +709,7 @@ rather than returning straight into its parent's redraw, where it would flash
 and vanish. The one exception is a picker with nothing to pick: it announces
 its empty message and returns, so the screen it returns to says it.
 
-A picker row carries one number: the two digits that select it on this page
+A picker row carries one number: the one that selects it on this page
 (issue #838). Rows used to show a second, permanent `(#N)` reference -- the
 item's database id -- for a `[G]oto #` command, so "02. (#1) Fountain Pens"
 asked a first-time caller to tell two numbers apart before choosing, and the
@@ -671,6 +719,21 @@ own order holding still (#839), not a second number beside it. The picker still
 identifies each row by a stable id internally, to reopen a list on the row just
 left. A caller key that acts on a row (New scan's `[M]ark read`) takes the
 highlighted row, or asks for its number on the page.
+
+A row number is two digits, or one digit and Enter (issue #840): the first
+field test's newcomer typed "3" and Enter where "03" was wanted, and nothing
+happened. A whole word typed at a one-key prompt ("Communities", "no") acts on
+its first letter only: after a main-menu key or a yes/no answer, letters that
+follow within 0.6 seconds of each other, and the Enter that ends them, are
+dropped rather than read by the next screen as keys (`char_input.
+arm_word_guard`). Any other key, or a pause, ends that at once. In the browser
+a click on a menu entry sends its bracketed key and a click on a numbered row
+its number; a click on anything else says once that the terminal is driven by
+the keyboard. The browser is never asked the plain-ASCII question, since it
+always draws Unicode. `[?] Help` on the main menu (and Ctrl-H there) sums up
+the keys, Back, New scan and who runs the node, with the User Handbook's
+address, and E-mail to `sysop` reaches the node's first usable SysOp account
+unless an account has that name.
 
 No *menu* has a typed command language. A caller's options are the keys the
 action bar shows, and a prompt reading `Choice: ` accepts exactly those. The
