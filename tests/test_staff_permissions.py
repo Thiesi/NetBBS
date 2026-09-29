@@ -395,3 +395,44 @@ def test_a_declined_confirmation_changes_nothing(db, lane, sysop):
     session = FakeSession(["u", "l", "0", "1", "s", "a", "n", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert get_user_by_id(db, carol.id).staff_permissions == 0
+
+
+# -- a refusal on screen is a message, never a crash (review on #863) ------------
+
+
+def test_an_approval_refused_meanwhile_is_reported_not_raised(db, lane, sysop):
+    from netbbs.net.admin_flow import _user_detail_screen
+
+    helper = _staff(db, sysop, "helper", APPROVE)
+    stale_helper = helper
+    set_staff_permissions(db, helper, 0, changed_by=sysop)
+    carol = create_user(db, "carol", password="hunter2pw", pending_approval=True)
+    session = FakeSession(["a", "y", "b"])
+    asyncio.run(_user_detail_screen(session, lane, stale_helper, carol, None))
+    assert "only a SysOp can do that" in _visible(_written_text(session))
+    assert get_user_by_id(db, carol.id).pending_approval is True
+
+
+def test_an_identity_grant_by_a_demoted_sysop_is_reported_not_raised(db, lane, sysop):
+    from netbbs.net.admin_flow import _user_detail_screen
+
+    boss = create_user(db, "boss", password="hunter2", user_level=SYSOP_LEVEL)
+    stale_boss = boss
+    set_user_level(db, boss, 10, changed_by=sysop)
+    carol = create_user(db, "carol", password="hunter2pw")
+    session = FakeSession(["i", "y", "b"])
+    asyncio.run(_user_detail_screen(session, lane, stale_boss, carol, None))
+    assert "only a SysOp can do that" in _visible(_written_text(session))
+    assert get_user_by_id(db, carol.id).can_verify_identity is False
+
+
+def test_a_password_reset_refused_meanwhile_is_reported_not_raised(db, lane, sysop):
+    from netbbs.net.password_screen import manage_password_screen
+
+    helper = _staff(db, sysop, "helper", MANAGE)
+    stale_helper = helper
+    set_staff_permissions(db, helper, 0, changed_by=sysop)
+    carol = create_user(db, "carol", password="hunter2pw")
+    session = FakeSession(["c", "new-secret", "new-secret", "b"])
+    asyncio.run(manage_password_screen(session, lane, carol, changed_by=stale_helper))
+    assert "only a SysOp can do that" in _visible(_written_text(session))
