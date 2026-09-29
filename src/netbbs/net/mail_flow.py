@@ -126,6 +126,13 @@ from netbbs.net.prose_editor import EditorHeader, edit_prose
 from netbbs.net.detail_view import show_detail
 from netbbs.net.picker import pick_item
 from netbbs.net.mail_arrivals import arrival_event, nudge
+from netbbs.net.mail_recipients import (
+    RecipientCompleter,
+    choose_recipient,
+    gather_address_book,
+    picker_request,
+    read_to_line_options,
+)
 from netbbs.net.notices import announce, announce_styled, pending_notice_rows, take_notices, write_notices
 from netbbs.net.session import Session, write_prompt
 from netbbs.rendering.detail import Section, Styled
@@ -1870,12 +1877,26 @@ async def _compose_mail(
             header_color=header_color, accent_color=accent_color,
         )
 
+    def picker_style() -> dict:
+        return {
+            "description_level": description_level, "redraw_in_place": redraw_in_place,
+            "unicode_style": unicode_style, "collapsed": collapsed,
+            "accent_color": accent_color, "header_color": header_color,
+        }
+
     async def settle_recipient(text: str) -> tuple[str, str]:
         """What to keep as the address, and how to show it (issue #813). A
         local name is kept as the account spells it, so `[T]o` opens on
         that too; a Link address is kept as typed, for Send to check again."""
         # "sysop" wherever an address is typed, [T]o included (#840).
         text = await lane.run(resolve_sysop_alias, text)
+        if link_enabled and "@" in text:
+            # Kept by the node's technical identity once it names one
+            # (issue #826): Send and a resumed draft reach the node the
+            # caller chose, even if another node takes its name meanwhile.
+            resolved = await lane.run(_resolve_link_address, text)
+            if not isinstance(resolved, str):
+                text = f"{resolved.user}@{resolved.fingerprint}"
         label = await lane.run(_recipient_label, text, link_enabled)
         return (text if link_enabled and "@" in text else label), label
 
@@ -1901,17 +1922,19 @@ async def _compose_mail(
             [("To", recipient_label), *([("Subject", prefill_subject)] if resumed and resumed.subject else [])]
         )
     else:
-        await compose_screen(
-            [],
-            hint=(
-                "Who is it for? Type their user name, or name@TheirBBS for someone on a linked BBS. "
-                if link_enabled else "Who is it for? Type their user name. "
-            ) + "An empty line or Esc cancels.",
-        )
+        to_hint = (
+            "Who is it for? Type their user name, or name@TheirBBS for someone on a linked BBS. "
+            if link_enabled else "Who is it for? Type their user name. "
+        ) + "Tab completes a name; ? and Enter lists who you can write to. An empty line or Esc cancels."
+        await compose_screen([], hint=to_hint)
+        # Tab and ? (issue #826): gathered once, as the prompt opens.
+        book = await lane.run(lambda db: gather_address_book(db, user, link_enabled=link_enabled))
+        to_options = read_to_line_options(RecipientCompleter(book, session, "To: "))
+        picked = False
         while True:
             await write_prompt(session, "To: ")
             try:
-                recipient_text = (await session.read_line(cancellable=True)).strip()
+                recipient_text = (await session.read_line(cancellable=True, **to_options)).strip()
             except InputCancelled:
                 recipient_text = ""
             if not recipient_text:
@@ -1919,6 +1942,15 @@ async def _compose_mail(
                 # #873): say so, not that it is gone.
                 announce(session, kept_notice if resumed is not None else "Cancelled.", tone="muted")
                 return False
+            request = picker_request(recipient_text, link_enabled=link_enabled)
+            picked = False
+            if request is not None:
+                chosen = await choose_recipient(session, book, request, **picker_style())
+                await compose_screen([], hint=to_hint)
+                if chosen is None:
+                    continue
+                # Checked below exactly as a typed address is.
+                recipient_text, picked = chosen, True
             # "sysop" reaches the node's SysOp (issue #840, F087).
             recipient_text = await lane.run(resolve_sysop_alias, recipient_text)
             if link_enabled and "@" in recipient_text:
@@ -1955,6 +1987,9 @@ async def _compose_mail(
                 continue
             break
         recipient_text, recipient_label = await settle_recipient(recipient_text)
+        if picked:
+            # Chosen from the list, so never typed on this screen: shown.
+            await compose_screen([("To", recipient_label)])
 
     if resumed is not None and resumed.subject is not None:
         subject = resumed.subject
@@ -2046,8 +2081,15 @@ async def _compose_mail(
             announce(session, "Message cancelled.", tone="muted")
             return False
         if action is ReviewAction.EDIT_RECIPIENT:
-            edited = await read_prefilled_field(session, "To", recipient_text)
-            if edited != recipient_text:
+            # Opened on the name the caller reads, not a technical identity
+            # the To prompt resolved it to (issue #826); unchanged keeps it.
+            edited = await read_prefilled_field(session, "To", recipient_label)
+            request = picker_request(edited, link_enabled=link_enabled)
+            if request is not None:
+                # ? here too, and what is chosen is checked at Send.
+                book = await lane.run(lambda db: gather_address_book(db, user, link_enabled=link_enabled))
+                edited = await choose_recipient(session, book, request, **picker_style()) or recipient_label
+            if edited != recipient_label:
                 reply_address = None
                 recipient_text, recipient_label = await settle_recipient(edited)
             continue

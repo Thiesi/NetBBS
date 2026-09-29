@@ -343,6 +343,15 @@ def present_link_author_label(db: Database, label: str) -> str:
     return rendered
 
 
+def met_peer_identities(db: Database) -> list[NodeDisplayIdentity]:
+    """Every node this one has completed a hello with, as screens name it:
+    the nodes a `met_only` reference can resolve to (issue #826)."""
+    return [
+        _identity_from_descriptor_json(row["fingerprint"], row["descriptor_json"])
+        for row in db.connection.execute("SELECT fingerprint, descriptor_json FROM link_peers")
+    ]
+
+
 def resolve_stored_peer_reference(
     db: Database, reference: str, *, met_only: bool = False
 ) -> str | list[str]:
