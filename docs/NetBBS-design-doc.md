@@ -595,8 +595,8 @@ Only when even one line per entry does not fit are they hidden, with the note.
 
 Every new account starts with redraw-in-place on, however it was made:
 signed up, created in the console, or the first SysOp created at install
-(issue #840). Only signup did, so a node's own SysOp saw screens scroll that
-every one of her callers saw redrawn.
+(issue #840). The first SysOp was the one left out, so a node's own SysOp saw
+screens scroll that every one of her callers saw redrawn.
 
 The outcome of an action is carried into the next redraw; it is never written
 somewhere that redraw erases, and the console never asks for a keypress just to

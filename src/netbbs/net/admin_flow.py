@@ -547,7 +547,6 @@ from netbbs.net.redraw_preference import (
     start_new_account_redrawing_in_place,
     redraw_in_place_enabled,
     redraw_in_place_ever_set,
-    set_redraw_in_place_enabled,
 )
 from netbbs.net.breadcrumb_preference import breadcrumb_collapsed_enabled
 from netbbs.net.color_depth_preference import effective_truecolor
@@ -1331,6 +1330,11 @@ def _yes_no(value: bool) -> str:
     return "yes" if value else "no"
 
 
+# `netbbs.rendering.layout`'s floor below which `menu_grid` hides
+# descriptions under entries.
+_MIN_MENU_HEIGHT_FOR_DESCRIPTIONS = 15
+
+
 def _degrade_description_level(
     *,
     panel: list[str],
@@ -1360,7 +1364,9 @@ def _degrade_description_level(
     if effective_desc_level != "off":
         columns = 2 if terminal_width >= 72 else 1
         rows_per_entry_row = -(-entry_count // columns)
-        if rows_per_entry_row * 2 > available_menu_height:
+        # `menu_grid` hides descriptions under its own height floor, so a
+        # menu below it takes the one-line form too (review on #872).
+        if rows_per_entry_row * 2 > available_menu_height or available_menu_height < _MIN_MENU_HEIGHT_FOR_DESCRIPTIONS:
             # Each description on its entry's own line before none at all
             # (issue #840): at 80x24 a first-time SysOp lost them exactly
             # where one-word entries needed them.
@@ -5535,7 +5541,6 @@ async def _create_user_screen(session: Session, lane: DatabaseLane, actor: User)
                 create_user, draft["username"], password=draft["password"],
                 verify_key=draft["verify_key"], user_level=draft["level"],
             )
-            await lane.run(start_new_account_redrawing_in_place, new_user)
         except UsernameRetiredError as exc:
             # Issue #594. The exception's own text is what a remote caller is
             # shown, and deliberately reads as "taken". A SysOp is owed the
@@ -5548,11 +5553,9 @@ async def _create_user_screen(session: Session, lane: DatabaseLane, actor: User)
         )
         # Dogfood report: three testers on modern (ANSI-capable) clients
         # never discovered in-place redraw existed, so never turned it
-        # on. New accounts (self-registered or SysOp-created) now start
-        # with it already on -- see the matching self-registration
-        # change in login_flow._register_new_account for the full
-        # rationale.
-        await lane.run(set_redraw_in_place_enabled, new_user, True)
+        # on. Every new account starts with it on, however it was made
+        # (issue #840).
+        await lane.run(start_new_account_redrawing_in_place, new_user)
         return new_user
 
     redraw_in_place, redraw_hint = await lane.run(_resolve_redraw_preference, actor)

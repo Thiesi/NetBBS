@@ -58,6 +58,16 @@ def test_a_short_screen_falls_back_to_inline_before_hiding_descriptions():
     assert (level, degraded) == ("inline", False)
 
 
+def test_a_small_panel_does_not_hide_what_a_large_one_shows():
+    """Two lines per entry fit, but under `menu_grid`'s height floor they
+    would be hidden: the one-line form instead (review on #872)."""
+    level, _, degraded = _degrade_description_level(
+        panel=["x"] * 8, unicode_style=True, description_level="brief",
+        entry_count=8, terminal_width=80, terminal_height=24,
+    )
+    assert (level, degraded) == ("inline", False)
+
+
 def test_the_console_landing_keeps_descriptions_at_80x24(db, lane):
     sysop = create_user(db, "InkWell", password="hunter2", user_level=SYSOP_LEVEL)
     set_menu_description_level(db, sysop, "brief")
