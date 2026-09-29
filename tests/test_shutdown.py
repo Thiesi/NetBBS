@@ -819,6 +819,78 @@ def test_graceful_shutdown_actually_waits_before_disconnecting(tmp_path):
     asyncio.run(scenario())
 
 
+def test_graceful_shutdown_with_nobody_connected_does_not_wait():
+    """Issue #845, F089: a restart for a config tweak with nobody on sat
+    through "going down in 1 minute" anyway."""
+
+    async def scenario():
+        shutdown_event = asyncio.Event()
+        await asyncio.wait_for(
+            run_shutdown_sequence(
+                graceful=True,
+                session_registry=ActiveSessionRegistry(),
+                maintenance=MaintenanceMode(),
+                delay_seconds=60.0,
+                shutdown_event=shutdown_event,
+                stop_early_when_empty=True,
+            ),
+            timeout=5.0,
+        )
+        assert shutdown_event.is_set()
+
+    asyncio.run(scenario())
+
+
+def test_graceful_shutdown_ends_once_the_last_caller_leaves():
+    async def scenario():
+        session = _FakeSession()
+        registry = ActiveSessionRegistry()
+        hold = asyncio.create_task(_hold_registered(registry, session))
+        await asyncio.sleep(0)
+        shutdown_event = asyncio.Event()
+        sequence = asyncio.create_task(
+            run_shutdown_sequence(
+                graceful=True,
+                session_registry=registry,
+                maintenance=MaintenanceMode(),
+                delay_seconds=60.0,
+                shutdown_event=shutdown_event,
+                stop_early_when_empty=True,
+            )
+        )
+        await asyncio.sleep(0.2)
+        assert not sequence.done(), "a connected caller is still waited for"
+        assert any("going down in 1 minute" in line for line in session.written)
+        hold.cancel()  # the caller hangs up
+        await asyncio.wait_for(sequence, timeout=5.0)
+        assert shutdown_event.is_set()
+        await asyncio.gather(hold, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_a_scheduled_shutdown_keeps_its_delay_when_everyone_leaves():
+    """A SysOp who schedules a shutdown and logs off may be back to cancel
+    it; only a service-manager stop ends early (issue #845 review)."""
+
+    async def scenario():
+        sequence = asyncio.create_task(
+            run_shutdown_sequence(
+                graceful=True,
+                session_registry=ActiveSessionRegistry(),
+                maintenance=MaintenanceMode(),
+                delay_seconds=60.0,
+                shutdown_event=asyncio.Event(),
+            )
+        )
+        await asyncio.sleep(1.5)
+        assert not sequence.done()
+        sequence.cancel()
+        await asyncio.gather(sequence, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
 def test_shutdown_activates_maintenance_mode():
     async def scenario():
         maintenance = MaintenanceMode()

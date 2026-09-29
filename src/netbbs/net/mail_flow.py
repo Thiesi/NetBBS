@@ -38,6 +38,7 @@ directly anymore):
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -124,6 +125,7 @@ from netbbs.net.post_color_preference import post_colors_enabled
 from netbbs.net.prose_editor import EditorHeader, edit_prose
 from netbbs.net.detail_view import show_detail
 from netbbs.net.picker import pick_item
+from netbbs.net.mail_arrivals import arrival_event, nudge
 from netbbs.net.notices import announce, announce_styled, pending_notice_rows, take_notices, write_notices
 from netbbs.net.session import Session, write_prompt
 from netbbs.rendering.detail import Section, Styled
@@ -615,10 +617,38 @@ class _MailboxScreen:
         await self._render()
         session = self.session
         while True:
-            key, echoed = await _read_list_key(session)
+            key, echoed = await self._next_key()
             char = key.char.lower() if key.kind == EditorKeyKind.CHAR and key.char else ""
             if await self._handle(key, char, echoed):
                 return
+
+    async def _next_key(self) -> tuple[EditorKey, bool]:
+        """The next key, redrawing the folder whenever mail arrives while
+        the caller is looking at it (issue #823): the new letter's row, the
+        counts, and its notice above the prompt. The pending key read is
+        kept across the redraw, never cancelled, so no keystroke is lost
+        (the live screen's way, `netbbs.net.live_screen`)."""
+        arrived = arrival_event(self.session)
+        if arrived is None:
+            return await _read_list_key(self.session)
+        key_task = asyncio.create_task(_read_list_key(self.session))
+        try:
+            while True:
+                arrival = asyncio.create_task(arrived.wait())
+                try:
+                    done, _pending = await asyncio.wait({key_task, arrival}, return_when=asyncio.FIRST_COMPLETED)
+                finally:
+                    arrival.cancel()
+                    await asyncio.gather(arrival, return_exceptions=True)
+                if key_task in done:
+                    return key_task.result()
+                arrived.clear()
+                await self._reload()
+                await self._render()
+        except BaseException:
+            key_task.cancel()
+            await asyncio.gather(key_task, return_exceptions=True)
+            raise
 
     async def _handle(self, key: EditorKey, char: str, echoed: bool) -> bool:
         """Act on one key; `True` when the caller left the mailbox."""
@@ -2001,6 +2031,8 @@ async def _compose_mail(
         except MailError as exc:
             announce(session, f"Could not send: {exc}", tone="error")
             continue
+        # Issue #823: a recipient online now hears of it now.
+        nudge(recipient.username)
         _forget_letter(draft_path)
         announce(session, "Message sent.")
         return

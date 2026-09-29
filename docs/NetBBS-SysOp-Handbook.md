@@ -260,7 +260,11 @@ need that behavior, arrange an external health check or supervisor yourself.
 NetBBS runs in the foreground. The service manager handles backgrounding.
 `systemctl stop netbbs` or `service netbbs stop` requests a graceful shutdown:
 callers are warned, then disconnected after the configured delay (60 seconds
-by default). Cleanup takes additional time. Increase the service stop timeout
+by default). With nobody connected, or once the last caller leaves, it stops
+without waiting out the delay. A shutdown you schedule from the console keeps
+the delay you chose. Change the delay under **Settings → Network &
+login limits**, or as `[shutdown] graceful_delay_seconds`. Cleanup takes
+additional time. Increase the service stop timeout
 if you raise that delay or configure slow-stopping door services.
 
 The Linux unit restricts writable paths to `/var/lib/netbbs`. **MANUAL:** extend

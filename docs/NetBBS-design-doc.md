@@ -1889,6 +1889,13 @@ parent, listed on the board like any other post. There is no threaded view.
 - **Body:** starts as the post quoted, with the cursor under the quote:
   "<author> wrote:", then each line of the post before its signature with
   `> ` in front. A line that was already quoted becomes `> > `.
+- **Attribution line:** the board reader, which reflows prose, shows a line
+  ending in " wrote:" (not itself quoted) as a line of its own, never joined
+  to the text around it. A replier who trims the quote and writes straight
+  under "<author> wrote:" would otherwise have their words read as the
+  quoted author's (#837). This holds for any such line, not just ones the
+  quote wrote, since a reader cannot tell them apart. Mail keeps every line
+  anyway.
 - **Quote limits:** a quote is at most 40 lines and 8 KB, and a cut quote
   ends with `> [...]`, so a reply to a long post stays writable in the line
   editor.
@@ -2241,6 +2248,40 @@ the owner can act on it.
 
 Local mail is the domain extended by Link messages; Link mail does not create a
 parallel mailbox UI.
+
+**Telling a caller that mail arrived** (issue #823). Three places, all only
+for a caller mail is open to (`caller_mail_refusal`):
+
+- *At login.* The first main menu after login says how many messages are
+  unread, above its prompt. The main menu's mail notices are told together
+  in one order: that count, then the cap's eviction count (#818), then the
+  caller's own Link mail that bounced or expired (#806). Moderation outcomes
+  come before them.
+- *In New scan.* A `Mail: N unread` line heads the summary above the list,
+  and `[E]-mail` opens the mailbox from there. A line with a key, like the
+  replies to the caller, not a row: the list is places, and a mailbox row
+  would renumber every board beneath it.
+- *While online.* A per-session watcher (`netbbs.net.mail_arrivals`, started
+  next to the account watcher) compares the Inbox's unread letters with the
+  ones it has seen. It polls every five seconds, so every way a letter
+  arrives is covered -- local, Link, system, another process -- without a
+  hook in each delivery path; a local send also wakes the recipient's
+  watchers at once. It tells the caller the way `/msg` does: through
+  `Session.pinned_notice_hook` when a screen has one (chat, the SysOp's live
+  monitor), so the line appears at once; otherwise as a notice for the next
+  screen drawn, never written into a door (`door_active`) or an editor. An
+  idle main menu or Inbox races the watcher's arrival event against its key
+  read and redraws at once, so its counts and rows are current; the Inbox
+  keeps its pending key read across that redraw rather than cancelling it.
+  Letters are told apart by `(id, created_at)`, not by id, because the table
+  has no AUTOINCREMENT; a letter marked unread again is not new. Up to three
+  arrivals are named ("New mail from bob: Lunch?"), more are counted.
+
+There is no preference to turn the live notice off: it is one line per
+letter, and callers already choose who may write to them (blocked senders,
+below). A `/msg` queued for a caller outside chat is carried above the main
+menu's prompt in the same way; before #823 it was written above the menu,
+where a redraw in place cleared it unseen.
 
 **Who may use mail** (issue #816). Mail has a node-wide level, `mail_min_level`
 (Settings > Limits & retention, default 0, so open to every account). It
@@ -6465,6 +6506,14 @@ disconnect that had never been intentional, just an artifact of the two
 having been built in separate rounds. The config value is now only the
 *prefill default* for the prompt, and what the SIGTERM/SIGINT signal path
 still uses (no one to prompt there).
+
+A SIGTERM shutdown ends its countdown early once nobody is connected,
+checked before the first warning and about once a second after it (issue
+#845). A service-manager stop or restart runs on the configured default,
+not a delay anyone chose for the occasion, and with no caller left there is
+nobody to wait for. A console `[S]hutdown` and the Update restart keep the
+full delay the SysOp chose even if everyone, themselves included, leaves:
+the SysOp may come back to cancel it.
 
 Cancelling a *scheduled* graceful shutdown needed one real design
 decision: `MaintenanceMode.activate()`'s own docstring already stated "no
