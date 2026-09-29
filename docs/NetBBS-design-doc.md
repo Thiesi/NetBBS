@@ -261,6 +261,65 @@ Untrusted user text is sanitized before styling. Trusted ANSI is added only
 after sanitization. Nested colored fragments are composed independently because
 an SGR reset does not restore an outer color.
 
+**Character set per session (issue #929).** Every session has one output
+character set: UTF-8, CP437 or ASCII. Screens are composed in Unicode as
+before. `Session.write`, the one path all text output already takes, maps the
+composed text to the session's character set before the transport encodes it.
+No screen has to know which set a caller has. The mapping is in three layers:
+
+- NetBBS's own glyphs go through one curated table (`rendering/charset`).
+  Characters CP437 has pass through unchanged, including the single and double
+  box-drawing characters, the block and shade characters, and `·` and `»`.
+  The rest get deliberate substitutes: rounded corners become square ones,
+  `›` becomes `»`, and stars and diamonds become `*`.
+- Text a caller wrote is mapped only on output. Stored text stays Unicode, so
+  readers on UTF-8 lose nothing. Each character becomes, in order of
+  preference: its exact CP437 character, its base letter after the accents are
+  removed (NFKD), an entry in a small table for letters and punctuation that
+  do not decompose (`ł`, `ø`, typographic quotes), or `?`.
+- A substitute always has the display width of the character it replaces. A
+  wide character becomes two cells, zero-width marks are dropped, and control
+  characters and escape sequences are never mapped. Width is still measured
+  on the Unicode text (§3.2's wrapping, §3.6's columns), so no layout moves
+  when a caller's set changes. `truncate_to_width` asks for the set's own
+  ellipsis: `…` in UTF-8 and `...` in CP437 and ASCII.
+
+ASCII is true 7-bit: nothing above 0x7F reaches an ASCII session, including
+accented letters in posts, which become their base letters. CP437 is one byte
+per character in both directions: typed input is decoded as CP437 rather than
+UTF-8, and Telnet doubles the 0xFF byte (CP437's non-breaking space) as RFC 854
+requires. Raw byte paths keep their own rules. A Zmodem transfer is binary and
+bypasses the mapping. A door that speaks CP437 reaches a CP437 session
+unchanged; any other combination is transcoded in `DoorTerminal`, in both
+directions. SysOp ANSI art is decoded to Unicode when it is loaded and mapped
+like any other text, so art authored in CP437 reaches a CP437 terminal byte for byte.
+
+**How the set is chosen.** A caller's preference is Auto (the default), Unicode,
+CP437 or ASCII, and an explicit choice always wins over detection. Auto means:
+
+- Telnet asks for the terminal type (TTYPE, RFC 1091) before the first byte
+  of the welcome screen, waiting at most one second for the answer or the
+  refusal. Keystrokes typed during the wait are kept. `syncterm`, `ansi-bbs`
+  and `ansi` mean CP437; SyncTERM reports `syncterm` in its normal screen modes
+  and some servers force `ansi-bbs`. Modern names (`xterm*`, `vt*`, `linux`,
+  `screen*`, `tmux*`, `putty*` and similar) mean UTF-8. A client that refuses
+  TTYPE, does not answer, or reports a name on neither list gets ASCII,
+  everything included: NetBBS's own chrome and the SysOp's banner.
+- SSH uses the terminal type from the PTY request, with the same lists; SyncTERM
+  sends `syncterm` over SSH too. The pre-authentication banner goes out before
+  any channel exists, so it is always ASCII.
+- The browser terminal is always UTF-8.
+
+After login, a caller whose set was not settled -- an unknown terminal, or one
+that reported only `ansi` -- is asked once which of two sample lines looks
+right: the same frame sent as UTF-8 and as CP437, or neither, which means
+ASCII. The answer becomes their preference. Profile changes it later. The
+earlier yes/no "Does that look garbled?" question and its Unicode/ASCII style
+preference are replaced by this; an account that had switched to ASCII keeps
+ASCII, and every other account moves to Auto. Screens that still vary their
+decoration by style ask for the Unicode style only when the session's set is
+UTF-8 or CP437.
+
 A SysOp may override three of the node's branding colors -- accent (board/
 channel/user names and other navigable-item branding), header (section
 titles and frame borders), and clock (the main-menu prompt's time display)
@@ -7648,7 +7707,8 @@ Completed product work informed by dogfood includes:
   custom SysOp banner bypasses the generated showcase. Before sign-in the
   node's own chrome is plain ASCII over Telnet, where CP437 terminals such as
   SyncTERM call from, and Unicode on the web and SSH; a custom banner is sent
-  as authored either way (issue #841). Both
+  as authored either way (issue #841). Issue #929 is replacing this with a
+  character set per session (§3.2). Both
   Telnet's and SSH's initial banners are shown before capability negotiation
   completes -- Telnet's can precede NEW-ENVIRON, and SSH's own pre-auth
   banner (asyncssh's `send_auth_banner`, sent from `begin_auth` before any
@@ -13585,6 +13645,57 @@ it.
 SysOp who renames their node to read like a node it knows is told so and the
 name is kept: two hobbyists choosing one name is harmless, and the nodes that
 know both already flag whichever arrived second.
+
+### Issue #929 — CP437 terminals: a character set per session — decided
+
+NetBBS sent UTF-8 to everyone, with a Unicode or ASCII choice of decoration.
+Classic BBS terminals such as SyncTERM read bytes as CP437, so they showed every
+non-ASCII character as two or three characters of noise and never saw ANSI art
+as drawn. Normative description: §3.2, "Character set per session".
+
+**Decision 1 — map at `Session.write`, with a curated table.** Every text write
+already goes through `Session.write`, so one mapping covers every screen,
+caller-written text, preset names and copy with `—` or `…` alike. The table
+gives NetBBS's own glyphs deliberate CP437 substitutes. Rejected: a glyph set
+passed to every renderer in place of the Unicode-style flag. That flag reaches
+975 call sites in 29 files, and even then caller text and ordinary copy would
+still carry characters CP437 lacks, so it would need the central mapping as a
+safety net anyway.
+
+**Decision 2 — the preference is Auto, Unicode, CP437 or ASCII.** Auto is the
+default, and an explicit choice beats detection, so one caller can use SyncTERM
+at home and PuTTY at work. The old style preference migrates: off becomes
+ASCII, on becomes Auto. Rejected: keeping a separate style flag beside the
+character set, which would allow meaningless pairs such as ASCII with Unicode
+decoration.
+
+**Decision 3 — an undetected Telnet caller gets ASCII before sign-in, including
+the SysOp's banner.** CP437 would garble a UTF-8 terminal and UTF-8 garbles a
+CP437 one; ASCII is readable on both. After login the "which line looks right?"
+question settles it. Rejected: guessing UTF-8 (the pre-#929 behaviour, which
+gave SyncTERM callers noise on their first screen) and guessing CP437.
+
+**Decision 4 — ASCII is true 7-bit.** Before this, turning Unicode off only
+swapped decorative glyphs; em dashes, ellipses, arrows and accented letters in
+posts still arrived as UTF-8. Now nothing above 0x7F reaches an ASCII session.
+
+**Decision 5 — substitutes keep the display width.** Width is measured once, on
+the Unicode text, and every substitute fills exactly the cells its original
+did. That keeps every layout rule in §3.2 and §3.6 valid unchanged.
+`truncate_to_width` asks for the set's own ellipsis instead of mapping `…` to
+`...`, which would be wider. Rejected: re-measuring after mapping, which would
+make every width-aware screen depend on the caller's character set.
+
+**Decision 6 — `ansi` means CP437.** That is the PC-ANSI convention, and it is
+what older SyncTERM versions reported; the question after login is the safety
+net for a UTF-8 terminal that says `ansi`.
+
+**Scope.** CP437 is the only code page; SyncTERM's other fonts (CP850, CP866 and
+others) are not detected or served, though the layer can take another codec
+later. The CTerm device-attributes answer (`CSI = 67;84;101;114;109;… c`) would
+also identify SyncTERM on any transport, but is not used until TTYPE proves too
+weak. SysOp art storage with SAUCE, art with live slots, hand-drawn menu items
+and animation pacing are later steps of #929 and build on this layer.
 
 ### SFTP over the SSH transport — declined
 
