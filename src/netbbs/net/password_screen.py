@@ -56,6 +56,7 @@ from netbbs.auth.users import (
     MIN_REGISTRATION_PASSWORD_LENGTH,
     AuthError,
     User,
+    UserManagementError,
     has_password,
     hash_password_off_loop,
     list_ssh_keys,
@@ -178,7 +179,10 @@ async def _change_password(
     new_hash = await hash_password_off_loop(first)
     try:
         target = await lane.run(set_password_hash, target, new_hash, changed_by=changed_by)
-    except AuthError as exc:
+    except (AuthError, UserManagementError) as exc:
+        # UserManagementError: the actor may no longer reset this account
+        # (issue #836) -- a staff permission revoked, or the account raised
+        # out of their reach, since the screen opened.
         await session.write_line(colored(str(exc), fg_color=ERROR_COLOR))
         return target
     await session.write_line(
@@ -205,7 +209,10 @@ async def _remove_password(
         return target
     try:
         target = await lane.run(set_password_hash, target, None, changed_by=changed_by)
-    except AuthError as exc:
+    except (AuthError, UserManagementError) as exc:
+        # UserManagementError: the actor may no longer reset this account
+        # (issue #836) -- a staff permission revoked, or the account raised
+        # out of their reach, since the screen opened.
         await session.write_line(colored(str(exc), fg_color=ERROR_COLOR))
         return target
     await session.write_line(colored("Password removed. This account now signs in by key only.", fg_color=MUTED_COLOR))

@@ -289,7 +289,7 @@ def test_moderation_notices_stay_canonical_only(db, lane, hub, presence, alice, 
     set_nick(db, alice, "DeepParse")
     # Rank protection requires the moderator to outrank the target; alice
     # and bob both start at the default level 10.
-    alice = set_user_level(db, alice, 50, changed_by=alice)
+    alice = set_user_level(db, alice, 50, changed_by=create_user(db, "admin", password="hunter2", user_level=255))
     grant_permissions(
         db, alice, object_type="channel", object_id=channel.id,
         permissions=ChannelPermission.MODERATE, granted_by=alice,

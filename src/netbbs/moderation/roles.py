@@ -32,7 +32,7 @@ import sqlite3
 from dataclasses import dataclass
 from enum import IntFlag, auto
 
-from netbbs.auth.users import SYSOP_LEVEL, User
+from netbbs.auth.users import SYSOP_LEVEL, StaffPermission, User
 from netbbs.moderation.log import record_action
 from netbbs.storage.database import Database
 from netbbs.timeutil import utc_now_iso
@@ -171,6 +171,61 @@ def grant_permissions(
     return _get_grant(db, target.id, object_type, object_id, community_id)
 
 
+def grant_everywhere(
+    db: Database,
+    target: User,
+    *,
+    board_permissions: BoardPermission,
+    channel_permissions: ChannelPermission,
+    granted_by: User,
+    community_id: int | None = None,
+) -> list[ModeratorGrant]:
+    """
+    Moderation of every board, file area and channel as one action (design
+    doc §5.2, issue #836 F131): the three blanket grants -- local, or
+    Community-blanket with `community_id` -- written and audited in one
+    transaction, so a SysOp never ends up with two of the three. Additive,
+    like `grant_permissions`.
+    """
+    from netbbs.moderation.log import record_action_without_commit
+
+    wanted = (
+        ("board", board_permissions),
+        ("file_area", board_permissions),
+        ("channel", channel_permissions),
+    )
+    for object_type, permissions in wanted:
+        _validate_permission_type(object_type, permissions)
+    db.connection.execute("BEGIN IMMEDIATE")
+    try:
+        for object_type, permissions in wanted:
+            row = _get_grant_row(db, target.id, object_type, None, community_id)
+            if row is None:
+                db.connection.execute(
+                    """
+                    INSERT INTO moderator_grants
+                        (user_id, object_type, object_id, permissions, granted_by_user_id, created_at, community_id)
+                    VALUES (?, ?, NULL, ?, ?, ?, ?)
+                    """,
+                    (target.id, object_type, int(permissions), granted_by.id, utc_now_iso(), community_id),
+                )
+            else:
+                db.connection.execute(
+                    "UPDATE moderator_grants SET permissions = ? WHERE id = ?",
+                    (row["permissions"] | int(permissions), row["id"]),
+                )
+            record_action_without_commit(
+                db, actor=granted_by, action="grant", object_type=object_type, object_id=None,
+                target_user_id=target.id, detail=_describe(_PERMISSION_ENUMS[object_type], int(permissions)),
+            )
+    except BaseException:
+        db.connection.rollback()
+        raise
+    else:
+        db.connection.commit()
+    return [_get_grant(db, target.id, object_type, None, community_id) for object_type, _ in wanted]
+
+
 def revoke_permissions(
     db: Database,
     target: User,
@@ -239,12 +294,19 @@ def has_permission(
     Input validation still runs first regardless of caller identity, so
     a SysOp passing a nonsensical `object_type`/`permission`
     combination still gets caught rather than silently bypassed.
+    The moderate-everything staff permission (design doc §5.6) satisfies
+    it the same way, read from `user` as passed, like the level.
     `get_grant`/`list_grants_for_object` are deliberately *not* given
     the same treatment -- those answer "what grants actually exist",
     used for admin displays, and must stay literal.
     """
     _validate_permission_type(object_type, permission)
     if user.user_level >= SYSOP_LEVEL:
+        return True
+    if user.has_staff(StaffPermission.MODERATE_ALL):
+        # Design doc §5.6: every moderator permission on every board, file
+        # area and channel, local and carried -- as if a local-blanket
+        # grant of every bit existed for each object type.
         return True
     community_id = _resolve_object_community_id(db, object_type, object_id)
     rows = db.connection.execute(
@@ -277,6 +339,36 @@ def list_grants_for_user(db: Database, user: User) -> list[ModeratorGrant]:
         (user.id,),
     ).fetchall()
     return [_row_to_grant(row) for row in rows]
+
+
+_KIND_WORDS: dict[str, tuple[str, str]] = {
+    # object_type -> (one, every)
+    "board": ("board", "boards"),
+    "file_area": ("file area", "file areas"),
+    "channel": ("channel", "channels"),
+}
+
+
+def describe_grant(db: Database, grant: ModeratorGrant) -> str:
+    """One grant in words (design doc §5.6: the account detail's grant
+    summary, which the Staff list repeats): `board "News": approve,
+    delete`, `every file area: approve`, `channels in "Pens": moderate`.
+    Permission names are lower-case; an object or Community that is gone
+    reads as its id."""
+    one, every = _KIND_WORDS[grant.object_type]
+    bits = _describe(_PERMISSION_ENUMS[grant.object_type], grant.permissions).lower().replace("_", " ")
+    bits = bits.replace(",", ", ")
+    if grant.object_id is not None:
+        table = _COMMUNITY_LOOKUP_TABLES[grant.object_type]
+        row = db.connection.execute(f"SELECT name FROM {table} WHERE id = ?", (grant.object_id,)).fetchone()
+        scope = f'{one} "{row["name"]}"' if row is not None else f"{one} #{grant.object_id}"
+    elif grant.community_id is not None:
+        row = db.connection.execute("SELECT name FROM communities WHERE id = ?", (grant.community_id,)).fetchone()
+        name = f'"{row["name"]}"' if row is not None else f"#{grant.community_id}"
+        scope = f"{every} in {name}"
+    else:
+        scope = f"every {one}"
+    return f"{scope}: {bits}"
 
 
 def list_grants_for_object(db: Database, *, object_type: str, object_id: int) -> list[ModeratorGrant]:

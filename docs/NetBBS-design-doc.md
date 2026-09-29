@@ -369,6 +369,28 @@ as applicable, commit explicitly, or cancel; leaving either editor never sends
 or posts by itself. Fullscreen-editor output passes through the same review
 boundary so editor preference cannot change send/commit safety.
 
+Composing is a screen of its own (issue #813). A new message, reply, post or
+edit opens under its own title ("New message", "Reply", "New post", "Edit
+post") with its breadcrumb, and the To and Subject prompts are asked there,
+never under the menu they were chosen from. Mail's To prompt says what to type
+in plain words -- a user name, or `name@TheirBBS` for a linked BBS -- and an
+empty line or Esc cancels. The fullscreen editor takes an optional header --
+a title and `label: value` rows (To and Subject; Board and Subject; a file's
+name) -- drawn above the text on every repaint. Its rows come out of the
+text's, never the status line's, and it gives them up before the text drops
+below four rows: the rule first, then the title, then fields from the last.
+Review keeps its title, To and Subject on every page and pages the body with
+the detail-panel machinery `show_detail` uses (`render_sections`/`paginate`),
+turned with `PgUp`/`PgDn` and `[N]ext`/`[P]rev page` (`[>]`/`[<]` where the
+commit key is already `P`). It stays its own loop rather than becoming a
+`show_detail` caller, because it keeps its `>` cursor over To/Subject/Body and
+its Ctrl-H field help. Once the body is paged, the menu is the packed action
+bar, the rule §3.5 sets for a detail screen with a described menu. An outcome
+carried into review, such as a refused Send, is wrapped and counted against
+the page. Review's `To:` names the recipient as the node knows them: a local
+account by its own spelling (`Alice`, however it was typed), a Link address
+by its node's current label. Send still re-checks what was typed.
+
 Size limits are enforced where the text is typed, in characters (issue #812).
 Storage limits are UTF-8 bytes, which mean nothing to a caller -- 200 bytes is
 as few as 100 accented letters -- so every refusal says how many characters to
@@ -2100,6 +2122,20 @@ upgraded from before this keep the alphabetical order they showed. The first
 field test's SysOp named a Community "The Clubhouse -- Start here" and watched
 it sort last, with nothing she could do about it.
 
+Boards and file areas have a SysOp order too (issue #839), and it is what a
+caller's list shows unless the caller picks another under `[O]rder`. The old
+default re-sorted by latest activity on every visit, so the field test's
+caller found another board at the "03" he remembered a minute later. A new
+board or area goes last, including one carried over the Link. The console's
+`[U]p`/`[D]own` move it among the boards or areas that share its category,
+Community and pinned flag -- a swap with any of those shows in every caller's
+list that holds both, where a swap with a board of another Community would
+change nothing in that Community's list -- and its screen shows its place; `[R]emove` deletes it, as on a
+Community's or a category's screen. The console's own lists follow the same
+order. Activity, name, newest and volume stay available as a caller's
+`[O]rder` choice. Channels keep their alphabetical default: they have no
+stored order to follow.
+
 Categories (for boards, file areas and chat channels, each kind independent)
 are at most two levels deep. The SysOp orders them: every listing follows a
 category's `position` among its siblings, not its name (issue #681). The
@@ -2386,7 +2422,26 @@ always worth surfacing.
 Selecting an item from new scan jumps directly into that resource
 pre-positioned at the first unread item — mechanically, calling the
 resource's own existing keyset-pagination entry point with `after=` set to
-the user's stored cursor, not a new navigation primitive.
+the user's stored cursor, not a new navigation primitive. When that item is
+on the newest page, the jump opens the newest page with the cursor on it
+(issue #839): a page starting at the first unread left out every read post
+and numbered the rest from 01, so the number a caller remembered from an
+ordinary visit picked nothing. Only a caller with more unread than a page
+holds gets the page that starts at the first one. `[/] Find` jumps the same
+way.
+
+New scan is a walk, not a one-shot list (issue #839). Back from a board,
+channel or area opened from it comes back to it, reloaded in place, with the
+cursor on the next row that has something waiting, and a line above the
+prompt naming it, so Enter after Enter goes through everything new. A board
+or area never visited counts as having something when it holds anything, and
+its row says how much ("not yet visited, 3 posts") rather than only "not yet
+visited". `[R]eplies` lists the replies to the caller's posts, one to a row;
+picking one opens its board with the cursor on it.
+
+Back from a board or file area opened from a list returns to that list, on
+the row left, and Back from a category's list to the list above it (issue
+#839). They used to return past the list, to whichever menu had opened it.
 
 #### Local search
 

@@ -50,6 +50,7 @@ from netbbs.auth.users import (
     SYSOP_LEVEL,
     AuthError,
     User,
+    UserManagementError,
     create_user,
     get_user_by_username,
     hash_password_off_loop,
@@ -144,7 +145,7 @@ async def run_reset_password(session: Session, db: Database, as_username: str | 
         new_hash = await hash_password_off_loop(first)
         try:
             await lane.run(set_password_hash, target, new_hash, changed_by=actor)
-        except AuthError as exc:
+        except (AuthError, UserManagementError) as exc:
             await session.write_line(str(exc))
             return 1
         await session.write_line(f"Password set for {target.username!r}. It applies to their next sign-in.")

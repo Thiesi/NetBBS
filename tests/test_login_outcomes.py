@@ -181,7 +181,7 @@ def test_ssh_authorize_rejects_a_disabled_account(db):
     re-checks fresh immediately before the session actually begins --
     closing the gap between the SSH handshake completing and the
     application session actually starting."""
-    sysop = create_user(db, "sysop", password="hunter2", user_level=100)
+    sysop = create_user(db, "sysop", password="hunter2", user_level=255)
     alice = create_user(db, "alice", password="hunter2", user_level=10)
     set_user_disabled(db, alice, True, changed_by=sysop)
     session = _SSHFakeSession([])  # read_key must never be reached

@@ -2136,7 +2136,7 @@ async def _handle_private(ctx: ChatCommandContext, args: str) -> ChatAction | No
         parsed = parse_remote_address(target_name)
         if parsed is None or ctx.link_context is None or ctx.link_context.direct_chat is None:
             await ctx.session.write_line(
-                colored("Address a linked node's user as user@node-name-or-dns (this node must be on NetBBS Link).", fg_color=MUTED_COLOR)
+                colored("Address someone on a linked BBS as name@TheirBBS (this node must be on NetBBS Link).", fg_color=MUTED_COLOR)
             )
             return None
         remote_user, _node_prefix = parsed
@@ -3790,7 +3790,7 @@ _COMMAND_INFO: dict[str, tuple[str, str]] = {
     "rooms": ("/rooms", "List the rooms on the MRC network (the hub's reply is shown to you alone)."),
     "topic": ("/topic [text]", "Set the chat channel topic; a bare /topic clears it (requires edit permission)."),
     "msg": ("/msg <user> <text>", "Send a one-off private message; quote a user@node name containing spaces."),
-    "private": ("/private <user>", "Enter a private conversation with an online user (user@node-name-or-dns for a linked node)."),
+    "private": ("/private <user>", "Enter a private conversation with an online user (name@TheirBBS for someone on a linked BBS)."),
     "close": ("/close", "Leave the current private conversation."),
     "dm": ("/dm <user>", "Invite an online user to a live, fullscreen direct chat."),
     "help": ("/help [command]", "List available commands, or show detail for one."),
