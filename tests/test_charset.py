@@ -95,6 +95,13 @@ def test_spacing_accents_never_become_blanks():
     assert map_text("´", CP437) == "'"
 
 
+def test_space_separators_stay_blank():
+    # Review on #936: they decompose to a plain space, which is exact.
+    assert map_text("a b　c", ASCII) == "a b  c"
+    assert map_text("a b", CP437) == "a b"
+    assert map_text("a b", ASCII) == "a b"
+
+
 def test_a_long_run_of_combining_marks_is_mapped_in_linear_time():
     import time
 

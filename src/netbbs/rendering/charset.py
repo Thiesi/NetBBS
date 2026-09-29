@@ -102,7 +102,8 @@ def _encodable(text: str, charset: Charset) -> bool:
 
 def _fit(candidate: str, width: int, charset: Charset) -> str | None:
     """`candidate` padded to `width` columns, or None if it is too wide,
-    empty for a visible character, or not encodable in `charset`."""
+    blank (empty or only spaces) for a visible character, or not
+    encodable in `charset`."""
     # A spacing accent (´ ¨ ¯) decomposes to a space and a combining
     # mark: a blank is no substitute for a visible character.
     if not candidate.strip() or not _encodable(candidate, charset):
@@ -125,6 +126,10 @@ def _map_char(ch: str, charset: Charset) -> str:
         # Combining marks, format characters and C1 controls: nothing to
         # show, and a C1 control must never reach the terminal as one.
         return ""
+    if unicodedata.category(ch) == "Zs" and not (charset == CP437 and _encodable(ch, CP437)):
+        # Space separators (en space, thin space, ideographic space) are
+        # blank by nature: a plain space of the same width is exact.
+        return " " * width
     if charset == CP437 and ch not in _GLYPHS and _encodable(ch, CP437):
         return ch
     glyph = _GLYPHS.get(ch)
