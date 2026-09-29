@@ -186,9 +186,10 @@ _VALID_CONFIDENTIALITY_TIERS = (_TIER1_HOME_NODE_KEY, _TIER2_PERSONAL_KEY)
 # guest account) with #816, `blocked_by_recipient` (the recipient blocked
 # this sender; `blocked_sender` is the recipient *node's* refusal) with
 # #817, `recipient_unavailable` (a disabled account or a signup awaiting
-# approval, told apart from neither) with #818; a receiver keeps a reason it does not know as an opaque code (every
-# release so far ignores it or shows a generic refusal), so a new code costs
-# an older sender nothing but the wording.
+# approval, not saying which) with #818; a receiver keeps a reason it does
+# not know as an opaque code (every release so far ignores it or shows a
+# generic refusal), so a new code costs an older sender nothing but the
+# wording.
 _VALID_BOUNCE_REASONS = (
     "mailbox_full", "blocked_sender", "unknown_recipient", "undecryptable", "malformed", "no_mailbox",
     "blocked_by_recipient", "recipient_unavailable",

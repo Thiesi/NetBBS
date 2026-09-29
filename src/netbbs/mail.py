@@ -483,10 +483,10 @@ def make_room(db: Database, recipient: User) -> bool:
         return False
     db.connection.execute(
         """
-        INSERT INTO mail_eviction_notices (user_id, evicted, since) VALUES (?, 1, ?)
+        INSERT INTO mail_eviction_notices (user_id, evicted) VALUES (?, 1)
         ON CONFLICT (user_id) DO UPDATE SET evicted = evicted + 1
         """,
-        (recipient.id, utc_now_iso()),
+        (recipient.id,),
     )
     _hard_delete_or_mark(db, oldest_read["id"], sender_deleted_at=oldest_read["sender_deleted_at"], recipient_deleted_at=utc_now_iso())
     return True

@@ -3709,8 +3709,7 @@ MIGRATIONS = [
 
         CREATE TABLE mail_eviction_notices (
             user_id  INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
-            evicted  INTEGER NOT NULL,
-            since    TEXT NOT NULL
+            evicted  INTEGER NOT NULL
         );
         """,
     ),
