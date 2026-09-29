@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import asyncio
 
-from netbbs.auth.users import SYSOP_LEVEL, User, current_account
+from netbbs.auth.users import SYSOP_LEVEL, User, current_account, describe_staff_permissions
 from netbbs.chat import (
     ChatHub,
     DirectChatInvites,
@@ -834,8 +834,8 @@ async def _main_menu_loop(
 
 def _access_change_notice(before: User, after: User) -> str | None:
     """The line shown above the redrawn menu when a SysOp changed this
-    account's level or verify-identity permission (issue #659), or `None`
-    when neither changed."""
+    account's level, verify-identity permission (issue #659) or staff
+    permissions (issue #836), or `None` when none of them changed."""
     lines = []
     if after.user_level != before.user_level:
         color = SUCCESS_COLOR if after.user_level > before.user_level else ALERT_COLOR
@@ -845,6 +845,16 @@ def _access_change_notice(before: User, after: User) -> str | None:
             lines.append(colored("You can now verify callers' identities.", fg_color=SUCCESS_COLOR))
         else:
             lines.append(colored("You can no longer verify callers' identities.", fg_color=ALERT_COLOR))
+    gained = after.staff_permissions & ~before.staff_permissions
+    lost = before.staff_permissions & ~after.staff_permissions
+    if gained:
+        lines.append(colored(
+            f"Staff permissions granted: {describe_staff_permissions(gained)}.", fg_color=SUCCESS_COLOR
+        ))
+    if lost:
+        lines.append(colored(
+            f"Staff permissions removed: {describe_staff_permissions(lost)}.", fg_color=ALERT_COLOR
+        ))
     return "\r\n".join(lines) if lines else None
 
 
@@ -854,7 +864,8 @@ def _adopt_account(session: Session, registry: ActiveSessionRegistry | None, fre
     on a change the menu has already applied (issue #659)."""
     if registry is not None:
         registry.record_account(
-            session, user_level=fresh.user_level, can_verify_identity=fresh.can_verify_identity
+            session, user_level=fresh.user_level, can_verify_identity=fresh.can_verify_identity,
+            staff_permissions=fresh.staff_permissions,
         )
     return fresh
 

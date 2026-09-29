@@ -160,7 +160,7 @@ def test_watcher_disconnects_a_genuinely_idle_session_at_the_main_menu(db):
     async def scenario():
         task = asyncio.create_task(_drive(db, hub, presence, mailbox, registry, alice, session))
         await asyncio.sleep(0.05)  # let it actually reach the idle main-menu read
-        set_user_disabled(db, alice, True, changed_by=alice)
+        set_user_disabled(db, alice, True, changed_by=create_user(db, "admin", password="hunter2", user_level=255))
         await _wait_until_done(task)
 
     asyncio.run(scenario())
@@ -183,7 +183,7 @@ def test_watcher_cancels_the_session_even_if_the_notice_write_blocks_forever(db)
     async def scenario():
         task = asyncio.create_task(_drive(db, hub, presence, mailbox, registry, alice, session))
         await asyncio.sleep(0.05)
-        set_user_disabled(db, alice, True, changed_by=alice)
+        set_user_disabled(db, alice, True, changed_by=create_user(db, "admin", password="hunter2", user_level=255))
         # A tight bound -- must complete well within the (patched-down)
         # notice timeout plus a small margin, not hang until the outer
         # test-suite timeout kills it.
@@ -247,7 +247,7 @@ def test_watcher_disconnects_a_session_stuck_composing_a_board_post(db):
     async def scenario():
         task = asyncio.create_task(_drive(db, hub, presence, mailbox, registry, alice, session))
         await asyncio.sleep(0.05)  # let it actually reach the blocked subject prompt
-        set_user_disabled(db, alice, True, changed_by=alice)
+        set_user_disabled(db, alice, True, changed_by=create_user(db, "admin", password="hunter2", user_level=255))
         await _wait_until_done(task)
 
     asyncio.run(scenario())
@@ -267,7 +267,7 @@ def test_watcher_disconnects_a_session_stuck_inside_a_file_area(db):
     async def scenario():
         task = asyncio.create_task(_drive(db, hub, presence, mailbox, registry, alice, session))
         await asyncio.sleep(0.05)
-        set_user_disabled(db, alice, True, changed_by=alice)
+        set_user_disabled(db, alice, True, changed_by=create_user(db, "admin", password="hunter2", user_level=255))
         await _wait_until_done(task)
         return task
 
@@ -286,7 +286,7 @@ def test_watcher_disconnects_a_session_stuck_inside_the_profile_screen(db):
     async def scenario():
         task = asyncio.create_task(_drive(db, hub, presence, mailbox, registry, alice, session))
         await asyncio.sleep(0.05)
-        set_user_disabled(db, alice, True, changed_by=alice)
+        set_user_disabled(db, alice, True, changed_by=create_user(db, "admin", password="hunter2", user_level=255))
         await _wait_until_done(task)
 
     asyncio.run(scenario())
