@@ -21,6 +21,7 @@ import logging
 
 from netbbs.auth.users import User
 from netbbs.doors import Door, get_door, list_doors
+from netbbs.doors.profiles import is_remote
 from netbbs.doors.runtime import DoorRunResult, run_door
 from netbbs.net.breadcrumb_preference import breadcrumb_collapsed_enabled
 from netbbs.net.menu_description_preference import menu_description_level
@@ -113,7 +114,7 @@ async def browse_doors(
             session,
             doors,
             name_of=lambda d: (f"{d.name} [remote: {d.profile.options['service_name']}]"
-                               if d.profile and d.profile.adapter == "rlogin" else d.name),
+                               if is_remote(d.profile) else d.name),
             stable_id_of=lambda d: d.id,
             description_of=lambda d: d.description,
             title=title,
@@ -155,7 +156,7 @@ async def browse_doors(
         # before the remote-service notice, which must stay readable.
         if redraw_in_place:
             await session.write(clear_screen())
-        if door.profile and door.profile.adapter == "rlogin":
+        if is_remote(door.profile):
             await session.write_line("Remote service: " + sanitize_text(door.profile.options["service_name"]) +
                                      ". Its operator receives your game identity and controls game data and availability.")
         # A door whose companion process is not up cannot be played, and

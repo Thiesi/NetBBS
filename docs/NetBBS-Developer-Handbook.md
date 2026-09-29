@@ -221,11 +221,12 @@ Two kinds of registration deliberately get none of it:
   DOS path could not reach it anyway. Give a DOS game the classic
   [drop files](NetBBS-door-guide.md#register-and-test-inside-netbbs) instead — which is what the
   DOS templates configure, and what a DOS-era program can actually read.
-- A **remote** (RLogin) registration. NetBBS launches no process for it, so
+- A **remote** (RLogin or BBSLink) registration. NetBBS launches no process for it, so
   there is no environment to carry a path and no filesystem in common. The
   RFC 1282 handshake conveys only the configured local and remote identity
   strings and a terminal type; everything else about that caller stays on
-  this side of the connection.
+  this side of the connection. A BBSLink registration is the same: it sends
+  the caller's user number and nothing else about them.
 
 | Field | Meaning |
 | --- | --- |

@@ -677,8 +677,8 @@ sensible defaults; review and Save. Callers reach games through **Games** on
 the main menu or a Community's page.
 
 Third-party native programs, DOS games through DOSBox-X, doors built only for
-another platform (in a per-caller qemu VM you provision), and remote RLogin
-services use compatibility profiles. Start with minimum play level 255,
+another platform (in a per-caller qemu VM you provision), remote RLogin
+services and BBSLink use compatibility profiles. Start with minimum play level 255,
 choose a template, set your actual paths, run **Check setup**, then **Test as
 SysOp**. Testing launches real programs and may change game data, even if you
 later discard the configuration draft. Test normal quit, disconnect, timeout,

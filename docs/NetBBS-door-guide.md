@@ -24,7 +24,7 @@ several files or their own directory layout still go onto the host directly.
 - [DOS prerequisites](#dos-prerequisites), [LORD](#lord-407-dos),
   [Global War](#global-war-27-dos), [TradeWars](#tradewars-2002-309-dos)
 - [Foreign-platform doors in a VM](#foreign-platform-doors-in-a-vm)
-- [Remote services](#remote-services-tunnel-first)
+- [Remote services](#remote-services-tunnel-first) and [BBSLink](#bbslink)
 - [War Dialer maintenance and recovery](#war-dialer-shared-world-sessions)
 - [Voidrunner saves and recovery](#voidrunner-careers-and-concurrent-sessions)
 - [Verification and troubleshooting](#verification-and-troubleshooting)
@@ -394,6 +394,7 @@ not configure a scheduler, remote storage, or automatic deletion.
 | Global War 2.7 DOS demo | DOSBox-X built-in UART | NetBSD game creation; NetBSD/Debian saved waiting-game re-entry and normal quit; a full three-player match is not certified |
 | TradeWars 2002 3.09 DOS demo | DOSBox-X + BNU 1.70 | NetBSD player/ship/planet creation; NetBSD/Debian persistent universe re-entry and normal quit |
 | Remote RFC 1282 | Operator-run SSH/TLS tunnel, provider access | Real loopback handshake tests; live third-party accounts not certified |
+| BBSLink | Provider codes; plaintext HTTP + Telnet | Protocol and account confirmed live by a standalone probe from a NetBSD 11 node (issue #565); the connector's handshake, Telnet negotiation, refusal and handshake serialisation are tested against loopback fakes. NetBBS itself against the live service is not yet certified |
 | Foreign-platform VM | External qemu 11.1 + the SysOp's guest image | NetBSD 11 amd64 (itself a VMware guest), `tcg`, recipe Alpine guest: capability probe, and Amiga Empire 0.13.1 (Linux x86_64, static) player creation, persistent re-entry, normal quit and caller hangup. `nvmm`/`kvm` and other guests are not certified; the runtime contract is tested against a fake qemu on every host |
 
 On both NetBSD and Debian, native and DOS serial fixtures pass over real Telnet, SSH and
@@ -462,7 +463,8 @@ host data in the game installation. Run NetBBS unprivileged, never as root.
 The complete developer contract has moved to the
 [developer handbook](NetBBS-Developer-Handbook.md#door-launch-metadata).
 Native doors receive launch metadata; DOS games use their classic drop files,
-and remote services receive their configured RLogin handshake fields.
+an RLogin service receives its configured handshake fields, and BBSLink the
+caller's user number.
 
 
 **MANUAL — outside NetBBS:** create the installation directories and give the
@@ -842,8 +844,8 @@ all — `NETBBS_DOOR_INFO` names a host path the guest has no way to reach — s
 it has no way to learn its posting name or where to write. The file-drop
 transport was chosen precisely so a DOS door *can* be served later (a socket
 never could, because of the emulator boundary), but publishing the
-configuration where DOS can read it is still to be built. A remote (RLogin)
-registration can never use this at all: NetBBS runs no program for it and
+configuration where DOS can read it is still to be built. A remote (RLogin or
+BBSLink) registration can never use this at all: NetBBS runs no program for it and
 shares no files with it, so the screen says so instead of offering the
 switch.
 
@@ -1426,9 +1428,10 @@ Never reuse a caller's NetBBS password as an RLogin credential.
 **MANUAL — outside NetBBS:** obtain a provider account and written connection
 parameters: tunnel host/port, account/key, remote RLogin destination, exact
 local-user and remote-user field format, and service name. There is no
-universal DoorParty/BBSLink credential convention; use the provider's current
+universal RLogin credential convention; use the provider's current
 instructions. A provider which requires a different protocol needs its own
-adapter, not guessed credentials in this one.
+adapter, not guessed credentials in this one -- [BBSLink](#bbslink) is such a
+provider.
 
 1. Copy [`remote/ssh_config`](../examples/doors/remote/ssh_config). Replace
    placeholders, including the destination in `LocalForward`. Obtain and
@@ -1518,6 +1521,68 @@ does: **back it up yourself**. Losing it orphans every caller's DoorParty accoun
 It is **not** the provider SSH password or a caller's NetBBS password.
 Use chmod 600. Do not grant guest accounts access; initially restrict the
 door to SysOp, then regular approved callers after a successful test.
+
+### BBSLink
+
+BBSLink does not speak RLogin, so it has its own adapter, `bbslink`, and the
+`remote-bbslink` template. For each caller NetBBS asks
+`games.bbslink.net:80` for a one-time token over HTTP, sends an authorisation
+request, then opens a Telnet connection to `games.bbslink.net:23` and relays
+it. The provider joins the Telnet session to the authorisation by the address
+it comes from, so NetBBS makes all three connections to one resolved address,
+and two callers' handshakes on the node run one after the other rather than
+interleaved. Both destinations are in the template's `allowed_destinations`;
+no caller chooses either.
+
+**What BBSLink receives, in clear:** your system code, the caller's NetBBS
+user number (it keys their player on BBSLink's side), the door code, the
+screen rows and a one-time token. The authorisation and scheme codes are sent
+only as MD5 hashes combined with that token. Nothing else about the caller --
+handle, password, address -- is sent. BBSLink offers no SSH or TLS route, so
+there is no tunnel to put in front of it; the template therefore sets
+`insecure_acknowledged: true`, and a profile pointing at the real service
+cannot be saved without it.
+
+**MANUAL — outside NetBBS:** apply for access at
+<https://www.bbslink.net/>; BBSLink e-mails a system code, an authorisation
+code and a scheme code. Copy
+[`bbslink.credentials.example.json`](../examples/doors/remote/bbslink.credentials.example.json)
+**outside the repository** to the template's
+`/var/lib/netbbs/bbslink.credentials.json` (or set `credential_file` to your
+own absolute path), fill in the three codes and chmod 600. The file may hold
+those three keys and nothing else; **Check setup** refuses it while a
+placeholder remains. BBSLink's own connection scripts are not needed, and are
+not to be redistributed.
+
+In NetBBS, pick the `remote-bbslink` template. `door` is `menu` for BBSLink's
+own door menu (34 games when this was written), or one game's code, such as
+`lord`, to put that game on your menu directly -- one registration per code.
+Keep `service_name` naming BBSLink: callers see it in the door picker and
+before launch, as for any remote service.
+
+- **Screen:** 80x24. BBSLink's own scripts send 24 rows, and NetBBS also
+  reports 80x24 over Telnet (NAWS) and `ANSI` as the terminal type when the
+  server asks. Terminal speed, X display and environment requests are
+  refused. The door menu asks the caller's terminal where its cursor is and
+  lays itself out only once answered; that request and its answer pass
+  through untouched.
+- **Callers at once:** the template admits one caller per registration.
+  Raising `max_sessions` needs `multinode_certified`; try two callers on it
+  first.
+- **Guests:** the user number is the account's, so everybody signed in as the
+  guest account would share one BBSLink player. Keep the door's play level
+  above the guest account's, and start at SysOp only.
+- **No files, no outbound hook:** BBSLink shares nothing with this node, so
+  there is no drop file and [outbound posting](#letting-a-door-post-to-boards-and-chat)
+  cannot apply.
+
+**Failures** reach callers as "could not be started"; the reason is in the
+door's **Last diagnostic**. `BBSLink refused the session: ...` is BBSLink's
+own answer, most often a mistyped code. `BBSLink answered HTTP ...`,
+`BBSLink did not answer at <address> port <port> ...` (port 80 is the
+authorisation step, 23 the game session), another connection error, or
+`did not complete its handshake within 15 seconds` means the service or the
+network is down.
 
 ## Verification and troubleshooting
 

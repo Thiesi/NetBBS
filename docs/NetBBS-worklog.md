@@ -6185,6 +6185,27 @@ never-drained qemu stdout pipe stalls the guest once its console fills it;
 the runtime's diagnostics task drains socketpair doors' stdout, and any
 test harness must too.
 
+The BBSLink connector (issue #565, `netbbs.doors.bbslink`) sends nothing
+identifying on its Telnet socket: the provider joins it to the preceding HTTP
+authorisation by source address. Two invariants follow. All three
+connections of one launch go to the one address that answered the token
+request -- on a dual-stack host a fresh resolve per step could send HTTP over
+IPv6 and Telnet over IPv4 -- and the HTTP client is hand-rolled over that
+socket. Unlike Link's outbound HTTP, which must honour proxy settings
+(`trust_env=True`, above), this client must not: through a proxy the
+authorisation would leave from another address than the Telnet session. Handshakes are serialised per provider host with an asyncio lock
+held from the token request until Telnet has connected, so two callers
+cannot cross identities; the lock is kept per event loop because a
+module-level `asyncio.Lock` binds to the first loop that waits on it. The
+token is echoed back as an HTTP header, so it is checked for printable
+non-space ASCII before use: a CR/LF in it would inject headers. The
+provider's Telnet side asks for TTYPE, TSPEED, XDISPLOC, NAWS and
+NEW-ENVIRON and carried on normally with all of them refused during the
+live probe; the connector answers TTYPE (`ANSI`) and NAWS (the fixed
+geometry) because BBSLink's own scripts run the system `telnet`, which
+answers both, and refuses the rest. Its Enter is NVT CR NUL outside binary
+mode, whatever line ending the caller's client sent.
+
 The door outbound hook's `drain` (issue #520) must be safe to repeat, so a
 request is claimed -- renamed out of the request pattern, to a bounded
 `_short(name) + ".claimed"` (a prefix plus a hash once a name passes 64
@@ -7918,8 +7939,8 @@ served: a socket cannot cross the emulator boundary. Suffix matching is
 case-insensitive because DOS writes 8.3 names in upper case. A DOS guest still
 cannot read `door_info.json` -- it names a host path -- so it cannot yet learn
 its label or drop directory, and the hook is in practice for locally launched
-native doors. A remote (RLogin) registration shares no filesystem and can
-never use it at all.
+native doors. A remote (RLogin or BBSLink) registration shares no filesystem
+and can never use it at all.
 
 A result must outlive the launch that produced it. The door's working
 directory is deleted when the run ends, so an outcome written there can never

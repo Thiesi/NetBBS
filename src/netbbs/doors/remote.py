@@ -47,6 +47,16 @@ def validate_remote(profile):
 
 
 def _credentials(path):
+    value = read_private_json(path)
+    if set(value) - {"local_user", "remote_user"}:
+        raise ValueError("Credential file permits local_user and remote_user only")
+    return value
+
+
+def read_private_json(path):
+    """An operator-created secret file: absolute, regular, chmod 600, at most
+    4 KiB, holding one JSON object. Shared by every remote adapter; each one
+    checks the keys it permits."""
     path = Path(path)
     if not path.is_absolute():
         raise ValueError("Credential file must be an absolute path")
@@ -63,8 +73,8 @@ def _credentials(path):
         value = json.loads(raw)
     except (ValueError, UnicodeError) as exc:
         raise ValueError("Credential file is not valid JSON") from exc
-    if not isinstance(value, dict) or set(value) - {"local_user", "remote_user"}:
-        raise ValueError("Credential file permits local_user and remote_user only")
+    if not isinstance(value, dict):
+        raise ValueError("Credential file must hold a JSON object")
     return value
 
 

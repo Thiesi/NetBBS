@@ -1,0 +1,17 @@
+{
+  "name": "BBSLink door menu (plaintext HTTP + Telnet; no tunnel route exists)",
+  "executable_path": "remote",
+  "args": [],
+  "profile": {
+    "version": 1, "adapter": "bbslink", "encoding": "cp437",
+    "width": 80, "height": 24, "max_sessions": 1,
+    "options": {
+      "service_name": "BBSLink",
+      "host": "games.bbslink.net", "port": 23, "http_port": 80,
+      "allowed_destinations": ["games.bbslink.net:80", "games.bbslink.net:23"],
+      "door": "menu",
+      "credential_file": "/var/lib/netbbs/bbslink.credentials.json",
+      "insecure_acknowledged": true
+    }
+  }
+}

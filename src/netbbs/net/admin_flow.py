@@ -239,6 +239,7 @@ from netbbs.doors import (
     update_door,
 )
 from netbbs.doors.bundled import available_bundled_doors
+from netbbs.doors.profiles import is_remote
 from netbbs.doors.outbound import (
     OutboundError,
     allow_channel,
@@ -20386,7 +20387,7 @@ async def _door_outbound_screen(session: Session, lane: DatabaseLane, actor: Use
     redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
     accent_color = await lane.run(effective_accent_color_256)
     header_color = await lane.run(effective_header_color_256)
-    if door.profile and door.profile.adapter == "rlogin":
+    if is_remote(door.profile):
         # A remote registration launches no local process and shares no
         # filesystem with a per-session working directory, so it could never
         # write a request. Offering the switch would let a SysOp turn on
