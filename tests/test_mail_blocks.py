@@ -18,6 +18,7 @@ from netbbs import mail as mail_module
 from netbbs.auth.users import SYSOP_LEVEL, create_user, delete_user, set_user_level
 from netbbs.link.mail import bounce_reason_text, deliver_link_message
 from netbbs.link.node_identity import bootstrap_node_identity
+from netbbs.link.mail_refusals import TRUST_REASONS, refusal_reason_text
 from netbbs.mail import (
     MailBlockError,
     MailSenderBlocked,
@@ -182,6 +183,10 @@ def test_link_mail_from_a_blocked_sender_bounces_blocked_by_recipient(node, iden
     # Not the node-policy wording `blocked_sender` has: this was the person.
     assert bounce_reason_text("blocked_by_recipient") == "the recipient does not accept mail from you"
     assert "BBS" not in bounce_reason_text("blocked_by_recipient")
+    # And the recipient node's SysOp sees it in the refusal log (#820) as
+    # the person's choice, not a trust matter.
+    assert refusal_reason_text("blocked_by_recipient") == "the recipient blocked its sender"
+    assert "blocked_by_recipient" not in TRUST_REASONS
 
 
 def test_link_mail_from_anyone_else_on_that_node_still_arrives(node, identities):

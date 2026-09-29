@@ -501,6 +501,46 @@ def unread_count(db: Database, user: User) -> int:
     return row["n"]
 
 
+@dataclass(frozen=True)
+class InboxSize:
+    """How full one account's inbox is (issue #820), for the SysOp. Counts
+    only: the SysOp console never shows a letter's sender, subject or body."""
+    user_id: int
+    username: str
+    total: int
+    unread: int
+    # Notices from the BBS itself (issue #819); included in `total`.
+    system: int
+
+    @property
+    def read(self) -> int:
+        return self.total - self.unread
+
+
+def inbox_sizes(db: Database) -> list[InboxSize]:
+    """Every account with mail in its inbox, the fullest first (by count, then
+    by unread mail, which the cap cannot make room by evicting). What counts is
+    what counts toward `MAX_MAIL_PER_RECIPIENT`: every message the recipient
+    has not deleted, system notices included."""
+    rows = db.connection.execute(
+        """
+        SELECT u.id AS user_id, u.username AS username, COUNT(m.id) AS total,
+               SUM(m.read_at IS NULL) AS unread, SUM(m.from_system) AS system
+        FROM mail_messages m JOIN users u ON u.id = m.recipient_user_id
+        WHERE m.recipient_deleted_at IS NULL
+        GROUP BY u.id
+        ORDER BY total DESC, unread DESC, u.username COLLATE NOCASE
+        """
+    ).fetchall()
+    return [
+        InboxSize(
+            user_id=row["user_id"], username=row["username"], total=row["total"],
+            unread=row["unread"] or 0, system=row["system"] or 0,
+        )
+        for row in rows
+    ]
+
+
 def mark_read(db: Database, user: User, message: MailMessage) -> MailMessage:
     """No-op (returning `message` unchanged) if `user` isn't the
     recipient, or it's already read -- mirrors
