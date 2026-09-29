@@ -355,6 +355,10 @@ class MailMessage:
     # that first reading (issue #922). A reading made while either did not
     # is never a receipt, whatever they share later.
     first_read_shared: bool = False
+    # When the sender last sent this Link letter again after it bounced or
+    # expired (issue #919); NULL otherwise. The new letter is a row of its
+    # own, and this one keeps its status and reason.
+    resent_at: str | None = None
 
     @property
     def is_read(self) -> bool:
@@ -1570,4 +1574,5 @@ def _row_to_message(row: sqlite3.Row) -> MailMessage:
         mail_group_to=row["mail_group_to"],
         first_read_at=row["first_read_at"],
         first_read_shared=bool(row["first_read_shared"]),
+        resent_at=row["resent_at"],
     )

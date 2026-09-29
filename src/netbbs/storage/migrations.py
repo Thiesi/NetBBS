@@ -3857,4 +3857,17 @@ MIGRATIONS = [
           );
         """,
     ),
+    Migration(
+        description=(
+            "Issue #919: `mail_messages.resent_at` -- when the sender last sent a Link letter "
+            "that bounced or expired again with Resend, so Sent can show it as `resent` rather "
+            "than as a failure still waiting on them. Set on the sender's copy the resend went "
+            "to (for a letter to several people, on each copy resent); the new letter is a row "
+            "of its own. NULL for every other letter, and for every existing one: nothing "
+            "recorded which failed letters were resent before."
+        ),
+        sql="""
+        ALTER TABLE mail_messages ADD COLUMN resent_at TEXT;
+        """,
+    ),
 ]
