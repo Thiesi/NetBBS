@@ -76,8 +76,7 @@ async def _browse_directory(
     the listing regardless of whether their bio itself is public.
 
     Loops back to the listing after each lookup, same "pick, view, pick
-    again" shape `_show_inbox`/`_show_sent` (`netbbs.net.mail_flow`)
-    already use -- a directory's whole purpose is looking people up,
+    again" shape the mailbox (`netbbs.net.mail_flow`) has -- a directory's whole purpose is looking people up,
     which a one-shot "view one, then dumped back to the main menu"
     flow made needlessly costly to do for more than one person in a
     row (dogfood follow-up).

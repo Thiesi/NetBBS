@@ -19,6 +19,7 @@ from netbbs.mail import (
     list_inbox,
     list_sent,
     mark_read,
+    mark_unread,
     send_mail,
     unread_count,
 )
@@ -121,6 +122,25 @@ def test_mark_read_is_idempotent(db, alice, bob):
     first = mark_read(db, bob, message)
     second = mark_read(db, bob, first)
     assert second.read_at == first.read_at
+
+
+def test_mark_unread_takes_the_read_back(db, alice, bob):
+    """Issue #810: a message opened by mistake, or kept to answer later,
+    counts as unread again."""
+    message = mark_read(db, bob, send_mail(db, alice, bob, "Hello", "body"))
+
+    updated = mark_unread(db, bob, message)
+
+    assert updated.is_read is False
+    assert unread_count(db, bob) == 1
+
+
+def test_mark_unread_is_a_no_op_for_the_sender_and_for_unread_mail(db, alice, bob):
+    message = mark_read(db, bob, send_mail(db, alice, bob, "Hello", "body"))
+    assert mark_unread(db, alice, message).is_read is True
+    assert get_mail(db, bob, message.id).is_read is True
+    unread = send_mail(db, alice, bob, "Again", "body")
+    assert mark_unread(db, bob, unread) == unread
 
 
 # -- access control ---------------------------------------------------------

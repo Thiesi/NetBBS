@@ -738,7 +738,7 @@ link); it announces it through `netbbs.net.notices`. Whichever screen is drawn
 next shows it directly above its prompt, and a picker shows it above its
 list. No keypress is asked for. This started in the SysOp console and now
 applies to every screen: boards, file areas, the composition review screen
-shared by posts and mail, every picker, and the main and mail menus that
+shared by posts and mail, every picker, the main menu and the mailbox that
 flows unwind back to.
 
 A screen with a nothing-to-do state still draws a `[B]ack` bar and waits,
@@ -2204,6 +2204,53 @@ Recipient mailboxes are bounded. When full:
 
 Local mail is the domain extended by Link messages; Link mail does not create a
 parallel mailbox UI.
+
+**The mailbox is a list; a message is read on its own screen** (issue #810),
+the shape the board post list has (§6.1, issue #679). `[E]-mail` opens the
+Inbox directly. Before #810 it opened a four-option menu (Inbox, Sent,
+Compose, Back), so every visit cost a keystroke before any mail showed.
+
+The list:
+- Is a table: number, a `new` column, From, Subject and Date. Sent's is
+  number, To, Subject, a Delivery column (pending, delivered, bounced,
+  expired) when any listed message went over Link,
+  and Date. Each row is numbered once. The generic picker it replaced
+  numbered rows twice (`01. (#5) ...`) and prefixed unread subjects with
+  `[NEW] `.
+- Follows §3.6: columns are measured in display width and cut with an
+  ellipsis. The name takes up to two fifths of what the fixed columns
+  leave. It has no fixed cap, because a Link address carries its node's
+  name, and the message view shows it in full. Below 60 columns a row
+  becomes prose: "N new name: subject".
+- Fits as many rows as the terminal holds and pages with `[N]ext page` and
+  `[P]rev page` (PgDn/PgUp). A mailbox is bounded (§14), so the whole folder
+  is loaded and paged in memory. Below 16 rows the blank rows and rules go,
+  and each note above the list is cut to one row, so the 40x12 floor keeps
+  three rows of mail.
+- Has a cursor: Up/Down, and Enter or a digit to open a message. `[B]ack`
+  from a message returns with the cursor on it.
+- Has a header that says how many messages are unread and how many there
+  are in all, the Inbox order, and any `[F]ind` filter. The prompt is the
+  main menu's, clock and node-status tags included.
+- Keeps every action the menu had on its action bar: `[S]ent` (whose
+  `[B]ack` returns to the Inbox), `[C]ompose`, and `[D]raft` with the kept
+  letter's notice (issue #814).
+- `[O]rder` switches the Inbox between newest first and unread first
+  (newest first within each). It is a per-caller preference (`mail_order`).
+- `[F]ind` narrows the folder to mail with a word in the name or the
+  subject, as the row shows them. The picker's `[S]earch` said "by name"
+  but matched the subject, `[NEW] ` prefix included, so "new" matched every
+  unread message.
+- `[U]nread` on the list marks the highlighted message unread, or read if
+  it is unread; the reader's `[U]nread` marks the open message unread and
+  returns to the list. Opening a message is still what marks it read.
+  Marked-unread mail is kept by the mailbox cap, like any unread mail.
+- Flags a sender whose node's identity changed (`_link_mail_identity_warning`)
+  with `!` before the name, and says what it means above the list. The
+  message view carries the full caution.
+
+A received message's view names its recipient: `From:`, `To:` (the reader)
+and `Date:`, as a sent message's view has `To:`.
 
 **How a body reads** (issue #809). A letter keeps its writer's lines: the
 message view, Sent's view and the review screen show every line as written,

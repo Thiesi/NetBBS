@@ -229,6 +229,23 @@ def mark_read(db: Database, user: User, message: MailMessage) -> MailMessage:
     return get_mail(db, user, message.id)
 
 
+def mark_unread(db: Database, user: User, message: MailMessage) -> MailMessage:
+    """`mark_read` undone (issue #810): the message counts as unread again,
+    as if it had never been opened. The same no-op shape: `message`
+    unchanged if `user` isn't the recipient or it is already unread.
+
+    An unread message is one the mailbox cap will not evict to make room
+    (`_make_room_if_needed`), so marking one unread also keeps it -- the
+    same protection a message nobody has opened yet gets."""
+    if user.id != message.recipient_user_id or not message.is_read:
+        return message
+    db.connection.execute(
+        "UPDATE mail_messages SET read_at = NULL WHERE id = ? AND recipient_user_id = ?", (message.id, user.id)
+    )
+    db.connection.commit()
+    return get_mail(db, user, message.id)
+
+
 def delete_for_recipient(db: Database, user: User, message: MailMessage) -> None:
     """Deletes `user`'s (the recipient's) own view of `message`. Hard-
     deletes the row outright once the sender's side is also gone --
