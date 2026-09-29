@@ -414,6 +414,18 @@ ending only on `/done` (a blank line would never finish, against the gesture
 callers already use) and a separate "answer mode" for quotes (a second
 concept for what one sticky insertion point already does).
 
+Trimming a reply's quote (issue #837) took one `/delete N` per line -- 17
+commands for a 19-line quote in the first-caller field test. `/delete N-M`
+removes a range, and `/unquote` removes the whole quote: every `>` line, the
+attribution directly above a run of them (`netbbs.quoting.is_attribution`)
+and the blank line `quote_body` leaves under it, keeping answers written
+between quoted lines. That is also how a reply goes out without a quote:
+[R]eply always quotes, and one command drops it, rather than a second reply
+key or a question before the editor opens (§3.5). The editor says so when it
+opens on a quote, and its opening lines and `/help` point to Profile's
+fullscreen editor, which nothing in the line editor mentioned before; the
+line editor stays the default, since it works on every terminal.
+
 Board posts and mail distinguish discarding from saving. `/cancel` (line
 editor) or discarding (fullscreen editor) always deletes any in-progress
 draft; `/exit`/`/quit` (line editor) or "Keep draft & exit" (fullscreen
@@ -483,6 +495,9 @@ nano's Ctrl+O/Ctrl+X/Ctrl+G (issue #815):
   Long words such as URLs are kept whole. Off a quote, Ctrl+R rings the
   bell. nano's justify key, Ctrl+J, is the byte of Enter (LF) and cannot be
   used.
+- **Ctrl+E** erases the whole text after a one-key yes (issue #837):
+  clearing a bio meant holding Delete. The erased lines become the cut
+  lines, so Ctrl+Y puts them back. On an empty text it rings the bell.
 - The status line counts **characters used/limit**, never bytes (issue
   #812): the limit is how many characters the text holds if the rest is
   plain letters, so it drops by one for each two-byte character typed and
