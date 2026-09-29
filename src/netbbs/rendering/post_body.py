@@ -40,6 +40,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Iterator
 
+from netbbs.quoting import is_attribution
 from netbbs.rendering.ansi import CSI, RESET, colored
 from netbbs.rendering.gradient import nearest_256
 from netbbs.rendering.pipe_codes import BACKGROUND_CODES, FOREGROUND_CODES, cga_to_xterm
@@ -385,6 +386,20 @@ def _strip_quote_marker(line: str) -> str:
     return prefix + rest
 
 
+def _line_kind(visible: str) -> str:
+    """How a reader lays out one line of a body, color codes removed:
+    ``blank``, a ``quote``, a quote's ``attribution`` -- always a line of
+    its own, so a reply written straight under it is never joined to it
+    and read as the quoted author's (issue #837) -- or ``text``, which
+    runs into the text lines next to it."""
+    stripped = visible.strip()
+    if not stripped:
+        return "blank"
+    if stripped.startswith(">"):
+        return "quote"
+    return "attribution" if is_attribution(stripped) else "text"
+
+
 def colored_body_rows(styled: str, width: int) -> list[str]:
     """A `styled_post_body` result as reader rows at `width`: reflowed
     prose, ``>`` quotes muted and rewrapped with their marker, blank lines
@@ -392,9 +407,8 @@ def colored_body_rows(styled: str, width: int) -> list[str]:
     row standing alone."""
     runs: list[tuple[str, list[str]]] = []
     for raw_line in styled.split("\n"):
-        visible = _visible(raw_line).strip()
-        kind = "blank" if not visible else "quote" if visible.startswith(">") else "text"
-        if runs and runs[-1][0] == kind:
+        kind = _line_kind(_visible(raw_line))
+        if runs and runs[-1][0] == kind and kind != "attribution":
             runs[-1][1].append(raw_line)
         else:
             runs.append((kind, [raw_line]))
@@ -653,9 +667,8 @@ def quoted_body(body: str, width: int) -> str:
     break, silently dropping the authored blank line."""
     runs: list[tuple[str, list[str]]] = []
     for raw_line in body.split("\n"):
-        stripped_line = raw_line.strip()
-        kind = "blank" if not stripped_line else "quote" if stripped_line.startswith(">") else "text"
-        if runs and runs[-1][0] == kind:
+        kind = _line_kind(raw_line)
+        if runs and runs[-1][0] == kind and kind != "attribution":
             runs[-1][1].append(raw_line)
         else:
             runs.append((kind, [raw_line]))

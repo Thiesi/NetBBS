@@ -1889,6 +1889,13 @@ parent, listed on the board like any other post. There is no threaded view.
 - **Body:** starts as the post quoted, with the cursor under the quote:
   "<author> wrote:", then each line of the post before its signature with
   `> ` in front. A line that was already quoted becomes `> > `.
+- **Attribution line:** the board reader, which reflows prose, shows a line
+  ending in " wrote:" (not itself quoted) as a line of its own, never joined
+  to the text around it. A replier who trims the quote and writes straight
+  under "<author> wrote:" would otherwise have their words read as the
+  quoted author's (#837). This holds for any such line, not just ones the
+  quote wrote, since a reader cannot tell them apart. Mail keeps every line
+  anyway.
 - **Quote limits:** a quote is at most 40 lines and 8 KB, and a cut quote
   ends with `> [...]`, so a reply to a long post stays writable in the line
   editor.
