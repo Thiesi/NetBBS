@@ -35,7 +35,7 @@ from netbbs.net.unicode_style_preference import unicode_style_enabled
 from netbbs.net.session import SessionClosedError
 from netbbs.net.session_activity import records_activity
 from netbbs.moderation.log import record_action
-from netbbs.rendering.charset import CP437, UTF8, encode_text
+from netbbs.rendering.charset import CP437, UTF8, encode_text, input_codec
 
 _logger = logging.getLogger(__name__)
 DOOR_CPU_LIMIT_SECONDS = 300
@@ -418,8 +418,7 @@ class DoorTerminal:
         self.session, self.encoding = session, encoding
         self.charset = getattr(session, "output_charset", UTF8)
         # Caller keystrokes, decoded before re-encoding for the door.
-        self.decoder = codecs.getincrementaldecoder(
-            "cp437" if self.charset == CP437 else "utf-8")("replace")
+        self.decoder = codecs.getincrementaldecoder(input_codec(session))("replace")
         # A UTF-8 door's output, decoded before mapping for a narrower terminal.
         self.output_decoder = codecs.getincrementaldecoder("utf-8")("replace")
         self.pending = deque()
