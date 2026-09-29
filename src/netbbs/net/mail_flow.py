@@ -124,6 +124,7 @@ from netbbs.file_refs import (
     body_with_link_text,
     mail_refs,
     open_ref,
+    sender_ref_problem,
 )
 from netbbs.mail_groups import LetterRecipient, LetterRefused, send_letter, too_many_recipients_text
 from netbbs.net.file_ref_view import (
@@ -3691,10 +3692,7 @@ def _unavailable_file_problem(db: Database, sender: User, files: list[FileRef]) 
     """Why a letter pointing at `files` cannot go, for the one path that
     does not reach `netbbs.mail`'s check: a letter to one person on another
     BBS, which names its files in text."""
-    for ref in files:
-        if open_ref(db, sender, ref).state != AVAILABLE:
-            return f"{ref.filename} is no longer available to you. [R]emove it from the letter, then send it."
-    return None
+    return sender_ref_problem(db, sender, files)
 
 
 def _file_lines_too_long(link_body: str) -> str | None:
