@@ -1689,6 +1689,51 @@ def test_sent_shows_the_delivery_state_in_the_list_and_the_view(tmp_path, status
     db.close()
 
 
+def test_sent_shows_mail_left_at_a_relay_as_with_a_relay(tmp_path):
+    """Issue #874: still pending, but the caller is told the letter sits at
+    a relay and when it will give up."""
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
+    alice = create_user(db, "alice", password="hunter2pw", user_level=10)
+    message, _remote = _sent_link_mail(db, alice)
+    db.connection.execute(
+        "UPDATE mail_messages SET link_relay_handoff_at = '2026-03-01T12:00:00.000000Z' "
+        "WHERE link_event_content_id = ?",
+        (message.content_id,),
+    )
+    db.connection.commit()
+
+    session = FakeSession(keys=["s", "1", "b", "b", "b"])
+    session.terminal_width = 200
+    lane = DatabaseLane(db_path)
+    asyncio.run(browse_mail(session, lane, alice))
+
+    text = _visible_text(session)
+    assert re.search(rf"1  bob@{re.escape(_FARPOINT)} +Hello +with relay ", text)
+    assert (
+        "Delivery: With a relay, no answer yet: it was left at a relay for that BBS to collect. "
+        "If no answer comes back within 14 days, it expires."
+    ) in " ".join(text.split())
+    lane.close()
+    db.close()
+
+
+def test_a_relay_timeout_is_told_at_the_next_main_menu(tmp_path):
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
+    alice = create_user(db, "alice", password="hunter2pw", user_level=10)
+    message, _remote = _sent_link_mail(db, alice, subject="Lunch")
+    _set_delivery(db, message, "expired", "no_answer", notice=1)
+
+    text = " ".join(_run_main_menu(db_path, db, alice).split())
+
+    assert (
+        f'Your mail "Lunch" to bob@{_FARPOINT} expired: no answer came back in the 14 days since it was '
+        "left at a relay for that BBS, so it may not have arrived."
+    ) in text
+    db.close()
+
+
 def test_sent_shows_no_delivery_state_for_local_mail(tmp_path):
     db_path = tmp_path / "node.db"
     db = Database(db_path)

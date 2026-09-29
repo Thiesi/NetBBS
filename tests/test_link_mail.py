@@ -7,6 +7,7 @@ Link messages are not yet implemented.
 from __future__ import annotations
 
 import base64
+import datetime
 import json
 
 import pytest
@@ -29,12 +30,15 @@ from netbbs.link.mail import (
     bounce_reason_text,
     compose_link_message,
     deliver_link_message,
+    delivery_display_status,
     delivery_explanation,
     expire_link_message_delivery,
+    expire_unanswered_relay_mail,
     get_link_mail_acknowledgement,
     get_link_message_for_delivery,
     pending_delivery_notices,
     record_link_message_refused,
+    record_relay_handoff,
     unexpire_link_message_delivery,
 )
 from netbbs.link.node_identity import bootstrap_node_identity
@@ -624,6 +628,139 @@ def _id(db):
     return db.connection.execute("SELECT id FROM mail_messages").fetchone()[0]
 
 
+# -- mail left at a relay that gets no answer (issue #874) ----------------------
+
+_HANDOFF = "2026-03-01T12:00:00.000000Z"
+_HANDOFF_MOMENT = datetime.datetime(2026, 3, 1, 12, tzinfo=datetime.timezone.utc)
+
+
+def _handoff_row(db):
+    return db.connection.execute(
+        "SELECT link_delivery_status, link_delivery_reason, link_delivery_notice_pending, link_relay_handoff_at "
+        "FROM mail_messages"
+    ).fetchone()
+
+
+def test_a_relay_handoff_keeps_the_letter_pending_and_records_when(db, alice, node_identity, remote_node_identity):
+    message = _sent(db, alice, remote_node_identity, node_identity)
+
+    record_relay_handoff(db, message.content_id, now=_HANDOFF)
+
+    assert tuple(_handoff_row(db)) == ("pending", None, 0, _HANDOFF)
+
+
+def test_a_relay_handoff_does_not_touch_a_letter_already_answered(db, alice, node_identity, remote_node_identity):
+    """The recipient can collect and answer before this node's own pass
+    records the deposit; the answer stands."""
+    message = _sent(db, alice, remote_node_identity, node_identity)
+    apply_link_message_bounced(db, _bounce(remote_node_identity, message))
+
+    record_relay_handoff(db, message.content_id, now=_HANDOFF)
+
+    assert _handoff_row(db)["link_relay_handoff_at"] is None
+
+
+def test_a_letter_left_at_a_relay_expires_after_fourteen_days_without_an_answer(
+    db, alice, node_identity, remote_node_identity
+):
+    message = _sent(db, alice, remote_node_identity, node_identity)
+    record_relay_handoff(db, message.content_id, now=_HANDOFF)
+
+    just_before = _HANDOFF_MOMENT + datetime.timedelta(days=14) - datetime.timedelta(seconds=1)
+    assert expire_unanswered_relay_mail(db, now=just_before) == 0
+    assert _delivery_row(db)["link_delivery_status"] == "pending"
+
+    assert expire_unanswered_relay_mail(db, now=_HANDOFF_MOMENT + datetime.timedelta(days=14)) == 1
+    assert tuple(_delivery_row(db)) == ("expired", "no_answer", 1)
+    # Once is enough: a second pass finds nothing left to expire.
+    assert expire_unanswered_relay_mail(db, now=_HANDOFF_MOMENT + datetime.timedelta(days=30)) == 0
+
+
+def test_a_letter_pushed_directly_never_times_out(db, alice, node_identity, remote_node_identity):
+    """Direct pushes are unaffected (issue #874): only a relay handoff
+    starts the clock."""
+    _sent(db, alice, remote_node_identity, node_identity)
+
+    assert expire_unanswered_relay_mail(db, now=_HANDOFF_MOMENT + datetime.timedelta(days=365)) == 0
+    assert _delivery_row(db)["link_delivery_status"] == "pending"
+
+
+def test_a_late_acceptance_wins_over_a_relay_timeout(db, alice, node_identity, remote_node_identity):
+    message = _sent(db, alice, remote_node_identity, node_identity)
+    record_relay_handoff(db, message.content_id, now=_HANDOFF)
+    expire_unanswered_relay_mail(db, now=_HANDOFF_MOMENT + datetime.timedelta(days=15))
+
+    apply_link_message_accepted(db, build_link_message_accepted(
+        signing_identity=remote_node_identity.signing_key,
+        recipient_node_fingerprint=remote_node_identity.fingerprint,
+        message_content_id=message.content_id,
+        created_at="2026-01-01T00:05:00Z",
+    ).to_dict())
+
+    assert tuple(_delivery_row(db)) == ("delivered", None, 0)
+
+
+def test_a_late_bounce_wins_over_a_relay_timeout_and_is_told_again(db, alice, node_identity, remote_node_identity):
+    """The sender already read "may not have arrived"; the bounce is the
+    first real answer, so they are told that too."""
+    message = _sent(db, alice, remote_node_identity, node_identity)
+    record_relay_handoff(db, message.content_id, now=_HANDOFF)
+    expire_unanswered_relay_mail(db, now=_HANDOFF_MOMENT + datetime.timedelta(days=15))
+    acknowledge_delivery_notices(db, [_id(db)])
+
+    apply_link_message_bounced(db, _bounce(remote_node_identity, message, "blocked_sender"))
+
+    assert tuple(_delivery_row(db)) == ("bounced", "blocked_sender", 1)
+
+
+def test_a_relay_timeout_is_told_as_maybe_not_arrived(db, alice, node_identity, remote_node_identity):
+    message = _sent(db, alice, remote_node_identity, node_identity, subject="Lunch")
+    record_relay_handoff(db, message.content_id, now=_HANDOFF)
+    expire_unanswered_relay_mail(db, now=_HANDOFF_MOMENT + datetime.timedelta(days=15))
+
+    lines, _ids = pending_delivery_notices(db, alice)
+
+    assert lines == [
+        'Your mail "Lunch" to bob@Unnamed linked node expired: no answer came back in the 14 days '
+        "since it was left at a relay for that BBS, so it may not have arrived."
+    ]
+
+
+def test_a_replay_forgets_an_old_relay_handoff(db, alice, node_identity, remote_node_identity):
+    message = _sent(db, alice, remote_node_identity, node_identity)
+    record_relay_handoff(db, message.content_id, now=_HANDOFF)
+    expire_link_message_delivery(db, message.content_id)
+
+    unexpire_link_message_delivery(db, message.content_id)
+
+    assert tuple(_handoff_row(db)) == ("pending", None, 0, None)
+
+
+@pytest.mark.parametrize(
+    ("status", "handoff", "shown"),
+    [
+        ("pending", None, "pending"),
+        ("pending", _HANDOFF, "relayed"),
+        ("delivered", _HANDOFF, "delivered"),
+        ("expired", _HANDOFF, "expired"),
+        (None, None, None),
+    ],
+)
+def test_delivery_display_status(status, handoff, shown):
+    assert delivery_display_status(status, handoff) == shown
+
+
+def test_every_expiry_reason_has_plain_words():
+    """A sender-side reason: this node gives it to itself, so it belongs in
+    the expiry table and in neither bounce table."""
+    from netbbs.link import mail
+    from netbbs.link.mail import _BOUNCE_REASON_TEXT, _EXPIRED_TEXT
+
+    codes = {value for name, value in vars(mail).items() if name.startswith("EXPIRED_") and isinstance(value, str)}
+    assert codes == set(_EXPIRED_TEXT) == {"own_policy", "no_answer"}
+    assert not codes & set(_BOUNCE_REASON_TEXT)
+
+
 def test_pending_delivery_notices_name_the_message_and_the_reason_until_acknowledged(
     db, alice, bob, node_identity, remote_node_identity
 ):
@@ -696,6 +833,16 @@ def test_every_reason_a_node_can_give_has_plain_words():
         (
             "expired", "own_policy",
             "Expired: this BBS stopped exchanging mail with that BBS before it could be sent. It was not delivered.",
+        ),
+        (
+            "relayed", None,
+            "With a relay, no answer yet: it was left at a relay for that BBS to collect. "
+            "If no answer comes back within 14 days, it expires.",
+        ),
+        (
+            "expired", "no_answer",
+            "Expired: no answer came back in the 14 days since it was left at a relay for that BBS, "
+            "so it may not have arrived.",
         ),
         (None, None, None),
     ],

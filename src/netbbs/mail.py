@@ -319,6 +319,9 @@ class MailMessage:
     # mail has neither.
     link_delivery_status: str | None = None
     link_delivery_reason: str | None = None
+    # When a still-pending Link letter was left at a relay for the
+    # recipient's node to collect (issue #874); NULL otherwise.
+    link_relay_handoff_at: str | None = None
     # Sent by the BBS itself (issue #819): no sender account, no reply,
     # never carried over Link. See `send_system_mail`.
     from_system: bool = False
@@ -777,6 +780,7 @@ def _row_to_message(row: sqlite3.Row) -> MailMessage:
         recipient_remote_address=row["recipient_remote_address"],
         link_delivery_status=row["link_delivery_status"],
         link_delivery_reason=row["link_delivery_reason"],
+        link_relay_handoff_at=row["link_relay_handoff_at"],
         from_system=bool(row["from_system"]),
         recipient_label=row["recipient_label"],
     )
