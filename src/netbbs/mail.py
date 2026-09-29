@@ -1109,6 +1109,30 @@ def unread_count(db: Database, user: User) -> int:
     return row["n"]
 
 
+def unread_count_since(db: Database, user: User, since: str) -> int:
+    """How many of `user`'s unread letters reached this node at or after
+    `since` (issue #917, "new since your last call").
+
+    By arrival, not by `created_at`: a letter received over Link is dated
+    by its sender's signed time (issue #808), which can be well before it
+    arrived -- a letter held by a relay for a day is still new to its
+    reader. Such a row records its arrival as `sender_deleted_at`, set on
+    insert because no Sent copy of it exists here and never changed after
+    (it has no local sender to delete it). Every other letter -- local,
+    system, and Link mail stored before that column was set on receipt --
+    is dated when it was stored, so `created_at` is its arrival."""
+    row = db.connection.execute(
+        """
+        SELECT COUNT(*) AS n FROM mail_messages
+        WHERE recipient_user_id = ? AND recipient_deleted_at IS NULL AND read_at IS NULL
+          AND (CASE WHEN link_source_event_id IS NOT NULL THEN COALESCE(sender_deleted_at, created_at)
+                    ELSE created_at END) >= ?
+        """,
+        (user.id, since),
+    ).fetchone()
+    return row["n"]
+
+
 MailKey = tuple[int, str]
 
 
