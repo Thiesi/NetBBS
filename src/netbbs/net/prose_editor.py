@@ -403,7 +403,8 @@ async def edit_prose(
 def _dispatch(state: _EditorState, key: EditorKey, width: int, height: int) -> bool:
     """Applies `key` to `state`. Returns True if the keystroke was
     refused for being at `state.max_bytes` (GitHub issue #32), or had
-    nothing to act on -- Ctrl-Y with nothing cut, Ctrl-R off a quote
+    nothing to act on -- Ctrl-K on the empty last line, Ctrl-Y with nothing
+    cut, Ctrl-R off a quote
     (issue #815) -- rather than applied. The caller sounds the bell for this, adapting
     `netbbs.rendering.ansi.reject_keystroke`'s "that key doesn't do
     anything here" convention to an editor that draws its own screen
@@ -412,7 +413,7 @@ def _dispatch(state: _EditorState, key: EditorKey, width: int, height: int) -> b
     cutting, state.cutting = state.cutting, False
     if key.kind == EditorKeyKind.CTRL and key.char == "k":
         if buffer.cursor_line == len(buffer.lines) - 1 and not buffer.lines[-1]:
-            return False  # the empty last line: nothing to cut
+            return True  # the empty last line: nothing to cut
         if not cutting:
             state.cut_lines = []
         state.cut_lines.append(buffer.cut_line())

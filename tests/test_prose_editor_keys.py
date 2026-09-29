@@ -70,9 +70,10 @@ def test_cutting_the_last_line_empties_it(tmp_path):
 
 
 def test_ctrl_k_on_the_empty_last_line_does_nothing(tmp_path):
-    result, _ = _edit(["CTRL+K", "CTRL+X"], tmp_path)
-    # Nothing changed, so Ctrl-X leaves without asking.
+    result, session = _edit(["CTRL+K", "CTRL+X"], tmp_path)
+    # Nothing changed, so Ctrl-X leaves without asking; the bell said so.
     assert result is None
+    assert "\a" in _written_text(session)
 
 
 def test_ctrl_y_with_nothing_cut_rings_the_bell(tmp_path):
