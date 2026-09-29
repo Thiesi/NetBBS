@@ -854,7 +854,10 @@ this node refused, and how full your callers' mailboxes are.
   it reached, whose mailbox turned it away (by name), and how many accounts
   were left out. It is local only: callers on linked BBSes are not written
   to. A letter already sent is never sent twice, even if you send its draft
-  again after a dropped connection.
+  again after a dropped connection. **[A]ttach file** on the review screen
+  points it at files in your file areas, as any letter can; a caller who may
+  not open one of those file areas is skipped, and named after Send, like a
+  full mailbox.
 
 These screens never show what a letter says. Mail is private: you see counts,
 account names, senders and reasons, never a subject or a body, and a refused

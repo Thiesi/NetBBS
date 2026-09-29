@@ -2661,6 +2661,55 @@ each recipient first opened it.
   `no receipt`; a Link copy that bounced, expired or is on its way still
   wins, as the more urgent state.
 
+**Files in a letter** (issue #830). A letter can point at files already in
+this node's file areas; there are no attachments of new files and no new
+storage. The model is `netbbs.file_refs`, meant to be reused as it is by a
+board post that points at a file (issue #842 F086); the screens are
+`netbbs.net.file_ref_view`.
+- **What is stored.** One `mail_file_refs` row per file per letter row:
+  the file's content-addressed `file_id` (which no later upload reuses;
+  `files.id` can be), and its name, area name and size as they were when
+  attached. A file deleted since is still named. At most `MAX_FILE_REFS`
+  (5) per letter. The body is left as the writer wrote it.
+- **Attaching.** `[A]ttach file` on the review screen picks a file area the
+  writer may read, then a file in it (approved, not past its age);
+  `[R]emove file` takes one off. The files are kept with the draft. A
+  forward carries the files of the letter it passes on, those the forwarder
+  can open; a reply, Reply all and Resend carry none.
+- **Who may be sent it.** Every local recipient must be able to read the
+  file area of every file: its read level or grant, and its age requirement
+  (`may_read_area`, the file areas' own gate). Checked for each copy by
+  `mail_groups.recipient_problem` before anything is written, so a letter to
+  several people refuses at Send, naming who cannot open which area, and
+  sends nothing -- the same all-or-none rule as a full mailbox. Sending to the
+  others with the file left out for one was rejected: every copy has the same
+  body, and a reader would read about a file they were never given. Mail to
+  all callers instead skips and names callers who cannot open a file, as it
+  does full mailboxes: a letter to everyone must not be held back by a few.
+  The writer must be able to open each file at Send too.
+- **Who may download it.** The letter's view lists the files under Date and
+  `[G]et file` downloads one through the file areas' own download
+  (`file_flow.send_file_to_caller`: Zmodem, else a browser link, and a
+  browser link when a Zmodem send fails), after `open_ref` checks again. A
+  reader who may no longer read the area -- its level raised after sending --
+  sees "A file in a file area you can't open", never the file's or area's
+  name. A file deleted, expired (by status or already past its area's age),
+  in an area removed or hidden (issue #683), or with its content gone shows
+  as "no longer available".
+- **Local only.** Nothing about a file crosses Link but text. A Link copy has
+  no reference rows; its body ends, after a blank line, with one line per
+  file: `File: <filename> (<size>) in file area "<area name>" on <node
+  display name>` (`link_text_line`), size as the file areas show it (B, KiB,
+  MiB, GiB). Those are the facts a reader on another node can use to find the
+  file by hand; the `file_id` is left out as meaningless to them. Received
+  Link mail never has references.
+- **Removal.** `mail_file_refs` has no foreign keys. One to `mail_messages`
+  would make that table a foreign-key parent, and a rebuild of it (as
+  migration 97 was) would then cascade through the references on DROP
+  TABLE's implicit DELETE. Rows go with their letter in
+  `netbbs.mail._remove_letters_without_commit`, the one place a letter is
+  deleted for good, beside its `mail_search` entry.
+
 **How a body reads** (issue #809). A letter keeps its writer's lines: the
 message view, Sent's view and the review screen show every line as written,
 and wrap only a line wider than the terminal, at a word

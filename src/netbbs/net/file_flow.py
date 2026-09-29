@@ -89,6 +89,7 @@ from netbbs.files.categories import (
 from netbbs.files.diz import MAX_DESCRIPTION_BYTES, MAX_DESCRIPTION_LINES, read_archive_description
 from netbbs.files.entries import count_pending_files, count_visible_files
 from netbbs.files.storage import new_incoming_temp_path
+from netbbs.file_refs import file_size_text
 from netbbs.net.file_transfer import (
     DEFAULT_GRANT_TTL_SECONDS,
     DOWNLOAD,
@@ -439,13 +440,7 @@ def _format_size(size_bytes: int) -> str:
     most file managers and BBS file listings show, rather than raw byte
     counts once a file is more than a few hundred bytes.
     """
-    if size_bytes < 1024:
-        return f"{size_bytes} B"
-    size = size_bytes / 1024
-    for unit in ("KiB", "MiB", "GiB"):
-        if size < 1024 or unit == "GiB":
-            return f"{size:.1f} {unit}"
-        size /= 1024
+    return file_size_text(size_bytes)
 
 
 def _file_column_widths(terminal_width: int, *, uploader_need: int | None = None) -> tuple[int, int, int, int, int]:

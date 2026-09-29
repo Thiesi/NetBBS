@@ -885,6 +885,7 @@ async def _main_menu_loop(
                     await browse_mail(
                         session, lane, user, link_context=link_context,
                         choice_prompt=lambda: _main_menu_prompt(db, user, node_controls),
+                        transfers=node_controls.transfers if node_controls is not None else None,
                     )
                 else:
                     await session.write_line(

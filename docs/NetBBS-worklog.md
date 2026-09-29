@@ -1131,6 +1131,12 @@ messages.
   is gone while its siblings stay. Sent collapses a group to one row by its
   newest copy (`_load_mail_rows`, `search_mail`), so anything that acts on
   a Sent row -- delete, mark -- must act on `_MailRow.ids`, every copy.
+- A letter is deleted for good only by `netbbs.mail._remove_letters_without_commit`,
+  which also removes its `mail_search` entry (issue #824) and its
+  `mail_file_refs` rows (issue #830). `mail_messages` has no AUTOINCREMENT,
+  so a freed id is reused by the next letter; any new per-letter side table
+  must be cleaned there, not by a foreign key: `mail_messages` stays
+  unreferenced so that rebuilding it never cascades.
 - Writing several copies atomically needs the `_without_commit` senders
   (`send_mail_without_commit`, `send_system_mail_without_commit`,
   `compose_link_message(commit=False)`), and `make_room` no longer commits

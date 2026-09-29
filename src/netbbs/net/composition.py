@@ -685,8 +685,18 @@ async def review_composition(
     body_mode: str | None = None,
     body_layout: str = "prose",
     breadcrumb: Sequence[str] = ("Compose",),
-) -> ReviewAction:
+    extra_rows: Sequence[str] = (),
+    extra_actions: Sequence[tuple[str, str, str | None]] = (),
+) -> ReviewAction | str:
     """Render a complete draft and return one explicit review action.
+
+    `extra_rows` and `extra_actions` are a caller's own additions (issue
+    #830: mail's attached files): rows, already styled, shown under the
+    Subject on every page, and `(key, label, brief)` actions placed after
+    `[B]ody`, the label already styled with `menu_key`. Pressing one returns
+    its key, lower-cased, instead of a `ReviewAction`. Both count toward the
+    page budget like the screen's own rows. Neither given, the screen is
+    what it always was.
 
     `commit_brief` and `description_level` (issue #160's rollout to this
     screen) describe the caller-supplied commit action for `menu_grid`'s
@@ -735,10 +745,11 @@ async def review_composition(
     }
     if recipient is not None:
         actions["t"] = ReviewAction.EDIT_RECIPIENT
+    extra_keys = {key.lower() for key, _label, _brief in extra_actions}
 
     selected: str | None = None
     width = max(1, session.terminal_width)
-    next_key, prev_key = (">", "<") if {"n", "p"} & set(actions) else ("n", "p")
+    next_key, prev_key = (">", "<") if {"n", "p"} & (set(actions) | extra_keys) else ("n", "p")
     if body_mode is None:
         body_rows = _preview_body(body, width).split("\n")
     else:
@@ -760,6 +771,7 @@ async def review_composition(
             MenuEntry(label=menu_key("U", "pdate subject"), brief="Change the subject"),
             MenuEntry(label=menu_key("B", "ody"), brief="Edit the body text"),
         ])
+        options.extend(MenuEntry(label=label, brief=brief) for _key, label, brief in extra_actions)
         if paged:
             options.extend([
                 MenuEntry(
@@ -804,6 +816,8 @@ async def review_composition(
             ),
             width,
         ))
+        for extra in extra_rows:
+            rows.extend(_rows(extra, width))
         rows.append(
             colored("> Body", fg_color=accent_color, bold=True)
             if selected == "b"
@@ -914,4 +928,7 @@ async def review_composition(
         if action is not None:
             await session.write_line("")
             return action
+        if choice in extra_keys:
+            await session.write_line("")
+            return choice
         await session.write(reject_unhandled_key(choice))

@@ -223,9 +223,9 @@ def test_send_refuses_a_recipient_who_blocked_you_while_you_wrote(node, monkeypa
     session = LineSession(keys=["c", "s", "c", "y", "b", "b"], lines=["bob", "Hello", "Hi there", "/done"])
     real_send = mail_module.send_mail
 
-    def block_then_send(db_, sender, recipient, subject, body):
+    def block_then_send(db_, sender, recipient, subject, body, **kwargs):
         block_local_sender(db_, recipient, sender)
-        return real_send(db_, sender, recipient, subject, body)
+        return real_send(db_, sender, recipient, subject, body, **kwargs)
 
     monkeypatch.setattr("netbbs.net.mail_flow.send_mail", block_then_send)
     asyncio.run(browse_mail(session, lane, alice))
