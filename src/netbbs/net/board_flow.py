@@ -78,6 +78,7 @@ from netbbs.link.boards import (
     queue_board_post_tombstone_if_linked,
 )
 from netbbs.moderation import BoardPermission, has_permission
+from netbbs.mail import MAX_MAIL_SUBJECT_BYTES
 from netbbs.net.board_list_banner import load_board_list_banner
 from netbbs.net.breadcrumb_preference import breadcrumb_collapsed_enabled
 from netbbs.net.chat_flow import NAME_GATE_NOTE
@@ -97,6 +98,7 @@ from netbbs.net.detail_view import show_detail
 from netbbs.net.draft_storage import delete_draft, drafts_directory, load_draft
 from netbbs.net.editor_preference import fullscreen_editor_enabled
 from netbbs.net.help_overlay import show_help
+from netbbs.net.mail_flow import _split_link_address, caller_mail_refusal, mail_someone, post_reply_key
 from netbbs.net.menu_description_preference import menu_description_level
 from netbbs.net.node_theme import effective_accent_color, effective_header_color, effective_header_color_256
 from netbbs.net.notices import announce, pending_notice_rows, take_notices, write_notices
@@ -819,7 +821,8 @@ _LIST_HELP = [
     "Pinned posts are listed first, marked \"pin\". A moderator pins",
     "and unpins a post, and keeps it from expiring, while reading it.",
     "",
-    "Reading a post: Reply, Edit, Withdraw, Remove, Next and Previous post live there,",
+    "Reading a post: Reply, Mail author (a private reply), Edit,",
+    "Withdraw, Remove, Next and Previous post live there,",
     "and PgUp/PgDn page a long post. A post counts as read once you",
     "open it; the list marks the ones you have not opened as new.",
 ]
@@ -1184,6 +1187,15 @@ async def _show_board(
             can_reply = can_post and post.tombstoned_at is None and not held
             if can_reply:
                 actions.append(("r", menu_key("R", "eply")))
+            # A private reply to the author (issue #821), to anyone who may
+            # read the post, whether or not they may post here.
+            mail_target = (
+                _post_author_mail_target(db, post, user, link_context=link_context)
+                if post.tombstoned_at is None and not held and caller_mail_refusal(session, db, user) is None
+                else None
+            )
+            if mail_target is not None:
+                actions.append(("m", menu_key("M", "ail author")))
             # An edited or removed post's versions, for moderators only
             # (issue #675, decided with the maintainer).
             can_see_history = not held and (post.is_edited or post.tombstoned_at is not None) and has_permission(
@@ -1248,6 +1260,22 @@ async def _show_board(
                         page = _refetch_current_page()
                         return None
                     index = found
+                continue
+            if key == "m" and mail_target is not None:
+                # Mail runs on a lane; the board page reads through `db`, so
+                # one is opened for as long as the letter is (as the
+                # moderation queue does).
+                account, address = mail_target
+                mail_lane = DatabaseLane(db.path)
+                try:
+                    await mail_someone(
+                        session, mail_lane, user, recipient=account, link_address=address,
+                        subject=reply_subject(post.subject, max_bytes=MAX_MAIL_SUBJECT_BYTES),
+                        quote=_reply_quote(db, post, board, name_requirement=name_requirement),
+                        reply_key=post_reply_key(post.root_post_id), link_context=link_context,
+                    )
+                finally:
+                    mail_lane.close()
                 continue
             if key == "r" and can_reply:
                 if _reply_target(db, post, board) is None:
@@ -2467,6 +2495,27 @@ def _reply_target(db: Database, post: Post, board: Board) -> Post | None:
     if current is None or current.tombstoned_at is not None:
         return None
     return current
+
+
+def _post_author_mail_target(
+    db: Database, post: Post, user: User, *, link_context: LinkContext | None,
+) -> tuple[User | None, str | None] | None:
+    """Whom `[M]ail author` writes to (issue #821): `(account, None)` for
+    a post written here, `(None, "user@<fingerprint>")` for one carried
+    from another BBS -- the author's stable Link address, checked when the
+    key is pressed -- or `None` when there is nobody to write to: the
+    caller's own post, a deleted account, and a carried post while this
+    node has Link off."""
+    if post.author_user_id is not None:
+        account = get_user_by_id(db, post.author_user_id)
+        if account is None or account.id == user.id:
+            return None
+        return account, None
+    if link_context is None:
+        return None
+    if _split_link_address(post.author_label) is None:
+        return None
+    return None, post.author_label
 
 
 def _reply_quote(db: Database, post: Post, board: Board, *, name_requirement: str | None) -> str:
