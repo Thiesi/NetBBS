@@ -24,6 +24,13 @@ from dataclasses import dataclass
 
 from netbbs.auth.users import User, get_user_by_id, is_usable_sysop, list_users
 from netbbs.config import get_mail_min_level, is_node_fingerprint_shape
+from netbbs.file_refs import (
+    FileRef,
+    forget_mail_refs_without_commit,
+    recipient_ref_problem,
+    sender_ref_problem,
+    write_mail_refs_without_commit,
+)
 from netbbs.guest import guest_is_eligible
 from netbbs.permissions.levels import meets_level
 from netbbs.search import index_mail_without_commit, unindex_mail_without_commit
@@ -369,7 +376,9 @@ def validate_mail_fields(subject: object, body: object) -> str:
     return subject
 
 
-def send_mail(db: Database, sender: User, recipient: User, subject: str, body: str) -> MailMessage:
+def send_mail(
+    db: Database, sender: User, recipient: User, subject: str, body: str, *, files: list[FileRef] = (),
+) -> MailMessage:
     """
     Send one message from `sender` to `recipient`.
 
@@ -387,19 +396,24 @@ def send_mail(db: Database, sender: User, recipient: User, subject: str, body: s
     blocked `sender` (issue #817). Whether the sender may write mail at all
     is not checked here: that is the mail screen's gate
     (`mail_access_refusal`).
+
+    `files` are the files in this node's file areas the letter points at
+    (issue #830, `netbbs.file_refs`): `MailError` if `sender` cannot open
+    one, `MailRecipientRefused` if `recipient` may not read its area.
     """
-    message = send_mail_without_commit(db, sender, recipient, subject, body)
+    message = send_mail_without_commit(db, sender, recipient, subject, body, files=files)
     db.connection.commit()
     return message
 
 
 def send_mail_without_commit(
     db: Database, sender: User, recipient: User, subject: str, body: str,
-    *, group: LetterGroup | None = None,
+    *, group: LetterGroup | None = None, files: list[FileRef] = (),
 ) -> MailMessage:
     """`send_mail` without the commit, for a letter to several people
     (issue #827), whose copies are written in one transaction. `group`
-    makes this one copy of such a letter."""
+    makes this one copy of such a letter; `files` are written with it, one
+    reference row each (issue #830)."""
     subject = validate_mail_fields(subject, body)
     refusal = mail_recipient_refusal(db, recipient)
     if refusal is not None:
@@ -407,6 +421,14 @@ def send_mail_without_commit(
     blocked = mail_sender_refusal(db, recipient, sender=sender)
     if blocked is not None:
         raise MailSenderBlocked(blocked)
+    files = list(files)
+    if files:
+        problem = sender_ref_problem(db, sender, files)
+        if problem is not None:
+            raise MailError(problem)
+        problem = recipient_ref_problem(db, recipient, files)
+        if problem is not None:
+            raise MailRecipientRefused(problem)
 
     _make_room_if_needed(db, recipient)
 
@@ -427,6 +449,8 @@ def send_mail_without_commit(
         "SELECT * FROM mail_messages WHERE id = last_insert_rowid()"
     ).fetchone()
     index_mail_without_commit(db, row["id"])
+    if files:
+        write_mail_refs_without_commit(db, row["id"], files)
     return _row_to_message(row)
 
 
@@ -460,13 +484,22 @@ def send_system_mail(db: Database, recipient: User, subject: str, body: str) -> 
 
 def send_system_mail_without_commit(
     db: Database, recipient: User, subject: str, body: str, *, group: LetterGroup | None = None,
+    files: list[FileRef] = (),
 ) -> MailMessage:
     """`send_system_mail` without the commit: one copy of a notice to all
-    callers (issue #827) is written in the same transaction as the rest."""
+    callers (issue #827) is written in the same transaction as the rest.
+    `files` (issue #830) are the notice's file references, which each
+    recipient must be able to open; the SysOp writing it checked they can
+    open them at the console."""
     subject = validate_mail_fields(subject, body)
     refusal = mail_recipient_refusal(db, recipient)
     if refusal is not None:
         raise MailRecipientRefused(refusal)
+    files = list(files)
+    if files:
+        problem = recipient_ref_problem(db, recipient, files)
+        if problem is not None:
+            raise MailRecipientRefused(problem)
 
     _make_room_if_needed(db, recipient)
 
@@ -487,6 +520,8 @@ def send_system_mail_without_commit(
         "SELECT * FROM mail_messages WHERE id = last_insert_rowid()"
     ).fetchone()
     index_mail_without_commit(db, row["id"])
+    if files:
+        write_mail_refs_without_commit(db, row["id"], files)
     return _row_to_message(row)
 
 
@@ -862,10 +897,13 @@ ALREADY_SENT_TEXT = "This letter was already sent; it is in your Sent folder."
 class AllCallersResult:
     """What `send_to_all_callers` did: the names of the callers it reached
     and of those whose mailbox was full, and how many accounts take no mail
-    at all and were left out."""
+    at all and were left out. `no_file_access` names the callers skipped
+    because a file the letter points at is in an area they may not read
+    (issue #830)."""
     sent_to: tuple[str, ...]
     mailbox_full: tuple[str, ...]
     left_out: int
+    no_file_access: tuple[str, ...] = ()
 
 
 def all_callers_recipients(db: Database, sender: User | None) -> tuple[list[User], int]:
@@ -888,6 +926,7 @@ def all_callers_recipients(db: Database, sender: User | None) -> tuple[list[User
 
 def send_to_all_callers(
     db: Database, subject: str, body: str, *, group_id: str, sender: User | None,
+    files: list[FileRef] = (),
 ) -> AllCallersResult:
     """SysOp mail to all callers (issue #827): one copy per account that
     takes mail, from `sender`'s own account -- which callers can reply to --
@@ -898,28 +937,43 @@ def send_to_all_callers(
     kept mail is named in the result rather than sent to. All copies are
     written in one transaction, and a `group_id` already sent raises
     `MailError`, so sending the same letter again -- a retry after a
-    dropped connection, a kept draft sent twice -- reaches nobody twice."""
+    dropped connection, a kept draft sent twice -- reaches nobody twice.
+
+    `files` (issue #830) are files the letter points at. A caller who may
+    not read the area one is in is skipped, and named in the result, as a
+    caller with a full mailbox is: a letter to everyone is not held back by
+    a few, and nobody is sent a file they cannot open."""
     subject = validate_mail_fields(subject, body)
     if letter_already_sent(db, sender, group_id):
         raise MailError(ALREADY_SENT_TEXT)
+    files = list(files)
+    if files and sender is not None:
+        problem = sender_ref_problem(db, sender, files)
+        if problem is not None:
+            raise MailError(problem)
     recipients, left_out = all_callers_recipients(db, sender)
     group = LetterGroup(id=group_id, to=encode_group_to(None))
-    sent, full = [], []
+    sent, full, no_access = [], [], []
     try:
         for recipient in recipients:
             if not mail_has_room(db, recipient):
                 full.append(recipient.username)
                 continue
+            if files and recipient_ref_problem(db, recipient, files) is not None:
+                no_access.append(recipient.username)
+                continue
             if sender is None:
-                send_system_mail_without_commit(db, recipient, subject, body, group=group)
+                send_system_mail_without_commit(db, recipient, subject, body, group=group, files=files)
             else:
-                send_mail_without_commit(db, sender, recipient, subject, body, group=group)
+                send_mail_without_commit(db, sender, recipient, subject, body, group=group, files=files)
             sent.append(recipient.username)
         db.connection.commit()
     except BaseException:
         db.connection.rollback()
         raise
-    return AllCallersResult(sent_to=tuple(sent), mailbox_full=tuple(full), left_out=left_out)
+    return AllCallersResult(
+        sent_to=tuple(sent), mailbox_full=tuple(full), left_out=left_out, no_file_access=tuple(no_access),
+    )
 
 
 # -- who a letter is from and to, as a reader sees it -----------------------
@@ -1290,8 +1344,7 @@ def _hard_delete_or_mark(
     commit: bool = True,
 ) -> None:
     if sender_deleted_at is not None and recipient_deleted_at is not None:
-        db.connection.execute("DELETE FROM mail_messages WHERE id = ?", (mail_id,))
-        unindex_mail_without_commit(db, [mail_id])
+        _remove_letters_without_commit(db, [mail_id])
     else:
         db.connection.execute(
             "UPDATE mail_messages SET sender_deleted_at = ?, recipient_deleted_at = ? WHERE id = ?",
@@ -1359,10 +1412,19 @@ def _delete_letters_without_commit(db: Database, where: str, parameters: tuple) 
     """Delete the letters `where` selects, and their search entries (issue
     #824) with them."""
     ids = [row["id"] for row in db.connection.execute(f"SELECT id FROM mail_messages WHERE {where}", parameters)]
-    if not ids:
-        return
-    db.connection.executemany("DELETE FROM mail_messages WHERE id = ?", [(mail_id,) for mail_id in ids])
-    unindex_mail_without_commit(db, ids)
+    if ids:
+        _remove_letters_without_commit(db, ids)
+
+
+def _remove_letters_without_commit(db: Database, mail_ids: list[int]) -> None:
+    """The one way a letter is deleted for good: its row, its search entry
+    (issue #824) and its file references (issue #830) together. Nothing else
+    may `DELETE FROM mail_messages`: `mail_messages` has no AUTOINCREMENT, so
+    an id freed here can be the next letter's, which must not inherit the
+    old one's words or files."""
+    db.connection.executemany("DELETE FROM mail_messages WHERE id = ?", [(mail_id,) for mail_id in mail_ids])
+    unindex_mail_without_commit(db, mail_ids)
+    forget_mail_refs_without_commit(db, mail_ids)
 
 
 def _row_to_message(row: sqlite3.Row) -> MailMessage:

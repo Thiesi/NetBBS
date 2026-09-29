@@ -409,7 +409,7 @@ async def _new_scan_screen(
         if state["mail"] is None:
             await session.write(reject_keystroke())
             return None
-        await browse_mail(session, lane, user, link_context=link_context)
+        await browse_mail(session, lane, user, link_context=link_context, transfers=transfers)
         return await _reload_in_place()
 
     async def _read_replies() -> list[_ScanItem] | None:
@@ -769,7 +769,7 @@ async def _find_screen(
             # there leaves the results (issue #824).
             still_there = await open_letter(
                 session, lane, user, selected.mail.message.id, sent=selected.mail.sent,
-                link_context=link_context,
+                link_context=link_context, transfers=transfers,
             )
             if not still_there:
                 items = [item for item in items if item is not selected]

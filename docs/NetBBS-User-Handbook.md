@@ -129,7 +129,19 @@ told which and why, and the prompt opens again on what you typed, to fix.
 Each person gets their own copy, and every copy shows everyone it went to --
 there is no blind copy. If one of them can't take it when you press **Send**
 -- their mailbox is full, say -- nothing is sent to anyone: the review screen
-names them, and **[T]o** lets you take them off and send to the rest. The
+names them, and **[T]o** lets you take them off and send to the rest.
+
+A letter can point at files that are already in a file area here, up to
+five. On the review screen press **[A]ttach file**, choose the file area and
+then the file; **[R]emove file** takes one off again. Nothing is copied: the
+letter names the file, and whoever reads it downloads it from the file area.
+Only someone who may open that file area can be sent the letter -- if one of
+your recipients can't, **Send** names them and nothing goes out. Someone on
+another BBS can't download from here: their copy ends with a line naming each
+file, its size, its file area and this BBS, as in
+`File: report.zip (12.3 KiB) in file area "Uploads" on Farpoint`. A forward
+takes the files of the letter it passes on along, and the draft of a letter
+keeps them. The
 fullscreen editor shows what you are
 writing above the text: the recipient or board, and the subject. Nothing is
 sent or posted until you choose to on the review screen, which keeps To and
@@ -333,6 +345,15 @@ When you receive such a letter, its To line shows everyone it went to, and
 **Reply [a]ll** writes to its sender and everyone else on it, where
 **[R]eply** writes to the sender alone. Anyone who can't be written to any
 more is left out, and you are told who.
+
+A letter that points at files lists them under its Date line: each file's
+name, size and file area. Press **[G]et file** to download one -- with
+several, you choose which -- the same way the file area downloads it: by
+Zmodem, or with a browser link where your terminal has no Zmodem or the
+Zmodem transfer fails. A file deleted or expired since the letter was sent,
+or taken out of its file area, shows as no longer available. A file in a file
+area you can't open, for example because its access level was raised after
+the letter was sent, shows only as a file in a file area you can't open.
 
 Mail your SysOp sends to all callers shows `Everyone on this BBS` as its To.
 If it comes from **System** it has no Reply; if it comes from the SysOp's own

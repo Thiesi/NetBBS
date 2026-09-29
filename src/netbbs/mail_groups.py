@@ -19,6 +19,13 @@ at Send by the caller of this module, as for a letter to one person.
 
 Link delivery happens later, one copy at a time: a Link copy that bounces
 is that recipient's alone, told in the sender's Sent like any other.
+
+Files a letter points at (issue #830, `netbbs.file_refs`) are written with
+each local copy, and checked for each recipient with the rest: a recipient
+who may not read the file area one is in is named, and nothing is sent. A
+Link copy carries no reference -- its body names each file in a line of
+text (`netbbs.file_refs.body_with_link_text`) -- so a Link recipient is
+never refused for one.
 """
 
 from __future__ import annotations
@@ -26,6 +33,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from netbbs.auth.users import User
+from netbbs.file_refs import FileRef, body_with_link_text, recipient_ref_problem, sender_ref_problem
 from netbbs.link.mail import check_link_mail_recipient, compose_link_message
 from netbbs.link.node_identity import NodeIdentity
 from netbbs.mail import (
@@ -91,15 +99,20 @@ def group_addresses(members: list[GroupMember], *, own_fingerprint: str) -> list
 
 def recipient_problem(
     db: Database, sender: User, recipient: LetterRecipient, *, node_identity: NodeIdentity | None,
+    files: list[FileRef] = (),
 ) -> str | None:
     """Why `recipient`'s copy cannot be written, or `None`: the checks
-    `send_mail` and `compose_link_message` make, asked first."""
+    `send_mail` and `compose_link_message` make, asked first -- and for a
+    local recipient, whether they may read the file area of each of `files`
+    (issue #830)."""
     if recipient.user is not None:
         refusal = mail_recipient_refusal(db, recipient.user)
         if refusal is None:
             refusal = mail_sender_refusal(db, recipient.user, sender=sender)
         if refusal is None and not mail_has_room(db, recipient.user):
             refusal = mailbox_full_text(recipient.user)
+        if refusal is None and files:
+            refusal = recipient_ref_problem(db, recipient.user, list(files))
         return refusal
     assert recipient.address is not None
     if node_identity is None:
@@ -116,6 +129,7 @@ def send_letter(
     *,
     group_id: str,
     node_identity: NodeIdentity | None = None,
+    files: list[FileRef] = (),
 ) -> int:
     """Send one letter to each of `recipients` (two or more; a repeat of
     someone already named is left out), linked by `group_id`. Returns how
@@ -123,9 +137,12 @@ def send_letter(
 
     Raises `LetterRefused` when any recipient cannot take it, naming each,
     and writes nothing; `MailError` for a letter already sent under this
-    `group_id` (`netbbs.mail.letter_already_sent`), too many recipients, or
-    a subject or body the limits refuse."""
+    `group_id` (`netbbs.mail.letter_already_sent`), too many recipients, a
+    subject or body the limits refuse, or a file in `files` the sender
+    cannot open."""
     subject = validate_mail_fields(subject, body)
+    files = list(files)
+    _check_sender_files(db, sender, files)
     unique: dict[tuple, LetterRecipient] = {}
     for recipient in recipients:
         unique.setdefault(recipient.key, recipient)
@@ -137,7 +154,8 @@ def send_letter(
     problems = [
         (recipient, problem)
         for recipient in recipients
-        if (problem := recipient_problem(db, sender, recipient, node_identity=node_identity)) is not None
+        if (problem := recipient_problem(db, sender, recipient, node_identity=node_identity, files=files))
+        is not None
     ]
     if problems:
         raise LetterRefused(problems)
@@ -151,14 +169,15 @@ def send_letter(
     addresses = (
         group_addresses(members, own_fingerprint=node_identity.fingerprint) if node_identity is not None else []
     )
+    link_body = body_with_link_text(db, body, files)
     try:
         for recipient in recipients:
             if recipient.user is not None:
-                send_mail_without_commit(db, sender, recipient.user, subject, body, group=group)
+                send_mail_without_commit(db, sender, recipient.user, subject, body, group=group, files=files)
             else:
                 assert recipient.address is not None and node_identity is not None
                 compose_link_message(
-                    db, sender, recipient.address, subject, body, node_identity=node_identity,
+                    db, sender, recipient.address, subject, link_body, node_identity=node_identity,
                     group=group, group_addresses=addresses, commit=False,
                 )
         db.connection.commit()
@@ -166,3 +185,10 @@ def send_letter(
         db.connection.rollback()
         raise
     return len(recipients)
+
+
+def _check_sender_files(db: Database, sender: User, files: list[FileRef]) -> None:
+    if files:
+        problem = sender_ref_problem(db, sender, files)
+        if problem is not None:
+            raise MailError(problem)

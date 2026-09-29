@@ -3771,4 +3771,28 @@ MIGRATIONS = [
         CREATE INDEX idx_mail_messages_group ON mail_messages(mail_group_id) WHERE mail_group_id IS NOT NULL;
         """,
     ),
+    Migration(
+        description=(
+            "Issue #830: `mail_file_refs` -- the files in this node's file areas a letter points "
+            "at, one row per file, in the order attached (`position`). A file is named by its "
+            "content-addressed `file_id`, which no later upload reuses, with its name, area and "
+            "size as they were when it was attached, so a letter still names a file removed "
+            "since. No foreign keys, deliberately: one to `mail_messages` would make that table a "
+            "foreign-key parent, and a later rebuild of it would cascade through this one on "
+            "DROP TABLE's implicit DELETE; rows go with their letter through `netbbs.mail`'s one "
+            "delete helper instead, as `mail_search` entries do. Empty on upgrade. Link mail "
+            "never has rows here: a Link copy names its files in its body."
+        ),
+        sql="""
+        CREATE TABLE mail_file_refs (
+            mail_id     INTEGER NOT NULL,
+            position    INTEGER NOT NULL,
+            file_id     TEXT NOT NULL,
+            filename    TEXT NOT NULL,
+            area_name   TEXT NOT NULL,
+            size_bytes  INTEGER NOT NULL,
+            PRIMARY KEY (mail_id, position)
+        );
+        """,
+    ),
 ]

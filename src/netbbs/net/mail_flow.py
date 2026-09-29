@@ -40,8 +40,9 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from netbbs.auth.users import (
@@ -108,7 +109,23 @@ from netbbs.mail import (
     unblock_link_sender,
     unblock_local_sender,
 )
+from netbbs.file_refs import (
+    AVAILABLE,
+    MAX_FILE_REFS,
+    FileRef,
+    body_with_link_text,
+    mail_refs,
+    open_ref,
+)
 from netbbs.mail_groups import LetterRecipient, LetterRefused, send_letter, too_many_recipients_text
+from netbbs.net.file_ref_view import (
+    attached_rows,
+    choose_file_to_attach,
+    download_ref,
+    open_refs,
+    ref_rows,
+)
+from netbbs.net.file_transfer import TransferGrants
 from netbbs.net.char_input import (
     HELP_KEY, REDRAW_KEY, EditorKey, EditorKeyKind, InputCancelled, reject_unhandled_key,
 )
@@ -208,6 +225,7 @@ async def browse_mail(
     *,
     link_context: LinkContext | None = None,
     choice_prompt: Callable[[], str] | None = None,
+    transfers: TransferGrants | None = None,
 ) -> None:
     """Entry point from the main menu's `[E]-mail` option: the mailbox
     itself (issue #810), opening on the Inbox with Sent, Compose and a kept
@@ -225,6 +243,9 @@ async def browse_mail(
     passes its own, so the mailbox shows the same clock and node-status
     tags. `None` is the bare `Choice: `.
 
+    `transfers` is the node's browser-transfer grants, for downloading a
+    file a letter points at (issue #830) where Zmodem cannot carry it.
+
     Refused, with the reason carried to the next screen, for a caller
     `netbbs.mail.mail_access_refusal` turns away (issue #816): the guest
     account or a session that signed in as it, or an account below the mail
@@ -236,7 +257,9 @@ async def browse_mail(
         announce(session, refusal, tone="error")
         return
     _adopt_legacy_mail_draft(lane, user)
-    screen = _MailboxScreen(session, lane, user, link_context=link_context, choice_prompt=choice_prompt)
+    screen = _MailboxScreen(
+        session, lane, user, link_context=link_context, choice_prompt=choice_prompt, transfers=transfers,
+    )
     await screen.run()
 
 
@@ -701,11 +724,13 @@ class _MailboxScreen:
     def __init__(
         self, session: Session, lane: DatabaseLane, user: User, *,
         link_context: LinkContext | None, choice_prompt: Callable[[], str] | None,
+        transfers: TransferGrants | None = None,
     ) -> None:
         self.session = session
         self.lane = lane
         self.user = user
         self.link_context = link_context
+        self.transfers = transfers
         self.choice_prompt = choice_prompt
         self.folder = _INBOX
         self.order = _ORDER_NEWEST
@@ -1075,7 +1100,9 @@ class _MailboxScreen:
         if self.sent:
             await _show_sent_message(self.session, self.lane, self.user, message, link_context=self.link_context)
         else:
-            await _show_inbox_message(self.session, self.lane, self.user, message, link_context=self.link_context)
+            await _show_inbox_message(
+                self.session, self.lane, self.user, message, link_context=self.link_context, transfers=self.transfers,
+            )
         await self._reload(keep=message.id)
         await self._render()
 
@@ -1444,10 +1471,28 @@ async def _message_view(
         message.created_at, override_format=display_format, override_timezone=display_timezone
     )
     preamble.append(colored("Date: ", fg_color=LABEL_COLOR) + colored(displayed_date, fg_color=METADATA_COLOR))
+    # Files the letter points at (issue #830), as this reader finds them.
+    refs = await lane.run(_letter_file_refs, message, copies)
+    preamble.extend(ref_rows(await open_refs(lane, user, refs), accent=accent))
     body_mode = await lane.run(_mail_body_mode, user)
     truecolor = await lane.run(lambda db: effective_truecolor(session, db, user))
     body_rows = post_body_rows(message.body, session.terminal_width, body_mode, truecolor=truecolor, layout="lines")
     return title, preamble, body_rows
+
+
+def _letter_file_refs(db: Database, message: MailMessage, copies: list[MailMessage] | None = None) -> list[FileRef]:
+    """The files `message` points at (issue #830). A letter to several
+    people writes them with each local copy and none with a Link copy, so
+    the Sent view of one -- shown by one of its copies -- takes them from
+    whichever copy has them."""
+    refs = mail_refs(db, message.id)
+    if refs or not copies:
+        return refs
+    for copy in copies:
+        refs = mail_refs(db, copy.id)
+        if refs:
+            return refs
+    return []
 
 
 def _mail_body_mode(db: Database, user: User) -> str:
@@ -1554,9 +1599,11 @@ async def _link_mail_identity_warning(
 
 async def _show_inbox_message(
     session: Session, lane: DatabaseLane, user: User, message: MailMessage,
-    *, link_context: LinkContext | None = None,
+    *, link_context: LinkContext | None = None, transfers: TransferGrants | None = None,
 ) -> None:
     message = await lane.run(mark_read, user, message)
+    # Issue #830: `[G]et file` downloads a file the letter points at.
+    refs = await lane.run(_letter_file_refs, message)
     block_target = await lane.run(_block_target, user, message)
     # Issue #827: a copy of a letter to several people answers them all.
     reply_all = await lane.run(_reply_all_entries, user, message)
@@ -1571,6 +1618,7 @@ async def _show_inbox_message(
             # Offered on system mail too (issue #822): passing a notice on
             # to someone -- the SysOp, say -- harms no one.
             ("f", menu_key("F", "orward")),
+            *([("g", menu_key("G", "et file"))] if refs else []),
             ("u", menu_key("U", "nread")),
             # Issue #828: to the Kept folder, which the cap never evicts
             # from, and back.
@@ -1591,6 +1639,9 @@ async def _show_inbox_message(
             continue
         if choice == "f":
             await _forward_message(session, lane, user, message, sent=False, link_context=link_context)
+            continue
+        if choice == "g":
+            await _get_referenced_file(session, lane, user, refs, transfers=transfers)
             continue
         if choice == "a":
             shown = await _display_sender_label(lane, message)
@@ -1662,6 +1713,144 @@ async def _show_inbox_message(
             prefill_body=quote_body(plain_post_body(message.body), author=message.sender_label) or None,
             reply_key=_reply_key(message),
         )
+
+
+async def _get_referenced_file(
+    session: Session, lane: DatabaseLane, user: User, refs: list[FileRef], *, transfers: TransferGrants | None,
+) -> None:
+    """`[G]et file` on a letter's view (issue #830): download the file it
+    points at, or with several, the one the reader picks. Only a file they
+    can open now is offered."""
+    opened = await open_refs(lane, user, refs)
+    available = [item.ref for item in opened if item.state == AVAILABLE]
+    if not available:
+        announce(session, "None of the files in this letter is available to you.", tone="error")
+        return
+    ref = available[0]
+    if len(available) > 1:
+        chosen = await pick_item(
+            session, available,
+            name_of=lambda item: item.filename,
+            stable_id_of=lambda item: available.index(item),
+            description_of=lambda item: f"in {item.area_name}",
+            title="Download which file?",
+            breadcrumb=("Mail",),
+            empty_message="None of the files in this letter is available to you.",
+            **await _picker_style(lane, user),
+        )
+        if chosen is None:
+            return
+        ref = chosen
+    await download_ref(session, lane, user, ref, transfers=transfers)
+
+
+async def _picker_style(lane: DatabaseLane, user: User) -> dict:
+    return {
+        "description_level": await lane.run(menu_description_level, user),
+        "redraw_in_place": await lane.run(redraw_in_place_enabled, user),
+        "unicode_style": await lane.run(unicode_style_enabled, user),
+        "collapsed": await lane.run(breadcrumb_collapsed_enabled, user),
+        "accent_color": await lane.run(effective_accent_color_256),
+        "header_color": await lane.run(effective_header_color_256),
+    }
+
+
+# -- attaching files (issue #830) --------------------------------------------
+#
+# The review screen of a letter has `[A]ttach file`, and `[R]emove file` once
+# one is attached: a file in a file area here, chosen from the areas and files
+# the writer can open (`netbbs.net.file_ref_view.choose_file_to_attach`). The
+# letter points at it; nothing is copied. Who it goes to is checked at Send.
+
+_ATTACH_KEY = "a"
+_REMOVE_KEY = "r"
+
+
+def _file_actions(files: list[FileRef]) -> list[tuple[str, str, str | None]]:
+    actions: list[tuple[str, str, str | None]] = [
+        (_ATTACH_KEY, menu_key("A", "ttach file"), "Point the letter at a file in a file area"),
+    ]
+    if files:
+        actions.append((_REMOVE_KEY, menu_key("R", "emove file"), "Take a file off the letter"))
+    return actions
+
+
+def _file_rows(files: list[FileRef], *, accent: int, to_another_bbs: bool) -> list[str]:
+    rows = attached_rows(files, accent=accent)
+    if files and to_another_bbs:
+        rows.append(colored(
+            "Someone on another BBS gets each file's name, size and file area as text at the end of the "
+            "letter, not a download.",
+            fg_color=MUTED_COLOR,
+        ))
+    return rows
+
+
+async def _change_files(
+    session: Session, lane: DatabaseLane, user: User, files: list[FileRef], key: str, *,
+    breadcrumb: tuple[str, ...], style: dict,
+) -> list[FileRef]:
+    """`[A]ttach file` or `[R]emove file` on the review screen: the letter's
+    files afterwards, with what happened carried to the review screen."""
+    if key == _ATTACH_KEY:
+        if len(files) >= MAX_FILE_REFS:
+            announce(session, f"A letter can point at {MAX_FILE_REFS} files at most.", tone="error")
+            return files
+        ref = await choose_file_to_attach(session, lane, user, breadcrumb=breadcrumb, **style)
+        if ref is None:
+            return files
+        if any(attached.file_id == ref.file_id for attached in files):
+            announce(session, f"{ref.filename} is already attached.", tone="muted")
+            return files
+        announce(session, f"Attached {ref.filename}.", tone="muted")
+        return [*files, ref]
+    if not files:
+        return files
+    removed = files[0]
+    if len(files) > 1:
+        chosen = await pick_item(
+            session, files,
+            name_of=lambda item: item.filename,
+            stable_id_of=lambda item: files.index(item),
+            description_of=lambda item: f"in {item.area_name}",
+            title="Remove which file?",
+            breadcrumb=breadcrumb,
+            empty_message="No files are attached.",
+            **style,
+        )
+        if chosen is None:
+            return files
+        removed = chosen
+    announce(session, f"Removed {removed.filename}.", tone="muted")
+    return [ref for ref in files if ref is not removed]
+
+
+def _files_field(files: list[FileRef]) -> dict[str, str]:
+    """A letter's files as its draft keeps them: a `"files"` field holding a
+    JSON string (the draft's fields are strings), none without files."""
+    if not files:
+        return {}
+    return {"files": json.dumps([
+        {"file_id": ref.file_id, "filename": ref.filename, "area": ref.area_name, "size": ref.size_bytes}
+        for ref in files
+    ])}
+
+
+def _decode_files(text: str | None) -> list[FileRef]:
+    if not text:
+        return []
+    try:
+        entries = json.loads(text)
+    except ValueError:
+        return []
+    files = []
+    for entry in entries if isinstance(entries, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        file_id, filename, area, size = entry.get("file_id"), entry.get("filename"), entry.get("area"), entry.get("size")
+        if isinstance(file_id, str) and isinstance(filename, str) and isinstance(area, str) and isinstance(size, int):
+            files.append(FileRef(file_id=file_id, filename=filename, area_name=area, size_bytes=size))
+    return files[:MAX_FILE_REFS]
 
 
 # -- blocked senders (issue #817) ---------------------------------------------
@@ -2021,7 +2210,7 @@ def current_letter(db: Database, user: User, mail_id: int, *, sent: bool) -> Mai
 
 async def open_letter(
     session: Session, lane: DatabaseLane, user: User, mail_id: int, *, sent: bool,
-    link_context: LinkContext | None = None,
+    link_context: LinkContext | None = None, transfers: TransferGrants | None = None,
 ) -> bool:
     """Open one of the caller's own letters found by the main menu's Find
     (issue #824) in the mailbox's own message view, with all its actions:
@@ -2043,7 +2232,7 @@ async def open_letter(
     if sent:
         await _show_sent_message(session, lane, user, message, link_context=link_context)
     else:
-        await _show_inbox_message(session, lane, user, message, link_context=link_context)
+        await _show_inbox_message(session, lane, user, message, link_context=link_context, transfers=transfers)
     return await lane.run(lambda db: current_letter(db, user, mail_id, sent=sent)) is not None
 
 
@@ -2164,23 +2353,30 @@ def _all_callers_draft_path(lane: DatabaseLane, user: User, *, as_system: bool) 
     return directory / f"mail_{'notice' if as_system else 'all'}_{user.id}.draft"
 
 
-def all_callers_outcome(sent: int, mailbox_full: tuple[str, ...], left_out: int) -> tuple[str, int]:
+def all_callers_outcome(
+    sent: int, mailbox_full: tuple[str, ...], left_out: int, no_file_access: tuple[str, ...] = (),
+) -> tuple[str, int]:
     """What sending to all callers did, in one line for the SysOp, and its
-    color: how many it reached, whose mailbox was full (named, then
-    counted), and how many accounts take no mail."""
+    color: how many it reached, whose mailbox was full and who may not open
+    a file it points at (named, then counted), and how many accounts take
+    no mail."""
     parts = [f"Sent to {_count(sent, 'caller')}."]
+
+    def named(names: tuple[str, ...]) -> str:
+        text = ", ".join(sanitize_text(name) for name in names[:_ALL_CALLERS_NAMES_SHOWN])
+        more = len(names) - _ALL_CALLERS_NAMES_SHOWN
+        return text + (f" and {more} more" if more > 0 else "")
+
     if mailbox_full:
-        names = ", ".join(sanitize_text(name) for name in mailbox_full[:_ALL_CALLERS_NAMES_SHOWN])
-        more = len(mailbox_full) - _ALL_CALLERS_NAMES_SHOWN
-        if more > 0:
-            names += f" and {more} more"
-        parts.append(f"Not delivered, mailbox full of unread and kept mail: {names}.")
+        parts.append(f"Not delivered, mailbox full of unread and kept mail: {named(mailbox_full)}.")
+    if no_file_access:
+        parts.append(f"Not delivered, can't open a file area it points at: {named(no_file_access)}.")
     if left_out:
         parts.append(
             f"{_count(left_out, 'account')} left out: the guest account, disabled accounts and signups "
             "awaiting approval take no mail."
         )
-    return " ".join(parts), WARNING_COLOR if mailbox_full else SUCCESS_COLOR
+    return " ".join(parts), WARNING_COLOR if mailbox_full or no_file_access else SUCCESS_COLOR
 
 
 async def write_to_all_callers(
@@ -2225,6 +2421,7 @@ async def write_to_all_callers(
             announce(session, "Draft deleted.", tone="muted")
             resumed = None
     group_id = resumed.group_id if resumed is not None and resumed.group_id else new_mail_group_id()
+    files = resumed.files if resumed is not None else []
 
     async def audience() -> str:
         recipients, _left_out = await lane.run(all_callers_recipients, sender)
@@ -2248,7 +2445,10 @@ async def write_to_all_callers(
         return EditorHeader(title, (("To", "All callers"), ("Subject", subject)), color=header_color)
 
     def keep_fields() -> None:
-        save_draft_fields(draft_path, {"to": None, "reply_address": None, "subject": subject, "group": group_id})
+        save_draft_fields(
+            draft_path,
+            {"to": None, "reply_address": None, "subject": subject, "group": group_id, **_files_field(files)},
+        )
 
     keep_fields()
     body = await _compose_mail_body(
@@ -2281,7 +2481,16 @@ async def write_to_all_callers(
             unicode_style=unicode_style, collapsed=collapsed, accent_color=accent_color,
             header_color=header_color, truecolor=truecolor, body_mode=body_mode, body_layout="lines",
             breadcrumb=("SysOp", "Mail", title),
+            extra_rows=_file_rows(files, accent=accent_color, to_another_bbs=False),
+            extra_actions=_file_actions(files),
         )
+        if isinstance(action, str):
+            files = await _change_files(
+                session, lane, user, files, action, breadcrumb=("SysOp", "Mail", title),
+                style=await _picker_style(lane, user),
+            )
+            keep_fields()
+            continue
         if action is ReviewAction.CANCEL:
             _forget_letter(draft_path)
             announce(session, "Message cancelled.", tone="muted")
@@ -2306,8 +2515,21 @@ async def write_to_all_callers(
         if action is not ReviewAction.COMMIT or too_long is not None:
             continue
         try:
+            if files:
+                # The SysOp writing a notice from the system checks the files
+                # as a sender would.
+                unavailable = await lane.run(
+                    lambda db: [ref for ref in files if open_ref(db, user, ref).state != AVAILABLE]
+                )
+                if unavailable:
+                    announce(
+                        session,
+                        f"{unavailable[0].filename} is no longer available to you. [R]emove it, then send.",
+                        tone="error",
+                    )
+                    continue
             result = await lane.run(
-                lambda db: send_to_all_callers(db, subject, body, group_id=group_id, sender=sender)
+                lambda db: send_to_all_callers(db, subject, body, group_id=group_id, sender=sender, files=files)
             )
         except MailError as exc:
             announce(session, f"Could not send: {exc}", tone="error")
@@ -2316,7 +2538,9 @@ async def write_to_all_callers(
         # Issue #823: those online now hear of it now.
         for name in result.sent_to:
             nudge(name)
-        text, color = all_callers_outcome(len(result.sent_to), result.mailbox_full, result.left_out)
+        text, color = all_callers_outcome(
+            len(result.sent_to), result.mailbox_full, result.left_out, result.no_file_access,
+        )
         announce(session, text, color=color)
         return True
 
@@ -2344,7 +2568,11 @@ async def _forward_message(
 
     Refused, as every way into mail is, while the caller's mail is closed
     (`caller_mail_refusal`): the SysOp can close it while a letter is open.
-    Each letter's forward keeps its own draft slot (`_forward_key`)."""
+    Each letter's forward keeps its own draft slot (`_forward_key`).
+
+    The files the letter points at (issue #830) go with the forward, those
+    the forwarder can open themselves; Send checks them for its new
+    recipients as for any letter."""
     refusal = await lane.run(lambda db: caller_mail_refusal(session, db, user))
     if refusal is not None:
         announce(session, refusal, tone="error")
@@ -2360,10 +2588,14 @@ async def _forward_message(
         post_body_text(message.body),
         sender=sender_label, recipient=recipient_label, date=date, subject=message.subject,
     )
+    copies = await lane.run(sent_group_copies, user, message) if sent else None
+    refs = await lane.run(_letter_file_refs, message, copies)
+    opened = await open_refs(lane, user, refs)
     await _compose_mail(
         session, lane, user,
         prefill_subject=forward_subject(message.subject, max_bytes=MAX_MAIL_SUBJECT_BYTES),
         prefill_body=body, link_context=link_context, forward_key=_forward_key(message),
+        prefill_files=[item.ref for item in opened if item.state == AVAILABLE],
     )
 
 
@@ -2382,6 +2614,7 @@ async def _compose_mail(
     forward_key: str | None = None,
     resend_key: str | None = None,
     resume: bool = False,
+    prefill_files: list[FileRef] | None = None,
 ) -> bool:
     """
     `link_context`, if given, lets the "To:" prompt accept a `user@node`
@@ -2427,6 +2660,13 @@ async def _compose_mail(
     to a letter to several people -- which Send checks like typed ones.
     Each letter keeps a group id with its draft, so a letter to several
     people sent once is never sent again from its draft.
+
+    Files (issue #830): the review screen's `[A]ttach file` points the
+    letter at a file in a file area here, up to `MAX_FILE_REFS`, and
+    `[R]emove file` takes one off; `prefill_files` starts a forward with
+    the files of the letter it passes on. They are kept with the draft.
+    Send refuses a local recipient who may not read a file's area, naming
+    them; a recipient on another BBS gets the files named in text.
 
     Returns whether the letter was sent.
     """
@@ -2543,6 +2783,7 @@ async def _compose_mail(
     # Kept with the draft (issue #827): a letter to several people sent
     # from it once is refused if its draft is sent again.
     group_id = resumed.group_id if resumed is not None and resumed.group_id else new_mail_group_id()
+    files: list[FileRef] = resumed.files if resumed is not None else list(prefill_files or [])
     if resumed is not None and resumed.reply_address is not None:
         prefill_link_address, prefill_recipient = resumed.reply_address, None
     elif resumed is not None and resumed.recipient_text is not None:
@@ -2650,7 +2891,10 @@ async def _compose_mail(
         # text (issue #814).
         save_draft_fields(
             draft_path,
-            {"to": recipient_text, "reply_address": reply_address, "subject": subject, "group": group_id},
+            {
+                "to": recipient_text, "reply_address": reply_address, "subject": subject, "group": group_id,
+                **_files_field(files),
+            },
         )
 
     keep_fields()
@@ -2716,7 +2960,20 @@ async def _compose_mail(
             body_mode=body_mode,
             body_layout="lines",
             breadcrumb=("Mail", title),
+            extra_rows=_file_rows(
+                files, accent=accent_color,
+                to_another_bbs=link_enabled and (
+                    reply_address is not None or any("@" in entry for entry in split_recipients(recipient_text))
+                ),
+            ),
+            extra_actions=_file_actions(files),
         )
+        if isinstance(action, str):
+            files = await _change_files(
+                session, lane, user, files, action, breadcrumb=("Mail", title), style=picker_style(),
+            )
+            keep_fields()
+            continue
         if action is ReviewAction.CANCEL:
             _forget_letter(draft_path)
             announce(session, "Message cancelled.", tone="muted")
@@ -2763,7 +3020,7 @@ async def _compose_mail(
         if reply_address is None and len(split_recipients(recipient_text)) > 1:
             if await _send_to_several(
                 session, lane, user, split_recipients(recipient_text), subject, body,
-                group_id=group_id, link_context=link_context,
+                group_id=group_id, link_context=link_context, files=files,
             ):
                 _forget_letter(draft_path)
                 return True
@@ -2789,9 +3046,16 @@ async def _compose_mail(
             warning = await _link_mail_identity_warning(lane, technical_recipient)
             if warning is not None:
                 await session.write_line(colored(warning, fg_color=MUTED_COLOR, bold=True))
+            if files:
+                problem = await lane.run(lambda db: _unavailable_file_problem(db, user, files))
+                if problem is not None:
+                    announce(session, problem, tone="error")
+                    continue
             try:
+                # Files go to another BBS as text only (issue #830).
+                link_body = await lane.run(body_with_link_text, body, files)
                 await lane.run(
-                    compose_link_message, user, technical_recipient, subject, body,
+                    compose_link_message, user, technical_recipient, subject, link_body,
                     node_identity=link_context.node_identity,
                 )
             except (LinkMailError, MailError) as exc:
@@ -2807,7 +3071,7 @@ async def _compose_mail(
             announce(session, f"Could not send: no such user {recipient_text!r}.", tone="error")
             continue
         try:
-            await lane.run(send_mail, user, recipient, subject, body)
+            await lane.run(lambda db: send_mail(db, user, recipient, subject, body, files=files))
         except MailboxFullError:
             announce(session, f"{recipient.username}'s mailbox is full and cannot accept new mail right now.", tone="error")
             continue
@@ -2834,6 +3098,8 @@ class _LetterDraft:
     subject: str | None
     # The letter's group id (issue #827), for a draft kept since.
     group_id: str | None = None
+    # The files it points at (issue #830).
+    files: list[FileRef] = field(default_factory=list)
 
 
 def _reply_key(message: MailMessage) -> str:
@@ -2918,6 +3184,7 @@ def _load_letter_draft(path: Path) -> _LetterDraft | None:
         body=body, recipient_text=fields.get("to"), reply_address=fields.get("reply_address"),
         subject=fields.get("subject"),
         group_id=fields.get("group") if isinstance(fields.get("group"), str) else None,
+        files=_decode_files(fields.get("files")),
     )
 
 
@@ -3059,7 +3326,7 @@ def _name_the_problem(entry: str, problem: str) -> str:
 
 async def _send_to_several(
     session: Session, lane: DatabaseLane, user: User, entries: list[str], subject: str, body: str,
-    *, group_id: str, link_context: LinkContext | None,
+    *, group_id: str, link_context: LinkContext | None, files: list[FileRef] = (),
 ) -> bool:
     """Send from the review screen to several people (issue #827). Every
     address is checked again as the To prompt checks it -- To may have been
@@ -3094,7 +3361,10 @@ async def _send_to_several(
     node_identity = link_context.node_identity if link_context is not None else None
     try:
         count = await lane.run(
-            send_letter, user, recipients, subject, body, group_id=group_id, node_identity=node_identity,
+            lambda db: send_letter(
+                db, user, recipients, subject, body, group_id=group_id, node_identity=node_identity,
+                files=list(files),
+            )
         )
     except LetterRefused as exc:
         for recipient, problem in exc.problems:
@@ -3265,6 +3535,16 @@ def _check_link_reply_address(db, technical_address: str, *, reply: bool = True)
         linked = "no longer linked" if reply else "not linked"
         return f"This BBS is {linked} with the BBS {shown} writes from, so {what} can't reach it."
     return _check_link_recipient(db, f"{user}@{fingerprint}")
+
+
+def _unavailable_file_problem(db: Database, sender: User, files: list[FileRef]) -> str | None:
+    """Why a letter pointing at `files` cannot go, for the one path that
+    does not reach `netbbs.mail`'s check: a letter to one person on another
+    BBS, which names its files in text."""
+    for ref in files:
+        if open_ref(db, sender, ref).state != AVAILABLE:
+            return f"{ref.filename} is no longer available to you. [R]emove it from the letter, then send it."
+    return None
 
 
 def _too_long_to_send(subject: str, body: str) -> str | None:
