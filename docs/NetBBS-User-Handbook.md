@@ -146,6 +146,25 @@ Live private messages need the recipient to be online. **E-mail** keeps a
 message for later; it is NetBBS mail, not an Internet email account. If live
 contact fails, send mail explicitly—chat does not silently turn it into mail.
 
+**E-mail** opens on your Inbox, with how many messages are unread at the top.
+Each row shows who a message is from, its subject and its date, with `new`
+beside mail you have not opened yet. Move with Up/Down and press Enter, or
+press a row's number, to read a message. On a long list, **[N]ext page** and
+**[P]rev page** (or PgDn and PgUp) turn the page. The other keys:
+
+- **[S]ent** lists the mail you have sent. **[B]ack** there returns to the
+  Inbox.
+- **[C]ompose** writes a new message.
+- **[O]rder** switches the Inbox between newest first and unread first. Your
+  choice is remembered.
+- **[F]ind** shows only mail with a word in the name or the subject. An empty
+  line shows everything again.
+- **[U]nread** marks the highlighted message unread, or read without opening
+  it. While you read a message, its own **[U]nread** does the same.
+
+A `!` before a sender's name means their node's identity has changed. The
+message explains it when you open it.
+
 On a linked node, addresses can use a known, unambiguous name such as
 `alice@OtherNode`. Use the address offered by the directory or Who screen,
 or the one on the From line of their mail: type it exactly as shown,

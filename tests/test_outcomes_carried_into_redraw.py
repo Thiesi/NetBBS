@@ -278,7 +278,7 @@ def test_the_main_menu_shows_an_outcome_a_flow_unwound_back_to_it(db, alice):
     assert pending_notices(session) == []
 
 
-def test_message_sent_is_shown_on_the_mail_menu_it_returns_to(db, alice):
+def test_message_sent_is_shown_on_the_mailbox_it_returns_to(db, alice):
     create_user(db, "bob", password="hunter2", user_level=10)
     lane = DatabaseLane(db.path)
     try:
@@ -290,12 +290,12 @@ def test_message_sent_is_shown_on_the_mail_menu_it_returns_to(db, alice):
     _stays_on_screen_until_the_next_prompt(session, "Message sent.")
 
 
-def test_an_empty_inbox_says_so_on_the_mail_menu(db, alice):
-    """The picker has nothing to pick and returns at once; its message goes
-    to the menu it returns to rather than under that menu's clear."""
+def test_an_empty_inbox_says_so_on_the_mailbox(db, alice):
+    """The mailbox opens on the Inbox (issue #810): an empty one says so in
+    place of the list, on the screen the prompt is on."""
     lane = DatabaseLane(db.path)
     try:
-        session = FakeSession(["i", "b"])
+        session = FakeSession(["b"])
         asyncio.run(mail_flow.browse_mail(session, lane, alice))
     finally:
         lane.close()

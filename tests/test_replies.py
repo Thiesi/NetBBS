@@ -211,7 +211,7 @@ def test_mail_reply_quotes_the_message(tmp_path):
     alice = create_user(db, "alice", password="hunter2pw", user_level=10)
     bob = create_user(db, "bob", password="hunter2pw", user_level=10)
     send_mail(db, alice, bob, "Hello", "How are you?\n-- \nAlice")
-    session = MailSession(keys=["i", "0", "1", "r", "s", "b", "b", "b"], lines=["", "Fine, thanks.", "/done"])
+    session = MailSession(keys=["1", "r", "s", "b", "b"], lines=["", "Fine, thanks.", "/done"])
     lane = DatabaseLane(path)
     try:
         asyncio.run(browse_mail(session, lane, bob))
