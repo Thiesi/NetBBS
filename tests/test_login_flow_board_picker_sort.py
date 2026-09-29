@@ -108,7 +108,7 @@ def test_order_command_resorts_the_flat_board_list_and_persists_globally(db, ali
     asyncio.run(board_flow._browse_boards(session, db, alice))
     text = _visible_text(session)
     assert "Sort: Alphabetical" in text
-    assert re.search(r"01\.\s*(?:\(#\d+\)|\d+)\s*apple", text)
+    assert re.search(r"01\.\s*apple", text)
     assert get_effective_sort_mode(db, alice, "board") == "alphabetical"
 
 
@@ -133,7 +133,7 @@ def test_order_command_in_the_mixed_categories_view_only_reorders_boards(db, ali
     session = FakeSession(["o", "l", "j", "b"])
     asyncio.run(board_flow._browse_boards(session, db, alice))
     text = _visible_text(session)
-    assert re.search(r"01\.\s*(?:\(#-?\d+\)|-?\d+)\s*\[Vintage\]", text)
+    assert re.search(r"01\.\s*\[Vintage\]", text)
 
 
 def test_community_scoped_order_offers_a_whole_community_save_option(db, alice):

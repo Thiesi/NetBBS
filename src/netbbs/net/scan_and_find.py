@@ -140,7 +140,7 @@ async def _new_scan_screen(
 
     This one numbers its rows instead of using `id(item)` (issue #541,
     Codex review). A `CPython` object address is around fifteen digits,
-    and `pick_item` prints the stable id beside every row as its `(#N)`
+    and `pick_item` used to print the stable id beside every row as its `(#N)`
     reference: at 40 columns that prefix plus an ordinary channel name
     consumed the whole row, so the description -- including the
     "needs a verified name" note this screen had just been given --
@@ -245,7 +245,7 @@ async def _new_scan_screen(
 
     async def _reload_in_place() -> list[_ScanItem]:
         """The list reloaded in the order already on screen, so the
-        highlight and every (#N) still name the row they did (Codex review
+        highlight and every row number still name the row they did (Codex review
         on #723). Anything new goes last. Narrowed to followed items while
         that view is on."""
         reloaded, state["replies"], state["boards"] = await lane.run(_load)
@@ -387,16 +387,11 @@ class _SearchResultItem:
     `result_index` (dogfood follow-up), not `id(item)`, is this item's
     `stable_id_of` -- a plain 1-based position in this one query's own
     result list. `root_post_id`/`file_id` are long content-addressed
-    hash strings, not small integers a caller could ever type back into
-    `pick_item`'s `[G]oto #` prompt (which is exactly why `_ScanItem`
-    elsewhere in this module still uses the unreachable `id(item)`
-    idiom -- there's no natural typeable id for those items either).
-    Search results are a fixed, never-reordered, never-re-paginated
-    list for the lifetime of one query, unlike a board/category
-    listing `goto` is designed to keep working across -- so a plain
-    per-query sequential number is a real, honest identifier here, not
-    a leaky abstraction, and matches the `(#N)` reference already
-    printed next to every row."""
+    hash strings, not the small integer `pick_item` wants as a row's
+    identity. Search results are a fixed, never-reordered list for the
+    lifetime of one query, so a plain per-query sequential number is a
+    real, honest identifier here. It is not printed: rows show only the
+    number that selects them (issue #838)."""
 
     kind: str  # "post" | "file" | "channel_message"
     name: str
@@ -407,14 +402,14 @@ class _SearchResultItem:
     message: ChannelMessageSearchHit | None = None
 
 
-# A search result row renders as "  NN. (#N) name - description",
+# A search result row renders as "  NN. name - description",
 # colored_truncate()d to terminal_width -- front-to-back, so anything
 # past the cutoff is dropped wholesale, not shortened (`netbbs.net.
 # picker.pick_item`). A channel message's whole body -- and, since the
 # same dogfood follow-up that added post/file snippets below, a
 # post's/file's own matched body/description text -- would otherwise
 # stand in as (or bloat) the name/description field with no budget left
-# for the row prefix, the `(#N)` goto reference, and each other on an
+# for the row prefix and each other on an
 # ordinary 80-column terminal. Trimmed to a scannable length that
 # leaves real room for the rest of the row in the common case, same
 # spirit as _ScanItem's "replies to you" list capping at 10 (a display

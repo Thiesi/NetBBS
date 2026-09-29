@@ -1,6 +1,6 @@
 """
 Generic paginated item picker: browse via [N]ext/[P]rev, [S]earch,
-[G]oto #, [B]ack, or a 2-digit number to select an item on the current
+[B]ack, or a 2-digit number to select an item on the current
 page -- plus an Up/Down-highlight-then-Enter path (issue #171) purely
 additive alongside the numbered selection, not a replacement for it.
 
@@ -16,26 +16,20 @@ pure tab-completion (inconsistent with single-key navigation elsewhere —
 Thiesi's own observation — and doesn't solve "jump to item #769") and
 pure alphabetical single-letter menu-style navigation (caps out at 26
 items, and reserves letters that would collide with navigation commands
-like this module's own N/P/S/G/B). Landed on: always-exactly-2-digit
+like this module's own N/P/S/B). Landed on: always-exactly-2-digit
 page-relative selection (matches the single-keystroke immediacy of the
 main menu) + a free-text search command (subsumes what tab completion
-would have offered, without redraw/cycling complexity) + a free-text
-"go to #" command referencing each item's own permanent stable ID (the
-one thing neither of the two original proposals solved on its own).
+would have offered, without redraw/cycling complexity).
 
-`goto`'s number is deliberately *not* a position in the current list —
-it's whatever permanent identifier the caller supplies (`stable_id_of`,
-typically a database ID). This was a real design correction: an earlier
-version derived the number from list position, which broke the moment
-sort order became configurable (alphabetical/most-recent-activity
-reorder existing items, unlike creation-order's append-only stability) —
-the same number would then mean a different item depending on current
-sort order, defeating the entire point of a memorable reference. Display
-order (whatever the caller's list is sorted by) and item identity
-(`stable_id_of`) are now fully independent: paging through an
-alphabetically-sorted list might show `(#7)`, `(#23)`, `(#4)` in that
-order — visually non-sequential, but each number is permanent regardless
-of how the list is currently sorted or filtered.
+One number per row (issue #838). Rows used to carry a second, permanent
+`(#N)` reference -- the caller's `stable_id_of`, typically a database ID
+-- for a `[G]oto #` command, so "02. (#1) Fountain Pens" asked a caller
+to tell two numbers apart before choosing. A first-time field test found
+that it confused more than it helped, so both are
+gone. The job the reference did -- a number that keeps meaning the same
+item -- belongs to the list's order being stable (#839), not to a second
+number. `stable_id_of` stays as the item's identity: it is how
+`start_stable_id` reopens a list on the row just left.
 """
 
 from __future__ import annotations
@@ -96,6 +90,12 @@ T = TypeVar("T")
 # Prev. Two rows of slack that happened to cover the shortfall -- and
 # stopped covering it on page 2, where the nav really is that tall.
 _RESERVED_LINES = 6
+
+# The nav splits into columns from two entries up, not four: dropping
+# [G]oto (issue #838) left page 1 with three, which `menu_grid`'s default
+# stacks in one column -- two rows of items gone for keys that fit
+# side by side.
+_NAV_MIN_ENTRIES_PER_COLUMN = 1
 
 # Selection numbers are always exactly two digits (01-99), zero-padded,
 # so a page can never need more than this many items — keeps "always
@@ -229,32 +229,24 @@ def _pad_cell(text: str, width: int, *, align_right: bool) -> str:
     return padding + text if align_right else text + padding
 
 
-def _table_widths(
-    terminal_width: int, columns: Sequence[ListColumn], reference_width: int
-) -> tuple[int, int] | None:
-    """`(reference_width, name_width)` for a columnar page, or `None`
-    when this terminal is too narrow to hold the table at all.
+def _is_ascii_number(text: str) -> bool:
+    """Digits `int()` accepts. `str.isdigit()` also accepts "²" and other
+    Unicode digits `int()` rejects, which crashed a picker reading one
+    from a UTF-8 terminal (review of #859)."""
+    return bool(text) and text.isascii() and text.isdigit()
 
-    `reference_width` in is the widest `stable_id_of` on the page (the
-    same per-page, not per-list, measurement the flat rows already
-    use); out, it is that clamped to at least the "#" heading above it.
-    """
-    reference = max(reference_width, display_width("#"))
-    fixed = (
-        _SELECTOR_WIDTH
-        + reference
-        + _COLUMN_GUTTER
-        + sum(column.width + _COLUMN_GUTTER for column in columns)
-    )
+
+def _table_widths(terminal_width: int, columns: Sequence[ListColumn]) -> int | None:
+    """The name column's width for a columnar page, or `None` when this
+    terminal is too narrow to hold the table at all."""
+    fixed = _SELECTOR_WIDTH + sum(column.width + _COLUMN_GUTTER for column in columns)
     name_width = terminal_width - fixed
     if name_width < _MIN_TABLE_NAME_WIDTH:
         return None
-    return reference, min(name_width, _MAX_TABLE_NAME_WIDTH)
+    return min(name_width, _MAX_TABLE_NAME_WIDTH)
 
 
-def _table_header(
-    columns: Sequence[ListColumn], *, reference_width: int, name_width: int
-) -> str:
+def _table_header(columns: Sequence[ListColumn], *, name_width: int) -> str:
     """The heading row, aligned to the same grid the rows below use.
 
     Headings are `LABEL_COLOR` -- the palette's "field name" role, the
@@ -265,8 +257,6 @@ def _table_header(
     """
     parts = [
         " " * _SELECTOR_WIDTH,
-        _pad_cell("#", reference_width, align_right=True),
-        " " * _COLUMN_GUTTER,
         _pad_cell("NAME", name_width, align_right=False),
     ]
     for column in columns:
@@ -410,7 +400,7 @@ async def pick_item(
     error message; the screen is left exactly as it was, and the next
     keystroke's own echo lands wherever the cursor already sits. A
     deliberately typed sub-prompt that fails on its own terms (`search`
-    with no matches, `goto` with an unparseable or out-of-range number)
+    with no matches, a caller's row key given a number not on the page)
     is different in kind, not a stray keystroke: it still gets its own
     specific text response *and* a freshly reprinted prompt afterward,
     since something was actually communicated that the user needs a
@@ -461,7 +451,7 @@ async def pick_item(
     own sub-prompt and returns the freshly re-sorted *entire* item
     sequence, or `None` if the user backed out without changing
     anything. A non-`None` result replaces both `items` and
-    `working_set` (so a later `search`/`goto` reflects the new order
+    `working_set` (so a later `search` reflects the new order
     too) and resets to page 1. `sort_label`, if given alongside, is
     read fresh on every render and appended to the nav trailer (e.g.
     "Sort: Activity") so the current mode is never a mystery -- exactly
@@ -473,7 +463,7 @@ async def pick_item(
     ("off"/"brief"/"detailed") -- fetched once by the caller, same
     caching rule as `netbbs.net.resource_editor.edit_resource_draft`'s
     own `description_level` parameter. The nav row (Next/Prev/Search/
-    Goto/Order/Back) renders through `menu_grid`; the per-item list
+    Order/Back) renders through `menu_grid`; the per-item list
     itself is unaffected -- items already show their own description
     via `description_of`. Unlike `edit_resource_draft`'s single fixed-
     size menu row, this nav block's *rendered height* now varies with
@@ -603,7 +593,7 @@ async def pick_item(
             lines += wrapped.count("\r\n") + 1
         if columns:
             width, _ = _dimensions()
-            if _table_widths(width, columns, 1) is not None:
+            if _table_widths(width, columns) is not None:
                 lines += 1
         return lines
 
@@ -846,12 +836,10 @@ async def pick_item(
                 # The list is empty because a search or a filter made it
                 # so, not because there is nothing here (Codex review).
                 # [S]earch with a blank query clears back to everything,
-                # [G]oto reaches any row by its reference, and Ctrl-H
-                # explains both -- and the handlers accept all three, so
-                # hiding them made the way out undiscoverable rather
+                # and Ctrl-H explains it -- and the handlers accept both,
+                # so hiding them made the way out undiscoverable rather
                 # than unavailable.
                 keys.append(menu_key("S", "earch"))
-                keys.append(menu_key("G", "oto #"))
             if on_create is not None:
                 # The whole point of staying here (issue #530): an empty
                 # list with a way out of being empty.
@@ -943,44 +931,25 @@ async def pick_item(
                 unicode_style=unicode_style, collapsed=collapsed,
                 header_color=header_color, node_name_gradient=session.node_name_gradient)
         )
-        # Dogfood report: stable_id_of is an arbitrary, permanent
-        # identifier (typically a DB id, see the module docstring) with
-        # no fixed digit count -- unlike `position` (always exactly
-        # 2 digits), a page mixing "(#1)" and "(#23)" left every name
-        # after a single-digit id one column further left than the
-        # rest. Right-pad each "(#N) " reference with however many
-        # trailing spaces its own id is short of the widest one *on
-        # this page* (not the whole list -- alignment only has to hold
-        # within one screen), so every name starts at the same column
-        # regardless of how many digits its own id happens to have.
-        max_id_width = max((len(str(stable_id_of(item))) for item in page_items), default=1)
         # Issue #528. Decided per render against the live terminal
         # width, so a resize mid-session gets whichever form actually
         # fits rather than the one that fitted on entry. `None` here
         # means "too narrow for a table", and every row below falls
         # back to the flat `description_of` form unchanged.
-        table = _table_widths(render_width, columns, max_id_width) if columns else None
-        if table is not None:
-            reference_width, name_width = table
-            await session.write_line(
-                _table_header(columns, reference_width=reference_width, name_width=name_width)
-            )
+        name_width = _table_widths(render_width, columns) if columns else None
+        if name_width is not None:
+            await session.write_line(_table_header(columns, name_width=name_width))
         for position, item in enumerate(page_items, start=1):
-            # Two numbers shown per line, deliberately: the 2-digit
-            # prefix is what to press to select *this item, right now,
-            # on this page*; the "(#N)" is its permanent stable_id_of
-            # reference for `goto` — usable later, from anywhere,
-            # regardless of paging, search state, or sort order. Without
-            # showing this second number somewhere, `goto` would be
-            # nearly undiscoverable — nothing else on screen reveals what
-            # number to type for it.
+            # One number per row: the 2-digit prefix is what to press to
+            # select *this item, right now, on this page* (issue #838
+            # dropped the permanent "(#N)" reference beside it).
             #
             # Colored per field (issue #104) via colored_truncate, not
             # plain truncate() on an already-colored string: the
             # selector in MENU_KEY_COLOR (it's literally the keystroke
-            # to press), the permanent reference in MUTED_COLOR, the
-            # name in ACCENT_COLOR (this module's existing convention for
-            # navigable item names), and any description muted again.
+            # to press), the name in ACCENT_COLOR (this module's existing
+            # convention for navigable item names), and any description
+            # muted.
             description = description_of(item)
             # Issue #171: a highlighted row's leading two spaces become
             # "> ", the same marker/column-width-preserving substitution
@@ -990,8 +959,6 @@ async def pick_item(
             # docstring.
             is_highlighted = highlighted == position - 1
             marker = "> " if is_highlighted else "  "
-            id_str = str(stable_id_of(item))
-            id_padding = " " * (max_id_width - len(id_str))
 
             if is_highlighted:
                 key_color = lambda txt: colored(txt, fg_color=accent_color, bold=True)
@@ -1002,18 +969,10 @@ async def pick_item(
                 item_name_color = accent_color
                 desc_color = MUTED_COLOR
 
-            if table is not None:
-                # Columnar row (issue #528). The parentheses around the
-                # permanent reference are dropped here and only here:
-                # the "#" heading above the column already says what
-                # the number is, which is the job "(#N)" was doing on a
-                # row with no headings to explain it. `goto` stays just
-                # as discoverable -- arguably more so, since the column
-                # is now labelled.
-                reference_width, name_width = table
+            if name_width is not None:
+                # Columnar row (issue #528).
                 segments: list[tuple[str, SegmentColor]] = [
                     (f"{marker}{position:02d}. ", key_color),
-                    (_pad_cell(id_str, reference_width, align_right=True) + " " * _COLUMN_GUTTER, MUTED_COLOR),
                     (_pad_cell(sanitize_text(name_of(item)), name_width, align_right=False), item_name_color),
                 ]
                 # Short-changed rows are padded rather than left to
@@ -1045,7 +1004,6 @@ async def pick_item(
 
             segments = [
                 (f"{marker}{position:02d}. ", key_color),
-                (f"(#{id_str}) {id_padding}", MUTED_COLOR),
             ]
             if name_segments_of is not None:
                 for text, color in name_segments_of(item):
@@ -1065,7 +1023,7 @@ async def pick_item(
                 # secondary text really is prose keep their unbounded
                 # name and lose the tail of a sentence instead, which
                 # is the right trade when the tail is a sentence.
-                fixed = display_width(f"{marker}{position:02d}. ") + display_width(f"(#{id_str}) {id_padding}")
+                fixed = display_width(f"{marker}{position:02d}. ")
                 room = render_width - fixed - display_width(f" - {description}")
                 name_text = sanitize_text(name_of(item))
                 if room < display_width(name_text):
@@ -1455,21 +1413,27 @@ async def pick_item(
         if item_keys and char_lower in item_keys:
             # A caller's key that acts on one row (issue #710: [N]ew scan's
             # [M]ark read): the highlighted one, or -- with nothing
-            # highlighted -- the one whose reference the caller types, as
-            # [G]oto asks. The callback returns the new working set; the
+            # highlighted -- the one whose number on this page the caller
+            # types, the same number that selects it (issue #838 removed
+            # the permanent references this used to ask for). The
+            # callback returns the new working set; the
             # page and the highlight stay, so a caller can work down a
             # list one row at a time. Checked after this screen's own
             # keys, as `live_keys` is. Its label goes in `live_nav`.
             if highlighted is not None and highlighted < len(page_items):
                 target = page_items[highlighted]
             else:
-                if not items:
+                if not page_items:
                     await session.write(reject_keystroke())
                     continue
                 await session.write_line("")
-                await write_prompt(session, "Which #: ")
+                await write_prompt(session, f"Which one (01-{len(page_items):02d}): ")
                 raw = (await session.read_line()).strip()
-                target = next((item for item in items if str(stable_id_of(item)) == raw), None)
+                target = (
+                    page_items[int(raw) - 1]
+                    if _is_ascii_number(raw) and 1 <= int(raw) <= len(page_items)
+                    else None
+                )
                 if target is None:
                     await session.write_line(colored("Out of range.", fg_color=ERROR_COLOR))
                     await write_prompt(session, "Choice: ")
@@ -1503,44 +1467,14 @@ async def pick_item(
             await session.write_line("")
             return created
 
-        if char_lower == "g":
-            if not items:
-                # Same reasoning as [S]earch's own guard above -- issue
-                # #155.
-                await session.write(reject_keystroke())
-                continue
-            await session.write_line("")
-            await session.write("Go to #: ")
-            raw = (await session.read_line()).strip()
-            try:
-                target_id = int(raw)
-            except ValueError:
-                await session.write_line(colored("Not a number.", fg_color=ERROR_COLOR))
-                await session.write("Choice: ")
-                continue
-            # Always searches `items` (the full original list) by
-            # stable_id_of, never `working_set` — a goto number means the
-            # same item regardless of any active search filter or sort
-            # order, matching the "(#N)" shown next to every displayed
-            # item. A linear scan, not a lookup table, since the caller's
-            # list is expected to be reasonably sized (boards/channels/
-            # areas on one node, not the whole Link) — acceptable here,
-            # revisit if that assumption stops holding.
-            for item in items:
-                if stable_id_of(item) == target_id:
-                    return item
-            await session.write_line(colored("Out of range.", fg_color=ERROR_COLOR))
-            await session.write("Choice: ")
-            continue
-
-        if char.isdigit():
+        if _is_ascii_number(char):
             second = await _read_navigable_key(session, distinguish_ctrl_h=True)
             second_char = (
                 second.char if second.kind == EditorKeyKind.CHAR and second.char is not None else None
             )
             if second_char is not None:
                 await session.write(second_char)
-            if second_char is None or not second_char.isdigit():
+            if second_char is None or not _is_ascii_number(second_char):
                 # The first digit is always echoed just above. A second
                 # key that was itself an ordinary character (including
                 # a non-digit one) was just echoed the same way; a
@@ -1640,18 +1574,13 @@ async def _show_picker_help(
         colored("Search", fg_color=header_color, bold=True),
         "  Filters the list to items whose name contains the text you type. A single "
         "match jumps straight to it. Blank search clears back to the full list.",
-        "",
-        colored("Goto #", fg_color=header_color, bold=True),
-        "  Jumps straight to a specific item by its permanent '(#N)' reference shown next "
-        "to each entry -- works regardless of the current page, search filter, or sort "
-        "order, unlike the 2-digit page-position number above.",
     ]
     if has_create is not None and has_create:
         # Listed before Order and Refresh, and worth describing even
         # though the nav row already names it (Codex review): on an
         # empty list this is the *only* action that resolves the state,
-        # while Search and Goto -- which this overlay does explain --
-        # can do nothing at all there.
+        # while Search -- which this overlay does explain -- can do
+        # nothing at all there.
         lines += [
             "",
             colored("Create", fg_color=header_color, bold=True),
@@ -1751,7 +1680,6 @@ def _nav_entries(
     if include_prev:
         entries.append(MenuEntry(label=menu_key("P", "rev"), brief="Previous page"))
     entries.append(MenuEntry(label=menu_key("S", "earch"), brief="Search by name"))
-    entries.append(MenuEntry(label=menu_key("G", "oto #"), brief="Jump to an item's #"))
     if on_sort is not None:
         entries.append(MenuEntry(label=menu_key("O", "rder"), brief="Change sort order"))
     # A caller's own keys, appended after this screen's (issue #537) --
@@ -1819,6 +1747,7 @@ def _tallest_nav(
                     on_create=on_create,
                 ))],
                 width=width, height=height, description_level=description_level,
+                min_entries_per_column=_NAV_MIN_ENTRIES_PER_COLUMN,
             )
             for next_here, prev_here in (
             # A list that fits one page can never draw Next or Prev, so
@@ -1864,6 +1793,7 @@ def _render_nav(
         descriptive = menu_grid(
             [("", entries)], width=width, height=height,
             description_level=description_level,
+            min_entries_per_column=_NAV_MIN_ENTRIES_PER_COLUMN,
         )
         # Measured against the *tallest* nav any page of this list can
         # produce, rather than this page's own entries (Codex review,

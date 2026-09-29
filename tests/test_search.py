@@ -457,10 +457,10 @@ def test_find_channel_message_result_row_fits_within_terminal_width(db, lane, al
     session = _run_main_menu(db, lane, alice, ["/", "quokkatown", "b", "l", "y"])
 
     text = _visible_text(session)
-    # "(#" only ever appears on an actual result row (the goto
-    # reference) -- scoped to just those, not the screen's own nav/help
-    # line, which legitimately runs longer than one result row.
-    result_rows = [line for line in text.splitlines() if "(#" in line]
+    # Scoped to the result rows (they start with their 2-digit number),
+    # not the screen's own nav/help line, which legitimately runs longer
+    # than one result row.
+    result_rows = [line for line in text.splitlines() if re.match(r"^(> |  )\d\d\. ", line)]
     assert result_rows, "no result row found at all"
     for line in result_rows:
         assert len(line) <= 80, f"a result row exceeded 80 columns: {line!r}"
@@ -516,27 +516,6 @@ def test_find_loops_back_to_results_after_viewing_a_hit(db, lane, alice):
     text = _visible_text(session)
     assert "firstviewmarker" in text
     assert "secondviewmarker" in text
-
-
-def test_find_goto_jumps_directly_to_a_result_by_its_shown_number(db, lane, alice):
-    # Dogfood follow-up: [G]oto # used to key off `id(item)` -- a raw
-    # Python object address no caller could ever type back correctly.
-    # Now a plain per-query sequential number, the same one shown as
-    # "(#N)" next to each row.
-    board = create_board(db, "general", creator=alice)
-    create_post(db, board, alice, "quokkatown first", "body")
-    create_post(db, board, alice, "quokkatown second", "body")
-
-    session = _run_main_menu(db, lane, alice, ["/", "quokkatown", "g", "2", "b", "b", "l", "y"])
-
-    text = _visible_text(session)
-    assert "Out of range" not in text
-    assert "Not a number" not in text
-    # Whichever of the two posts is actually result #2 (bm25 relevance
-    # order, not creation order) is the one that must have opened --
-    # not asserting a specific title, just that goto genuinely
-    # navigated rather than silently failing.
-    assert "quokkatown first" in text or "quokkatown second" in text
 
 
 # -- check_index_integrity / rebuild_indexes (issue #74) -------------------

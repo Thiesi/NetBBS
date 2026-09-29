@@ -639,6 +639,17 @@ rather than returning straight into its parent's redraw, where it would flash
 and vanish. The one exception is a picker with nothing to pick: it announces
 its empty message and returns, so the screen it returns to says it.
 
+A picker row carries one number: the two digits that select it on this page
+(issue #838). Rows used to show a second, permanent `(#N)` reference -- the
+item's database id -- for a `[G]oto #` command, so "02. (#1) Fountain Pens"
+asked a first-time caller to tell two numbers apart before choosing, and the
+field test found it confused more than it helped. Both are gone, on caller and
+SysOp screens alike. A number that keeps meaning the same item is the list's
+own order holding still (#839), not a second number beside it. The picker still
+identifies each row by a stable id internally, to reopen a list on the row just
+left. A caller key that acts on a row (New scan's `[M]ark read`) takes the
+highlighted row, or asks for its number on the page.
+
 No *menu* has a typed command language. A caller's options are the keys the
 action bar shows, and a prompt reading `Choice: ` accepts exactly those. The
 file-area listing was the last menu that read whole *lines* instead: it

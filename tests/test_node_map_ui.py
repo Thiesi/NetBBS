@@ -113,7 +113,7 @@ def test_the_directory_offers_the_node_map_and_it_lists_known_nodes(rig):
     listing = text[text.index("Nodes known to Roanoke"):]
     listing = listing[: listing.index("Choice:")]
     # The friendly name alone, numbered from 1; the DNS name is the detail's.
-    assert re.search(r"01\.\s+1\s+Harbor BBS\s+direct", listing)
+    assert re.search(r"01\.\s+Harbor BBS\s+direct", listing)
     assert "harbor.example.org" not in listing
     assert "direct" in text
     assert "Directory › Nodes known to Roanoke › Harbor BBS" in text

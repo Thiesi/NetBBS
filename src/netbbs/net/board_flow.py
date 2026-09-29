@@ -217,11 +217,10 @@ async def _browse_boards_in_category(
 
     One correctness detail: `Category` and `Board` rows come from
     different tables, so their database IDs can collide (both start at
-    1) — mixed into one picker call, that would make `goto` ambiguous
-    between two different things sharing the same displayed number.
-    Disambiguated by negating category IDs for picker purposes only
-    (`-item.id`) — boards keep their real, positive ID unchanged, so
-    existing board `goto` numbers aren't affected by this at all.
+    1) — mixed into one picker call, two different rows would share one
+    identity (the picker reopens a list on a row by it). Disambiguated
+    by negating category IDs for picker purposes only (`-item.id`) —
+    boards keep their real, positive ID unchanged.
 
     `community_id`/`community_scoped` (design doc §16) narrow
     browsing to one Community's boards (`community_scoped=True`,

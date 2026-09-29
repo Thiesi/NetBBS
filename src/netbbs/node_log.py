@@ -270,8 +270,8 @@ class StableEntryIds:
     """Keeps an entry's number the same across re-reads of one screen.
 
     `read_node_log` numbers entries by position, which shifts whenever the
-    retained window moves (new lines, a rotation). The picker shows the
-    number as a permanent reference (`#N`, reachable with Goto), so an
+    retained window moves (new lines, a rotation). The picker identifies a
+    row by this number (reopening the list on it), so an
     entry seen before keeps its number -- matched by its text and by how
     many identical entries precede it -- and only entries new to this
     screen get new ones."""

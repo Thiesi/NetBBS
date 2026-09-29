@@ -111,7 +111,7 @@ def test_order_command_resorts_the_flat_area_list_and_persists_globally(db, lane
     asyncio.run(file_flow.browse_file_areas(session, lane, alice))
     text = _visible_text(session)
     assert "Sort: Alphabetical" in text
-    assert re.search(r"01\.\s*\(#\d+\)\s*apple", text)
+    assert re.search(r"01\.\s*apple", text)
     assert get_effective_sort_mode(db, alice, "file_area") == "alphabetical"
 
 
@@ -136,7 +136,7 @@ def test_order_command_in_the_mixed_categories_view_only_reorders_areas(db, lane
     session = FakeSession(["o", "l", "j", "b"])
     asyncio.run(file_flow.browse_file_areas(session, lane, alice))
     text = _visible_text(session)
-    assert re.search(r"01\.\s*\(#-?\d+\)\s*\[Vintage\]", text)
+    assert re.search(r"01\.\s*\[Vintage\]", text)
 
 
 def test_community_scoped_order_offers_a_whole_community_save_option(db, lane, alice):

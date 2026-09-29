@@ -193,8 +193,8 @@ class _RemoteWhoEntry:
         # A local SessionSummary.session_id is a small, node-lifetime
         # sequential integer (that type's own docstring) -- this stays
         # well outside that range without needing to coordinate with it,
-        # since collision would only ever affect picker's cosmetic
-        # "goto #" convenience, never selection correctness itself.
+        # since collision would only ever affect which row a reopened
+        # list lands on, never selection correctness itself.
         digest = hashlib.sha256(f"{self.node_fingerprint}:{self.username}".encode("utf-8")).hexdigest()
         return int(digest[:8], 16)
 

@@ -1047,7 +1047,7 @@ def test_user_detail_ctrl_h_shows_real_help_text_for_every_field(db, lane, sysop
     # this same session, alongside review_composition) had no on-demand
     # help wired in at all until now.
     alice = create_user(db, "alice", password="hunter2", user_level=10)
-    session = FakeSession(["u", "l", "g", str(alice.id), "CTRL+H", " ", "b", "b", "b"])
+    session = FakeSession(["u", "l", "s", "alice", "CTRL+H", " ", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _visible(_written_text(session))
     assert "moderator/sysop capability" in text.lower()
@@ -1056,7 +1056,7 @@ def test_user_detail_ctrl_h_shows_real_help_text_for_every_field(db, lane, sysop
 
 def test_user_detail_ctrl_h_narrows_to_the_highlighted_field(db, lane, sysop):
     alice = create_user(db, "alice", password="hunter2", user_level=10)
-    session = FakeSession(["u", "l", "g", str(alice.id), "DOWN", "CTRL+H", " ", "b", "b", "b"])
+    session = FakeSession(["u", "l", "s", "alice", "DOWN", "CTRL+H", " ", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _visible(_written_text(session))
     # Down lands on "l" (Level, the first of _USER_DETAIL_FIELD_ORDER) --
@@ -1072,7 +1072,7 @@ def test_user_detail_arrow_nav_activates_the_highlighted_field(db, lane, sysop):
     # arrow-selectable fields (_USER_DETAIL_FIELD_ORDER = l, t, i, k, r);
     # Space then activates it exactly like pressing "t" directly would.
     alice = create_user(db, "alice", password="hunter2", user_level=10)
-    session = FakeSession(["u", "l", "g", str(alice.id), "DOWN", "DOWN", " ", "y", "b", "b", "b"])
+    session = FakeSession(["u", "l", "s", "alice", "DOWN", "DOWN", " ", "y", "b", "b", "b"])
     _run(session, lane, sysop)
     updated = next(u for u in list_users(db) if u.username == "alice")
     assert updated.disabled_at is not None
@@ -1080,7 +1080,7 @@ def test_user_detail_arrow_nav_activates_the_highlighted_field(db, lane, sysop):
 
 def test_user_detail_escape_clears_the_cursor_highlight_without_leaving(db, lane, sysop):
     alice = create_user(db, "alice", password="hunter2", user_level=10)
-    session = FakeSession(["u", "l", "g", str(alice.id), "DOWN", "ESCAPE", "b", "b", "b"])
+    session = FakeSession(["u", "l", "s", "alice", "DOWN", "ESCAPE", "b", "b", "b"])
     _run(session, lane, sysop)
     # Esc only cancels the highlight -- the account is untouched and the
     # screen is still reachable (proven by the trailing backs succeeding
@@ -1247,13 +1247,6 @@ def test_user_picker_search_still_works(db, lane, sysop):
     assert "Level: 10" in _normalized_visible(_written_text(session))
 
 
-def test_user_picker_goto_still_works(db, lane, sysop):
-    alice = create_user(db, "alice", password="hunter2", user_level=10)
-    session = FakeSession(["u", "l", "g", str(alice.id), "b", "b", "b"])
-    _run(session, lane, sysop)
-    assert "Level: 10" in _normalized_visible(_written_text(session))
-
-
 def test_user_picker_visibility_toggle_hides_disabled_users_on_first_press(db, lane, sysop):
     """The biggest node's own SysOp, dogfooding the sort toggles with a
     real ~50-user roster: [V] cycles all -> active-only -> disabled-only
@@ -1313,9 +1306,9 @@ def test_user_picker_visibility_toggle_returns_to_all_on_third_press(db, lane, s
     assert "bob" in after
 
 
-def test_user_picker_visibility_filter_scopes_search_and_goto(db, lane, sysop):
+def test_user_picker_visibility_filter_scopes_search(db, lane, sysop):
     """The whole point of hiding a class of accounts is to stop having to
-    look at or reach them -- search and goto should respect the active
+    look at or reach them -- search should respect the active
     visibility filter, not silently bypass it."""
     from netbbs.auth.users import set_user_disabled
 
@@ -1328,11 +1321,6 @@ def test_user_picker_visibility_filter_scopes_search_and_goto(db, lane, sysop):
     session = FakeSession(["u", "l", "v", "s", "bob", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "No matches." in _written_text(session)
-
-    # Same filter; goto by bob's numeric ID is likewise out of range.
-    session2 = FakeSession(["u", "l", "v", "g", str(bob.id), "b", "b", "b"])
-    _run(session2, lane, sysop)
-    assert "Out of range." in _written_text(session2)
 
 
 def test_list_users_unrecognized_key_sounds_a_bell_and_changes_nothing(db, lane, sysop):
@@ -1857,66 +1845,16 @@ def test_who_screen_with_no_custom_message_sends_nothing_extra_to_the_target(db,
     asyncio.run(scenario())
 
 
-def test_who_screen_shows_the_real_persisted_session_id_not_a_recomputed_position(db, lane, sysop):
-    """Issue #113: the "(#N)" reference `pick_item` shows must be
-    `ActiveSessionRegistry`'s own persistent, never-reused session_id --
-    not something merely derived from current page position (which would
-    always just be 1, 2, 3... and could never actually distinguish this
-    from the pre-#113 id(session) behavior in a test). Session A enters
-    and leaves first, freeing session_id 1; B and C then enter and stay,
-    getting session_id 2 and 3. On a page listing only [B, C], a
-    position-based scheme would show 01/02 -- the real IDs are 2 and 3."""
-    async def scenario():
-        node_controls = _node_controls()
-        registry = node_controls.session_registry
-
-        a_task = asyncio.create_task(_hold_registered(registry, FakeSession()))
-        await asyncio.sleep(0)
-        a_task.cancel()
-        await asyncio.gather(a_task, return_exceptions=True)
-
-        b, c = FakeSession(), FakeSession()
-        b_task = asyncio.create_task(_hold_registered(registry, b))
-        c_task = asyncio.create_task(_hold_registered(registry, c))
-        await asyncio.sleep(0)
-
-        # One extra "b" versus other Who-screen tests: those select a
-        # session (which returns control to _who_screen without needing
-        # its own "b"), this one backs straight out of the picker itself
-        # first, then unwinds node/sysop menus same as always.
-        admin_session = FakeSession(["n", "w", "b", "b", "b", "b"])
-        registry.enter(admin_session)
-        try:
-            await admin_menu(admin_session, lane, sysop, node_controls=node_controls)
-        finally:
-            registry.leave(admin_session)
-
-        text = _written_text(admin_session)
-        assert "(#2)" in text
-        assert "(#3)" in text
-        assert "(#1)" not in text
-
-        for task in (b_task, c_task):
-            task.cancel()
-        await asyncio.gather(b_task, c_task, return_exceptions=True)
-
-    asyncio.run(scenario())
-
-
-def test_who_screen_goto_targets_the_exact_session_by_its_real_id(db, lane, sysop):
-    """SysOp disconnect must still target the exact selected session
-    (issue #113's own acceptance criterion) when reached via `Go to #`
-    rather than a 2-digit page position -- proving the number shown is
-    genuinely usable as `pick_item`'s own permanent per-item reference,
-    not merely cosmetic."""
+def test_who_screen_disconnects_the_exact_session_picked(db, lane, sysop):
+    """SysOp disconnect must target the exact selected session (issue
+    #113's own acceptance criterion), even when session ids and page
+    positions differ."""
     async def scenario():
         node_controls = _node_controls()
         registry = node_controls.session_registry
 
         # A leaves first, so B and C's real session_id (2, 3) diverges
-        # from their page position (1, 2) -- same setup as the display
-        # test above, reused here to prove goto, not just display, uses
-        # the real ID.
+        # from their page position (1, 2).
         a_task = asyncio.create_task(_hold_registered(registry, FakeSession()))
         await asyncio.sleep(0)
         a_task.cancel()
@@ -1927,10 +1865,9 @@ def test_who_screen_goto_targets_the_exact_session_by_its_real_id(db, lane, syso
         c_task = asyncio.create_task(_hold_registered(registry, c))
         await asyncio.sleep(0)
 
-        # "g" (goto), target session_id 2 (b, page position 01 here --
-        # but selection must be driven by the typed ID, not position),
-        # then [D]isconnect and confirm, with no custom message.
-        admin_session = FakeSession(["n", "w", "g", "2", "d", "y", "b", "b", "b"])
+        # 01 (b, session_id 2), then [D]isconnect and confirm, with no
+        # custom message.
+        admin_session = FakeSession(["n", "w", "0", "1", "d", "y", "b", "b", "b"])
         registry.enter(admin_session)
         try:
             await admin_menu(admin_session, lane, sysop, node_controls=node_controls)
@@ -9548,9 +9485,8 @@ def test_user_picker_filtered_to_empty_still_offers_the_way_back(db, lane, sysop
     """A search followed by a visibility change can empty the page while
     the roster still has selectable accounts -- and the empty screen
     advertised only the live keys and Back, though [S]earch (blank
-    clears), [G]oto and Ctrl-H all still work. Hiding them made the way
-    out undiscoverable rather than unavailable (issue #537, Codex
-    review)."""
+    clears) and Ctrl-H still work. Hiding them made the way out
+    undiscoverable rather than unavailable (issue #537, Codex review)."""
     from netbbs.auth.users import set_user_disabled
 
     for name in ("alice", "alina"):
@@ -9569,7 +9505,7 @@ def test_user_picker_filtered_to_empty_still_offers_the_way_back(db, lane, sysop
     after = text[text.rindex("No users match that view."):]
     assert "Showing: Disabled users only" in after, "it says which filter emptied it"
     assert "[S]earch" in after, "and offers the key that clears the search"
-    assert "[G]oto" in after
+    assert "[G]oto" not in after  # issue #838
 
 
 # -- published identity: what this node asserts about its own users ---------
