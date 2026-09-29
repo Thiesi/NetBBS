@@ -232,7 +232,7 @@ many messages arrived since your last call and how many are unread in all,
 for example "3 new since your last call, 7 unread in all"; on your
 first call it gives just the unread count, and with nothing unread it says
 nothing. **New scan** shows the same counts above its list. Mail news is
-shown in the node's highlight colour, not the warning colour.
+shown in green, the colour of good news, not the warning colour.
 A message that arrives while you are online is announced with its sender and
 subject: at once in chat, straight away on an idle main menu or Inbox, and
 otherwise above the prompt of the next screen you reach. Nothing is written

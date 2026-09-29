@@ -51,7 +51,7 @@ from netbbs.net.chat_flow import (
 )
 from netbbs.net.file_flow import enter_file_area
 from netbbs.net.mail_flow import browse_mail, caller_mail_refusal, open_letter
-from netbbs.net.mail_arrivals import new_scan_mail_line, waiting_mail_counts
+from netbbs.net.mail_arrivals import NOTICE_COLOR as NEW_MAIL_COLOR, new_scan_mail_line, waiting_mail_counts
 from netbbs.net.notices import announce, announce_styled
 from netbbs.net.node_theme import effective_accent_color, effective_header_color, effective_header_color_256
 from netbbs.net.picker import pick_item
@@ -260,9 +260,9 @@ async def _new_scan_screen(
         unread, new = counts
         if not unread:
             return colored("Mail: nothing unread.", fg_color=MUTED_COLOR)
-        # The login notice's counts and colour (issue #917): the highlight,
-        # since waiting mail is news rather than a problem.
-        return colored(new_scan_mail_line(unread, new), fg_color=accent)
+        # The login notice's counts and colour (issues #917, #944): the
+        # good-news green, since waiting mail is news rather than a problem.
+        return colored(new_scan_mail_line(unread, new), fg_color=NEW_MAIL_COLOR)
 
     async def _replies_summary() -> str:
         """Replies to the caller, above the list on every redraw: the

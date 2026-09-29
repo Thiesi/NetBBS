@@ -349,8 +349,8 @@ text at both truecolor and 256-color depth for the values currently in the
 draft and applies them together on Save (issue #282 replaced the earlier
 per-slot preview-then-confirm screens and their separate preview).
 This is deliberately narrow: every *semantic* color in `netbbs.rendering.
-theme` (errors, warnings, success, privilege badges, operational alerts,
-verified-identity badges) stays fixed everywhere, never SysOp-configurable --
+theme` (errors, warnings, success, good news, privilege badges,
+operational alerts, verified-identity badges) stays fixed everywhere, never SysOp-configurable --
 a caller who has used several NetBBS nodes can keep trusting that red always
 means failure and green always means verified/success, regardless of any
 node's own branding. Full palette theming (every color configurable) was
@@ -2490,14 +2490,24 @@ for a caller mail is open to (`caller_mail_refusal`):
   has no AUTOINCREMENT; a letter marked unread again is not new. Up to three
   arrivals are named ("New mail from bob: Lunch?"), more are counted.
 
-News of mail is drawn in the highlight colour, the node's accent (issue
-#917; a SysOp's accent override applies): the live "New mail from ..."
-lines, the login notice, New scan's `Mail:` line, and the unread counts in
-the main menu's header and the mailbox's. New mail is good news, not a
+News of mail is drawn in the good-news colour, `theme.GOOD_NEWS_COLOR`
+(issues #917, #944): the live "New mail from ..." lines, the login notice,
+New scan's `Mail:` line, and the unread counts in the main menu's header and
+the mailbox's, "N unread in Kept" included. New mail is good news, not a
 problem, so none of these uses the warning colour; that stays for what is
 one -- a mailbox nearly at its cap, the cap's eviction count, and bounced
-or expired Link mail (in the error colour). In a session without colour
-the lines read the same, uncoloured.
+or expired Link mail (in the error colour). #917 first drew them in the
+node's accent, but its gold is a shade off the warning amber and the change
+barely showed, and the main menu's unread count sits beside the caller's
+name in that same gold. Good news is the palette's success green (82)
+under its own name: green already means "good" in NetBBS, so a second green
+would only be a shade to tell apart. Like the other semantic colours it is
+not a SysOp branding slot, so a node's accent override never moves it. It
+reads on a dark background as the rest of the palette does; the palette as
+a whole targets dark terminals (a light background already washes out its
+soft-white body text), and a client that folds 256 colours down to 16
+maps it to green, still apart from the yellow the accent and the amber fold
+to. In a session without colour the lines read the same, uncoloured.
 
 There is no preference to turn the live notice off: it is one line per
 letter, and callers already choose who may write to them (blocked senders,
