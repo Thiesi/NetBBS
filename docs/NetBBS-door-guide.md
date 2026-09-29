@@ -1460,6 +1460,8 @@ adapter, not guessed credentials in this one.
    set `options.credential_file` to its absolute path. NetBBS reads only a
    regular file of at most 4 KiB; keep it out of game mounts and backups
    exposed to callers. Do not put secrets in a shared exported profile.
+   `netbbs.backup` does not include this file: back it up yourself, next to
+   the node backups.
 
 RLogin is plaintext. A loopback destination is only a configuration guard;
 the SysOp must actually provide the secure tunnel. Direct non-loopback access
@@ -1470,15 +1472,28 @@ traditional servers insisting on ports 512–1023 are incompatible.
 
 RFC 1282 urgent window-size requests are answered on the RLogin socket.
 Ordinary SSH port forwarding and TLS byte tunnels do not generally preserve
-TCP urgent data. Use the provider-agreed fixed geometry (normally 80x25) for
-those tunnels; do not assume live resize negotiation reaches the remote host.
+TCP urgent data. Use the provider-agreed fixed geometry for those tunnels;
+do not assume live resize negotiation reaches the remote host. The remote
+templates use 80x24, the size of an ordinary terminal. A fixed geometry refuses
+every caller whose terminal is smaller, so raise it only for a provider that
+really draws more rows; 80x25 belongs to the DOS templates.
+
+A remote service keeps no game files on this node, so the legacy rule of one
+session until shared-file locking is proven does not apply. `max_sessions: 1`
+on a remote template only means one caller from this BBS at a time; raise it
+to the number of simultaneous callers the provider allows.
 
 ### DoorParty provider template
 
 The `remote-doorparty` preset uses the provider's documented RLogin identity
 mapping: local-user is a stable door-only password, remote-user is
-`[assigned-system-tag]handle`. This is a configuration template, **not a
-live-account certification**. See the provider connector author's
+`[assigned-system-tag]handle`. It was verified against a live DoorParty
+account on 2026-09-29 (NetBBS v7.13.0, NetBSD 11.0): the SSH endpoint
+`dp.throwbackbbs.com:2022`, the forward from `127.0.0.1:1513` to
+`dp.throwbackbbs.com:513`, the identity mapping and the tag format all work as
+shipped, over Telnet/SSH. Provider endpoints can change; if the tunnel stops
+connecting, check the provider's current instructions first. See the provider
+connector author's
 [protocol and account instructions](https://github.com/echicken/dpc2#usage).
 
 **MANUAL — outside NetBBS:** obtain provider access first, confirm the current
@@ -1494,7 +1509,12 @@ the provider's SSH password in NetBBS.
 Copy [`doorparty.credentials.example.json`](../examples/doors/remote/doorparty.credentials.example.json)
 to the preset's private credential path, replace the tag (do not double its
 brackets), and generate a long random door-only secret prefix. Keep that
-secret stable and backed up; changing it can break existing provider accounts.
+secret stable; changing it breaks existing provider accounts. A caller with
+the wrong secret still connects, then DoorParty prints `Invalid password.
+Inform the sysop of your BBS!` and closes, so NetBBS records a door that ended,
+not one that failed to start. `netbbs.backup` does not include the credential
+file, even when it sits in the state directory as the preset's default path
+does: **back it up yourself**. Losing it orphans every caller's DoorParty account.
 It is **not** the provider SSH password or a caller's NetBBS password.
 Use chmod 600. Do not grant guest accounts access; initially restrict the
 door to SysOp, then regular approved callers after a successful test.
