@@ -12717,8 +12717,10 @@ async def _write_banner_not_live(session: Session, status, *, callers_see: str) 
             )
         )
         return True
-    if status.enabled:
-        message = f"(Switched on, but the file is missing or over 256 KiB: callers see {callers_see}.)"
+    if status.exists and art is None:
+        message = f"(The saved file is over 256 KiB or can't be read: callers see {callers_see}.)"
+    elif status.enabled:
+        message = f"(Switched on, but no file is saved: callers see {callers_see}.)"
     else:
         message = f"(Nothing saved yet: callers see {callers_see}.)"
     await session.write_line(colored(message, fg_color=MUTED_COLOR))
