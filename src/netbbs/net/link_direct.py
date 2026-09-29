@@ -27,12 +27,12 @@ from netbbs.link.protocol import LinkProtocolError, RealtimeProtocolVersionError
 from netbbs.link.node_profiles import (
     ambiguous_node_guidance,
     fingerprint_prefix_matches,
-    identity_for_fingerprint,
     identity_for_peer,
     latest_identity_observation,
     link_address_label,
     reference_needle,
     resolve_peer_reference,
+    short_node_name,
     unknown_node_guidance,
     unquote_reference,
 )
@@ -306,14 +306,17 @@ def build_direct_message_deliverer(
             return (
                 target,
                 live,
-                identity_for_fingerprint(db, message.from_node_fingerprint),
+                short_node_name(db, message.from_node_fingerprint),
                 latest_identity_observation(db, message.from_node_fingerprint),
             )
 
-        target, live, node_identity, identity_notice = await lane.run(_lookup)
+        target, live, node_name, identity_notice = await lane.run(_lookup)
         if target is None or not presence.is_online(target.username):
             return False
-        origin = link_address_label(sanitize_text(message.from_display_label), sanitize_text(node_identity.label))
+        # Each line of a Link private conversation arrives as one of these,
+        # so the node is named as on a chat line, without its DNS name
+        # (issue #899).
+        origin = link_address_label(sanitize_text(message.from_display_label), sanitize_text(node_name))
         notice = colored(
             f"*** Private message from {origin}: {sanitize_text(message.body)}", fg_color=MUTED_COLOR, bold=True,
         )

@@ -31,7 +31,7 @@ storage underneath.
 from __future__ import annotations
 
 from netbbs.auth.users import User, presentation_name_problem
-from netbbs.rendering import NICK_COLOR, colored, sanitize_text
+from netbbs.rendering import MUTED_COLOR, NICK_COLOR, colored, sanitize_text
 from netbbs.storage.database import Database
 from netbbs.user_preferences import get_user_preference, set_user_preference
 
@@ -115,8 +115,11 @@ def display_label(db: Database, user: User) -> str:
 
 def chat_stream_label(db: Database, user: User) -> str:
     """
-    `nick|username` with the alias colored via `NICK_COLOR`, or plain
-    `username` if `user` has no alias. Used in the live chat stream
+    `nick|username` with the alias colored via `NICK_COLOR` and the
+    `|username` after it muted, or plain `username` if `user` has no
+    alias. The alias leads: the username is there so no alias stands
+    alone (issue #843), and at the same weight readers could not tell
+    which of the two was the alias (issue #899). Used in the live chat stream
     itself (regular messages, `/me`, join/leave, scrollback replay).
 
     Sanitizes the underlying nick/username *before* applying
@@ -134,4 +137,6 @@ def chat_stream_label(db: Database, user: User) -> str:
     nick = get_nick(db, user)
     if not nick:
         return sanitize_text(user.username)
-    return colored(sanitize_text(nick), fg_color=NICK_COLOR) + f"{NICK_SEPARATOR}{sanitize_text(user.username)}"
+    return colored(sanitize_text(nick), fg_color=NICK_COLOR) + colored(
+        f"{NICK_SEPARATOR}{sanitize_text(user.username)}", fg_color=MUTED_COLOR
+    )

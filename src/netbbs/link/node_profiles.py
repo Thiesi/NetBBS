@@ -11,11 +11,13 @@ from dataclasses import dataclass
 from ipaddress import ip_address
 import json
 import unicodedata
+import weakref
 
 from netbbs.managed_dns.state import (
     RegistrationStatus, get_node_fingerprint, get_previous_name, get_previous_published, get_previous_status,
     get_published, get_registered_name, get_registration_status,
 )
+from netbbs.auth.users import presentation_skeleton
 from netbbs.config import get_config, get_node_display_name, is_node_fingerprint_shape, set_config
 from netbbs.storage.database import Database
 from netbbs.timeutil import utc_now_iso
@@ -31,6 +33,9 @@ _OWN_CANONICAL_DNS_CONFIG_KEY = "link_own_canonical_dns_claim"
 _OWN_IDENTITY_HISTORY_CONFIG_KEY = "link_own_identity_claim_history"
 UNKNOWN_NODE_NAME = "Unknown linked node"
 UNNAMED_NODE_NAME = "Unnamed linked node"
+#: Between a friendly name and what qualifies it. `·` is reserved in
+#: friendly names, so a qualified name never equals another node's name.
+NAME_QUALIFIER_SEPARATOR = " · "
 
 
 @dataclass(frozen=True)
@@ -48,7 +53,10 @@ class NodeDisplayIdentity:
         every such node look the same."""
         if self.friendly_name == UNKNOWN_NODE_NAME and self.fingerprint:
             return self.fingerprint
-        return f"{self.friendly_name} · {self.dns_name}" if self.dns_name else self.friendly_name
+        return (
+            f"{self.friendly_name}{NAME_QUALIFIER_SEPARATOR}{self.dns_name}"
+            if self.dns_name else self.friendly_name
+        )
 
 
 @dataclass(frozen=True)
@@ -72,6 +80,37 @@ def name_key(value: str) -> str:
     same name -- identical on every terminal -- can never be two
     distinct claims."""
     return unicodedata.normalize("NFC", value).lower()
+
+
+def look_alike_key(value: str) -> str:
+    """Comparison key for whether a reader could take two friendly names
+    for one (issue #900): `presentation_skeleton`, the key local aliases
+    are checked with (issue #843), so "OutBound", "0utBound", "Out Bound"
+    and "OutBоund" with a Cyrillic о share one. A name with no letter or
+    digit in it has an empty skeleton and keeps its `name_key`.
+
+    For "could these be confused" -- identity warnings and telling nodes
+    apart on screen. "Is this the same name" (a rename, a typed reference)
+    stays `name_key`: a fuzzy match there could pick a different node."""
+    return presentation_skeleton(value) or name_key(value)
+
+
+def _friendly_claim_keys(value: str | None) -> set[tuple[str, str]]:
+    if not value or value == UNNAMED_NODE_NAME:
+        return set()
+    return {("exact", name_key(value)), ("look", look_alike_key(value))}
+
+
+def _dns_claim_keys(value: str | None) -> set[tuple[str, str]]:
+    # A DNS name is unique by registration, and folding would equate
+    # different real hostnames (`presentation_skeleton` drops `-` and `.`).
+    return {("exact", name_key(value))} if value else set()
+
+
+def _identity_claim_keys(identity: NodeDisplayIdentity) -> set[tuple[str, str]]:
+    """What `identity` claims, for the collision checks: exact friendly and
+    DNS names, plus the friendly name's look-alike key."""
+    return _friendly_claim_keys(identity.friendly_name) | _dns_claim_keys(identity.dns_name)
 
 
 def normalize_friendly_name(value: object) -> str | None:
@@ -250,12 +289,19 @@ def _identity_matches(identity: NodeDisplayIdentity, needle: str) -> bool:
     label a screen shows for it (`Name · dns.example`), or the start of its
     technical identity. The `·` in a label is reserved (a friendly name may
     not contain it), so a label can never be mistaken for another node's
-    name."""
+    name. `Name · abc123`, the form `qualified_node_name` gives a shared
+    name with no DNS name, is read as the friendly name plus the start of
+    the technical identity (issue #899)."""
+    name, separator, prefix = needle.rpartition(NAME_QUALIFIER_SEPARATOR)
     return (
         identity.dns_name == needle.rstrip(".")
         or name_key(identity.friendly_name) == needle
         or name_key(identity.label) == needle
         or fingerprint_prefix_matches(identity.fingerprint, needle)
+        or (
+            bool(separator) and name_key(identity.friendly_name) == name
+            and fingerprint_prefix_matches(identity.fingerprint, prefix)
+        )
     )
 
 
@@ -269,10 +315,145 @@ def link_address_label(user: str, node_label: str) -> str:
     user `alice@"Trusted Node"` and have its own posts read as another
     node's. `@` and `"` in it are shown as `?`: no real user name contains
     either, and the address a reader sees then has one `@`, the real one."""
+    user, node = link_address_parts(user, node_label)
+    return f"{user}@{node}"
+
+
+def link_address_parts(user: str, node_label: str) -> tuple[str, str]:
+    """The two halves `link_address_label` joins with `@`, for a caller
+    that styles them apart (the chat line, issue #899)."""
     user = user.replace("@", "?").replace('"', "?")
-    if "@" in node_label:
-        return f'{user}@"{node_label}"'
-    return f"{user}@{node_label}"
+    return user, (f'"{node_label}"' if "@" in node_label else node_label)
+
+
+def qualified_node_name(identity: NodeDisplayIdentity) -> str:
+    """How a node reads where its friendly name alone is not enough to
+    tell it apart: `Name · dns.example`, or `Name · abc123` -- the start
+    of its technical identity -- without a DNS name. Both forms resolve
+    back to the node when typed (`_identity_matches`)."""
+    if identity.friendly_name == UNKNOWN_NODE_NAME or identity.dns_name:
+        return identity.label
+    prefix = identity.fingerprint[:MIN_FINGERPRINT_PREFIX]
+    return f"{identity.friendly_name}{NAME_QUALIFIER_SEPARATOR}{prefix}"
+
+
+#: Stands for this BBS among the owners of a claimed name.
+_OWN_NODE = ""
+#: Per database: which nodes claim each name, and the state it was read at.
+_NAME_CLAIM_INDEX: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+
+def _own_claimed_names(db: Database) -> list[str]:
+    """This BBS's current friendly and DNS claims, and the bounded history
+    of the ones it retired -- what another node must not wear unnoticed."""
+    try:
+        history = json.loads(get_config(db, _OWN_IDENTITY_HISTORY_CONFIG_KEY) or "[]")
+    except (TypeError, ValueError):
+        history = []
+    if not isinstance(history, list):
+        history = []
+    return [
+        value for value in (
+            get_node_display_name(db),
+            get_config(db, _OWN_FRIENDLY_NAME_CONFIG_KEY),
+            get_config(db, _OWN_CANONICAL_DNS_CONFIG_KEY),
+            *history,
+        ) if isinstance(value, str) and value
+    ]
+
+
+def _shown_friendly_keys(value: str | None) -> set[tuple[str, str]]:
+    """`_friendly_claim_keys`, keeping the unnamed placeholder: two unnamed
+    nodes are no identity collision, but a screen must still tell them
+    apart."""
+    if not value:
+        return set()
+    return {("exact", name_key(value)), ("look", look_alike_key(value))}
+
+
+def _name_claim_owners(db: Database) -> dict[tuple[str, str], set[str]]:
+    """Every friendly and DNS name a known node claims, and this BBS's own
+    claims, keyed as the collision check keys them (`_identity_claim_keys`)
+    to the fingerprints claiming it.
+
+    Friendly and DNS names are one namespace here, as in the identity
+    collision check: a node whose friendly name is another node's DNS name
+    shares it. A chat line asks this once per line, so the index is kept
+    until the database changes -- this connection's own writes
+    (`total_changes`) or another connection's commits (`data_version`)."""
+    connection = db.connection
+    stamp = (connection.total_changes, connection.execute("PRAGMA data_version").fetchone()[0])
+    cached = _NAME_CLAIM_INDEX.get(db)
+    if cached is not None and cached[0] == stamp:
+        return cached[1]
+    owners: dict[tuple[str, str], set[str]] = {}
+    for value in _own_claimed_names(db):
+        # Retired claims do not say which were friendly names (the
+        # collision check reads them the same way).
+        for key in _shown_friendly_keys(value) | _dns_claim_keys(value):
+            owners.setdefault(key, set()).add(_OWN_NODE)
+    for row in connection.execute("SELECT fingerprint, descriptor_json FROM link_known_identities"):
+        known = _identity_from_descriptor_json(row["fingerprint"], row["descriptor_json"])
+        for key in _shown_friendly_keys(known.friendly_name) | _dns_claim_keys(known.dns_name):
+            owners.setdefault(key, set()).add(known.fingerprint)
+    _NAME_CLAIM_INDEX[db] = (stamp, owners)
+    return owners
+
+
+def friendly_name_is_shared(db: Database, identity: NodeDisplayIdentity) -> bool:
+    """Whether another node this BBS knows of, or this BBS itself, claims
+    `identity`'s friendly name, as a friendly name or as a DNS name, or a
+    friendly name a reader could take for it (`look_alike_key`, issue
+    #900)."""
+    index = _name_claim_owners(db)
+    owners: set[str] = set()
+    for key in _shown_friendly_keys(identity.friendly_name):
+        owners |= index.get(key, set())
+    return bool(owners - {identity.fingerprint})
+
+
+def presentations_confusable(first: NodeDisplayIdentity, second: NodeDisplayIdentity) -> bool:
+    """Whether a reader could take one node's full label for the other's
+    (issue #900): their friendly names read alike, and their DNS names do
+    not tell them apart -- one lacks a DNS name, or both have the same.
+    DNS names are compared exactly, never folded."""
+    if look_alike_key(first.friendly_name) != look_alike_key(second.friendly_name):
+        return False
+    if first.dns_name and second.dns_name:
+        return name_key(first.dns_name) == name_key(second.dns_name)
+    return True
+
+
+def known_nodes_named_like(
+    db: Database, name: str, *, exclude: str | None = None
+) -> list[NodeDisplayIdentity]:
+    """Every node this BBS knows of whose friendly name reads as `name`
+    (`look_alike_key`), leaving out the node `exclude` names."""
+    key = look_alike_key(name)
+    found = []
+    for row in db.connection.execute(
+        "SELECT fingerprint, descriptor_json FROM link_known_identities WHERE fingerprint IS NOT ?",
+        (exclude,),
+    ):
+        other = _identity_from_descriptor_json(row["fingerprint"], row["descriptor_json"])
+        if look_alike_key(other.friendly_name) == key:
+            found.append(other)
+    return found
+
+
+def short_node_name(db: Database, fingerprint: str) -> str:
+    """A node's name on a chat line (issue #899): the friendly name alone,
+    since the DNS name repeated on every line of a conversation cost more
+    width than it told anyone. A name another known node, or this BBS,
+    also goes by is qualified (`qualified_node_name`) so the two stay
+    distinguishable. A node never admitted reads as its fingerprint, as
+    `NodeDisplayIdentity.label` does."""
+    identity = identity_for_fingerprint(db, fingerprint)
+    if identity.friendly_name == UNKNOWN_NODE_NAME:
+        return identity.label
+    if friendly_name_is_shared(db, identity):
+        return qualified_node_name(identity)
+    return identity.friendly_name
 
 
 def unknown_node_guidance(reference: str) -> str:
@@ -395,10 +576,7 @@ def recheck_introduced_identities_against(db: Database, peer) -> None:
     comparison finds it.
     """
     met = identity_for_peer(peer)
-    claims = {
-        name_key(value) for value in (met.friendly_name, met.dns_name)
-        if value and value != UNNAMED_NODE_NAME
-    }
+    claims = _identity_claim_keys(met)
     if not claims:
         return
     rows = db.connection.execute(
@@ -407,11 +585,7 @@ def recheck_introduced_identities_against(db: Database, peer) -> None:
     ).fetchall()
     for row in rows:
         introduced = _identity_from_descriptor_json(row["fingerprint"], row["descriptor_json"])
-        introduced_claims = {
-            name_key(value) for value in (introduced.friendly_name, introduced.dns_name)
-            if value and value != UNNAMED_NODE_NAME
-        }
-        if claims & introduced_claims:
+        if claims & _identity_claim_keys(introduced):
             _record_identity_observation(db, introduced, met=False)
     db.connection.commit()
 
@@ -445,25 +619,24 @@ def _record_identity_observation(db: Database, current: NodeDisplayIdentity, *, 
     previous_name = previous.friendly_name if previous else None
     previous_dns = previous.dns_name if previous else None
     collision = None
-    current_claims = {
-        name_key(value) for value in (current.friendly_name, current.dns_name)
-        if value and value != UNNAMED_NODE_NAME
-    }
+    current_claims = _identity_claim_keys(current)
     try:
         local_history = json.loads(get_config(db, _OWN_IDENTITY_HISTORY_CONFIG_KEY) or "[]")
     except (TypeError, ValueError):
         local_history = []
     if not isinstance(local_history, list):
         local_history = []
-    local_claims = {
-        name_key(value)
-        for value in (
-            get_node_display_name(db),
-            get_config(db, _OWN_FRIENDLY_NAME_CONFIG_KEY),
-            get_config(db, _OWN_CANONICAL_DNS_CONFIG_KEY),
-            *local_history,
-        ) if isinstance(value, str) and value
-    }
+    # The history mixes retired friendly and DNS names without saying which
+    # is which, so each gets both kinds of key. A DNS name's look-alike key
+    # could only meet a friendly name spelled out like a hostname.
+    local_claims = (
+        _friendly_claim_keys(get_node_display_name(db))
+        | _friendly_claim_keys(get_config(db, _OWN_FRIENDLY_NAME_CONFIG_KEY))
+        | _dns_claim_keys(get_config(db, _OWN_CANONICAL_DNS_CONFIG_KEY))
+    )
+    for value in local_history:
+        if isinstance(value, str) and value:
+            local_claims |= _friendly_claim_keys(value) | _dns_claim_keys(value)
     if current_claims & local_claims:
         collision = NodeDisplayIdentity(
             get_node_fingerprint(db) or "local-node", get_node_display_name(db),
@@ -475,11 +648,7 @@ def _record_identity_observation(db: Database, current: NodeDisplayIdentity, *, 
         (current.fingerprint,),
     ):
         known = _identity_from_descriptor_json(row["fingerprint"], row["descriptor_json"])
-        known_claims = {
-            name_key(value) for value in (known.friendly_name, known.dns_name)
-            if value and value != UNNAMED_NODE_NAME
-        }
-        if collision is None and current_claims & known_claims:
+        if collision is None and current_claims & _identity_claim_keys(known):
             collision = known
             break
 
@@ -500,24 +669,33 @@ def _record_identity_observation(db: Database, current: NodeDisplayIdentity, *, 
             """,
             (current.fingerprint, 1 if met else 0),
         ):
-            historical_claims = {
-                name_key(value) for value in (
-                    row["friendly_name"], row["previous_friendly_name"],
-                    row["canonical_dns_name"], row["previous_dns_name"],
-                ) if value and value != UNNAMED_NODE_NAME
-            }
-            matched_claims = current_claims & historical_claims
-            if matched_claims:
-                matched_claim = next(iter(matched_claims))
-                collision = NodeDisplayIdentity(
-                    row["node_fingerprint"],
-                    current.friendly_name
-                    if name_key(current.friendly_name) == matched_claim
-                    else row["friendly_name"] or row["previous_friendly_name"] or UNKNOWN_NODE_NAME,
-                    current.dns_name
-                    if current.dns_name and name_key(current.dns_name) == matched_claim
-                    else row["canonical_dns_name"] or row["previous_dns_name"],
+            historical_claims = (
+                _friendly_claim_keys(row["friendly_name"])
+                | _friendly_claim_keys(row["previous_friendly_name"])
+                | _dns_claim_keys(row["canonical_dns_name"])
+                | _dns_claim_keys(row["previous_dns_name"])
+            )
+            if current_claims & historical_claims:
+                # Name the familiar node by the claim that was matched, as
+                # it was spelled then -- a renamed node's old name when that
+                # is the one being worn -- and fall back to its latest.
+                current_friendly = _friendly_claim_keys(current.friendly_name)
+                friendly = next(
+                    (
+                        row[column] for column in ("friendly_name", "previous_friendly_name")
+                        if current_friendly & _friendly_claim_keys(row[column])
+                    ),
+                    row["friendly_name"] or row["previous_friendly_name"] or UNKNOWN_NODE_NAME,
                 )
+                current_dns = _dns_claim_keys(current.dns_name)
+                dns_name = next(
+                    (
+                        row[column] for column in ("canonical_dns_name", "previous_dns_name")
+                        if current_dns & _dns_claim_keys(row[column])
+                    ),
+                    row["canonical_dns_name"] or row["previous_dns_name"],
+                )
+                collision = NodeDisplayIdentity(row["node_fingerprint"], friendly, dns_name)
                 break
 
     if collision is not None:
