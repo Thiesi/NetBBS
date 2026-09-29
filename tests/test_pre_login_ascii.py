@@ -1,8 +1,11 @@
-"""Before sign-in, Telnet callers get plain ASCII chrome (issue #841, F073).
+"""Before sign-in, the chrome follows the connection's character set
+(issues #841, #929).
 
 A CP437 terminal such as SyncTERM showed the UTF-8 rules, arrows and the
-default banner's box as noise until after login, when the caller could
-first ask for plain ASCII. The browser and SSH keep the Unicode look."""
+default banner's box as noise until after login. Now the character set
+is detected: a terminal that said nothing gets ASCII and the plain
+chrome, and UTF-8 and CP437 terminals keep the decorated look (CP437 is
+mapped on write)."""
 
 from __future__ import annotations
 
@@ -13,6 +16,7 @@ import pytest
 from netbbs.net.login_flow import _write_connection_notice
 from netbbs.net.welcome_banner import banner_path, load_welcome_banner, pre_login_unicode_style, set_welcome_banner_enabled
 from netbbs.rendering import strip_ansi
+from netbbs.rendering.charset import ASCII, CP437, UTF8
 from netbbs.storage.database import Database
 
 _UNICODE_CHROME = set("─═║╔╗╚╝›")
@@ -28,17 +32,17 @@ def db(tmp_path):
 class _Session:
     terminal_width = 80
 
-    def __init__(self, transport_name: str):
-        self.transport_name = transport_name
+    def __init__(self, output_charset: str):
+        self.output_charset = output_charset
         self.written: list[str] = []
 
     async def write_line(self, text: str = "") -> None:
         self.written.append(text)
 
 
-@pytest.mark.parametrize(("transport", "unicode"), [("telnet", False), ("web", True), ("ssh", True)])
-def test_pre_login_style_follows_the_transport(transport, unicode):
-    assert pre_login_unicode_style(_Session(transport)) is unicode
+@pytest.mark.parametrize(("charset", "unicode"), [(ASCII, False), (CP437, True), (UTF8, True)])
+def test_pre_login_style_follows_the_character_set(charset, unicode):
+    assert pre_login_unicode_style(_Session(charset)) is unicode
 
 
 def test_default_banner_in_ascii_has_no_box_characters(db):
@@ -58,9 +62,9 @@ def test_a_sysop_banner_is_shown_as_authored_either_way(db):
     assert "MY ═ PEN" in load_welcome_banner(db, unicode_style=False)
 
 
-@pytest.mark.parametrize(("transport", "expect_unicode"), [("telnet", False), ("web", True)])
-def test_connection_notices_follow_the_transport(db, transport, expect_unicode):
-    session = _Session(transport)
+@pytest.mark.parametrize(("charset", "expect_unicode"), [(ASCII, False), (UTF8, True)])
+def test_connection_notices_follow_the_character_set(db, charset, expect_unicode):
+    session = _Session(charset)
     asyncio.run(_write_connection_notice(session, db, "Sign-in failed", "Too many failed attempts."))
     text = "".join(session.written)
     assert bool(_UNICODE_CHROME & set(text)) is expect_unicode

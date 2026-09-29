@@ -868,7 +868,7 @@ def test_shutdown_event_and_graceful_delay_reach_handle_session(tmp_path, monkey
         task = asyncio.create_task(run(config, shutdown_event=shutdown_event))
         try:
             reader, writer = await _open_connection_when_ready("127.0.0.1", port(12391))
-            await skip_initial_negotiation(reader)
+            await skip_initial_negotiation(reader, writer)
 
             deadline = asyncio.get_event_loop().time() + 30.0
             while "node_controls" not in captured:

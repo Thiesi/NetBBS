@@ -737,7 +737,7 @@ def test_immediate_shutdown_broadcasts_and_disconnects_without_waiting(tmp_path)
         )
         try:
             reader, writer = await _open_connection_when_ready("127.0.0.1", port(12394))
-            await skip_initial_negotiation(reader)
+            await skip_initial_negotiation(reader, writer)
 
             deadline = asyncio.get_event_loop().time() + 30.0
             while len(session_registry) == 0:
@@ -785,7 +785,7 @@ def test_graceful_shutdown_actually_waits_before_disconnecting(tmp_path):
         )
         try:
             reader, writer = await _open_connection_when_ready("127.0.0.1", port(12393))
-            await skip_initial_negotiation(reader)
+            await skip_initial_negotiation(reader, writer)
 
             deadline = asyncio.get_event_loop().time() + 30.0
             while len(session_registry) == 0:
