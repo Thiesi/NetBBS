@@ -244,8 +244,10 @@ def test_the_staff_list_names_nothing_a_member_cannot_see(db, lane, sysop):
     asyncio.run(staff_list_screen(session, lane, carol))
     text = " ".join(_visible(_written_text(session)).split())
     assert "Trading Post" in text
-    assert "Inner circle" not in text and "Back room" not in text
+    # Table cells wrap, so look for the first word of each name.
+    assert "Inner" not in text and '"Back' not in text
 
     session = FakeSession(["b"])
     asyncio.run(staff_list_screen(session, lane, sysop))
-    assert "Inner circle" in " ".join(_visible(_written_text(session)).split())
+    text = _visible(_written_text(session))
+    assert "Inner" in text and '"Back' in text
