@@ -98,7 +98,7 @@ from netbbs.net.detail_view import show_detail
 from netbbs.net.draft_storage import delete_draft, drafts_directory, load_draft
 from netbbs.net.editor_preference import fullscreen_editor_enabled
 from netbbs.net.help_overlay import show_help
-from netbbs.net.mail_flow import _split_link_address, caller_mail_refusal, mail_someone, post_reply_key
+from netbbs.net.mail_flow import caller_mail_refusal, mail_someone, post_reply_key, split_link_address
 from netbbs.net.menu_description_preference import menu_description_level
 from netbbs.net.node_theme import effective_accent_color, effective_header_color, effective_header_color_256
 from netbbs.net.notices import announce, pending_notice_rows, take_notices, write_notices
@@ -2513,7 +2513,7 @@ def _post_author_mail_target(
         return account, None
     if link_context is None:
         return None
-    if _split_link_address(post.author_label) is None:
+    if split_link_address(post.author_label) is None:
         return None
     return None, post.author_label
 

@@ -1070,7 +1070,7 @@ async def _show_message(
     )
 
 
-def _split_link_address(technical_address: str) -> tuple[str, str] | None:
+def split_link_address(technical_address: str) -> tuple[str, str] | None:
     """`(user, fingerprint)` of a stored `user@<home-node-fingerprint>`, or
     `None` for a local name. Split at the last `@`: the user half comes from
     a peer's signed payload and nothing holds it to the username grammar,
@@ -1079,6 +1079,11 @@ def _split_link_address(technical_address: str) -> tuple[str, str] | None:
     if not separator or not is_node_fingerprint(fingerprint):
         return None
     return user, fingerprint
+
+
+# Public for the board reader's [M]ail author (issue #821); this module's own
+# call sites keep the name they had.
+_split_link_address = split_link_address
 
 
 async def _display_link_address(lane: DatabaseLane, technical_address: str) -> str:

@@ -159,6 +159,11 @@ _LOGOFF_SUMMARY_GRADIENT = [
 ]
 
 
+# What a row shows for a caller whose name is hidden -- and so, being
+# compared against, what keeps that row from being mailed (issue #821).
+_NAME_HIDDEN = "(name hidden)"
+
+
 def _session_history_display_name(
     db: Database, entry: SessionHistoryEntry, *, viewer_is_sysop: bool
 ) -> str:
@@ -187,11 +192,11 @@ def _session_history_display_name(
     if viewer_is_sysop:
         return entry.username_label
     if entry.user_id is None:
-        return entry.username_label if entry.name_visible_fallback else "(name hidden)"
+        return entry.username_label if entry.name_visible_fallback else _NAME_HIDDEN
     target = get_user_by_id(db, entry.user_id)
     if target is None or session_history_name_visible(db, target):
         return entry.username_label
-    return "(name hidden)"
+    return _NAME_HIDDEN
 
 
 def _previous_caller_entries(
@@ -338,7 +343,7 @@ def _render_previous_callers_panel(
     # malformed, and ambiguous about whether the name is hidden or just
     # long. A deliberately shorter label is substituted instead, so the
     # row still says plainly what it is.
-    _HIDDEN = "(name hidden)"
+    _HIDDEN = _NAME_HIDDEN
     _HIDDEN_SHORT = "(hidden)"
 
     # The timestamp is not a fixed width: a 12-hour display format
@@ -387,8 +392,8 @@ def _render_previous_callers_panel(
         )
         name_color = (
             (lambda text: _gradient(text, bold=True))
-            if use_truecolor and name != "(name hidden)"
-            else MUTED_COLOR if name == "(name hidden)" else accent_color
+            if use_truecolor and name != _NAME_HIDDEN
+            else MUTED_COLOR if name == _NAME_HIDDEN else accent_color
         )
         name_text, name_padding = _fit(name, name_width)
         connected_text, connected_padding = _fit(connected, connected_width)
@@ -471,9 +476,6 @@ async def _show_previous_callers_screen(
     )
     await session.read_any_key()
     return True
-
-
-_NAME_HIDDEN = "(name hidden)"
 
 
 def _previous_caller_mail_target(
