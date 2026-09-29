@@ -94,6 +94,7 @@ from netbbs.net.breadcrumb_preference import breadcrumb_collapsed_enabled
 from netbbs.net.unicode_style_preference import unicode_style_enabled
 from netbbs.net.node_theme import effective_accent_color_256, effective_header_color_256
 from netbbs.net.picker import pick_item
+from netbbs.net.post_color_preference import post_colors_enabled
 from netbbs.net.prose_editor import EditorHeader, edit_prose
 from netbbs.net.detail_view import show_detail
 from netbbs.net.notices import announce, announce_styled, take_notices, write_notices
@@ -114,10 +115,11 @@ from netbbs.rendering import (
     colored,
     menu_grid,
     menu_key,
-    reflow,
     sanitize_text,
     screen_title,
 )
+from netbbs.rendering.post_body import plain_post_body, post_body_mode, post_body_rows
+from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 from netbbs.timeutil import format_for_display, resolve_display_preferences
 
@@ -364,9 +366,22 @@ async def _message_view(
         message.created_at, override_format=display_format, override_timezone=display_timezone
     )
     preamble.append(colored("Date: ", fg_color=LABEL_COLOR) + colored(displayed_date, fg_color=METADATA_COLOR))
-    body = reflow(sanitize_text(message.body, allow_newlines=True), width=session.terminal_width)
-    body_rows = [colored(line, fg_color=VALUE_COLOR) if line else "" for line in body.splitlines()]
+    body_mode = await lane.run(_mail_body_mode, user)
+    truecolor = await lane.run(lambda db: effective_truecolor(session, db, user))
+    body_rows = post_body_rows(message.body, session.terminal_width, body_mode, truecolor=truecolor, layout="lines")
     return title, preamble, body_rows
+
+
+def _mail_body_mode(db: Database, user: User) -> str:
+    """How `user` sees a mail body (issue #809): as a board post on a
+    board that allows color -- pipe codes and SGR filtered by
+    `netbbs.rendering.post_body`, the same for local mail and mail
+    carried from another node -- in color, or plain with the codes
+    removed when the reader turned "Pos[t] colors" off. Mail has no
+    SysOp setting of its own: a letter is between its writer and its
+    reader, and the filter already keeps a body from moving the cursor
+    or clearing the screen."""
+    return post_body_mode(board_allows_color=True, reader_wants_color=post_colors_enabled(db, user))
 
 
 async def _show_message(
@@ -516,7 +531,7 @@ async def _show_inbox_message(
             await _compose_mail(
                 session, lane, user, prefill_link_address=message.sender_label,
                 prefill_subject=subject,
-                prefill_body=quote_body(message.body, author=shown) or None,
+                prefill_body=quote_body(plain_post_body(message.body), author=shown) or None,
                 link_context=link_context, reply_key=_reply_key(message),
             )
             continue
@@ -531,7 +546,7 @@ async def _show_inbox_message(
         await _compose_mail(
             session, lane, user, prefill_recipient=sender,
             prefill_subject=subject,
-            prefill_body=quote_body(message.body, author=message.sender_label) or None,
+            prefill_body=quote_body(plain_post_body(message.body), author=message.sender_label) or None,
             reply_key=_reply_key(message),
         )
 
@@ -614,6 +629,7 @@ async def _compose_mail(
     accent_color = await lane.run(effective_accent_color_256)
     header_color = await lane.run(effective_header_color_256)
     truecolor = await lane.run(lambda db: effective_truecolor(session, db, user))
+    body_mode = await lane.run(_mail_body_mode, user)
     title = "Reply" if reply_key is not None else "New message"
     link_enabled = link_context is not None
 
@@ -791,6 +807,9 @@ async def _compose_mail(
             accent_color=accent_color,
             header_color=header_color,
             truecolor=truecolor,
+            # Previewed as its reader will see it, lines kept (issue #809).
+            body_mode=body_mode,
+            body_layout="lines",
             breadcrumb=("Mail", title),
         )
         if action is ReviewAction.CANCEL:
@@ -1112,12 +1131,15 @@ async def _compose_mail_body(
     Neither asks about a draft found there: `_compose_mail` has already
     offered it and passes it in as `initial_text`. `None` with the draft
     still on disk means the letter was kept; without it, cancelled.
+
+    Pasted color is kept as pipe codes (issue #809), as on a board that
+    allows color: mail shows it (`_mail_body_mode`).
     """
     if await lane.run(fullscreen_editor_enabled, user):
         return await edit_prose(
             session, initial_text=initial_text, draft_path=draft_path, max_bytes=MAX_MAIL_BODY_BYTES,
             unicode_style=await lane.run(unicode_style_enabled, user), cursor_at_end=cursor_at_end,
-            header=header, offer_recovery=False,
+            header=header, offer_recovery=False, keep_pasted_color=True,
         )
     return await edit_line_body(
         session,
@@ -1126,4 +1148,5 @@ async def _compose_mail_body(
         max_lines=_MAX_PLAIN_MAIL_LINES,
         draft_path=draft_path,
         offer_recovery=False,
+        keep_pasted_color=True,
     )

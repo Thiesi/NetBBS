@@ -3,9 +3,9 @@ Replying with a quote (issue #675): the subject a reply starts with and
 the quoted text its body starts with. Shared by a board post's `[R]eply`
 and mail's Reply, so the two read the same.
 
-A board caller hands `quote_body` the body a reader with color off sees
-(`netbbs.rendering.post_body.plain_post_body`), mail its body as stored;
-either way it is sanitized again here, since it can come from another
+Both callers hand `quote_body` the body a reader with color off sees
+(`netbbs.rendering.post_body.plain_post_body`) -- mail too, since it
+shows color (issue #809); either way it is sanitized again here, since it can come from another
 node. Both return text for an editor, never anything rendered.
 """
 
