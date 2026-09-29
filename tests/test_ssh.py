@@ -421,18 +421,12 @@ def test_ssh_pre_auth_banner_is_the_real_welcome_banner_not_a_bare_literal(db):
     # Design-doc correction (issue #136 claimed SSH already showed the
     # same truecolor-capable banner web does -- it never actually called
     # load_welcome_banner at all, only a hand-typed "NetBBS" literal).
-    # Proves the real banner content -- the double-frame border and
-    # tagline that only `load_welcome_banner` produces -- reaches a real
-    # SSH client pre-auth, not just the word "NetBBS" on its own.
-    # Compared as plain text (`strip_ansi`), not the raw
-    # `DEFAULT_WELCOME_BANNER` constant verbatim -- issue #203's fix
-    # strips every ANSI sequence from this specific pre-auth banner
-    # before sending it, so the colored constant is no longer a literal
-    # substring of what a client actually receives; see the dedicated
-    # `test_ssh_pre_auth_banner_contains_no_ansi_escapes` below for that
-    # stripping itself.
-    from netbbs.net.welcome_banner import DEFAULT_WELCOME_BANNER
-    from netbbs.rendering import strip_ansi
+    # Proves the real banner content -- the frame and tagline that only
+    # `load_welcome_banner` produces -- reaches a real SSH client
+    # pre-auth, not just the word "NetBBS" on its own. Issue #203 strips
+    # every ANSI sequence from this banner (see
+    # `test_ssh_pre_auth_banner_contains_no_ansi_escapes` below), and
+    # issue #929 sends it in ASCII, the plain frame.
 
     create_user(db, "alice", password="hunter2", user_level=10)
     client = _BannerCapturingClient()
@@ -458,8 +452,10 @@ def test_ssh_pre_auth_banner_is_the_real_welcome_banner_not_a_bare_literal(db):
     asyncio.run(scenario())
     banner = "\n".join(client.banners)
     assert "conversations across independent nodes" in banner
-    assert "╔" in banner and "╝" in banner
-    assert strip_ansi(DEFAULT_WELCOME_BANNER) in banner
+    # Issue #929: sent before any terminal type exists, so ASCII -- the
+    # default banner's plain frame, not its box characters.
+    assert "+====" in banner and "╔" not in banner
+    assert banner.isascii()
 
 
 def test_ssh_pre_auth_banner_contains_no_ansi_escapes(db):

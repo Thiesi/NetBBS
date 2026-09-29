@@ -18,6 +18,7 @@ from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Awaitable, Callable
 
+from netbbs.rendering.charset import CP437, UTF8, Charset, map_text
 from netbbs.rendering.pipe_codes import PastedColor
 from netbbs.rendering.reflow import wrap_terminal_text
 from netbbs.rendering.terminal_emulator import TerminalEmulator
@@ -260,6 +261,22 @@ class Session(ABC):
     #: -- is not written into the door's screen.
     door_active: bool = False
 
+    #: What this caller's terminal reads (design doc §3.2, "Character set
+    #: per session", issue #929): UTF-8, CP437 or 7-bit ASCII. `write` maps
+    #: composed text to it, and the transport encodes in it; raw byte
+    #: output (a door's stream) is in it too. Stays UTF-8 until the
+    #: caller's terminal or preference says otherwise.
+    output_charset: Charset = UTF8
+    #: Whether `output_charset` came from something the terminal said for
+    #: certain. False for a Telnet terminal that reported no known type
+    #: (it gets ASCII) or only `ansi`, and for an SSH terminal type on
+    #: neither list: such a caller is asked after login which sample line
+    #: looks right (`netbbs.net.terminal_detect`).
+    charset_certain: bool = True
+    #: The terminal types the client reported, in order (Telnet TTYPE, or
+    #: the SSH PTY request's terminal type).
+    terminal_types: tuple[str, ...] = ()
+
     #: The server-side copy of this caller's screen (issue #764), created
     #: on the first write. See `screen_copy`.
     _screen_copy: TerminalEmulator | None = None
@@ -310,6 +327,7 @@ class Session(ABC):
             # the copy must too.
             self._copy_output(self._raw_decoder.decode(b"", final=True))
             self._raw_decoder = None
+        text = map_text(text, self.output_charset)
         self._copy_output(_normalize_newlines(text))
         if self._output_held:
             return
@@ -328,13 +346,15 @@ class Session(ABC):
         happen to appear in a ZDLE-escaped frame or raw file content,
         which `write` would otherwise corrupt.
 
-        Outside a binary transfer, raw output is a door's UTF-8 terminal
-        stream (`netbbs.doors.runtime.DoorTerminal` transcodes CP437), and
-        the screen copy decodes it as such.
+        Outside a binary transfer, raw output is a door's terminal stream
+        in this session's `output_charset` (`netbbs.doors.runtime.
+        DoorTerminal` transcodes to it), and the screen copy decodes it as
+        such.
         """
         if not self.binary_transfer_active:
             if self._raw_decoder is None:
-                self._raw_decoder = codecs.getincrementaldecoder("utf-8")("replace")
+                codec = "cp437" if self.output_charset == CP437 else "utf-8"
+                self._raw_decoder = codecs.getincrementaldecoder(codec)("replace")
             self._copy_output(self._raw_decoder.decode(data))
         elif self._output_held:
             # A transfer is refused a break-in (#765); should one start
@@ -476,7 +496,7 @@ class Session(ABC):
         """Write past a break-in's hold, and past the screen copy: the
         chat is drawn over the caller's screen, and the copy keeps what is
         underneath, to be put back."""
-        await self._send_text(text)
+        await self._send_text(map_text(text, self.output_charset))
 
     def _held_raw_prefix(self) -> bytes:
         """The start of a multi-byte character a door sent while output was
