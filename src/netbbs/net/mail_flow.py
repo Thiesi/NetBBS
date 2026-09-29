@@ -43,12 +43,16 @@ import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
-from netbbs.auth.users import AuthError, User, get_user_by_id, get_user_by_username
+from netbbs.auth.users import (
+    AuthError, User, get_user_by_id, get_user_by_username, is_usable_sysop, list_users,
+)
 from netbbs.identity.addressing import is_valid_user_part, user_part_problem
 from netbbs.link.boards import LinkContext
 from netbbs.link.enforcement import LinkPolicyAction, decide_node_action
 from netbbs.link.trust import TrustState
-from netbbs.link.mail import LinkMailError, compose_link_message
+from netbbs.link.mail import (
+    DELIVERY_STATUS_LABELS, LinkMailError, acknowledge_delivery_notices, compose_link_message, delivery_explanation,
+)
 from netbbs.link.node_profiles import (
     ambiguous_node_guidance, link_address_label, unknown_node_guidance, unquote_reference,
     identity_for_fingerprint, is_node_fingerprint, latest_identity_observation, resolve_stored_peer_reference,
@@ -289,6 +293,7 @@ async def _show_sent(session: Session, lane: DatabaseLane, user: User) -> None:
 
         descriptions = {
             m.id: f"to {recipient_labels[m.id]} "
+            f"{_delivery_tag(m)}"
             f"({format_for_display(m.created_at, override_format=display_format, override_timezone=display_timezone)})"
             for m in messages
         }
@@ -340,6 +345,12 @@ async def _message_view(
     preamble: list[str] = []
     if to_label is not None:
         preamble.append(colored("To: ", fg_color=LABEL_COLOR) + colored(sanitize_text(to_label), fg_color=accent))
+        delivery = delivery_explanation(message.link_delivery_status, message.link_delivery_reason)
+        if delivery is not None:
+            preamble.append(
+                colored("Delivery: ", fg_color=LABEL_COLOR)
+                + colored(delivery, fg_color=_DELIVERY_COLORS.get(message.link_delivery_status, VALUE_COLOR))
+            )
     else:
         sender_label = await _display_sender_label(lane, message)
         preamble.append(
@@ -428,6 +439,23 @@ async def _display_recipient_label(lane: DatabaseLane, message: MailMessage) -> 
     return recipient.username if recipient is not None else "(deleted account)"
 
 
+_DELIVERY_COLORS = {
+    "pending": MUTED_COLOR,
+    "delivered": SUCCESS_COLOR,
+    "bounced": ERROR_COLOR,
+    "expired": ERROR_COLOR,
+}
+
+
+def _delivery_tag(message: MailMessage) -> str:
+    """Where a sent Link message stands, as a tag for its Sent list row
+    (issue #806); empty for local mail. The reason is on the message."""
+    status = message.link_delivery_status
+    if status not in DELIVERY_STATUS_LABELS:
+        return ""
+    return f"[{DELIVERY_STATUS_LABELS[status].upper()}] "
+
+
 async def _link_mail_identity_warning(
     lane: DatabaseLane, technical_address: str,
 ) -> str | None:
@@ -510,6 +538,9 @@ async def _show_inbox_message(
 
 async def _show_sent_message(session: Session, lane: DatabaseLane, user: User, message: MailMessage) -> None:
     to_label = await _display_recipient_label(lane, message)
+    if message.link_delivery_status in ("bounced", "expired"):
+        # Seen here, so the main menu need not tell it again (issue #806).
+        await lane.run(acknowledge_delivery_notices, [message.id])
     actions = [("d", menu_key("D", "elete")), ("b", menu_key("B", "ack"))]
     page = 0
     while True:
@@ -619,6 +650,8 @@ async def _compose_mail(
         """What to keep as the address, and how to show it (issue #813). A
         local name is kept as the account spells it, so `[T]o` opens on
         that too; a Link address is kept as typed, for Send to check again."""
+        # "sysop" wherever an address is typed, [T]o included (#840).
+        text = await lane.run(resolve_sysop_alias, text)
         label = await lane.run(_recipient_label, text, link_enabled)
         return (text if link_enabled and "@" in text else label), label
 
@@ -662,6 +695,8 @@ async def _compose_mail(
                 # #873): say so, not that it is gone.
                 announce(session, kept_notice if resumed is not None else "Cancelled.", tone="muted")
                 return
+            # "sysop" reaches the node's SysOp (issue #840, F087).
+            recipient_text = await lane.run(resolve_sysop_alias, recipient_text)
             if link_enabled and "@" in recipient_text:
                 # Checked as it is typed, like a local name (issue #807):
                 # a bad address is asked for again here, not after the
@@ -958,6 +993,24 @@ def _link_mail_refusal(db, fingerprint: str) -> str | None:
 class _LinkRecipient:
     user: str
     fingerprint: str
+
+
+def resolve_sysop_alias(db, recipient_text: str) -> str:
+    """`sysop` as a To address (issue #840, F087): the classic BBS way to
+    write to whoever runs the node. It names the node's first usable SysOp
+    account, unless an account is actually called that. The field test's
+    newcomer got "No such user: 'sysop'" and had to find the SysOp's name
+    in a post."""
+    if recipient_text.strip().lower() != "sysop":
+        return recipient_text
+    try:
+        return get_user_by_username(db, recipient_text).username
+    except AuthError:
+        pass
+    sysops = [account for account in list_users(db) if is_usable_sysop(account)]
+    if not sysops:
+        return recipient_text
+    return min(sysops, key=lambda account: account.id).username
 
 
 def _check_link_recipient(db, recipient_text: str) -> _LinkRecipient | str:

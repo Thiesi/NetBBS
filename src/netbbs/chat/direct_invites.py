@@ -79,6 +79,9 @@ class DirectChatInvites:
         # object-key API for non-weak-referenceable test/embedder keys.
         self._arrival: weakref.WeakKeyDictionary[object, asyncio.Event] = weakref.WeakKeyDictionary()
         self._arrival_nonweak: dict[object, asyncio.Event] = {}
+        # Sessions whose main menu is waiting on `arrival_event` right now
+        # (issue #843). Held only for the length of that wait.
+        self._watching: set[object] = set()
 
     def _arrival_store(self, session: object) -> dict | weakref.WeakKeyDictionary:
         """Return the arrival-event mapping suitable for ``session``."""
@@ -112,6 +115,23 @@ class DirectChatInvites:
             event = asyncio.Event()
             store[session] = event
         return event
+
+    async def wait_for_arrival(self, session: object) -> None:
+        """Wait on `arrival_event(session)`, marked as watching for the
+        length of the wait (`is_watching`). The main menu's read/invite
+        race waits through this rather than on the event directly."""
+        self._watching.add(session)
+        try:
+            await self.arrival_event(session).wait()
+        finally:
+            self._watching.discard(session)
+
+    def is_watching(self, session: object) -> bool:
+        """Whether an invite to `session` would open at once, because
+        its main menu is waiting for one (issue #843). If not, the
+        invite waits until that caller is back at the main menu, and
+        the inviter's side tells them so."""
+        return session in self._watching
 
     def clear_arrival(self, session: object) -> None:
         """Resets `session`'s arrival event once its caller has actually

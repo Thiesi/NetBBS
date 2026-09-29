@@ -28,11 +28,16 @@ forgotten it, ask the SysOp to set a new one; nobody can recover the old one.
 ## Find your way around
 
 Press a highlighted letter such as **[M]** for **Message boards**. Most menus react
-immediately, without Enter. When typing text, use Enter to submit it.
+immediately, without Enter. In the browser you can also click an entry or a
+numbered row. In a list, type a row's number: two digits (**03**) or one digit
+and Enter (**3** Enter). **[?] Help** on the main menu sums up how the board
+works and who runs it. To write to the SysOp, send E-mail **To: sysop**.
+When typing text, use Enter to submit it.
 **Ctrl+U** clears the line you are typing, and at a field that allows it,
 Esc leaves it without changing anything.
 Follow the action bar on the current screen: letters can mean different
-things in different places. **[B]ack** leaves most screens.
+things in different places. **[B]ack** leaves most screens and goes one level
+up: from a board to the list you picked it from, and from there to the menu.
 
 | Main-menu choice | What it does |
 | --- | --- |
@@ -41,11 +46,19 @@ things in different places. **[B]ack** leaves most screens.
 | **Files** | Every file area |
 | **Games** | Door games, when the SysOp has set some up |
 | **Communities** (key **O**) | Topics the SysOp set up, each with its own boards, chat channels, file areas and games |
-| **New scan** | See unread activity and resources you have not visited |
+| **New scan** | See unread activity and resources you have not visited; Back from each one brings you back with the next new one ready for Enter, and **[R]eplies** opens the replies to your posts |
 | **Find** (key **/**) | Search content available on this node |
 | **E-mail** | Read and send persistent NetBBS mail |
 | **Who's online** | See callers and available ways to contact them |
 | **Profile** | Change your public profile and personal preferences |
+| **Moderation** (key **A**) | Posts and uploads waiting for your decision, if the SysOp made you a moderator |
+| **Staff** | Your staff console, if the SysOp gave you staff permissions |
+| **Staff list** (key **T**) | Who runs this node: the SysOps, staff and moderators, when each was last on, and who is away |
+
+Lists of boards and file areas keep the SysOp's order, so the number you
+remember for a board still picks it next time. **[O]rder** in a list sorts it
+another way, by activity, name, newest or size, just this once or from then
+on; **[S]ysOp's order** there puts it back.
 
 Some choices appear only when they have something to show or you have
 permission to use them. Search covers content held by this node, including
@@ -101,6 +114,16 @@ to speak. `/help` lists the commands available there.
 | `/quit` | Leave chat |
 | `/msg user text` | Send a live private message |
 | `/away text` | Set an away message |
+| `/nick name` | Set a chat alias; a bare `/nick` clears it |
+| `/dm user` | Invite someone online to a private direct chat |
+
+An alias is always shown with the username beside it, as `Quill|Copperplate`,
+so everyone can see who is speaking. An alias that reads like someone else's
+username, or like a staff title such as "SysOp", is refused.
+
+A direct-chat invitation opens on your main menu. If you are somewhere else
+on the board, a line tells you who invited you; go back to the main menu
+within a minute to answer.
 
 Live private messages need the recipient to be online. **E-mail** keeps a
 message for later; it is NetBBS mail, not an Internet email account. If live
@@ -122,6 +145,21 @@ address on its From line, with the same `Re:` subject and quote a local reply
 gets. If that node can't be written to any more, Reply says why instead of
 opening the message. **Sent** shows each message's recipient, with the full
 address for mail that went to another node.
+
+Mail to another node also shows where it stands, in Sent's list and on its
+Delivery line when you open it:
+
+- **Pending**: on its way; the other node has not confirmed it yet.
+- **Delivered**: it is in the recipient's mailbox.
+- **Bounced**: the other node sent it back, and the Delivery line says why,
+  for example that there is no user by that name there, that their mailbox
+  is full of unread mail, or that the node does not trust yours yet.
+- **Expired**: no route to that node worked before delivery gave up, so it
+  was not delivered.
+
+When mail bounces or expires you are told at the main menu, once, even if it
+happened while you were away. Opening the message in Sent counts as being
+told. To try again, send it anew.
 
 Channels marked **MRC** connect to a separate public chat network. Your handle
 and messages are visible there. MRC private messages are optional in your

@@ -567,7 +567,7 @@ def test_the_page_number_counts_pages_walked_not_rows_divided():
     session = Growing(80, 22, ["n", "b"])
     asyncio.run(
         pick_item(
-            session, list(range(1, 16)),
+            session, list(range(1, 21)),
             name_of=lambda i: f"area {i}", stable_id_of=lambda i: i,
             description_of=lambda i: "read 0/write 0, open",
             title="File areas", empty_message="none",

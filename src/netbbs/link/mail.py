@@ -62,8 +62,10 @@ from netbbs.link.events import (
     build_link_message_bounced,
 )
 from netbbs.link.node_identity import NodeIdentity, resolve_current_operational_key
+from netbbs.link.node_profiles import identity_for_fingerprint, link_address_label
 from netbbs.link.work_items import KIND_LINK_MAIL_ACK, KIND_LINK_MAIL_DELIVERY, enqueue_work_item_without_commit
 from netbbs.mail import MailError
+from netbbs.rendering.width import cut_to_width
 from netbbs.storage.database import Database
 from netbbs.timeutil import utc_now_iso
 
@@ -361,14 +363,22 @@ def apply_link_message_accepted(db: Database, raw_ack: dict) -> None:
     mark_read`'s own no-op-if-unchanged shape for an unexpected but
     harmless case."""
     accepted = LinkMessageAccepted.from_dict(raw_ack)
-    _set_delivery_status(db, accepted.payload["message_content_id"], "delivered")
+    # Delivered after all (a bounce or an expiry can only have come first
+    # through a replay): nothing is left to tell the sender about.
+    db.connection.execute(
+        "UPDATE mail_messages SET link_delivery_status = 'delivered', link_delivery_reason = NULL, "
+        "link_delivery_notice_pending = 0 WHERE link_event_content_id = ?",
+        (accepted.payload["message_content_id"],),
+    )
+    db.connection.commit()
 
 
 def apply_link_message_bounced(db: Database, raw_ack: dict) -> None:
     """Counterpart to `apply_link_message_accepted` for a `link_message_
-    bounced` acknowledgement."""
+    bounced` acknowledgement. Keeps the recipient node's reason and flags
+    the message for its sender's next main menu (issue #806)."""
     bounced = LinkMessageBounced.from_dict(raw_ack)
-    _set_delivery_status(db, bounced.payload["message_content_id"], "bounced")
+    _record_bounce(db, bounced.payload["message_content_id"], bounced.payload["reason"], only_pending=False)
 
 
 def record_link_message_refused(db: Database, message_content_id: str, reason_code: str) -> None:
@@ -379,20 +389,26 @@ def record_link_message_refused(db: Database, message_content_id: str, reason_co
     final for this message, so it is a bounce, not a failure to retry.
 
     Only a still-`pending` row changes. `reason_code` is the recipient's
-    `netbbs.link.enforcement` reason; keeping it for the Sent screen is
-    #806's, so it is not stored yet; the caller logs it."""
-    db.connection.execute(
-        "UPDATE mail_messages SET link_delivery_status = 'bounced' "
-        "WHERE link_event_content_id = ? AND link_delivery_status = 'pending'",
-        (message_content_id,),
-    )
-    db.connection.commit()
+    `netbbs.link.enforcement` reason, kept for the Sent screen (issue
+    #806)."""
+    _record_bounce(db, message_content_id, reason_code, only_pending=True)
 
 
-def _set_delivery_status(db: Database, message_content_id: str, status: str) -> None:
+# A reason code comes from another node: kept only up to this length. Every
+# code NetBBS defines is far shorter.
+_MAX_REASON_LENGTH = 64
+
+
+def _record_bounce(db: Database, message_content_id: str, reason: str, *, only_pending: bool) -> None:
+    # A message that was already bounced is not told about twice; one that
+    # had expired is, since the bounce is the first real answer.
     db.connection.execute(
-        "UPDATE mail_messages SET link_delivery_status = ? WHERE link_event_content_id = ?",
-        (status, message_content_id),
+        "UPDATE mail_messages SET link_delivery_status = 'bounced', link_delivery_reason = ?, "
+        "link_delivery_notice_pending = CASE WHEN link_delivery_status = 'bounced' "
+        "THEN link_delivery_notice_pending ELSE 1 END "
+        "WHERE link_event_content_id = ?"
+        + (" AND link_delivery_status = 'pending'" if only_pending else ""),
+        (str(reason)[:_MAX_REASON_LENGTH], message_content_id),
     )
     db.connection.commit()
 
@@ -438,7 +454,7 @@ def get_link_mail_acknowledgement(db: Database, ack_id: str) -> LinkMessageAccep
     return LinkMessageBounced.from_dict(raw)
 
 
-def expire_link_message_delivery(db: Database, content_id: str) -> None:
+def expire_link_message_delivery(db: Database, content_id: str, *, reason: str | None = None) -> None:
     """Called when a `link_mail_delivery` work item dead-letters or is
     cancelled -- the payload could never even be successfully pushed
     (or a SysOp gave up on it), so this finally gives `mail_messages.
@@ -446,11 +462,16 @@ def expire_link_message_delivery(db: Database, content_id: str) -> None:
     a real producer. Guarded on the row still being `'pending'`: a
     genuine accepted/bounced event racing in first (this node's own
     push actually did succeed, just not yet reflected in the work item)
-    must win, never be overwritten by a stale dead-letter outcome."""
+    must win, never be overwritten by a stale dead-letter outcome.
+
+    `reason` is `EXPIRED_BY_OWN_POLICY` when this node's own trust policy
+    held the mail back to the end; `None` means no route worked. The
+    sender is told either way at their next main menu (issue #806)."""
     db.connection.execute(
-        "UPDATE mail_messages SET link_delivery_status = 'expired' "
+        "UPDATE mail_messages SET link_delivery_status = 'expired', link_delivery_reason = ?, "
+        "link_delivery_notice_pending = 1 "
         "WHERE link_event_content_id = ? AND link_delivery_status = 'pending'",
-        (content_id,),
+        (reason, content_id),
     )
     db.connection.commit()
 
@@ -463,8 +484,123 @@ def unexpire_link_message_delivery(db: Database, content_id: str) -> None:
     accepted/bounced resolution, rather than the message staying
     permanently `'expired'` even though delivery is being retried again."""
     db.connection.execute(
-        "UPDATE mail_messages SET link_delivery_status = 'pending' "
+        "UPDATE mail_messages SET link_delivery_status = 'pending', link_delivery_reason = NULL, "
+        "link_delivery_notice_pending = 0 "
         "WHERE link_event_content_id = ? AND link_delivery_status = 'expired'",
         (content_id,),
     )
     db.connection.commit()
+
+
+# -- what the sender is told (issue #806) -----------------------------------
+
+DELIVERY_STATUS_LABELS = {
+    "pending": "pending",
+    "delivered": "delivered",
+    "bounced": "bounced",
+    "expired": "expired",
+}
+
+# Each reason a recipient node can give, in words a caller understands. The
+# signed bounce reasons (`netbbs.link.events`) and the trust-policy refusal
+# codes (`netbbs.link.enforcement`) share one table; the sender cannot tell
+# which route a bounce took and does not need to.
+_BOUNCE_REASON_TEXT = {
+    "unknown_recipient": "there is no user by that name on that BBS",
+    "mailbox_full": "the recipient's mailbox is full of unread mail",
+    "blocked_sender": "that BBS does not accept mail from you or from this BBS",
+    "link_policy_manual_block": "that BBS has blocked you or this BBS",
+    "link_policy_node_quarantined": "that BBS has quarantined this BBS",
+    "link_policy_node_probationary_read_only": "that BBS does not trust this BBS yet; its SysOp has to establish it",
+    "link_policy_user_quarantined": "that BBS has quarantined your account",
+    "link_policy_user_probationary_approval_required": "that BBS does not trust your account yet",
+    "link_policy_probation_budget_exceeded": "this BBS is new to that BBS and has sent it as much as it accepts for now",
+}
+_UNKNOWN_BOUNCE_TEXT = "that BBS refused it"
+
+# The one expiry with a reason of its own: this node's trust policy stopped
+# holding the peer as one it sends mail to, and never allowed it again
+# before the delivery gave up.
+EXPIRED_BY_OWN_POLICY = "own_policy"
+_EXPIRED_TEXT = {
+    EXPIRED_BY_OWN_POLICY: "this BBS stopped exchanging mail with that BBS before it could be sent",
+}
+_EXPIRED_NO_ROUTE_TEXT = "no route to that BBS worked before delivery gave up"
+
+
+def delivery_explanation(status: str | None, reason: str | None) -> str | None:
+    """One line saying where a sent Link message stands, for the Sent view
+    (issue #806). `None` for local mail, which has no delivery state."""
+    if status == "pending":
+        return "Pending: that BBS has not confirmed it yet."
+    if status == "delivered":
+        return "Delivered to the recipient's mailbox."
+    if status == "bounced":
+        return f"Bounced: {bounce_reason_text(reason)}."
+    if status == "expired":
+        return f"Expired: {expiry_reason_text(reason)}. It was not delivered."
+    return None
+
+
+def bounce_reason_text(reason: str | None) -> str:
+    return _BOUNCE_REASON_TEXT.get(reason or "", _UNKNOWN_BOUNCE_TEXT)
+
+
+def expiry_reason_text(reason: str | None) -> str:
+    return _EXPIRED_TEXT.get(reason or "", _EXPIRED_NO_ROUTE_TEXT)
+
+
+# How many undelivered messages the main menu names at once; the rest are
+# counted in one line (the same bound as moderation notices).
+MAX_DELIVERY_NOTICES_SHOWN = 10
+# How much of a subject a notice quotes.
+_NOTICE_SUBJECT_COLUMNS = 40
+
+
+def pending_delivery_notices(db: Database, sender: User) -> tuple[list[str], list[int]]:
+    """`sender`'s Link mail that bounced or expired since they were last
+    told, as notice lines oldest first, and the ids to acknowledge once
+    the lines are on screen. Persistent, so a sender who was offline when
+    the bounce arrived is told at their next main menu (issue #806).
+    Nothing is marked here: a caller who drops before the menu is drawn is
+    told next time. Mail the sender deleted from Sent is left out: they are
+    done with it, and Sent can no longer show it."""
+    rows = db.connection.execute(
+        """
+        SELECT id, subject, recipient_remote_address, link_delivery_status, link_delivery_reason
+        FROM mail_messages
+        WHERE sender_user_id = ? AND link_delivery_notice_pending = 1 AND sender_deleted_at IS NULL
+        ORDER BY id
+        """,
+        (sender.id,),
+    ).fetchall()
+    lines = [_delivery_notice_text(db, row) for row in rows[:MAX_DELIVERY_NOTICES_SHOWN]]
+    if len(rows) > MAX_DELIVERY_NOTICES_SHOWN:
+        more = len(rows) - MAX_DELIVERY_NOTICES_SHOWN
+        lines.append(f"...and {more} more message{'s' if more != 1 else ''} not delivered; see E-mail, Sent.")
+    return lines, [row["id"] for row in rows]
+
+
+def acknowledge_delivery_notices(db: Database, mail_ids: list[int]) -> None:
+    """The sender has been told: stop flagging these messages."""
+    if not mail_ids:
+        return
+    db.connection.execute(
+        f"UPDATE mail_messages SET link_delivery_notice_pending = 0 WHERE id IN ({','.join('?' * len(mail_ids))})",
+        tuple(mail_ids),
+    )
+    db.connection.commit()
+
+
+def _delivery_notice_text(db: Database, row) -> str:
+    subject = row["subject"]
+    cut = cut_to_width(subject, _NOTICE_SUBJECT_COLUMNS)
+    subject = subject if cut == subject else cut.rstrip() + "..."
+    address = row["recipient_remote_address"] or ""
+    user, separator, fingerprint = address.rpartition("@")
+    to_label = (
+        link_address_label(user, identity_for_fingerprint(db, fingerprint).label) if separator else address
+    )
+    if row["link_delivery_status"] == "bounced":
+        return f'Your mail "{subject}" to {to_label} bounced: {bounce_reason_text(row["link_delivery_reason"])}.'
+    return f'Your mail "{subject}" to {to_label} was not delivered: {expiry_reason_text(row["link_delivery_reason"])}.'

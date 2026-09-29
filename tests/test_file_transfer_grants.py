@@ -143,7 +143,7 @@ def test_a_disabled_account_cannot_redeem(db, alice):
     area = create_file_area(db, "docs", creator=alice)
     entry = upload_file(db, area, alice, "game.zip", b"payload")
     grant = _download_grant(db, grants, alice, area, entry)
-    set_user_disabled(db, alice, True, changed_by=alice)
+    set_user_disabled(db, alice, True, changed_by=create_user(db, "admin", password="hunter2", user_level=255))
 
     with pytest.raises(TransferError):
         resolve(db, grant)

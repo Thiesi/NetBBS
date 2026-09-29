@@ -31,7 +31,7 @@ import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
-from netbbs.auth.users import SYSOP_LEVEL, User
+from netbbs.auth.users import SYSOP_LEVEL, StaffPermission, User
 from netbbs.boards.content_id import compute_content_id
 from netbbs.boards.posts import PENDING_ORDER_SQL
 from netbbs.config import get_expiry_grace_period_days
@@ -42,6 +42,7 @@ from netbbs.files.diz import (
     normalize_description,
 )
 from netbbs.files.storage import move_temp_file_into_storage, read_bytes, store_bytes
+from netbbs.communities import require_level_gate
 from netbbs.moderation import BoardPermission, has_permission, record_action
 from netbbs.permissions import require_level
 from netbbs.search import reindex_file
@@ -99,7 +100,7 @@ def upload_file(
     `approve_file`/`delete_file` for how a pending upload gets
     resolved, and `list_pending_files` for the moderation queue view.
     """
-    require_level(uploader, area.min_write_level)
+    require_level_gate(db, uploader, area.min_write_level, area, BoardPermission.WRITE)
     _refuse_hidden_area(db, area)
     # Before the bytes are stored, not after (Codex review): a
     # description this node will refuse should never leave a blob in
@@ -159,7 +160,7 @@ def upload_file_from_temp(
     either way.
     """
     try:
-        require_level(uploader, area.min_write_level)
+        require_level_gate(db, uploader, area.min_write_level, area, BoardPermission.WRITE)
         _refuse_hidden_area(db, area)
         # Validated before the move, for the same reason `upload_file`
         # validates before storing (Codex review) -- and here a refusal
@@ -348,7 +349,7 @@ def list_files_page(
     are listed first, exactly as `list_posts_page(with_pinned=True)` lists
     pinned posts -- see there. They stay in the dated feed too.
     """
-    require_level(requesting_user, area.min_read_level)
+    require_level_gate(db, requesting_user, area.min_read_level, area, BoardPermission.READ)
     if before is not None and after is not None:
         raise ValueError("specify at most one of before/after")
 
@@ -772,7 +773,9 @@ def list_node_pending_files(db: Database, *, requesting_user: User, limit: int) 
     """The oldest `limit` held uploads in every area, for the SysOp's
     node-wide queue -- `netbbs.boards.posts.list_node_pending_posts`'
     counterpart."""
-    require_level(requesting_user, SYSOP_LEVEL)
+    if not requesting_user.has_staff(StaffPermission.MODERATE_ALL):
+        # Moderate everything (design doc §5.6) decides on every one too.
+        require_level(requesting_user, SYSOP_LEVEL)
     rows = db.connection.execute(
         f"""
         SELECT * FROM files WHERE status = 'pending'
@@ -844,7 +847,7 @@ def list_pinned_files(
     Requires only `area.min_read_level` -- see
     `netbbs.boards.posts.list_pinned_posts` for the identical
     reasoning."""
-    require_level(requesting_user, area.min_read_level)
+    require_level_gate(db, requesting_user, area.min_read_level, area, BoardPermission.READ)
     rows = db.connection.execute(
         """
         SELECT * FROM files WHERE area_id = ? AND status = 'approved' AND pinned = 1

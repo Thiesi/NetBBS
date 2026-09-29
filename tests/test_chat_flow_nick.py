@@ -169,15 +169,10 @@ def test_alias_shown_on_join(db, lane, hub, presence, alice, bob, channel):
         return watcher
 
     watcher = asyncio.run(scenario())
-    # Nick-only-plus-marker in the live stream, not both forms -- the
-    # canonical username is deliberately absent here now; still
-    # available via /whois. Checked as two separate substrings, not one
-    # spanning "~DeepParse~ has joined", since chat_stream_label's own
-    # trailing ANSI reset sits between the two once colored.
-    text = _written_text(watcher)
-    assert "~DeepParse~" in text
-    assert "has joined the channel." in text
-    assert "alice has joined" not in text
+    # Issue #843: the alias with the username beside it, never the alias
+    # alone. Compared without ANSI: the alias carries its own color.
+    text = strip_ansi(_written_text(watcher))
+    assert "DeepParse|alice has joined the channel." in text
 
 
 def test_alias_shown_on_leave(db, lane, hub, presence, alice, bob, channel):
@@ -203,35 +198,23 @@ def test_alias_shown_on_leave(db, lane, hub, presence, alice, bob, channel):
         return watcher
 
     watcher = asyncio.run(scenario())
-    text = _written_text(watcher)
-    assert "~Bobby~" in text
-    assert "has left the channel." in text
-    assert "bob has left" not in text
+    text = strip_ansi(_written_text(watcher))
+    assert "Bobby|bob has left the channel." in text
 
 
 def test_alias_shown_in_regular_message(db, lane, hub, presence, alice, channel):
     set_nick(db, alice, "DeepParse")
     session = asyncio.run(_run(lane, hub, presence, channel, alice, ["hello", "/quit"]))
-    text = _written_text(session)
-    assert "~DeepParse~" in text
-    # Anchored to the raw-username chat-stream author format --
-    # "<alice>" is what an un-aliased message would look like -- not a
-    # blanket "alice" never appears anywhere: the status line's own
-    # "alice(DeepParse)" field legitimately shows the real username,
-    # since it's telling the viewer who *they* are, not attributing a
-    # message to anyone.
+    text = strip_ansi(_written_text(session))
+    assert "<DeepParse|alice>" in text
     assert "<alice>" not in text
 
 
 def test_alias_shown_in_me_action(db, lane, hub, presence, alice, channel):
     set_nick(db, alice, "DeepParse")
     session = asyncio.run(_run(lane, hub, presence, channel, alice, ["/me waves", "/quit"]))
-    text = _written_text(session)
-    assert "~DeepParse~" in text
-    assert "waves" in text
-    # Same anchoring reasoning as test_alias_shown_in_regular_message --
-    # "* alice " is the un-aliased /me action's own author format.
-    assert "* alice " not in text
+    text = strip_ansi(_written_text(session))
+    assert "DeepParse|alice waves" in text
 
 
 def test_alias_shown_on_scrollback_replay(db, lane, hub, presence, alice, channel):
@@ -240,7 +223,7 @@ def test_alias_shown_on_scrollback_replay(db, lane, hub, presence, alice, channe
     # A second session replays scrollback -- current alias should show,
     # not whatever was canonical-only at storage time.
     session = asyncio.run(_run(lane, hub, presence, channel, alice, ["/quit"]))
-    assert "~DeepParse~" in _written_text(session)
+    assert "<DeepParse|alice>" in strip_ansi(_written_text(session))
 
 
 def test_names_still_shows_both_forms(db, lane, hub, presence, alice, channel):
@@ -306,7 +289,7 @@ def test_moderation_notices_stay_canonical_only(db, lane, hub, presence, alice, 
     set_nick(db, alice, "DeepParse")
     # Rank protection requires the moderator to outrank the target; alice
     # and bob both start at the default level 10.
-    alice = set_user_level(db, alice, 50, changed_by=alice)
+    alice = set_user_level(db, alice, 50, changed_by=create_user(db, "admin", password="hunter2", user_level=255))
     grant_permissions(
         db, alice, object_type="channel", object_id=channel.id,
         permissions=ChannelPermission.MODERATE, granted_by=alice,

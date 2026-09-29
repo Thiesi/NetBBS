@@ -58,9 +58,10 @@ from netbbs.net.new_account_banner_after import load_new_account_banner_after
 from netbbs.net.new_account_banner_before import load_new_account_banner_before
 from netbbs.net.node_theme import effective_accent_color, effective_header_color_256, effective_node_name_gradient
 from netbbs.net.nodeconfig import ThrottleConfig
-from netbbs.net.redraw_preference import set_redraw_in_place_enabled
+from netbbs.net.redraw_preference import start_new_account_redrawing_in_place
 from netbbs.net.session import Session, SessionClosedError, write_preformatted_line, write_prompt
 from netbbs.net.signup_text import pending_approval_notice, username_problem_line
+from netbbs.staff import approvers_away_line
 from netbbs.net.session_activity import set_root_activity
 from netbbs.net.session_registry import ActiveSessionRegistry
 from netbbs.net.shutdown import NodeControls, SequenceScheduler, format_remaining_seconds
@@ -485,11 +486,11 @@ async def _watch_for_account_revocation(
     `cancel_one` runs from a `finally`, guaranteed to fire whether the
     write finishes, fails, or times out.
 
-    Issue #659: the same poll carries a SysOp's level or verify-identity
-    change into the live session -- see `_apply_access_change`. The
-    registry's `recheck` event wakes it early when the change was made
-    in this process, so an in-node demotion applies at once rather than
-    at the next tick.
+    Issue #659: the same poll carries a SysOp's level, verify-identity or
+    staff-permission change (issue #836) into the live session -- see
+    `_apply_access_change`. The registry's `recheck` event wakes it early
+    when the change was made in this process, so an in-node demotion
+    applies at once rather than at the next tick.
     """
     recheck = session_registry.recheck_event(session)
     while True:
@@ -523,8 +524,8 @@ async def _watch_for_account_revocation(
 
 def _apply_access_change(session: Session, current: User, session_registry: ActiveSessionRegistry) -> None:
     """
-    Carry a changed level or verify-identity permission into `session`
-    (issue #659). A gain only signals the main menu, which re-reads the
+    Carry a changed level, verify-identity permission or staff permission
+    into `session` (issues #659, #836). A gain only signals the main menu, which re-reads the
     account when it is next shown. A loss also unwinds the session back
     to the main menu, because whatever screen it is on was entered with
     the old access -- the SysOp console above all.
@@ -537,12 +538,19 @@ def _apply_access_change(session: Session, current: User, session_registry: Acti
     baseline = session_registry.account_baseline(session)
     if baseline is None:
         return
-    level, can_verify = baseline
-    if (current.user_level, current.can_verify_identity) == (level, can_verify):
+    level, can_verify, staff = baseline
+    if (current.user_level, current.can_verify_identity, current.staff_permissions) == (level, can_verify, staff):
         return
-    lost = current.user_level < level or (can_verify and not current.can_verify_identity)
+    lost = (
+        current.user_level < level
+        or (can_verify and not current.can_verify_identity)
+        # Any staff permission taken away (design doc §5.6): the Staff
+        # console was entered with it.
+        or bool(staff & ~current.staff_permissions)
+    )
     session_registry.record_account(
-        session, user_level=current.user_level, can_verify_identity=current.can_verify_identity
+        session, user_level=current.user_level, can_verify_identity=current.can_verify_identity,
+        staff_permissions=current.staff_permissions,
     )
     if lost:
         session_registry.request_level_unwind(session)
@@ -567,6 +575,12 @@ async def _confirm_unicode_style(session: Session, db: Database, user: User) -> 
     again (`netbbs.net.unicode_style_preference`'s own established
     contract, shared with `redraw_preference`)."""
     if unicode_style_ever_set(db, user):
+        return
+    if getattr(session, "transport_name", None) == "web":
+        # The browser terminal always draws them, so the question only
+        # puzzled callers there (issue #840, F090/F112). Nothing is saved:
+        # the same account dialling in with an ASCII-only client later is
+        # still asked (review on #871).
         return
     await session.write_line(
         colored("\r\nNetBBS can use a few Unicode characters for a cleaner look, like this:", fg_color=METADATA_COLOR)
@@ -765,7 +779,8 @@ async def run_authenticated_session(
             session, user.username, is_sysop=meets_level(user, SYSOP_LEVEL)
         )
         node_controls.session_registry.record_account(
-            session, user_level=user.user_level, can_verify_identity=user.can_verify_identity
+            session, user_level=user.user_level, can_verify_identity=user.can_verify_identity,
+            staff_permissions=user.staff_permissions,
         )
         watcher_task = asyncio.create_task(
             _watch_for_account_revocation(session, db, user, node_controls.session_registry)
@@ -1291,7 +1306,8 @@ async def _login(
             # (issue #835). Ends the connection like any other outcome a
             # retry cannot change.
             await _write_connection_notice(
-                session, db, "Waiting for approval", pending_approval_notice(exc.username)
+                session, db, "Waiting for approval",
+                pending_approval_notice(exc.username, approvers_away_line(db)),
             )
             return LoginOutcome.PENDING_APPROVAL
         except AuthError:
@@ -1551,7 +1567,7 @@ async def _register_new_account(
         # flipping `redraw_in_place_enabled`'s own resolve default,
         # which would silently change behavior for every existing
         # account with an unset preference too, not just new ones.
-        set_redraw_in_place_enabled(db, new_user, True)
+        start_new_account_redrawing_in_place(db, new_user)
 
         # GitHub issue #177: covers both successful outcomes below (an
         # account created and immediately usable, or created but pending
@@ -1574,7 +1590,10 @@ async def _register_new_account(
             )
             await session.write_line(
                 colored(
-                    reflow(pending_approval_notice(new_user.username), width=session.terminal_width),
+                    reflow(
+                        pending_approval_notice(new_user.username, approvers_away_line(db)),
+                        width=session.terminal_width,
+                    ),
                     fg_color=WARNING_COLOR,
                 )
             )

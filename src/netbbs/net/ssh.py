@@ -62,6 +62,7 @@ from netbbs.net.session import (
     wait_until_drained,
 )
 from netbbs.net.signup_text import pending_approval_notice, username_problem_line
+from netbbs.staff import approvers_away_line
 from netbbs.net.throttle import LoginThrottle
 from netbbs.net.welcome_banner import load_welcome_banner
 from netbbs.rendering import strip_ansi
@@ -239,6 +240,9 @@ class SSHSession(Session):
 
     async def discard_buffered_input(self) -> None:
         await char_input.discard_buffered_input(self)
+
+    def arm_word_guard(self) -> None:
+        char_input.arm_word_guard(self)
 
     async def close(self) -> None:
         self._process.exit(0)
@@ -449,7 +453,9 @@ class _NetBBSSSHServer(asyncssh.SSHServer):
             # denied" made the caller think they had mistyped it; an auth
             # banner is the one thing SSH can show before auth succeeds.
             if self._conn is not None:
-                self._conn.send_auth_banner(pending_approval_notice(exc.username) + "\r\n")
+                self._conn.send_auth_banner(
+                    pending_approval_notice(exc.username, approvers_away_line(self._db)) + "\r\n"
+                )
             return False
         except AuthError:
             return False
@@ -672,7 +678,8 @@ class _NetBBSSSHServer(asyncssh.SSHServer):
         after_prefix = f"{after_banner}\r\n" if after_banner else ""
         if require_approval:
             return await self._finish_registration(
-                f"{after_prefix}Account {username!r} created. {pending_approval_notice(username)}"
+                f"{after_prefix}Account {username!r} created. "
+                f"{pending_approval_notice(username, approvers_away_line(self._db))}"
             )
         return await self._finish_registration(
             f"{after_prefix}Account {username!r} created. Reconnect as {username!r} to log in."

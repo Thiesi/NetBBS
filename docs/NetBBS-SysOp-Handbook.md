@@ -401,9 +401,10 @@ account change that would leave no enabled, approved SysOp. Disabling an account
 revokes its access; deletion is permanent and requires its exact name. Existing
 content retains its recorded author label.
 
-A level change, or a granted or revoked identity-verifier permission, reaches
-a caller who is already logged in without them reconnecting. This also applies
-to a change made with `python -m netbbs.admin`, within a few seconds. A raised
+A level change, a granted or revoked identity-verifier permission, or a change
+to staff permissions reaches a caller who is already logged in without them
+reconnecting. This also applies to a change made with `python -m
+netbbs.admin`, within a few seconds. A raised
 level shows on their main menu. A lowered one takes them out of whatever they
 were doing, a door game included, and back to the main menu with a line naming
 their new level. Text they were composing is kept as a draft.
@@ -433,6 +434,62 @@ Access can also depend on resource-specific grants, verified age, and verified
 name. Raising a level does not replace identity verification. When access looks
 wrong, inspect both the account and the resource's effective settings, including
 Community defaults.
+
+### Sharing the work: staff permissions
+
+To hand someone the node's routine work without making them a second SysOp,
+give them **staff permissions** instead of level 255. Open their account
+under **Users** and choose **Staff**:
+
+| Permission | What it allows |
+| --- | --- |
+| Approve accounts | Approve or decline signups waiting under approval-required registration |
+| Manage accounts | Disable and re-enable accounts, reset passwords, set levels from 0 to 254 |
+| Moderate everything | Act as moderator on every board, file area and chat channel, local and carried |
+
+**Co-SysOp** on the same screen sets all three in one step. Every change asks
+for confirmation first and is audit-logged, and you can remove any permission
+on its own later. The account's level stays whatever it was.
+
+A staff member never acts on a level-255 account or on another staff member,
+so they cannot demote, disable or lock out you or each other, and they cannot
+widen their own permissions. They cannot raise anyone to 255, delete an
+account, grant staff permissions or moderator grants, or reach Settings, Link,
+Node, DNS or backups.
+
+The **Privileges** group on an account's detail screen shows its staff
+permissions, the identity-verifier permission, and every moderator grant it
+holds, such as `board "News": approve`.
+
+A staff member sees **[S]taff** on their main menu instead of [S]ysOp. It
+opens a reduced console that counts what waits for them and offers only what
+their permissions reach: **Accounts waiting** with approve accounts,
+**Users** with manage accounts, and **Moderation** when they moderate
+anything. These are your own screens with fewer actions: a staff member can
+open your account or another staff member's, but only to look.
+
+Whoever can approve accounts, you included, is told on the main menu when
+signups are waiting ("2 accounts awaiting approval"). A moderator who may
+approve posts or uploads anywhere sees **Moderation (n)** on the main menu,
+with how many wait, and it opens one queue across every board and file area
+their grants cover. To make someone a moderator of everything local in one
+step, grant a moderator with the scope **blanket across everything**: it
+writes the board, file area and channel grants together.
+
+Members find everyone who runs the node under **Staff list** on their main
+menu: SysOps, staff members, and moderators with what they look after, each
+with the date of their last session. Being listed is the point, so a
+member's choice to stay off Previous callers does not hide them here. Guests
+don't see the list.
+
+Going away for a while? Choose **Away** on your console's landing screen (it
+is on the Staff console too) and leave one short line, such as "At a pen
+show", with the date you expect to be back, or none if you don't know. The
+Staff list shows it beside your name. When everyone who can approve accounts
+is away, a caller waiting for approval is told who is expected back first.
+A notice with a date ends by itself after that day; one without a date stays
+until you end it, reads "away since" the day you set it, and your landing
+screen reminds you of it each time. Being away changes nobody's permissions.
 
 ### Verified age and names
 
@@ -465,6 +522,12 @@ draft and save it explicitly.
 - **File areas:** set access, upload policy, size/retention rules, and moderation.
   Uploads may include a description extracted from `FILE_ID.DIZ`. A remote
   catalogue entry is metadata; fetching its bytes is a separate action.
+- **Order of boards and file areas:** callers' lists follow your order, not
+  the latest activity, so the number a caller remembers keeps its board. A
+  new board or area goes last. **Up** and **Down** on its screen move it among
+  the others in the same category and Community; pinned ones stay first and
+  move among themselves. **Remove** deletes it. A caller can still sort a list by
+  activity with **[O]rder**.
 - **Chat channels:** set join gates, visibility, invitations, and moderation.
   Hidden or invite-only channels need more than a sufficient account level.
 - **Communities:** group related resources and provide inherited defaults.
@@ -495,6 +558,15 @@ Moderator grants belong to a resource or Community. Membership alone does not
 make someone a moderator. Grant only the scope required; use approval queues
 and the audit log to review actions. Chat moderation commands are used inside
 the channel by someone with the appropriate authority.
+
+A read or write grant on a board or file area lets its holder past that
+resource's minimum read or write level. To let a helper post on an
+announcements board whose write level is 255, grant them the **Read and post**
+preset on that board rather than raising their level (**Read only** opens
+reading alone). A grant opens only what its scope covers: one board or area,
+or, with a blanket scope, every board or area of that kind on the node or in
+one Community, so pick the scope with care. The minimum age and
+verified-name requirements still apply.
 
 The [user handbook](NetBBS-User-Handbook.md) covers posting, drafts, follows,
 search, mail, and everyday chat. **New scan** and **Find** only show content the
@@ -640,6 +712,14 @@ a space or other punctuation cannot send Link mail, because no reply could
 reach it; rename it if its owner needs to. Mail already waiting in the **Outbox** for a
 node goes out on the next Link pass after you establish it, and expires if
 the node is not established before its retries run out.
+
+Your callers see each Link message's state in their **Sent** mail: pending,
+delivered, bounced (with the other node's reason in plain words) or expired.
+A caller whose mail bounces or expires is told once at their next main menu.
+One refusal never comes back as a bounce: mail left at a relay for a node
+that has *your* node quarantined or blocked. That node sends yours nothing,
+and the relay took the message, so it stays pending. Replaying an expired
+delivery from the **Outbox** puts it back to pending.
 
 ### Behind an HTTP proxy
 

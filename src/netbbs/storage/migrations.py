@@ -3473,4 +3473,98 @@ MIGRATIONS = [
         );
         """,
     ),
+    Migration(
+        description=(
+            "Issue #839: `position` on boards and file_areas -- the SysOp's order, which caller "
+            "lists now follow by default instead of re-sorting by activity on every visit. "
+            "Existing rows keep the order they were created in; a trigger puts every new row, "
+            "local or carried over the Link, last. user_sort_preferences is rebuilt so its "
+            "CHECK accepts the new 'sysop' sort mode (nothing references that table)."
+        ),
+        sql="""
+        ALTER TABLE boards ADD COLUMN position INTEGER NOT NULL DEFAULT 0;
+        UPDATE boards SET position = (SELECT COUNT(*) FROM boards other WHERE other.id <= boards.id);
+        CREATE TRIGGER boards_position_last AFTER INSERT ON boards
+        BEGIN
+            UPDATE boards SET position = (SELECT COALESCE(MAX(position), 0) + 1 FROM boards WHERE id != NEW.id)
+            WHERE id = NEW.id;
+        END;
+
+        ALTER TABLE file_areas ADD COLUMN position INTEGER NOT NULL DEFAULT 0;
+        UPDATE file_areas SET position = (SELECT COUNT(*) FROM file_areas other WHERE other.id <= file_areas.id);
+        CREATE TRIGGER file_areas_position_last AFTER INSERT ON file_areas
+        BEGIN
+            UPDATE file_areas SET position = (SELECT COALESCE(MAX(position), 0) + 1 FROM file_areas WHERE id != NEW.id)
+            WHERE id = NEW.id;
+        END;
+
+        CREATE TABLE user_sort_preferences_new (
+            id             INTEGER PRIMARY KEY,
+            user_id        INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            resource_kind  TEXT NOT NULL CHECK (resource_kind IN ('channel', 'board', 'file_area')),
+            community_id   INTEGER REFERENCES communities(id),
+            category_id    INTEGER,
+            sort_mode      TEXT NOT NULL CHECK (sort_mode IN ('sysop', 'activity', 'alphabetical', 'recent', 'volume')),
+            created_at     TEXT NOT NULL,
+            CHECK (community_id IS NULL OR category_id IS NULL)
+        );
+        INSERT INTO user_sort_preferences_new
+            (id, user_id, resource_kind, community_id, category_id, sort_mode, created_at)
+        SELECT id, user_id, resource_kind, community_id, category_id, sort_mode, created_at
+        FROM user_sort_preferences;
+        DROP TABLE user_sort_preferences;
+        ALTER TABLE user_sort_preferences_new RENAME TO user_sort_preferences;
+        CREATE UNIQUE INDEX idx_user_sort_preferences_global
+            ON user_sort_preferences(user_id, resource_kind)
+            WHERE community_id IS NULL AND category_id IS NULL;
+        CREATE UNIQUE INDEX idx_user_sort_preferences_community
+            ON user_sort_preferences(user_id, resource_kind, community_id)
+            WHERE community_id IS NOT NULL;
+        CREATE UNIQUE INDEX idx_user_sort_preferences_category
+            ON user_sort_preferences(user_id, resource_kind, category_id)
+            WHERE category_id IS NOT NULL;
+        """,
+    ),
+    Migration(
+        description=(
+            "Issue #836: `users.staff_permissions` -- the staff permissions a SysOp gives an "
+            "account below 255 (approve accounts, manage accounts, moderate everything; design "
+            "doc §5.6), as a bitmask. 0 for every existing account, so nothing changes on upgrade."
+        ),
+        sql="""
+        ALTER TABLE users ADD COLUMN staff_permissions INTEGER NOT NULL DEFAULT 0;
+        """,
+    ),
+    Migration(
+        description=(
+            "Issue #836: `staff_away` -- a SysOp's or staff member's away notice (design doc "
+            "§5.6): one line of plain text, when it was set, and an optional node-local return "
+            "date after which it stops showing. One per person; goes with the account."
+        ),
+        sql="""
+        CREATE TABLE staff_away (
+            user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+            message TEXT NOT NULL,
+            since   TEXT NOT NULL,
+            until   TEXT
+        );
+        """,
+    ),
+    Migration(
+        description=(
+            "Issue #806: why Link mail was not delivered, and whether its sender has been told. "
+            "`link_delivery_reason` keeps the recipient node's bounce reason (a signed bounce's "
+            "reason, or the `link_policy_*` code of its trust-policy refusal); "
+            "`link_delivery_notice_pending` is 1 from the moment a sent message bounces or expires "
+            "until its sender has been told, at the main menu or in Sent. Mail that bounced "
+            "before this migration is not flagged."
+        ),
+        sql="""
+        ALTER TABLE mail_messages ADD COLUMN link_delivery_reason TEXT;
+        ALTER TABLE mail_messages ADD COLUMN link_delivery_notice_pending INTEGER NOT NULL DEFAULT 0;
+        CREATE INDEX idx_mail_messages_link_delivery_notice
+            ON mail_messages(sender_user_id)
+            WHERE link_delivery_notice_pending = 1;
+        """,
+    ),
 ]

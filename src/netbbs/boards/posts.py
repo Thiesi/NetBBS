@@ -22,12 +22,12 @@ import sqlite3
 from dataclasses import dataclass, replace
 
 from netbbs.attestation import meets_age
-from netbbs.auth.users import SYSOP_LEVEL, User
+from netbbs.auth.users import SYSOP_LEVEL, StaffPermission, User
 from netbbs.boards.boards import Board
 from netbbs.boards.content_id import compute_content_id
 from netbbs.boards.limits import MAX_BODY_BYTES, MAX_SUBJECT_BYTES
 from netbbs.boards.moderation_notices import record_moderation_outcome
-from netbbs.communities import get_effective_min_age, get_effective_min_read_level
+from netbbs.communities import get_effective_min_age, get_effective_min_read_level, require_level_gate
 from netbbs.config import get_expiry_grace_period_days
 from netbbs.link.enforcement import envelope_content_visible, link_content_visible
 from netbbs.moderation import BoardPermission, has_permission, record_action
@@ -147,7 +147,7 @@ def create_post(
     `board_closure`) -- a closed board accepts no further posts of any
     kind, replies included.
     """
-    require_level(author, board.min_write_level)
+    require_level_gate(db, author, board.min_write_level, board, BoardPermission.WRITE)
     _check_content_length(subject, body)
     closed_row = db.connection.execute(
         "SELECT * FROM boards WHERE id = ?", (board.id,)
@@ -690,7 +690,7 @@ def _require_board_readable(db: Database, board: Board, user: User) -> None:
     -- and its effective minimum age, the two gates on reading a board.
     (The name requirement gates posting, not reading.) Checked by every
     listing of a board's posts, not only by the screens that lead to one."""
-    require_level(user, get_effective_min_read_level(db, board))
+    require_level_gate(db, user, get_effective_min_read_level(db, board), board, BoardPermission.READ)
     if not meets_age(db, user, get_effective_min_age(db, board)):
         raise PostError("this message board has an age requirement you do not meet")
 
@@ -1412,7 +1412,9 @@ def list_node_pending_posts(db: Database, *, requesting_user: User, limit: int) 
     node-wide queue (issue #678) -- one bounded query however many boards
     the node carries (Codex review on #795). SysOp only: a SysOp may
     decide on every board, so no board is left out."""
-    require_level(requesting_user, SYSOP_LEVEL)
+    if not requesting_user.has_staff(StaffPermission.MODERATE_ALL):
+        # Moderate everything (design doc §5.6) decides on every one too.
+        require_level(requesting_user, SYSOP_LEVEL)
     # A board this node excluded from a carried Link keeps its rows, but no
     # screen lists it: its held posts must not take the queue's places
     # (Codex review on #795).

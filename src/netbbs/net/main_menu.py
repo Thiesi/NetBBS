@@ -16,7 +16,10 @@ from __future__ import annotations
 
 import asyncio
 
-from netbbs.auth.users import SYSOP_LEVEL, User, current_account
+from netbbs.auth.users import (
+    SYSOP_LEVEL, User, current_account, describe_staff_permissions, is_usable_sysop, list_users,
+)
+from netbbs.net.help_overlay import show_help
 from netbbs.chat import (
     ChatHub,
     DirectChatInvites,
@@ -27,8 +30,9 @@ from netbbs.chat import (
 )
 from netbbs.communities import Community, list_communities
 from netbbs.link.boards import LinkContext
+from netbbs.link.mail import acknowledge_delivery_notices, pending_delivery_notices
 from netbbs.mail import unread_count as unread_mail_count
-from netbbs.net.admin_flow import admin_menu
+from netbbs.net.admin_flow import admin_menu, moderation_queue, staff_list_screen, staff_menu
 from netbbs.boards import list_boards
 from netbbs.chat.channels import list_channels
 from netbbs.files import list_file_areas
@@ -36,7 +40,7 @@ from netbbs.net.board_flow import _browse_boards, visible_boards
 from netbbs.net.breadcrumb_preference import breadcrumb_collapsed_enabled
 from netbbs.boards.moderation_notices import acknowledge_moderation_notices, pending_moderation_notices
 from netbbs.net.notices import announce, write_notices
-from netbbs.net.char_input import REDRAW_KEY, InputHistory, reject_unhandled_key
+from netbbs.net.char_input import HELP_KEY, REDRAW_KEY, InputHistory, reject_unhandled_key
 from netbbs.net.chat_flow import browse_channels, run_direct_chat_loop, visible_channels
 from netbbs.net.confirm import prompt_yes_no
 from netbbs.net.directory_flow import _browse_directory, _caller_who_screen
@@ -83,6 +87,14 @@ from netbbs.rendering import (
     sanitize_text,
     screen_title,
 )
+from netbbs.staff import (
+    count_moderation_items,
+    count_pending_accounts,
+    has_moderation_scope,
+    is_staff,
+    sees_staff_list,
+    told_of_pending_accounts,
+)
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 from netbbs.timeutil import format_for_display, is_utc_zone_name, resolve_display_preferences, utc_now_iso
@@ -107,6 +119,8 @@ _MENU_ACTIVITY = {
     "i": "Invitations",
     "v": "Verify",
     "s": "SysOp",
+    "a": "Moderation",
+    "t": "Staff list",
     "l": "Logging off",
 }
 
@@ -244,6 +258,8 @@ async def _draw_main_menu(
                 detailed="Scan every accessible message board/chat channel/file area for activity since your last visit.",
             ),
             MenuEntry(label=menu_key("/", " Find"), brief="Search boards, files, and mail"),
+            # Issue #840 (F116): the main menu had no help at all.
+            MenuEntry(label=menu_key("?", " Help"), brief="How this board works"),
         ]
     )
     personal_options = [
@@ -268,6 +284,9 @@ async def _draw_main_menu(
         personal_options.append(
             MenuEntry(label=menu_key("W", "ho's online"), brief="See who's connected now")
         )
+    if sees_staff_list(db, user):
+        # Issue #836 (design doc §5.6): who runs the node, and who is away.
+        personal_options.append(MenuEntry(label=menu_key("t", "aff list", prefix="S"), brief="Who runs this node"))
     if list_pending_invitations_for_user(db, user):
         personal_options.append(
             MenuEntry(label=menu_key("I", "nvitations"), brief="Pending invitations for you")
@@ -281,6 +300,16 @@ async def _draw_main_menu(
         system_options.append(
             MenuEntry(label=menu_key("S", "ysOp"), brief="Node administration console")
         )
+    else:
+        # Issue #836 (design doc §5.2, §5.6): a moderator is told what waits
+        # for them, and a staff member reaches their own console.
+        if has_moderation_scope(db, user):
+            system_options.append(MenuEntry(
+                label=menu_key("a", f"tion ({count_moderation_items(db, user)})", prefix="Moder"),
+                brief="Held posts and uploads to decide",
+            ))
+        if is_staff(user):
+            system_options.append(MenuEntry(label=menu_key("S", "taff"), brief="Your staff console"))
     system_options.append(MenuEntry(label=menu_key("L", "ogoff"), brief="Disconnect from this node"))
 
     unicode_style = unicode_style_enabled(db, user)
@@ -336,6 +365,17 @@ async def _draw_main_menu(
         await session.write_line(
             colored(f"No boards yet: create one under SysOp {arrow} Content.", fg_color=MUTED_COLOR)
         )
+    if told_of_pending_accounts(user):
+        # Issue #835 (F071): only the console dashboard used to say that
+        # signups were waiting. Told to whoever can approve them (§5.6).
+        waiting = count_pending_accounts(db)
+        if waiting:
+            arrow = "\u2192" if unicode_style else "->"
+            where = f"SysOp {arrow} Users" if meets_level(user, SYSOP_LEVEL) else f"Staff {arrow} Accounts waiting"
+            await session.write_line(colored(
+                f"{waiting} account{'' if waiting == 1 else 's'} awaiting approval: {where}.",
+                fg_color=WARNING_COLOR,
+            ))
     if notice:
         await session.write_line(notice)
     # An outcome from a flow that unwound all the way back here (a download
@@ -560,8 +600,15 @@ async def _main_menu_loop(
                 moderation_lines, moderation_ids = pending_moderation_notices(db, user)
                 for outcome, text in moderation_lines:
                     announce(session, text, tone="success" if outcome == "approved" else "error")
+                # Link mail of this caller's that bounced or expired, told
+                # once the same way, even if it happened while they were
+                # offline (issue #806).
+                delivery_lines, delivery_ids = pending_delivery_notices(db, user)
+                for text in delivery_lines:
+                    announce(session, text, tone="error")
                 await _draw_main_menu(session, db, mailbox, user, node_controls=node_controls, notice=notice)
                 acknowledge_moderation_notices(db, moderation_ids)
+                acknowledge_delivery_notices(db, delivery_ids)
                 notice = None
                 redraw = False
             set_root_activity(session, None)
@@ -576,7 +623,7 @@ async def _main_menu_loop(
                 # flight (idle, nothing racing it yet) would only be noticed
                 # on the *next* keystroke instead of interrupting immediately
                 # -- see that method's own docstring.
-                side_tasks["invite"] = asyncio.create_task(direct_invites.arrival_event(session).wait())
+                side_tasks["invite"] = asyncio.create_task(direct_invites.wait_for_arrival(session))
             if changed is not None:
                 # Issue #659: a promotion redraws an idle menu at once, so
                 # the new options appear without a keypress.
@@ -616,6 +663,10 @@ async def _main_menu_loop(
                     # Issue #762: "Invitation", never whose.
                     with activity(session, "Invitation"):
                         await _handle_incoming_invite(session, db, direct_invites, hub, presence, user)
+                    # Issue #843: a direct chat clears the screen on its
+                    # way out, so the menu is drawn again, carrying a
+                    # decline or a lapsed invitation above its prompt.
+                    redraw = True
                     continue
                 if access_task is not None and access_task in done and key_task not in done:
                     for task in (key_task, *side_tasks.values()):
@@ -627,6 +678,13 @@ async def _main_menu_loop(
                     task.cancel()
                 await asyncio.gather(*side_tasks.values(), return_exceptions=True)
             choice = (await key_task).lower()
+            if len(choice) == 1 and choice.isalpha():
+                # A whole word typed at this one-key menu ("Communities",
+                # "help"): its first letter acts, the rest must not act on
+                # the next screen (issue #840, F114).
+                arm_word_guard = getattr(session, "arm_word_guard", None)
+                if arm_word_guard is not None:
+                    arm_word_guard()
 
             fresh = current_account(db, user)
             if fresh is None:
@@ -703,6 +761,10 @@ async def _main_menu_loop(
                     await session.write_line(
                         colored("New scan is not available in this context.", fg_color=MUTED_COLOR)
                     )
+                redraw = True
+            elif choice in ("?", HELP_KEY):
+                await session.write_line("")
+                await _how_this_board_works(session, db, user)
                 redraw = True
             elif choice == "/":
                 await session.write_line("")
@@ -817,6 +879,37 @@ async def _main_menu_loop(
                         colored("SysOp menu is not available in this context.", fg_color=MUTED_COLOR)
                     )
                 redraw = True
+            elif choice == "t" and sees_staff_list(db, user):
+                await session.write_line("")
+                if lane is not None:
+                    await staff_list_screen(session, lane, user)
+                else:
+                    await session.write_line(
+                        colored("The Staff list is not available in this context.", fg_color=MUTED_COLOR)
+                    )
+                redraw = True
+            elif choice == "s" and is_staff(user):
+                await session.write_line("")
+                set_root_activity(session, "Staff console")
+                if lane is not None:
+                    await staff_menu(session, lane, user, node_controls=node_controls, link_context=link_context)
+                else:
+                    await session.write_line(
+                        colored("The staff console is not available in this context.", fg_color=MUTED_COLOR)
+                    )
+                redraw = True
+            elif choice == "a" and not meets_level(user, SYSOP_LEVEL) and has_moderation_scope(db, user):
+                await session.write_line("")
+                if lane is not None:
+                    await moderation_queue(
+                        session, lane, user, link_context=link_context,
+                        transfers=node_controls.transfers if node_controls is not None else None,
+                    )
+                else:
+                    await session.write_line(
+                        colored("Moderation is not available in this context.", fg_color=MUTED_COLOR)
+                    )
+                redraw = True
             else:
                 await session.write(reject_unhandled_key(choice))
         except asyncio.CancelledError:
@@ -834,8 +927,8 @@ async def _main_menu_loop(
 
 def _access_change_notice(before: User, after: User) -> str | None:
     """The line shown above the redrawn menu when a SysOp changed this
-    account's level or verify-identity permission (issue #659), or `None`
-    when neither changed."""
+    account's level, verify-identity permission (issue #659) or staff
+    permissions (issue #836), or `None` when none of them changed."""
     lines = []
     if after.user_level != before.user_level:
         color = SUCCESS_COLOR if after.user_level > before.user_level else ALERT_COLOR
@@ -845,6 +938,16 @@ def _access_change_notice(before: User, after: User) -> str | None:
             lines.append(colored("You can now verify callers' identities.", fg_color=SUCCESS_COLOR))
         else:
             lines.append(colored("You can no longer verify callers' identities.", fg_color=ALERT_COLOR))
+    gained = after.staff_permissions & ~before.staff_permissions
+    lost = before.staff_permissions & ~after.staff_permissions
+    if gained:
+        lines.append(colored(
+            f"Staff permissions granted: {describe_staff_permissions(gained)}.", fg_color=SUCCESS_COLOR
+        ))
+    if lost:
+        lines.append(colored(
+            f"Staff permissions removed: {describe_staff_permissions(lost)}.", fg_color=ALERT_COLOR
+        ))
     return "\r\n".join(lines) if lines else None
 
 
@@ -854,7 +957,8 @@ def _adopt_account(session: Session, registry: ActiveSessionRegistry | None, fre
     on a change the menu has already applied (issue #659)."""
     if registry is not None:
         registry.record_account(
-            session, user_level=fresh.user_level, can_verify_identity=fresh.can_verify_identity
+            session, user_level=fresh.user_level, can_verify_identity=fresh.can_verify_identity,
+            staff_permissions=fresh.staff_permissions,
         )
     return fresh
 
@@ -881,6 +985,9 @@ async def _handle_incoming_invite(
     function got a chance to run, e.g. because this session was busy
     elsewhere the whole time and only just returned to the main menu.
     That's a safe no-op, not an error: there is nothing left to show.
+
+    A decline or an invitation that lapsed meanwhile is announced for
+    the redrawn menu (issue #843) rather than written here.
     """
     invite = direct_invites.pending_for(session)
     if invite is None:
@@ -897,7 +1004,7 @@ async def _handle_incoming_invite(
         # Expired/cancelled between the prompt being shown and this
         # answer -- same "no longer valid" tolerance as everywhere else
         # in this feature (netbbs.chat.direct_invites's own docstrings).
-        await session.write_line(colored("That invitation is no longer valid.", fg_color=MUTED_COLOR))
+        announce(session, "That invitation is no longer valid.", tone="muted")
         return
     if accepted:
         await run_direct_chat_loop(
@@ -909,7 +1016,7 @@ async def _handle_incoming_invite(
             header_color=effective_header_color_256(db),
         )
     else:
-        await session.write_line(colored("Declined.", fg_color=MUTED_COLOR))
+        announce(session, f"Declined {invite.inviter.username}'s invitation.", tone="muted")
 
 
 # -- Communities navigation (design doc §16) ------------
@@ -926,6 +1033,37 @@ def _visible_communities_for(db: Database, user: User) -> list[Community]:
     if meets_level(user, SYSOP_LEVEL):
         return communities
     return [c for c in communities if not c.hidden]
+
+
+_USER_HANDBOOK_URL = "https://github.com/Thiesi/NetBBS/blob/main/docs/NetBBS-User-Handbook.md"
+
+
+async def _how_this_board_works(session: Session, db: Database, user: User) -> None:
+    """`[?] Help` (issue #840, F116): the few things a first-time caller
+    needs, and who runs the node. The field test's newcomer got by only
+    because the SysOp answered her within a minute."""
+    sysops = sorted(
+        (account.username for account in list_users(db) if is_usable_sysop(account)), key=str.lower
+    )
+    web = getattr(session, "transport_name", None) == "web"
+    lines = [
+        "Menus take one key: press the letter in [brackets], no Enter needed."
+        + (" Clicking a [letter] works too." if web else ""),
+        "Lists number their rows: type the number (03, or 3 and Enter), or move with the arrow keys and press Enter.",
+        "[B]ack goes one level up. [N]ew scan shows what is new since your last visit, one place after another.",
+        "Ctrl-H or ? shows help on most screens.",
+        "",
+        (
+            "This board is run by " + ", ".join(sysops) + ". Send them E-mail (To: sysop reaches them)."
+            if sysops else "Send the SysOp E-mail: To: sysop reaches them."
+        ),
+        "",
+        "The User Handbook explains the rest: " + _USER_HANDBOOK_URL,
+    ]
+    await show_help(
+        session, "How this board works", lines,
+        header_color=effective_header_color_256(db), unicode_style=unicode_style_enabled(db, user),
+    )
 
 
 def _has_visible_communities(db: Database, user: User) -> bool:

@@ -72,14 +72,14 @@ def test_creating_a_board_says_so_on_the_menu_it_returns_to(db, lane, sysop):
 
 def test_deleting_a_board_says_so_on_the_menu_it_returns_to(db, lane, sysop):
     create_board(db, "General", creator=sysop)
-    rows = _screen(lane, sysop, ["c", "m", "l", "0", "1", "d", "General"])
+    rows = _screen(lane, sysop, ["c", "m", "l", "0", "1", "r", "General"])
     assert list_boards(db) == []
     assert _above_the_prompt(rows) == "'General' deleted."
 
 
 def test_a_cancelled_delete_says_so_on_the_detail_screen_it_returns_to(db, lane, sysop):
     create_board(db, "General", creator=sysop)
-    rows = _screen(lane, sysop, ["c", "m", "l", "0", "1", "d", "not the name"])
+    rows = _screen(lane, sysop, ["c", "m", "l", "0", "1", "r", "not the name"])
     assert [board.name for board in list_boards(db)] == ["General"]
     assert rows[0].endswith("General")  # still the board's own screen
     assert "Cancelled." in _above_the_prompt(rows)
