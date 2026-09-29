@@ -5,7 +5,8 @@ previously had no notification mechanism at all for a channel invitation
 ephemeral -- see its own docstring -- so it silently reached nobody with
 no active session at `/invite` time). These drive the real entry
 points -- `netbbs.net.login_flow.run_authenticated_session`'s
-post-login announcement, and `netbbs.net.main_menu._draw_main_menu`'s
+post-login announcement (on the first main menu since issue #923), and
+`netbbs.net.main_menu._draw_main_menu`'s
 conditional `[I]nvitations` option and `_show_pending_invitations`'s
 full-detail screen -- rather than just the underlying `netbbs.chat.membership.
 list_pending_invitations_for_user` (covered separately, at the library
@@ -24,8 +25,8 @@ from netbbs.chat.membership import create_invitation
 from netbbs.chat.presence import PresenceRegistry
 from netbbs.moderation import ChannelPermission, grant_permissions
 from netbbs.net.char_input import InputHistory
-from netbbs.net.login_flow import _announce_pending_invitations, run_authenticated_session
-from netbbs.net.main_menu import _main_menu, _show_pending_invitations
+from netbbs.net.login_flow import run_authenticated_session
+from netbbs.net.main_menu import _main_menu, _show_pending_invitations, pending_invitations_notice
 from netbbs.storage.database import Database
 
 
@@ -79,17 +80,14 @@ def _grant_manage_members(db, user, channel):
     )
 
 
-# -- _announce_pending_invitations (post-login, one-time) -------------------
+# -- pending_invitations_notice (the first main menu after login) -----------
 
 
 def test_announce_says_nothing_with_no_pending_invitations(tmp_path):
     db = Database(tmp_path / "node.db")
     bob = create_user(db, "bob", password="hunter2", user_level=10)
-    session = FakeSession()
 
-    asyncio.run(_announce_pending_invitations(session, db, bob))
-
-    assert _written_text(session) == ""
+    assert pending_invitations_notice(db, bob) is None
     db.close()
 
 
@@ -100,13 +98,10 @@ def test_announce_reports_a_single_pending_invitation(tmp_path):
     channel = create_channel(db, "lobby", creator=alice, members_only=True)
     _grant_manage_members(db, alice, channel)
     create_invitation(db, channel, bob, invited_by=alice)
-    session = FakeSession()
 
-    asyncio.run(_announce_pending_invitations(session, db, bob))
-
-    text = _written_text(session)
-    assert "1 pending chat channel invitation." in text  # singular, no trailing 's'
-    assert "[I]nvitations" in text
+    text = pending_invitations_notice(db, bob)
+    assert "1 pending chat channel invitation --" in text  # singular, no trailing 's'
+    assert "[I]nvitations to see it." in text
     db.close()
 
 
@@ -119,11 +114,10 @@ def test_announce_reports_multiple_pending_invitations_with_correct_plural(tmp_p
     for ch in (first, second):
         _grant_manage_members(db, alice, ch)
         create_invitation(db, ch, bob, invited_by=alice)
-    session = FakeSession()
 
-    asyncio.run(_announce_pending_invitations(session, db, bob))
-
-    assert "2 pending chat channel invitations." in _written_text(session)
+    text = pending_invitations_notice(db, bob)
+    assert "2 pending chat channel invitations --" in text
+    assert "[I]nvitations to see them." in text
     db.close()
 
 

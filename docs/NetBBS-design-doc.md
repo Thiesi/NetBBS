@@ -2423,7 +2423,11 @@ for a caller mail is open to (`caller_mail_refusal`):
   unread, above its prompt. The main menu's mail notices are told together
   in one order: that count, then the cap's eviction count (#818), then the
   caller's own Link mail that bounced or expired (#806). Moderation outcomes
-  come before them.
+  come before them, and a drain warning (§13.8) before those; the count of
+  pending chat channel invitations and any queued `/msg` lines follow them
+  (issue #923). Ahead of all of these is the outcome of a question answered
+  during login (the Unicode-style check, a first-run choice), which answers
+  the last thing the caller did.
 - *In New scan.* A `Mail: N unread` line heads the summary above the list,
   and `[E]-mail` opens the mailbox from there. A line with a key, like the
   replies to the caller, not a row: the list is places, and a mailbox row
@@ -2704,7 +2708,8 @@ the last comma, and `?` as the last address opens the list for it.
   received copy writes to its sender and everyone else on it but the reader;
   `[R]eply` stays the sender alone. Sent lists the letter once, by its newest
   copy, with the list under To and the status of the copy that needs the
-  caller most (bounced, expired, pending, with relay, delivered). Its view
+  caller most (bounced, expired, resent, pending, with relay, delivered;
+  issue #919). Its view
   gives each Link copy a `Delivery to <name>:` line; `[R]eply` writes to them
   all again, `Re[s]end` only to the copies that bounced or expired, and
   `[D]elete` (on the view or the list) removes every copy from Sent. Find
@@ -2780,8 +2785,8 @@ each recipient first opened it.
   by N of the M who share read receipts (K more don't share them)`. The
   list's Delivery column, headed Status once it shows a receipt, says
   `read`, `not read`, `some read` (a group, of the copies that report) or
-  `no receipt`; a Link copy that bounced, expired or is on its way still
-  wins, as the more urgent state.
+  `no receipt`; a Link copy that bounced, expired, was resent (#919) or is
+  on its way still wins, as the more urgent state.
 
 **Files in a letter** (issue #830). A letter can point at files already in
 this node's file areas; there are no attachments of new files and no new
@@ -2963,6 +2968,12 @@ only at the forwarded letter's own.
   say -- harms no one, and the header says it came from System.
 - `caller_mail_refusal` is checked when the key is pressed. Each letter's
   forward has its own draft slot, apart from a reply to it.
+- Where it returns (issue #919): a forward sent from a Sent letter closes
+  the view as Reply and Resend there do (below) -- the Sent list, on the
+  letter, or Find's results, with "Message sent." above the prompt. The
+  new letter is in Sent, and a view left open would stand on the old one
+  as though nothing had happened. A forward from the Inbox comes back to
+  the letter's view, as a reply to it does.
 
 **Reply and Resend on Sent** (issue #825). A sent letter's view is
 `[R]eply Re[s]end [F]orward [D]elete [B]ack`; both new keys write to the
@@ -2990,8 +3001,36 @@ prompt; a cancelled, kept or refused one comes back to the view.
   kept, as a forward's body is. The signature it was sent with is part of the
   body, so none is appended again. It has a draft slot of its own per letter
   (`mail_resend_<user>_<key>.draft`), apart from a reply to or a forward of
-  it. The failed row is not changed: it keeps its status and reason, and
-  opening it still clears its notice flag (#806).
+  it. The failed row keeps its status and reason, and opening it still
+  clears its notice flag (#806).
+- A resent letter says so (issue #919). Once the new letter is sent, the
+  failed row gets `mail_messages.resent_at` (`netbbs.link.mail.
+  record_resend`); a second resend moves it to the later time. Sent's
+  Delivery column then reads `resent`, the view adds `Resent: <date> (the
+  new copy is in Sent)` under its Delivery line, and the key reads
+  `Re[s]end again`. Only a bounced or expired Link row of the sender's is
+  marked, and only when the new letter went to that row's recipient: the
+  review screen's `[T]o` can send the resend to someone else, and then the
+  old letter did not go again. The marker is a display over the stored
+  state, not a new `link_delivery_status`, so every delivery path, expiry
+  and notice keeps treating the row as the failure it is; a late answer
+  that makes it `delivered` (a relay's `no_answer` expiry, #874) shows as
+  delivered, with its `Resent:` line kept. Recorded after the send, in a
+  write of its own: a crash between the two leaves a sent resend unmarked,
+  which a second Resend would repeat, and nothing worse.
+- A letter to several people records the resend on each copy the new
+  letter reached, by the same address rule. `Re[s]end` goes to the failed
+  copies not yet resent; once every failed copy was, the key reads
+  `Re[s]end again` and goes to them all. The view gives each resent copy a
+  `Resent to <name>: <date>` line under its own Delivery line.
+- `resent` ranks as a failed letter. In a group's one row the order is
+  bounced, expired, resent, pending, with relay, then a read receipt
+  (#829), then delivered: a failure still waiting on the caller comes
+  first, so the row reads `resent` only when every failed copy was resent,
+  and a failure the caller already dealt with still outranks a copy on
+  its way and a local copy's receipt. It is shown muted, as pending is.
+  Receipts never meet it on one copy: only local copies have receipts,
+  and only Link copies can be resent.
 
 ### 6.5 Communities
 
@@ -7014,11 +7053,12 @@ one-off broadcast alone never could.** Before this round, drain state was
 purely a one-shot broadcast — a user not connected at the moment it fired
 (including one reconnecting *after* an earlier drain pass already
 disconnected them) had no way to know a drain was still in progress until
-it silently disconnected them again. Now: `netbbs.net.login_flow.
-run_authenticated_session` tells a non-SysOp, once, right after login
-(the same one-time-notice convention `_announce_pending_invitations`
-already established), that a drain is scheduled and roughly how long until
-disconnection — SysOp-exempt, since drain never actually affects them.
+it silently disconnected them again. Now the first main menu after login
+tells a non-SysOp, once, above its prompt, that a drain is scheduled and
+roughly how long until disconnection — SysOp-exempt, since drain never
+actually affects them. It is told there, with the pending chat
+invitation count, and not written during login, because the menu's
+redraw-in-place clear would wipe it unseen (issue #923).
 Separately, `netbbs.net.maintenance.LOCKDOWN_NOTICE` (deliberately
 distinct wording from `LOCKDOWN_MESSAGE`, the actual non-SysOp rejection)
 is shown to *every* connecting client right after the welcome banner,
