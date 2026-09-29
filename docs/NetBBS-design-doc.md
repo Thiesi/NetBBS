@@ -369,6 +369,28 @@ as applicable, commit explicitly, or cancel; leaving either editor never sends
 or posts by itself. Fullscreen-editor output passes through the same review
 boundary so editor preference cannot change send/commit safety.
 
+Composing is a screen of its own (issue #813). A new message, reply, post or
+edit opens under its own title ("New message", "Reply", "New post", "Edit
+post") with its breadcrumb, and the To and Subject prompts are asked there,
+never under the menu they were chosen from. Mail's To prompt says what to type
+in plain words -- a user name, or `name@TheirBBS` for a linked BBS -- and an
+empty line or Esc cancels. The fullscreen editor takes an optional header --
+a title and `label: value` rows (To and Subject; Board and Subject; a file's
+name) -- drawn above the text on every repaint. Its rows come out of the
+text's, never the status line's, and it gives them up before the text drops
+below four rows: the rule first, then the title, then fields from the last.
+Review keeps its title, To and Subject on every page and pages the body with
+the detail-panel machinery `show_detail` uses (`render_sections`/`paginate`),
+turned with `PgUp`/`PgDn` and `[N]ext`/`[P]rev page` (`[>]`/`[<]` where the
+commit key is already `P`). It stays its own loop rather than becoming a
+`show_detail` caller, because it keeps its `>` cursor over To/Subject/Body and
+its Ctrl-H field help. Once the body is paged, the menu is the packed action
+bar, the rule §3.5 sets for a detail screen with a described menu. An outcome
+carried into review, such as a refused Send, is wrapped and counted against
+the page. Review's `To:` names the recipient as the node knows them: a local
+account by its own spelling (`Alice`, however it was typed), a Link address
+by its node's current label. Send still re-checks what was typed.
+
 Size limits are enforced where the text is typed, in characters (issue #812).
 Storage limits are UTF-8 bytes, which mean nothing to a caller -- 200 bytes is
 as few as 100 accented letters -- so every refusal says how many characters to
