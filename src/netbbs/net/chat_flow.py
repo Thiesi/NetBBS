@@ -94,6 +94,7 @@ from netbbs.auth.users import (
 )
 from netbbs.chat import (
     Channel,
+    account_suffix,
     ChannelError,
     ChannelMessage,
     ChatHub,
@@ -104,7 +105,6 @@ from netbbs.chat import (
     DurationError,
     MembershipError,
     MessageMailbox,
-    NICK_SEPARATOR,
     NickError,
     ParticipantId,
     PresenceRegistry,
@@ -1541,7 +1541,7 @@ def _local_speaker_name(
     if nick is not None:
         name = colored(
             sanitize_text(nick), fg_color=color if self_message else NICK_COLOR, bold=self_message
-        ) + colored(f"{NICK_SEPARATOR}{sanitize_text(author.username)}", fg_color=MUTED_COLOR)
+        ) + colored(account_suffix(sanitize_text(author.username)), fg_color=MUTED_COLOR)
     else:
         primary = (get_display_name(db, author) or author.username) if verified_unit else author.username
         name = colored(sanitize_text(primary), fg_color=color, bold=self_message)
@@ -3127,7 +3127,7 @@ async def _handle_nick(ctx: ChatCommandContext, args: str) -> None:
 async def _announce_nick_change(ctx: ChatCommandContext, *, new_nick: str | None) -> None:
     username = sanitize_text(ctx.user.username)
     if new_nick is not None:
-        body = f"is now known as {sanitize_text(new_nick)}|{username}"
+        body = f"is now known as {sanitize_text(new_nick)}{account_suffix(username)}"
     else:
         body = "is no longer using an alias"
     notice = colored(f"*** {username} {body}", fg_color=MUTED_COLOR)

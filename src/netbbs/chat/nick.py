@@ -4,7 +4,7 @@ Transparent chat display aliases (design doc, points 7-10):
 presentation alias — not identity.
 
 An alias is always shown next to the account's canonical username, as
-`nick|username` (`display_label`, and `chat_stream_label` for the live
+`nick (username)` (`display_label`, and `chat_stream_label` for the live
 stream). Moderation, permissions, blocking, reputation, and auditing
 always operate on canonical identity and never look at this module at
 all.
@@ -39,14 +39,20 @@ _NICK_KEY = "nick"
 
 MAX_NICK_LENGTH = 32
 
-#: Joins an alias to the username it stands for: `nick|username`.
-NICK_SEPARATOR = "|"
+def account_suffix(username: str) -> str:
+    """What follows an alias: the account it stands for, in parentheses --
+    `Quill (lena_h)` (issue #899). "Name (handle)" already reads as a name
+    and the account behind it, which `Quill|lena_h` never did."""
+    return f" ({username})"
 
-# Characters an alias may not contain (issue #843): the separator itself,
-# the brackets of a status-bar tag ("[sysop]"), the angle brackets that
-# frame a speaker, and the "*" of `/me` lines and system notices. "~" was
-# the old alias marker; an alias holding one would read as two.
-_RESERVED_NICK_CHARACTERS = f"{NICK_SEPARATOR}[]<>*~"
+
+# Characters an alias may not contain (issue #843): the parentheses that
+# hold the account after it (#899), so no alias can carry a second,
+# forged account; the brackets of a status-bar tag ("[sysop]"); the angle
+# brackets that frame a speaker; and the "*" of `/me` lines and system
+# notices. "~" and "|" were earlier alias markers; an alias holding one
+# would read as two names.
+_RESERVED_NICK_CHARACTERS = "()|[]<>*~"
 
 
 class NickError(Exception):
@@ -99,7 +105,7 @@ def get_nick(db: Database, user: User) -> str | None:
 
 def display_label(db: Database, user: User) -> str:
     """
-    `nick|username` if `user` has an alias set, else just `username`,
+    `nick (username)` if `user` has an alias set, else just `username`,
     unsanitized and uncolored -- for directory-style listings (`/who`,
     `/whois`, `/names`) and Link direct messages, which sanitize it
     themselves. The live stream uses `chat_stream_label`, the same text
@@ -110,13 +116,13 @@ def display_label(db: Database, user: User) -> str:
     `user.username` directly.
     """
     nick = get_nick(db, user)
-    return f"{nick}{NICK_SEPARATOR}{user.username}" if nick else user.username
+    return f"{nick}{account_suffix(user.username)}" if nick else user.username
 
 
 def chat_stream_label(db: Database, user: User) -> str:
     """
-    `nick|username` with the alias colored via `NICK_COLOR` and the
-    `|username` after it muted, or plain `username` if `user` has no
+    `nick (username)` with the alias colored via `NICK_COLOR` and the
+    ` (username)` after it muted, or plain `username` if `user` has no
     alias. The alias leads: the username is there so no alias stands
     alone (issue #843), and at the same weight readers could not tell
     which of the two was the alias (issue #899). Used in the live chat stream
@@ -138,5 +144,5 @@ def chat_stream_label(db: Database, user: User) -> str:
     if not nick:
         return sanitize_text(user.username)
     return colored(sanitize_text(nick), fg_color=NICK_COLOR) + colored(
-        f"{NICK_SEPARATOR}{sanitize_text(user.username)}", fg_color=MUTED_COLOR
+        account_suffix(sanitize_text(user.username)), fg_color=MUTED_COLOR
     )

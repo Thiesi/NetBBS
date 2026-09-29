@@ -157,7 +157,7 @@ def test_gated_channel_verified_with_nick_is_alias_username_and_real_name(db, ga
     set_nick(db, alice, "ali")
     attest_name(db, alice, "Alice Smith", verifier=sysop)
     label = chat_flow._chat_author_label(db, gated_channel, alice)
-    assert strip_ansi(label) == "ali|alice (=Alice Smith=)"
+    assert strip_ansi(label) == "ali (alice) (=Alice Smith=)"
 
 
 def test_unresolvable_author_never_gets_verified_styling(db, gated_channel):
@@ -216,7 +216,7 @@ def test_live_message_shows_verified_unit_to_sender_and_recipient(db, lane, hub,
 
     actor_session, watcher_session = asyncio.run(scenario())
     for text in (_written(actor_session), _written(watcher_session)):
-        assert "ali|alice" in strip_ansi(text)
+        assert "ali (alice)" in strip_ansi(text)
         assert "(=Alice Smith=)" in text
         assert "hello everyone" in text
 
@@ -229,7 +229,7 @@ def test_scrollback_replay_matches_live_rendering(db, lane, hub, presence, gated
 
     late_session, _ = asyncio.run(_run(lane, hub, presence, gated_channel, bob, ["/quit"]))
     replay_text = _written(late_session)
-    assert "ali|alice" in strip_ansi(replay_text)
+    assert "ali (alice)" in strip_ansi(replay_text)
     assert "(=Alice Smith=)" in replay_text
     assert "hello everyone" in replay_text
 

@@ -2176,14 +2176,14 @@ An optional `/nick` alias is presentation metadata only. Every context retains
 the authenticated canonical identity, and permissions, moderation, blocking,
 reputation, and addressing always use canonical identity.
 
-An alias is always shown with the username beside it, as `alias|username`, in
-the live stream as in `/who`, `/whois` and `/names` (issue #843). In the live
-stream the alias leads in its own color and `|username` follows muted (issue
-#899): the username is there so no alias stands alone, not to compete with the
-name its owner chose. It may not
-contain `| [ ] < > * ~`: the separator, a status-bar tag's brackets, the angle
-brackets around a speaker, the `*` of actions and notices, and the old alias
-marker. It may not read as another local account's username, or, unless its
+An alias is always shown with the username beside it, as `alias (username)`,
+in the live stream as in `/who`, `/whois` and `/names` (issue #843). In the
+live stream the alias leads in its own color and `(username)` follows muted
+(issue #899): the username is there so no alias stands alone, not to compete
+with the name its owner chose. It may not contain `( ) | [ ] < > * ~`: the
+parentheses that hold the account, a status-bar tag's brackets, the angle
+brackets around a speaker, the `*` of actions and notices, and the two earlier
+alias markers. It may not read as another local account's username, or, unless its
 owner is a SysOp, as a staff title: a reserved name from §4.2 or anything
 containing `sysop`. "Reads as" is §4.2's skeleton, applied after accents are
 dropped, Cyrillic and Greek look-alikes become Latin letters, and everything but
@@ -13518,8 +13518,20 @@ drops the name a reader knows the node by.
 in the speaker color, the node in `NODE_COLOR`. The same split fixes the
 alias label: it read `Quill|lena_h` with the username at the alias's weight,
 so readers could not tell which was the alias and the alias no longer read as
-the chosen name. The alias now leads in its color with `|username` muted; the
-text, and so #843's rule that no alias stands alone, is unchanged. Rejected:
+the chosen name. The alias now leads in its color with the username muted.
+
+**Decision 4 — `alias (username)`, not `alias|username`.** Color alone did not
+settle it: a pipe has no settled meaning, and a reader could not tell whether
+it joined two names, separated them, or which side was the account.
+"Name (handle)" already reads as a name and the account behind it, needs no
+fallback on a terminal without UTF-8, and keeps #843's rule that no alias
+stands alone. Aliases may no longer contain parentheses, so none can carry a
+forged second account; existing ones are left alone, since the real username
+beside them keeps them honest. The verified-name unit keeps its own `(=...=)`
+marker. Rejected: `aka`, English and longer on every line; an arrow, which has
+no settled meaning and could read as "talking to".
+
+Rejected for Decision 3:
 restricting node friendly names to the alias character set, which would make
 this node refuse the hello of any existing peer whose name uses one, and would
 undo #807's quoting of names containing `@`.
