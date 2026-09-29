@@ -912,11 +912,52 @@ def _pop_pushed_back(source: ByteSource) -> int | None:
     return pending.pop()
 
 
+# The typed-word guard (issue #840, F114): a first-time caller types a
+# whole word ("Communities", "no") at a prompt that takes one key. The first
+# letter acts; the rest used to reach the next screen as keys of its own.
+# After such a key, letters that follow it closely, and the Enter that ends
+# them, are dropped. A pause longer than this, or any other key, ends it.
+WORD_GUARD_SECONDS = 0.6
+_WORD_GUARD_ATTR = "_netbbs_word_guard_until"
+
+
+def arm_word_guard(source: object) -> None:
+    """Drop the rest of a word typed after a one-key answer (see
+    `WORD_GUARD_SECONDS`). For any transport: it only stores a deadline."""
+    setattr(source, _WORD_GUARD_ATTR, time.monotonic() + WORD_GUARD_SECONDS)
+
+
+def word_guard_drops(source: object, char: str) -> bool:
+    """Whether `char`, just read, is the tail of a guarded word -- dropped,
+    extending the guard -- or ends the guard and is delivered. Enter ends
+    the word and is dropped with it."""
+    until = getattr(source, _WORD_GUARD_ATTR, None)
+    if until is None:
+        return False
+    now = time.monotonic()
+    if now > until:
+        setattr(source, _WORD_GUARD_ATTR, None)
+        return False
+    if char in ("\r", "\n"):
+        setattr(source, _WORD_GUARD_ATTR, None)
+        return True
+    if len(char) == 1 and (char.isalpha() or char in " -'"):
+        setattr(source, _WORD_GUARD_ATTR, now + WORD_GUARD_SECONDS)
+        return True
+    setattr(source, _WORD_GUARD_ATTR, None)
+    return False
+
+
 async def _read_byte(source: ByteSource) -> int | None:
     pushed = _pop_pushed_back(source)
     if pushed is not None:
         return pushed
-    return await source.read_byte()
+    while True:
+        byte = await source.read_byte()
+        if byte is None or byte >= 0x80 or not word_guard_drops(source, chr(byte)):
+            return byte
+        if byte == _CR:
+            await _consume_optional_lf_or_nul(source)
 
 
 async def _read_byte_with_timeout(source: ByteSource, timeout: float) -> int | None:
@@ -1623,6 +1664,9 @@ async def discard_buffered_enter(source: ByteSource) -> None:
     pairs are consumed as one line ending through the existing helper.
     """
     peek = await _read_byte_with_timeout(source, _FOLLOWUP_BYTE_TIMEOUT)
+    if peek in (_CR, _LF):
+        # The Enter ends any word the answer was part of (issue #840).
+        setattr(source, _WORD_GUARD_ATTR, None)
     if peek == _CR:
         await _consume_optional_lf_or_nul(source)
     elif peek is not None and peek != _LF:

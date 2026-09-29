@@ -49,6 +49,7 @@ from urllib.parse import urlsplit
 
 from aiohttp import WSCloseCode, web
 
+from netbbs.net import char_input
 from netbbs.net.char_input import (
     KILL_LINE_KEY,
     REDRAW_KEY,
@@ -385,7 +386,13 @@ class WebSession(Session):
             item = await self._char_queue.get()
         if item is None:
             raise SessionClosedError(self._input_error)
+        if isinstance(item, str) and char_input.word_guard_drops(self, item):
+            # The tail of a word typed after a one-key answer (issue #840).
+            return await self._read_item()
         return item
+
+    def arm_word_guard(self) -> None:
+        char_input.arm_word_guard(self)
 
     async def _read_char(self) -> str:
         """Plain characters only -- a recognized special key has no

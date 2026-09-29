@@ -16,7 +16,10 @@ from __future__ import annotations
 
 import asyncio
 
-from netbbs.auth.users import SYSOP_LEVEL, User, current_account, describe_staff_permissions
+from netbbs.auth.users import (
+    SYSOP_LEVEL, User, current_account, describe_staff_permissions, is_usable_sysop, list_users,
+)
+from netbbs.net.help_overlay import show_help
 from netbbs.chat import (
     ChatHub,
     DirectChatInvites,
@@ -36,7 +39,7 @@ from netbbs.net.board_flow import _browse_boards, visible_boards
 from netbbs.net.breadcrumb_preference import breadcrumb_collapsed_enabled
 from netbbs.boards.moderation_notices import acknowledge_moderation_notices, pending_moderation_notices
 from netbbs.net.notices import announce, write_notices
-from netbbs.net.char_input import REDRAW_KEY, InputHistory, reject_unhandled_key
+from netbbs.net.char_input import HELP_KEY, REDRAW_KEY, InputHistory, reject_unhandled_key
 from netbbs.net.chat_flow import browse_channels, run_direct_chat_loop, visible_channels
 from netbbs.net.confirm import prompt_yes_no
 from netbbs.net.directory_flow import _browse_directory, _caller_who_screen
@@ -244,6 +247,8 @@ async def _draw_main_menu(
                 detailed="Scan every accessible message board/chat channel/file area for activity since your last visit.",
             ),
             MenuEntry(label=menu_key("/", " Find"), brief="Search boards, files, and mail"),
+            # Issue #840 (F116): the main menu had no help at all.
+            MenuEntry(label=menu_key("?", " Help"), brief="How this board works"),
         ]
     )
     personal_options = [
@@ -627,6 +632,13 @@ async def _main_menu_loop(
                     task.cancel()
                 await asyncio.gather(*side_tasks.values(), return_exceptions=True)
             choice = (await key_task).lower()
+            if len(choice) == 1 and choice.isalpha():
+                # A whole word typed at this one-key menu ("Communities",
+                # "help"): its first letter acts, the rest must not act on
+                # the next screen (issue #840, F114).
+                arm_word_guard = getattr(session, "arm_word_guard", None)
+                if arm_word_guard is not None:
+                    arm_word_guard()
 
             fresh = current_account(db, user)
             if fresh is None:
@@ -703,6 +715,10 @@ async def _main_menu_loop(
                     await session.write_line(
                         colored("New scan is not available in this context.", fg_color=MUTED_COLOR)
                     )
+                redraw = True
+            elif choice in ("?", HELP_KEY):
+                await session.write_line("")
+                await _how_this_board_works(session, db, user)
                 redraw = True
             elif choice == "/":
                 await session.write_line("")
@@ -937,6 +953,37 @@ def _visible_communities_for(db: Database, user: User) -> list[Community]:
     if meets_level(user, SYSOP_LEVEL):
         return communities
     return [c for c in communities if not c.hidden]
+
+
+_USER_HANDBOOK_URL = "https://github.com/Thiesi/NetBBS/blob/main/docs/NetBBS-User-Handbook.md"
+
+
+async def _how_this_board_works(session: Session, db: Database, user: User) -> None:
+    """`[?] Help` (issue #840, F116): the few things a first-time caller
+    needs, and who runs the node. The field test's newcomer got by only
+    because the SysOp answered her within a minute."""
+    sysops = sorted(
+        (account.username for account in list_users(db) if is_usable_sysop(account)), key=str.lower
+    )
+    web = getattr(session, "transport_name", None) == "web"
+    lines = [
+        "Menus take one key: press the letter in [brackets], no Enter needed."
+        + (" Clicking a [letter] works too." if web else ""),
+        "Lists number their rows: type the number (03, or 3 and Enter), or move with the arrow keys and press Enter.",
+        "[B]ack goes one level up. [N]ew scan shows what is new since your last visit, one place after another.",
+        "Ctrl-H or ? shows help on most screens.",
+        "",
+        (
+            "This board is run by " + ", ".join(sysops) + ". Send them E-mail (To: sysop reaches them)."
+            if sysops else "Send the SysOp E-mail: To: sysop reaches them."
+        ),
+        "",
+        "The User Handbook explains the rest: " + _USER_HANDBOOK_URL,
+    ]
+    await show_help(
+        session, "How this board works", lines,
+        header_color=effective_header_color_256(db), unicode_style=unicode_style_enabled(db, user),
+    )
 
 
 def _has_visible_communities(db: Database, user: User) -> bool:

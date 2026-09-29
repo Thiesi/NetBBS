@@ -125,6 +125,59 @@
   });
 
 
+  // -- clicking a key (issue #840) ----------------------------------------
+  //
+  // A first-time caller in a browser clicks "[C]hat" and expects it to
+  // work. A click on a menu entry sends its bracketed key, and a click on
+  // a numbered list row sends its number, exactly as if typed. A click on
+  // anything else says once that the terminal is driven by the keyboard.
+  // Door games get their clicks left alone; a drag still selects text.
+  function sendKey(key) {
+    if (ws.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify({ type: "key", stream: null, data: key }));
+  }
+
+  // The key a click at `col` on `text` means, or null. Menu entries are
+  // separated by two or more spaces, so the entry around the click is the
+  // run between such gaps; its bracketed letter is its key.
+  function keyAt(text, col) {
+    var row = /^(?:> |  )?\s*(\d{2})\.\s/.exec(text);
+    if (row) return row[1];
+    var start = col, end = col;
+    while (start > 0 && !(text[start - 1] === " " && text[start - 2] === " ")) start--;
+    while (end < text.length && !(text[end] === " " && text[end + 1] === " ")) end++;
+    var entry = /\[([^\]\s])\]/.exec(text.slice(start, end));
+    return entry ? entry[1].toLowerCase() : null;
+  }
+
+  var hint = null;
+  function showKeyboardHint() {
+    if (hint) return;
+    hint = document.createElement("div");
+    hint.textContent = "Use your keyboard: press the letter in [brackets]. Clicking a [letter] works too.";
+    hint.style.cssText = "position:fixed;left:50%;bottom:1rem;transform:translateX(-50%);" +
+      "background:#14161b;color:#e2e8f0;border:1px solid #4a5568;border-radius:4px;" +
+      "padding:.4rem .8rem;font:14px system-ui,sans-serif;z-index:5;";
+    document.body.appendChild(hint);
+    setTimeout(function () { hint.remove(); hint = null; }, 5000);
+  }
+
+  if (term.element) term.element.addEventListener("mouseup", function (event) {
+    if (event.button !== 0 || doorStream !== null || term.hasSelection()) return;
+    var screen = term.element.querySelector(".xterm-screen");
+    if (!screen) return;
+    var box = screen.getBoundingClientRect();
+    var col = Math.floor((event.clientX - box.left) / (box.width / term.cols));
+    var row = Math.floor((event.clientY - box.top) / (box.height / term.rows));
+    if (col < 0 || row < 0 || col >= term.cols || row >= term.rows) return;
+    var buffer = term.buffer.active;
+    var line = buffer.getLine(buffer.viewportY + row);
+    var key = line ? keyAt(line.translateToString(true), col) : null;
+    if (key) sendKey(key);
+    else showKeyboardHint();
+    term.focus();
+  });
+
   // -- file transfer (issue #475) ---------------------------------------
   //
   // Zmodem cannot work in a browser tab, so the BBS hands this page a

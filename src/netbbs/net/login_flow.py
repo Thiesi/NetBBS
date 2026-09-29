@@ -575,6 +575,11 @@ async def _confirm_unicode_style(session: Session, db: Database, user: User) -> 
     contract, shared with `redraw_preference`)."""
     if unicode_style_ever_set(db, user):
         return
+    if getattr(session, "transport_name", None) == "web":
+        # The browser terminal always draws them, so the question only
+        # puzzled callers there (issue #840, F090/F112).
+        set_unicode_style_enabled(db, user, True)
+        return
     await session.write_line(
         colored("\r\nNetBBS can use a few Unicode characters for a cleaner look, like this:", fg_color=METADATA_COLOR)
     )

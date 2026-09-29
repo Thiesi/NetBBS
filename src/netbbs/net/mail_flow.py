@@ -42,7 +42,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from netbbs.auth.users import AuthError, User, get_user_by_id, get_user_by_username
+from netbbs.auth.users import (
+    AuthError, User, get_user_by_id, get_user_by_username, is_usable_sysop, list_users,
+)
 from netbbs.identity.addressing import is_valid_user_part, user_part_problem
 from netbbs.link.boards import LinkContext
 from netbbs.link.enforcement import LinkPolicyAction, decide_node_action
@@ -593,6 +595,8 @@ async def _compose_mail(
             if not recipient_text:
                 announce(session, "Cancelled.", tone="muted")
                 return
+            # "sysop" reaches the node's SysOp (issue #840, F087).
+            recipient_text = await lane.run(resolve_sysop_alias, recipient_text)
             if link_enabled and "@" in recipient_text:
                 # Checked as it is typed, like a local name (issue #807):
                 # a bad address is asked for again here, not after the
@@ -754,6 +758,24 @@ def _link_mail_refusal(db, fingerprint: str) -> str | None:
 class _LinkRecipient:
     user: str
     fingerprint: str
+
+
+def resolve_sysop_alias(db, recipient_text: str) -> str:
+    """`sysop` as a To address (issue #840, F087): the classic BBS way to
+    write to whoever runs the node. It names the node's first usable SysOp
+    account, unless an account is actually called that. The field test's
+    newcomer got "No such user: 'sysop'" and had to find the SysOp's name
+    in a post."""
+    if recipient_text.strip().lower() != "sysop":
+        return recipient_text
+    try:
+        return get_user_by_username(db, recipient_text).username
+    except AuthError:
+        pass
+    sysops = [account for account in list_users(db) if is_usable_sysop(account)]
+    if not sysops:
+        return recipient_text
+    return min(sysops, key=lambda account: account.id).username
 
 
 def _check_link_recipient(db, recipient_text: str) -> _LinkRecipient | str:

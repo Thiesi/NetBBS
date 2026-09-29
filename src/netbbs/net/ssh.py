@@ -240,6 +240,9 @@ class SSHSession(Session):
     async def discard_buffered_input(self) -> None:
         await char_input.discard_buffered_input(self)
 
+    def arm_word_guard(self) -> None:
+        char_input.arm_word_guard(self)
+
     async def close(self) -> None:
         self._process.exit(0)
 

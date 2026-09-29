@@ -672,6 +672,21 @@ identifies each row by a stable id internally, to reopen a list on the row just
 left. A caller key that acts on a row (New scan's `[M]ark read`) takes the
 highlighted row, or asks for its number on the page.
 
+A row number is two digits, or one digit and Enter (issue #840): the first
+field test's newcomer typed "3" and Enter where "03" was wanted, and nothing
+happened. A whole word typed at a one-key prompt ("Communities", "no") acts on
+its first letter only: after a main-menu key or a yes/no answer, letters that
+follow within 0.6 seconds of each other, and the Enter that ends them, are
+dropped rather than read by the next screen as keys (`char_input.
+arm_word_guard`). Any other key, or a pause, ends that at once. In the browser
+a click on a menu entry sends its bracketed key and a click on a numbered row
+its number; a click on anything else says once that the terminal is driven by
+the keyboard. The browser is never asked the plain-ASCII question, since it
+always draws Unicode. `[?] Help` on the main menu (and Ctrl-H there) sums up
+the keys, Back, New scan and who runs the node, with the User Handbook's
+address, and E-mail to `sysop` reaches the node's first usable SysOp account
+unless an account has that name.
+
 No *menu* has a typed command language. A caller's options are the keys the
 action bar shows, and a prompt reading `Choice: ` accepts exactly those. The
 file-area listing was the last menu that read whole *lines* instead: it
