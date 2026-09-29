@@ -675,7 +675,8 @@ class _NetBBSSSHServer(asyncssh.SSHServer):
         after_prefix = f"{after_banner}\r\n" if after_banner else ""
         if require_approval:
             return await self._finish_registration(
-                f"{after_prefix}Account {username!r} created. {pending_approval_notice(username)}"
+                f"{after_prefix}Account {username!r} created. "
+                f"{pending_approval_notice(username, approvers_away_line(self._db))}"
             )
         return await self._finish_registration(
             f"{after_prefix}Account {username!r} created. Reconnect as {username!r} to log in."
