@@ -3729,4 +3729,20 @@ MIGRATIONS = [
             WHERE link_delivery_status = 'pending' AND link_relay_handoff_at IS NOT NULL;
         """,
     ),
+    Migration(
+        description=(
+            "Issue #824: `mail_search`, an FTS5 table of every letter's subject and plain-text "
+            "body, so the main menu's Find searches the caller's own mail the way it searches "
+            "posts. One entry per `mail_messages` row, its rowid the letter's id, written and "
+            "removed with the row by `netbbs.mail`/`netbbs.link.mail` (`netbbs.search."
+            "index_mail_without_commit`/`unindex_mail_without_commit`). Whose mailbox a letter "
+            "is in is not indexed: Find reads that from the row. Every letter already stored "
+            "is indexed now."
+        ),
+        sql="""
+        CREATE VIRTUAL TABLE mail_search USING fts5(subject, body);
+        INSERT INTO mail_search (rowid, subject, body)
+        SELECT id, subject, netbbs_plain_post_body(body) FROM mail_messages;
+        """,
+    ),
 ]
