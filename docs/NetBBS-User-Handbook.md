@@ -406,14 +406,19 @@ Profile.
 whether they have read it: the list says `read` or `not read`, and the
 opened letter has a `Read:` line with the time they first opened it (marking
 it unread again does not take that back). A letter to several people lists
-who has read it, who hasn't yet, and who deleted it unread. The same goes the
+who has read it and who hasn't yet. A letter deleted without being opened
+simply reads as not read: nobody learns that you deleted it. The same goes the
 other way: whoever writes to you sees when you first open their letter.
 
 This is on for everyone unless they turn it off, and it works both ways. In
 **Profile → E[x]change read receipts** ("Let senders see when I've read their
 mail") you can turn it off: then no one sees when you read their mail, and you
 no longer see when anyone reads yours. Turning it off also hides the receipts
-you already gave; turning it on again shows them again. A sender is told that
+you already gave; turning it on again shows them again. But a letter opened
+while either of you had receipts off never shows as read, even once you both
+turn them back on -- so nobody can switch receipts on for a moment to see what
+you read while they were off, and what you read while yours were off stays
+unreported. A sender is told that
 you don't share read receipts (`no receipt` in their Sent list), so an
 unread-looking letter isn't taken for one you haven't read -- they learn your
 setting, never whether you read it. Mail to or from another BBS, and mail

@@ -2,9 +2,10 @@
 Read receipts for local mail (issue #829).
 
 On by default, opted out of in Profile, reciprocal (a caller who does not
-share receipts sees none), and decided by both sides' preference at the time
-a receipt is shown. A recipient who opted out is always named as such in the
-sender's Sent view. Link and system mail have none.
+share receipts sees none), and shown only when both sides shared receipts at
+the first reading and both share them now (issue #922). A recipient who
+opted out is always named as such in the sender's Sent view; a letter
+deleted unopened is simply not read. Link and system mail have none.
 """
 
 from __future__ import annotations
@@ -14,10 +15,9 @@ import re
 
 import pytest
 
-from netbbs.auth.users import create_user, delete_user
+from netbbs.auth.users import create_user, delete_user, get_user_by_id
 from netbbs.link.node_identity import bootstrap_node_identity
 from netbbs.mail import (
-    RECEIPT_DELETED_UNREAD,
     RECEIPT_HIDDEN,
     RECEIPT_NOT_READ,
     RECEIPT_READ,
@@ -110,12 +110,60 @@ def test_the_first_reading_is_the_receipt_and_mark_unread_keeps_it(db):
     assert (receipt.state, receipt.read_at) == (RECEIPT_READ, first.first_read_at)
 
 
-def test_a_recipient_who_deletes_a_letter_unread_is_reported_so(db):
+def test_a_letter_deleted_unread_is_just_not_read(db, lane):
+    # The recipient's deletion stays their own (issue #922).
     alice, bob = _user(db, "alice"), _user(db, "bob")
     message = send_mail(db, alice, bob, "Hello", "body")
     delete_for_recipient(db, bob, message)
 
-    assert _receipt(db, alice, message).state == RECEIPT_DELETED_UNREAD
+    assert _receipt(db, alice, message).state == RECEIPT_NOT_READ
+    text = _open_first_sent(db, lane, alice)
+    assert re.search(r"1  bob +Hello +not read", text)
+    assert "Read: not yet" in text
+    assert "deleted" not in text.lower()
+
+
+# -- the peek loophole (issue #922) -------------------------------------------------
+
+
+def test_a_sender_who_turns_receipts_on_briefly_sees_nothing_read_while_off(db):
+    alice, bob = _user(db, "alice"), _user(db, "bob")
+    message = send_mail(db, alice, bob, "Hello", "body")
+    set_shares_read_receipts(db, alice, False)
+    _read(db, bob)
+
+    set_shares_read_receipts(db, alice, True)
+
+    assert _receipt(db, alice, message).state == RECEIPT_NOT_READ
+
+
+def test_a_reading_while_the_recipient_opted_out_never_becomes_a_receipt(db):
+    alice, bob = _user(db, "alice"), _user(db, "bob")
+    message = send_mail(db, alice, bob, "Hello", "body")
+    set_shares_read_receipts(db, bob, False)
+    read = mark_read(db, bob, message)
+    assert read.first_read_shared is False
+
+    set_shares_read_receipts(db, bob, True)
+    assert _receipt(db, alice, message).state == RECEIPT_NOT_READ
+
+    # Nor does reading it again, now that both share: the first reading
+    # is the one a receipt would report.
+    again = mark_read(db, bob, mark_unread(db, bob, read))
+    assert again.first_read_at == read.first_read_at and again.first_read_shared is False
+    assert _receipt(db, alice, message).state == RECEIPT_NOT_READ
+
+
+def test_a_reading_made_while_both_shared_is_recorded_as_shared(db):
+    alice, bob = _user(db, "alice"), _user(db, "bob")
+    message = send_mail(db, alice, bob, "Hello", "body")
+    read = mark_read(db, bob, message)
+    assert read.first_read_shared is True
+
+    # Reading it again after either side opted out does not unshare it.
+    set_shares_read_receipts(db, bob, False)
+    again = mark_read(db, bob, mark_unread(db, bob, read))
+    assert again.first_read_shared is True
 
 
 def test_opting_out_hides_receipts_both_ways_and_already_given_ones_too(db):
@@ -192,8 +240,14 @@ def test_letters_already_read_before_the_upgrade_keep_their_reading(tmp_path, mo
     monkeypatch.setattr(database_module, "MIGRATIONS", MIGRATIONS)
     upgraded = Database(tmp_path / "node.db")
     try:
-        rows = upgraded.connection.execute("SELECT subject, first_read_at FROM mail_messages ORDER BY id").fetchall()
-        assert [tuple(row) for row in rows] == [("read", "2026-09-02T10:00:00.000Z"), ("unread", None)]
+        rows = upgraded.connection.execute(
+            "SELECT subject, first_read_at, first_read_shared FROM mail_messages ORDER BY id"
+        ).fetchall()
+        # Before the upgrade everyone counted as sharing (issue #922).
+        assert [tuple(row) for row in rows] == [("read", "2026-09-02T10:00:00.000Z", 1), ("unread", None, 0)]
+        alice = get_user_by_id(upgraded, 1)
+        receipts = read_receipts(upgraded, alice, list_sent(upgraded, alice))
+        assert sorted(receipt.state for receipt in receipts.values()) == [RECEIPT_NOT_READ, RECEIPT_READ]
     finally:
         upgraded.close()
 
@@ -263,8 +317,9 @@ def test_a_letter_to_several_people_names_them_by_their_receipt(db, lane):
 
     assert re.search(r"1  bob, carol, dave, erin +Lunch +some read", text)
     assert re.search(r"Read by: bob \(\d", text)
-    assert "Not read yet: carol" in text
-    assert "Deleted unread: erin" in text
+    # Erin deleted it unopened: to Alice, just not read yet (issue #922).
+    assert "Not read yet: carol, erin" in text
+    assert "Deleted unread" not in text
     assert "Don't share read receipts: dave" in text
 
 

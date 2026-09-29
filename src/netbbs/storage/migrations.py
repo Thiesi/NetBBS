@@ -3832,4 +3832,18 @@ MIGRATIONS = [
         );
         """,
     ),
+    Migration(
+        description=(
+            "Issue #922: `mail_messages.first_read_shared` -- 1 when the sender and the recipient "
+            "both shared read receipts at the letter's first reading (`first_read_at`), else 0. A "
+            "receipt shows only if both shared then and both share now, so neither side can turn "
+            "receipts on for a moment to see what was read while they were off. Every letter "
+            "already read gets 1: before this, receipts were on for everyone by default, and "
+            "whether one shows is still subject to both sides' current preference."
+        ),
+        sql="""
+        ALTER TABLE mail_messages ADD COLUMN first_read_shared INTEGER NOT NULL DEFAULT 0;
+        UPDATE mail_messages SET first_read_shared = 1 WHERE first_read_at IS NOT NULL;
+        """,
+    ),
 ]
