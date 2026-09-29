@@ -820,6 +820,7 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
         encoding = profile.encoding if profile else "utf-8"
         terminal = DoorTerminal(session, encoding)
         mode_entered = True
+        session.door_active = True
         await session.enter_door_mode(encoding=encoding, width=(profile.width or None) if profile else None,
                                       height=(profile.height or None) if profile else None)
         if profile and profile.adapter == "rlogin":
@@ -1038,6 +1039,7 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
             await asyncio.gather(*diagnostic_tasks, return_exceptions=True)
             try:
                 if mode_entered:
+                    session.door_active = False
                     await session.leave_door_mode()
             except Exception as exc:
                 errors.append(exc)

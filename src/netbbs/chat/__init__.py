@@ -38,7 +38,7 @@ from netbbs.chat.membership import (
 )
 from netbbs.chat.nick import (
     MAX_NICK_LENGTH,
-    NICK_MARKER,
+    NICK_SEPARATOR,
     NickError,
     chat_stream_label,
     display_label,
@@ -103,7 +103,7 @@ __all__ = [
     "remove_member",
     "revoke_invitation",
     "MAX_NICK_LENGTH",
-    "NICK_MARKER",
+    "NICK_SEPARATOR",
     "NickError",
     "chat_stream_label",
     "display_label",

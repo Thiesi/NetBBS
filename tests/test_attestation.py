@@ -89,6 +89,27 @@ def test_display_name_rejects_oversized_input(db, alice):
         set_display_name(db, alice, "x" * 100)
 
 
+@pytest.mark.parametrize("name", ["SysOp", "Admin", "The Sys-Op"])
+def test_display_name_rejects_staff_titles(db, alice, name):
+    # Issue #843: a display name stands in for the username in resources
+    # that show verified names, so it follows the chat-alias rule.
+    with pytest.raises(ProfileFieldError, match="staff title"):
+        set_display_name(db, alice, name)
+
+
+def test_display_name_rejects_a_look_alike_of_a_sysop_username(db, alice):
+    create_user(db, "InkWell", password="hunter2", user_level=SYSOP_LEVEL)
+    with pytest.raises(ProfileFieldError, match="SysOp"):
+        set_display_name(db, alice, "Ink WeII")
+
+
+def test_display_name_may_match_another_callers_username(db, alice):
+    # Unlike an alias: two people can share a name.
+    create_user(db, "anna", password="hunter2pw")
+    set_display_name(db, alice, "Anna")
+    assert get_display_name(db, alice) == "Anna"
+
+
 def test_display_name_visibility_defaults_hidden(db, alice):
     assert is_display_name_visible(db, alice) is False
     set_display_name_visible(db, alice, True)

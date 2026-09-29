@@ -32,7 +32,7 @@ from netbbs.auth.users import SYSOP_LEVEL, create_user
 from netbbs.chat.channels import create_channel, update_channel
 from netbbs.chat.hub import ChatHub
 from netbbs.chat.mailbox import MessageMailbox
-from netbbs.chat.nick import NICK_MARKER, set_nick
+from netbbs.chat.nick import set_nick
 from netbbs.chat.presence import PresenceRegistry
 from netbbs.chat.scrollback import get_scrollback, record_message
 from netbbs.link.node_identity import bootstrap_node_identity
@@ -42,6 +42,7 @@ from netbbs.net import chat_flow
 from netbbs.net.char_input import InputHistory
 from netbbs.net.notices import pending_notices
 from netbbs.rendering import MUTED_COLOR, VERIFIED_COLOR, fg
+from netbbs.rendering.ansi import strip_ansi
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 from tests.test_chat_flow_moderation import FakeSession
@@ -149,16 +150,14 @@ def test_gated_channel_verified_no_nick_uses_display_name_or_username(db, gated_
     assert fg(VERIFIED_COLOR) in label
 
 
-def test_gated_channel_verified_with_nick_is_two_name_form(db, gated_channel, alice, sysop):
-    # Confirmed with Thiesi (issue #64): "~nick~ (=Real Name=)", not the
-    # three-name "~nick~ display-name (=Real Name=)" form -- the
-    # canonical username/display_name must not appear alongside the nick.
+def test_gated_channel_verified_with_nick_is_alias_username_and_real_name(db, gated_channel, alice, sysop):
+    # Issue #64 kept the display name out of this form; issue #843 puts
+    # the username beside the alias: "nick|username (=Real Name=)".
+    set_display_name(db, alice, "Al")
     set_nick(db, alice, "ali")
     attest_name(db, alice, "Alice Smith", verifier=sysop)
     label = chat_flow._chat_author_label(db, gated_channel, alice)
-    assert f"{NICK_MARKER}ali{NICK_MARKER}" in label
-    assert "(=Alice Smith=)" in label
-    assert "alice" not in label
+    assert strip_ansi(label) == "ali|alice (=Alice Smith=)"
 
 
 def test_unresolvable_author_never_gets_verified_styling(db, gated_channel):
@@ -216,7 +215,7 @@ def test_live_message_shows_verified_unit_to_sender_and_recipient(db, lane, hub,
 
     actor_session, watcher_session = asyncio.run(scenario())
     for text in (_written(actor_session), _written(watcher_session)):
-        assert f"{NICK_MARKER}ali{NICK_MARKER}" in text
+        assert "ali|alice" in strip_ansi(text)
         assert "(=Alice Smith=)" in text
         assert "hello everyone" in text
 
@@ -229,7 +228,7 @@ def test_scrollback_replay_matches_live_rendering(db, lane, hub, presence, gated
 
     late_session, _ = asyncio.run(_run(lane, hub, presence, gated_channel, bob, ["/quit"]))
     replay_text = _written(late_session)
-    assert f"{NICK_MARKER}ali{NICK_MARKER}" in replay_text
+    assert "ali|alice" in strip_ansi(replay_text)
     assert "(=Alice Smith=)" in replay_text
     assert "hello everyone" in replay_text
 

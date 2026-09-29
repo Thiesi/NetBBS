@@ -21537,7 +21537,12 @@ async def _pick_moderator_scope(
 
 
 
-_MODERATOR_PRESETS = ["full", "limited"]
+_MODERATOR_PRESETS = ["full", "limited", "post", "read"]
+
+#: Presets that are access, not moderation (issue #836): a read or write
+#: grant lets its holder past a board's or file area's level gate. Chat
+#: channels have no read/write split.
+_ACCESS_PRESETS = {"post", "read"}
 
 #: `_pick_moderator_scope`'s "every kind at once" scope (issue #836) --
 #: not an object type; `_grant_moderator_screen` writes it as the three
@@ -21546,6 +21551,15 @@ _EVERYWHERE = "everywhere"
 
 
 def _moderator_preset_label(object_type: str | None, preset: str) -> str:
+    # The access presets can't cover channels, and the everything scope
+    # includes them (review on #868): say so before Save is tried.
+    no_access = object_type in ("channel", _EVERYWHERE)
+    if preset == "post":
+        return "Read and post (boards and areas only)" if no_access else "Read and post (past the level gates)"
+    if preset == "read":
+        return "Read only (boards and areas only)" if no_access else "Read only (past the read level)"
+    if object_type == _EVERYWHERE:
+        object_type = None
     if object_type == "channel":
         return "Full moderator (edit+moderate+manage members)" if preset == "full" else "Moderator only"
     if object_type is None:
@@ -21554,6 +21568,10 @@ def _moderator_preset_label(object_type: str | None, preset: str) -> str:
 
 
 def _moderator_preset_permissions(object_type: str, preset: str):
+    if preset in _ACCESS_PRESETS:
+        if object_type == "channel":
+            raise ModeratorGrantError("read and post grants are for boards and file areas; channels use their level")
+        return BoardPermission.READ | BoardPermission.WRITE if preset == "post" else BoardPermission.READ
     if object_type == "channel":
         if preset == "full":
             return ChannelPermission.EDIT | ChannelPermission.MODERATE | ChannelPermission.MANAGE_MEMBERS
@@ -21669,16 +21687,18 @@ async def _grant_moderator_screen(session: Session, lane: DatabaseLane, actor: U
         ),
         FieldSpec(
             key="preset", hotkey="p", menu_text=menu_key("P", "reset"), label="Preset",
-            render=lambda d: _moderator_preset_label(
-                None if d["object_type"] == _EVERYWHERE else d["object_type"], d["preset"]
-            ),
+            render=lambda d: _moderator_preset_label(d["object_type"], d["preset"]),
             prompt=choice_field("preset", _MODERATOR_PRESETS),
             step=choice_step("preset", _MODERATOR_PRESETS),
-            brief="Full, or approve/moderate only",
+            brief="Moderator, approver, or access",
             help=(
                 "Full moderator can edit, delete/moderate, and (for boards/areas) approve or (for "
                 "channels) manage members. The limited preset only approves (boards/areas) or "
-                "only moderates (channels)."
+                "only moderates (channels). Read and post, and read only, are access rather than "
+                "moderation: they let the holder past the minimum level of whatever the scope "
+                "covers -- one board or area, or every one under a blanket scope -- such as "
+                "posting on an announcements board with write level 255. Age and "
+                "verified-name requirements still apply."
             ),
         ),
     ]
@@ -21693,7 +21713,7 @@ async def _grant_moderator_screen(session: Session, lane: DatabaseLane, actor: U
         if community is not None:
             label = f"{label} scoped to Community {community.name!r}"
         if draft["object_type"] == _EVERYWHERE:
-            preset_label = _moderator_preset_label(None, draft["preset"])
+            preset_label = _moderator_preset_label(_EVERYWHERE, draft["preset"])
             await lane.run(
                 grant_everywhere,
                 draft["user"],
