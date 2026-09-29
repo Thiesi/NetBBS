@@ -3483,4 +3483,19 @@ MIGRATIONS = [
         ALTER TABLE users ADD COLUMN staff_permissions INTEGER NOT NULL DEFAULT 0;
         """,
     ),
+    Migration(
+        description=(
+            "Issue #836: `staff_away` -- a SysOp's or staff member's away notice (design doc "
+            "§5.6): one line of plain text, when it was set, and an optional node-local return "
+            "date after which it stops showing. One per person; goes with the account."
+        ),
+        sql="""
+        CREATE TABLE staff_away (
+            user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+            message TEXT NOT NULL,
+            since   TEXT NOT NULL,
+            until   TEXT
+        );
+        """,
+    ),
 ]

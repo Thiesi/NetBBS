@@ -467,7 +467,20 @@ from netbbs.mrc.settings import (
     validate_mrc_settings,
 )
 from netbbs.mrc.protocol import sanitize_room
-from netbbs.staff import count_moderation_items, count_pending_accounts, has_moderation_scope, moderation_scope
+from netbbs.staff import (
+    MAX_AWAY_MESSAGE_CHARS,
+    away_notice,
+    away_problem,
+    count_moderation_items,
+    count_pending_accounts,
+    describe_away,
+    end_away,
+    has_moderation_scope,
+    list_staff,
+    moderation_scope,
+    node_today,
+    set_away,
+)
 from netbbs.moderation.roles import (
     BoardPermission,
     ChannelPermission,
@@ -1486,6 +1499,12 @@ async def admin_menu(
             await _managed_dns_status_screen(session, lane, user)
             await _draw_admin_menu(session, lane, user, node_controls=node_controls,
                                    link_context=link_context, state=dashboard_state)
+        elif choice == "w":
+            await session.write_line("")
+            await _away_screen(session, lane, user)
+            dashboard_state = await _draw_admin_menu(
+                session, lane, user, node_controls=node_controls, link_context=link_context
+            )
         else:
             await session.write(reject_unhandled_key(choice))
 
@@ -1533,6 +1552,9 @@ async def staff_menu(
         elif choice == "u" and user.has_staff(StaffPermission.MANAGE_ACCOUNTS):
             await session.write_line("")
             await _pick_and_edit_user(session, lane, user, node_controls, title="Accounts")
+        elif choice == "w":
+            await session.write_line("")
+            await _away_screen(session, lane, user)
         elif choice == "m" and await lane.run(has_moderation_scope, user):
             await session.write_line("")
             await _pending_review_screen(
@@ -1556,6 +1578,7 @@ async def _draw_staff_menu(session: Session, lane: DatabaseLane, user: User) -> 
             "unicode_style": unicode_style_enabled(db, user),
             "collapsed": breadcrumb_collapsed_enabled(db, user),
             "header_color": effective_header_color_256(db),
+            **_away_state(db, user),
         }
 
     state = await lane.run(_load)
@@ -1581,6 +1604,9 @@ async def _draw_staff_menu(session: Session, lane: DatabaseLane, user: User) -> 
         held = state["held"]
         counts.append(Field("Held for moderation", str(held), color=WARNING_COLOR if held else MUTED_COLOR))
     panel_rows = await _write_sections(session, [Section(None, counts)], unicode_style=unicode_style) if counts else 0
+    for line in _away_panel_lines(state, width=min(session.terminal_width, 78) - 4, unicode_style=unicode_style):
+        await session.write_line(line)
+        panel_rows += 1
     options: list[MenuEntry] = []
     if user.has_staff(StaffPermission.APPROVE_ACCOUNTS):
         options.append(MenuEntry(label=menu_key("A", "ccounts waiting"), brief="Approve or decline signups"))
@@ -1588,12 +1614,142 @@ async def _draw_staff_menu(session: Session, lane: DatabaseLane, user: User) -> 
         options.append(MenuEntry(label=menu_key("U", "sers"), brief="Levels, disabling, passwords"))
     if state["moderates"]:
         options.append(MenuEntry(label=menu_key("M", "oderation"), brief="Held posts and uploads"))
+    options.append(MenuEntry(label=menu_key("w", "ay", prefix="A"), brief="Tell members you're away"))
     options.append(MenuEntry(label=menu_key("R", "efresh"), brief="Redraw with current numbers"))
     options.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to the main menu"))
     await session.write_line(
         "\r\n" + _fitted_menu(options, state["description_level"], session=session, used_rows=panel_rows + 5)
     )
     await _choice_prompt(session)
+
+
+def _date_of(db: Database, stamp: str | None) -> str | None:
+    """A stored timestamp as the node-local date alone (design doc §5.6:
+    the Staff list shows the day of a last session, not the time)."""
+    if not stamp:
+        return None
+    _fmt, tz_name = resolve_display_preferences(db)
+    try:
+        return format_for_display(stamp, override_format="%Y-%m-%d", override_timezone=tz_name)
+    except ValueError:
+        return None
+
+
+def _away_state(db: Database, user: User) -> dict[str, object]:
+    notice = away_notice(db, user)
+    return {"away": notice, "away_since": _date_of(db, notice.since) if notice is not None else None}
+
+
+def _away_panel_lines(state: dict[str, object], *, width: int, unicode_style: bool) -> list[str]:
+    notice = state.get("away")
+    if notice is None:
+        return []
+    text = f"You are marked {describe_away(notice, state['away_since'])}. A[w]ay ends it."
+    return [
+        colored(line, fg_color=WARNING_COLOR)
+        for line in _wrap_panel_sentence(sanitize_text(text), prefix="  ", width=width, unicode_style=unicode_style)
+    ]
+
+
+def _parse_return_date(raw: str) -> datetime.date | None:
+    """`YYYY-MM-DD`, the one spelling that reads the same everywhere."""
+    return datetime.date.fromisoformat(raw)
+
+
+async def _away_screen(session: Session, lane: DatabaseLane, user: User) -> None:
+    """
+    Mark yourself away, or end it (design doc §5.6, issue #836): one short
+    line of plain text and an optional return date. It shows on the Staff
+    list beside your name and, when every approver is away, to pending
+    callers. Being away changes nobody's permissions.
+    """
+    while True:
+        state = await lane.run(lambda db: _away_state(db, user))
+        notice = state["away"]
+        await session.write_line("")
+        await session.write_line(colored("Away notice", fg_color=LABEL_COLOR, bold=True))
+        if notice is None:
+            await session.write_line(colored("  You are not marked away.", fg_color=MUTED_COLOR))
+        else:
+            await session.write_line("  " + sanitize_text(describe_away(notice, state["away_since"])))
+        options = [menu_key("S", "et" if notice is None else "et a new notice")]
+        if notice is not None:
+            options.append(menu_key("E", "nd it"))
+        options.append(menu_key("B", "ack"))
+        await write_prompt(session, f"\r\n{action_bar(options, width=session.terminal_width)}: ")
+        choice = (await session.read_key()).lower()
+        await session.write_line("")
+        if choice == "b":
+            return
+        if choice == "e" and notice is not None:
+            await lane.run(end_away, user)
+            _announce_line(session, "You are no longer marked away.")
+            return
+        if choice != "s":
+            await session.write(reject_unhandled_key(choice))
+            continue
+        await write_prompt(session, f"Message (one line, up to {MAX_AWAY_MESSAGE_CHARS} characters): ")
+        message = (await session.read_line()).strip()
+        if not message:
+            _announce_line(session, colored("Cancelled.", fg_color=MUTED_COLOR))
+            continue
+        await write_prompt(session, "Back on (YYYY-MM-DD, blank if you don't know): ")
+        raw_date = (await session.read_line()).strip()
+        try:
+            until = _parse_return_date(raw_date) if raw_date else None
+        except ValueError:
+            _announce_line(session, colored(f"{raw_date!r} is not a date like 2026-10-12.", fg_color=MUTED_COLOR))
+            continue
+        problem = away_problem(message, until, await lane.run(node_today))
+        if problem is not None:
+            _announce_line(session, colored(f"{problem[0].upper()}{problem[1:]}.", fg_color=MUTED_COLOR))
+            continue
+        try:
+            await lane.run(set_away, user, message, until)
+        except UserManagementError as exc:
+            _announce_line(session, colored(str(exc), fg_color=MUTED_COLOR))
+            continue
+        _announce_line(session, "You are marked away. Members see it on the Staff list.")
+        return
+
+
+async def staff_list_screen(session: Session, lane: DatabaseLane, user: User) -> None:
+    """
+    Who runs the node (design doc §5.6, issue #836): every usable SysOp,
+    staff member and moderator, what they look after, the day of their
+    last session, and any away notice. For members; the main menu offers
+    it to everyone but guests.
+    """
+    def _load(db: Database) -> tuple[list, dict[int, str | None], dict[int, str | None]]:
+        entries = list_staff(db)
+        last_on = {entry.user.id: _date_of(db, entry.user.last_login_at) for entry in entries}
+        away_since = {entry.user.id: _date_of(db, entry.away.since) if entry.away else None for entry in entries}
+        return entries, last_on, away_since
+
+    entries, last_on, away_since = await lane.run(_load)
+    rows = [
+        [
+            (sanitize_text(entry.user.username), AUTHOR_COLOR),
+            entry.role,
+            sanitize_text(entry.looks_after),
+            (last_on[entry.user.id] or "never", DATE_COLOR),
+        ]
+        for entry in entries
+    ]
+    body: list[Field | Note | Table] = (
+        [Table(("Name", "Role", "Looks after", "Last on"), rows, flex=2)] if rows
+        else [Note("Nobody is listed yet.")]
+    )
+    for entry in entries:
+        if entry.away is not None:
+            body.append(Note(
+                sanitize_text(f"{entry.user.username}: {describe_away(entry.away, away_since[entry.user.id])}"),
+                color=WARNING_COLOR,
+            ))
+    await _show_report(
+        session, lane, user, "Staff", breadcrumb=(),
+        subtitle="Who runs this node, and when they were last on.", sections=[Section(None, body)],
+    )
 
 
 async def _operator_lost_sysop(
@@ -1667,6 +1823,7 @@ async def _draw_admin_menu(
             "collapsed": breadcrumb_collapsed_enabled(db, actor),
             "header_color": effective_header_color_256(db),
             "node_running": node_controls is None and running_node_pid(db.path) is not None,
+            **_away_state(db, actor),
         }
 
     if state is None:
@@ -1836,6 +1993,7 @@ async def _draw_admin_menu(
     quick = [
         MenuEntry(label=menu_key("K", "up", prefix="Bac"), brief="Create and review complete backups"),
         MenuEntry(label=menu_key("D", "NS"), brief="Managed netbbs.org name status"),
+        MenuEntry(label=menu_key("w", "ay", prefix="A"), brief="Tell members you're away"),
     ]
     if node_controls is not None:
         quick.insert(
@@ -1871,6 +2029,11 @@ async def _draw_admin_menu(
         state, node_badge=node_badge, active_sessions=active_sessions, link_context=link_context,
         node_controls=node_controls, unicode_style=unicode_style, width=box_inner_width,
     )
+    # Design doc §5.6: your own away notice, on every landing -- the reminder
+    # that ends a notice nobody dated.
+    away_lines = _away_panel_lines(state, width=box_inner_width, unicode_style=unicode_style)
+    health.extend(away_lines)
+    compact.extend(away_lines)
     level = state["description_level"]
     for panel, menu_level in ((health, level), (compact, level), (compact, "off")):
         menu = _menu(menu_level)
@@ -6485,13 +6648,15 @@ async def _staff_permissions_screen(
             question = (
                 f"{'Give' if giving else 'Remove'} {STAFF_PERMISSION_LABELS[flag]} "
                 f"{'to' if giving else 'from'} {target.username!r}?"
+                + (" Staff are shown to members on the Staff list." if giving and not target.staff_permissions else "")
             )
         elif choice == "c":
             new_mask = int(CO_SYSOP_PRESET)
             question = (
                 f"Make {target.username!r} a Co-SysOp -- approve accounts, manage accounts (disable, "
                 "password reset, levels up to 254) and moderate everything? They can't act on "
-                "SysOps or other staff, or reach Settings, Link, Node, DNS or backups."
+                "SysOps or other staff, or reach Settings, Link, Node, DNS or backups, and members "
+                "see them on the Staff list."
             )
         elif choice == "n":
             new_mask = 0
@@ -21654,7 +21819,11 @@ async def _grant_moderator_screen(session: Session, lane: DatabaseLane, actor: U
             permissions=_moderator_preset_permissions(draft["object_type"], draft["preset"]),
             granted_by=actor, community_id=community.id if community is not None else None,
         )
-        _announce_line(session, f"Granted {preset_label} on {label} to {draft['user'].username!r}.")
+        _announce_line(
+            session,
+            f"Granted {preset_label} on {label} to {draft['user'].username!r}. "
+            "Members see moderators on the Staff list.",
+        )
         return True
 
     await edit_resource_draft(

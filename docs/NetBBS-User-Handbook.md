@@ -48,6 +48,7 @@ things in different places. **[B]ack** leaves most screens.
 | **Profile** | Change your public profile and personal preferences |
 | **Moderation** (key **A**) | Posts and uploads waiting for your decision, if the SysOp made you a moderator |
 | **Staff** | Your staff console, if the SysOp gave you staff permissions |
+| **Staff list** (key **T**) | Who runs this node: the SysOps, staff and moderators, when each was last on, and who is away |
 
 Some choices appear only when they have something to show or you have
 permission to use them. Search covers content held by this node, including
