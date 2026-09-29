@@ -36,8 +36,7 @@ from typing import TYPE_CHECKING
 
 from netbbs.attestation import meets_age
 from netbbs.auth.users import User
-from netbbs.communities import get_effective_min_age, get_effective_min_read_level
-from netbbs.permissions import meets_level
+from netbbs.communities import get_effective_min_age, meets_read_gate
 from netbbs.rendering.pipe_codes import strip_pipe_codes
 from netbbs.rendering.post_body import indexed_post_body
 from netbbs.rendering.reflow import print_wrapped
@@ -167,7 +166,7 @@ def search_posts(db: Database, user: User, query: str, *, limit: int = 20) -> li
         if board is None:
             continue
         if not (
-            meets_level(user, get_effective_min_read_level(db, board))
+            meets_read_gate(db, user, board)
             and meets_age(db, user, get_effective_min_age(db, board))
         ):
             continue
@@ -205,7 +204,7 @@ def search_files(db: Database, user: User, query: str, *, limit: int = 20) -> li
         if area is None:
             continue
         if not (
-            meets_level(user, get_effective_min_read_level(db, area))
+            meets_read_gate(db, user, area)
             and meets_age(db, user, get_effective_min_age(db, area))
         ):
             continue

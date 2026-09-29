@@ -299,6 +299,57 @@ def get_effective_min_write_level(db: Database, resource) -> int:
     return 0
 
 
+# -- a read or write grant passes the level gate (design doc §5.2, issue #836) --
+
+_GRANT_OBJECT_TYPES = {"Board": "board", "FileArea": "file_area"}
+
+
+def passes_level_gate(db: Database, user: User, minimum_level: int, resource, permission) -> bool:
+    """
+    Whether `user` gets past `resource`'s `minimum_level`: by level, or by
+    holding `permission` (`BoardPermission.READ` or `.WRITE`) on it
+    (design doc §5.2). A board or file area's read or write grant lets its
+    holder past that one resource's level, never another's -- how a SysOp
+    opens a level-255 announcements board to a helper. The age and
+    verified-name gates are separate checks and still apply.
+
+    `resource` is a board or a file area. The grant is only looked up when
+    the level falls short, so the common case costs no query.
+    """
+    if user.user_level >= minimum_level:
+        return True
+    # Deferred: netbbs.moderation's package imports reach back here.
+    from netbbs.moderation.roles import has_permission
+
+    return has_permission(
+        db, user, object_type=_GRANT_OBJECT_TYPES[type(resource).__name__], object_id=resource.id,
+        permission=permission,
+    )
+
+
+def require_level_gate(db: Database, user: User, minimum_level: int, resource, permission) -> None:
+    """`passes_level_gate`, raising `InsufficientLevelError` as
+    `require_level` does when it fails."""
+    from netbbs.permissions import InsufficientLevelError
+
+    if not passes_level_gate(db, user, minimum_level, resource, permission):
+        raise InsufficientLevelError(minimum_level, user.user_level)
+
+
+def meets_read_gate(db: Database, user: User, resource) -> bool:
+    """`resource`'s effective read level, or a read grant on it."""
+    from netbbs.moderation.roles import BoardPermission
+
+    return passes_level_gate(db, user, get_effective_min_read_level(db, resource), resource, BoardPermission.READ)
+
+
+def meets_write_gate(db: Database, user: User, resource) -> bool:
+    """`resource`'s effective write level, or a write grant on it."""
+    from netbbs.moderation.roles import BoardPermission
+
+    return passes_level_gate(db, user, get_effective_min_write_level(db, resource), resource, BoardPermission.WRITE)
+
+
 def get_effective_min_age(db: Database, resource) -> int | None:
     """`resource`'s own `min_age` if explicitly set, else its
     Community's `default_min_age` if it belongs to one (which may
