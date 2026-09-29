@@ -274,7 +274,8 @@ their address. The compose screen opens with **To** filled in:
 - In the **Directory**, open a member's card and press **[M]ail**.
 - On **Who's online**, pick a caller and press **[E]-mail** (**[M]** there is
   a live message). It works for a caller on a linked node, and for a caller
-  who has turned off live messages.
+  who has turned off live messages. It is not offered for someone who has
+  blocked you.
 - On **Previous callers**, press **[M]ail a caller** and type the caller's
   number. A caller whose name is hidden there can't be written to from the
   list.
@@ -413,12 +414,14 @@ there.
 
 One block stops both their mail and their live messages: `/msg`,
 `/private`, `/dm` invitations, and messages and chat invitations from Who's
-online. If they are in a private conversation with you when you block
+online. It also stops them inviting you into a chat channel with
+`/invite`. If they are in a private conversation with you when you block
 them, it ends.
 
 A blocked person is told. On this board the To prompt and Send say that
-you do not accept mail from them, and `/msg`, `/private`, `/dm` and Who's
-online say you do not accept messages from them. Mail from another node
+you do not accept mail from them, and `/msg`, `/private`, `/dm` and
+`/invite` say you do not accept messages from them. Who's online says you
+do not accept messages or mail from them, and offers neither. Mail from another node
 bounces with that reason. It is never taken and quietly thrown away. The
 one exception is a live message from someone on another node: it is
 dropped without an answer, because live messages between nodes have no way
@@ -431,7 +434,7 @@ A block does not hide what someone says in a chat channel everyone shares;
 ask a channel operator or the SysOp if someone is disrupting a channel. To
 stop live messages from everyone at once, turn off **Direct messages** in
 Profile; it applies to `/msg` and `/private` as well as `/dm` and Who's
-online, and does not stop mail.
+online, and does not stop mail or channel invitations.
 
 **Read receipts.** When you send mail to someone on this board, Sent shows
 whether they have read it: the list says `read` or `not read`, and the

@@ -2560,8 +2560,8 @@ Mail about Link delivery (#806's bounces) is told at the main menu and on the
 sent message's Delivery line, not by a system message; a bounce letter in
 the Inbox could use this sender later.
 
-**Blocked people** (issues #817, #925). An account can refuse mail and
-live messages from one person. A block names a local account by id, so it survives a rename, or a
+**Blocked people** (issues #817, #925, #948). An account can refuse mail,
+live messages and chat channel invitations from one person. A block names a local account by id, so it survives a rename, or a
 Link sender by the `user@<home-node-fingerprint>` address its mail came
 from (user part compared case-insensitively), never by the node's display
 name, which can change. Blocks live in `mail_blocks`; deleting the blocking
@@ -2614,9 +2614,30 @@ already received stays.
   `direct_message` frame has no reply on the wire, and adding one is a
   protocol change this does not make. The remote sender sees their usual
   "(sent to ...)"; their mail, which does have a bounce, tells them.
+- A block stops a chat channel invitation too (issue #948). `/invite` to
+  someone who has blocked the inviter writes no `channel_invitations` row
+  and sends no live notice, and tells the inviter "<name> does not accept
+  messages from you", `/msg`'s words
+  (`netbbs.messaging_preferences.invitation_refusal`). The inviter's right
+  to invite is answered first, so a caller who may not invite anyone hears
+  that rather than learning of a block. The direct-message opt-out does not
+  stop an invitation, as it never has: an invitation waits in the invitee's
+  pending list and asks nothing of them, where a live message interrupts.
+  The SysOp exemption is the same as mail's. `/invite` is the only path that
+  creates an invitation; Link carries none. An invitation made before the
+  block stays pending until it expires or is revoked.
+- Who's online offers only what can succeed (issue #948, after #920's
+  picker). For a local caller who has blocked the viewer it offers neither
+  live action nor `[E]-mail`, since the letter would be refused, and its
+  subtitle says "<name> does not accept messages or mail from you." The
+  screen is still drawn, with `Bloc[k]` where the viewer may block them back
+  (their block does not stop their own mail) and `[B]ack`. A caller on a
+  linked node keeps `[E]-mail`: their node's block list is not known here,
+  and the To prompt or the bounce answers.
 - What a block does not cover. Public chat channels: a block does not hide a
   blocked person's lines in a shared room, and there is no per-caller ignore
-  in chat; channel moderation (mute, kick, ban) is the tool there. MRC
+  in chat; channel moderation (mute, kick, ban) is the tool there. An
+  invitation into a channel is covered (above). MRC
   private messages come from another network's users, not accounts or Link
   addresses, and are not covered. SysOp messages (the console's message to a
   caller) and system notices never pass the check.

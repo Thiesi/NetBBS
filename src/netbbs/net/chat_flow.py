@@ -116,6 +116,7 @@ from netbbs.chat import (
     ban_user,
     chat_stream_label,
     create_invitation,
+    may_invite,
     display_label,
     format_with_preference,
     get_channel_by_name,
@@ -169,7 +170,7 @@ from netbbs.mrc.settings import (
 from netbbs.net.mrc_color_preference import mrc_colors_enabled
 from netbbs.rendering.pipe_codes import render_pipe_codes, strip_pipe_codes
 from netbbs.timeutil import utc_now_iso
-from netbbs.messaging_preferences import live_message_refusal
+from netbbs.messaging_preferences import invitation_refusal, live_message_refusal
 from netbbs.moderation import ChannelPermission, has_permission
 from netbbs.net.char_input import Completer, InputHistory, LineViewport, LiveInputBuffer, reject_unhandled_key
 from netbbs.net.char_input import move_cursor as relative_move_cursor
@@ -3769,6 +3770,11 @@ async def _handle_invite(ctx: ChatCommandContext, args: str) -> None:
     and silently reaches nobody for an offline invitee, yet it always
     printed "(sent to X)" regardless -- misleading the inviter into
     believing a notification went out when none did.
+
+    Issue #948: someone who has blocked the inviter is not invited -- no
+    row, no live notice -- and the inviter is told so in `/msg`'s words
+    (`netbbs.messaging_preferences.invitation_refusal`). The
+    direct-message opt-out does not stop an invitation.
     """
     target_name = args.strip()
     if not target_name:
@@ -3779,12 +3785,25 @@ async def _handle_invite(ctx: ChatCommandContext, args: str) -> None:
     if target is None:
         return
 
+    def _invite(db: Database) -> str | None:
+        # The right to invite is answered first: a caller who may not
+        # invite anyone is told that, not whether this invitee blocks them.
+        if may_invite(db, ctx.channel, ctx.user):
+            refusal = invitation_refusal(db, target, inviter=ctx.user)
+            if refusal is not None:
+                return refusal
+        create_invitation(db, ctx.channel, target, invited_by=ctx.user)
+        return None
+
     try:
-        await ctx.lane.run(create_invitation, ctx.channel, target, invited_by=ctx.user)
+        refusal = await ctx.lane.run(_invite)
     except MembershipError:
         await ctx.session.write_line(
             colored("You do not have permission to invite users to this channel.", fg_color=MUTED_COLOR)
         )
+        return
+    if refusal is not None:
+        await ctx.session.write_line(colored(sanitize_text(refusal), fg_color=MUTED_COLOR))
         return
 
     if ctx.presence.is_online(target.username):

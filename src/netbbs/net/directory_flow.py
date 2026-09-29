@@ -20,7 +20,9 @@ from netbbs.link.boards import LinkContext
 from netbbs.link.node_profiles import identity_for_fingerprint, link_address_label, presentations_confusable
 from netbbs.doors import list_doors
 from netbbs.mail import mail_sender_refusal, sender_unblockable_reason
-from netbbs.messaging_preferences import LIVE_BLOCK_REFUSAL, accepts_direct_messages, live_message_refusal
+from netbbs.messaging_preferences import (
+    MESSAGES_AND_MAIL_BLOCK_REFUSAL, accepts_direct_messages, live_message_refusal,
+)
 from netbbs.net.breadcrumb_preference import breadcrumb_collapsed_enabled
 from netbbs.net.char_input import reject_unhandled_key
 from netbbs.net.chat_flow import run_direct_chat_invite_flow
@@ -376,7 +378,11 @@ async def _caller_who_screen(
     or the caller's own account.
     It does not close mail (issue #821): `[E]-mail` is offered to anyone
     listed, local or on a linked node, while mail is open to the caller,
-    and opens the compose screen addressed to them.
+    and opens the compose screen addressed to them -- except to a local
+    caller who has blocked them (issue #948), whose screen says "<name>
+    does not accept messages or mail from you." instead, since the letter
+    would be refused. A linked node's block list is not known here, so a
+    remote entry still offers it and the To prompt answers.
 
     `[I]nvite to chat` is only offered when both `direct_invites` and
     `lane` are given (`run_direct_chat_invite_flow` needs both) -- same
@@ -519,30 +525,32 @@ async def _caller_who_screen(
             await session.write_line(colored("That account no longer exists.", fg_color=ERROR_COLOR))
             return True
 
-        # Your own account, signed in on another connection, is listed too;
-        # mail to yourself is not offered.
-        offer_mail = mail_open and target.id != user.id
         # Opting out of direct messages (and so of chat invites) is not
         # opting out of mail (issue #821): such a caller is still offered
         # [E]-mail, and told why nothing else is. A block (issue #925) stops
-        # both; [E]-mail then says so itself, as the To prompt does.
+        # both, so [E]-mail is not offered to someone who has blocked the
+        # caller (issue #948), as neither live action is.
         refusal = live_message_refusal(db, target, sender=user)
         live = refusal is None
+        blocked = mail_sender_refusal(db, target, sender=user) is not None
+        # Your own account, signed in on another connection, is listed too;
+        # mail to yourself is not offered.
+        offer_mail = mail_open and target.id != user.id and not blocked
         offer_block = (
             lane is not None and target.id != user.id and sender_unblockable_reason(db, user, target) is None
         )
-        if not live and not offer_mail and not offer_block:
+        if not live and not offer_mail and not offer_block and not blocked:
             await session.write_line(colored(sanitize_text(refusal or ""), fg_color=MUTED_COLOR))
             return True
 
         offer_invite = live and direct_invites is not None and lane is not None
         if live:
             subtitle = "Choose how you would like to connect."
-        elif mail_sender_refusal(db, target, sender=user) is not None:
-            # Opted out *and* blocking the caller: the opt-out answers first,
-            # but the block closes mail too, so "e-mail still reaches them"
+        elif blocked:
+            # The block closes mail as well as live messages; this answers
+            # before an opt-out would, since "e-mail still reaches them"
             # would be false.
-            subtitle = LIVE_BLOCK_REFUSAL.format(name=target.username)
+            subtitle = MESSAGES_AND_MAIL_BLOCK_REFUSAL.format(name=target.username)
         elif offer_mail and not accepts_direct_messages(db, target):
             subtitle = f"{target.username} has opted out of direct messages; e-mail still reaches them."
         else:
