@@ -10,12 +10,16 @@ mocking anything.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import os
+import socket
 
 import aiohttp
 import pytest
+from aiohttp import web_fileresponse
 
 from netbbs.net.session import Session, SessionClosedError
-from netbbs.net.web import WebServer
+from netbbs.net.web import _STATIC_DIR, WebServer
 
 
 async def _run_server(session_handler):
@@ -450,6 +454,43 @@ def test_static_assets_are_served():
             await server.stop()
 
     asyncio.run(scenario())
+
+
+def test_static_assets_reach_a_slow_reader_intact_without_os_sendfile(monkeypatch):
+    # Issue #961: without `os.sendfile` (NetBSD), aiohttp's FileResponse
+    # went through asyncio's sendfile fallback, which queues views of one
+    # reused buffer and overwrote them before a slow reader drained them.
+    # Selector loop on every platform: that's the loop NetBSD runs, and the
+    # Windows proactor loop has a native sendfile of its own.
+    monkeypatch.delattr(os, "sendfile", raising=False)
+    monkeypatch.setattr(web_fileresponse, "NOSENDFILE", False)
+    expected = hashlib.sha256((_STATIC_DIR / "xterm.js").read_bytes()).hexdigest()
+
+    async def handler(session: Session):
+        pass
+
+    async def scenario():
+        server = await _run_server(handler)
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+            sock.connect(("127.0.0.1", server.port))
+            reader, writer = await asyncio.open_connection(sock=sock, limit=4096)
+            writer.write(b"GET /static/xterm.js HTTP/1.0\r\nHost: localhost\r\n\r\n")
+            await writer.drain()
+            received = bytearray()
+            while chunk := await reader.read(4096):
+                received += chunk
+                await asyncio.sleep(0.001)
+            writer.close()
+        finally:
+            await server.stop()
+        head, _, body = bytes(received).partition(b"\r\n\r\n")
+        assert head.startswith(b"HTTP/1.0 200")
+        return hashlib.sha256(body).hexdigest()
+
+    with asyncio.Runner(loop_factory=asyncio.SelectorEventLoop) as runner:
+        assert runner.run(scenario()) == expected
 
 
 def test_server_port_property_before_start_raises():

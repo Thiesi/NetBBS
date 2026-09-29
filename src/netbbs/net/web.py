@@ -43,12 +43,13 @@ import contextlib
 import json
 import re
 import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Awaitable, Callable
 from urllib.parse import urlsplit
 
-from aiohttp import WSCloseCode, web
+from aiohttp import WSCloseCode, web, web_fileresponse
 
 from netbbs.net import char_input
 from netbbs.net.char_input import (
@@ -85,6 +86,22 @@ _logger = logging.getLogger(__name__)
 # under netbbs/net/ (design doc) — asset files aren't
 # a transport-layer concern the way this module's actual code is.
 _STATIC_DIR = Path(__file__).resolve().parent.parent / "web" / "static"
+
+
+def _avoid_asyncio_sendfile_fallback() -> None:
+    """Keep `FileResponse` off asyncio's sendfile fallback (issue #961).
+
+    Where `os.sendfile` is missing (NetBSD's Python), aiohttp's
+    `FileResponse` lands in asyncio's own fallback, which queues
+    memoryviews of one reused buffer on the transport and overwrites
+    them before a slow reader has drained them: the caller gets a file
+    of the right length with the wrong bytes. aiohttp's own chunked
+    fallback writes fresh chunks, so switch to it -- the same switch
+    `AIOHTTP_NOSENDFILE=1` flips, but set here because aiohttp reads
+    that variable once, at import time.
+    """
+    if not hasattr(os, "sendfile"):
+        web_fileresponse.NOSENDFILE = True
 
 _CR = "\r"
 _LF = "\n"
@@ -1138,6 +1155,7 @@ class WebServer:
         return self._runner.addresses[0][1]
 
     async def start(self) -> None:
+        _avoid_asyncio_sendfile_fallback()
         app = web.Application()
         app.on_response_prepare.append(_set_server_header)
         app.router.add_get("/", self._handle_index)
