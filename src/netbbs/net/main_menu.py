@@ -315,7 +315,7 @@ async def _draw_main_menu(
     unicode_style = unicode_style_enabled(db, user)
     collapsed = breadcrumb_collapsed_enabled(db, user)
     # "mail" pluralized is "mails," which reads oddly -- the Mail submenu's
-    # own header (`_render_mail_menu`) already settled this exact wording as
+    # own header (now the mailbox's, `_MailboxScreen`) settled this wording as
     # "message(s)"; matching it here fixes both the missing pluralization
     # and a term the app wasn't even using consistently with itself.
     mail_status = (
@@ -833,7 +833,12 @@ async def _main_menu_loop(
                 # real connection, since netbbs.__main__.run() always
                 # passes a real foreground lane.
                 if lane is not None:
-                    await browse_mail(session, lane, user, link_context=link_context)
+                    # The mailbox's prompt is this menu's, clock and node
+                    # tags included (issue #810).
+                    await browse_mail(
+                        session, lane, user, link_context=link_context,
+                        choice_prompt=lambda: _main_menu_prompt(db, user, node_controls),
+                    )
                 else:
                     await session.write_line(
                         colored("Mail is not available in this context.", fg_color=MUTED_COLOR)
