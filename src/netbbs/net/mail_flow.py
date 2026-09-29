@@ -564,6 +564,8 @@ async def _compose_mail(
         """What to keep as the address, and how to show it (issue #813). A
         local name is kept as the account spells it, so `[T]o` opens on
         that too; a Link address is kept as typed, for Send to check again."""
+        # "sysop" wherever an address is typed, [T]o included (#840).
+        text = await lane.run(resolve_sysop_alias, text)
         label = await lane.run(_recipient_label, text, link_enabled)
         return (text if link_enabled and "@" in text else label), label
 

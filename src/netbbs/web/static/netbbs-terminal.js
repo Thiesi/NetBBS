@@ -131,10 +131,12 @@
   // work. A click on a menu entry sends its bracketed key, and a click on
   // a numbered list row sends its number, exactly as if typed. A click on
   // anything else says once that the terminal is driven by the keyboard.
-  // Door games get their clicks left alone; a drag still selects text.
+  // Door games get their clicks left alone; a drag still selects text. The
+  // server ignores a click while a line or a post is being typed.
   function sendKey(key) {
     if (ws.readyState !== WebSocket.OPEN) return;
-    ws.send(JSON.stringify({ type: "key", stream: null, data: key }));
+    // Its own type, so the server can drop it while text is being typed.
+    ws.send(JSON.stringify({ type: "click", data: key }));
   }
 
   // The key a click at `col` on `text` means, or null. Menu entries are

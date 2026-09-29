@@ -577,8 +577,9 @@ async def _confirm_unicode_style(session: Session, db: Database, user: User) -> 
         return
     if getattr(session, "transport_name", None) == "web":
         # The browser terminal always draws them, so the question only
-        # puzzled callers there (issue #840, F090/F112).
-        set_unicode_style_enabled(db, user, True)
+        # puzzled callers there (issue #840, F090/F112). Nothing is saved:
+        # the same account dialling in with an ASCII-only client later is
+        # still asked (review on #871).
         return
     await session.write_line(
         colored("\r\nNetBBS can use a few Unicode characters for a cleaner look, like this:", fg_color=METADATA_COLOR)

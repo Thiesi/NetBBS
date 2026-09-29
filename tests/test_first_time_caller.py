@@ -162,7 +162,8 @@ def test_the_browser_is_not_asked_about_plain_ascii(db):
     asyncio.run(_confirm_unicode_style(session, db, lena))
 
     assert "Switch to plain ASCII" not in _visible_text(session)
-    assert unicode_style_ever_set(db, lena) and unicode_style_enabled(db, lena)
+    # Not saved: the same account on an ASCII-only client is still asked.
+    assert not unicode_style_ever_set(db, lena) and unicode_style_enabled(db, lena)
 
 
 def test_sysop_as_an_address_names_the_first_sysop(db):
@@ -180,3 +181,78 @@ def test_an_enter_right_behind_the_answer_ends_the_guard():
     char_input.arm_word_guard(source)
     asyncio.run(char_input.discard_buffered_enter(source))
     assert asyncio.run(char_input.read_key(source, _no_echo)) == "n"
+
+
+def test_a_fast_no_does_not_leak_its_o_through_the_enter_check():
+    """"n" is the answer; the Enter check peeks "o", pushes it back, and the
+    next screen must still not read it (review on #871)."""
+    source = _Bytes(b"o\rx")
+    char_input.arm_word_guard(source)
+    asyncio.run(char_input.discard_buffered_enter(source))
+    assert asyncio.run(char_input.read_key(source, _no_echo)) == "x"
+
+
+def test_an_umlaut_in_a_guarded_word_is_dropped_too():
+    source = _Bytes("\u00dcbersicht\rx".encode())  # Uebersicht, Enter, x
+    char_input.arm_word_guard(source)
+    assert asyncio.run(char_input.read_key(source, _no_echo)) == "x"
+
+
+# -- the browser: clicks and Ctrl-H ------------------------------------------------
+
+
+def _web_scenario(handler, events):
+    import aiohttp
+
+    from tests.test_web_line_editing import _run_server
+
+    async def scenario():
+        server = await _run_server(handler)
+        try:
+            async with aiohttp.ClientSession() as client:
+                async with client.ws_connect(f"http://127.0.0.1:{server.port}/ws") as ws:
+                    for event in events:
+                        await ws.send_json(event)
+                    await asyncio.sleep(0.5)
+        finally:
+            await server.stop()
+
+    asyncio.run(scenario())
+
+
+def test_a_click_is_a_key_at_a_menu_but_types_nothing_into_a_line():
+    results = []
+
+    async def handler(session):
+        results.append(await session.read_key())
+        results.append(await session.read_line())
+
+    _web_scenario(handler, [
+        {"type": "click", "data": "m"},
+        {"type": "click", "data": "b"},
+        {"type": "key", "data": "hi\r"},
+    ])
+    assert results == ["m", "hi"]
+
+
+def test_a_clicked_row_number_arrives_as_its_two_digits():
+    results = []
+
+    async def handler(session):
+        results.append(await session.read_key())
+        results.append(await session.read_key())
+
+    _web_scenario(handler, [{"type": "click", "data": "03"}])
+    assert results == ["0", "3"]
+
+
+def test_ctrl_h_reaches_a_menu_in_the_browser():
+    from netbbs.net.char_input import HELP_KEY
+
+    results = []
+
+    async def handler(session):
+        results.append(await session.read_key())
+
+    _web_scenario(handler, [{"type": "key", "data": "\x08"}])
+    assert results == [HELP_KEY]

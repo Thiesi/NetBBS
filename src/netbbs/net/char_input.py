@@ -941,7 +941,7 @@ def word_guard_drops(source: object, char: str) -> bool:
     if char in ("\r", "\n"):
         setattr(source, _WORD_GUARD_ATTR, None)
         return True
-    if len(char) == 1 and (char.isalpha() or char in " -'"):
+    if len(char) == 1 and (char.isalpha() or char in " -'" or ord(char) >= 0x80):
         setattr(source, _WORD_GUARD_ATTR, now + WORD_GUARD_SECONDS)
         return True
     setattr(source, _WORD_GUARD_ATTR, None)
@@ -949,12 +949,13 @@ def word_guard_drops(source: object, char: str) -> bool:
 
 
 async def _read_byte(source: ByteSource) -> int | None:
-    pushed = _pop_pushed_back(source)
-    if pushed is not None:
-        return pushed
     while True:
-        byte = await source.read_byte()
-        if byte is None or byte >= 0x80 or not word_guard_drops(source, chr(byte)):
+        # A byte pushed back by a peek counts too: "no" typed fast has its
+        # "o" peeked by the Enter check behind the "n" (review on #871).
+        pushed = _pop_pushed_back(source)
+        byte = pushed if pushed is not None else await source.read_byte()
+        # Bytes of a non-ASCII letter (an umlaut) count as letters.
+        if byte is None or not word_guard_drops(source, chr(byte)):
             return byte
         if byte == _CR:
             await _consume_optional_lf_or_nul(source)
