@@ -158,19 +158,51 @@ def _migration():
     return migration
 
 
-def test_the_migration_keeps_existing_boards_in_creation_order(tmp_path):
-    database = Database(tmp_path / "node.db")
-    try:
-        sysop = create_user(database, "sysop", password="hunter2", user_level=SYSOP_LEVEL)
-        for name in ("zebra", "Apple", "mike"):
-            create_board(database, name, creator=sysop)
-        database.connection.execute("UPDATE boards SET position = 0")
-        backfill = [s for s in _migration().sql.split(";") if s.strip().startswith("UPDATE boards SET position")]
-        database.connection.executescript(backfill[0] + ";")
+def test_upgrading_keeps_creation_order_and_every_saved_preference(tmp_path, monkeypatch):
+    """The real upgrade: a node on the schema before this migration, with
+    boards, areas and saved sort preferences, opened by this build."""
+    from netbbs.storage import database as database_module
+    from tests.legacy_schema import insert_user_on_old_schema
 
-        assert _names(list_boards(database)) == ["zebra", "Apple", "mike"]
+    index = MIGRATIONS.index(_migration())
+    monkeypatch.setattr(database_module, "MIGRATIONS", MIGRATIONS[:index])
+    path = tmp_path / "node.db"
+    old = Database(path)
+    sysop = insert_user_on_old_schema(old, "sysop", user_level=SYSOP_LEVEL)
+    caller = insert_user_on_old_schema(old, "caller", user_level=10)
+    retro = create_community(old, "Retro", creator=sysop)
+    for name in ("zebra", "Apple", "mike"):
+        create_board(old, name, creator=sysop)
+    for name in ("Scans", "Manuals"):
+        create_file_area(old, name, creator=sysop)
+    set_sort_preference(old, caller, "board", "activity")
+    set_sort_preference(old, caller, "file_area", "volume", community_id=retro.id)
+    set_sort_preference(old, caller, "channel", "recent")
+    old.close()
+    monkeypatch.undo()
+
+    upgraded = Database(path)
+    try:
+        assert _names(list_boards(upgraded)) == ["zebra", "Apple", "mike"]
+        assert _names(list_file_areas(upgraded)) == ["Scans", "Manuals"]
+        # Every preference survived the table rebuild, at its own scope...
+        assert get_effective_sort_mode(upgraded, caller, "board") == "activity"
+        assert get_effective_sort_mode(upgraded, caller, "file_area", community_id=retro.id) == "volume"
+        assert get_effective_sort_mode(upgraded, caller, "file_area") == "sysop"
+        assert get_effective_sort_mode(upgraded, caller, "channel") == "recent"
+        # ...and the rebuilt unique indexes still make a second save an update.
+        set_sort_preference(upgraded, caller, "board", "sysop")
+        count = upgraded.connection.execute(
+            "SELECT COUNT(*) FROM user_sort_preferences WHERE user_id = ? AND resource_kind = 'board'", (caller.id,)
+        ).fetchone()[0]
+        assert count == 1
+        # A board made after the upgrade goes last (the trigger).
+        create_board(upgraded, "Aardvark", creator=sysop)
+        create_file_area(upgraded, "Audio", creator=sysop)
+        assert _names(list_boards(upgraded))[-1] == "Aardvark"
+        assert _names(list_file_areas(upgraded))[-1] == "Audio"
     finally:
-        database.close()
+        upgraded.close()
 
 
 def test_a_saved_preference_survives_and_sysop_is_a_mode_boards_accept(db, sysop):
