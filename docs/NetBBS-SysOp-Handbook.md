@@ -764,10 +764,9 @@ never comes back as a bounce: mail for a node that has *your* node
 quarantined or blocked, which sends yours nothing. So if no answer comes back
 within 14 days of the handoff, the letter expires and its sender is told that
 no answer came back, so it may not have arrived. An answer that arrives later
-still counts: the letter turns delivered, or bounced. Relays keep what they
-are handed for 30 days by default; if you run a relay, keep its retention
-longer than those 14 days, or a slow recipient's mail can disappear while its
-sender still waits. Replaying an expired delivery from the **Outbox** puts it
+still counts: the letter turns delivered, or bounced. A relay keeps a letter
+well past those 14 days, so a recipient that is only slow to collect still
+answers in time. Replaying an expired delivery from the **Outbox** puts it
 back to pending.
 
 Mail arriving here is checked the way your own callers' mail is: a sender

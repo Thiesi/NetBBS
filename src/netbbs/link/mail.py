@@ -532,9 +532,9 @@ def record_relay_handoff(db: Database, content_id: str, *, now: str | None = Non
 
 
 # How long a letter left at a relay waits for an answer before its sender is
-# told it may not have arrived (issue #874). Relay mailboxes keep a deposit
-# longer than this (issue #891), so a recipient that is only slow to collect
-# still answers inside it.
+# told it may not have arrived (issue #874). Any retention limit on relay
+# mailboxes (issue #891) must stay longer than this, so a recipient that is
+# only slow to collect still answers inside it.
 RELAY_NO_ANSWER_TIMEOUT = datetime.timedelta(days=14)
 
 

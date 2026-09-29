@@ -4753,11 +4753,11 @@ out this way, since the push itself reached the recipient's node; mail left at
 a relay before the upgrade that added the handoff time cannot be told apart
 from it and keeps waiting.
 
-A relay must hold a deposit longer than this timeout. Relay mailbox retention
-(issue #891, 30 days by default) is set well above 14 days so that a recipient
-that is merely slow to collect still answers inside the sender's window;
-lowering it below the timeout would let a letter vanish while its sender still
-reads "no answer yet".
+A relay must hold a deposit longer than this timeout. Any limit on how long a
+relay mailbox keeps an uncollected deposit (issue #891 plans 30 days) must stay
+well above 14 days, so that a recipient that is merely slow to collect still
+answers inside the sender's window; a limit below the timeout would let a
+letter vanish while its sender still reads "no answer yet".
 
 ### 10.4 Routing limitations
 
