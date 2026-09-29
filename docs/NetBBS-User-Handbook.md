@@ -279,8 +279,7 @@ their address. The compose screen opens with **To** filled in:
 - In the **Directory**, open a member's card and press **[M]ail**.
 - On **Who's online**, pick a caller and press **[E]-mail** (**[M]** there is
   a live message). It works for a caller on a linked node, and for a caller
-  who has turned off live messages. It is not offered for someone who has
-  blocked you.
+  who has turned off live messages.
 - On **Previous callers**, press **[M]ail a caller** and type the caller's
   number. A caller whose name is hidden there can't be written to from the
   list.
@@ -288,6 +287,12 @@ their address. The compose screen opens with **To** filled in:
   the post's `Re:` subject and a quote, as a reply on the board would have.
   You don't need to be allowed to post on that board, and it works for a post
   carried from a linked node too.
+
+None of these offers mail to someone on this board who has blocked you. The
+member card and Who's online say that they do not accept messages or mail
+from you, Previous callers says so when you type their number, and a post of
+theirs has no **[M]ail author**. For someone on a linked node you are still
+offered mail, since this board can't see who they block; their board answers.
 
 After you send the letter, keep it or cancel it, you are back on the screen
 you came from, with the result above the prompt. None of these is offered
@@ -425,9 +430,10 @@ them, it ends.
 
 A blocked person is told. On this board the To prompt and Send say that
 you do not accept mail from them, and `/msg`, `/private`, `/dm` and
-`/invite` say you do not accept messages from them. Who's online says you
-do not accept messages or mail from them, and offers neither. Mail from another node
-bounces with that reason. It is never taken and quietly thrown away. The
+`/invite` say you do not accept messages from them. Who's online and your
+Directory card say you do not accept messages or mail from them, and offer
+neither; Previous callers says it when they type your number, and your posts
+offer them no **[M]ail author**. Mail from another node bounces with that reason. It is never taken and quietly thrown away. The
 one exception is a live message from someone on another node: it is
 dropped without an answer, because live messages between nodes have no way
 to send one back. The same works the other way: if you are told someone

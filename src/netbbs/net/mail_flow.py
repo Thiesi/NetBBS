@@ -116,6 +116,7 @@ from netbbs.mail import (
     unblock_link_sender,
     unblock_local_sender,
 )
+from netbbs.messaging_preferences import MESSAGES_AND_MAIL_BLOCK_REFUSAL
 from netbbs.file_refs import (
     AVAILABLE,
     MAX_FILE_REFS,
@@ -2396,6 +2397,11 @@ async def open_letter(
 # Mail action. They all come through here, so every one of them makes the same
 # checks the mailbox's own To prompt makes, and lands on the same compose
 # screen with the recipient already filled in.
+#
+# None of them offers Mail to a local caller who has blocked the viewer
+# (issues #948 and #953): `mail_blocked_notice` says why, where the screen has
+# room. A linked node's block list is not visible here, so a Link address is
+# still offered and the To prompt or a bounce answers.
 
 
 async def mail_open_to(session: Session, lane: DatabaseLane, user: User) -> bool:
@@ -2404,6 +2410,19 @@ async def mail_open_to(session: Session, lane: DatabaseLane, user: User) -> bool
     checks again when the key is pressed, since the SysOp can close mail
     while the screen is up."""
     return await lane.run(lambda db: caller_mail_refusal(session, db, user)) is None
+
+
+def mail_blocked_notice(db: Database, recipient: User, *, sender: User) -> str | None:
+    """"<name> does not accept messages or mail from you." when local
+    `recipient` has blocked local `sender`, else `None` (issues #948, #953).
+
+    A screen that meets callers hides its Mail action on this, and shows
+    the sentence where it has room: the block stops live messages as well
+    as letters, so it says both. `mail_sender_refusal` decides it, so a
+    SysOp of this node, whom nobody can block, is never told it."""
+    if mail_sender_refusal(db, recipient, sender=sender) is None:
+        return None
+    return MESSAGES_AND_MAIL_BLOCK_REFUSAL.format(name=recipient.username)
 
 
 async def mail_someone(
