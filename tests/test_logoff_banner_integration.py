@@ -211,7 +211,7 @@ def test_logoff_summary_is_skipped_when_main_menu_exit_is_not_voluntary(db, monk
 
 def test_disabled_logoff_banner_still_shows_call_summary_and_goodbye(db):
     create_user(db, "alice", password="hunter2pw", user_level=10)
-    session = FakeSession(["alice", "hunter2pw", "n", "y"], keys=["l"])
+    session = FakeSession(["alice", "hunter2pw", "y"], keys=["l"])
 
     asyncio.run(_run_login(session, db))
 

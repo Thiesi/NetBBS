@@ -180,7 +180,7 @@ class SSHSession(Session):
         terminal_type = (get_terminal_type() if get_terminal_type is not None else None) or ""
         self.terminal_types = (terminal_type,) if terminal_type else ()
         charset, self.charset_certain = classify_terminal_types(self.terminal_types)
-        self.output_charset = charset if charset is not None else UTF8
+        self.output_charset = self.detected_charset = charset if charset is not None else UTF8
 
     async def _send_text(self, text: str) -> None:
         # Same CRLF normalization TelnetSession.write performs, and the

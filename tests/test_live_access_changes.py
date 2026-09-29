@@ -69,6 +69,9 @@ class FedSession:
     async def write_line(self, text: str = "") -> None:
         self.written.append(text + "\n")
 
+    async def write_raw(self, data: bytes) -> None:
+        self.written.append(data.decode("utf-8", errors="replace"))
+
     async def read_key(self, echo: bool = True) -> str:
         return await self._keys.get()
 
@@ -162,7 +165,7 @@ def test_a_demoted_sysop_is_taken_out_of_the_console_and_the_session_carries_on(
 
     async def scenario():
         task = asyncio.create_task(_drive(db, registry, sysop, session))
-        session.feed("n", "s")  # answer the Unicode prompt, open the console
+        session.feed("s")  # open the console
         await _until(lambda: _CONSOLE_TITLE in session.text())
         mark = len(session.written)
         set_user_level(db, sysop, 10, changed_by=boss)
@@ -469,12 +472,15 @@ def test_the_post_login_prompts_are_not_reported_as_the_main_menu(db):
     sysop, _boss = _sysops(db)
     registry = ActiveSessionRegistry()
     session = FedSession()
+    # A terminal that did not say which character set it reads is asked
+    # after login (issue #929).
+    session.charset_certain = False
 
     async def scenario():
         task = asyncio.create_task(_drive(db, registry, sysop, session))
-        await _until(lambda: "Unicode" in session.text())
+        await _until(lambda: "looks right" in session.text())
         assert session.activity == ("Logging in",)
-        session.feed("n")
+        session.feed("1")
         await _until(lambda: "Main menu" in session.text())
         assert session.activity == ()
         session.feed("l", "y")

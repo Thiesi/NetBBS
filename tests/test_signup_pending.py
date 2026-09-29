@@ -159,7 +159,7 @@ def test_post_signup_message_explains_the_wait_without_the_redraw_hint(db):
 
 
 def test_open_signup_still_mentions_in_place_redraw(db):
-    session = FakeSession(["new", "lena_h", "hunter2pw", "hunter2pw", "n", "y"], keys=["l"])
+    session = FakeSession(["new", "lena_h", "hunter2pw", "hunter2pw", "y"], keys=["l"])
 
     asyncio.run(_run_login(session, db))
 
@@ -389,7 +389,7 @@ def test_signup_question_is_not_asked_on_an_open_node(db):
     from netbbs.auth.signup_answers import set_registration_question
 
     set_registration_question(db, "What do you write with?")
-    session = FakeSession(["new", "anna_writes", "hunter2pw", "hunter2pw", "n", "y"], keys=["l"])
+    session = FakeSession(["new", "anna_writes", "hunter2pw", "hunter2pw", "y"], keys=["l"])
 
     asyncio.run(_run_login(session, db))
 
