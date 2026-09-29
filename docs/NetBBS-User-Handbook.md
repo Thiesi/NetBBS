@@ -46,7 +46,7 @@ up: from a board to the list you picked it from, and from there to the menu.
 | **Files** | Every file area |
 | **Games** | Door games, when the SysOp has set some up |
 | **Communities** (key **O**) | Topics the SysOp set up, each with its own boards, chat channels, file areas and games |
-| **New scan** | See unread activity and resources you have not visited; Back from each one brings you back with the next new one ready for Enter, and **[R]eplies** opens the replies to your posts |
+| **New scan** | See unread activity and resources you have not visited; Back from each one brings you back with the next new one ready for Enter, **[R]eplies** opens the replies to your posts, and **[E]-mail** opens your mailbox, whose unread count is shown above the list |
 | **Find** (key **/**) | Search posts, files and retained chat on this node. It does not search mail; the mailbox has its own **[F]ind** |
 | **E-mail** | Read and send persistent NetBBS mail, from the level the SysOp chose; not offered to the guest account |
 | **Who's online** | See callers and available ways to contact them |
@@ -164,6 +164,14 @@ new message removes your oldest message you have already read; unread mail is
 never removed, and a mailbox full of unread mail turns new mail away until
 you read or delete some. If old mail was removed to make room, the main menu
 tells you how many messages went, once.
+
+You are told when mail arrives. The first main menu after you log in says how
+many unread messages wait, and **New scan** shows the count above its list.
+A message that arrives while you are online is announced with its sender and
+subject: at once in chat, straight away on an idle main menu or Inbox, and
+otherwise above the prompt of the next screen you reach. Nothing is written
+into a door game or an editor while you are in it; the notice waits until you
+leave.
 Each row shows who a message is from, its subject and its date, with `new`
 beside mail you have not opened yet. Move with Up/Down and press Enter, or
 press a row's number, to read a message. On a long list, **[N]ext page** and

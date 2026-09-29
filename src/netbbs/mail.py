@@ -589,6 +589,44 @@ def unread_count(db: Database, user: User) -> int:
     return row["n"]
 
 
+MailKey = tuple[int, str]
+
+
+def inbox_mail_keys(db: Database, user: User, *, unread_only: bool = False) -> set[MailKey]:
+    """`(id, created_at)` of every letter in `user`'s inbox (or only the
+    unread ones), for telling which letters are new since the last look
+    (issue #823, `netbbs.net.mail_arrivals`).
+
+    The pair, not the id alone: `mail_messages` has no AUTOINCREMENT, so a
+    letter removed from both sides can free the highest id for the next
+    one, and an id already seen would hide that letter."""
+    rows = db.connection.execute(
+        f"""
+        SELECT id, created_at FROM mail_messages
+        WHERE recipient_user_id = ? AND recipient_deleted_at IS NULL
+        {"AND read_at IS NULL" if unread_only else ""}
+        """,
+        (user.id,),
+    ).fetchall()
+    return {(row["id"], row["created_at"]) for row in rows}
+
+
+def get_inbox_letters(db: Database, user: User, mail_ids: list[int]) -> list[MailMessage]:
+    """The letters among `mail_ids` still in `user`'s inbox, in arrival
+    order -- whatever was deleted in the meantime is left out."""
+    if not mail_ids:
+        return []
+    rows = db.connection.execute(
+        f"""
+        SELECT * FROM mail_messages
+        WHERE recipient_user_id = ? AND recipient_deleted_at IS NULL AND id IN ({",".join("?" * len(mail_ids))})
+        ORDER BY id
+        """,
+        (user.id, *mail_ids),
+    ).fetchall()
+    return [_row_to_message(row) for row in rows]
+
+
 @dataclass(frozen=True)
 class InboxSize:
     """How full one account's inbox is (issue #820), for the SysOp. Counts
