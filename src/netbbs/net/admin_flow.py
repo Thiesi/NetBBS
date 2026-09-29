@@ -6145,8 +6145,12 @@ async def _user_detail_screen(
         elif choice == "a" and target.pending_approval:
             await session.write_line("")
             if await prompt_yes_no(session, "Approve this account so it can log in?", default=False):
-                target = await lane.run(approve_pending_user, target, approved_by=actor)
-                _announce_line(session, f"{target.username!r} approved.")
+                try:
+                    target = await lane.run(approve_pending_user, target, approved_by=actor)
+                except UserManagementError as exc:
+                    _announce_line(session, colored(str(exc), fg_color=MUTED_COLOR))
+                else:
+                    _announce_line(session, f"{target.username!r} approved.")
             blocked = await _draw_user_detail(
                 session, lane, target, description_level, redraw_in_place, unicode_style, collapsed, selected=selected,
             )
@@ -6195,19 +6199,25 @@ async def _user_detail_screen(
             if await prompt_yes_no(
                 session, f"{new_state.capitalize()} identity-verification permission?", default=False
             ):
-                target = await lane.run(
-                    set_can_verify_identity, target, not target.can_verify_identity, changed_by=actor
-                )
-                _announce_line(session,
-                    f"{target.username!r} can now verify identity: "
-                    f"{'yes' if target.can_verify_identity else 'no'}."
-                )
-                _request_live_access_recheck(node_controls, target)
+                try:
+                    target = await lane.run(
+                        set_can_verify_identity, target, not target.can_verify_identity, changed_by=actor
+                    )
+                except UserManagementError as exc:
+                    _announce_line(session, colored(str(exc), fg_color=MUTED_COLOR))
+                else:
+                    _announce_line(session,
+                        f"{target.username!r} can now verify identity: "
+                        f"{'yes' if target.can_verify_identity else 'no'}."
+                    )
+                    _request_live_access_recheck(node_controls, target)
             blocked = await _draw_user_detail(
                 session, lane, target, description_level, redraw_in_place, unicode_style, collapsed, selected=selected,
             )
         elif choice == "s":
-            target = await _staff_permissions_screen(session, lane, actor, target, node_controls)
+            target = await _staff_permissions_screen(
+                session, lane, actor, target, node_controls, description_level=description_level
+            )
             blocked = await _draw_user_detail(
                 session, lane, target, description_level, redraw_in_place, unicode_style, collapsed, selected=selected,
             )
@@ -6293,7 +6303,8 @@ _STAFF_TOGGLE_KEYS: dict[str, StaffPermission] = {
 
 
 async def _staff_permissions_screen(
-    session: Session, lane: DatabaseLane, actor: User, target: User, node_controls: NodeControls | None
+    session: Session, lane: DatabaseLane, actor: User, target: User, node_controls: NodeControls | None,
+    *, description_level: str,
 ) -> User:
     """
     Give or take `target`'s staff permissions (design doc §5.6, issue
@@ -6319,7 +6330,7 @@ async def _staff_permissions_screen(
         options.append(MenuEntry(label=menu_key("C", "o-SysOp preset"), brief="All three at once"))
         options.append(MenuEntry(label=menu_key("N", "one"), brief="Remove every staff permission"))
         options.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to the account"))
-        await session.write_line(_fitted_menu(options, "brief", session=session, used_rows=4))
+        await session.write_line(_fitted_menu(options, description_level, session=session, used_rows=4))
         await _choice_prompt(session)
         choice = (await session.read_key()).lower()
         await session.write_line("")
