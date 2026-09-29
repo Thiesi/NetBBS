@@ -185,6 +185,13 @@ def encode_text(text: str, charset: Charset) -> bytes:
     return map_text(text, charset).encode(charset, errors="replace")
 
 
+def input_codec(session: object) -> str:
+    """The codec a caller's typed bytes are in: CP437 for a CP437
+    terminal, UTF-8 otherwise (an ASCII terminal's bytes are valid UTF-8,
+    and a UTF-8 terminal the caller chose ASCII for still types UTF-8)."""
+    return "cp437" if getattr(session, "output_charset", UTF8) == CP437 else "utf-8"
+
+
 def ellipsis(charset: Charset) -> str:
     """The truncation marker for `charset`: one column in UTF-8, three
     plain dots where the single-character ellipsis does not exist."""
