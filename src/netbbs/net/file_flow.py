@@ -885,7 +885,16 @@ async def _show_area(
             # as a board does (issue #839, F095).
             newest = list_files_page(db, area, user, with_pinned=True)
             target = page.entries[0].file_id
-            on_newest = next((i for i, listed in enumerate(newest.entries) if listed.file_id == target), None)
+            # In the dated rows only, as a board does: a match in the
+            # pinned block would record the files between it and the newest
+            # rows as seen without ever showing them (review on #869).
+            on_newest = next(
+                (
+                    i for i, listed in enumerate(newest.entries)
+                    if i >= newest.pinned_count and listed.file_id == target
+                ),
+                None,
+            )
             jump["highlight"] = 0 if on_newest is None else on_newest
             if on_newest is not None:
                 page = newest

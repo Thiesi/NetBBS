@@ -507,3 +507,24 @@ def test_jump_to_first_unread_falls_back_to_the_newest_page_once_caught_up(tmp_p
     assert "has no posts yet" not in session.output  # must not be mistaken for a genuinely empty board
     assert 2 in _listed(session)  # shows the ordinary newest page instead
     db.close()
+
+
+def test_a_pinned_first_unread_does_not_skip_the_posts_after_it(tmp_path, monkeypatch):
+    """The first unread is pinned, so the newest page lists it in its
+    pinned block -- but not the unread posts between it and the page's
+    dated rows. The jump keeps the page that starts at it (review on #869)."""
+    db = Database(tmp_path / "node.db")
+    board, alice = _make_board_with_posts(db, 40, monkeypatch)
+    bob = create_user(db, "bob", password="hunter2", user_level=10)
+    posts = db.connection.execute(
+        "SELECT post_id, created_at FROM posts ORDER BY created_at ASC"
+    ).fetchall()
+    db.connection.execute("UPDATE posts SET pinned = 1 WHERE post_id = ?", (posts[1]["post_id"],))
+    db.connection.commit()
+    cursor = (posts[0]["created_at"], posts[0]["post_id"])
+
+    session = FakeSession(keys=["b"])
+    asyncio.run(_show_board(session, db, board, bob, initial_cursor=cursor))
+
+    assert 2 in _listed(session)  # the unread post right after the pinned one
+    db.close()

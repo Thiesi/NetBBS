@@ -1569,7 +1569,16 @@ async def _show_board(
         newest = list_posts_page(
             db, board, user, limit=_page_limit(), with_pinned=True, pinned_block_rows=_PINNED_BLOCK_ROWS
         )
-        on_newest = next((i for i, listed in enumerate(newest.posts) if listed.root_post_id == target), None)
+        # In the dated rows only: a pinned target is also listed in the
+        # pinned block, and taking that match could skip the unread posts
+        # between it and the newest page's rows (review on #869).
+        on_newest = next(
+            (
+                i for i, listed in enumerate(newest.posts)
+                if i >= newest.pinned_count and listed.root_post_id == target
+            ),
+            None,
+        )
         if on_newest is not None:
             page, page_anchor, jump_highlight = newest, None, on_newest
         else:

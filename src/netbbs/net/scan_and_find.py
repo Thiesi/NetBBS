@@ -223,7 +223,11 @@ async def _new_scan_screen(
         # Followed items first; a stable sort preserves each source
         # list's own order (the SysOp's, issue #839) within both groups.
         items.sort(key=lambda item: not item.followed)
-        replies = unread_replies_to(db, user)
+        # Only replies on boards this caller may still read: [R]eplies opens
+        # the board, and a board whose gate was raised since would refuse
+        # them there (review on #869).
+        readable = {item.board.id for item in items if item.board is not None}
+        replies = [reply for reply in unread_replies_to(db, user) if reply.board_id in readable]
         return items, replies, boards_by_id
 
     items, replies, boards_by_id = await lane.run(_load)

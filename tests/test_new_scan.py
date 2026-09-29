@@ -532,3 +532,21 @@ def test_replies_to_you_can_be_opened_from_the_scan(db, lane, alice, monkeypatch
 
     assert "Replies to you" in text and "[R]eplies" in text
     assert re.search(r">\s+\d+\s+Re: question\b", text)
+
+
+def test_a_reply_on_a_board_no_longer_readable_is_not_offered(db, lane, alice, monkeypatch):
+    board = create_board(db, "general", creator=alice)
+    timestamps = iter([f"2026-01-01T00:00:0{i}.000000Z" for i in range(2)])
+    monkeypatch.setattr(posts_module, "utc_now_iso", lambda: next(timestamps))
+    question = create_post(db, board, alice, "question", "how do I do X?")
+    other = create_user(db, "bob", password="hunter2", user_level=100)
+    create_post(db, board, other, "Re: question", "like this", parent_post_id=question.post_id)
+    db.connection.execute("UPDATE boards SET min_read_level = 50 WHERE id = ?", (board.id,))
+    db.connection.commit()
+    create_board(db, "open", creator=other)  # so the scan has a row to show
+
+    session = _run_main_menu(db, lane, alice, ["n", "r", "b", "l", "y"])
+    text = _visible_text(session)
+
+    assert "Replies to you: none." in text
+    assert "No replies to you are waiting." in text
