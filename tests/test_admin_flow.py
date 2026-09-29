@@ -6963,7 +6963,8 @@ def test_backup_status_shows_no_backup_yet_message(db, lane, sysop):
     assert "No backup has been taken on this node yet." in text
 
 
-def test_backup_page_on_a_node_without_doors_says_so_in_one_line(db, lane, sysop):
+def test_backup_page_on_a_node_without_doors_says_so_in_one_line(db, lane, sysop, monkeypatch):
+    monkeypatch.delenv("WAR_DIALER_DB_PATH", raising=False)
     # F066: page 1 was mostly Voidrunner, War Dialer and door-installation
     # text on a node with no doors.
     session = FakeSession(["s", "k", "PAGE_DOWN", "PAGE_DOWN", "b", "b", "b"])
@@ -6973,6 +6974,19 @@ def test_backup_page_on_a_node_without_doors_says_so_in_one_line(db, lane, sysop
     assert "Voidrunner" not in text
     assert "DOOR INSTALLATION DIRECTORIES" not in text
     assert "oor installations:" not in text
+
+
+def test_backup_page_shows_door_data_a_removed_door_left_behind(db, lane, sysop):
+    # A War Dialer world outlives its door and still goes into every backup,
+    # so the page must not say there is no door data (issue #845 review).
+    doors_dir = db.path.parent / (db.path.name + ".doors")
+    doors_dir.mkdir()
+    (doors_dir / "war-dialer.db").write_bytes(b"")
+    session = FakeSession(["s", "k", "PAGE_DOWN", "PAGE_DOWN", "PAGE_DOWN", "b", "b", "b"])
+    _run(session, lane, sysop)
+    text = _visible(_written_text(session))
+    assert "No doors are set up" not in text
+    assert "DOOR DATA IN A BACKUP" in text
 
 
 def test_backup_page_puts_the_schedule_before_door_data(db, lane, sysop, isolated_door_career_directory):

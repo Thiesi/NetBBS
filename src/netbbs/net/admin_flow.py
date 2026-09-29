@@ -104,6 +104,7 @@ from netbbs.backup import (
     running_node_pid,
     create_backup,
     default_backup_destination,
+    door_data_left_behind,
     door_installs_included,
     set_door_installs_included,
     voidrunner_save_directory,
@@ -7729,8 +7730,12 @@ async def _backup_status_screen(
 
         installs_on = await lane.run(door_installs_included)
         voidrunner_dir = await lane.run(lambda db: voidrunner_save_directory(db.path)[0])
-        # A toggle left on stays reachable to be turned off.
-        has_doors = bool(await lane.run(list_doors)) or voidrunner_dir.is_dir() or installs_on
+        # Anything a backup would still capture counts, and a toggle left on
+        # stays reachable to be turned off.
+        has_doors = (
+            bool(await lane.run(list_doors)) or installs_on
+            or await asyncio.to_thread(door_data_left_behind, db_path)
+        )
         if has_doors:
             sections.extend(_backup_door_sections(voidrunner_dir, installs_on))
         else:

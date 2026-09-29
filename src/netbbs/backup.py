@@ -716,6 +716,21 @@ def _war_dialer_sources(db_path: Path) -> list[Path]:
     return sorted((path for path in paths if path.exists()), key=str)
 
 
+def door_data_left_behind(db_path: Path) -> bool:
+    """Whether a backup of this node would capture door data even with no
+    door registered: a Voidrunner save directory, a retained War Dialer
+    world, a `WAR_DIALER_DB_PATH` override, or door outbound receipts --
+    the same places `create_backup` looks. The Backup screen says "no door
+    data" only when this is False (issue #845)."""
+    node = db_path.resolve()
+    return (
+        voidrunner_save_directory(db_path)[0].is_dir()
+        or (node.parent / (node.name + ".doors") / "war-dialer.db").exists()
+        or bool(os.environ.get("WAR_DIALER_DB_PATH"))
+        or _door_outbound_root_for(db_path).is_dir()
+    )
+
+
 def _war_dialer_owner(node: Path) -> str | None:
     with contextlib.closing(sqlite3.connect(node.resolve().as_uri() + "?mode=ro", uri=True)) as conn:
         row = conn.execute("SELECT value FROM node_config WHERE key='war_dialer_owner'").fetchone()
