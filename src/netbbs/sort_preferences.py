@@ -37,12 +37,20 @@ from netbbs.timeutil import utc_now_iso
 # exact per-kind meaning; this module only stores/resolves the mode
 # name, never computes it.
 VALID_RESOURCE_KINDS = ("channel", "board", "file_area")
-VALID_SORT_MODES = ("activity", "alphabetical", "recent", "volume")
+VALID_SORT_MODES = ("sysop", "activity", "alphabetical", "recent", "volume")
+# "sysop" -- the SysOp's own order (issue #839) -- exists for boards and
+# file areas only: channels have no `position` to follow.
+_MODES_BY_KIND: dict[str, tuple[str, ...]] = {
+    "channel": ("activity", "alphabetical", "recent", "volume"),
+    "board": VALID_SORT_MODES,
+    "file_area": VALID_SORT_MODES,
+}
 
 # The node-wide default when a user has never set any preference at any
-# scope, per resource kind -- boards/file areas keep "activity" (their
-# own pre-existing order_by default: real, persisted, Link-synced post/
-# upload timestamps every node agrees on). Channels default to
+# scope, per resource kind -- boards/file areas follow the SysOp's order
+# (issue #839). They used to default to "activity", which re-sorted a
+# list between two visits: the field test's caller came back to find
+# "03" meant a different board. Channels default to
 # "alphabetical" instead, deliberately *not* matching boards/areas:
 # unlike them, a channel's "activity" is only ever `netbbs.chat.hub.
 # ChatHub.last_activity` -- in-memory, per-node, reset on restart --
@@ -53,8 +61,8 @@ VALID_SORT_MODES = ("activity", "alphabetical", "recent", "volume")
 # only the *unset* fallback differs.
 DEFAULT_SORT_MODE_BY_KIND: dict[str, str] = {
     "channel": "alphabetical",
-    "board": "activity",
-    "file_area": "activity",
+    "board": "sysop",
+    "file_area": "sysop",
 }
 
 
@@ -157,6 +165,8 @@ def set_sort_preference(
     """
     _check_resource_kind(resource_kind)
     _check_sort_mode(sort_mode)
+    if sort_mode not in _MODES_BY_KIND[resource_kind]:
+        raise ValueError(f"sort_mode {sort_mode!r} does not apply to {resource_kind!r}")
     if community_id is not None and category_id is not None:
         raise ValueError("set_sort_preference takes at most one of community_id/category_id, not both")
 

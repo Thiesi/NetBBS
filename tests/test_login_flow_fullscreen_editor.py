@@ -829,3 +829,45 @@ def test_an_enter_typed_right_behind_post_does_not_cancel_the_post(db, alice):
     text = _visible(session)
     assert "Post cancelled" not in text
     assert list_posts_page(db, board, alice).posts[0].subject == "Hello"
+
+
+# -- issue #813: composing is a screen of its own ----------------------------
+
+
+def _first_editor_screen(session: FakeSession) -> list[str]:
+    """The fullscreen editor's first paint, as a terminal shows it."""
+    from netbbs.rendering.terminal_emulator import TerminalEmulator
+
+    written = _written_text(session)
+    status = written.index("Ctrl+O save")
+    start = written.rindex("\x1b[2J", 0, status)
+    emulator = TerminalEmulator(session.terminal_width, session.terminal_height)
+    emulator.feed(written[start:status])
+    return [row.rstrip() for row in emulator.text_rows()]
+
+
+def test_a_new_post_opens_on_its_own_screen_and_the_editor_names_it(db, alice):
+    set_fullscreen_editor_enabled(db, alice, True)
+    board = create_board(db, "general", creator=alice)
+    session = FakeSession(["p", "Hello"] + _type("Body") + ["CTRL+O", "p", "b"])
+    asyncio.run(board_flow._show_board(session, db, board, alice, breadcrumb=("Message boards",)))
+
+    text = _visible(session)
+    assert re.search(r"Message boards \W general \W New post", text)
+    assert text.index("New post") < text.index("Subject (or press Enter to cancel)")
+    rows = _first_editor_screen(session)
+    assert rows[:3] == ["New post", "Board: general", "Subject: Hello"]
+    assert re.search(r"general \W New post \W Review composition", text)
+    assert list_posts_page(db, board, alice).posts[0].body == "Body"
+
+
+def test_editing_a_post_names_it_in_the_editor(db, alice):
+    set_fullscreen_editor_enabled(db, alice, True)
+    board = create_board(db, "general", creator=alice)
+    create_post(db, board, alice, "Original subject", "Original body")
+    session = FakeSession(["1", "e", "", "CTRL+O", "c", "b", "b"])
+    asyncio.run(board_flow._show_board(session, db, board, alice))
+
+    assert "Edit post" in _visible(session)
+    rows = _first_editor_screen(session)
+    assert rows[:3] == ["Edit post", "Board: general", "Subject: Original subject"]

@@ -31,10 +31,12 @@ from netbbs.activity import (
 from netbbs.attestation import meets_age
 from netbbs.auth.users import User
 from netbbs.boards import Board, Post, list_boards
+from netbbs.boards.posts import count_listed_posts
 from netbbs.chat import ChatHub, MessageMailbox, PresenceRegistry
 from netbbs.chat.channels import Channel
-from netbbs.communities import get_effective_min_age, get_effective_min_read_level
+from netbbs.communities import get_effective_min_age, meets_read_gate
 from netbbs.files.areas import FileArea, list_file_areas
+from netbbs.files.entries import count_listed_files
 from netbbs.link.boards import LinkContext
 from netbbs.mrc.bridge import MrcBridge
 from netbbs.net.board_flow import _show_board
@@ -54,7 +56,6 @@ from netbbs.rendering import GATE_COLOR, MenuEntry, SegmentColor, menu_key
 from netbbs.net.redraw_preference import redraw_in_place_enabled
 from netbbs.net.session import Session
 from netbbs.net.unicode_style_preference import unicode_style_enabled
-from netbbs.permissions import meets_level
 from netbbs.rendering import MUTED_COLOR, colored, sanitize_text, screen_title
 from netbbs.search import (
     ChannelMessageSearchHit,
@@ -103,6 +104,25 @@ class _ScanItem:
     # picker reproduces exactly the pick-it-and-be-refused behaviour the
     # channel picker was just fixed for.
     name_gate_unmet: bool = False
+    # For a board or area never visited, how many posts or files it holds
+    # (issue #839): "not yet visited" alone gave no reason to go in.
+    held: int | None = None
+
+    @property
+    def has_something(self) -> bool:
+        """Whether a walk through the scan stops here: something unread,
+        or a board or area never visited that holds anything."""
+        return bool(self.unread) or (self.unread is None and bool(self.held))
+
+
+def _next_with_something(rows: list[_ScanItem], after: tuple[str, int]) -> _ScanItem | None:
+    """The row after the one at `after` that a walk stops at next,
+    wrapping round to the top, or `None` when nothing else is waiting."""
+    index = next((i for i, row in enumerate(rows) if _identity(row) == after), -1)
+    for row in rows[index + 1:] + rows[:max(index, 0)]:
+        if row.has_something and _identity(row) != after:
+            return row
+    return None
 
 
 async def _new_scan_screen(
@@ -162,14 +182,16 @@ async def _new_scan_screen(
         for board in list_boards(db):
             boards_by_id[board.id] = board
             if not (
-                meets_level(user, get_effective_min_read_level(db, board))
+                meets_read_gate(db, user, board)
                 and meets_age(db, user, get_effective_min_age(db, board))
             ):
                 continue
+            unread = unread_post_count(db, user, board)
             items.append(
                 _ScanItem(
-                    kind="board", name=board.name, unread=unread_post_count(db, user, board),
+                    kind="board", name=board.name, unread=unread,
                     followed=is_following(db, user, "board", board.id), board=board,
+                    held=count_listed_posts(db, board)[0] if unread is None else None,
                 )
             )
 
@@ -184,21 +206,27 @@ async def _new_scan_screen(
 
         for area in list_file_areas(db):
             if not (
-                meets_level(user, get_effective_min_read_level(db, area))
+                meets_read_gate(db, user, area)
                 and meets_age(db, user, get_effective_min_age(db, area))
             ):
                 continue
+            unread = unread_file_count(db, user, area)
             items.append(
                 _ScanItem(
-                    kind="file_area", name=area.name, unread=unread_file_count(db, user, area),
+                    kind="file_area", name=area.name, unread=unread,
                     followed=is_following(db, user, "file_area", area.id), file_area=area,
+                    held=count_listed_files(db, area)[0] if unread is None else None,
                 )
             )
 
         # Followed items first; a stable sort preserves each source
-        # list's own activity-based order within both groups.
+        # list's own order (the SysOp's, issue #839) within both groups.
         items.sort(key=lambda item: not item.followed)
-        replies = unread_replies_to(db, user)
+        # Only replies on boards this caller may still read: [R]eplies opens
+        # the board, and a board whose gate was raised since would refuse
+        # them there (review on #869).
+        readable = {item.board.id for item in items if item.board is not None}
+        replies = [reply for reply in unread_replies_to(db, user) if reply.board_id in readable]
         return items, replies, boards_by_id
 
     items, replies, boards_by_id = await lane.run(_load)
@@ -211,7 +239,7 @@ async def _new_scan_screen(
         current, boards = state["replies"], state["boards"]
         if not current:
             return colored("Replies to you: none.", fg_color=MUTED_COLOR)
-        lines = [f"Replies to you: {len(current)}"]
+        lines = [f"Replies to you: {len(current)} -- [R]eplies to read them"]
         for reply in current[:_REPLIES_SHOWN]:
             reply_board = boards.get(reply.board_id)
             board_label = sanitize_text(reply_board.name) if reply_board is not None else "unknown message board"
@@ -222,7 +250,10 @@ async def _new_scan_screen(
 
     def _description(item: _ScanItem) -> str:
         prefix = "* " if item.followed else ""
-        if item.unread is None:
+        if item.unread is None and item.held:
+            noun = "post" if item.kind == "board" else "file"
+            status = f"not yet visited, {item.held} {noun}{'s' if item.held != 1 else ''}"
+        elif item.unread is None:
             status = "not yet visited"
         elif item.unread == 0:
             status = "caught up"
@@ -335,45 +366,104 @@ async def _new_scan_screen(
         # with it rather than being lost (Codex review on #723).
         for line in (await _replies_summary()).split("\r\n"):
             announce_styled(session, line)
-    selected = await pick_item(
-        session, items,
-        name_of=lambda item: item.name,
-        stable_id_of=lambda item: positions[id(item)],
-        name_segments_of=_name_segments,
-        description_of=_description,
-        title="New scan",
-        empty_message="Nothing accessible yet.",
-        item_keys={"m": _mark_read, "f": _toggle_follow},
-        live_keys={"v": _toggle_followed_only},
-        masthead=_replies_summary,
-        live_nav=[
-            MenuEntry(label=menu_key("M", "ark read"), brief="Count a message board's posts as read"),
-            MenuEntry(label=menu_key("F", "ollow"), brief="Follow a board, channel or file area, or stop"),
-            MenuEntry(label=menu_key("V", "iew followed"), brief="Only what you follow, or everything again"),
-        ],
-        redraw_in_place=redraw_in_place_enabled(db, user),
-        unicode_style=unicode_style_enabled(db, user),
-        collapsed=breadcrumb_collapsed_enabled(db, user),
-        accent_color=accent,
-        header_color=effective_header_color(session, db),
-    )
-    if selected is None:
-        return
+    async def _open(item: _ScanItem) -> None:
+        if item.kind == "board":
+            cursor = await lane.run(board_read_cursor, user, item.board)
+            await _show_board(session, db, item.board, user, link_context=link_context, initial_cursor=cursor)
+        elif item.kind == "channel":
+            await browse_channels(
+                session, lane, hub, presence, mailbox, history, user,
+                initial_channel=item.channel, link_context=link_context, mrc_bridge=mrc_bridge,
+            )
+        else:
+            cursor = await lane.run(file_area_read_cursor, user, item.file_area)
+            await enter_file_area(
+                session, lane, item.file_area, user, initial_cursor=cursor,
+                link_context=link_context, transfers=transfers,
+            )
 
-    if selected.kind == "board":
-        cursor = await lane.run(board_read_cursor, user, selected.board)
-        await _show_board(session, db, selected.board, user, link_context=link_context, initial_cursor=cursor)
-    elif selected.kind == "channel":
-        await browse_channels(
-            session, lane, hub, presence, mailbox, history, user,
-            initial_channel=selected.channel, link_context=link_context, mrc_bridge=mrc_bridge,
+    async def _read_replies() -> list[_ScanItem] | None:
+        """[R]eplies (issue #839, F121): the replies to the caller, one to
+        a row. Picking one opens its board on that post; Back from the
+        board, or from this list, comes back to the scan."""
+        current, boards = state["replies"], state["boards"]
+        if not current:
+            announce(session, "No replies to you are waiting.", tone="muted")
+            return None
+        numbered = list(enumerate(current, start=1))
+
+        def _where(entry: tuple[int, Post]) -> str:
+            reply_board = boards.get(entry[1].board_id)
+            return sanitize_text(reply_board.name) if reply_board is not None else "unknown message board"
+
+        chosen = await pick_item(
+            session, numbered,
+            name_of=lambda entry: entry[1].subject,
+            stable_id_of=lambda entry: entry[0],
+            description_of=_where,
+            title="Replies to you",
+            breadcrumb=("New scan",),
+            empty_message="No replies to you are waiting.",
+            redraw_in_place=redraw_in_place_enabled(db, user),
+            unicode_style=unicode_style_enabled(db, user),
+            collapsed=breadcrumb_collapsed_enabled(db, user),
+            accent_color=accent,
+            header_color=effective_header_color(session, db),
         )
-    else:
-        cursor = await lane.run(file_area_read_cursor, user, selected.file_area)
-        await enter_file_area(
-            session, lane, selected.file_area, user, initial_cursor=cursor,
-            link_context=link_context, transfers=transfers,
+        if chosen is not None:
+            reply = chosen[1]
+            reply_board = boards.get(reply.board_id)
+            if reply_board is not None:
+                cursor = await lane.run(post_jump_cursor, reply_board.id, reply.root_post_id)
+                await _show_board(session, db, reply_board, user, link_context=link_context, initial_cursor=cursor)
+        return await _reload_in_place()
+
+    # Back from a row comes back here (issue #839, F045): the scan used to
+    # end there, and a caller went round the main menu for every board. The
+    # cursor moves on to the next row with something waiting, so Enter walks
+    # the scan (F075).
+    reopen_at: int | None = None
+    while True:
+        selected = await pick_item(
+            session, shown["items"],
+            name_of=lambda item: item.name,
+            stable_id_of=lambda item: positions[id(item)],
+            name_segments_of=_name_segments,
+            description_of=_description,
+            title="New scan",
+            empty_message="Nothing accessible yet.",
+            item_keys={"m": _mark_read, "f": _toggle_follow},
+            live_keys={"v": _toggle_followed_only, "r": _read_replies},
+            masthead=_replies_summary,
+            live_nav=[
+                MenuEntry(label=menu_key("M", "ark read"), brief="Count a message board's posts as read"),
+                MenuEntry(label=menu_key("F", "ollow"), brief="Follow a board, channel or file area, or stop"),
+                MenuEntry(label=menu_key("V", "iew followed"), brief="Only what you follow, or everything again"),
+                MenuEntry(label=menu_key("R", "eplies"), brief="Read the replies to your posts"),
+            ],
+            redraw_in_place=redraw_in_place_enabled(db, user),
+            unicode_style=unicode_style_enabled(db, user),
+            collapsed=breadcrumb_collapsed_enabled(db, user),
+            accent_color=accent,
+            header_color=effective_header_color(session, db),
+            start_stable_id=reopen_at,
         )
+        if selected is None:
+            return
+        visited = _identity(selected)
+        await _open(selected)
+        rows = await _reload_in_place()
+        following = _next_with_something(rows, visited)
+        if following is not None:
+            announce(
+                session, f"Next with something new: {sanitize_text(following.name)}. Enter opens it.",
+                tone="muted",
+            )
+            reopen_at = positions[id(following)]
+        else:
+            announce(session, "Nothing else is new.", tone="muted")
+            back_on = next((row for row in rows if _identity(row) == visited), None)
+            reopen_at = positions[id(back_on)] if back_on is not None else None
 
 
 @dataclass(frozen=True)

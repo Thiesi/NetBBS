@@ -118,7 +118,7 @@ def test_choosing_community_persists_a_community_scoped_override(db, alice, retr
     )
     assert mode == "recent"
     assert get_effective_sort_mode(db, alice, "board", community_id=retro.id) == "recent"
-    assert get_effective_sort_mode(db, alice, "board") == "activity"  # global untouched
+    assert get_effective_sort_mode(db, alice, "board") == "sysop"  # global untouched
 
 
 def test_choosing_category_persists_a_category_scoped_override(db, alice):

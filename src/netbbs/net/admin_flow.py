@@ -148,7 +148,9 @@ from netbbs.net.managed_dns_flow import (
     standard_ports_lines as managed_dns_standard_ports_lines,
     cancel_registration_rename, register_via_prompt, release_registration, rename_registration,
 )
-from netbbs.boards.boards import Board, BoardError, create_board, delete_board, list_boards, update_board
+from netbbs.boards.boards import (
+    Board, BoardError, board_siblings, create_board, delete_board, list_boards, move_board, update_board,
+)
 from netbbs.boards.categories import Category, CategoryError
 from netbbs.boards.categories import create_category as create_board_category
 from netbbs.boards.categories import delete_category as delete_board_category
@@ -247,7 +249,10 @@ from netbbs.doors.outbound import (
     set_rate_ceiling,
 )
 from netbbs.doors.outbound import targets as outbound_targets
-from netbbs.files.areas import FileArea, FileAreaError, create_file_area, delete_file_area, list_file_areas, update_file_area
+from netbbs.files.areas import (
+    FileArea, FileAreaError, create_file_area, delete_file_area, file_area_siblings, list_file_areas, move_file_area,
+    update_file_area,
+)
 from netbbs.files.categories import FileAreaCategory
 from netbbs.files.categories import FileAreaCategoryError as FileCategoryError
 from netbbs.files.categories import create_category as create_file_category
@@ -16406,7 +16411,10 @@ async def _list_boards_screen(
     session: Session, lane: DatabaseLane, actor: User, *, link_context: LinkContext | None = None
 ) -> None:
     def _load_boards(db: Database):
-        boards = list_boards(db, order_by="alphabetical")
+        # The SysOp's order (issue #839), which callers' lists follow within
+        # each category and Community; [U]p/[D]own on a detail screen move
+        # one among those, and its Place row says where it sits.
+        boards = list_boards(db, order_by="sysop")
         counts = {board.id: (count_listed_posts(db, board)[0], count_pending_posts(db, board)) for board in boards}
         return boards, _effective_by_id(db, boards), counts, carried_to_review(db, "boards")
 
@@ -16680,6 +16688,22 @@ def _community_columns(community: Community) -> list[str | tuple[str, SegmentCol
     ]
 
 
+def _place_label(place: int, total: int, *, pinned: bool) -> str:
+    """Where a board or area sits in the callers' list (issue #839): among
+    those in the same category and Community, pinned ones apart. It replaced
+    the "Pinned" row, which it now says, so the screen gained no row."""
+    return f"{place + 1} of {total}" + (", pinned first" if pinned else "")
+
+
+def _move_entries(place: int, total: int) -> list[MenuEntry]:
+    """`[U]p`/`[D]own` for a board or area (issue #839), each offered only
+    where it can move, as on a Community's screen."""
+    return [
+        *([MenuEntry(label=menu_key("U", "p"), brief="Earlier in the callers' list")] if place > 0 else []),
+        *([MenuEntry(label=menu_key("D", "own"), brief="Later in the callers' list")] if place < total - 1 else []),
+    ]
+
+
 async def _board_detail_screen(
     session: Session, lane: DatabaseLane, actor: User, board: Board, *, link_context: LinkContext | None = None
 ) -> None:
@@ -16710,7 +16734,16 @@ async def _board_detail_screen(
                 description_level=description_level, redraw_in_place=redraw_in_place,
                 unicode_style=unicode_style, collapsed=collapsed,
             )
-        elif choice == "d":
+        elif choice in ("u", "d") and await lane.run(move_board, board, -1 if choice == "u" else 1, moved_by=actor):
+            # Moved within its category (issue #839); the first cannot go
+            # up nor the last down, and those keys fall through to the bell.
+            await session.write_line("")
+            is_origin, has_incoming_offer, is_closed = await _draw_board_detail(
+                session, lane, board, linked=linked, link_context=link_context,
+                description_level=description_level, redraw_in_place=redraw_in_place,
+                unicode_style=unicode_style, collapsed=collapsed,
+            )
+        elif choice == "r":
             await session.write_line("")
             deleted = await _delete_board_screen(
                 session, lane, actor, board,
@@ -17225,6 +17258,8 @@ async def _draw_board_detail(
     # no way to tell without leaving admin and browsing it as an ordinary
     # reader.
     post_count, last_post_at = await lane.run(count_visible_posts, board)
+    order = [b.id for b in await lane.run(board_siblings, board)]
+    place, total = (order.index(board.id) if board.id in order else 0), len(order)
     if last_post_at is None:
         activity = "no posts yet"
     else:
@@ -17243,7 +17278,7 @@ async def _draw_board_detail(
             _gate_field("Name requirement", board.name_requirement),
         ], paired=True),
         Section("Behavior", [
-            Field("Pinned", _yes_no(board.pinned)),
+            Field("Place", _place_label(place, total, pinned=board.pinned)),
             Field("Moderated", _yes_no(board.moderated)),
             Field(
                 "Max post age",
@@ -17304,7 +17339,8 @@ async def _draw_board_detail(
     panel_rows = await _write_sections(session, sections, unicode_style=unicode_style)
     options = [
         MenuEntry(label=menu_key("E", "dit"), brief="Change this board's settings"),
-        MenuEntry(label=menu_key("D", "elete"), brief="Permanently remove this board"),
+        *_move_entries(place, total),
+        MenuEntry(label=menu_key("R", "emove"), brief="Permanently remove this board"),
         MenuEntry(label=menu_key("P", "ending posts"), brief="Review posts awaiting approval"),
         MenuEntry(label=menu_key("H", "istory"), brief="Its moderators and what they did"),
     ]
@@ -18192,7 +18228,10 @@ async def _list_areas_screen(
     transfers: Any = None,
 ) -> None:
     def _load_areas(db: Database):
-        areas = list_file_areas(db, order_by="alphabetical")
+        # The SysOp's order (issue #839), which callers' lists follow within
+        # each category and Community; [U]p/[D]own on a detail screen move
+        # one among those, and its Place row says where it sits.
+        areas = list_file_areas(db, order_by="sysop")
         counts = {area.id: (count_listed_files(db, area)[0], count_pending_files(db, area)) for area in areas}
         return areas, _effective_by_id(db, areas), counts, carried_to_review(db, "file_areas")
 
@@ -18257,7 +18296,11 @@ async def _area_detail_screen(
             if updated is not None:
                 area = updated
             await _draw_area_detail(session, lane, area, linked=linked, link_context=link_context, description_level=description_level, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed)
-        elif choice == "d":
+        elif choice in ("u", "d") and await lane.run(move_file_area, area, -1 if choice == "u" else 1, moved_by=actor):
+            # Moved within its category (issue #839), as a board moves.
+            await session.write_line("")
+            await _draw_area_detail(session, lane, area, linked=linked, link_context=link_context, description_level=description_level, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed)
+        elif choice == "r":
             await session.write_line("")
             deleted = await _delete_area_screen(
                 session, lane, actor, area,
@@ -18312,6 +18355,8 @@ async def _draw_area_detail(
     )
     await session.write_line(await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width))
     file_count, last_file_at = await lane.run(count_visible_files, area)
+    order = [a.id for a in await lane.run(file_area_siblings, area)]
+    place, total = (order.index(area.id) if area.id in order else 0), len(order)
     if last_file_at is None:
         activity = "no files yet"
     else:
@@ -18330,7 +18375,7 @@ async def _draw_area_detail(
             _gate_field("Name requirement", area.name_requirement),
         ], paired=True),
         Section("Behavior", [
-            Field("Pinned", _yes_no(area.pinned)),
+            Field("Place", _place_label(place, total, pinned=area.pinned)),
             Field("Moderated", _yes_no(area.moderated)),
             Field(
                 "Max file age",
@@ -18343,7 +18388,8 @@ async def _draw_area_detail(
     panel_rows = await _write_sections(session, sections, unicode_style=unicode_style)
     options = [
         MenuEntry(label=menu_key("E", "dit"), brief="Change this area's settings"),
-        MenuEntry(label=menu_key("D", "elete"), brief="Permanently remove this area"),
+        *_move_entries(place, total),
+        MenuEntry(label=menu_key("R", "emove"), brief="Permanently remove this area"),
         MenuEntry(label=menu_key("P", "ending files"), brief="Review uploads awaiting approval"),
         MenuEntry(label=menu_key("x", "pired files", prefix="E"), brief="Recover before they are purged"),
         MenuEntry(label=menu_key("H", "istory"), brief="Its moderators and what they did"),
@@ -21646,7 +21692,12 @@ async def _pick_moderator_scope(
 
 
 
-_MODERATOR_PRESETS = ["full", "limited"]
+_MODERATOR_PRESETS = ["full", "limited", "post", "read"]
+
+#: Presets that are access, not moderation (issue #836): a read or write
+#: grant lets its holder past a board's or file area's level gate. Chat
+#: channels have no read/write split.
+_ACCESS_PRESETS = {"post", "read"}
 
 #: `_pick_moderator_scope`'s "every kind at once" scope (issue #836) --
 #: not an object type; `_grant_moderator_screen` writes it as the three
@@ -21655,6 +21706,15 @@ _EVERYWHERE = "everywhere"
 
 
 def _moderator_preset_label(object_type: str | None, preset: str) -> str:
+    # The access presets can't cover channels, and the everything scope
+    # includes them (review on #868): say so before Save is tried.
+    no_access = object_type in ("channel", _EVERYWHERE)
+    if preset == "post":
+        return "Read and post (boards and areas only)" if no_access else "Read and post (past the level gates)"
+    if preset == "read":
+        return "Read only (boards and areas only)" if no_access else "Read only (past the read level)"
+    if object_type == _EVERYWHERE:
+        object_type = None
     if object_type == "channel":
         return "Full moderator (edit+moderate+manage members)" if preset == "full" else "Moderator only"
     if object_type is None:
@@ -21663,6 +21723,10 @@ def _moderator_preset_label(object_type: str | None, preset: str) -> str:
 
 
 def _moderator_preset_permissions(object_type: str, preset: str):
+    if preset in _ACCESS_PRESETS:
+        if object_type == "channel":
+            raise ModeratorGrantError("read and post grants are for boards and file areas; channels use their level")
+        return BoardPermission.READ | BoardPermission.WRITE if preset == "post" else BoardPermission.READ
     if object_type == "channel":
         if preset == "full":
             return ChannelPermission.EDIT | ChannelPermission.MODERATE | ChannelPermission.MANAGE_MEMBERS
@@ -21778,16 +21842,18 @@ async def _grant_moderator_screen(session: Session, lane: DatabaseLane, actor: U
         ),
         FieldSpec(
             key="preset", hotkey="p", menu_text=menu_key("P", "reset"), label="Preset",
-            render=lambda d: _moderator_preset_label(
-                None if d["object_type"] == _EVERYWHERE else d["object_type"], d["preset"]
-            ),
+            render=lambda d: _moderator_preset_label(d["object_type"], d["preset"]),
             prompt=choice_field("preset", _MODERATOR_PRESETS),
             step=choice_step("preset", _MODERATOR_PRESETS),
-            brief="Full, or approve/moderate only",
+            brief="Moderator, approver, or access",
             help=(
                 "Full moderator can edit, delete/moderate, and (for boards/areas) approve or (for "
                 "channels) manage members. The limited preset only approves (boards/areas) or "
-                "only moderates (channels)."
+                "only moderates (channels). Read and post, and read only, are access rather than "
+                "moderation: they let the holder past the minimum level of whatever the scope "
+                "covers -- one board or area, or every one under a blanket scope -- such as "
+                "posting on an announcements board with write level 255. Age and "
+                "verified-name requirements still apply."
             ),
         ),
     ]
@@ -21802,7 +21868,7 @@ async def _grant_moderator_screen(session: Session, lane: DatabaseLane, actor: U
         if community is not None:
             label = f"{label} scoped to Community {community.name!r}"
         if draft["object_type"] == _EVERYWHERE:
-            preset_label = _moderator_preset_label(None, draft["preset"])
+            preset_label = _moderator_preset_label(_EVERYWHERE, draft["preset"])
             await lane.run(
                 grant_everywhere,
                 draft["user"],

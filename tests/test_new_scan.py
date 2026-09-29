@@ -201,13 +201,15 @@ def test_selecting_a_board_jumps_to_the_first_unread_post(db, lane, alice, monke
 
     record_post_opened(db, alice, board, first)
 
-    session = _run_main_menu(db, lane, alice, ["n", "0", "1", "b", "l", "y"])
+    # New scan, board 01, Back to the scan (issue #839), Back, log off.
+    session = _run_main_menu(db, lane, alice, ["n", "0", "1", "b", "b", "l", "y"])
 
-    # The board opens as its post list (issue #679), on the page after the
-    # cursor, with the list's cursor on the first unread post.
+    # The board opens as its post list (issue #679) on the page an ordinary
+    # visit shows, read posts included and numbered as they always are
+    # (issue #839), with the list's cursor on the first unread post.
     text = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", _written_text(session))
-    assert re.search(r">\s+1\s+second\b", text)
-    assert not re.search(r"\d\s+first\b", text)
+    assert re.search(r">\s+2\s+second\b", text)
+    assert re.search(r"\b1\s+first\b", text)
 
 
 def test_selecting_a_file_area_jumps_to_the_first_unread_file(db, lane, alice, monkeypatch):
@@ -223,11 +225,12 @@ def test_selecting_a_file_area_jumps_to_the_first_unread_file(db, lane, alice, m
 
     record_file_area_seen(db, alice, area, first)
 
-    session = _run_main_menu(db, lane, alice, ["n", "0", "1", "b", "l", "y"])
+    session = _run_main_menu(db, lane, alice, ["n", "0", "1", "b", "b", "l", "y"])
 
-    text = _written_text(session)
-    assert "a.txt" not in text
-    assert "b.txt" in text
+    # The ordinary newest page, the cursor on the first unseen file (#839).
+    text = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", _written_text(session))
+    assert "a.txt" in text
+    assert re.search(r">.*b\.txt", text)
 
 
 # -- channel dispatch (proved for real in tests/test_chat_flow_join.py) -----
@@ -253,7 +256,7 @@ def test_selecting_a_channel_calls_browse_channels_with_that_channel(db, lane, a
     # unaffected by patching the other module's copy).
     monkeypatch.setattr(scan_and_find, "browse_channels", fake_browse_channels)
 
-    _run_main_menu(db, lane, alice, ["n", "0", "1", "l", "y"])
+    _run_main_menu(db, lane, alice, ["n", "0", "1", "b", "l", "y"])
 
     assert len(calls) == 1
     assert calls[0].id == channel.id
@@ -468,3 +471,82 @@ def test_unfollowing_in_the_followed_view_keeps_the_row_there(db, lane, alice):
     after = text.split("No longer following zebras.")[1]
     assert "zebras" in after and "aardvarks" not in after.split("Choice")[0]
     assert not is_following(db, alice, "file_area", area.id)
+
+
+# -- walking the scan (issue #839) ---------------------------------------------
+
+
+def test_an_unvisited_board_says_how_much_it_holds(db, lane, alice):
+    other = create_user(db, "bob", password="hunter2", user_level=10)
+    board = create_board(db, "general", creator=other)
+    for subject in ("one", "two", "three"):
+        create_post(db, board, other, subject, "x")
+
+    session = _run_main_menu(db, lane, alice, ["n", "b", "l", "y"])
+
+    assert "not yet visited, 3 posts" in _visible_text(session)
+
+
+def test_back_from_a_board_returns_to_the_scan_on_the_next_with_something_new(db, lane, alice):
+    from netbbs.net.char_input import EditorKey, EditorKeyKind
+
+    other = create_user(db, "bob", password="hunter2", user_level=10)
+    for name in ("Pens", "Inks"):
+        create_post(db, create_board(db, name, creator=other), other, f"about {name}", "x")
+
+    class _EnterSession(FakeSession):
+        """Enter as the picker reads it from a real terminal."""
+
+        async def read_editor_key(self, **kwargs):
+            key = await self.read_key()
+            return EditorKey(EditorKeyKind.ENTER) if key == "\r" else EditorKey(EditorKeyKind.CHAR, char=key)
+
+    # New scan, board 01, Back: the scan again, its cursor on the other
+    # board, so Enter opens it; Back, Back out of the scan, log off.
+    session = _EnterSession(["n", "0", "1", "b", "\r", "b", "b", "l", "y"])
+    asyncio.run(
+        _main_menu(
+            session, db, ChatHub(), PresenceRegistry(), MessageMailbox(), InputHistory(), alice, lane=lane
+        )
+    )
+    text = _visible_text(session)
+    second = "Inks" if "01. Pens" in text else "Pens"
+
+    assert f"Next with something new: {second}. Enter opens it." in text
+    assert text.count("NetBBS \u203a New scan") >= 3  # the scan came back after each board
+    assert f"about {second}" in text  # Enter opened the next board
+    assert "Nothing else is new." in text
+
+
+def test_replies_to_you_can_be_opened_from_the_scan(db, lane, alice, monkeypatch):
+    board = create_board(db, "general", creator=alice)
+    timestamps = iter([f"2026-01-01T00:00:0{i}.000000Z" for i in range(2)])
+    monkeypatch.setattr(posts_module, "utc_now_iso", lambda: next(timestamps))
+    question = create_post(db, board, alice, "question", "how do I do X?")
+    other = create_user(db, "bob", password="hunter2", user_level=10)
+    create_post(db, board, other, "Re: question", "like this", parent_post_id=question.post_id)
+
+    # New scan, [R]eplies, reply 01: its board opens with the cursor on it.
+    session = _run_main_menu(db, lane, alice, ["n", "r", "0", "1", "b", "b", "l", "y"])
+    text = _visible_text(session)
+
+    assert "Replies to you" in text and "[R]eplies" in text
+    assert re.search(r">\s+\d+\s+Re: question\b", text)
+
+
+def test_a_reply_on_a_board_no_longer_readable_is_not_offered(db, lane, alice, monkeypatch):
+    board = create_board(db, "general", creator=alice)
+    timestamps = iter([f"2026-01-01T00:00:0{i}.000000Z" for i in range(2)])
+    monkeypatch.setattr(posts_module, "utc_now_iso", lambda: next(timestamps))
+    question = create_post(db, board, alice, "question", "how do I do X?")
+    other = create_user(db, "bob", password="hunter2", user_level=100)
+    create_post(db, board, other, "Re: question", "like this", parent_post_id=question.post_id)
+    db.connection.execute("UPDATE boards SET min_read_level = 50 WHERE id = ?", (board.id,))
+    db.connection.commit()
+    create_board(db, "open", creator=other)  # so the scan has a row to show
+
+    session = _run_main_menu(db, lane, alice, ["n", "r", "b", "l", "y"])
+    text = _visible_text(session)
+
+    assert "Replies to you: none." in text
+    assert "No replies to you are waiting." in text

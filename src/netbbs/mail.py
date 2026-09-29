@@ -62,13 +62,16 @@ class MailMessage:
     id: int
     sender_user_id: int | None
     sender_label: str
-    recipient_user_id: int
+    recipient_user_id: int | None
     subject: str
     body: str
     created_at: str
     read_at: str | None
     sender_deleted_at: str | None
     recipient_deleted_at: str | None
+    # `user@<home-node-fingerprint>` for mail this node sent over Link,
+    # whose `recipient_user_id` is NULL (issue #805).
+    recipient_remote_address: str | None = None
 
     @property
     def is_read(self) -> bool:
@@ -265,4 +268,5 @@ def _row_to_message(row: sqlite3.Row) -> MailMessage:
         read_at=row["read_at"],
         sender_deleted_at=row["sender_deleted_at"],
         recipient_deleted_at=row["recipient_deleted_at"],
+        recipient_remote_address=row["recipient_remote_address"],
     )

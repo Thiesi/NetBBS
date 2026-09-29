@@ -1215,18 +1215,18 @@ def set_password_hash(db: Database, target: User, password_hash: str | None, *, 
     Persist an already-computed hash as `target`'s password, or `None`
     to clear it.
 
-    Whoever is allowed to call this has already been decided by the
-    caller: the account itself after proving its current password
-    (`netbbs.net.password_screen`), a SysOp from the user detail screen,
-    or the local admin CLI, for which filesystem access to the database
-    is the trust boundary. This function only enforces what must hold
-    regardless of who asks: clearing is refused while the account has no
-    SSH/public key, the same "never leave an account with no way back
-    in" rule `remove_ssh_key` applies from the other direction. The
-    check runs inside `BEGIN IMMEDIATE`, against the current row, for
-    the same reason that function's docstring gives: two concurrent
-    removals each reading "the other credential still exists" is how a
-    CHECK constraint gets defeated without ever firing.
+    The account itself may call it after proving its current password
+    (`netbbs.net.password_screen`); that proof is the caller's job. Anyone
+    else -- a SysOp from the user detail screen or the local admin CLI, a
+    staff member with manage accounts -- is checked here by
+    `_require_account_authority` (issue #836). Beyond who asks, clearing
+    is refused while the account has no SSH/public key, the same "never
+    leave an account with no way back in" rule `remove_ssh_key` applies
+    from the other direction. Both checks run inside `BEGIN IMMEDIATE`,
+    against the current row, for the same reason that function's
+    docstring gives: two concurrent removals each reading "the other
+    credential still exists" is how a CHECK constraint gets defeated
+    without ever firing.
 
     Re-fetches by `target.id`, as every setter in this module does. A
     deleted-and-recreated account can in principle inherit a SQLite
