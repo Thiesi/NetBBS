@@ -230,3 +230,45 @@ def test_link_mail_acknowledgements_pending_index_excludes_sent(db):
         "SELECT message_content_id FROM link_mail_acknowledgements WHERE sent_at IS NULL"
     ).fetchall()
     assert [r["message_content_id"] for r in pending] == ["still-pending"]
+
+
+# -- issue #806: the bounce reason and the sender's unseen-bounce flag ---------
+
+
+def test_upgrading_keeps_existing_link_mail_and_flags_none_of_it(tmp_path, monkeypatch):
+    """Mail that bounced before the upgrade has no reason on record, and its
+    sender is not suddenly told about it at their next main menu."""
+    from netbbs.storage import database as database_module
+    from netbbs.storage.migrations import MIGRATIONS
+
+    index = next(i for i, m in enumerate(MIGRATIONS) if "Issue #806" in m.description)
+    monkeypatch.setattr(database_module, "MIGRATIONS", MIGRATIONS[:index])
+    old = Database(tmp_path / "node.db")
+    old.connection.execute(
+        "INSERT INTO users (username, password_hash, user_level, created_at) VALUES ('alice', 'x', 10, ?)", (_now(),)
+    )
+    for status in ("pending", "delivered", "bounced", "expired"):
+        old.connection.execute(
+            """
+            INSERT INTO mail_messages
+                (sender_user_id, sender_label, recipient_remote_address, subject, body, created_at,
+                 link_event_content_id, link_delivery_status)
+            VALUES (1, 'alice', 'bob@abc', ?, 'world', ?, ?, ?)
+            """,
+            (status, _now(), f"content-{status}", status),
+        )
+    old.connection.commit()
+    old.close()
+
+    monkeypatch.setattr(database_module, "MIGRATIONS", MIGRATIONS)
+    upgraded = Database(tmp_path / "node.db")
+    try:
+        rows = upgraded.connection.execute(
+            "SELECT link_delivery_status, link_delivery_reason, link_delivery_notice_pending FROM mail_messages "
+            "ORDER BY id"
+        ).fetchall()
+        assert [tuple(row) for row in rows] == [
+            ("pending", None, 0), ("delivered", None, 0), ("bounced", None, 0), ("expired", None, 0),
+        ]
+    finally:
+        upgraded.close()

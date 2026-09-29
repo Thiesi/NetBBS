@@ -383,3 +383,25 @@ def test_kbdint_is_not_offered_for_an_ordinary_username(db):
             await server.stop()
 
     asyncio.run(scenario())
+
+
+def test_an_ssh_signup_hears_who_is_away_when_every_approver_is(db):
+    # Review on #870: the SSH signup message carries the away line too.
+    from netbbs.auth.users import SYSOP_LEVEL
+    from netbbs.staff import set_away
+
+    set_registration_mode(db, RegistrationMode.APPROVAL_REQUIRED)
+    sysop = create_user(db, "InkWell", password="hunter2pw", user_level=SYSOP_LEVEL)
+    set_away(db, sysop, "At a pen show", None)
+
+    async def scenario():
+        server = await _run_server(db, _noop_handler, throttle=_throttle())
+        try:
+            return await _attempt_kbdint_registration(
+                server.port, responses=["carol", "hunter2pw", "hunter2pw"]
+            )
+        finally:
+            await server.stop()
+
+    client = asyncio.run(scenario())
+    assert any("At a pen show" in message for message in client.messages)

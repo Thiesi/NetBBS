@@ -476,6 +476,21 @@ their grants cover. To make someone a moderator of everything local in one
 step, grant a moderator with the scope **blanket across everything**: it
 writes the board, file area and channel grants together.
 
+Members find everyone who runs the node under **Staff list** on their main
+menu: SysOps, staff members, and moderators with what they look after, each
+with the date of their last session. Being listed is the point, so a
+member's choice to stay off Previous callers does not hide them here. Guests
+don't see the list.
+
+Going away for a while? Choose **Away** on your console's landing screen (it
+is on the Staff console too) and leave one short line, such as "At a pen
+show", with the date you expect to be back, or none if you don't know. The
+Staff list shows it beside your name. When everyone who can approve accounts
+is away, a caller waiting for approval is told who is expected back first.
+A notice with a date ends by itself after that day; one without a date stays
+until you end it, reads "away since" the day you set it, and your landing
+screen reminds you of it each time. Being away changes nobody's permissions.
+
 ### Verified age and names
 
 A SysOp, or an account explicitly granted **Identity verification**, records
@@ -697,6 +712,14 @@ a space or other punctuation cannot send Link mail, because no reply could
 reach it; rename it if its owner needs to. Mail already waiting in the **Outbox** for a
 node goes out on the next Link pass after you establish it, and expires if
 the node is not established before its retries run out.
+
+Your callers see each Link message's state in their **Sent** mail: pending,
+delivered, bounced (with the other node's reason in plain words) or expired.
+A caller whose mail bounces or expires is told once at their next main menu.
+One refusal never comes back as a bounce: mail left at a relay for a node
+that has *your* node quarantined or blocked. That node sends yours nothing,
+and the relay took the message, so it stays pending. Replaying an expired
+delivery from the **Outbox** puts it back to pending.
 
 ### Behind an HTTP proxy
 

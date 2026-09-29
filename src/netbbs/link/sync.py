@@ -188,6 +188,7 @@ from netbbs.link.enforcement import (
     LinkPolicyAction,
 )
 from netbbs.link.mail import (
+    EXPIRED_BY_OWN_POLICY,
     expire_link_message_delivery,
     get_link_mail_acknowledgement,
     get_link_message_for_delivery,
@@ -2448,7 +2449,9 @@ async def _push_pending_link_mail(
             # the peer lost standing. It expires like undeliverable mail.
             updated = await lane.run(record_failure, work_item, error=POLICY_REFUSED_TARGET_ERROR)
             if updated.status == "dead_lettered":
-                await lane.run(expire_link_message_delivery, work_item.reference_id)
+                await lane.run(
+                    expire_link_message_delivery, work_item.reference_id, reason=EXPIRED_BY_OWN_POLICY
+                )
                 _logger.warning(
                     "Link sync: dead-lettered mail to %s, which this node's trust policy still refuses",
                     target_fingerprint,

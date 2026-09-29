@@ -21,14 +21,20 @@ from netbbs.link.events import (
     build_link_message_bounced,
 )
 from netbbs.link.mail import (
+    MAX_DELIVERY_NOTICES_SHOWN,
     LinkMailError,
+    acknowledge_delivery_notices,
     apply_link_message_accepted,
     apply_link_message_bounced,
+    bounce_reason_text,
     compose_link_message,
     deliver_link_message,
+    delivery_explanation,
     expire_link_message_delivery,
     get_link_mail_acknowledgement,
     get_link_message_for_delivery,
+    pending_delivery_notices,
+    record_link_message_refused,
     unexpire_link_message_delivery,
 )
 from netbbs.link.node_identity import bootstrap_node_identity
@@ -495,3 +501,174 @@ def test_expire_link_message_delivery_never_overwrites_a_genuine_resolution(
 
     _, status = get_link_message_for_delivery(db, message.content_id)
     assert status == "delivered"
+
+
+# -- delivery state for the sender (issue #806) --------------------------------
+
+
+def _delivery_row(db):
+    return db.connection.execute(
+        "SELECT link_delivery_status, link_delivery_reason, link_delivery_notice_pending FROM mail_messages"
+    ).fetchone()
+
+
+def _bounce(remote_node_identity, message, reason="unknown_recipient"):
+    return build_link_message_bounced(
+        signing_identity=remote_node_identity.signing_key,
+        recipient_node_fingerprint=remote_node_identity.fingerprint,
+        message_content_id=message.content_id,
+        reason=reason,
+        created_at="2026-01-01T00:05:00Z",
+    ).to_dict()
+
+
+def _sent(db, alice, remote_node_identity, node_identity, subject="subject"):
+    _seed_peer(db, remote_node_identity)
+    return compose_link_message(
+        db, alice, f"bob@{remote_node_identity.fingerprint}", subject, "world", node_identity=node_identity,
+    )
+
+
+def test_a_signed_bounce_keeps_its_reason_and_flags_the_sender(db, alice, node_identity, remote_node_identity):
+    message = _sent(db, alice, remote_node_identity, node_identity)
+    assert tuple(_delivery_row(db)) == ("pending", None, 0)
+
+    apply_link_message_bounced(db, _bounce(remote_node_identity, message, "mailbox_full"))
+
+    assert tuple(_delivery_row(db)) == ("bounced", "mailbox_full", 1)
+
+
+def test_a_policy_refusal_keeps_its_reason_code(db, alice, node_identity, remote_node_identity):
+    message = _sent(db, alice, remote_node_identity, node_identity)
+
+    record_link_message_refused(db, message.content_id, "link_policy_node_quarantined")
+
+    assert tuple(_delivery_row(db)) == ("bounced", "link_policy_node_quarantined", 1)
+
+
+def test_a_reason_code_from_another_node_is_kept_only_up_to_a_bound(db, alice, node_identity, remote_node_identity):
+    message = _sent(db, alice, remote_node_identity, node_identity)
+
+    record_link_message_refused(db, message.content_id, "link_policy_" + "x" * 5000)
+
+    assert len(_delivery_row(db)["link_delivery_reason"]) == 64
+
+
+def test_a_repeated_bounce_is_not_told_twice(db, alice, node_identity, remote_node_identity):
+    message = _sent(db, alice, remote_node_identity, node_identity)
+    apply_link_message_bounced(db, _bounce(remote_node_identity, message))
+    acknowledge_delivery_notices(db, [_id(db)])
+
+    apply_link_message_bounced(db, _bounce(remote_node_identity, message))
+
+    assert _delivery_row(db)["link_delivery_notice_pending"] == 0
+
+
+def test_expiry_flags_the_sender_and_a_replay_takes_it_back(db, alice, node_identity, remote_node_identity):
+    message = _sent(db, alice, remote_node_identity, node_identity)
+
+    expire_link_message_delivery(db, message.content_id)
+    assert tuple(_delivery_row(db)) == ("expired", None, 1)
+
+    unexpire_link_message_delivery(db, message.content_id)
+    assert tuple(_delivery_row(db)) == ("pending", None, 0)
+
+
+def test_a_late_acceptance_clears_an_expiry_the_sender_was_not_yet_told(
+    db, alice, node_identity, remote_node_identity
+):
+    message = _sent(db, alice, remote_node_identity, node_identity)
+    expire_link_message_delivery(db, message.content_id)
+
+    apply_link_message_accepted(db, build_link_message_accepted(
+        signing_identity=remote_node_identity.signing_key,
+        recipient_node_fingerprint=remote_node_identity.fingerprint,
+        message_content_id=message.content_id,
+        created_at="2026-01-01T00:05:00Z",
+    ).to_dict())
+
+    assert tuple(_delivery_row(db)) == ("delivered", None, 0)
+
+
+def _id(db):
+    return db.connection.execute("SELECT id FROM mail_messages").fetchone()[0]
+
+
+def test_pending_delivery_notices_name_the_message_and_the_reason_until_acknowledged(
+    db, alice, bob, node_identity, remote_node_identity
+):
+    message = _sent(db, alice, remote_node_identity, node_identity, subject="Lunch on Friday")
+    apply_link_message_bounced(db, _bounce(remote_node_identity, message))
+
+    assert pending_delivery_notices(db, bob) == ([], [])
+    lines, ids = pending_delivery_notices(db, alice)
+    assert lines == [
+        # The same label Sent shows: a peer with no name is not a fingerprint.
+        'Your mail "Lunch on Friday" to bob@Unnamed linked node bounced: '
+        "there is no user by that name on that BBS."
+    ]
+    # Nothing is marked until the lines are on screen.
+    assert pending_delivery_notices(db, alice)[1] == ids
+
+    acknowledge_delivery_notices(db, ids)
+    assert pending_delivery_notices(db, alice) == ([], [])
+
+
+def test_pending_delivery_notices_leave_out_mail_deleted_from_sent(db, alice, node_identity, remote_node_identity):
+    from netbbs.mail import delete_for_sender, list_sent
+
+    message = _sent(db, alice, remote_node_identity, node_identity)
+    delete_for_sender(db, alice, list_sent(db, alice)[0])
+
+    apply_link_message_bounced(db, _bounce(remote_node_identity, message))
+
+    assert pending_delivery_notices(db, alice) == ([], [])
+
+
+def test_pending_delivery_notices_cap_the_list_and_count_the_rest(db, alice, node_identity, remote_node_identity):
+    _seed_peer(db, remote_node_identity)
+    for index in range(MAX_DELIVERY_NOTICES_SHOWN + 3):
+        message = compose_link_message(
+            db, alice, f"bob@{remote_node_identity.fingerprint}", f"m{index}", "world", node_identity=node_identity,
+        )
+        expire_link_message_delivery(db, message.content_id)
+
+    lines, ids = pending_delivery_notices(db, alice)
+
+    assert len(ids) == MAX_DELIVERY_NOTICES_SHOWN + 3
+    assert len(lines) == MAX_DELIVERY_NOTICES_SHOWN + 1
+    assert "was not delivered: no route to that BBS worked" in lines[0]
+    assert lines[-1] == "...and 3 more messages not delivered; see E-mail, Sent."
+
+
+def test_every_reason_a_node_can_give_has_plain_words():
+    from netbbs.link import enforcement
+    from netbbs.link.events import _VALID_BOUNCE_REASONS
+    from netbbs.link.mail import _BOUNCE_REASON_TEXT
+
+    codes = set(_VALID_BOUNCE_REASONS) | {
+        value for name, value in vars(enforcement).items() if name.startswith("REASON_")
+    }
+    assert codes <= set(_BOUNCE_REASON_TEXT)
+    for code in codes:
+        assert "_" not in bounce_reason_text(code)
+    assert bounce_reason_text("something_new") == "that BBS refused it"
+    assert bounce_reason_text(None) == "that BBS refused it"
+
+
+@pytest.mark.parametrize(
+    ("status", "reason", "expected"),
+    [
+        ("pending", None, "Pending: that BBS has not confirmed it yet."),
+        ("delivered", None, "Delivered to the recipient's mailbox."),
+        ("bounced", "unknown_recipient", "Bounced: there is no user by that name on that BBS."),
+        ("expired", None, "Expired: no route to that BBS worked before delivery gave up. It was not delivered."),
+        (
+            "expired", "own_policy",
+            "Expired: this BBS stopped exchanging mail with that BBS before it could be sent. It was not delivered.",
+        ),
+        (None, None, None),
+    ],
+)
+def test_delivery_explanation(status, reason, expected):
+    assert delivery_explanation(status, reason) == expected
