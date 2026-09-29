@@ -61,6 +61,7 @@ from netbbs.net.new_account_banner_after import load_new_account_banner_after
 from netbbs.net.new_account_banner_before import load_new_account_banner_before
 from netbbs.net.node_theme import effective_accent_color, effective_header_color_256, effective_node_name_gradient
 from netbbs.net.nodeconfig import ThrottleConfig
+from netbbs.net.notices import announce_styled
 from netbbs.net.redraw_preference import start_new_account_redrawing_in_place
 from netbbs.net.session import Session, SessionClosedError, write_preformatted_line, write_prompt
 from netbbs.net.signup_text import pending_approval_notice, username_problem_line
@@ -607,6 +608,49 @@ async def _confirm_charset(session: Session, db: Database, user: User, *, apply_
     )
 
 
+def _welcome_line(
+    session: Session, db: Database, user: User, node_controls: NodeControls | None
+) -> str:
+    """The login line, "Welcome, <name> › level N › Ctrl-L redraws".
+
+    Shown once, as the first notice above the first main menu's prompt
+    (issue #949), in either redraw mode -- so it is written nowhere else.
+    Built after the login questions, so the character-set answer (issue
+    #929) already decides its separator."""
+    # The Ctrl-L mention (issue #102) lives here, once per session,
+    # rather than repeated on every single menu redraw the way list
+    # screens' own Ctrl-L/Ctrl-R hint is (netbbs.net.picker) -- the main
+    # menu's own options line is already dense enough without adding a
+    # permanent trailer to it too. Separator matches the main menu's own
+    # subtitle line just below it (style spec, round following the
+    # pre-5.0.0 "beautify" audit) instead of the flat, always-ASCII "/"
+    # this used to hardcode -- built by hand rather than via field_row
+    # since the username segment keeps its own pre-existing `bold=True`,
+    # which that shared helper doesn't (and doesn't need to, for its
+    # other callers) support per-field.
+    welcome_separator = (
+        colored(" › ", fg_color=METADATA_COLOR) if unicode_style_enabled(db, user) else "  /  "
+    )
+    welcome = (
+        colored(
+            f"Welcome, {sanitize_text(user.username)}",
+            fg_color=effective_accent_color(session, db),
+            bold=True,
+        )
+        + welcome_separator
+        + colored(f"level {user.user_level}", fg_color=VALUE_COLOR)
+        + welcome_separator
+        + colored("Ctrl-L redraws", fg_color=METADATA_COLOR)
+    )
+    if (
+        node_controls is not None
+        and node_controls.maintenance.is_lockdown_active()
+        and meets_level(user, SYSOP_LEVEL)
+    ):
+        welcome += " (Maintenance mode is ON.)"
+    return welcome
+
+
 async def run_authenticated_session(
     session: Session,
     db: Database,
@@ -682,43 +726,10 @@ async def run_authenticated_session(
         await session.write_line(f"\r\n{LOCKDOWN_MESSAGE}")
         return
 
-    # The Ctrl-L mention (issue #102) lives here, once per session,
-    # rather than repeated on every single menu redraw the way list
-    # screens' own Ctrl-L/Ctrl-R hint is (netbbs.net.picker) -- the main
-    # menu's own options line is already dense enough without adding a
-    # permanent trailer to it too. Separator matches the main menu's own
-    # subtitle line just below it (style spec, round following the
-    # pre-5.0.0 "beautify" audit) instead of the flat, always-ASCII "/"
-    # this used to hardcode -- built by hand rather than via field_row
-    # since the username segment keeps its own pre-existing `bold=True`,
-    # which that shared helper doesn't (and doesn't need to, for its
-    # other callers) support per-field.
-    welcome_separator = (
-        colored(" › ", fg_color=METADATA_COLOR) if unicode_style_enabled(db, user) else "  /  "
-    )
-    welcome = (
-        "\r\n"
-        + colored(
-            f"Welcome, {sanitize_text(user.username)}",
-            fg_color=effective_accent_color(session, db),
-            bold=True,
-        )
-        + welcome_separator
-        + colored(f"level {user.user_level}", fg_color=VALUE_COLOR)
-        + welcome_separator
-        + colored("Ctrl-L redraws", fg_color=METADATA_COLOR)
-    )
-    if (
-        node_controls is not None
-        and node_controls.maintenance.is_lockdown_active()
-        and meets_level(user, SYSOP_LEVEL)
-    ):
-        welcome += " (Maintenance mode is ON.)"
-    await session.write_line(welcome)
-    # Issue #923: the pending-invitation count and the drain warning are
-    # not written here. The main menu's redraw-in-place clear came next
-    # and wiped them unseen; the first main menu tells them above its
-    # prompt instead (`netbbs.net.main_menu`, `first_draw`).
+    # Issue #949: the Welcome line is not written here either. Like the
+    # notices below (issue #923), it was wiped by the first main menu's
+    # redraw-in-place clear; it is carried above that menu's prompt
+    # instead, once the login questions are answered (`_welcome_line`).
 
     # Design doc §16 (issues #219 Decision 7 and #201 Decision 1): the
     # fallback anchor for the first-run screen (reliable-node
@@ -798,6 +809,9 @@ async def run_authenticated_session(
         # The answer is applied to the real session: `first_run` only
         # holds the outcome line for the first main menu (issue #923).
         await _confirm_charset(first_run, db, user, apply_to=session)
+        # The Welcome line first, then what the questions said (issue
+        # #949): ahead of anything already queued for the first menu.
+        announce_styled(session, _welcome_line(session, db, user, node_controls), first=True)
         first_run.announce_rest(last_paragraph=False)
         await _show_previous_callers_screen(
             session, db, user, current_history_id=history_id
