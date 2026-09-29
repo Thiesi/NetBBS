@@ -701,6 +701,12 @@ class Session(ABC):
         for non-interactive and lightweight Session adapters.
         """
 
+    def arm_word_guard(self) -> None:
+        """After a one-key answer, drop the rest of a word typed after it
+        and the Enter that ends it (issue #840, F114; see
+        `netbbs.net.char_input.WORD_GUARD_SECONDS`). Interactive transports
+        override it; the no-op default suits every other adapter."""
+
     async def discard_buffered_input(self) -> None:
         """Discard *every* byte/keystroke currently buffered ahead of the
         next real read -- a wider-scoped sibling of

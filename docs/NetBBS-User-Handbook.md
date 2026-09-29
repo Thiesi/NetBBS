@@ -28,7 +28,11 @@ forgotten it, ask the SysOp to set a new one; nobody can recover the old one.
 ## Find your way around
 
 Press a highlighted letter such as **[M]** for **Message boards**. Most menus react
-immediately, without Enter. When typing text, use Enter to submit it.
+immediately, without Enter. In the browser you can also click an entry or a
+numbered row. In a list, type a row's number: two digits (**03**) or one digit
+and Enter (**3** Enter). **[?] Help** on the main menu sums up how the board
+works and who runs it. To write to the SysOp, send E-mail **To: sysop**.
+When typing text, use Enter to submit it.
 **Ctrl+U** clears the line you are typing, and at a field that allows it,
 Esc leaves it without changing anything.
 Follow the action bar on the current screen: letters can mean different
