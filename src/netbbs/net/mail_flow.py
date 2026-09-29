@@ -50,8 +50,6 @@ from netbbs.auth.users import (
 )
 from netbbs.identity.addressing import is_valid_user_part, user_part_problem
 from netbbs.link.boards import LinkContext
-from netbbs.link.enforcement import LinkPolicyAction, decide_node_action
-from netbbs.link.trust import TrustState
 from netbbs.link.mail import (
     DELIVERY_STATUS_LABELS, RELAYED_DISPLAY_STATUS, LinkMailError, acknowledge_delivery_notices, compose_link_message,
     delivery_display_status, delivery_explanation,
@@ -169,6 +167,7 @@ from netbbs.net.mail_recipients import (
     choose_recipient,
     gather_address_book,
     join_recipients,
+    link_mail_refusal,
     picker_request,
     read_to_line_options,
     split_recipients,
@@ -3382,14 +3381,11 @@ async def _letter_draft_choice(
 def _link_mail_refusal(db, fingerprint: str) -> str | None:
     """Why this node will not send mail to `fingerprint`, in words for the
     caller, or `None` when it will (issue #804). Nothing is queued that the
-    push loop would refuse, and "Message sent." is never shown for it."""
-    decision = decide_node_action(db, fingerprint, LinkPolicyAction.LINK_MAIL)
-    if decision.allowed:
-        return None
-    label = sanitize_text(identity_for_fingerprint(db, fingerprint).label)
-    if decision.state == TrustState.PROBATIONARY:
-        return f"{label} is newly linked; mail opens once the SysOp establishes it."
-    return f"Mail to {label} is closed on this BBS."
+    push loop would refuse, and "Message sent." is never shown for it. The
+    words are `link_mail_refusal`'s, whose tag the To prompt's list shows
+    (issue #920)."""
+    refusal = link_mail_refusal(db, fingerprint)
+    return None if refusal is None else refusal.sentence
 
 
 @dataclass(frozen=True)
