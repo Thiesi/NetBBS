@@ -256,3 +256,25 @@ def test_ctrl_h_reaches_a_menu_in_the_browser():
 
     _web_scenario(handler, [{"type": "key", "data": "\x08"}])
     assert results == [HELP_KEY]
+
+
+def test_sysop_typed_at_the_review_screens_to_reaches_the_sysop(tmp_path):
+    """[T]o on the review screen resolves "sysop" as the first prompt does
+    (review on #871)."""
+    from netbbs.mail import list_inbox
+    from netbbs.net.mail_flow import browse_mail
+    from netbbs.storage.execution import DatabaseLane
+    from tests.test_mail_flow import FakeSession as MailSession
+
+    db = Database(tmp_path / "node.db")
+    inkwell = create_user(db, "InkWell", password="hunter2pw", user_level=SYSOP_LEVEL)
+    lena = create_user(db, "lena_h", password="hunter2pw", user_level=10)
+    create_user(db, "harold", password="hunter2pw", user_level=10)
+    session = MailSession(keys=["c", "t", "s", "b"], lines=["harold", "Hello", "Body", "", "sysop"])
+    lane = DatabaseLane(db.path)
+    try:
+        asyncio.run(browse_mail(session, lane, lena))
+        assert [message.subject for message in list_inbox(db, inkwell)] == ["Hello"]
+    finally:
+        lane.close()
+        db.close()

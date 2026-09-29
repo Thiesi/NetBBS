@@ -396,27 +396,30 @@ class WebSession(Session):
         key alike — used by `read_line`'s cursor-aware path, which
         needs to tell them apart. `_read_char` (below) is the
         char-only view `read_key` and masked reads still want."""
-        if self._input_closed:
-            raise SessionClosedError(self._input_error)
-        if self._pushed_back_item is not None:
-            item = self._pushed_back_item
-            self._pushed_back_item = None
-        elif self._typed_pipe_codes:
-            item = self._typed_pipe_codes.pop(0)
-        else:
-            item = await self._char_queue.get()
-        if item is None:
-            raise SessionClosedError(self._input_error)
-        if isinstance(item, _Click):
-            if self._clicks_blocked:
-                return await self._read_item()
-            if len(item) > 1:
-                self._pushed_back_item = _Click(item[1:])
-            item = str(item[0])
-        if isinstance(item, str) and char_input.word_guard_drops(self, item):
-            # The tail of a word typed after a one-key answer (issue #840).
-            return await self._read_item()
-        return item
+        # A loop, not recursion: a queue full of dropped clicks or a long
+        # guarded word must not exhaust the stack (review on #871).
+        while True:
+            if self._input_closed:
+                raise SessionClosedError(self._input_error)
+            if self._pushed_back_item is not None:
+                item = self._pushed_back_item
+                self._pushed_back_item = None
+            elif self._typed_pipe_codes:
+                item = self._typed_pipe_codes.pop(0)
+            else:
+                item = await self._char_queue.get()
+            if item is None:
+                raise SessionClosedError(self._input_error)
+            if isinstance(item, _Click):
+                if self._clicks_blocked:
+                    continue
+                if len(item) > 1:
+                    self._pushed_back_item = _Click(item[1:])
+                item = str(item[0])
+            if isinstance(item, str) and char_input.word_guard_drops(self, item):
+                # The tail of a word typed after a one-key answer (issue #840).
+                continue
+            return item
 
     def arm_word_guard(self) -> None:
         char_input.arm_word_guard(self)
