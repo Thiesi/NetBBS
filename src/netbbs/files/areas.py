@@ -373,11 +373,13 @@ def update_file_area(
 
 
 def file_area_siblings(db: Database, area: FileArea) -> list[FileArea]:
-    """The areas `area` is ordered among -- same category, same pinned
-    flag -- as `netbbs.boards.boards.board_siblings`."""
+    """The areas `area` is ordered among -- same category, same Community,
+    same pinned flag -- as `netbbs.boards.boards.board_siblings`."""
     return [
         a for a in list_file_areas(db, order_by="sysop")
-        if a.category_id == area.category_id and a.pinned == area.pinned
+        if a.category_id == area.category_id
+        and a.community_id == area.community_id
+        and a.pinned == area.pinned
     ]
 
 

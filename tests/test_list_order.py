@@ -19,6 +19,7 @@ from netbbs.auth.users import SYSOP_LEVEL, create_user
 from netbbs.boards.boards import create_board, get_board_by_name, list_boards, move_board
 from netbbs.boards.categories import create_category
 from netbbs.boards.posts import create_post
+from netbbs.communities import create_community
 from netbbs.files.areas import create_file_area, get_file_area_by_name, list_file_areas, move_file_area
 from netbbs.moderation.log import list_actions_for_object
 from netbbs.net import board_flow
@@ -104,6 +105,20 @@ def test_a_board_moves_only_among_its_own_category(db, sysop):
     in_pens = [b.name for b in list_boards(db) if b.category_id == pens.id]
     assert in_pens == ["Modern", "Vintage"]
     assert not move_board(db, get_board_by_name(db, "Modern"), -1, moved_by=sysop)
+
+
+def test_a_board_moves_only_among_its_own_community(db, sysop):
+    retro = create_community(db, "Retro", creator=sysop)
+    create_board(db, "Amiga", creator=sysop, community_id=retro.id)
+    create_board(db, "Elsewhere", creator=sysop)
+    create_board(db, "Atari", creator=sysop, community_id=retro.id)
+
+    # "Elsewhere" sits between them, but Retro's list never shows it: one
+    # move up must pass "Amiga", or Retro's callers would see nothing move.
+    assert move_board(db, get_board_by_name(db, "Atari"), -1, moved_by=sysop)
+    in_retro = [b.name for b in list_boards(db) if b.community_id == retro.id]
+    assert in_retro == ["Atari", "Amiga"]
+    assert not move_board(db, get_board_by_name(db, "Atari"), -1, moved_by=sysop)
 
 
 def test_pinned_boards_stay_first_and_move_among_themselves(db, sysop):

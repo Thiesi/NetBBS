@@ -433,12 +433,15 @@ def update_board(
 
 def board_siblings(db: Database, board: Board) -> list[Board]:
     """The boards `board` is ordered among, in order, itself included:
-    those in the same category with the same pinned flag. A caller's list
-    shows one category at a time, pinned boards first, so these are the
-    only neighbours a move can visibly pass."""
+    those in the same category and the same Community, with the same
+    pinned flag. A caller's list shows one category at a time, pinned
+    boards first, and a Community's list only its own boards, so swapping
+    with one of these changes what every list holding both shows."""
     return [
         b for b in list_boards(db, order_by="sysop")
-        if b.category_id == board.category_id and b.pinned == board.pinned
+        if b.category_id == board.category_id
+        and b.community_id == board.community_id
+        and b.pinned == board.pinned
     ]
 
 

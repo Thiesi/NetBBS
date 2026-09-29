@@ -468,8 +468,8 @@ draft and save it explicitly.
 - **Order of boards and file areas:** callers' lists follow your order, not
   the latest activity, so the number a caller remembers keeps its board. A
   new board or area goes last. **Up** and **Down** on its screen move it among
-  the others in the same category; pinned ones stay first and move among
-  themselves. **Remove** deletes it. A caller can still sort a list by
+  the others in the same category and Community; pinned ones stay first and
+  move among themselves. **Remove** deletes it. A caller can still sort a list by
   activity with **[O]rder**.
 - **Chat channels:** set join gates, visibility, invitations, and moderation.
   Hidden or invite-only channels need more than a sufficient account level.

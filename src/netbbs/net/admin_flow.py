@@ -15971,7 +15971,9 @@ async def _list_boards_screen(
     session: Session, lane: DatabaseLane, actor: User, *, link_context: LinkContext | None = None
 ) -> None:
     def _load_boards(db: Database):
-        # The order callers see (issue #839), which [U]p/[D]own change.
+        # The SysOp's order (issue #839), which callers' lists follow within
+        # each category and Community; [U]p/[D]own on a detail screen move
+        # one among those, and its Place row says where it sits.
         boards = list_boards(db, order_by="sysop")
         counts = {board.id: (count_listed_posts(db, board)[0], count_pending_posts(db, board)) for board in boards}
         return boards, _effective_by_id(db, boards), counts, carried_to_review(db, "boards")
@@ -16248,7 +16250,7 @@ def _community_columns(community: Community) -> list[str | tuple[str, SegmentCol
 
 def _place_label(place: int, total: int, *, pinned: bool) -> str:
     """Where a board or area sits in the callers' list (issue #839): among
-    those in the same category (or none), pinned ones apart. It replaced
+    those in the same category and Community, pinned ones apart. It replaced
     the "Pinned" row, which it now says, so the screen gained no row."""
     return f"{place + 1} of {total}" + (", pinned first" if pinned else "")
 
@@ -17770,7 +17772,9 @@ async def _list_areas_screen(
     transfers: Any = None,
 ) -> None:
     def _load_areas(db: Database):
-        # The order callers see (issue #839), which [U]p/[D]own change.
+        # The SysOp's order (issue #839), which callers' lists follow within
+        # each category and Community; [U]p/[D]own on a detail screen move
+        # one among those, and its Place row says where it sits.
         areas = list_file_areas(db, order_by="sysop")
         counts = {area.id: (count_listed_files(db, area)[0], count_pending_files(db, area)) for area in areas}
         return areas, _effective_by_id(db, areas), counts, carried_to_review(db, "file_areas")
