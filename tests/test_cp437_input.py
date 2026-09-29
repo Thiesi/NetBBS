@@ -7,7 +7,7 @@ import asyncio
 from netbbs.net import break_in
 from netbbs.net.session import Session
 from netbbs.net.telnet import IAC
-from netbbs.rendering.charset import CP437, UTF8
+from netbbs.rendering.charset import ASCII, CP437, UTF8
 from tests.test_telnet import _run_server, skip_initial_negotiation
 
 
@@ -62,6 +62,40 @@ def test_telnets_escaped_0xff_is_cp437s_nbsp():
 
 def test_utf8_terminals_are_unchanged():
     assert _typed(UTF8, "café\r".encode("utf-8")) == "café"
+
+
+def test_a_lone_high_byte_on_an_ascii_terminal_is_dropped_not_fatal():
+    # An ASCII session still reads UTF-8: a stray 0x84 is no lead byte,
+    # so it is skipped and the rest of the line survives.
+    assert _typed(ASCII, b"a" + bytes([0x84]) + b"b\r") == "ab"
+
+
+def test_a_cursor_navigated_screen_reads_cp437_characters():
+    keys = []
+
+    async def handler(session: Session):
+        session.output_charset = CP437
+        for _ in range(2):
+            keys.append(await session.read_editor_key())
+
+    async def scenario():
+        server = await _run_server(handler)
+        try:
+            reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
+            await skip_initial_negotiation(reader)
+            writer.write(bytes([0x82, 0xC3]))  # é, then a lone box piece
+            await writer.drain()
+            for _ in range(200):
+                if len(keys) == 2:
+                    break
+                await asyncio.sleep(0.01)
+            writer.close()
+            await writer.wait_closed()
+        finally:
+            await server.stop()
+
+    asyncio.run(scenario())
+    assert [key.char for key in keys] == ["é", "├"]
 
 
 class _Session:
