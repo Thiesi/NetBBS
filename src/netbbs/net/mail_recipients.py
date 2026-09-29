@@ -74,6 +74,8 @@ class RecipientChoice:
     label: str
     recent: bool = False
     linked: bool = False
+    #: A BBS's DNS name, which Tab also matches.
+    dns_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -149,6 +151,7 @@ def gather_address_book(db: Database, user: User, *, link_enabled: bool) -> Addr
         (
             RecipientChoice(
                 "node", fingerprint, sanitize_text(reference), sanitize_text(identity.label), linked=True,
+                dns_name=identity.dns_name,
             )
             for fingerprint, (identity, reference) in nodes.items()
         ),
@@ -180,12 +183,13 @@ class RecipientCompleter:
         typed = typed.lstrip()
         if "@" in typed:
             user_part, _, node_part = typed.partition("@")
-            needle = name_key(node_part.lstrip('"'))
+            needle = name_key(node_part.strip('"'))
             found = [
                 link_address_label(user_part, node.completion)
                 for node in self._book.nodes
                 if name_key(node.completion).startswith(needle)
                 or name_key(node.label).startswith(needle)
+                or (node.dns_name is not None and node.dns_name.startswith(needle))
             ]
         else:
             needle = typed.casefold()
