@@ -208,6 +208,26 @@ def record_session_end(db: Database, history_id: int) -> SessionHistoryEntry | N
     return _entry_from_row(row) if row is not None else None
 
 
+def previous_call_started_at(db: Database, user: User, *, current_history_id: int | None) -> str | None:
+    """When `user`'s previous call began: the newest of their rows older
+    than `current_history_id`, the session they are in now (issue #917,
+    "new since your last call"). `None` for an account with no earlier call
+    on record -- their first call, or one whose older rows the bounded
+    table has since pruned -- which the caller reads as "no last call to
+    count from".
+
+    By row id, not by timestamp: ids follow insertion order, so a second
+    session of the same account opened meanwhile counts as its previous
+    call, and a clock step cannot reorder them. `current_history_id=None`
+    (a screen driven without a recorded session, as in a test) takes the
+    newest row."""
+    row = db.connection.execute(
+        "SELECT connected_at FROM session_history WHERE user_id = ? AND id < ? ORDER BY id DESC LIMIT 1",
+        (user.id, current_history_id if current_history_id is not None else 2**63 - 1),
+    ).fetchone()
+    return row["connected_at"] if row is not None else None
+
+
 def list_recent_sessions(
     db: Database, *, limit: int = 20, user_id: int | None = None
 ) -> list[SessionHistoryEntry]:

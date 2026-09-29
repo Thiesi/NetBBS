@@ -47,7 +47,7 @@ from netbbs.net.confirm import prompt_yes_no
 from netbbs.net.directory_flow import _browse_directory, _caller_who_screen
 from netbbs.net.door_flow import _visible_doors, browse_doors, has_visible_doors
 from netbbs.net.file_flow import browse_file_areas, visible_areas
-from netbbs.net.mail_arrivals import NOTICE_COLOR as NEW_MAIL_COLOR, arrival_event, login_mail_notice
+from netbbs.net.mail_arrivals import arrival_event, login_mail_notice, notice_color, waiting_mail_counts
 from netbbs.net.mail_flow import browse_mail, caller_mail_refusal
 from netbbs.net.main_menu_banner import load_main_menu_banner
 from netbbs.net.menu_description_preference import menu_description_level
@@ -266,12 +266,13 @@ async def _draw_main_menu(
                 detailed="Scan every accessible message board/chat channel/file area for activity since your last visit.",
             ),
             # Find names what it searches (issue #811): the caller's own
-            # mail too (issue #824), for a caller mail is open to.
+            # mail too (issue #824), for a caller mail is open to -- named
+            # first, as its results are listed first (issue #918).
             MenuEntry(
                 label=menu_key("/", " Find"),
-                brief="Search posts, files, chat, mail" if has_mail else "Search posts, files, and chat",
+                brief="Search mail, posts, files, chat" if has_mail else "Search posts, files, and chat",
                 detailed=(
-                    "Find posts, files, retained chat, and your own mail on this node." if has_mail
+                    "Find your own mail, posts, files, and retained chat on this node." if has_mail
                     else "Find posts, files, and retained chat on this node."
                 ),
             ),
@@ -335,8 +336,10 @@ async def _draw_main_menu(
     # own header (now the mailbox's, `_MailboxScreen`) settled this wording as
     # "message(s)"; matching it here fixes both the missing pluralization
     # and a term the app wasn't even using consistently with itself.
+    # The unread count in the highlight colour, the accent beside the
+    # caller's name (issue #917): news, not a warning.
     mail_status = (
-        (f"{unread} unread message{'' if unread == 1 else 's'}", WARNING_COLOR)
+        (f"{unread} unread message{'' if unread == 1 else 's'}", effective_accent_color(session, db))
         if unread
         else ("mail caught up", SUCCESS_COLOR)
     )
@@ -669,9 +672,13 @@ async def _main_menu_loop(
                 # from it, then the caller's own Link mail that came back.
                 mail_open = caller_mail_refusal(session, db, user) is None
                 if first_draw and mail_open:
-                    waiting = login_mail_notice(unread_mail_count(db, user))
+                    # Both counts (issue #917): what arrived since the last
+                    # call, and everything unread.
+                    waiting = login_mail_notice(
+                        *waiting_mail_counts(db, user, current_history_id=current_history_id)
+                    )
                     if waiting is not None:
-                        announce(session, waiting, color=NEW_MAIL_COLOR)
+                        announce(session, waiting, color=notice_color(db))
                 # Read mail the mailbox cap removed to make room, counted
                 # and told once (issue #818) -- never which messages. Held
                 # for a caller mail is closed to, who has no Inbox to see.
@@ -852,6 +859,7 @@ async def _main_menu_loop(
                         session, db, lane, hub, presence, mailbox, history, user, link_context=link_context,
                         mrc_bridge=node_controls.mrc_bridge if node_controls is not None else None,
                         transfers=node_controls.transfers if node_controls is not None else None,
+                        current_history_id=current_history_id,
                     )
                 else:
                     await session.write_line(

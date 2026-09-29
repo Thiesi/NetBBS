@@ -1221,10 +1221,13 @@ class _MailboxScreen:
             if self.kept:
                 parts.append(colored(_count(total, "kept message") if not narrow else f"{total} kept", fg_color=VALUE_COLOR))
                 if unread:
-                    parts.append(colored(f"{unread} unread", fg_color=WARNING_COLOR))
+                    parts.append(colored(f"{unread} unread", fg_color=self.accent))
             else:
+                # Unread counts in the highlight colour, as on the main menu
+                # and in the new-mail notices (issue #917): news, not a
+                # warning. The cap nearing full stays a warning.
                 parts.append(
-                    colored(_count(unread, "unread message") if not narrow else f"{unread} unread", fg_color=WARNING_COLOR)
+                    colored(_count(unread, "unread message") if not narrow else f"{unread} unread", fg_color=self.accent)
                     if unread else colored("Inbox caught up", fg_color=SUCCESS_COLOR)
                 )
             # Counted against the cap (issue #818): everything received,
@@ -1242,7 +1245,7 @@ class _MailboxScreen:
                     # The main menu counts these as unread too (review on
                     # #908): said at any width, or the Inbox would read
                     # "caught up" while the main menu says otherwise.
-                    parts.append(colored(f"{kept_unread} unread in Kept", fg_color=WARNING_COLOR))
+                    parts.append(colored(f"{kept_unread} unread in Kept", fg_color=self.accent))
                 elif kept and not narrow:
                     parts.append(colored(f"{len(kept)} in Kept", fg_color=MUTED_COLOR))
         order = self._effective_order()
