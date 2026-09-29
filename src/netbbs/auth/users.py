@@ -370,7 +370,7 @@ def _validate_username(username: str) -> None:
     if username.lower().endswith(DOOR_LABEL_SUFFIX):
         raise AuthError(
             f"usernames may not end in {DOOR_LABEL_SUFFIX!r} — that suffix is reserved "
-            "for doors which post to a board (issue #520)"
+            "for doors which post to a board"
         )
 
 
