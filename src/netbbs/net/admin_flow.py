@@ -70,9 +70,12 @@ import nacl.signing
 
 from netbbs.attestation import AttestationError, withdraw_link_visibility
 from netbbs.auth.users import (
+    CO_SYSOP_PRESET,
     NEW_ACCOUNT_SENTINEL,
+    STAFF_PERMISSION_LABELS,
     SYSOP_LEVEL,
     AuthError,
+    StaffPermission,
     User,
     UserManagementError,
     UsernameRetiredError,
@@ -89,7 +92,9 @@ from netbbs.auth.users import (
     list_retired_usernames,
     list_users,
     release_retired_username,
+    describe_staff_permissions,
     set_can_verify_identity,
+    set_staff_permissions,
     set_user_disabled,
     set_user_level,
 )
@@ -470,6 +475,7 @@ from netbbs.moderation.roles import (
     BoardPermission,
     ChannelPermission,
     ModeratorGrantError,
+    describe_grant,
     get_grant,
     grant_permissions,
     has_permission,
@@ -5840,10 +5846,18 @@ async def _draw_user_detail(
                 "set" if await lane.run(has_password, target) else "(none -- key login only)",
             ),
         ]),
-        # Design doc §18: a narrow, SysOp-grantable permission independent
-        # of the four moderator scope tiers.
+        # Design doc §5.6 (issue #836, F132): everything this account may
+        # do beyond its level, in one place -- the staff permissions, the
+        # verify-identity permission (§5.5) beside them but separate, and
+        # a summary of its moderator grants, which used to show nowhere
+        # on the account.
         Section("Privileges", [
+            _editable(
+                "s", "Staff", describe_staff_permissions(target.staff_permissions),
+                color=VALUE_COLOR if target.staff_permissions else MUTED_COLOR,
+            ),
             _editable("i", "Can verify identity", f"{_yes_no(target.can_verify_identity)} (age/name attestation)"),
+            _grants_field(await lane.run(_grant_summaries, target)),
         ]),
     ]
     # Issue #835 (F072): what the caller said when signing up, for whoever
@@ -5861,6 +5875,7 @@ async def _draw_user_detail(
         options.append(MenuEntry(label=menu_key("A", "pprove"), brief="Approve this pending signup"))
     options.append(MenuEntry(label=menu_key("L", "evel"), brief="Change this user's access level"))
     options.append(MenuEntry(label=menu_key("T", "oggle enable/disabled"), brief="Enable or disable this account"))
+    options.append(MenuEntry(label=menu_key("S", "taff"), brief="Staff permissions, Co-SysOp preset"))
     options.append(MenuEntry(label=menu_key("I", "dentity verification"), brief="Grant/revoke attestation rights"))
     options.append(MenuEntry(label=menu_key("K", "ey"), brief="View/replace this user's SSH key"))
     options.append(MenuEntry(label=menu_key("P", "assword"), brief="Set or clear this user's password"))
@@ -5881,7 +5896,24 @@ async def _draw_user_detail(
     return blocked
 
 
-_USER_DETAIL_FIELD_ORDER = ("l", "t", "r", "k", "p", "i")
+_USER_DETAIL_FIELD_ORDER = ("l", "t", "r", "k", "p", "s", "i")
+
+
+def _grant_summaries(db: Database, target: User) -> list[str]:
+    """`target`'s moderator grants in words (`describe_grant`)."""
+    return [describe_grant(db, grant) for grant in list_grants_for_user(db, target)]
+
+
+def _grants_field(summaries: list[str]) -> Field:
+    """The account detail's moderator-grant line: how many, and each one
+    beneath it. Board and Community names can come from other nodes over
+    Link, so they are sanitized like any remote text."""
+    if not summaries:
+        return Field("Moderator grants", "none", color=MUTED_COLOR)
+    return Field(
+        "Moderator grants", str(len(summaries)),
+        note="; ".join(sanitize_text(summary) for summary in summaries),
+    )
 async def _user_history_screen(session: Session, lane: DatabaseLane, actor: User, target: User) -> None:
     """Every recorded admin action against `target`, newest first, paged.
 
@@ -5966,6 +5998,13 @@ _USER_DETAIL_HELP: dict[str, tuple[str, str]] = {
         "Status",
         "Enable/disable this account. A disabled account can't log in; existing posts/"
         "files/messages they created are untouched.",
+    ),
+    "s": (
+        "Staff",
+        "Staff permissions (design doc §5.6): approve accounts, manage accounts (disable/"
+        "enable, password reset, levels up to 254) and moderate everything. Co-SysOp sets "
+        "all three. A staff member never acts on level 255 or on other staff, and can't "
+        "grant anything.",
     ),
     "i": (
         "Can verify identity",
@@ -6111,8 +6150,12 @@ async def _user_detail_screen(
         elif choice == "a" and target.pending_approval:
             await session.write_line("")
             if await prompt_yes_no(session, "Approve this account so it can log in?", default=False):
-                target = await lane.run(approve_pending_user, target, approved_by=actor)
-                _announce_line(session, f"{target.username!r} approved.")
+                try:
+                    target = await lane.run(approve_pending_user, target, approved_by=actor)
+                except UserManagementError as exc:
+                    _announce_line(session, colored(str(exc), fg_color=MUTED_COLOR))
+                else:
+                    _announce_line(session, f"{target.username!r} approved.")
             blocked = await _draw_user_detail(
                 session, lane, target, description_level, redraw_in_place, unicode_style, collapsed, selected=selected,
             )
@@ -6161,14 +6204,25 @@ async def _user_detail_screen(
             if await prompt_yes_no(
                 session, f"{new_state.capitalize()} identity-verification permission?", default=False
             ):
-                target = await lane.run(
-                    set_can_verify_identity, target, not target.can_verify_identity, changed_by=actor
-                )
-                _announce_line(session,
-                    f"{target.username!r} can now verify identity: "
-                    f"{'yes' if target.can_verify_identity else 'no'}."
-                )
-                _request_live_access_recheck(node_controls, target)
+                try:
+                    target = await lane.run(
+                        set_can_verify_identity, target, not target.can_verify_identity, changed_by=actor
+                    )
+                except UserManagementError as exc:
+                    _announce_line(session, colored(str(exc), fg_color=MUTED_COLOR))
+                else:
+                    _announce_line(session,
+                        f"{target.username!r} can now verify identity: "
+                        f"{'yes' if target.can_verify_identity else 'no'}."
+                    )
+                    _request_live_access_recheck(node_controls, target)
+            blocked = await _draw_user_detail(
+                session, lane, target, description_level, redraw_in_place, unicode_style, collapsed, selected=selected,
+            )
+        elif choice == "s":
+            target = await _staff_permissions_screen(
+                session, lane, actor, target, node_controls, description_level=description_level
+            )
             blocked = await _draw_user_detail(
                 session, lane, target, description_level, redraw_in_place, unicode_style, collapsed, selected=selected,
             )
@@ -6244,6 +6298,85 @@ async def _user_detail_screen(
             )
         else:
             await session.write(reject_unhandled_key(choice))
+
+
+_STAFF_TOGGLE_KEYS: dict[str, StaffPermission] = {
+    "a": StaffPermission.APPROVE_ACCOUNTS,
+    "m": StaffPermission.MANAGE_ACCOUNTS,
+    "e": StaffPermission.MODERATE_ALL,
+}
+
+
+async def _staff_permissions_screen(
+    session: Session, lane: DatabaseLane, actor: User, target: User, node_controls: NodeControls | None,
+    *, description_level: str,
+) -> User:
+    """
+    Give or take `target`'s staff permissions (design doc §5.6, issue
+    #836): one toggle each, the Co-SysOp preset that sets all three in one
+    confirmed step, and one that removes them all. Every change is
+    confirmed, audited by `set_staff_permissions`, and carried into the
+    account's live sessions the way a level change is. Returns the account
+    as it now stands.
+    """
+    while True:
+        await session.write_line("")
+        await session.write_line(
+            colored(f"Staff permissions for {sanitize_text(target.username)}:", fg_color=LABEL_COLOR, bold=True)
+        )
+        options = [
+            MenuEntry(label=menu_key("A", "pprove accounts"),
+                      brief=_yes_no(target.has_staff(StaffPermission.APPROVE_ACCOUNTS))),
+            MenuEntry(label=menu_key("M", "anage accounts"),
+                      brief=_yes_no(target.has_staff(StaffPermission.MANAGE_ACCOUNTS))),
+            MenuEntry(label=menu_key("E", "verything", prefix="Moderate "),
+                      brief=_yes_no(target.has_staff(StaffPermission.MODERATE_ALL))),
+        ]
+        options.append(MenuEntry(label=menu_key("C", "o-SysOp preset"), brief="All three at once"))
+        options.append(MenuEntry(label=menu_key("N", "one"), brief="Remove every staff permission"))
+        options.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to the account"))
+        await session.write_line(_fitted_menu(options, description_level, session=session, used_rows=4))
+        await _choice_prompt(session)
+        choice = (await session.read_key()).lower()
+        await session.write_line("")
+        if choice == "b":
+            return target
+        if choice in _STAFF_TOGGLE_KEYS:
+            flag = _STAFF_TOGGLE_KEYS[choice]
+            giving = not target.has_staff(flag)
+            new_mask = target.staff_permissions | int(flag) if giving else target.staff_permissions & ~int(flag)
+            question = (
+                f"{'Give' if giving else 'Remove'} {STAFF_PERMISSION_LABELS[flag]} "
+                f"{'to' if giving else 'from'} {target.username!r}?"
+            )
+        elif choice == "c":
+            new_mask = int(CO_SYSOP_PRESET)
+            question = (
+                f"Make {target.username!r} a Co-SysOp -- approve accounts, manage accounts (disable, "
+                "password reset, levels up to 254) and moderate everything? They can't act on "
+                "SysOps or other staff, or reach Settings, Link, Node, DNS or backups."
+            )
+        elif choice == "n":
+            new_mask = 0
+            question = f"Remove every staff permission from {target.username!r}?"
+        else:
+            await session.write(reject_unhandled_key(choice))
+            continue
+        if new_mask == target.staff_permissions:
+            _announce_line(session, colored("Nothing to change.", fg_color=MUTED_COLOR))
+            continue
+        if not await prompt_yes_no(session, question, default=False):
+            continue
+        try:
+            target = await lane.run(set_staff_permissions, target, new_mask, changed_by=actor)
+        except UserManagementError as exc:
+            _announce_line(session, colored(str(exc), fg_color=MUTED_COLOR))
+            continue
+        _announce_line(
+            session,
+            f"{target.username!r} staff permissions: {describe_staff_permissions(target.staff_permissions)}.",
+        )
+        _request_live_access_recheck(node_controls, target)
 
 
 async def _delete_user_confirm(

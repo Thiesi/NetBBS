@@ -101,7 +101,7 @@ def test_disabled_account_is_disconnected_on_next_main_menu_action(tmp_path):
     still catch it."""
     db = Database(tmp_path / "node.db")
     user = create_user(db, "alice", password="hunter2", user_level=10)
-    set_user_disabled(db, user, True, changed_by=user)
+    set_user_disabled(db, user, True, changed_by=create_user(db, "admin", password="hunter2", user_level=255))
     session = FakeSession(keys=["m"])  # any ordinary action
 
     exit_was_voluntary = asyncio.run(
@@ -115,7 +115,7 @@ def test_disabled_account_is_disconnected_on_next_main_menu_action(tmp_path):
 
 def test_deleted_account_is_disconnected_on_next_main_menu_action(tmp_path):
     db = Database(tmp_path / "node.db")
-    sysop = create_user(db, "sysop", password="hunter2", user_level=100)
+    sysop = create_user(db, "sysop", password="hunter2", user_level=255)
     user = create_user(db, "alice", password="hunter2", user_level=10)
     delete_user(db, user, deleted_by=sysop)
     session = FakeSession(keys=["m"])

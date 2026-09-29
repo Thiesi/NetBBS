@@ -597,6 +597,21 @@ The node refuses to start with zero usable SysOps. Pending accounts cannot be
 promoted directly to SysOp. Demotion, disable, and deletion share the atomic
 last-SysOp guard described above.
 
+### Who may change an account (issue #836)
+
+The account mutators in `netbbs.auth.users` check their actor themselves,
+inside their own `BEGIN IMMEDIATE`, against a fresh read of the actor:
+`_require_account_authority` for level, disable/enable, password reset,
+approval and decline, `_require_sysop` for deletion, raising to 255, and
+granting staff or verify-identity permissions. A usable SysOp always passes; a
+staff member passes only with the matching `StaffPermission` and only on a
+target below 255 that holds no staff bit, which also rules out their own
+account. Everyone else is refused, with two exceptions: an account changing
+its own password (the password screen proved the old one) and deleting
+itself. Tests that disabled or promoted an account "as itself" to set up a
+scenario now need a real level-255 actor. `moderator_grants` setters still
+trust their caller; only the SysOp console reaches them.
+
 ### Registration
 
 Registration mode is one of:
@@ -694,8 +709,10 @@ Numeric user levels and moderator grants solve different problems:
 - levels are broad eligibility gates;
 - grants convey scoped capabilities.
 
-SysOps pass `has_permission` without stored grant rows. Functions which list
-literal grants must remain literal and must not synthesize SysOp grants.
+SysOps pass `has_permission` without stored grant rows, and so does an account
+holding the moderate-everything staff permission (issue #836). Functions which
+list literal grants must remain literal and must not synthesize SysOp or staff
+grants.
 
 Board/file permissions and channel permissions are separate enums. Validate
 the object type and permission combination before applying any SysOp bypass.

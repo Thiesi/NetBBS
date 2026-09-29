@@ -3525,4 +3525,14 @@ MIGRATIONS = [
             WHERE category_id IS NOT NULL;
         """,
     ),
+    Migration(
+        description=(
+            "Issue #836: `users.staff_permissions` -- the staff permissions a SysOp gives an "
+            "account below 255 (approve accounts, manage accounts, moderate everything; design "
+            "doc §5.6), as a bitmask. 0 for every existing account, so nothing changes on upgrade."
+        ),
+        sql="""
+        ALTER TABLE users ADD COLUMN staff_permissions INTEGER NOT NULL DEFAULT 0;
+        """,
+    ),
 ]

@@ -485,11 +485,11 @@ async def _watch_for_account_revocation(
     `cancel_one` runs from a `finally`, guaranteed to fire whether the
     write finishes, fails, or times out.
 
-    Issue #659: the same poll carries a SysOp's level or verify-identity
-    change into the live session -- see `_apply_access_change`. The
-    registry's `recheck` event wakes it early when the change was made
-    in this process, so an in-node demotion applies at once rather than
-    at the next tick.
+    Issue #659: the same poll carries a SysOp's level, verify-identity or
+    staff-permission change (issue #836) into the live session -- see
+    `_apply_access_change`. The registry's `recheck` event wakes it early
+    when the change was made in this process, so an in-node demotion
+    applies at once rather than at the next tick.
     """
     recheck = session_registry.recheck_event(session)
     while True:
@@ -523,8 +523,8 @@ async def _watch_for_account_revocation(
 
 def _apply_access_change(session: Session, current: User, session_registry: ActiveSessionRegistry) -> None:
     """
-    Carry a changed level or verify-identity permission into `session`
-    (issue #659). A gain only signals the main menu, which re-reads the
+    Carry a changed level, verify-identity permission or staff permission
+    into `session` (issues #659, #836). A gain only signals the main menu, which re-reads the
     account when it is next shown. A loss also unwinds the session back
     to the main menu, because whatever screen it is on was entered with
     the old access -- the SysOp console above all.
@@ -537,12 +537,19 @@ def _apply_access_change(session: Session, current: User, session_registry: Acti
     baseline = session_registry.account_baseline(session)
     if baseline is None:
         return
-    level, can_verify = baseline
-    if (current.user_level, current.can_verify_identity) == (level, can_verify):
+    level, can_verify, staff = baseline
+    if (current.user_level, current.can_verify_identity, current.staff_permissions) == (level, can_verify, staff):
         return
-    lost = current.user_level < level or (can_verify and not current.can_verify_identity)
+    lost = (
+        current.user_level < level
+        or (can_verify and not current.can_verify_identity)
+        # Any staff permission taken away (design doc §5.6): the Staff
+        # console was entered with it.
+        or bool(staff & ~current.staff_permissions)
+    )
     session_registry.record_account(
-        session, user_level=current.user_level, can_verify_identity=current.can_verify_identity
+        session, user_level=current.user_level, can_verify_identity=current.can_verify_identity,
+        staff_permissions=current.staff_permissions,
     )
     if lost:
         session_registry.request_level_unwind(session)
@@ -765,7 +772,8 @@ async def run_authenticated_session(
             session, user.username, is_sysop=meets_level(user, SYSOP_LEVEL)
         )
         node_controls.session_registry.record_account(
-            session, user_level=user.user_level, can_verify_identity=user.can_verify_identity
+            session, user_level=user.user_level, can_verify_identity=user.can_verify_identity,
+            staff_permissions=user.staff_permissions,
         )
         watcher_task = asyncio.create_task(
             _watch_for_account_revocation(session, db, user, node_controls.session_registry)
