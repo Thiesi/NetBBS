@@ -425,7 +425,7 @@ Every draft slot belongs to one composition, and a draft is only ever
 offered for the composition it belongs to (issue #814): a board's new post
 (one per caller and board), a reply to one post, an edit of one post, a
 caller's new letter (one per caller), a reply to one message, a forward of one
-message (issue #822). A caller that
+message (issue #822), a resend of one sent message (issue #825). A caller that
 offers its draft itself -- a board's `[D]raft`, mail's `[D]raft`, `[C]ompose`,
 `[R]eply` or `[F]orward` -- passes the draft in as the text with `offer_recovery` off, so
 the editor neither asks again nor deletes the draft before something replaces
@@ -2524,6 +2524,34 @@ only at the forwarded letter's own.
   say -- harms no one, and the header says it came from System.
 - `caller_mail_refusal` is checked when the key is pressed. Each letter's
   forward has its own draft slot, apart from a reply to it.
+
+**Reply and Resend on Sent** (issue #825). A sent letter's view is
+`[R]eply Re[s]end [F]orward [D]elete [B]ack`; both new keys write to the
+letter's recipient through `mail_someone`, so the checks a letter started from
+a meeting place gets are made when the key is pressed, and Send makes them
+again (`send_mail`'s recipient and block checks, `_check_link_reply_address`
+for a Link address). A recipient whose account was deleted since (#818) is
+refused at the key, by the name Sent shows. After a letter is sent the view
+closes and the Sent list shows "Message sent." above its prompt, the new
+letter on it; a cancelled, kept or refused one comes back to the view.
+- `[R]eply` is a follow-up: `Re:` by the reply rule, and the caller's own
+  letter quoted under "<caller> wrote:" as a reply to a received letter is
+  quoted. Quoting one's own letter was chosen over an empty body: the
+  recipient may have deleted it, and the quote is one keystroke to remove. It
+  shares the reply draft slot scheme (`_reply_key`), so it is offered only for
+  that letter.
+- `Re[s]end` is offered only on Link mail that bounced or expired (any
+  reason, `no_answer` included). Mail that was delivered, is pending or is
+  with a relay may reach its reader, and local mail cannot fail after Send, so
+  a second copy there would only be a duplicate; the caller can still forward
+  it or write anew. The new letter is titled "Resend", goes to the stored
+  `recipient_remote_address`, and carries the subject and body verbatim --
+  not quoted, not `Fwd:` -- with escape sequences removed and color pipe codes
+  kept, as a forward's body is. The signature it was sent with is part of the
+  body, so none is appended again. It has a draft slot of its own per letter
+  (`mail_resend_<user>_<key>.draft`), apart from a reply to or a forward of
+  it. The failed row is not changed: it keeps its status and reason, and
+  opening it still clears its notice flag (#806).
 
 ### 6.5 Communities
 

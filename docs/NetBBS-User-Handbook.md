@@ -270,7 +270,20 @@ reads as plain text.
 
 When mail bounces or expires you are told at the main menu, once, even if it
 happened while you were away. Opening the message in Sent counts as being
-told. To try again, send it anew.
+told. To try again, open it in Sent and press **Re[s]end**: the compose
+screen opens with the same recipient, subject and text, ready to send as a
+new letter, and the old one stays in Sent as it was. If the reason it failed
+still applies on this side -- for example your SysOp has since stopped mail
+to that node -- you are told so when you press the key or at Send. Resend is
+only offered for mail that bounced or expired: a letter that arrived, or may
+still arrive, would reach its reader twice.
+
+To follow up on a letter you sent, open it in Sent and press **[R]eply**.
+It writes to the letter's recipient, with `Re:` in front of the subject and
+your letter quoted, as a reply to mail you received would. You can't reply to
+a letter whose recipient's account has been deleted. After either key sends
+a letter, you are back on the Sent list, with the new letter at the top and
+the result above the prompt.
 
 To stop someone's mail, open a letter from them and press **Bloc[k]
 sender**; the same key, now **Unbloc[k] sender**, takes it back. It works
