@@ -2282,11 +2282,12 @@ Recipient mailboxes are bounded (`MAX_MAIL_PER_RECIPIENT`, 500). When full:
 
 - the oldest already-read message may be evicted to make room;
 - unread mail is never silently discarded;
+- a kept message (below, issue #828) is never evicted, read or not;
 - if no safe eviction exists, delivery fails explicitly.
 
 The owner can see the cap coming (issue #818): the Inbox header counts
 "N of 500", and from 450 (nine in ten) the Inbox says what happens at the
-cap; a mailbox full of unread mail says new mail is turned away. Each
+cap; a mailbox full of unread and kept mail says new mail is turned away. Each
 eviction is counted (`mail_eviction_notices`), and the owner is told once,
 at their next main menu, how many old read messages were removed -- a count,
 never which ones, since the notice outlives them. A warning at the main menu
@@ -2394,7 +2395,7 @@ existing "no local sender" shape. Mail from before the change that a
 moderator's account sent stays theirs.
 
 **SysOp tools, and what they do not show (issue #820).** Operations → Mail
-shows how full each inbox is -- letters, unread, read and system notices per
+shows how full each inbox is -- letters, unread, read, kept (#828) and system notices per
 account, against `MAX_MAIL_PER_RECIPIENT`, fullest first -- and the Link mail
 this node refused (§12.4). Both show counts, account names, senders and reasons
 only: no SysOp screen shows a letter's subject or body, and a refused letter's
@@ -2474,7 +2475,8 @@ The list:
   `[B]ack` returns to the Inbox), `[C]ompose`, and `[D]raft` with the kept
   letter's notice (issue #814).
 - `[O]rder` switches the Inbox between newest first and unread first
-  (newest first within each). It is a per-caller preference (`mail_order`).
+  (newest first within each), and since #828 by conversation (below). It is
+  a per-caller preference (`mail_order`).
 - `[F]ind` narrows the folder to mail with a word in the name or the
   subject, as the row shows them. The picker's `[S]earch` said "by name"
   but matched the subject, `[NEW] ` prefix included, so "new" matched every
@@ -2487,6 +2489,51 @@ The list:
 - Flags a sender whose node's identity changed (`_link_mail_identity_warning`)
   with `!` before the name, and says what it means above the list. The
   message view carries the full caution.
+
+**Managing a mailbox** (issue #828). The list manages letters in bulk, keeps
+letters from the cap, and lists by conversation:
+- `[M]ark` (or Space) toggles a mark on the highlighted letter and moves the
+  cursor down, so a run is marked key by key. The mark is a `*` in the column
+  after the cursor's (before the number in prose rows), and the header counts
+  the marks. Marks belong to the folder on screen and go when it changes.
+- `De[l]ete` deletes the marked letters, or with none marked the highlighted
+  one, behind one yes/no that names the count (or the subject). `Delete [r]ead`
+  in the Inbox deletes every read letter there, behind one yes/no with the
+  count; unread and kept mail stays. Both delete the caller's own side only,
+  with the one-letter rule (`netbbs.mail.delete_letters`): a letter whose
+  other side is gone is removed with its `mail_search` entry (§6.6), one the
+  other side still has is marked deleted.
+- **Kept** is a third folder beside the Inbox and Sent (`[K]ept` from the
+  Inbox, `[B]ack` returns). A folder rather than a filter: kept mail is mail
+  the caller has dealt with and wants out of the way but safe, and a filter
+  would leave it in the Inbox. `K[e]ep` in the Inbox, on the list (marked or
+  highlighted) or in a letter's view, moves letters there;
+  `Mov[e] to Inbox` moves them back. Nothing is lost either way, so nothing
+  is asked. `mail_messages.kept_at` records it; it is the recipient's alone,
+  since Sent is never evicted.
+- A kept letter is never evicted by the cap (`make_room` skips it) but still
+  counts toward `MAX_MAIL_PER_RECIPIENT`. Counting it was chosen over exempting
+  it: an exempt folder would let a mailbox grow without bound (§14), one kept
+  letter at a time. So the Inbox header's "N of 500" counts the Inbox and
+  Kept together and says how many are in Kept, a mailbox full of unread and
+  kept mail refuses new mail (`mailbox_full`), and the warnings say "unread
+  and kept mail is never removed". The SysOp's Mailboxes screen has a Kept
+  column.
+- `[O]rder` cycles newest first, unread first and by conversation (Sent:
+  newest first and by conversation), one per-caller preference. Replies record
+  no parent letter, so a conversation is the correspondent (the sender in the
+  Inbox and Kept, the recipient in Sent; the system is its own) plus the
+  subject with every leading `Re:`, `Fwd:` or `Fw:` removed -- the prefixes
+  `netbbs.quoting` writes -- compared case-insensitively
+  (`netbbs.mail.thread_key`). Conversations are listed by their newest letter,
+  and each one's later rows are indented under it. A reply-to id would group
+  a renamed subject too; it was left out as not worth a schema change and a
+  Link payload field while subjects carry the conversation.
+- At the 40x12 floor the action bar takes four rows, so below 16 rows the
+  notes above the list share one row, the most urgent (the cap's, then a kept
+  letter's, then the identity note); what the others say is on screen in brief
+  (the `[D]raft` key, "N of 500", a row's `!`). Below 60 columns the header
+  uses short counts and leaves out the order and the Kept count.
 
 A received message's view names its recipient: `From:`, `To:` (the reader)
 and `Date:`, as a sent message's view has `To:`.

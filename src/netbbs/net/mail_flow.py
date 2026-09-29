@@ -41,7 +41,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from netbbs.auth.users import (
@@ -77,6 +77,7 @@ from netbbs.mail import (
     blocks_local_sender,
     delete_for_recipient,
     delete_for_sender,
+    delete_letters,
     get_mail,
     link_address_display_label,
     list_inbox,
@@ -91,7 +92,9 @@ from netbbs.mail import (
     send_mail,
     sender_display_label,
     sender_unblockable_reason,
+    set_kept,
     split_link_address,
+    thread_key,
     unblock,
     unblock_link_sender,
     unblock_local_sender,
@@ -273,28 +276,56 @@ _COMFORTABLE_LIST_ROWS = 6
 _ORDER_PREFERENCE = "mail_order"
 _ORDER_NEWEST = "newest"
 _ORDER_UNREAD = "unread"
+# Grouped by conversation (issue #828): `netbbs.mail.thread_key`.
+_ORDER_THREADS = "threads"
+_ORDERS = (_ORDER_NEWEST, _ORDER_UNREAD, _ORDER_THREADS)
+_ORDER_LABELS = {_ORDER_UNREAD: "unread first", _ORDER_THREADS: "by conversation"}
+_ORDER_ANNOUNCEMENTS = {
+    _ORDER_NEWEST: "Newest mail first.",
+    _ORDER_UNREAD: "Unread mail first.",
+    _ORDER_THREADS: "Mail by conversation, newest conversation first.",
+}
+
+# The three folders (issue #828 added Kept): the Inbox and Kept are the two
+# halves of what was sent to the caller, Sent is what they sent.
+_INBOX = "inbox"
+_SENT = "sent"
+_KEPT = "kept"
+_FOLDER_TITLES = {_INBOX: "Inbox", _SENT: "Sent", _KEPT: "Kept"}
+# Put in the list's second column on a marked row (issue #828).
+_MARK = "*"
+# A later letter of the same conversation, listed by conversation, is
+# indented under the conversation's newest one.
+_THREAD_INDENT = "  "
 
 _EMPTY_INBOX = "Your inbox is empty. New mail will appear here."
 _EMPTY_SENT = "You haven't sent any mail. [C]ompose writes a new message."
-def mailbox_capacity_note(total: int, unread: int) -> tuple[str, str] | None:
-    """What the Inbox says about its cap (issue #818), and its tone, once it
-    holds `MAILBOX_NEARLY_FULL` messages; `None` below that."""
-    if total >= MAX_MAIL_PER_RECIPIENT and unread >= total:
+_EMPTY_KEPT = (
+    "Nothing kept. K[e]ep in the Inbox moves a letter here, where the mailbox cap never removes it."
+)
+def mailbox_capacity_note(total: int, unread: int, *, kept_read: int = 0) -> tuple[str, str] | None:
+    """What the Inbox and Kept say about the cap (issues #818, #828), and
+    its tone, once the mailbox holds `MAILBOX_NEARLY_FULL` messages; `None`
+    below that. `total` counts both folders; `kept_read` is the kept letters
+    already read, which the cap cannot evict either."""
+    if total >= MAX_MAIL_PER_RECIPIENT and unread + kept_read >= total:
+        what = "unread and kept mail" if kept_read else "unread mail"
+        undo = "read, delete or stop keeping" if kept_read else "read or delete"
         return (
-            f"Your mailbox is full of unread mail ({MAX_MAIL_PER_RECIPIENT} messages): new mail is "
-            "turned away until you read or delete some.",
+            f"Your mailbox is full of {what} ({MAX_MAIL_PER_RECIPIENT} messages): new mail is "
+            f"turned away until you {undo} some.",
             "error",
         )
     if total >= MAX_MAIL_PER_RECIPIENT:
         return (
             f"Your mailbox is full ({MAX_MAIL_PER_RECIPIENT} messages): each new message removes your "
-            "oldest read one. Delete what you don't need to keep it.",
+            "oldest read one. Delete what you don't need, and move what you want to keep to Kept.",
             "warning",
         )
     if total >= MAILBOX_NEARLY_FULL:
         return (
             f"Your mailbox is nearly full: at {MAX_MAIL_PER_RECIPIENT} messages, each new one removes "
-            "your oldest read message. Unread mail is never removed.",
+            "your oldest read message. Unread and kept mail is never removed.",
             "warning",
         )
     return None
@@ -312,14 +343,25 @@ _LIST_HELP = [
     "C            write a new message",
     "D            resume or delete your unfinished letter",
     "S            your sent mail; B there comes back to the Inbox",
+    "K            your kept mail; B there comes back to the Inbox",
     "U            mark the highlighted message unread, or read",
-    "O            Inbox order: newest first, or unread first",
+    "M, Space     mark the highlighted message, or unmark it",
+    "L            delete the marked messages, or the highlighted one",
+    "E            keep the marked (or highlighted) messages, or in",
+    "             Kept, move them back to the Inbox",
+    "R            delete every read message in the Inbox",
+    "O            order: newest first, unread first (not in Sent),",
+    "             or by conversation",
     "F            show only mail with a word in its name or subject",
     "Ctrl-L       redraw the list",
     "B            back to the main menu",
     "",
     "\"new\" marks mail you have not opened. Opening a message marks",
     "it read; [U]nread in the message or on the list takes that back.",
+    "* marks a message for Delete or Keep. Kept mail is never removed",
+    "to make room, but still counts toward the mailbox's size.",
+    "By conversation groups mail with one person under one subject,",
+    "Re: and Fwd: aside, newest conversation first.",
     "Sent shows where mail to another BBS stands under Delivery.",
     "Mail from System is a notice from this BBS; it has no Reply.",
 ]
@@ -327,7 +369,7 @@ _LIST_HELP = [
 
 def _mail_order(db: Database, user: User) -> str:
     stored = get_user_preference(db, user, _ORDER_PREFERENCE, default=_ORDER_NEWEST)
-    return _ORDER_UNREAD if stored == _ORDER_UNREAD else _ORDER_NEWEST
+    return stored if stored in _ORDERS else _ORDER_NEWEST
 
 
 def _set_mail_order(db: Database, user: User, order: str) -> None:
@@ -343,6 +385,13 @@ class _MailRow:
     subject: str
     when: str
     identity_changed: bool = False
+    # Listed by conversation, a later letter of the conversation above it
+    # (issue #828): drawn indented.
+    continues: bool = False
+
+    @property
+    def shown_subject(self) -> str:
+        return _THREAD_INDENT + self.subject if self.continues else self.subject
 
     @property
     def status(self) -> str | None:
@@ -442,13 +491,17 @@ def _mail_list_rows(
     show_status: bool,
     accent: int | tuple[int, int, int],
     ellipsis: str = "...",
+    marked: frozenset[int] | set[int] = frozenset(),
 ) -> list[str]:
     """One styled row per message, fitted to `width` in display columns.
     `first_number` is the number the first row shows; the highlighted row
     (an index into `rows`) is drawn in reverse video, the way the board
-    list draws its cursor."""
+    list draws its cursor. A row whose message id is in `marked` (issue
+    #828) shows the mark in the column after the cursor's."""
     lines: list[str] = []
+    styled_mark = colored(_MARK, fg_color=WARNING_COLOR, bold=True)
     for index, row in enumerate(rows):
+        is_marked = row.message.id in marked
         number = f"{first_number + index:>{number_width}}"
         unread = not sent and not row.message.is_read
         marker = _NEW_MARKER if unread else ""
@@ -459,13 +512,15 @@ def _mail_list_rows(
             tag = marker or status
             # The name takes at most half the row, so the subject shows.
             name = truncate_to_width(_name_text(row), max(8, (width - 1) // 2), ellipsis=ellipsis)
+            lead = _MARK if is_marked else ""
             plain = truncate_to_width(
-                f"{number} {tag + ' ' if tag else ''}{name}: {row.subject}", max(1, width - 1), ellipsis=ellipsis,
+                f"{lead}{number} {tag + ' ' if tag else ''}{name}: {row.shown_subject}", max(1, width - 1),
+                ellipsis=ellipsis,
             )
             if index == highlighted:
                 lines.append(colored(plain, reverse=True))
                 continue
-            rest = plain[len(number) + 1:]
+            rest = plain[len(lead) + len(number) + 1:]
             styled_tag = ""
             if tag and rest.startswith(tag):
                 styled_tag = colored(
@@ -473,11 +528,13 @@ def _mail_list_rows(
                     bold=unread,
                 )
                 rest = rest[len(tag):]
-            lines.append(colored(number, fg_color=accent) + " " + styled_tag + rest)
+            lines.append(
+                (styled_mark if is_marked else "") + colored(number, fg_color=accent) + " " + styled_tag + rest
+            )
             continue
         name_width, subject_width, date_width = widths
         name_cell = _fit(_name_text(row), name_width, ellipsis)
-        subject_cell = _fit(row.subject, subject_width, ellipsis)
+        subject_cell = _fit(row.shown_subject, subject_width, ellipsis)
         date_cell = _fit(row.when, date_width, ellipsis)
         if index == highlighted:
             cells = [number]
@@ -487,7 +544,7 @@ def _mail_list_rows(
             if show_status:
                 cells.append(_pad(status, _STATUS_WIDTH))
             cells.append(date_cell)
-            lines.append(colored("> " + "  ".join(cells), reverse=True))
+            lines.append(colored(">" + (_MARK if is_marked else " ") + "  ".join(cells), reverse=True))
             continue
         styled = [colored(number, fg_color=accent)]
         if not sent:
@@ -503,7 +560,7 @@ def _mail_list_rows(
                 if status else " " * _STATUS_WIDTH
             )
         styled.append(colored(date_cell, fg_color=METADATA_COLOR))
-        lines.append("  " + "  ".join(styled))
+        lines.append(" " + (styled_mark if is_marked else " ") + "  ".join(styled))
     return lines
 
 
@@ -558,6 +615,21 @@ def _matches(row: _MailRow, query: str) -> bool:
     return needle in row.name.casefold() or needle in row.subject.casefold()
 
 
+def _by_conversation(rows: list[_MailRow], *, sent: bool) -> list[_MailRow]:
+    """`rows` (newest first) grouped by conversation (issue #828,
+    `netbbs.mail.thread_key`): the conversation with the newest letter
+    first, and within each its letters newest first, every one after the
+    first marked as continuing it."""
+    groups: dict[tuple, list[_MailRow]] = {}
+    for row in rows:
+        groups.setdefault(thread_key(row.message, sent=sent), []).append(row)
+    return [
+        replace(row, continues=index > 0)
+        for group in groups.values()
+        for index, row in enumerate(group)
+    ]
+
+
 async def _read_list_key(session: Session) -> tuple[EditorKey, bool]:
     """A structured key, so Up/Down/Enter arrive as keys, with the plain
     `read_key` fallback lightweight sessions need. The flag says whether
@@ -570,6 +642,10 @@ async def _read_list_key(session: Session) -> tuple[EditorKey, bool]:
         except NotImplementedError:
             pass
     return EditorKey(EditorKeyKind.CHAR, char=await session.read_key()), True
+
+
+def _count(n: int, noun: str) -> str:
+    return f"{n} {noun}{'' if n == 1 else 's'}"
 
 
 def _count_rows(text: str, width: int) -> int:
@@ -589,10 +665,15 @@ class _MailboxScreen:
         self.user = user
         self.link_context = link_context
         self.choice_prompt = choice_prompt
-        self.sent = False
+        self.folder = _INBOX
         self.order = _ORDER_NEWEST
         self.query: str | None = None
+        # The folder's letters, and for the Inbox and Kept, every letter
+        # the caller received: the two share the cap (issue #828).
         self.all_rows: list[_MailRow] = []
+        self.received_rows: list[_MailRow] = []
+        # Ids of the letters marked in this folder (issue #828).
+        self.marked: set[int] = set()
         self.rows: list[_MailRow] = []
         self.highlighted: int | None = None
         # The page on screen at the last render: its first row, which the
@@ -607,6 +688,30 @@ class _MailboxScreen:
         # then shift under the caller (review on #877).
         self.top = 0
         self.has_draft = False
+
+    @property
+    def sent(self) -> bool:
+        return self.folder == _SENT
+
+    @property
+    def kept(self) -> bool:
+        return self.folder == _KEPT
+
+    def _effective_order(self) -> str:
+        """The order the folder is listed in: Sent has no unread mail, so
+        unread first is newest first there."""
+        if self.sent and self.order == _ORDER_UNREAD:
+            return _ORDER_NEWEST
+        return self.order
+
+    def _next_order(self) -> str:
+        """What `[O]rder` switches to: newest first, unread first, by
+        conversation and round again; in Sent, newest first and by
+        conversation."""
+        current = self._effective_order()
+        if self.sent:
+            return _ORDER_NEWEST if current == _ORDER_THREADS else _ORDER_THREADS
+        return _ORDERS[(_ORDERS.index(current) + 1) % len(_ORDERS)]
 
     async def _settings(self) -> None:
         lane, user = self.lane, self.user
@@ -703,15 +808,34 @@ class _MailboxScreen:
             await self._draft()
             await self._reload()
             await self._render()
-        elif char == "s" and not self.sent:
+        elif char == "s" and self.folder == _INBOX:
             await moved_on()
-            await self._switch(sent=True)
+            await self._switch(_SENT)
+        elif char == "k" and self.folder == _INBOX:
+            await moved_on()
+            await self._switch(_KEPT)
         elif char == "b":
             await moved_on()
-            if self.sent:
-                await self._switch(sent=False)
+            if self.folder != _INBOX:
+                await self._switch(_INBOX)
                 return False
             return True
+        elif char in ("m", " ") and self.highlighted is not None:
+            await moved_on()
+            self._toggle_mark()
+            await self._render()
+        elif char == "l" and self.highlighted is not None:
+            await moved_on()
+            await self._delete()
+            await self._render()
+        elif char == "e" and not self.sent and self.highlighted is not None:
+            await moved_on()
+            await self._keep()
+            await self._render()
+        elif char == "r" and self._read_count():
+            await moved_on()
+            await self._delete_read()
+            await self._render()
         elif char == "u" and not self.sent and self.highlighted is not None:
             await moved_on()
             row = self.rows[self.highlighted]
@@ -723,15 +847,11 @@ class _MailboxScreen:
                 announce(session, "Marked read.", tone="muted")
             await self._reload()
             await self._render()
-        elif char == "o" and not self.sent and self.all_rows:
+        elif char == "o" and self.all_rows:
             await moved_on()
-            self.order = _ORDER_NEWEST if self.order == _ORDER_UNREAD else _ORDER_UNREAD
+            self.order = self._next_order()
             await self.lane.run(_set_mail_order, self.user, self.order)
-            announce(
-                session,
-                "Unread mail first." if self.order == _ORDER_UNREAD else "Newest mail first.",
-                tone="muted",
-            )
+            announce(session, _ORDER_ANNOUNCEMENTS[self.order], tone="muted")
             await self._reload()
             await self._render()
         elif char == "f" and self.all_rows:
@@ -755,13 +875,25 @@ class _MailboxScreen:
         if was_on is None and self.highlighted is not None and self.highlighted < len(self.rows):
             was_on = self.rows[self.highlighted].message.id
         was_index = self.highlighted
-        self.all_rows = await _load_mail_rows(self.lane, self.user, sent=self.sent)
+        loaded = await _load_mail_rows(self.lane, self.user, sent=self.sent)
+        if self.sent:
+            self.received_rows = []
+            self.all_rows = loaded
+        else:
+            self.received_rows = loaded
+            self.all_rows = [row for row in loaded if (row.message.kept_at is not None) == self.kept]
+        # A mark on a letter no longer in this folder (deleted, kept,
+        # moved back) goes with it.
+        self.marked &= {row.message.id for row in self.all_rows}
         rows = self.all_rows
-        if not self.sent and self.order == _ORDER_UNREAD:
-            # Stable: newest first within the unread and the read.
-            rows = sorted(rows, key=lambda row: row.message.is_read)
         if self.query:
             rows = [row for row in rows if _matches(row, self.query)]
+        order = self._effective_order()
+        if order == _ORDER_UNREAD:
+            # Stable: newest first within the unread and the read.
+            rows = sorted(rows, key=lambda row: row.message.is_read)
+        elif order == _ORDER_THREADS:
+            rows = _by_conversation(rows, sent=self.sent)
         self.rows = rows
         # Offered only for a letter that loads: [D]raft on one that does
         # not would do nothing (review on #877).
@@ -774,13 +906,92 @@ class _MailboxScreen:
             index = min(was_index, len(rows) - 1) if was_index is not None else 0
         self.highlighted = index
 
-    async def _switch(self, *, sent: bool) -> None:
-        self.sent = sent
+    async def _switch(self, folder: str) -> None:
+        self.folder = folder
         self.query = None
         self.highlighted = None
         self.top = 0
+        self.marked = set()
         await self._reload()
         await self._render()
+
+    # -- managing letters (issue #828) ----------------------------------------
+
+    def _toggle_mark(self) -> None:
+        """[M]ark (or Space): mark the highlighted letter, or unmark it, and
+        move on to the next, so a run of letters is marked key by key."""
+        assert self.highlighted is not None
+        mail_id = self.rows[self.highlighted].message.id
+        if mail_id in self.marked:
+            self.marked.discard(mail_id)
+        else:
+            self.marked.add(mail_id)
+        if self.highlighted + 1 < len(self.rows):
+            self.highlighted += 1
+
+    def _targets(self) -> list[_MailRow]:
+        """What Delete and Keep act on: the marked letters, or with none
+        marked, the highlighted one."""
+        if self.marked:
+            return [row for row in self.all_rows if row.message.id in self.marked]
+        assert self.highlighted is not None
+        return [self.rows[self.highlighted]]
+
+    def _read_count(self) -> int:
+        """How many letters `Delete [r]ead` would delete: the read ones in
+        the Inbox. Kept mail is kept, and unread mail has not been seen."""
+        if self.folder != _INBOX:
+            return 0
+        return sum(1 for row in self.all_rows if row.message.is_read)
+
+    async def _delete(self) -> None:
+        """De[l]ete: the marked letters, or the highlighted one, after one
+        confirmation. Each goes from the caller's own side only
+        (`netbbs.mail.delete_letters`)."""
+        targets = self._targets()
+        if len(targets) == 1 and not self.marked:
+            subject = truncate_to_width(targets[0].subject, 40, ellipsis="…" if self.unicode_style else "...")
+            question = f"Delete \"{subject}\"?"
+        else:
+            question = f"Delete the {_count(len(targets), 'marked message')}?"
+        if not await prompt_yes_no(self.session, question, default=False):
+            return
+        deleted = await self.lane.run(
+            delete_letters, self.user, [row.message.id for row in targets], sent=self.sent,
+        )
+        self.marked = set()
+        announce(self.session, f"Deleted {_count(deleted, 'message')}.")
+        await self._reload()
+
+    async def _delete_read(self) -> None:
+        """Delete [r]ead: every read letter in the Inbox, after one
+        confirmation that says how many. Unread mail and Kept stay."""
+        count = self._read_count()
+        if not await prompt_yes_no(
+            self.session,
+            f"Delete all {_count(count, 'read message')} in your Inbox? Unread and kept mail stays.",
+            default=False,
+        ):
+            return
+        # The letters the count was of: one read since, elsewhere, stays.
+        ids = [row.message.id for row in self.all_rows if row.message.is_read]
+        deleted = await self.lane.run(delete_letters, self.user, ids, sent=False)
+        self.marked = set()
+        announce(self.session, f"Deleted {_count(deleted, 'read message')}.")
+        await self._reload()
+
+    async def _keep(self) -> None:
+        """K[e]ep in the Inbox moves the marked letters, or the highlighted
+        one, to Kept; Mov[e] to Inbox in Kept moves them back. Nothing is
+        lost either way, so nothing is asked."""
+        targets = self._targets()
+        moved = await self.lane.run(
+            set_kept, self.user, [row.message.id for row in targets], kept=not self.kept,
+        )
+        self.marked = set()
+        where = "back to the Inbox" if self.kept else "to Kept"
+        announce(self.session, f"Moved {_count(moved, 'message')} {where}.", tone="muted")
+        await self._reload()
 
     def _turn_page(self, forward: bool) -> bool:
         """Move the highlight to the first row of the page after or before
@@ -865,29 +1076,60 @@ class _MailboxScreen:
     def _subtitle(self) -> str:
         separator = colored(" · " if self.unicode_style else " - ", fg_color=MUTED_COLOR)
         total = len(self.all_rows)
+        # Below the table width the header keeps to one row where it can
+        # (issue #828): short counts, and what the list itself shows -- its
+        # order, how much is in Kept -- left out.
+        narrow = self.session.terminal_width < _TABLE_MIN_WIDTH
         parts: list[str] = []
         if self.sent:
-            parts.append(colored(f"{total} sent message{'s' if total != 1 else ''}", fg_color=VALUE_COLOR))
+            parts.append(colored(_count(total, "sent message") if not narrow else f"{total} sent", fg_color=VALUE_COLOR))
         else:
             unread = sum(1 for row in self.all_rows if not row.message.is_read)
-            parts.append(
-                colored(f"{unread} unread message{'s' if unread != 1 else ''}", fg_color=WARNING_COLOR)
-                if unread else colored("Inbox caught up", fg_color=SUCCESS_COLOR)
-            )
-            # Counted against the cap (issue #818): the whole Inbox, read or
-            # not, whatever [F]ind is showing.
+            if self.kept:
+                parts.append(colored(_count(total, "kept message") if not narrow else f"{total} kept", fg_color=VALUE_COLOR))
+                if unread:
+                    parts.append(colored(f"{unread} unread", fg_color=WARNING_COLOR))
+            else:
+                parts.append(
+                    colored(_count(unread, "unread message") if not narrow else f"{unread} unread", fg_color=WARNING_COLOR)
+                    if unread else colored("Inbox caught up", fg_color=SUCCESS_COLOR)
+                )
+            # Counted against the cap (issue #818): everything received,
+            # Inbox and Kept (issue #828), read or not, whatever [F]ind is
+            # showing.
+            received = len(self.received_rows)
             parts.append(colored(
-                f"{total} of {MAX_MAIL_PER_RECIPIENT}",
-                fg_color=WARNING_COLOR if total >= MAILBOX_NEARLY_FULL else VALUE_COLOR,
+                f"{received} of {MAX_MAIL_PER_RECIPIENT}",
+                fg_color=WARNING_COLOR if received >= MAILBOX_NEARLY_FULL else VALUE_COLOR,
             ))
-            if self.order == _ORDER_UNREAD:
-                parts.append(colored("unread first", fg_color=MUTED_COLOR))
+            if not self.kept:
+                kept = [row.message for row in self.received_rows if row.message.kept_at is not None]
+                kept_unread = sum(1 for message in kept if not message.is_read)
+                if kept_unread:
+                    # The main menu counts these as unread too (review on
+                    # #908): said at any width, or the Inbox would read
+                    # "caught up" while the main menu says otherwise.
+                    parts.append(colored(f"{kept_unread} unread in Kept", fg_color=WARNING_COLOR))
+                elif kept and not narrow:
+                    parts.append(colored(f"{len(kept)} in Kept", fg_color=MUTED_COLOR))
+        order = self._effective_order()
+        if order in _ORDER_LABELS and not narrow:
+            parts.append(colored(_ORDER_LABELS[order], fg_color=MUTED_COLOR))
+        if self.marked:
+            parts.append(colored(f"{len(self.marked)} marked", fg_color=WARNING_COLOR, bold=True))
         if self.query:
             parts.append(colored(f"matching \"{sanitize_text(self.query)}\"", fg_color=MUTED_COLOR))
         return separator.join(parts)
 
     def _options(self, *, row_count: int, pages: tuple[bool, bool], measuring: bool = False) -> list[MenuEntry]:
+        """The folder's action bar. `measuring` asks for the busiest bar the
+        folder can draw -- every entry that can appear, each with its longer
+        label -- which the page budget is measured against."""
         has_next, has_previous = pages
+        highlighted = (
+            self.rows[self.highlighted]
+            if self.highlighted is not None and self.highlighted < len(self.rows) else None
+        )
         options: list[MenuEntry] = []
         if row_count:
             keys = "1" if row_count == 1 else f"1-{min(row_count, 9)}"
@@ -899,26 +1141,49 @@ class _MailboxScreen:
         options.append(MenuEntry(label=menu_key("C", "ompose"), brief="Write a new message"))
         if self.has_draft:
             options.append(MenuEntry(label=menu_key("D", "raft"), brief="Resume or delete your unfinished letter"))
-        if not self.sent:
+        if self.folder == _INBOX:
             options.append(MenuEntry(label=menu_key("S", "ent"), brief="Review mail you've sent"))
-            if row_count:
-                highlighted = self.rows[self.highlighted] if self.highlighted is not None else None
+            options.append(MenuEntry(label=menu_key("K", "ept"), brief="Mail you keep from the mailbox cap"))
+        if row_count:
+            if not measuring and (highlighted is None or highlighted.message.id not in self.marked):
+                options.append(MenuEntry(label=menu_key("M", "ark"), brief="Mark the highlighted message"))
+            else:
+                # Un[m]ark is the longer label, which the page budget measures.
+                options.append(MenuEntry(label=menu_key("m", "ark", prefix="Un"), brief="Unmark it"))
+            options.append(MenuEntry(
+                label=menu_key("l", "ete", prefix="De"),
+                brief="Delete the marked messages" if self.marked else "Delete the highlighted message",
+            ))
+            if self.folder == _INBOX:
+                options.append(MenuEntry(
+                    label=menu_key("e", "ep", prefix="K"), brief="Move to Kept, safe from the mailbox cap",
+                ))
+            elif self.kept:
+                options.append(MenuEntry(label=menu_key("e", " to Inbox", prefix="Mov"), brief="Move back to the Inbox"))
+            if not self.sent:
                 if measuring or highlighted is None or highlighted.message.is_read:
                     # The longer label, which the page budget measures.
                     options.append(MenuEntry(label=menu_key("U", "nread"), brief="Mark the highlighted message unread"))
                 else:
                     options.append(MenuEntry(label=menu_key("U", " Read"), brief="Mark the highlighted message read"))
-            if self.all_rows:
-                options.append(MenuEntry(
-                    label=menu_key("O", "rder"),
-                    brief="Newest first" if self.order == _ORDER_UNREAD else "Unread mail first",
-                ))
+        if self.folder == _INBOX and (measuring or self._read_count()):
+            options.append(MenuEntry(
+                label=menu_key("r", "ead", prefix="Delete "), brief="Delete every read message in the Inbox",
+            ))
         if self.all_rows:
+            options.append(MenuEntry(
+                label=menu_key("O", "rder"),
+                brief={
+                    _ORDER_NEWEST: "Newest first", _ORDER_UNREAD: "Unread mail first",
+                    _ORDER_THREADS: "By conversation",
+                }[self._next_order()],
+            ))
             options.append(MenuEntry(
                 label=menu_key("F", "ind"), brief=f"Find by {'recipient' if self.sent else 'sender'} or subject",
             ))
         options.append(MenuEntry(
-            label=menu_key("B", "ack"), brief="Back to the Inbox" if self.sent else "Return to the main menu",
+            label=menu_key("B", "ack"),
+            brief="Return to the main menu" if self.folder == _INBOX else "Back to the Inbox",
         ))
         return options
 
@@ -929,7 +1194,7 @@ class _MailboxScreen:
         session = self.session
         width = session.terminal_width
         header = screen_title(
-            "Sent" if self.sent else "Inbox",
+            _FOLDER_TITLES[self.folder],
             breadcrumb=(session.node_display_name, "Mail"),
             subtitle=self._subtitle(),
             width=width,
@@ -938,28 +1203,37 @@ class _MailboxScreen:
             header_color=self.header_color,
             node_name_gradient=session.node_name_gradient,
         )
-        notes: list[str] = []
-
-        def note(text: str, color: int) -> None:
-            # A short terminal gives each note one row: the list is what
-            # the caller came for, and the 40x12 floor has three rows for it.
-            if not self._roomy():
-                text = truncate_to_width(text, max(1, width - 1), ellipsis="…" if self.unicode_style else "...")
-            notes.extend(colored(row, fg_color=color) for row in wrap_to_width(text, max(1, width - 1)))
-
+        # (urgency, text, color): the lower, the more urgent.
+        pending: list[tuple[int, str, int]] = []
         draft = _load_letter_draft(_letter_draft_path(self.lane, self.user)) if self.has_draft else None
         if draft is not None:
             # Said on the mail screen, not asked on the way in (issue #814).
-            note(_letter_draft_notice(draft), MUTED_COLOR)
+            pending.append((1, _letter_draft_notice(draft), MUTED_COLOR))
         if not self.sent:
+            # The cap counts the Inbox and Kept together (issue #828).
+            received = [row.message for row in self.received_rows]
             capacity = mailbox_capacity_note(
-                len(self.all_rows), sum(1 for row in self.all_rows if not row.message.is_read),
+                len(received), sum(1 for message in received if not message.is_read),
+                kept_read=sum(1 for message in received if message.is_read and message.kept_at is not None),
             )
             if capacity is not None:
                 text, tone = capacity
-                note(text, ERROR_COLOR if tone == "error" else WARNING_COLOR)
+                pending.append((0, text, ERROR_COLOR if tone == "error" else WARNING_COLOR))
         if not self.sent and any(row.identity_changed for row in self.all_rows):
-            note(_IDENTITY_NOTE, WARNING_COLOR)
+            pending.append((2, _IDENTITY_NOTE, WARNING_COLOR))
+        notes: list[str] = []
+        if not self._roomy() and pending:
+            # A short terminal gives the notes one row, the most urgent
+            # one's: the list is what the caller came for, and the 40x12
+            # floor has three rows for it under a bar that takes four. What
+            # the others say is still on screen in brief -- the [D]raft key,
+            # the "N of 500" count, a row's "!".
+            _urgency, text, color = min(pending, key=lambda item: item[0])
+            text = truncate_to_width(text, max(1, width - 1), ellipsis="…" if self.unicode_style else "...")
+            notes.append(colored(text, fg_color=color))
+        else:
+            for _urgency, text, color in pending:
+                notes.extend(colored(row, fg_color=color) for row in wrap_to_width(text, max(1, width - 1)))
         above = "\r\n".join(["", header, *notes])
         options = self._options(row_count=row_count, pages=pages, measuring=measuring)
         # Descriptions double the action bar. Where they would leave the
@@ -1034,7 +1308,7 @@ class _MailboxScreen:
                 page_rows, width=width, first_number=1, number_width=number_width, widths=widths,
                 highlighted=self.highlighted - top if self.highlighted is not None else None,
                 sent=self.sent, show_status=show_status, accent=self.accent,
-                ellipsis="…" if self.unicode_style else "...",
+                ellipsis="…" if self.unicode_style else "...", marked=self.marked,
             ))
             if roomy:
                 lines.append(rule)
@@ -1042,7 +1316,7 @@ class _MailboxScreen:
             if self.query:
                 empty = f"Nothing here matches \"{sanitize_text(self.query)}\". [F]ind with an empty line shows all."
             else:
-                empty = _EMPTY_SENT if self.sent else _EMPTY_INBOX
+                empty = {_INBOX: _EMPTY_INBOX, _SENT: _EMPTY_SENT, _KEPT: _EMPTY_KEPT}[self.folder]
             lines.append(colored(empty, fg_color=MUTED_COLOR))
         if roomy:
             lines.append("")
@@ -1066,7 +1340,7 @@ async def _message_view(
     """The title, the header rows (From or To, Date, any identity warning)
     and the body rows of one message, for `show_detail` to draw a page at a
     time (issue #679: a long message used to scroll its own header away)."""
-    mailbox = "Sent" if to_label is not None else "Inbox"
+    mailbox = "Sent" if to_label is not None else ("Kept" if message.kept_at is not None else "Inbox")
     title = screen_title(
         sanitize_text(message.subject),
         breadcrumb=(session.node_display_name, "Mail", mailbox),
@@ -1228,6 +1502,9 @@ async def _show_inbox_message(
             # to someone -- the SysOp, say -- harms no one.
             ("f", menu_key("F", "orward")),
             ("u", menu_key("U", "nread")),
+            # Issue #828: to the Kept folder, which the cap never evicts
+            # from, and back.
+            ("e", menu_key("e", " to Inbox", prefix="Mov") if message.kept_at else menu_key("e", "ep", prefix="K")),
             ("d", menu_key("D", "elete")),
         ]
         if block_target is not None:
@@ -1245,6 +1522,11 @@ async def _show_inbox_message(
         if choice == "f":
             await _forward_message(session, lane, user, message, sent=False, link_context=link_context)
             continue
+        if choice == "e":
+            keep = message.kept_at is None
+            await lane.run(set_kept, user, [message.id], kept=keep)
+            announce(session, "Moved to Kept." if keep else "Moved back to the Inbox.", tone="muted")
+            return
         if choice == "u":
             # Opening a message is what marks it read; this takes that back
             # (issue #810), and the list shows it "new" again.

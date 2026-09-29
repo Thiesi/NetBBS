@@ -179,9 +179,10 @@ offers no **E-mail**.
 and how full it is: your mailbox holds 500 messages, and the header counts
 them, for example `120 of 500`. From 450 the Inbox warns you. At 500, each
 new message removes your oldest message you have already read; unread mail is
-never removed, and a mailbox full of unread mail turns new mail away until
-you read or delete some. If old mail was removed to make room, the main menu
-tells you how many messages went, once.
+never removed, and neither is mail you keep (see **Kept** below). A mailbox
+full of unread and kept mail turns new mail away until you read, delete or
+stop keeping some. If old mail was removed to make room, the main menu tells
+you how many messages went, once.
 
 You are told when mail arrives. The first main menu after you log in says how
 many unread messages wait, and **New scan** shows the count above its list.
@@ -197,9 +198,24 @@ press a row's number, to read a message. On a long list, **[N]ext page** and
 
 - **[S]ent** lists the mail you have sent. **[B]ack** there returns to the
   Inbox.
+- **[K]ept** lists the letters you keep. **K[e]ep** in the Inbox (on the list
+  or in a letter) moves a letter there, and **Mov[e] to Inbox** moves it back.
+  The mailbox never removes a kept letter to make room, but it still counts
+  toward the 500, so keep what matters, not everything. The Inbox header says
+  how many are in Kept.
 - **[C]ompose** writes a new message.
-- **[O]rder** switches the Inbox between newest first and unread first. Your
-  choice is remembered.
+- **[M]ark** (or Space) marks the highlighted message with `*` and moves to
+  the next, so you can mark a run of them; press it again on a marked one to
+  unmark it. **De[l]ete** then deletes the marked messages, after one
+  question that says how many; with nothing marked it deletes the highlighted
+  one. In the Inbox, **K[e]ep** moves the marked messages to Kept the same way.
+- **Delete [r]ead** in the Inbox deletes every message you have read, after
+  one question that says how many. Unread and kept mail stays.
+- **[O]rder** switches between newest first, unread first, and by
+  conversation, which groups the letters with one person under one subject
+  (`Re:` and `Fwd:` aside), the conversation with the newest letter first and
+  its earlier letters indented under it. In Sent it switches between newest
+  first and by conversation. Your choice is remembered.
 - **[F]ind** shows only mail with a word in the name or the subject. An empty
   line shows everything again.
 - **[U]nread** marks the highlighted message unread, or read without opening
@@ -274,7 +290,7 @@ Delivery line when you open it:
 - **Delivered**: it is in the recipient's mailbox.
 - **Bounced**: the other node sent it back, and the Delivery line says why,
   for example that there is no user by that name there, that their mailbox
-  is full of unread mail, or that the node does not trust yours yet.
+  is full of unread and kept mail, or that the node does not trust yours yet.
 - **Expired**: no route to that node worked before delivery gave up, so it
   was not delivered. Mail left at a relay expires when no answer came back
   in 14 days; it may still have arrived, and if an answer turns up later,

@@ -10788,7 +10788,8 @@ _MAIL_PRIVACY_NOTE = (
 )
 
 # A mailbox this full is flagged: at the cap, a letter can arrive only by
-# evicting the oldest read one, and not at all once every letter is unread.
+# evicting the oldest read one it does not keep, and not at all once every
+# letter is unread or kept (issue #828).
 _NEAR_MAIL_CAP = MAX_MAIL_PER_RECIPIENT * 9 // 10
 
 _REFUSAL_VIA_TEXT = {
@@ -10798,7 +10799,7 @@ _REFUSAL_VIA_TEXT = {
 
 def _inbox_color(size: InboxSize) -> int:
     if size.total >= MAX_MAIL_PER_RECIPIENT:
-        return ALERT_COLOR if size.unread >= MAX_MAIL_PER_RECIPIENT else WARNING_COLOR
+        return ALERT_COLOR if size.evictable <= 0 else WARNING_COLOR
     return WARNING_COLOR if size.total >= _NEAR_MAIL_CAP else VALUE_COLOR
 
 
@@ -10842,7 +10843,7 @@ async def _mail_tools_screen(
             boxes.extend([
                 Field("Accounts with mail", str(len(sizes))),
                 Field(
-                    "Letters kept",
+                    "Letters stored",
                     f"{sum(size.total for size in sizes)}, {sum(size.unread for size in sizes)} unread",
                 ),
                 Field(
@@ -10917,17 +10918,17 @@ async def _mailboxes_screen(session: Session, lane: DatabaseLane, actor: User) -
         if by_name:
             sizes = sorted(sizes, key=lambda size: size.username.casefold())
         rows: list[Field | Note | Table] = [Table(
-            ("Account", "Letters", "Unread", "Read", "System", "Of the cap"),
+            ("Account", "Letters", "Unread", "Read", "Kept", "System", "Of the cap"),
             [
                 [
                     (size.username, ACCENT_COLOR),
                     (str(size.total), _inbox_color(size)),
-                    str(size.unread), str(size.read), str(size.system),
+                    str(size.unread), str(size.read), str(size.kept), str(size.system),
                     (f"{size.total * 100 // MAX_MAIL_PER_RECIPIENT}%", _inbox_color(size)),
                 ]
                 for size in sizes
             ],
-            right_aligned=frozenset({1, 2, 3, 4, 5}),
+            right_aligned=frozenset({1, 2, 3, 4, 5, 6}),
         )] if sizes else [Note("No account has mail.")]
         choice, listing.page = await show_detail(
             session,
@@ -10942,8 +10943,9 @@ async def _mailboxes_screen(session: Session, lane: DatabaseLane, actor: User) -
             sections=[
                 Section(None, rows),
                 Section(None, [Note(
-                    "System counts the BBS's own notices, which are part of Letters. A full inbox makes room "
-                    "by dropping its oldest read letter; one full of unread mail refuses new mail. "
+                    "Kept counts the letters the owner moved to their Kept folder, and System the BBS's own "
+                    "notices; both are part of Letters. A full inbox makes room by dropping its oldest read "
+                    "letter that is not kept; one full of unread and kept mail refuses new mail. "
                     + _MAIL_PRIVACY_NOTE
                 )]),
             ],

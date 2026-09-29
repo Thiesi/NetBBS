@@ -354,7 +354,7 @@ def test_mailboxes_show_counts_and_never_a_subject(db, lane, sysop):
     assert "Accounts with mail: 2" not in text  # only bob has mail
     assert "Accounts with mail: 1" in text
     assert "Fullest first." in text and "By account name." in text
-    assert "bob 1 1 0 0 0%" in text
+    assert "bob 1 1 0 0 0 0%" in text  # letters, unread, read, kept, system
     assert "Secret plans" not in text and "Nobody else" not in text
     assert "never a subject or a body" in text
 

@@ -330,6 +330,9 @@ class MailMessage:
     # #818): `recipient_user_id` is NULL then, and the sender's Sent copy
     # still says who the letter went to. NULL while the account exists.
     recipient_label: str | None = None
+    # When the recipient moved it to their Kept folder (issue #828): the
+    # mailbox cap never evicts it. NULL for every other letter.
+    kept_at: str | None = None
 
     @property
     def is_read(self) -> bool:
@@ -456,7 +459,7 @@ def send_system_mail(db: Database, recipient: User, subject: str, body: str) -> 
 def _make_room_if_needed(db: Database, recipient: User) -> None:
     if not make_room(db, recipient):
         raise MailboxFullError(
-            f"{recipient.username!r}'s mailbox is full and every message is still unread"
+            f"{recipient.username!r}'s mailbox is full and every message is unread or kept"
         )
 
 
@@ -469,6 +472,9 @@ def make_room(db: Database, recipient: User) -> bool:
 
     A read message from the system goes before any read letter (issue
     #819): a notice the BBS sent is not to push out mail a person wrote.
+    A kept letter (issue #828) is never evicted, read or not. It still
+    counts toward the cap, so a mailbox full of unread and kept mail
+    refuses new mail rather than lose any of it.
 
     Each eviction is counted for the owner (issue #818), who is told at
     their next main menu how many old messages went
@@ -481,6 +487,7 @@ def make_room(db: Database, recipient: User) -> bool:
         """
         SELECT id, sender_deleted_at FROM mail_messages
         WHERE recipient_user_id = ? AND recipient_deleted_at IS NULL AND read_at IS NOT NULL
+          AND kept_at IS NULL
         ORDER BY from_system DESC, id ASC LIMIT 1
         """,
         (recipient.id,),
@@ -500,7 +507,8 @@ def make_room(db: Database, recipient: User) -> bool:
 
 def inbox_count(db: Database, user: User) -> int:
     """How many messages count toward `user`'s `MAX_MAIL_PER_RECIPIENT`:
-    every one in the inbox they have not deleted, read or not."""
+    every one in the inbox they have not deleted, read or not, kept (issue
+    #828) or not."""
     return db.connection.execute(
         "SELECT COUNT(*) AS n FROM mail_messages WHERE recipient_user_id = ? AND recipient_deleted_at IS NULL",
         (user.id,),
@@ -521,7 +529,7 @@ def pending_eviction_notice(db: Database, user: User) -> tuple[str | None, int]:
     what = "your oldest read message was" if evicted == 1 else f"your {evicted} oldest read messages were"
     return (
         f"Your mailbox was full ({MAX_MAIL_PER_RECIPIENT} messages), so {what} removed to make room "
-        "for new mail. Unread mail is never removed.",
+        "for new mail. Unread and kept mail is never removed.",
         evicted,
     )
 
@@ -739,10 +747,22 @@ class InboxSize:
     unread: int
     # Notices from the BBS itself (issue #819); included in `total`.
     system: int
+    # Letters the owner keeps (issue #828), read or not; included in
+    # `total`, and never evicted.
+    kept: int = 0
+    # Kept letters among the unread ones, so `evictable` counts each
+    # letter once.
+    kept_unread: int = 0
 
     @property
     def read(self) -> int:
         return self.total - self.unread
+
+    @property
+    def evictable(self) -> int:
+        """Letters the cap may evict to make room: read and not kept. At
+        the cap with none, the inbox refuses new mail."""
+        return self.read - (self.kept - self.kept_unread)
 
 
 def inbox_sizes(db: Database) -> list[InboxSize]:
@@ -753,7 +773,9 @@ def inbox_sizes(db: Database) -> list[InboxSize]:
     rows = db.connection.execute(
         """
         SELECT u.id AS user_id, u.username AS username, COUNT(m.id) AS total,
-               SUM(m.read_at IS NULL) AS unread, SUM(m.from_system) AS system
+               SUM(m.read_at IS NULL) AS unread, SUM(m.from_system) AS system,
+               SUM(m.kept_at IS NOT NULL) AS kept,
+               SUM(m.kept_at IS NOT NULL AND m.read_at IS NULL) AS kept_unread
         FROM mail_messages m JOIN users u ON u.id = m.recipient_user_id
         WHERE m.recipient_deleted_at IS NULL
         GROUP BY u.id
@@ -764,6 +786,7 @@ def inbox_sizes(db: Database) -> list[InboxSize]:
         InboxSize(
             user_id=row["user_id"], username=row["username"], total=row["total"],
             unread=row["unread"] or 0, system=row["system"] or 0,
+            kept=row["kept"] or 0, kept_unread=row["kept_unread"] or 0,
         )
         for row in rows
     ]
@@ -836,6 +859,129 @@ def delete_for_sender(db: Database, user: User, message: MailMessage) -> None:
     if current.sender_deleted_at is not None:
         return
     _hard_delete_or_mark(db, message.id, sender_deleted_at=utc_now_iso(), recipient_deleted_at=current.recipient_deleted_at)
+
+
+# -- managing many letters at once (issue #828) --------------------------------
+#
+# The mailbox list marks letters and deletes or keeps them together, and
+# empties the Inbox of what has been read. Each function acts only on the
+# letters among `mail_ids` still on the caller's own side -- anything else,
+# someone else's letter included, is skipped, not refused: a list can be a
+# moment stale -- and returns how many it acted on.
+
+# Ids per statement: well under SQLite's bound variable limit, and a Sent
+# folder, unlike the Inbox, has no cap.
+_ID_CHUNK = 400
+
+
+def _chunks(ids: list[int]) -> list[list[int]]:
+    return [ids[start:start + _ID_CHUNK] for start in range(0, len(ids), _ID_CHUNK)]
+
+
+def delete_letters(db: Database, user: User, mail_ids: list[int], *, sent: bool) -> int:
+    """Delete `user`'s own view of each letter in `mail_ids`: their Sent
+    copy (`sent`) or their Inbox copy, kept letters included. The one-letter
+    rule (`delete_for_recipient`, `delete_for_sender`), applied to many in
+    one transaction: a letter whose other side is already gone is removed,
+    search entry and all (issue #824); one the other side still has is
+    marked, so their delete removes it later."""
+    own, own_deleted, other_deleted = (
+        ("sender_user_id", "sender_deleted_at", "recipient_deleted_at") if sent
+        else ("recipient_user_id", "recipient_deleted_at", "sender_deleted_at")
+    )
+    now = utc_now_iso()
+    count = 0
+    for chunk in _chunks(sorted(set(mail_ids))):
+        marks = ",".join("?" * len(chunk))
+        ids = [
+            row["id"] for row in db.connection.execute(
+                f"SELECT id FROM mail_messages WHERE {own} = ? AND {own_deleted} IS NULL AND id IN ({marks})",
+                (user.id, *chunk),
+            )
+        ]
+        if not ids:
+            continue
+        count += len(ids)
+        held = ",".join("?" * len(ids))
+        _delete_letters_without_commit(db, f"id IN ({held}) AND {other_deleted} IS NOT NULL", tuple(ids))
+        db.connection.execute(
+            f"UPDATE mail_messages SET {own_deleted} = ? WHERE id IN ({held})", (now, *ids),
+        )
+    db.connection.commit()
+    return count
+
+
+def set_kept(db: Database, user: User, mail_ids: list[int], *, kept: bool) -> int:
+    """Move the letters among `mail_ids` in `user`'s Inbox to their Kept
+    folder (`kept`), or back to the Inbox (issue #828). A kept letter is
+    one the mailbox cap never evicts (`make_room`)."""
+    count = 0
+    now = utc_now_iso()
+    for chunk in _chunks(sorted(set(mail_ids))):
+        marks = ",".join("?" * len(chunk))
+        if kept:
+            cursor = db.connection.execute(
+                f"""
+                UPDATE mail_messages SET kept_at = ?
+                WHERE recipient_user_id = ? AND recipient_deleted_at IS NULL AND kept_at IS NULL
+                  AND id IN ({marks})
+                """,
+                (now, user.id, *chunk),
+            )
+        else:
+            cursor = db.connection.execute(
+                f"""
+                UPDATE mail_messages SET kept_at = NULL
+                WHERE recipient_user_id = ? AND recipient_deleted_at IS NULL AND kept_at IS NOT NULL
+                  AND id IN ({marks})
+                """,
+                (user.id, *chunk),
+            )
+        count += cursor.rowcount
+    db.connection.commit()
+    return count
+
+
+# -- conversations (issue #828) ----------------------------------------------
+#
+# The mailbox can list a folder by conversation. Replies record no parent
+# letter, so a conversation is what a reader would call one: the same
+# correspondent and the same subject once its reply and forward prefixes
+# are gone -- the prefixes `netbbs.quoting.reply_subject` and
+# `forward_subject` add or recognize ("Re:", "Fwd:", "Fw:").
+
+_THREAD_PREFIXES = ("re:", "fwd:", "fw:")
+
+
+def thread_subject(subject: str) -> str:
+    """`subject` as a conversation is told by: every leading "Re:", "Fwd:"
+    or "Fw:" removed, however many and in whatever case, and case folded."""
+    text = subject.strip()
+    while True:
+        lowered = text.lower()
+        prefix = next((prefix for prefix in _THREAD_PREFIXES if lowered.startswith(prefix)), None)
+        if prefix is None:
+            return text.casefold()
+        text = text[len(prefix):].lstrip()
+
+
+def thread_key(message: MailMessage, *, sent: bool) -> tuple:
+    """Which conversation `message` belongs to in the Sent folder (`sent`)
+    or the Inbox: its correspondent -- the recipient of a sent letter, the
+    sender of a received one -- and its `thread_subject`. Mail from the
+    system is its own correspondent, whatever name an account has."""
+    if sent:
+        who: tuple = (
+            "to", message.recipient_remote_address.casefold() if message.recipient_remote_address else None,
+            message.recipient_user_id, message.recipient_label,
+        )
+    elif message.from_system:
+        who = ("system",)
+    elif message.sender_user_id is not None:
+        who = ("from", message.sender_user_id)
+    else:
+        who = ("from", message.sender_label.casefold())
+    return (*who, thread_subject(message.subject))
 
 
 def _hard_delete_or_mark(
@@ -934,4 +1080,5 @@ def _row_to_message(row: sqlite3.Row) -> MailMessage:
         link_relay_handoff_at=row["link_relay_handoff_at"],
         from_system=bool(row["from_system"]),
         recipient_label=row["recipient_label"],
+        kept_at=row["kept_at"],
     )
