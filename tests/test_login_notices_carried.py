@@ -310,3 +310,110 @@ def test_every_line_after_the_last_first_run_question_is_carried(db):
     menu = session.first_menu()
     assert menu.index("Node name set to 'Lighthouse'") < menu.index("(Saved.")
     assert session.output.count("Node name set to") == 1
+
+
+# Issue #949: the login line "Welcome, <name> › level N › Ctrl-L redraws".
+_WELCOME = "Welcome, bob"
+
+
+@pytest.mark.parametrize("roll", [False, True])
+def test_the_welcome_line_survives_the_redraw_in_place_clear(db, roll):
+    bob = _caller(db)
+    if roll:
+        _previous_caller(db)
+    else:
+        set_previous_callers_enabled(db, False)
+
+    session = _login(db, bob, FakeSession())
+
+    assert _WELCOME in session.first_menu()
+    assert "Ctrl-L redraws" in session.first_menu()
+    assert session.output.count(_WELCOME) == 1
+
+
+@pytest.mark.parametrize("roll", [False, True])
+def test_the_welcome_line_is_shown_once_without_redraw_in_place(db, roll):
+    bob = _caller(db, redraw=False)
+    if roll:
+        _previous_caller(db)
+    else:
+        set_previous_callers_enabled(db, False)
+
+    session = _login(db, bob, FakeSession())
+
+    output = session.output
+    assert _CLEAR not in output
+    assert output.count(_WELCOME) == 1
+    assert output.index("Main menu") < output.index(_WELCOME) < output.index("Choice")
+
+
+def test_the_welcome_line_is_not_shown_again_after_ctrl_l(db):
+    bob = _caller(db)
+    set_previous_callers_enabled(db, False)
+
+    session = _login(db, bob, FakeSession(keys=[REDRAW_KEY, "l"]))
+
+    output = session.output
+    assert output.count("Main menu") >= 2  # Ctrl-L redrew it
+    assert output.count(_WELCOME) == 1
+    assert _WELCOME not in output[output.rindex(_CLEAR):]
+
+
+def test_the_welcome_line_heads_the_first_menu_notices(db):
+    """The mockup on #949: the Welcome line, then the mail count, then the
+    prompt."""
+    bob = _caller(db)
+    alice = create_user(db, "alice", password="hunter2", user_level=10)
+    send_mail(db, alice, bob, "Lunch?", "Noon?")
+    _invite(db, bob)
+    set_previous_callers_enabled(db, False)
+
+    session = _login(db, bob, FakeSession())
+
+    menu = session.first_menu()
+    order = [menu.index(_WELCOME), menu.index("You have 1 unread message"), menu.index(_INVITES)]
+    assert order == sorted(order)
+    # Nothing of the menu itself between the Welcome line and the notices.
+    between = menu[menu.index(_WELCOME):menu.index("You have 1 unread message")]
+    assert between.count("\n") == 1
+
+
+def test_the_welcome_line_comes_before_the_character_set_outcome(db):
+    bob = create_user(db, "bob", password="hunter2", user_level=10)
+    set_redraw_in_place_enabled(db, bob, True)
+    set_previous_callers_enabled(db, False)
+
+    session = FakeSession(keys=["3", "l"], lines=["y"])
+    session.charset_certain = False
+    session = _login(db, bob, session)
+
+    menu = session.first_menu()
+    assert _WELCOME not in session.before_first_menu()
+    assert menu.index(_WELCOME) < menu.index("Using plain ASCII")
+    # Built after the answer: plain ASCII has no "›" separator.
+    welcome_row = menu[menu.index(_WELCOME):].split("\n", 1)[0]
+    assert "›" not in welcome_row
+    assert "level 10" in welcome_row
+
+
+def test_the_welcome_line_goes_ahead_of_a_notice_queued_during_login(db, monkeypatch):
+    """Mail arriving while the login questions are open is announced then;
+    the Welcome line still comes first."""
+    import netbbs.net.login_flow as login_flow
+    from netbbs.net.notices import announce, pending_notices
+
+    bob = _caller(db)
+    set_previous_callers_enabled(db, False)
+    session = FakeSession()
+    original = login_flow._confirm_charset
+
+    async def confirm_and_mail_arrives(*args, **kwargs):
+        announce(session, "New mail from alice")
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(login_flow, "_confirm_charset", confirm_and_mail_arrives)
+    _login(db, bob, session)
+
+    menu = session.first_menu()
+    assert menu.index(_WELCOME) < menu.index("New mail from alice")
+    assert pending_notices(session) == []

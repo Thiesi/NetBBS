@@ -46,6 +46,10 @@ class _FakeSession:
     # (breadcrumb=() notices included) even though it has no visible
     # effect there.
     node_name_gradient: str | None = None
+    # The lockdown SysOp test reaches the first main menu, which is where
+    # the Welcome line is shown (issue #949).
+    terminal_width = 80
+    terminal_height = 24
 
     def __init__(self):
         self.written: list[str] = []
@@ -1110,8 +1114,12 @@ def test_lockdown_lets_a_sysop_through(tmp_path):
                     node_controls=node_controls,
                 )
             )
-            await asyncio.sleep(0)
-            await asyncio.sleep(0)
+            # The Welcome line is shown above the first main menu's prompt
+            # (issue #949), so wait for that menu to be drawn.
+            for _ in range(500):
+                if any("Welcome, sysop" in line for line in session.written):
+                    break
+                await asyncio.sleep(0.01)
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
 
