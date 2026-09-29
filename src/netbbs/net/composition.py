@@ -635,8 +635,9 @@ async def review_composition(
 
     `body_mode` (issue #711) previews a board post as its readers will see
     it -- `netbbs.rendering.post_body.post_body_mode`'s ``color``,
-    ``plain`` or ``text``. `None`, for mail, keeps the plain preview.
-    `body_layout` is the post's layout, ``art`` keeping its lines.
+    ``plain`` or ``text``. Mail passes it too (issue #809). `None` keeps
+    the plain preview. `body_layout` is the post's layout: ``art``
+    keeping its lines, or ``lines`` for mail, wrapped at words.
 
     Dogfood feature request, issue #160's cursor-navigation follow-up
     (item 2 of the prioritized list): `[T]o`/`[U]pdate subject`/`[B]ody`
