@@ -42,6 +42,13 @@ MAX_MAIL_BODY_BYTES = 20_000
 # doesn't call for per-node tuning, so this isn't built as a knob speculatively.
 MAX_MAIL_PER_RECIPIENT = 500
 
+# What the mailbox calls mail the BBS itself sent (issue #819). Shown for
+# any row whose `from_system` flag is set, never looked up by name: the
+# label stored with the row is only what the NOT NULL column holds.
+# "system" is also a name self-service signup refuses
+# (`netbbs.auth.users.SELF_SERVICE_RESERVED_USERNAMES`).
+SYSTEM_SENDER_LABEL = "System"
+
 
 class MailError(Exception):
     """Raised for a mail-send validation failure (oversized subject/
@@ -132,6 +139,9 @@ class MailMessage:
     # mail has neither.
     link_delivery_status: str | None = None
     link_delivery_reason: str | None = None
+    # Sent by the BBS itself (issue #819): no sender account, no reply,
+    # never carried over Link. See `send_system_mail`.
+    from_system: bool = False
 
     @property
     def is_read(self) -> bool:
@@ -202,27 +212,87 @@ def send_mail(db: Database, sender: User, recipient: User, subject: str, body: s
     return _row_to_message(row)
 
 
+def send_system_mail(db: Database, recipient: User, subject: str, body: str) -> MailMessage:
+    """
+    Send one message from the BBS itself to `recipient` (issue #819): a
+    notice no person wrote, such as a moderation rejection. Before this a
+    rejection came from the moderator's own account, so Reply went to
+    them personally.
+
+    The row has no sender account (`sender_user_id` NULL) and
+    `from_system` set; the flag is what the mailbox shows as
+    `SYSTEM_SENDER_LABEL` and what refuses a reply, so no account can pass
+    for it by its name. Nobody's Sent folder holds it, so its sender side
+    is deleted from the start and the recipient's delete removes the row.
+    It is local by construction -- no remote address, no Link event -- and
+    never leaves this node.
+
+    The same limits and cap as `send_mail`: a system message counts
+    toward the recipient's `MAX_MAIL_PER_RECIPIENT`, but is the first read
+    message evicted to make room (`make_room`), and a mailbox full of
+    unread mail raises `MailboxFullError` rather than lose anything. A
+    recipient that takes no mail raises `MailRecipientRefused`, as in
+    `send_mail` (issue #816).
+    """
+    subject = validate_mail_fields(subject, body)
+    refusal = mail_recipient_refusal(db, recipient)
+    if refusal is not None:
+        raise MailRecipientRefused(refusal)
+
+    _make_room_if_needed(db, recipient)
+
+    created_at = utc_now_iso()
+    db.connection.execute(
+        """
+        INSERT INTO mail_messages
+            (sender_user_id, sender_label, recipient_user_id, subject, body, created_at,
+             sender_deleted_at, from_system)
+        VALUES (NULL, ?, ?, ?, ?, ?, ?, 1)
+        """,
+        (SYSTEM_SENDER_LABEL, recipient.id, subject, body, created_at, created_at),
+    )
+    db.connection.commit()
+    row = db.connection.execute(
+        "SELECT * FROM mail_messages WHERE id = last_insert_rowid()"
+    ).fetchone()
+    return _row_to_message(row)
+
+
 def _make_room_if_needed(db: Database, recipient: User) -> None:
+    if not make_room(db, recipient):
+        raise MailboxFullError(
+            f"{recipient.username!r}'s mailbox is full and every message is still unread"
+        )
+
+
+def make_room(db: Database, recipient: User) -> bool:
+    """Make room for one more message in `recipient`'s inbox if it is at
+    `MAX_MAIL_PER_RECIPIENT`, by evicting the oldest already-read message.
+    `False` when it is full and every message is unread: nothing is
+    evicted then, and the new message must not be stored. Local and Link
+    delivery both come through here, so the rule is one rule.
+
+    A read message from the system goes before any read letter (issue
+    #819): a notice the BBS sent is not to push out mail a person wrote."""
     count = db.connection.execute(
         "SELECT COUNT(*) AS n FROM mail_messages WHERE recipient_user_id = ? AND recipient_deleted_at IS NULL",
         (recipient.id,),
     ).fetchone()["n"]
     if count < MAX_MAIL_PER_RECIPIENT:
-        return
+        return True
 
     oldest_read = db.connection.execute(
         """
         SELECT id, sender_deleted_at FROM mail_messages
         WHERE recipient_user_id = ? AND recipient_deleted_at IS NULL AND read_at IS NOT NULL
-        ORDER BY id ASC LIMIT 1
+        ORDER BY from_system DESC, id ASC LIMIT 1
         """,
         (recipient.id,),
     ).fetchone()
     if oldest_read is None:
-        raise MailboxFullError(
-            f"{recipient.username!r}'s mailbox is full and every message is still unread"
-        )
+        return False
     _hard_delete_or_mark(db, oldest_read["id"], sender_deleted_at=oldest_read["sender_deleted_at"], recipient_deleted_at=utc_now_iso())
+    return True
 
 
 def get_mail(db: Database, user: User, mail_id: int) -> MailMessage:
@@ -375,4 +445,5 @@ def _row_to_message(row: sqlite3.Row) -> MailMessage:
         recipient_remote_address=row["recipient_remote_address"],
         link_delivery_status=row["link_delivery_status"],
         link_delivery_reason=row["link_delivery_reason"],
+        from_system=bool(row["from_system"]),
     )

@@ -47,7 +47,7 @@ up: from a board to the list you picked it from, and from there to the menu.
 | **Games** | Door games, when the SysOp has set some up |
 | **Communities** (key **O**) | Topics the SysOp set up, each with its own boards, chat channels, file areas and games |
 | **New scan** | See unread activity and resources you have not visited; Back from each one brings you back with the next new one ready for Enter, and **[R]eplies** opens the replies to your posts |
-| **Find** (key **/**) | Search content available on this node |
+| **Find** (key **/**) | Search posts, files and retained chat on this node. It does not search mail; the mailbox has its own **[F]ind** |
 | **E-mail** | Read and send persistent NetBBS mail, from the level the SysOp chose; not offered to the guest account |
 | **Who's online** | See callers and available ways to contact them |
 | **Profile** | Change your public profile and personal preferences |
@@ -69,6 +69,8 @@ carried NetBBS Link content; it is not a search of the entire network.
 Open a message board, select a post, and use the displayed actions to read,
 reply, or start a topic. Follow a resource to make it easier to revisit.
 On a moderated board, your post may wait for approval before others see it.
+You are told at the main menu when it is approved or rejected; a rejection
+also arrives as mail from **System**, with the reason and what you wrote.
 
 The text editor shows its commands. In the line editor, a blank line starts
 a new paragraph; press Enter on an empty line twice, or type `/done`, to
@@ -170,6 +172,11 @@ press a row's number, to read a message. On a long list, **[N]ext page** and
 
 A `!` before a sender's name means their node's identity has changed. The
 message explains it when you open it.
+
+Mail from **System** was sent by the BBS itself, not by a person -- for
+example, when a moderator turns down a post you wrote, with their reason and
+your text. There is no one to reply to, so it has no **Reply**; to question
+the decision, write to the moderator or the SysOp.
 
 On a linked node, addresses can use a known, unambiguous name such as
 `alice@OtherNode`. Use the address offered by the directory or Who screen,

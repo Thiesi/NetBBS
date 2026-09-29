@@ -1430,9 +1430,11 @@ a moderator approves or rejects a held post or edit, its local author is
 told:
 - **once, at the main menu:** a one-line notice (`moderation_notices`), for
   example `Your post "X" on general was rejected: off topic`;
-- **by mail, for a rejection:** from the moderator who rejected it, with the
-  reason and the rejected text, since a rejection deletes the post and the
-  author would otherwise have lost what they wrote.
+- **by mail, for a rejection:** from the system (§6.4, issue #819), with the
+  reason, the moderator who decided, and the rejected text, since a
+  rejection deletes the post and the author would otherwise have lost what
+  they wrote. It used to come from the moderator's own account, so Reply
+  wrote to the moderator personally about their decision.
 
 Rejecting asks for a reason, which is optional (Enter leaves it out). It is
 kept with the rejection record (§9.3's `post_rejections`) and goes to the
@@ -2226,12 +2228,47 @@ caller who cannot read them yet.
 
 The guest account (§4.6) never has mail, whatever its level and whatever the
 mail level says, and nothing is delivered to it. Local mail to it is refused
-at the To prompt and by `send_mail` (`MailRecipientRefused`), Link mail to it
-bounces `no_mailbox` (§10.3), and a moderator's rejection of a guest's post
-sends no rejection mail -- the main-menu notice still tells whoever signs in
-next. `netbbs.mail.mail_access_refusal` is the one check for the caller and
-`mail_recipient_refusal` the one for the recipient; `browse_mail` makes the
+at the To prompt and by `send_mail` and `send_system_mail`
+(`MailRecipientRefused`), Link mail to it bounces `no_mailbox` (§10.3), and a
+moderator's rejection of a guest's post sends no rejection mail -- the
+main-menu notice still tells whoever signs in next. A session that signed in
+through guest login stays refused for as long as it lasts, even if the SysOp
+turns guest login off or moves it meanwhile: the account's check reads the
+current setting, so the session's login route (`authenticated_without_credential`)
+is checked too. `netbbs.mail.mail_access_refusal` is the one check for the
+account, `netbbs.net.mail_flow.caller_mail_refusal` adds the session's, and
+`mail_recipient_refusal` is the one for the recipient; `browse_mail` makes the
 caller's check itself, so no way into mail can skip it.
+
+**Mail from the system** (issue #819). Some mail is sent by the BBS itself,
+not by a person: today, a moderation rejection (§6.1). Such a message has no
+sender account (`sender_user_id` NULL) and is marked `from_system`, and:
+- the mailbox shows it as from **System**, in the list and on the From line,
+  and its view says it is a notice from the BBS with no one to reply to. It
+  has no `[R]eply` key.
+- It is told apart by the flag, never by the name stored with it. "System"
+  is a name self-service signup refuses, and an account a SysOp names
+  "System" is still a person: its mail has Reply and never reads as the
+  BBS's notice.
+- It is in nobody's Sent, so the recipient's delete removes the row.
+- It is local by construction -- no remote address, no Link event -- and is
+  never carried over the Link.
+- It counts toward the recipient's cap like any mail, but when the cap must
+  make room, a read system message is evicted before any read letter, so a
+  notice never pushes out mail a person wrote. Unread mail of either kind is
+  never evicted; a system message that finds the mailbox full of unread mail
+  is not stored (a rejection's main-menu notice still tells its author).
+
+The alternative was a reserved account that cannot log in. It was rejected:
+it would own rows (ON DELETE, quotas, an account list entry to hide), Reply
+would open a letter to it, and its name would be one more thing a
+look-alike could imitate. A NULL sender plus a flag fits the table's
+existing "no local sender" shape. Mail from before the change that a
+moderator's account sent stays theirs.
+
+Mail about Link delivery (#806's bounces) is told at the main menu and on the
+sent message's Delivery line, not by a system message; a bounce letter in
+the Inbox could use this sender later.
 
 **The mailbox is a list; a message is read on its own screen** (issue #810),
 the shape the board post list has (§6.1, issue #679). `[E]-mail` opens the

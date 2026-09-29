@@ -34,7 +34,7 @@ from netbbs.link.store import save_peer
 from netbbs.link.trust import (
     TrustDimension, TrustState, TrustSubject, register_subject, set_trust_override,
 )
-from netbbs.mail import list_inbox, list_sent, send_mail
+from netbbs.mail import list_inbox, list_sent, send_mail, send_system_mail
 from netbbs.net.char_input import InputCancelled, InputHistory
 from netbbs.net.main_menu import _main_menu
 from netbbs.net.mail_flow import browse_mail
@@ -1342,6 +1342,51 @@ def test_reply_to_link_mail_can_be_readdressed_from_the_review_screen(tmp_path):
 
     assert [m.subject for m in list_inbox(db, carol)] == ["Re: Hi"]
     assert _remote_rows(db) == []
+    lane.close()
+    db.close()
+
+
+def test_system_mail_shows_as_system_and_offers_no_reply(tmp_path):
+    """Issue #819: mail the BBS sent reads as from "System", says there is
+    no one to reply to, and has no Reply key -- R is refused like any key
+    the screen does not offer."""
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
+    bob = create_user(db, "bob", password="hunter2pw", user_level=10)
+    send_system_mail(db, bob, "Your post was rejected", "Reason: off topic")
+
+    session = FakeSession(keys=["1", "r", "b", "b"])
+    session.node_display_name = "Nib & Quill"
+    lane = DatabaseLane(db_path)
+    asyncio.run(browse_mail(session, lane, bob))
+
+    text = _visible_text(session)
+    assert "System" in text.split("Your post was rejected")[0]
+    assert "From: System" in text
+    assert "A notice from Nib & Quill itself. There is no one to reply to." in text
+    assert "[R]eply" not in text and "Reply" not in text.split("From: System")[1]
+    assert list_sent(db, bob) == []
+    lane.close()
+    db.close()
+
+
+def test_an_account_named_system_is_still_a_person_to_reply_to(tmp_path):
+    """The label is not what makes mail the system's: an account a SysOp
+    named "System" gets Reply like anyone, and its mail never reads as the
+    BBS's notice (issue #819)."""
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
+    impostor = create_user(db, "System", password="hunter2pw", user_level=10)
+    bob = create_user(db, "bob", password="hunter2pw", user_level=10)
+    send_mail(db, impostor, bob, "Hello", "body")
+
+    session = FakeSession(keys=["1", "b", "b"])
+    lane = DatabaseLane(db_path)
+    asyncio.run(browse_mail(session, lane, bob))
+
+    text = _visible_text(session)
+    assert "[R]eply" in text or "R]eply" in text
+    assert "There is no one to reply to." not in text
     lane.close()
     db.close()
 

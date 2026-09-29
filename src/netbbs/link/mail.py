@@ -352,41 +352,14 @@ def bounce_link_message(
 
 
 def _make_room_or_report_full(db: Database, recipient: User) -> bool:
-    """Mirrors `netbbs.mail`'s own `MAX_MAIL_PER_RECIPIENT` quota rule
-    exactly -- evicts the oldest already-read message to make room and
-    returns `False`, or returns `True` (the caller should bounce rather
-    than deliver) only when the inbox is at cap *and* every message in
-    it is still unread, the same "never silently drop something unread"
-    rule `netbbs.mail.MailboxFullError` enforces locally, applied here
-    as a bounce instead of a raised exception since there is no
-    synchronous caller to catch it."""
-    count = db.connection.execute(
-        "SELECT COUNT(*) AS n FROM mail_messages WHERE recipient_user_id = ? AND recipient_deleted_at IS NULL",
-        (recipient.id,),
-    ).fetchone()["n"]
-    if count < mail_module.MAX_MAIL_PER_RECIPIENT:
-        return False
-
-    oldest_read = db.connection.execute(
-        """
-        SELECT id, sender_deleted_at FROM mail_messages
-        WHERE recipient_user_id = ? AND recipient_deleted_at IS NULL AND read_at IS NOT NULL
-        ORDER BY id ASC LIMIT 1
-        """,
-        (recipient.id,),
-    ).fetchone()
-    if oldest_read is None:
-        return True
-
-    if oldest_read["sender_deleted_at"] is not None:
-        db.connection.execute("DELETE FROM mail_messages WHERE id = ?", (oldest_read["id"],))
-    else:
-        db.connection.execute(
-            "UPDATE mail_messages SET recipient_deleted_at = ? WHERE id = ?",
-            (utc_now_iso(), oldest_read["id"]),
-        )
-    db.connection.commit()
-    return False
+    """`netbbs.mail.make_room`, the one quota rule local delivery uses
+    too: evicts the oldest already-read message (a system notice first,
+    issue #819) and returns `False`, or returns `True` (the caller should
+    bounce rather than deliver) only when the inbox is at cap *and* every
+    message in it is still unread -- the "never silently drop something
+    unread" rule `netbbs.mail.MailboxFullError` enforces locally, applied
+    here as a bounce since there is no synchronous caller to catch it."""
+    return not mail_module.make_room(db, recipient)
 
 
 def _queue_acknowledgement(

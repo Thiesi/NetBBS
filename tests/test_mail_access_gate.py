@@ -33,6 +33,7 @@ from netbbs.mail import (
     mail_access_refusal,
     mail_recipient_refusal,
     send_mail,
+    send_system_mail,
 )
 from netbbs.moderation.log import list_recent_actions
 from netbbs.net.admin_flow import admin_menu
@@ -130,6 +131,12 @@ def test_local_mail_to_the_guest_account_is_refused(db, alice, guest):
     assert mail_recipient_refusal(db, alice) is None
 
 
+def test_system_mail_to_the_guest_account_is_refused(db, guest):
+    with pytest.raises(MailRecipientRefused):
+        send_system_mail(db, guest, "Notice", "from the BBS")
+    assert list_inbox(db, guest) == []
+
+
 def test_mail_to_an_account_below_the_mail_level_still_arrives(db, sysop, alice):
     # It waits for the day the SysOp raises the account's level.
     set_mail_min_level(db, 20)
@@ -208,6 +215,20 @@ def test_the_mailbox_itself_refuses_the_guest(db, lane, guest):
     # Refused before anything is drawn: the reason waits for the next screen.
     assert session.written == []
     assert any("Mail needs an account of your own" in line for line in take_notices(session))
+
+
+def test_a_guest_session_stays_refused_after_guest_login_is_turned_off(db, lane, alice, guest):
+    # Review on #880: the account check reads the current setting, so the
+    # session's login route has to hold the refusal for the guests still on.
+    set_guest_user(db, None)
+    session = FakeSession(keys=["e", "l"], lines=["y"])
+    session.authenticated_without_credential = True
+    asyncio.run(_main_menu(session, db, ChatHub(), PresenceRegistry(), MessageMailbox(), InputHistory(), guest, lane=lane))
+
+    text = _visible_text(session)
+    assert "-mail" not in text
+    assert "Mail needs an account of your own" in " ".join(text.split())
+    assert "Inbox" not in text
 
 
 def test_the_to_prompt_refuses_the_guest_account_and_asks_again(db, lane, alice, guest):

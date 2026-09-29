@@ -58,8 +58,10 @@ from netbbs.link.node_profiles import (
     identity_for_fingerprint, is_node_fingerprint, latest_identity_observation, resolve_stored_peer_reference,
 )
 from netbbs.mail import (
+    GUEST_MAIL_REFUSAL,
     MAX_MAIL_BODY_BYTES,
     MAX_MAIL_SUBJECT_BYTES,
+    SYSTEM_SENDER_LABEL,
     MailboxFullError,
     MailError,
     MailMessage,
@@ -180,16 +182,32 @@ async def browse_mail(
 
     Refused, with the reason carried to the next screen, for a caller
     `netbbs.mail.mail_access_refusal` turns away (issue #816): the guest
-    account, or an account below the mail level. The main menu does not
+    account or a session that signed in as it, or an account below the mail
+    level. The main menu does not
     offer mail to them either; this is the gate itself, so that no other
     way in can skip it."""
-    refusal = await lane.run(mail_access_refusal, user)
+    refusal = await lane.run(lambda db: caller_mail_refusal(session, db, user))
     if refusal is not None:
         announce(session, refusal, tone="error")
         return
     _adopt_legacy_mail_draft(lane, user)
     screen = _MailboxScreen(session, lane, user, link_context=link_context, choice_prompt=choice_prompt)
     await screen.run()
+
+
+def caller_mail_refusal(session: Session, db: Database, user: User) -> str | None:
+    """`netbbs.mail.mail_access_refusal` for the caller on `session`.
+
+    A session that came in through guest login keeps the guest's refusal for
+    as long as it lasts (issue #816, review): `mail_access_refusal` reads the
+    node's *current* guest setting, so turning guest login off -- or moving
+    it to another account -- would otherwise hand every guest still
+    connected the old guest account's mail. How the caller got in is the
+    session's to say (`authenticated_without_credential`, set by the guest
+    branch of the login flow), not the account's."""
+    if getattr(session, "authenticated_without_credential", False):
+        return GUEST_MAIL_REFUSAL
+    return mail_access_refusal(db, user)
 
 
 # -- the mailbox list (issue #810) ---------------------------------------------
@@ -249,6 +267,7 @@ _LIST_HELP = [
     "\"new\" marks mail you have not opened. Opening a message marks",
     "it read; [U]nread in the message or on the list takes that back.",
     "Sent shows where mail to another BBS stands under Delivery.",
+    "Mail from System is a notice from this BBS; it has no Reply.",
 ]
 
 
@@ -447,6 +466,11 @@ async def _load_mail_rows(lane: DatabaseLane, user: User, *, sent: bool) -> list
             key = (message.recipient_remote_address, message.recipient_user_id)
             if key not in names:
                 names[key] = await _display_recipient_label(lane, message)
+        elif message.from_system:
+            # Keyed apart from any account's name (issue #819): a SysOp
+            # can still create an account called "System".
+            key = (SYSTEM_SENDER_LABEL, 0)
+            names[key] = SYSTEM_SENDER_LABEL
         else:
             key = (message.sender_label, None)
             if key not in names:
@@ -969,9 +993,13 @@ async def _message_view(
         preamble.append(
             colored("From: ", fg_color=LABEL_COLOR) + colored(sanitize_text(sender_label), fg_color=accent)
         )
-        warning = await _link_mail_identity_warning(lane, message.sender_label)
+        warning = (
+            None if message.from_system else await _link_mail_identity_warning(lane, message.sender_label)
+        )
         if warning is not None:
             preamble.append(colored(warning, fg_color=MUTED_COLOR, bold=True))
+        if message.from_system:
+            preamble.append(colored(_system_mail_note(session), fg_color=MUTED_COLOR))
         # Received mail names its recipient too (issue #810): the reader,
         # as a letter's envelope would.
         preamble.append(colored("To: ", fg_color=LABEL_COLOR) + colored(sanitize_text(user.username), fg_color=accent))
@@ -1052,7 +1080,19 @@ async def _display_link_address(lane: DatabaseLane, technical_address: str) -> s
 
 
 async def _display_sender_label(lane: DatabaseLane, message: MailMessage) -> str:
+    """Who a received message is from: `SYSTEM_SENDER_LABEL` for mail the
+    BBS sent (issue #819) -- by its flag, never by the stored name -- else
+    the sender's name or Link address."""
+    if message.from_system:
+        return SYSTEM_SENDER_LABEL
     return await _display_link_address(lane, message.sender_label)
+
+
+def _system_mail_note(session: Session) -> str:
+    """What a system message's view says about its sender (issue #819),
+    in place of the Reply key it does not offer."""
+    name = sanitize_text(session.node_display_name)
+    return f"A notice from {name} itself. There is no one to reply to."
 
 
 async def _display_recipient_label(lane: DatabaseLane, message: MailMessage) -> str:
@@ -1097,8 +1137,10 @@ async def _show_inbox_message(
     *, link_context: LinkContext | None = None,
 ) -> None:
     message = await lane.run(mark_read, user, message)
-    actions = [
-        ("r", menu_key("R", "eply")),
+    # Mail the BBS sent has nobody to answer (issue #819): no Reply key,
+    # and the view says why.
+    actions = [] if message.from_system else [("r", menu_key("R", "eply"))]
+    actions += [
         ("u", menu_key("U", "nread")),
         ("d", menu_key("D", "elete")),
         ("b", menu_key("B", "ack")),
@@ -1120,6 +1162,9 @@ async def _show_inbox_message(
             await lane.run(delete_for_recipient, user, message)
             announce(session, "Message deleted.")
             return
+        if message.from_system:
+            announce(session, _system_mail_note(session), tone="error")
+            continue
         # The same subject rule and quote a board reply uses (issue #675).
         subject = reply_subject(message.subject, max_bytes=MAX_MAIL_SUBJECT_BYTES)
         link_sender = (

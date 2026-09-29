@@ -556,7 +556,11 @@ shows where to create one.
 
 Moderator grants belong to a resource or Community. Membership alone does not
 make someone a moderator. Grant only the scope required; use approval queues
-and the audit log to review actions. Chat moderation commands are used inside
+and the audit log to review actions. When a moderator rejects a post, its
+author gets a mail from **System** -- the BBS, not the moderator's own
+account -- with the reason, who decided, and the text; it cannot be
+replied to. Such a notice counts toward the author's mailbox limit but is
+the first read mail removed to make room. Chat moderation commands are used inside
 the channel by someone with the appropriate authority.
 
 A read or write grant on a board or file area lets its holder past that

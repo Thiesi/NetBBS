@@ -31,7 +31,7 @@ from netbbs.chat import (
 from netbbs.communities import Community, list_communities
 from netbbs.link.boards import LinkContext
 from netbbs.link.mail import acknowledge_delivery_notices, pending_delivery_notices
-from netbbs.mail import mail_access_refusal, unread_count as unread_mail_count
+from netbbs.mail import unread_count as unread_mail_count
 from netbbs.net.admin_flow import admin_menu, moderation_queue, staff_list_screen, staff_menu
 from netbbs.boards import list_boards
 from netbbs.chat.channels import list_channels
@@ -46,7 +46,7 @@ from netbbs.net.confirm import prompt_yes_no
 from netbbs.net.directory_flow import _browse_directory, _caller_who_screen
 from netbbs.net.door_flow import _visible_doors, browse_doors, has_visible_doors
 from netbbs.net.file_flow import browse_file_areas, visible_areas
-from netbbs.net.mail_flow import browse_mail
+from netbbs.net.mail_flow import browse_mail, caller_mail_refusal
 from netbbs.net.main_menu_banner import load_main_menu_banner
 from netbbs.net.menu_description_preference import menu_description_level
 from netbbs.net.node_theme import (
@@ -189,7 +189,7 @@ async def _draw_main_menu(
     notification -- and grows an "(N unread)" suffix the same "re-query on
     every redraw, no separate seen-tracking" way. Mail is open to everyone
     but the guest account and callers below the SysOp's mail level (issue
-    #816, `netbbs.mail.mail_access_refusal`); for them neither the entry
+    #816, `netbbs.net.mail_flow.caller_mail_refusal`); for them neither the entry
     nor the header's mail count is shown. Deliberately a different letter and a
     different persistence model from `/msg`: `E` (for "E-mail") is the
     closest thing to a ready-made convention BBS users already have
@@ -233,7 +233,7 @@ async def _draw_main_menu(
     for text, created_at in mailbox.flush(session):
         await session.write_line(format_with_preference(db, user, text, created_at))
 
-    has_mail = mail_access_refusal(db, user) is None
+    has_mail = caller_mail_refusal(session, db, user) is None
     unread = unread_mail_count(db, user) if has_mail else 0
     mail_label = f"-mail ({unread} unread)" if unread else "-mail"
     # Brief descriptions are kept to roughly 34 characters or less --
@@ -261,7 +261,14 @@ async def _draw_main_menu(
                 brief="Activity since your last visit",
                 detailed="Scan every accessible message board/chat channel/file area for activity since your last visit.",
             ),
-            MenuEntry(label=menu_key("/", " Find"), brief="Search boards, files, and mail"),
+            # Issue #811: Find searches posts, files and retained chat --
+            # not mail, which only the mailbox's own folder-local [F]ind
+            # filters. Say so rather than promise a mail search.
+            MenuEntry(
+                label=menu_key("/", " Find"),
+                brief="Search posts, files, and chat",
+                detailed="Find posts, files, and retained chat on this node.",
+            ),
             # Issue #840 (F116): the main menu had no help at all.
             MenuEntry(label=menu_key("?", " Help"), brief="How this board works"),
         ]
@@ -1063,7 +1070,7 @@ async def _how_this_board_works(session: Session, db: Database, user: User) -> N
         "[B]ack goes one level up. [N]ew scan shows what is new since your last visit, one place after another.",
         "Ctrl-H or ? shows help on most screens.",
         "",
-        _contact_line(sysops, mail_access_refusal(db, user)),
+        _contact_line(sysops, caller_mail_refusal(session, db, user)),
         "",
         "The User Handbook explains the rest: " + _USER_HANDBOOK_URL,
     ]
