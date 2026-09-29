@@ -766,6 +766,21 @@ this node refused, and how full your callers' mailboxes are.
   mail was removed to make room.
 - In **Refused Link mail**, "the recipient's account is disabled or still
   awaiting approval" is mail for an account that takes none at the moment.
+- **[W]rite to all callers** sends one letter to every account on this BBS
+  that takes mail, from your own account: it is signed like your other mail,
+  sits in your **Sent** as one letter, and callers can reply to you.
+  **[N]otice to all callers** sends it from the BBS itself, as **System**:
+  unsigned, not in your Sent, and no one can reply to it; it reaches your own
+  Inbox too. Both open the ordinary compose screens -- Subject, your editor,
+  the review screen -- and keep a draft of their own. The review screen says
+  how many accounts it will reach. The guest account, disabled accounts and
+  signups awaiting approval are left out, and so is anyone whose mailbox is
+  full of unread and kept mail: each caller gets their own copy, under the
+  same 500-letter cap as any letter. After Send you are told how many callers
+  it reached, whose mailbox turned it away (by name), and how many accounts
+  were left out. It is local only: callers on linked BBSes are not written
+  to. A letter already sent is never sent twice, even if you send its draft
+  again after a dropped connection.
 
 These screens never show what a letter says. Mail is private: you see counts,
 account names, senders and reasons, never a subject or a body, and a refused

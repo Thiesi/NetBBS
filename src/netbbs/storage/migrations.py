@@ -3757,4 +3757,18 @@ MIGRATIONS = [
         ALTER TABLE mail_messages ADD COLUMN kept_at TEXT;
         """,
     ),
+    Migration(
+        description=(
+            "Issue #827: a letter to several people is one ordinary letter per recipient, each "
+            "with its own delivery state, linked by `mail_messages.mail_group_id`; "
+            "`mail_group_to` is the JSON list of everyone it went to (or `{\"all\": true}` for "
+            "SysOp mail to all callers), which each copy shows as its To. Both NULL for a letter "
+            "to one person, and for every existing letter."
+        ),
+        sql="""
+        ALTER TABLE mail_messages ADD COLUMN mail_group_id TEXT;
+        ALTER TABLE mail_messages ADD COLUMN mail_group_to TEXT;
+        CREATE INDEX idx_mail_messages_group ON mail_messages(mail_group_id) WHERE mail_group_id IS NOT NULL;
+        """,
+    ),
 ]

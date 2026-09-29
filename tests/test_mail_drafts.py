@@ -9,6 +9,8 @@ letter's own text, so a reply to someone else lost its quote to it.
 
 from __future__ import annotations
 
+from unittest.mock import ANY
+
 import asyncio
 import json
 
@@ -59,7 +61,7 @@ def test_exit_from_the_line_editor_keeps_the_letter_with_its_to_and_subject(node
     assert "Message cancelled" not in text
     path = _letter_draft_path(lane, alice)
     assert path.read_text(encoding="utf-8") == "Are you free on Friday?"
-    assert _fields(path) == {"to": "bob", "reply_address": None, "subject": "Lunch?"}
+    assert _fields(path) == {"to": "bob", "reply_address": None, "subject": "Lunch?", "group": ANY}
     # The mail screen redrawn after it says so, and offers [D]raft; the one
     # drawn before the letter did not.
     before = text[: text.index("Who is it for?")]
@@ -237,7 +239,7 @@ def test_a_kept_letter_keeps_the_to_and_subject_review_changed(node):
 
     path = _letter_draft_path(lane, alice)
     assert path.read_text(encoding="utf-8") == "Body!"
-    assert _fields(path) == {"to": "carol", "reply_address": None, "subject": "Dinner?"}
+    assert _fields(path) == {"to": "carol", "reply_address": None, "subject": "Dinner?", "group": ANY}
 
 
 def test_a_link_reply_keeps_the_address_it_goes_to(node, monkeypatch):
@@ -257,7 +259,7 @@ def test_a_link_reply_keeps_the_address_it_goes_to(node, monkeypatch):
     ))
 
     path = _letter_draft_path(lane, alice, "7")
-    assert _fields(path) == {"to": "bob@Farpoint", "reply_address": address, "subject": "Re: Hi"}
+    assert _fields(path) == {"to": "bob@Farpoint", "reply_address": address, "subject": "Re: Hi", "group": ANY}
     draft = mail_flow._load_letter_draft(path)
     assert draft.reply_address == address
 

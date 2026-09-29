@@ -17,10 +17,12 @@ that design; nothing here assumes or depends on it.
 
 from __future__ import annotations
 
+import json
+import secrets
 import sqlite3
 from dataclasses import dataclass
 
-from netbbs.auth.users import User, get_user_by_id, is_usable_sysop
+from netbbs.auth.users import User, get_user_by_id, is_usable_sysop, list_users
 from netbbs.config import get_mail_min_level, is_node_fingerprint_shape
 from netbbs.guest import guest_is_eligible
 from netbbs.permissions.levels import meets_level
@@ -333,6 +335,11 @@ class MailMessage:
     # When the recipient moved it to their Kept folder (issue #828): the
     # mailbox cap never evicts it. NULL for every other letter.
     kept_at: str | None = None
+    # One copy of a letter to several people (issue #827): the id every
+    # copy shares, and the JSON of everyone it went to (`group_members`).
+    # Both NULL for a letter to one person.
+    mail_group_id: str | None = None
+    mail_group_to: str | None = None
 
     @property
     def is_read(self) -> bool:
@@ -381,6 +388,18 @@ def send_mail(db: Database, sender: User, recipient: User, subject: str, body: s
     is not checked here: that is the mail screen's gate
     (`mail_access_refusal`).
     """
+    message = send_mail_without_commit(db, sender, recipient, subject, body)
+    db.connection.commit()
+    return message
+
+
+def send_mail_without_commit(
+    db: Database, sender: User, recipient: User, subject: str, body: str,
+    *, group: LetterGroup | None = None,
+) -> MailMessage:
+    """`send_mail` without the commit, for a letter to several people
+    (issue #827), whose copies are written in one transaction. `group`
+    makes this one copy of such a letter."""
     subject = validate_mail_fields(subject, body)
     refusal = mail_recipient_refusal(db, recipient)
     if refusal is not None:
@@ -395,16 +414,19 @@ def send_mail(db: Database, sender: User, recipient: User, subject: str, body: s
     db.connection.execute(
         """
         INSERT INTO mail_messages
-            (sender_user_id, sender_label, recipient_user_id, subject, body, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)
+            (sender_user_id, sender_label, recipient_user_id, subject, body, created_at,
+             mail_group_id, mail_group_to)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (sender.id, sender.username, recipient.id, subject, body, created_at),
+        (
+            sender.id, sender.username, recipient.id, subject, body, created_at,
+            group.id if group else None, group.to if group else None,
+        ),
     )
     row = db.connection.execute(
         "SELECT * FROM mail_messages WHERE id = last_insert_rowid()"
     ).fetchone()
     index_mail_without_commit(db, row["id"])
-    db.connection.commit()
     return _row_to_message(row)
 
 
@@ -431,6 +453,16 @@ def send_system_mail(db: Database, recipient: User, subject: str, body: str) -> 
     `send_mail` (issue #816). A recipient's blocked senders are not
     consulted (issue #817): system mail has no sender to block.
     """
+    message = send_system_mail_without_commit(db, recipient, subject, body)
+    db.connection.commit()
+    return message
+
+
+def send_system_mail_without_commit(
+    db: Database, recipient: User, subject: str, body: str, *, group: LetterGroup | None = None,
+) -> MailMessage:
+    """`send_system_mail` without the commit: one copy of a notice to all
+    callers (issue #827) is written in the same transaction as the rest."""
     subject = validate_mail_fields(subject, body)
     refusal = mail_recipient_refusal(db, recipient)
     if refusal is not None:
@@ -443,16 +475,18 @@ def send_system_mail(db: Database, recipient: User, subject: str, body: str) -> 
         """
         INSERT INTO mail_messages
             (sender_user_id, sender_label, recipient_user_id, subject, body, created_at,
-             sender_deleted_at, from_system)
-        VALUES (NULL, ?, ?, ?, ?, ?, ?, 1)
+             sender_deleted_at, from_system, mail_group_id, mail_group_to)
+        VALUES (NULL, ?, ?, ?, ?, ?, ?, 1, ?, ?)
         """,
-        (SYSTEM_SENDER_LABEL, recipient.id, subject, body, created_at, created_at),
+        (
+            SYSTEM_SENDER_LABEL, recipient.id, subject, body, created_at, created_at,
+            group.id if group else None, group.to if group else None,
+        ),
     )
     row = db.connection.execute(
         "SELECT * FROM mail_messages WHERE id = last_insert_rowid()"
     ).fetchone()
     index_mail_without_commit(db, row["id"])
-    db.connection.commit()
     return _row_to_message(row)
 
 
@@ -501,8 +535,36 @@ def make_room(db: Database, recipient: User) -> bool:
         """,
         (recipient.id,),
     )
-    _hard_delete_or_mark(db, oldest_read["id"], sender_deleted_at=oldest_read["sender_deleted_at"], recipient_deleted_at=utc_now_iso())
+    # Not committed here: the letter it makes room for is written in the
+    # same transaction, and a letter to all callers (issue #827) writes
+    # every copy in one.
+    _hard_delete_or_mark(
+        db, oldest_read["id"], sender_deleted_at=oldest_read["sender_deleted_at"],
+        recipient_deleted_at=utc_now_iso(), commit=False,
+    )
     return True
+
+
+def mail_has_room(db: Database, recipient: User) -> bool:
+    """Whether `make_room` would find room for one more letter in
+    `recipient`'s inbox, asked without evicting anything: a letter to
+    several people (issue #827) checks every copy before it writes one."""
+    if inbox_count(db, recipient) < MAX_MAIL_PER_RECIPIENT:
+        return True
+    return db.connection.execute(
+        """
+        SELECT 1 FROM mail_messages
+        WHERE recipient_user_id = ? AND recipient_deleted_at IS NULL AND read_at IS NOT NULL
+          AND kept_at IS NULL
+        LIMIT 1
+        """,
+        (recipient.id,),
+    ).fetchone() is not None
+
+
+def mailbox_full_text(recipient: User) -> str:
+    """What a sender is told about `recipient`'s full mailbox."""
+    return f"{recipient.username}'s mailbox is full and cannot accept new mail right now."
 
 
 def inbox_count(db: Database, user: User) -> int:
@@ -633,6 +695,233 @@ def recent_correspondents(db: Database, user: User, *, limit: int = 10) -> list[
     return found
 
 
+# -- one letter to several people (issue #827) --------------------------------
+#
+# A letter to several people is written as one ordinary letter per
+# recipient: each copy has its own delivery state, cap handling, block and
+# refusal, and every other rule in this module applies to it unchanged. What
+# ties the copies together is `mail_group_id`, the same on each, and
+# `mail_group_to`, the list of everyone the letter went to, which each copy
+# shows as its To. The list is stored with every copy rather than read back
+# from the other copies: a copy deleted on both sides is gone, and the
+# letter's To must not lose a name because of it.
+#
+# There is no blind copy: everyone a letter went to sees everyone else.
+#
+# `mail_group_to` is JSON: a list with one object per recipient, in the order
+# they were typed -- `{"id": 5, "name": "bob"}` for an account here (shown by
+# its current name, or `name` once the account is gone), `{"address":
+# "carol@<fingerprint>"}` for someone on another BBS, `{"name": "dave"}` for
+# a name at this BBS that a letter from another BBS listed and no account
+# here has -- or `{"all": true}` for SysOp mail to all callers.
+
+#: The most people one letter can go to, local and Link together. A letter
+#: is written once per recipient, so this bounds what one Send writes.
+MAX_MAIL_RECIPIENTS = 20
+
+#: What a copy of SysOp mail to all callers shows as its To.
+ALL_CALLERS_LABEL = "Everyone on this BBS"
+
+
+@dataclass(frozen=True)
+class LetterGroup:
+    """What every copy of one letter to several people carries: its
+    `mail_group_id` and `mail_group_to` (encoded by `encode_group_to`)."""
+    id: str
+    to: str
+
+
+@dataclass(frozen=True)
+class GroupMember:
+    """One entry of a letter's To (see the section comment)."""
+    user_id: int | None = None
+    name: str | None = None
+    address: str | None = None
+
+
+def new_mail_group_id() -> str:
+    """A fresh id for one letter to several people. Chosen when the letter
+    is started and kept with its draft, so a letter sent once cannot be
+    sent again by sending its draft (`letter_already_sent`)."""
+    return secrets.token_hex(8)
+
+
+def encode_group_to(members: list[GroupMember] | None) -> str:
+    """`mail_group_to` for `members`, or for all callers when `None`."""
+    if members is None:
+        return json.dumps({"all": True})
+    entries = []
+    for member in members:
+        if member.address is not None:
+            entries.append({"address": member.address})
+        elif member.user_id is not None:
+            entries.append({"id": member.user_id, "name": member.name})
+        else:
+            entries.append({"name": member.name})
+    return json.dumps(entries)
+
+
+def is_to_all_callers(message: MailMessage) -> bool:
+    """Whether `message` is a copy of SysOp mail to all callers."""
+    if message.mail_group_to is None:
+        return False
+    try:
+        return json.loads(message.mail_group_to) == {"all": True}
+    except ValueError:
+        return False
+
+
+def group_members(message: MailMessage) -> list[GroupMember] | None:
+    """Everyone the letter `message` is a copy of went to, in order, or
+    `None` for a letter to one person and for mail to all callers."""
+    if message.mail_group_to is None:
+        return None
+    try:
+        entries = json.loads(message.mail_group_to)
+    except ValueError:
+        return None
+    if not isinstance(entries, list):
+        return None
+    members: list[GroupMember] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        address, user_id, name = entry.get("address"), entry.get("id"), entry.get("name")
+        if isinstance(address, str):
+            members.append(GroupMember(address=address))
+        elif isinstance(user_id, int) and isinstance(name, str):
+            members.append(GroupMember(user_id=user_id, name=name))
+        elif isinstance(name, str):
+            members.append(GroupMember(name=name))
+    return members
+
+
+def group_member_label(db: Database, member: GroupMember) -> str:
+    """One recipient as a copy's To shows them: an account by its current
+    name (the name it had, once it is deleted), a Link address with its
+    node's current name."""
+    if member.address is not None:
+        return link_address_display_label(db, member.address)
+    if member.user_id is not None:
+        account = get_user_by_id(db, member.user_id)
+        if account is not None:
+            return account.username
+    return member.name or "?"
+
+
+def group_to_label(db: Database, message: MailMessage) -> str | None:
+    """The whole To of a copy of a letter to several people -- "bob,
+    carol@Farpoint" -- or `ALL_CALLERS_LABEL`; `None` for a letter to one
+    person."""
+    if is_to_all_callers(message):
+        return ALL_CALLERS_LABEL
+    members = group_members(message)
+    if members is None:
+        return None
+    return ", ".join(group_member_label(db, member) for member in members)
+
+
+def letter_already_sent(db: Database, sender: User | None, group_id: str) -> bool:
+    """Whether a letter with this group id was already sent (issue #827):
+    a letter to several people cannot go out twice because its draft was
+    sent again. `sender` `None` asks about mail to all callers from the
+    system."""
+    if sender is None:
+        row = db.connection.execute(
+            "SELECT 1 FROM mail_messages WHERE mail_group_id = ? AND from_system = 1 LIMIT 1", (group_id,),
+        ).fetchone()
+    else:
+        row = db.connection.execute(
+            "SELECT 1 FROM mail_messages WHERE mail_group_id = ? AND sender_user_id = ? LIMIT 1",
+            (group_id, sender.id),
+        ).fetchone()
+    return row is not None
+
+
+def sent_group_copies(db: Database, user: User, message: MailMessage) -> list[MailMessage]:
+    """Every copy of the letter `message` is one of that is still in
+    `user`'s Sent folder, in the order written; just `message` for a letter
+    to one person."""
+    if message.mail_group_id is None:
+        return [message]
+    rows = db.connection.execute(
+        """
+        SELECT * FROM mail_messages
+        WHERE mail_group_id = ? AND sender_user_id = ? AND sender_deleted_at IS NULL
+        ORDER BY id
+        """,
+        (message.mail_group_id, user.id),
+    ).fetchall()
+    return [_row_to_message(row) for row in rows] or [message]
+
+
+ALREADY_SENT_TEXT = "This letter was already sent; it is in your Sent folder."
+
+
+@dataclass(frozen=True)
+class AllCallersResult:
+    """What `send_to_all_callers` did: the names of the callers it reached
+    and of those whose mailbox was full, and how many accounts take no mail
+    at all and were left out."""
+    sent_to: tuple[str, ...]
+    mailbox_full: tuple[str, ...]
+    left_out: int
+
+
+def all_callers_recipients(db: Database, sender: User | None) -> tuple[list[User], int]:
+    """Who SysOp mail to all callers goes to (issue #827): every account
+    the To prompt's address book would offer (`mail_recipient_refusal`,
+    `mail_sender_refusal`) but the sender's own; and how many accounts were
+    left out. Mail from the system goes to the SysOp too."""
+    recipients, left_out = [], 0
+    for account in list_users(db):
+        if sender is not None and account.id == sender.id:
+            continue
+        if mail_recipient_refusal(db, account) is not None or (
+            sender is not None and mail_sender_refusal(db, account, sender=sender) is not None
+        ):
+            left_out += 1
+            continue
+        recipients.append(account)
+    return recipients, left_out
+
+
+def send_to_all_callers(
+    db: Database, subject: str, body: str, *, group_id: str, sender: User | None,
+) -> AllCallersResult:
+    """SysOp mail to all callers (issue #827): one copy per account that
+    takes mail, from `sender`'s own account -- which callers can reply to --
+    or, with `sender` `None`, from the system, which nobody can.
+
+    Every copy is an ordinary letter under the ordinary rules: each
+    recipient's cap applies, and one whose mailbox is full of unread and
+    kept mail is named in the result rather than sent to. All copies are
+    written in one transaction, and a `group_id` already sent raises
+    `MailError`, so sending the same letter again -- a retry after a
+    dropped connection, a kept draft sent twice -- reaches nobody twice."""
+    subject = validate_mail_fields(subject, body)
+    if letter_already_sent(db, sender, group_id):
+        raise MailError(ALREADY_SENT_TEXT)
+    recipients, left_out = all_callers_recipients(db, sender)
+    group = LetterGroup(id=group_id, to=encode_group_to(None))
+    sent, full = [], []
+    try:
+        for recipient in recipients:
+            if not mail_has_room(db, recipient):
+                full.append(recipient.username)
+                continue
+            if sender is None:
+                send_system_mail_without_commit(db, recipient, subject, body, group=group)
+            else:
+                send_mail_without_commit(db, sender, recipient, subject, body, group=group)
+            sent.append(recipient.username)
+        db.connection.commit()
+    except BaseException:
+        db.connection.rollback()
+        raise
+    return AllCallersResult(sent_to=tuple(sent), mailbox_full=tuple(full), left_out=left_out)
+
+
 # -- who a letter is from and to, as a reader sees it -----------------------
 #
 # One answer for the mailbox's list and message view and for the main
@@ -675,7 +964,15 @@ def sender_display_label(db: Database, message: MailMessage) -> str:
 
 
 def recipient_display_label(db: Database, message: MailMessage) -> str:
-    """Who a sent letter went to: the remote address of Link mail (issue
+    """Who a sent letter went to: everyone, for a copy of a letter to
+    several people (issue #827, `group_to_label`), else the one recipient
+    (`copy_recipient_label`)."""
+    group = group_to_label(db, message)
+    return group if group is not None else copy_recipient_label(db, message)
+
+
+def copy_recipient_label(db: Database, message: MailMessage) -> str:
+    """Who this one copy went to: the remote address of Link mail (issue
     #805), else the local recipient's current name, or the name it had when
     its account was deleted (issue #818)."""
     if message.recipient_remote_address is not None:
@@ -970,8 +1267,12 @@ def thread_key(message: MailMessage, *, sent: bool) -> tuple:
     or the Inbox: its correspondent -- the recipient of a sent letter, the
     sender of a received one -- and its `thread_subject`. Mail from the
     system is its own correspondent, whatever name an account has."""
-    if sent:
-        who: tuple = (
+    if sent and message.mail_group_to is not None:
+        # A letter to several people (issue #827): its correspondents are
+        # all of them together.
+        who: tuple = ("to-group", message.mail_group_to)
+    elif sent:
+        who = (
             "to", message.recipient_remote_address.casefold() if message.recipient_remote_address else None,
             message.recipient_user_id, message.recipient_label,
         )
@@ -985,7 +1286,8 @@ def thread_key(message: MailMessage, *, sent: bool) -> tuple:
 
 
 def _hard_delete_or_mark(
-    db: Database, mail_id: int, *, sender_deleted_at: str | None, recipient_deleted_at: str | None
+    db: Database, mail_id: int, *, sender_deleted_at: str | None, recipient_deleted_at: str | None,
+    commit: bool = True,
 ) -> None:
     if sender_deleted_at is not None and recipient_deleted_at is not None:
         db.connection.execute("DELETE FROM mail_messages WHERE id = ?", (mail_id,))
@@ -995,7 +1297,8 @@ def _hard_delete_or_mark(
             "UPDATE mail_messages SET sender_deleted_at = ?, recipient_deleted_at = ? WHERE id = ?",
             (sender_deleted_at, recipient_deleted_at, mail_id),
         )
-    db.connection.commit()
+    if commit:
+        db.connection.commit()
 
 
 def release_mail_of_deleted_account_without_commit(db: Database, user: User) -> None:
@@ -1081,4 +1384,6 @@ def _row_to_message(row: sqlite3.Row) -> MailMessage:
         from_system=bool(row["from_system"]),
         recipient_label=row["recipient_label"],
         kept_at=row["kept_at"],
+        mail_group_id=row["mail_group_id"],
+        mail_group_to=row["mail_group_to"],
     )

@@ -335,7 +335,8 @@ def search_mail(db: Database, user: User, query: str, *, limit: int = 20) -> lis
     sides = db.connection.execute(
         """
         SELECT id, sender_user_id, sender_label, recipient_user_id, recipient_remote_address,
-               recipient_label, from_system, recipient_user_id = ? AND recipient_deleted_at IS NULL AS in_inbox,
+               recipient_label, from_system, mail_group_id, mail_group_to,
+               recipient_user_id = ? AND recipient_deleted_at IS NULL AS in_inbox,
                sender_user_id = ? AND sender_deleted_at IS NULL AS in_sent
           FROM mail_messages
          WHERE (recipient_user_id = ? AND recipient_deleted_at IS NULL)
@@ -363,19 +364,31 @@ def search_mail(db: Database, user: User, query: str, *, limit: int = 20) -> lis
 
     labels: dict[tuple, str] = {}
     found: list[tuple[int, bool, str]] = []
+    # A letter to several people is one copy per recipient (issue #827), and
+    # one letter in Sent: its first copy found stands for it, matched by
+    # everyone it went to.
+    sent_groups: set[str] = set()
     for row in sides:
         for sent in (False, True):
             if not row["in_sent" if sent else "in_inbox"]:
                 continue
+            if sent and row["mail_group_id"] is not None:
+                if row["mail_group_id"] in sent_groups:
+                    continue
+                sent_groups.add(row["mail_group_id"])
             envelope = MailMessage(
                 id=row["id"], sender_user_id=row["sender_user_id"], sender_label=row["sender_label"],
                 recipient_user_id=row["recipient_user_id"], subject="", body="", created_at="",
                 read_at=None, sender_deleted_at=None, recipient_deleted_at=None,
                 recipient_remote_address=row["recipient_remote_address"],
                 from_system=bool(row["from_system"]), recipient_label=row["recipient_label"],
+                mail_group_id=row["mail_group_id"], mail_group_to=row["mail_group_to"],
             )
             if sent:
-                key = (True, envelope.recipient_remote_address, envelope.recipient_user_id, envelope.recipient_label)
+                key = (
+                    True, envelope.recipient_remote_address, envelope.recipient_user_id, envelope.recipient_label,
+                    envelope.mail_group_to,
+                )
             else:
                 key = (False, envelope.sender_label, envelope.from_system)
             if key not in labels:

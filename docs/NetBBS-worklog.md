@@ -1118,6 +1118,18 @@ messages.
   transaction, as `delete_user` does; skipping it fails the DELETE with a
   CHECK error rather than orphaning mail.
 - Read receipts are not part of the current model.
+- A letter to several people (issue #827) is one row per recipient sharing
+  `mail_group_id`; `mail_group_to` holds the whole To on every copy. Any
+  per-letter feature (receipts, attachments, threads) works per row and
+  must not assume a group has all its copies: a copy deleted on both sides
+  is gone while its siblings stay. Sent collapses a group to one row by its
+  newest copy (`_load_mail_rows`, `search_mail`), so anything that acts on
+  a Sent row -- delete, mark -- must act on `_MailRow.ids`, every copy.
+- Writing several copies atomically needs the `_without_commit` senders
+  (`send_mail_without_commit`, `send_system_mail_without_commit`,
+  `compose_link_message(commit=False)`), and `make_room` no longer commits
+  its eviction: it runs inside the caller's transaction, which a group
+  rolls back whole on any failure.
 - `created_at` is when a letter was written, not when it arrived: received
   Link mail keeps its sender's signed time (issue #808). Anything ordering a
   mailbox -- the lists, quota eviction -- orders by row id (arrival), never by

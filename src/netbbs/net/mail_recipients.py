@@ -26,6 +26,12 @@ prompt checks it exactly as it checks a typed address, and Send checks
 it again. A BBS chosen from the list goes in by its technical identity,
 so the letter reaches the node that was chosen even if another takes its
 name.
+
+The To field can name several people (issue #827), separated by commas:
+`bob, carol@Farpoint`. Tab completes the address after the last comma,
+and `?` as the last address opens the list for that one. A comma inside
+double quotes -- a quoted node name, `bob@"Cats, Dogs"` -- does not
+separate (`split_recipients`).
 """
 
 from __future__ import annotations
@@ -59,6 +65,49 @@ RECENT_LIMIT = 10
 MAX_LISTED_MATCHES = 24
 
 PICKER_REQUEST = "?"
+
+#: What separates the people a letter is for in the To field (issue #827).
+RECIPIENT_SEPARATOR = ","
+
+
+def _separator_positions(text: str) -> list[int]:
+    """Where the separating commas are in `text`: not inside double
+    quotes, which a node name with `@` in it is shown in."""
+    positions, quoted = [], False
+    for index, char in enumerate(text):
+        if char == '"':
+            quoted = not quoted
+        elif char == RECIPIENT_SEPARATOR and not quoted:
+            positions.append(index)
+    return positions
+
+
+def split_recipients(text: str) -> list[str]:
+    """The addresses a To field names, in order, each stripped; empty ones
+    (`bob,, carol`, a trailing comma) left out."""
+    parts, start = [], 0
+    for position in _separator_positions(text):
+        parts.append(text[start:position])
+        start = position + 1
+    parts.append(text[start:])
+    return [part.strip() for part in parts if part.strip()]
+
+
+def join_recipients(addresses: list[str]) -> str:
+    """`split_recipients` undone: the To field for `addresses`."""
+    return f"{RECIPIENT_SEPARATOR} ".join(addresses)
+
+
+def _last_address_start(typed: str) -> int:
+    """Where the address being typed starts: after the last separating
+    comma and the spaces after it, else at the start."""
+    positions = _separator_positions(typed)
+    if not positions:
+        return 0
+    start = positions[-1] + 1
+    while start < len(typed) and typed[start] == " ":
+        start += 1
+    return start
 
 
 @dataclass(frozen=True)
@@ -166,11 +215,12 @@ def gather_address_book(db: Database, user: User, *, link_enabled: bool) -> Addr
 class RecipientCompleter:
     """Tab at the To prompt (see `netbbs.net.char_input.apply_tab_completion`).
 
-    Completes the whole field: a name, an address, or after `@` a linked
+    Completes the address after the last comma (issue #827), or the whole
+    field when there is none: a name, an address, or after `@` a linked
     BBS for the name before it. The line editor replaces only the word
     since the last space, and a BBS's name can hold spaces, so each match
-    is handed back from that word on. `last_matches` keeps the matches
-    whole, for `print_matches` to list."""
+    is handed back from that word on. `last_matches` keeps the matched
+    addresses whole, for `print_matches` to list."""
 
     def __init__(self, book: AddressBook, session: Session, prompt: str) -> None:
         self._book = book
@@ -201,12 +251,16 @@ class RecipientCompleter:
 
     def __call__(self, text_before_cursor: str) -> list[str]:
         typed = text_before_cursor.lstrip()
+        start = _last_address_start(typed)
+        head = typed[:start]
         word = typed.rsplit(" ", 1)[-1]
         lead = typed[: len(typed) - len(word)]
-        self.last_matches = [
-            match for match in self.matches(typed) if match.casefold().startswith(lead.casefold())
+        found = [
+            (address, head + address) for address in self.matches(typed[start:])
+            if (head + address).casefold().startswith(lead.casefold())
         ]
-        return [match[len(lead):] for match in self.last_matches]
+        self.last_matches = [address for address, _field in found]
+        return [field[len(lead):] for _address, field in found]
 
     async def print_matches(self, candidates, line: str, cursor: int) -> None:
         """List several matches under the prompt, wrapped, and draw the
