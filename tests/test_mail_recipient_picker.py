@@ -164,7 +164,7 @@ def test_tab_after_the_at_sign_completes_a_linked_bbs(db):
     )
     completer, _ = _completer(db, alice)
 
-    assert completer("bob@f") == ["bob@Farpoint"]
+    assert completer("bob@n") == ["bob@Nib & Quill"]
     assert completer("bob@") == ["bob@Farpoint", "bob@Nib & Quill"]
     # A name with a space: the editor replaces only the word after it.
     assert completer("bob@Nib & q") == ["Quill"]
@@ -172,7 +172,7 @@ def test_tab_after_the_at_sign_completes_a_linked_bbs(db):
     # By DNS name too (the test helper gives both the same one); a closing
     # quote is not part of a name.
     assert completer("bob@farpoint.ex") == ["bob@Farpoint", "bob@Nib & Quill"]
-    assert completer('bob@"Farpoint"') == ["bob@Farpoint"]
+    assert completer('bob@"Nib"') == ["bob@Nib & Quill"]
 
 
 def test_tab_offers_a_recent_link_correspondent_by_name(db):
