@@ -186,3 +186,21 @@ def test_presentations_confusable(first, second, confusable):
     b = _identity("b" * 32, *second)
     assert presentations_confusable(a, b) is confusable
     assert presentations_confusable(b, a) is confusable
+
+
+def test_who_shows_the_technical_identity_of_look_alike_nodes(db, tmp_path):
+    from types import SimpleNamespace
+
+    from netbbs.net.directory_flow import _remote_who_entries
+
+    real = _peer(tmp_path, "real", "OutBound", "outbound.example.org")
+    impostor = _peer(tmp_path, "impostor", "0utBound", None)
+    other = _peer(tmp_path, "other", "Harbor", None)
+    for peer in (real, impostor, other):
+        save_peer(db, peer)
+    presence = {real.fingerprint: ["alice"], impostor.fingerprint: ["mallory"], other.fingerprint: ["bob"]}
+    link_context = SimpleNamespace(realtime_bridge=SimpleNamespace(remote_node_presence=lambda: presence))
+
+    shown = {entry.username: entry.show_fingerprint for entry in _remote_who_entries(db, link_context)}
+
+    assert shown == {"alice": True, "mallory": True, "bob": False}
