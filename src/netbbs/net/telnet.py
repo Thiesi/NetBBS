@@ -264,7 +264,7 @@ class TelnetSession(Session):
                     break
         self._ttype_state = "done"
         charset, certain = classify_terminal_types(self.terminal_types)
-        self.output_charset = charset if charset is not None else ASCII
+        self.output_charset = self.detected_charset = charset if charset is not None else ASCII
         self.charset_certain = certain
 
     async def _send_terminal_type_request(self) -> None:

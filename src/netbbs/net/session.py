@@ -267,6 +267,10 @@ class Session(ABC):
     #: output (a door's stream) is in it too. Stays UTF-8 until the
     #: caller's terminal or preference says otherwise.
     output_charset: Charset = UTF8
+    #: What the connection's terminal type said (`output_charset` before a
+    #: caller's preference is applied), kept so a caller who goes back to
+    #: Auto gets it again.
+    detected_charset: Charset = UTF8
     #: Whether `output_charset` came from something the terminal said for
     #: certain. False for a Telnet terminal that reported no known type
     #: (it gets ASCII) or only `ansi`, and for an SSH terminal type on

@@ -115,8 +115,7 @@ def test_handle_session_enters_and_leaves_presence_around_the_main_menu(db, monk
 
     async def scenario() -> None:
         presence = _SpyPresence()
-        # "n" answers the one-time post-login Unicode-style prompt.
-        session = FakeSession(["alice", "correct-password", "n", "y"], keys=["l"])  # "l" = logoff, confirmed
+        session = FakeSession(["alice", "correct-password", "y"], keys=["l"])  # "l" = logoff, confirmed
         config = _throttle_config()
         await login_flow.handle_session(session, db, ChatHub(), presence, MessageMailbox(), _throttle(config), config, ActiveSessionRegistry(), MaintenanceMode())
 
@@ -141,7 +140,7 @@ def test_previous_callers_screen_appears_after_login_and_before_main_menu(db, mo
 
     async def scenario() -> None:
         session = FakeSession(
-            ["alice", "correct-password", "n", "y"],
+            ["alice", "correct-password", "y"],
             keys=[" ", "l"],
         )
         config = _throttle_config()
@@ -193,16 +192,14 @@ def test_presence_left_even_if_main_menu_raises(db, monkeypatch):
 
     async def scenario() -> None:
         presence = _SpyPresence()
-        # "n" answers the one-time post-login Unicode-style prompt, as
-        # in the sibling tests. Without it this session ran out of
-        # scripted lines inside `_confirm_unicode_style`, and the
-        # `StopIteration` that raised from a coroutine arrives as a
-        # `RuntimeError` -- indistinguishable, to the `except` below,
-        # from the failure this test means to simulate. It passed for
-        # years without the main menu ever being reached (AGENTS.md:
-        # confirm scripted UI tests still reach the path their name
-        # claims); `reached` is what keeps that honest now.
-        session = FakeSession(["alice", "correct-password", "n"])
+        # A session that runs out of scripted lines raises a
+        # `StopIteration` from a coroutine, which arrives as a
+        # `RuntimeError` -- indistinguishable, to the `except` below, from
+        # the failure this test means to simulate. It once passed without
+        # the main menu ever being reached (AGENTS.md: confirm scripted UI
+        # tests still reach the path their name claims); `reached` is what
+        # keeps that honest now.
+        session = FakeSession(["alice", "correct-password"])
         config = _throttle_config()
         try:
             await login_flow.handle_session(session, db, ChatHub(), presence, MessageMailbox(), _throttle(config), config, ActiveSessionRegistry(), MaintenanceMode())
