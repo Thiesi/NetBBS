@@ -281,8 +281,15 @@ No screen has to know which set a caller has. The mapping is in three layers:
   wide character becomes two cells, zero-width marks are dropped, and control
   characters and escape sequences are never mapped. Width is still measured
   on the Unicode text (§3.2's wrapping, §3.6's columns), so no layout moves
-  when a caller's set changes. `truncate_to_width` asks for the set's own
-  ellipsis: `…` in UTF-8 and `...` in CP437 and ASCII.
+  when a caller's set changes. That makes `…` a single `.` in CP437 and ASCII,
+  which reads as a full stop, so a screen that cuts text picks its marker
+  with `ellipsis_for(session)`: `…` on a UTF-8 terminal, `...` elsewhere.
+- A box-drawing character the table does not list is worked out from the
+  directions its Unicode name says it draws: CP437 gets the light line of
+  that shape (it has no heavy, dashed or mixed light/heavy lines), and ASCII
+  gets `+`, `|`, `-` or `=`. That covers CP437's own mixed single/double
+  corners and tees too, so a CP437 door or CP437 art shown on an ASCII
+  session keeps its frames.
 
 ASCII is true 7-bit: nothing above 0x7F reaches an ASCII session, including
 accented letters in posts, which become their base letters. CP437 is one byte
@@ -309,6 +316,12 @@ CP437 or ASCII, and an explicit choice always wins over detection. Auto means:
   sends `syncterm` over SSH too. The pre-authentication banner goes out before
   any channel exists, so it is always ASCII.
 - The browser terminal is always UTF-8.
+
+Each Telnet and SSH connection logs one INFO line with the terminal types the
+client reported, how the exchange ended (answered, refused, no answer, or the
+SSH PTY request) and the character set chosen, so a SysOp can read what a
+client calls itself. Reported names are kept to printable ASCII and 40
+characters before they are stored or logged.
 
 After login, a caller whose set was not settled -- an unknown terminal, or one
 that reported only `ansi` -- is asked once which of two sample lines looks
@@ -2398,16 +2411,18 @@ deleted sender (or a Link sender) left rows its recipient could delete from
 view but never remove. The table's CHECK still refuses a row with neither a
 local nor a remote recipient unless its recipient side is deleted.
 
-Recipient mailboxes are bounded (`MAX_MAIL_PER_RECIPIENT`, 500). When full:
+Recipient mailboxes are bounded (`MAX_MAIL_PER_RECIPIENT`, 500, counting the
+Inbox). When full:
 
 - the oldest already-read message may be evicted to make room;
 - unread mail is never silently discarded;
-- a kept message (below, issue #828) is never evicted, read or not;
+- a kept message (below, issues #828 and #921) is never evicted, read or not,
+  and is not counted: Kept has its own limit, `MAX_KEPT_PER_RECIPIENT` (100);
 - if no safe eviction exists, delivery fails explicitly.
 
 The owner can see the cap coming (issue #818): the Inbox header counts
 "N of 500", and from 450 (nine in ten) the Inbox says what happens at the
-cap; a mailbox full of unread and kept mail says new mail is turned away. Each
+cap; a mailbox full of unread mail says new mail is turned away. Each
 eviction is counted (`mail_eviction_notices`), and the owner is told once,
 at their next main menu, how many old read messages were removed -- a count,
 never which ones, since the notice outlives them. A warning at the main menu
@@ -2555,7 +2570,8 @@ moderator's account sent stays theirs.
 
 **SysOp tools, and what they do not show (issue #820).** Operations → Mail
 shows how full each inbox is -- letters, unread, read, kept (#828) and system notices per
-account, against `MAX_MAIL_PER_RECIPIENT`, fullest first -- and the Link mail
+account, the Inbox against `MAX_MAIL_PER_RECIPIENT` (Kept is outside it, #921),
+fullest first -- and the Link mail
 this node refused (§12.4). Both show counts, account names, senders and reasons
 only: no SysOp screen shows a letter's subject or body, and a refused letter's
 record does not name its recipient. Mail is private between its writer and its
@@ -2696,8 +2712,8 @@ The list:
   with `!` before the name, and says what it means above the list. The
   message view carries the full caution.
 
-**Managing a mailbox** (issue #828). The list manages letters in bulk, keeps
-letters from the cap, and lists by conversation:
+**Managing a mailbox** (issues #828, #921). The list manages letters in bulk,
+keeps letters out of the cap, and lists by conversation:
 - `[M]ark` (or Space) toggles a mark on the highlighted letter and moves the
   cursor down, so a run is marked key by key. The mark is a `*` in the column
   after the cursor's (before the number in prose rows), and the header counts
@@ -2717,14 +2733,32 @@ letters from the cap, and lists by conversation:
   `Mov[e] to Inbox` moves them back. Nothing is lost either way, so nothing
   is asked. `mail_messages.kept_at` records it; it is the recipient's alone,
   since Sent is never evicted.
-- A kept letter is never evicted by the cap (`make_room` skips it) but still
-  counts toward `MAX_MAIL_PER_RECIPIENT`. Counting it was chosen over exempting
-  it: an exempt folder would let a mailbox grow without bound (§14), one kept
-  letter at a time. So the Inbox header's "N of 500" counts the Inbox and
-  Kept together and says how many are in Kept, a mailbox full of unread and
-  kept mail refuses new mail (`mailbox_full`), and the warnings say "unread
-  and kept mail is never removed". The SysOp's Mailboxes screen has a Kept
-  column.
+- A kept letter is never evicted by the cap (`make_room` skips it) and does
+  not count toward `MAX_MAIL_PER_RECIPIENT` (issue #921). Kept has its own
+  limit instead, `MAX_KEPT_PER_RECIPIENT` (100), so each caller holds at most
+  600 letters, and a mailbox cannot grow without bound (§14) one kept letter
+  at a time. #828 first counted Kept toward the 500; that made the cap about
+  "unread and kept mail", a limit the caller could not see coming from the
+  Inbox and one that kept letters quietly ate into, so the operator chose a
+  separate, visible limit. The cap is about unread mail again: the Inbox
+  header's "N of 500" counts the Inbox alone (and says how many are in Kept),
+  a mailbox full of unread mail refuses new mail (`mailbox_full`), and moving
+  a letter to Kept makes room in the Inbox. The Kept folder's header counts
+  "N of 100", and a full Kept says so above its list.
+- Keeping when Kept is full is refused in place, with nothing moved: "Kept is
+  full (100 letters) -- move some back to the Inbox or delete them first."
+  (`netbbs.mail.KeptFullError`, raised by `set_kept`). A bulk keep of marked
+  letters is all or none: when they do not all fit, none move, the marks stay,
+  and the caller is told how many more Kept has room for. Keeping as many as
+  fit was rejected: it would split the marked letters between the folders by
+  list order, leaving the caller to find which went where -- the same reason a
+  letter to several people is all or none (#827). Moving letters back to the
+  Inbox is never refused. It can take the Inbox past 500 by what was kept;
+  nothing is removed for that, and new mail then arrives only in place of a
+  read letter, so the account still holds no more than the two limits
+  together. Kept counts are local: no Link payload carries them. The SysOp's
+  Mailboxes screen has a Kept column (flagged at 100), and its "Of the cap"
+  and fullest-first order count the Inbox alone.
 - `[O]rder` cycles newest first, unread first and by conversation (Sent:
   newest first and by conversation), one per-caller preference. Replies record
   no parent letter, so a conversation is the correspondent (the sender in the
@@ -2738,7 +2772,7 @@ letters from the cap, and lists by conversation:
 - At the 40x12 floor the action bar takes four rows, so below 16 rows the
   notes above the list share one row, the most urgent (the cap's, then a kept
   letter's, then the identity note); what the others say is on screen in brief
-  (the `[D]raft` key, "N of 500", a row's `!`). Below 60 columns the header
+  (the `[D]raft` key, "N of 500" or "N of 100", a row's `!`). Below 60 columns the header
   uses short counts and leaves out the order and the Kept count.
 
 A received message's view names its recipient: `From:`, `To:` (the reader)

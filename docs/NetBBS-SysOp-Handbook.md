@@ -830,7 +830,7 @@ this node refused, and how full your callers' mailboxes are.
 
 - **Refused Link mail** lists each refused letter with its sender, the reason
   in plain words (its node is still on probation here, the sender or node is
-  blocked, no such account, a mailbox full of unread and kept mail, ...), when it was
+  blocked, no such account, a mailbox full of unread mail, ...), when it was
   last refused and how many times its sender tried. **Open** one to see its
   node's and its sender's trust here, and **Node trust** or **User trust**
   takes you to that subject's trust screen to establish or block it. A letter
@@ -840,11 +840,14 @@ this node refused, and how full your callers' mailboxes are.
 - **Mailboxes** lists every account with mail, fullest first (**Order**
   switches to by name): letters, unread, read, kept (in the caller's Kept
   folder), notices from the BBS itself, and how much of the 500-letter cap
-  that is. A full inbox makes room by dropping its oldest read letter that is
-  not kept; an inbox full of unread and kept mail refuses new mail, and a
-  Link sender gets a "mailbox full" bounce. Callers see the same count in their
-  own Inbox header, a warning from 450, and a main-menu line when old read
-  mail was removed to make room.
+  the Inbox takes. Kept letters are part of Letters but not of the cap: Kept
+  has its own limit of 100 per caller, and the Kept column is flagged when
+  one is full (the caller cannot keep another until they move some back or
+  delete some). So each caller holds at most 600 letters. A full inbox makes
+  room by dropping its oldest read letter; an inbox full of unread mail
+  refuses new mail, and a Link sender gets a "mailbox full" bounce. Callers
+  see the same count in their own Inbox header, a warning from 450, and a
+  main-menu line when old read mail was removed to make room.
 - In **Refused Link mail**, "the recipient's account is disabled or still
   awaiting approval" is mail for an account that takes none at the moment.
 - **[W]rite to all callers** sends one letter to every account on this BBS
@@ -856,7 +859,7 @@ this node refused, and how full your callers' mailboxes are.
   the review screen -- and keep a draft of their own. The review screen says
   how many accounts it will reach. The guest account, disabled accounts and
   signups awaiting approval are left out, and so is anyone whose mailbox is
-  full of unread and kept mail: each caller gets their own copy, under the
+  full of unread mail: each caller gets their own copy, under the
   same 500-letter cap as any letter. After Send you are told how many callers
   it reached, whose mailbox turned it away (by name), and how many accounts
   were left out. It is local only: callers on linked BBSes are not written
@@ -1314,6 +1317,10 @@ Every caller gets text in the character set their terminal reads:
   - SSH callers are detected from their terminal type, but the banner SSH shows
     during login is always ASCII.
   - The browser always gets Unicode.
+  - The node log has one line per Telnet or SSH connection saying what the
+    terminal called itself and which character set it got, for example
+    `telnet caller 203.0.113.9 terminal type: 'syncterm' (answered); character
+    set cp437 (certain)`. Look there if a caller's screen looks wrong.
 - **After sign-in:**
   - Each caller's own **Profile → Unicode or CP437** choice applies.
   - A caller whose terminal wasn't recognised is asked once which of two sample

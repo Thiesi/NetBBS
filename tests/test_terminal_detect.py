@@ -263,3 +263,67 @@ def test_a_flood_during_the_wait_ends_the_wait_early():
     elapsed = asyncio.run(scenario())
     assert seen["charset"] == ASCII
     assert elapsed < 10.0
+
+
+# -- The connection's log line (#929 PR 6): a SysOp reads a client's
+# -- reported terminal type from the node log.
+
+
+def _detection_lines(caplog):
+    return [r.getMessage() for r in caplog.records if "terminal type:" in r.getMessage()]
+
+
+def test_telnet_logs_the_reported_terminal_type_once(caplog):
+    caplog.set_level("INFO", logger="netbbs.net.telnet")
+
+    async def client(reader, writer):
+        await answer_terminal_type(reader, writer, "syncterm")
+        return await reader.readuntil(b"\r\n")
+
+    _connect(client)
+    lines = _detection_lines(caplog)
+    assert len(lines) == 1
+    assert "telnet caller 127.0.0.1 terminal type: 'syncterm' (answered)" in lines[0]
+    assert "character set cp437 (certain)" in lines[0]
+
+
+def test_telnet_logs_a_refusal(caplog):
+    caplog.set_level("INFO", logger="netbbs.net.telnet")
+
+    async def client(reader, writer):
+        writer.write(bytes([IAC, WONT, TTYPE]))
+        await writer.drain()
+        return await reader.readuntil(b"\r\n")
+
+    _connect(client)
+    (line,) = _detection_lines(caplog)
+    assert "terminal type: none (refused); character set ascii (uncertain, asked after login)" in line
+
+
+def test_telnet_logs_no_answer(caplog):
+    caplog.set_level("INFO", logger="netbbs.net.telnet")
+
+    async def client(reader, writer):
+        return await reader.readuntil(b"\r\n")
+
+    _connect(client, wait=0.3)
+    (line,) = _detection_lines(caplog)
+    assert "terminal type: none (no answer)" in line
+
+
+def test_ssh_logs_the_pty_terminal_type(caplog):
+    caplog.set_level("INFO", logger="netbbs.net.ssh")
+    SSHSession(_Process("syncterm"))
+    SSHSession(_Process(None))
+    lines = _detection_lines(caplog)
+    assert "SSH caller ? terminal type: 'syncterm' (PTY request); character set cp437 (certain)" in lines[0]
+    assert "terminal type: none (no PTY terminal type); character set utf-8" in lines[1]
+
+
+def test_a_reported_type_is_cleaned_before_it_is_kept_or_logged():
+    from netbbs.net.terminal_detect import MAX_TERMINAL_TYPE_LENGTH, clean_terminal_type
+
+    assert clean_terminal_type(" sync\x1b[2Jterm\r\n") == "sync[2Jterm"
+    assert len(clean_terminal_type("x" * 500)) == MAX_TERMINAL_TYPE_LENGTH
+    session = SSHSession(_Process("evil\x1b]0;title\x07term"))
+    assert session.terminal_types == ("evil]0;titleterm",)

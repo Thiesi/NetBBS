@@ -240,7 +240,7 @@ def test_quota_bounces_when_every_message_is_unread(db, alice, bob, monkeypatch)
     send_mail(db, alice, bob, "First", "body")
     send_mail(db, alice, bob, "Second", "body")
 
-    with pytest.raises(MailboxFullError, match="every message is unread or kept"):
+    with pytest.raises(MailboxFullError, match="every message is still unread"):
         send_mail(db, alice, bob, "Third", "body")
 
     # The bounced message was never stored.

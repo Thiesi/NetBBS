@@ -65,7 +65,7 @@ from netbbs.net.signup_text import pending_approval_notice, username_problem_lin
 from netbbs.staff import approvers_away_line
 from netbbs.net.throttle import LoginThrottle
 from netbbs.net.welcome_banner import load_welcome_banner
-from netbbs.net.terminal_detect import classify_terminal_types
+from netbbs.net.terminal_detect import classify_terminal_types, clean_terminal_type, describe_detection
 from netbbs.rendering import strip_ansi
 from netbbs.rendering.charset import ASCII, UTF8, map_text
 from netbbs.rendering.pipe_codes import PastedColor
@@ -177,10 +177,15 @@ class SSHSession(Session):
         # clients are otherwise modern, so an unrecognised name keeps UTF-8,
         # and the caller is asked after login.
         get_terminal_type = getattr(process, "get_terminal_type", None)
-        terminal_type = (get_terminal_type() if get_terminal_type is not None else None) or ""
+        terminal_type = clean_terminal_type((get_terminal_type() if get_terminal_type is not None else None) or "")
         self.terminal_types = (terminal_type,) if terminal_type else ()
         charset, self.charset_certain = classify_terminal_types(self.terminal_types)
         self.output_charset = self.detected_charset = charset if charset is not None else UTF8
+        _logger.info(describe_detection(
+            "SSH", self.peer_address, names=self.terminal_types,
+            outcome="PTY request" if terminal_type else "no PTY terminal type",
+            charset=self.output_charset, certain=self.charset_certain,
+        ))
 
     async def _send_text(self, text: str) -> None:
         # Same CRLF normalization TelnetSession.write performs, and the

@@ -61,6 +61,8 @@ from netbbs.link.node_profiles import (
 from netbbs.mail import (
     GUEST_MAIL_REFUSAL,
     MAILBOX_NEARLY_FULL,
+    KeptFullError,
+    MAX_KEPT_PER_RECIPIENT,
     MAX_MAIL_BODY_BYTES,
     MAX_MAIL_PER_RECIPIENT,
     MAX_MAIL_RECIPIENTS,
@@ -200,6 +202,7 @@ from netbbs.rendering import (
     wrap_to_width,
 )
 from netbbs.rendering.post_body import plain_post_body, post_body_mode, post_body_rows, post_body_text
+from netbbs.rendering.charset import ellipsis_for
 from netbbs.rendering.reflow import wrap_terminal_text
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
@@ -367,19 +370,29 @@ _THREAD_INDENT = "  "
 _EMPTY_INBOX = "Your inbox is empty. New mail will appear here."
 _EMPTY_SENT = "You haven't sent any mail. [C]ompose writes a new message."
 _EMPTY_KEPT = (
-    "Nothing kept. K[e]ep in the Inbox moves a letter here, where the mailbox cap never removes it."
+    f"Nothing kept. K[e]ep in the Inbox moves a letter here, where the mailbox cap never removes it. "
+    f"Kept holds {MAX_KEPT_PER_RECIPIENT} letters."
 )
-def mailbox_capacity_note(total: int, unread: int, *, kept_read: int = 0) -> tuple[str, str] | None:
-    """What the Inbox and Kept say about the cap (issues #818, #828), and
-    its tone, once the mailbox holds `MAILBOX_NEARLY_FULL` messages; `None`
-    below that. `total` counts both folders; `kept_read` is the kept letters
-    already read, which the cap cannot evict either."""
-    if total >= MAX_MAIL_PER_RECIPIENT and unread + kept_read >= total:
-        what = "unread and kept mail" if kept_read else "unread mail"
-        undo = "read, delete or stop keeping" if kept_read else "read or delete"
+def kept_capacity_note(kept: int) -> str | None:
+    """What Kept says once it is full (issue #921): keeping another letter
+    is refused until some go back to the Inbox or are deleted."""
+    if kept < MAX_KEPT_PER_RECIPIENT:
+        return None
+    return (
+        f"Kept is full ({MAX_KEPT_PER_RECIPIENT} letters): K[e]ep in the Inbox is refused until you move "
+        "some back to the Inbox or delete them."
+    )
+
+
+def mailbox_capacity_note(total: int, unread: int) -> tuple[str, str] | None:
+    """What the Inbox says about its cap (issue #818), and its tone, once it
+    holds `MAILBOX_NEARLY_FULL` messages; `None` below that. Kept letters
+    count toward Kept's own limit, not this one (issue #921), so `total`
+    and `unread` are the Inbox's alone."""
+    if total >= MAX_MAIL_PER_RECIPIENT and unread >= total:
         return (
-            f"Your mailbox is full of {what} ({MAX_MAIL_PER_RECIPIENT} messages): new mail is "
-            f"turned away until you {undo} some.",
+            f"Your mailbox is full of unread mail ({MAX_MAIL_PER_RECIPIENT} messages): new mail is "
+            "turned away until you read or delete some, or move some to Kept.",
             "error",
         )
     if total >= MAX_MAIL_PER_RECIPIENT:
@@ -391,7 +404,7 @@ def mailbox_capacity_note(total: int, unread: int, *, kept_read: int = 0) -> tup
     if total >= MAILBOX_NEARLY_FULL:
         return (
             f"Your mailbox is nearly full: at {MAX_MAIL_PER_RECIPIENT} messages, each new one removes "
-            "your oldest read message. Unread and kept mail is never removed.",
+            "your oldest read message. Unread mail is never removed.",
             "warning",
         )
     return None
@@ -1092,7 +1105,7 @@ class _MailboxScreen:
         (`netbbs.mail.delete_letters`)."""
         targets = self._targets()
         if len(targets) == 1 and not self.marked:
-            subject = truncate_to_width(targets[0].subject, 40, ellipsis="…" if self.unicode_style else "...")
+            subject = truncate_to_width(targets[0].subject, 40, ellipsis=ellipsis_for(self.session, unicode_style=self.unicode_style))
             question = f"Delete \"{subject}\"?"
         else:
             question = f"Delete the {_count(len(targets), 'marked message')}?"
@@ -1131,9 +1144,15 @@ class _MailboxScreen:
         one, to Kept; Mov[e] to Inbox in Kept moves them back. Nothing is
         lost either way, so nothing is asked."""
         targets = self._targets()
-        moved = await self.lane.run(
-            set_kept, self.user, [row.message.id for row in targets], kept=not self.kept,
-        )
+        try:
+            moved = await self.lane.run(
+                set_kept, self.user, [row.message.id for row in targets], kept=not self.kept,
+            )
+        except KeptFullError as exc:
+            # Refused in place (issue #921), marks and all, so the caller
+            # can unmark some or make room and try again.
+            announce(self.session, str(exc), tone="error")
+            return
         self.marked = set()
         where = "back to the Inbox" if self.kept else "to Kept"
         announce(self.session, f"Moved {_count(moved, 'message')} {where}.", tone="muted")
@@ -1245,13 +1264,17 @@ class _MailboxScreen:
                     colored(_count(unread, "unread message") if not narrow else f"{unread} unread", fg_color=self.accent)
                     if unread else colored("Inbox caught up", fg_color=SUCCESS_COLOR)
                 )
-            # Counted against the cap (issue #818): everything received,
-            # Inbox and Kept (issue #828), read or not, whatever [F]ind is
-            # showing.
-            received = len(self.received_rows)
+            # Counted against the folder's own limit, read or not, whatever
+            # [F]ind is showing: the Inbox's cap (issue #818), or Kept's
+            # (issue #921).
+            held = sum(1 for row in self.received_rows if (row.message.kept_at is not None) == self.kept)
+            limit, warn_at = (
+                (MAX_KEPT_PER_RECIPIENT, MAX_KEPT_PER_RECIPIENT) if self.kept
+                else (MAX_MAIL_PER_RECIPIENT, MAILBOX_NEARLY_FULL)
+            )
             parts.append(colored(
-                f"{received} of {MAX_MAIL_PER_RECIPIENT}",
-                fg_color=WARNING_COLOR if received >= MAILBOX_NEARLY_FULL else VALUE_COLOR,
+                f"{held} of {limit}",
+                fg_color=WARNING_COLOR if held >= warn_at else VALUE_COLOR,
             ))
             if not self.kept:
                 kept = [row.message for row in self.received_rows if row.message.kept_at is not None]
@@ -1360,13 +1383,15 @@ class _MailboxScreen:
         if draft is not None:
             # Said on the mail screen, not asked on the way in (issue #814).
             pending.append((1, _letter_draft_notice(draft), MUTED_COLOR))
-        if not self.sent:
-            # The cap counts the Inbox and Kept together (issue #828).
-            received = [row.message for row in self.received_rows]
-            capacity = mailbox_capacity_note(
-                len(received), sum(1 for message in received if not message.is_read),
-                kept_read=sum(1 for message in received if message.is_read and message.kept_at is not None),
-            )
+        if self.kept:
+            # Kept has a limit of its own (issue #921).
+            kept_note = kept_capacity_note(sum(1 for row in self.received_rows if row.message.kept_at is not None))
+            if kept_note is not None:
+                pending.append((0, kept_note, WARNING_COLOR))
+        elif not self.sent:
+            # The cap counts the Inbox alone (issue #921).
+            received = [row.message for row in self.received_rows if row.message.kept_at is None]
+            capacity = mailbox_capacity_note(len(received), sum(1 for message in received if not message.is_read))
             if capacity is not None:
                 text, tone = capacity
                 pending.append((0, text, ERROR_COLOR if tone == "error" else WARNING_COLOR))
@@ -1380,7 +1405,9 @@ class _MailboxScreen:
             # the others say is still on screen in brief -- the [D]raft key,
             # the "N of 500" count, a row's "!".
             _urgency, text, color = min(pending, key=lambda item: item[0])
-            text = truncate_to_width(text, max(1, width - 1), ellipsis="…" if self.unicode_style else "...")
+            text = truncate_to_width(
+                text, max(1, width - 1), ellipsis=ellipsis_for(self.session, unicode_style=self.unicode_style)
+            )
             notes.append(colored(text, fg_color=color))
         else:
             for _urgency, text, color in pending:
@@ -1460,7 +1487,7 @@ class _MailboxScreen:
                 page_rows, width=width, first_number=1, number_width=number_width, widths=widths,
                 highlighted=self.highlighted - top if self.highlighted is not None else None,
                 sent=self.sent, show_status=show_status, accent=self.accent,
-                ellipsis="…" if self.unicode_style else "...", marked=self.marked,
+                ellipsis=ellipsis_for(self.session, unicode_style=self.unicode_style), marked=self.marked,
             ))
             if roomy:
                 lines.append(rule)
@@ -1799,7 +1826,7 @@ async def _show_inbox_message(
             *([("g", menu_key("G", "et file"))] if refs else []),
             ("u", menu_key("U", "nread")),
             # Issue #828: to the Kept folder, which the cap never evicts
-            # from, and back.
+            # from, and back; Kept has its own limit (issue #921).
             ("e", menu_key("e", " to Inbox", prefix="Mov") if message.kept_at else menu_key("e", "ep", prefix="K")),
             ("d", menu_key("D", "elete")),
         ]
@@ -1835,7 +1862,12 @@ async def _show_inbox_message(
             continue
         if choice == "e":
             keep = message.kept_at is None
-            await lane.run(set_kept, user, [message.id], kept=keep)
+            try:
+                await lane.run(set_kept, user, [message.id], kept=keep)
+            except KeptFullError as exc:
+                # Refused in place (issue #921): the letter stays open.
+                announce(session, str(exc), tone="error")
+                continue
             announce(session, "Moved to Kept." if keep else "Moved back to the Inbox.", tone="muted")
             return
         if choice == "u":
@@ -2514,7 +2546,7 @@ def all_callers_outcome(
         return text + (f" and {more} more" if more > 0 else "")
 
     if mailbox_full:
-        parts.append(f"Not delivered, mailbox full of unread and kept mail: {named(mailbox_full)}.")
+        parts.append(f"Not delivered, mailbox full of unread mail: {named(mailbox_full)}.")
     if no_file_access:
         parts.append(f"Not delivered, can't open a file area it points at: {named(no_file_access)}.")
     if left_out:

@@ -151,3 +151,36 @@ def test_every_cp437_character_round_trips_byte_for_byte():
 def test_ellipsis_follows_the_charset():
     assert ellipsis(UTF8) == "…"
     assert ellipsis(CP437) == "..." and ellipsis(ASCII) == "..."
+
+
+# -- #929 PR 6: CP437's whole upper half, and every box-drawing character,
+# -- reach an ASCII terminal as something other than "?".
+
+
+def test_every_cp437_character_has_an_ascii_stand_in():
+    """A CP437 door or CP437 art on an ASCII session: its mixed
+    single/double box corners and its Greek and maths signs all read as
+    something, not "?" (only the inverted question mark is one)."""
+    unshown = [
+        f"{byte:02X}"
+        for byte in range(0x80, 0x100)
+        if (char := bytes([byte]).decode("cp437")) != "\u00bf"
+        and "?" in map_text(char, ASCII)
+    ]
+    assert unshown == []
+
+
+@pytest.mark.parametrize("charset", [CP437, ASCII])
+def test_every_box_drawing_character_maps_to_a_line_of_the_same_shape(charset):
+    for code in range(0x2500, 0x2580):
+        char = chr(code)
+        mapped = map_text(char, charset)
+        assert "?" not in mapped, (hex(code), charset)
+        assert display_width(mapped) == display_width(char)
+        mapped.encode(charset)
+
+
+def test_mixed_box_characters_keep_their_shape():
+    assert map_text("\u2552\u2550\u2555\u255e\u256a\u2561", ASCII) == "+=++++"
+    assert map_text("\u250f\u2501\u2533\u2501\u2513\u2521\u254d\u2529", CP437) == "\u250c\u2500\u252c\u2500\u2510\u251c\u2500\u2524"
+    assert map_text("\u2502\u2551\u2500\u2550", ASCII) == "||-="

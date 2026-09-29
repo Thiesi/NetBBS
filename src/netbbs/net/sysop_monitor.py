@@ -69,6 +69,7 @@ from netbbs.rendering.theme import (
     SUCCESS_COLOR,
     VALUE_COLOR,
 )
+from netbbs.rendering.charset import ellipsis_for
 from netbbs.rendering.width import cut_to_width, display_width, wrap_to_width
 from netbbs.storage.execution import DatabaseLane
 from netbbs.timeutil import resolve_display_preferences
@@ -136,6 +137,15 @@ class Glyphs:
 
 UNICODE_GLYPHS = Glyphs(" › ", "…", " · ", "↓", "─", "↑↓ select", "▾")
 ASCII_GLYPHS = Glyphs(" > ", "...", " - ", "v", "-", "Up/Dn select", "v")
+
+def monitor_glyphs(session: object, *, unicode_style: bool) -> Glyphs:
+    """The glyph set for the viewer: plain ASCII without Unicode styling,
+    and on a CP437 terminal the Unicode set with three dots for "…",
+    which that terminal could only be sent as one (#929)."""
+    if not unicode_style:
+        return ASCII_GLYPHS
+    return replace(UNICODE_GLYPHS, ellipsis=ellipsis_for(session))
+
 
 #: Which column each order sorts by, for the heading's sort mark.
 _SORTED_COLUMN = {"time on": "on", "idle": "idle", "user": "user"}
@@ -373,7 +383,7 @@ def paint_monitor(buffer: ScreenBuffer, state: MonitorState, controls: NodeContr
         # The sorted column's heading carries a mark, which is how the
         # order is shown: the action bar has no room to spell it out.
         heading = column.heading + state.glyphs.sorted_mark if column.key == sorted_key else column.heading
-        col = paint_text(buffer, 1, col, _fit(heading, column) + " ", fg=LABEL_COLOR, bold=True)
+        col = paint_text(buffer, 1, col, _fit(heading, column, state.glyphs.ellipsis) + " ", fg=LABEL_COLOR, bold=True)
     paint_text(buffer, 1, col, "DOING", width=doing_width, fg=LABEL_COLOR, bold=True)
 
     # Keep the selection on the same session as the list changes under it.
@@ -404,7 +414,7 @@ def paint_monitor(buffer: ScreenBuffer, state: MonitorState, controls: NodeContr
                 name, color = _name_cell(entry, state)
                 text, bold = _fit(name, column, state.glyphs.ellipsis), entry.is_sysop
             else:
-                text, color, bold = _fit(_cell_text(column, entry), column), VALUE_COLOR, False
+                text, color, bold = _fit(_cell_text(column, entry), column, state.glyphs.ellipsis), VALUE_COLOR, False
                 if column.key == "id":
                     color = METADATA_COLOR
             col = paint_text(buffer, row, col, text + " ", fg=color, bg=bg, bold=bold)
@@ -662,7 +672,7 @@ async def monitor_screen(
         header_color=await lane.run(effective_header_color_256),
         accent_color=await lane.run(effective_accent_color_256),
         name_gradient=session.node_name_gradient,
-        glyphs=UNICODE_GLYPHS if await lane.run(unicode_style_enabled, actor) else ASCII_GLYPHS,
+        glyphs=monitor_glyphs(session, unicode_style=await lane.run(unicode_style_enabled, actor)),
     )
 
     async def on_key(key: EditorKey) -> KeyOutcome:

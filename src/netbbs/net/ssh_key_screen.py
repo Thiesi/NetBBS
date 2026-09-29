@@ -29,6 +29,7 @@ from netbbs.identity.keys import IdentityError, parse_verify_key
 from netbbs.net.char_input import InputCancelled
 from netbbs.net.confirm import prompt_yes_no
 from netbbs.net.session import Session, write_prompt
+from netbbs.rendering.charset import ellipsis_for
 from netbbs.rendering import ERROR_COLOR, LABEL_COLOR, METADATA_COLOR, MUTED_COLOR, action_bar, colored, menu_key, sanitize_text
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
@@ -121,7 +122,7 @@ async def manage_ssh_keys_screen(session: Session, lane: DatabaseLane, target: U
             )
             await session.write_line(
                 " " * (len(str(position)) + 4)
-                + colored(f"{key.fingerprint[:12]}…  added {added}", fg_color=MUTED_COLOR)
+                + colored(f"{key.fingerprint[:12]}{ellipsis_for(session)}  added {added}", fg_color=MUTED_COLOR)
             )
 
         options = [menu_key("A", "dd a key"), menu_key("B", "ack")]
