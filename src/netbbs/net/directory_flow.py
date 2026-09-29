@@ -19,14 +19,14 @@ from netbbs.directory import get_vcard, has_bio, is_bio_visible
 from netbbs.link.boards import LinkContext
 from netbbs.link.node_profiles import identity_for_fingerprint, link_address_label, presentations_confusable
 from netbbs.doors import list_doors
-from netbbs.mail import mail_sender_refusal, sender_unblockable_reason
-from netbbs.messaging_preferences import (
-    MESSAGES_AND_MAIL_BLOCK_REFUSAL, accepts_direct_messages, live_message_refusal,
-)
+from netbbs.mail import sender_unblockable_reason
+from netbbs.messaging_preferences import accepts_direct_messages, live_message_refusal
 from netbbs.net.breadcrumb_preference import breadcrumb_collapsed_enabled
 from netbbs.net.char_input import reject_unhandled_key
 from netbbs.net.chat_flow import run_direct_chat_invite_flow
-from netbbs.net.mail_flow import BlockTarget, is_blocked, mail_open_to, mail_someone, toggle_block
+from netbbs.net.mail_flow import (
+    BlockTarget, is_blocked, mail_blocked_notice, mail_open_to, mail_someone, toggle_block,
+)
 from netbbs.net.menu_description_preference import menu_description_level
 from netbbs.net.node_map_flow import (
     MAP_HOTKEY,
@@ -153,19 +153,32 @@ async def _show_vcard(
     `[B]ack` to the directory. Before it the card was written and the
     directory redrawn straight over it, so with redraw-in-place on it was
     never seen. After a letter is sent or given up the card comes back,
-    with the outcome above its prompt."""
+    with the outcome above its prompt.
+
+    Issue #953: nor is `[M]ail` offered on the card of a member who has
+    blocked the caller -- the letter would be refused -- and the card says
+    "<name> does not accept messages or mail from you." above its action
+    bar instead (`mail_blocked_notice`, in Who's online's words)."""
     while True:
-        offer_mail = (
+        mail_open = (
             lane is not None and target.id != requesting_user.id
             and await mail_open_to(session, lane, requesting_user)
         )
+        blocked_notice = mail_blocked_notice(db, target, sender=requesting_user) if mail_open else None
+        offer_mail = mail_open and blocked_notice is None
         await _draw_vcard(session, db, target, requesting_user)
+        # The sentence takes the blank row above the action bar, so the card
+        # grows by one row, not two.
+        lead = "\r\n"
+        if blocked_notice is not None:
+            await session.write_line(lead + colored(sanitize_text(blocked_notice), fg_color=MUTED_COLOR))
+            lead = ""
         entries = []
         if offer_mail:
             entries.append(MenuEntry(label=menu_key("M", "ail"), brief=f"Write to {sanitize_text(target.username)}"))
         entries.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to the directory"))
         await session.write_line(
-            "\r\n" + menu_row(
+            lead + menu_row(
                 entries, width=session.terminal_width, height=session.terminal_height,
                 description_level=menu_description_level(db, requesting_user),
             )
@@ -532,7 +545,8 @@ async def _caller_who_screen(
         # caller (issue #948), as neither live action is.
         refusal = live_message_refusal(db, target, sender=user)
         live = refusal is None
-        blocked = mail_sender_refusal(db, target, sender=user) is not None
+        blocked_notice = mail_blocked_notice(db, target, sender=user)
+        blocked = blocked_notice is not None
         # Your own account, signed in on another connection, is listed too;
         # mail to yourself is not offered.
         offer_mail = mail_open and target.id != user.id and not blocked
@@ -550,7 +564,7 @@ async def _caller_who_screen(
             # The block closes mail as well as live messages; this answers
             # before an opt-out would, since "e-mail still reaches them"
             # would be false.
-            subtitle = MESSAGES_AND_MAIL_BLOCK_REFUSAL.format(name=target.username)
+            subtitle = blocked_notice
         elif offer_mail and not accepts_direct_messages(db, target):
             subtitle = f"{target.username} has opted out of direct messages; e-mail still reaches them."
         else:

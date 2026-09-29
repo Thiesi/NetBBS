@@ -108,7 +108,9 @@ from netbbs.net.file_ref_view import (
 )
 from netbbs.net.file_transfer import TransferGrants
 from netbbs.net.help_overlay import show_help
-from netbbs.net.mail_flow import caller_mail_refusal, mail_someone, post_reply_key, split_link_address
+from netbbs.net.mail_flow import (
+    caller_mail_refusal, mail_blocked_notice, mail_someone, post_reply_key, split_link_address,
+)
 from netbbs.net.menu_description_preference import menu_description_level
 from netbbs.net.node_theme import (
     effective_accent_color,
@@ -2640,11 +2642,16 @@ def _post_author_mail_target(
     a post written here, `(None, "user@<fingerprint>")` for one carried
     from another BBS -- the author's stable Link address, checked when the
     key is pressed -- or `None` when there is nobody to write to: the
-    caller's own post, a deleted account, and a carried post while this
-    node has Link off."""
+    caller's own post, a deleted account, an author here who has blocked
+    the caller (issue #953, the letter would be refused; the reader has no
+    line to say so, so the key is simply not offered), and a carried post
+    while this node has Link off. A carried post's author is offered even
+    so: their node's block list is not visible here."""
     if post.author_user_id is not None:
         account = get_user_by_id(db, post.author_user_id)
         if account is None or account.id == user.id:
+            return None
+        if mail_blocked_notice(db, account, sender=user) is not None:
             return None
         return account, None
     if link_context is None:
