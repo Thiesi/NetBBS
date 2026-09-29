@@ -1167,6 +1167,229 @@ def test_compose_an_unmatched_quote_is_shown_as_typed(tmp_path):
     db.close()
 
 
+# -- replying to Link mail, and Link mail in Sent (issue #805) -----------------
+
+
+_FARPOINT = "Farpoint · farpoint.example.org"
+
+
+def _receive_link_mail(db, recipient, sender_address, *, subject="Hi", body="Hello there"):
+    """Link mail as `deliver_link_message` stores it: no local sender."""
+    db.connection.execute(
+        "INSERT INTO mail_messages (sender_user_id, sender_label, recipient_user_id, subject, body, created_at,"
+        " link_source_event_id) VALUES (NULL, ?, ?, ?, ?, '2026-01-01T00:00:00+00:00', 'event-1')",
+        (sender_address, recipient.id, subject, body),
+    )
+    db.connection.commit()
+
+
+def _remote_rows(db):
+    return db.connection.execute(
+        "SELECT * FROM mail_messages WHERE recipient_remote_address IS NOT NULL"
+    ).fetchall()
+
+
+def test_reply_to_link_mail_goes_back_over_link_with_quote_and_subject(tmp_path):
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
+    alice = create_user(db, "alice", password="hunter2pw", user_level=10)
+    node_identity = bootstrap_node_identity("roanoke")
+    remote_identity = bootstrap_node_identity("farpoint")
+    link_context = _link_context_with_known_peer(db, node_identity, remote_identity)
+    _receive_link_mail(db, alice, f"bob@{remote_identity.fingerprint}")
+
+    session = FakeSession(
+        keys=["i", "0", "1", "r", "s", "b", "b", "b"], lines=["", "Back at you", ""]
+    )
+    session.terminal_width = 200
+    lane = DatabaseLane(db_path)
+    asyncio.run(browse_mail(session, lane, alice, link_context=link_context))
+
+    text = _visible_text(session)
+    assert "no longer exists" not in text
+    assert f"To: bob@{_FARPOINT}" in text
+    assert "Message sent." in text
+    [row] = _remote_rows(db)
+    assert row["recipient_remote_address"] == f"bob@{remote_identity.fingerprint}"
+    assert row["subject"] == "Re: Hi"
+    assert row["body"].startswith(f"bob@{_FARPOINT} wrote:\n> Hello there\n\nBack at you")
+    assert row["link_delivery_status"] == "pending"
+    assert row["link_event_content_id"] is not None
+    lane.close()
+    db.close()
+
+
+def test_reply_to_link_mail_from_a_peer_now_on_probation_is_refused_as_at_the_to_prompt(tmp_path):
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
+    alice = create_user(db, "alice", password="hunter2pw", user_level=10)
+    node_identity = bootstrap_node_identity("roanoke")
+    remote_identity = bootstrap_node_identity("farpoint")
+    link_context = _link_context_with_known_peer(db, node_identity, remote_identity, established=False)
+    _receive_link_mail(db, alice, f"bob@{remote_identity.fingerprint}")
+
+    session = FakeSession(keys=["i", "0", "1", "r", "b", "b", "b"])
+    session.terminal_width = 200
+    lane = DatabaseLane(db_path)
+    asyncio.run(browse_mail(session, lane, alice, link_context=link_context))
+
+    text = _visible_text(session)
+    assert f"{_FARPOINT} is newly linked; mail opens once the SysOp establishes it." in text
+    assert "Subject:" not in text
+    assert "Message sent." not in text
+    assert _remote_rows(db) == []
+    lane.close()
+    db.close()
+
+
+def test_reply_to_link_mail_refused_when_the_peer_changes_while_it_is_written(tmp_path, monkeypatch):
+    """Send checks the reply's address again, as it does a typed one."""
+    import netbbs.net.mail_flow as mail_flow
+
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
+    alice = create_user(db, "alice", password="hunter2pw", user_level=10)
+    node_identity = bootstrap_node_identity("roanoke")
+    remote_identity = bootstrap_node_identity("farpoint")
+    link_context = _link_context_with_known_peer(db, node_identity, remote_identity)
+    _receive_link_mail(db, alice, f"bob@{remote_identity.fingerprint}")
+
+    real_refusal = mail_flow._link_mail_refusal
+    calls = []
+
+    def refusal_after_the_first_check(db, fingerprint):
+        calls.append(fingerprint)
+        return real_refusal(db, fingerprint) if len(calls) == 1 else "Mail to Farpoint is closed on this BBS."
+
+    monkeypatch.setattr(mail_flow, "_link_mail_refusal", refusal_after_the_first_check)
+    session = FakeSession(
+        keys=["i", "0", "1", "r", "s", "c", "b", "b", "b"], lines=["", "Back at you", ""]
+    )
+    session.terminal_width = 200
+    lane = DatabaseLane(db_path)
+    asyncio.run(browse_mail(session, lane, alice, link_context=link_context))
+
+    text = _visible_text(session)
+    assert calls == [remote_identity.fingerprint, remote_identity.fingerprint]
+    assert "Mail to Farpoint is closed on this BBS." in text
+    assert "Message sent." not in text
+    assert _remote_rows(db) == []
+    lane.close()
+    db.close()
+
+
+def test_reply_to_link_mail_from_a_node_no_longer_linked_says_so(tmp_path):
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
+    alice = create_user(db, "alice", password="hunter2pw", user_level=10)
+    node_identity = bootstrap_node_identity("roanoke")
+    gone = bootstrap_node_identity("gone")
+    link_context = LinkContext(link_node=LinkNode(identity=node_identity))
+    _receive_link_mail(db, alice, f"bob@{gone.fingerprint}")
+
+    session = FakeSession(keys=["i", "0", "1", "r", "b", "b", "b"])
+    session.terminal_width = 200
+    lane = DatabaseLane(db_path)
+    asyncio.run(browse_mail(session, lane, alice, link_context=link_context))
+
+    text = _visible_text(session)
+    assert "This BBS is no longer linked with the BBS bob@" in text
+    assert "writes from, so a reply can't reach it." in text
+    assert "no longer exists" not in text
+    lane.close()
+    db.close()
+
+
+def test_reply_to_link_mail_with_link_off_says_so(tmp_path):
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
+    alice = create_user(db, "alice", password="hunter2pw", user_level=10)
+    remote_identity = bootstrap_node_identity("farpoint")
+    _receive_link_mail(db, alice, f"bob@{remote_identity.fingerprint}")
+
+    session = FakeSession(keys=["i", "0", "1", "r", "b", "b", "b"])
+    session.terminal_width = 200
+    lane = DatabaseLane(db_path)
+    asyncio.run(browse_mail(session, lane, alice))  # no link_context
+
+    text = _visible_text(session)
+    assert "not linked with other BBSes right now, so a reply can't reach bob@" in text
+    assert "no longer exists" not in text
+    lane.close()
+    db.close()
+
+
+def test_reply_to_link_mail_can_be_readdressed_from_the_review_screen(tmp_path):
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
+    alice = create_user(db, "alice", password="hunter2pw", user_level=10)
+    carol = create_user(db, "carol", password="hunter2pw", user_level=10)
+    node_identity = bootstrap_node_identity("roanoke")
+    remote_identity = bootstrap_node_identity("farpoint")
+    link_context = _link_context_with_known_peer(db, node_identity, remote_identity)
+    _receive_link_mail(db, alice, f"bob@{remote_identity.fingerprint}")
+
+    session = FakeSession(
+        keys=["i", "0", "1", "r", "t", "s", "b", "b", "b"], lines=["", "Forwarding", "", "carol"]
+    )
+    lane = DatabaseLane(db_path)
+    asyncio.run(browse_mail(session, lane, alice, link_context=link_context))
+
+    assert [m.subject for m in list_inbox(db, carol)] == ["Re: Hi"]
+    assert _remote_rows(db) == []
+    lane.close()
+    db.close()
+
+
+def test_reply_to_a_deleted_local_sender_still_says_the_account_is_gone(tmp_path):
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
+    alice = create_user(db, "alice", password="hunter2pw", user_level=10)
+    bob = create_user(db, "bob", password="hunter2pw", user_level=10)
+    send_mail(db, alice, bob, "Hello", "body")
+    # What deleting alice's account leaves behind (ON DELETE SET NULL).
+    db.connection.execute("UPDATE mail_messages SET sender_user_id = NULL")
+    db.connection.commit()
+    node_identity = bootstrap_node_identity("roanoke")
+    link_context = LinkContext(link_node=LinkNode(identity=node_identity))
+
+    session = FakeSession(keys=["i", "0", "1", "r", "b", "b", "b"])
+    lane = DatabaseLane(db_path)
+    asyncio.run(browse_mail(session, lane, bob, link_context=link_context))
+
+    assert "That sender's account no longer exists -- can't reply." in _visible_text(session)
+    assert list_sent(db, bob) == []
+    lane.close()
+    db.close()
+
+
+def test_sent_shows_the_remote_address_of_link_mail_in_the_list_and_the_view(tmp_path):
+    from netbbs.link.mail import compose_link_message
+
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
+    alice = create_user(db, "alice", password="hunter2pw", user_level=10)
+    node_identity = bootstrap_node_identity("roanoke")
+    remote_identity = bootstrap_node_identity("farpoint")
+    _link_context_with_known_peer(db, node_identity, remote_identity, friendly_name="Cats @ Night")
+    compose_link_message(
+        db, alice, f"Bob@{remote_identity.fingerprint}", "Hello", "Over there", node_identity=node_identity,
+    )
+
+    session = FakeSession(keys=["s", "0", "1", "b", "b", "b"])
+    session.terminal_width = 200
+    lane = DatabaseLane(db_path)
+    asyncio.run(browse_mail(session, lane, alice))
+
+    text = _visible_text(session)
+    shown = 'Bob@"Cats @ Night · farpoint.example.org"'
+    assert f"to {shown}" in text
+    assert f"To: {shown}" in text
+    assert "(deleted account)" not in text
+    lane.close()
+    db.close()
+
+
 # -- the compose screen (issue #813) ---------------------------------------------
 
 
