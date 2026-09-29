@@ -70,6 +70,7 @@ class FakeSession(Session):
         self.node_display_name = "NetBBS"
         self.terminal_height = 24
         self.peer_address = None
+        self.pasted_color_offered = False
 
     async def write(self, text: str) -> None:
         self.written.append(text)
@@ -84,7 +85,10 @@ class FakeSession(Session):
             raise AssertionError("FakeSession ran out of scripted input (read_key)")
         return self._inputs.pop(0)
 
-    async def read_editor_key(self, *, distinguish_ctrl_h: bool = False) -> EditorKey:
+    async def read_editor_key(self, *, distinguish_ctrl_h: bool = False, pasted_color=None) -> EditorKey:
+        # Recorded so a caller can prove it asked for pasted color (issue #809).
+        if pasted_color is not None:
+            self.pasted_color_offered = True
         if not self._inputs:
             await asyncio.Event().wait()
             raise AssertionError("unreachable")

@@ -174,6 +174,12 @@ Delivery line when you open it:
 - **Expired**: no route to that node worked before delivery gave up, so it
   was not delivered.
 
+A letter shows the way its writer typed it: each line stays a line, and
+only a line too wide for your screen wraps. Mail can be in color, written
+with pipe codes like `|12` or pasted in, as on a board that allows color.
+Profile's **Pos[t] colors** switch covers mail too; with it off, colored mail
+reads as plain text.
+
 When mail bounces or expires you are told at the main menu, once, even if it
 happened while you were away. Opening the message in Sent counts as being
 told. To try again, send it anew.

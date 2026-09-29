@@ -318,3 +318,64 @@ def test_a_painted_delimiter_line_is_not_a_signature():
     assert split_signature(drawing) == (drawing, "")
     rows = post_body_rows(drawing, 80, "color", truecolor=True, layout="art")
     assert _SGR.sub("", rows[-1]) == "A|12B"
+
+
+# -- a mail body's lines (issue #809) ------------------------------------------
+
+
+def _plain(rows: list[str]) -> list[str]:
+    return [_SGR.sub("", row) for row in rows]
+
+
+def test_lines_layout_keeps_every_line_the_author_wrote():
+    body = "Hi Bob,\nThe meeting moved.\n\n- chairs\n- tables\n-- \nAlice\nQ Pen club treasurer"
+    rows = post_body_rows(body, 80, "plain", truecolor=True, layout="lines")
+    assert _plain(rows) == [
+        "Hi Bob,", "The meeting moved.", "", "- chairs", "- tables", "-- ", "Alice", "Q Pen club treasurer",
+    ]
+
+
+def test_lines_layout_wraps_only_a_line_wider_than_the_screen_at_a_word():
+    long_line = "word " * 20
+    rows = _plain(post_body_rows(f"short\n{long_line.strip()}\nend", 40, "plain", truecolor=True, layout="lines"))
+    assert rows[0] == "short" and rows[-1] == "end"
+    assert all(display_width(row) <= 40 for row in rows)
+    assert len(rows) > 3
+    assert all(row.strip().split(" ") == ["word"] * len(row.strip().split(" ")) for row in rows[1:-1])
+
+
+def test_lines_layout_keeps_indentation():
+    rows = _plain(post_body_rows("list:\n    indented", 80, "plain", truecolor=True, layout="lines"))
+    assert rows == ["list:", "    indented"]
+
+
+def test_lines_layout_mutes_quotes_and_keeps_their_marker_when_they_wrap():
+    quote = "> " + "quoted " * 15
+    rows = post_body_rows(f"bob wrote:\n{quote}\nmy answer", 40, "plain", truecolor=True, layout="lines")
+    plain = _plain(rows)
+    assert plain[0] == "bob wrote:" and plain[-1] == "my answer"
+    quoted = plain[1:-1]
+    assert len(quoted) > 1 and all(row.startswith("> quoted") for row in quoted)
+    assert all(display_width(row) <= 40 for row in plain)
+
+
+def test_lines_layout_shows_pipe_color_and_every_row_stands_alone():
+    rows = post_body_rows("|12red line\nstill red|07\nplain", 80, "color", truecolor=True, layout="lines")
+    assert _plain(rows) == ["red line", "still red", "plain"]
+    assert "|12" not in "".join(rows)
+    # The second row restates the color the first left behind.
+    assert rows[1].startswith(ESC + "[")
+    assert all(_only_allowed_sgr(row) for row in rows)
+
+
+def test_lines_layout_plain_mode_removes_the_codes():
+    rows = post_body_rows("|12red|07 text", 80, "plain", truecolor=True, layout="lines")
+    assert rows == ["red text"]
+
+
+def test_lines_layout_drops_escapes_that_are_not_color():
+    body = f"before{ESC}[2J{ESC}[10;10Hafter\n{ESC}]0;title{chr(7)}next"
+    for mode in ("color", "plain"):
+        rows = post_body_rows(body, 80, mode, truecolor=True, layout="lines")
+        assert _plain(rows) == ["beforeafter", "next"]
+        assert all(_only_allowed_sgr(row) for row in rows)

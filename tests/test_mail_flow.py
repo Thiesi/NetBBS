@@ -44,7 +44,6 @@ from netbbs.rendering import (
     LABEL_COLOR,
     METADATA_COLOR,
     SUCCESS_COLOR,
-    VALUE_COLOR,
     colored,
 )
 from netbbs.storage.database import Database
@@ -66,6 +65,7 @@ class FakeSession:
         self.terminal_height = 24
         self.peer_address = "203.0.113.5"
         self.seeded: list[str] = []
+        self.pasted_color_offered: list[bool] = []
 
     async def write(self, text: str) -> None:
         self.written.append(text)
@@ -81,6 +81,7 @@ class FakeSession:
 
     async def read_line(self, echo: bool = True, history=None, completer=None, *, live_buffer=None, lock=None, **kwargs) -> str:
         self.seeded.append(kwargs.get("initial", ""))
+        self.pasted_color_offered.append(kwargs.get("pasted_color") is not None)
         line = next(self._lines, "")
         if line is ESC:
             assert kwargs.get("cancellable"), "Esc pressed at a prompt that does not accept it"
@@ -234,7 +235,6 @@ def test_inbox_shows_unread_marker_and_opening_marks_read(tmp_path):
     assert colored("alice", fg_color=ACCENT_COLOR) in text
     assert colored("Date: ", fg_color=LABEL_COLOR) in text
     assert f"\x1b[38;5;{METADATA_COLOR}m" in text
-    assert colored("How are you?", fg_color=VALUE_COLOR) in text
     assert list_inbox(db, bob)[0].is_read is True
     lane.close()
     db.close()
@@ -1703,4 +1703,197 @@ def test_opening_a_bounced_message_in_sent_counts_as_being_told(tmp_path):
 
     assert db.connection.execute("SELECT link_delivery_notice_pending FROM mail_messages").fetchone()[0] == 0
     assert "Your mail" not in _run_main_menu(db_path, db, alice)
+    db.close()
+
+
+# -- a letter's lines and color (issue #809) -------------------------------------
+
+
+_LETTER = "Hi Bob,\nThe meeting moved to Friday.\n\n- chairs\n- tables\n-- \nAlice\nQ Pen club treasurer"
+
+
+def _visible_lines(session: FakeSession) -> list[str]:
+    return [line.strip() for line in re.split(r"\r?\n", _visible_text(session))]
+
+
+def _assert_letter_lines_kept(lines: list[str]) -> None:
+    for line in ("Hi Bob,", "The meeting moved to Friday.", "- chairs", "- tables", "Alice", "Q Pen club treasurer"):
+        assert line in lines, line
+    assert not any("Alice Q Pen" in line or "Hi Bob, The" in line for line in lines)
+
+
+def test_the_reader_keeps_the_authors_line_breaks(tmp_path):
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
+    alice = create_user(db, "alice", password="hunter2pw", user_level=10)
+    bob = create_user(db, "bob", password="hunter2pw", user_level=10)
+    send_mail(db, alice, bob, "Meeting", _LETTER)
+
+    session = FakeSession(keys=["i", "0", "1", "b", "b", "b"])
+    lane = DatabaseLane(db_path)
+    asyncio.run(browse_mail(session, lane, bob))
+    lane.close()
+
+    _assert_letter_lines_kept(_visible_lines(session))
+    db.close()
+
+
+def test_sent_view_keeps_the_authors_line_breaks(tmp_path):
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
+    alice = create_user(db, "alice", password="hunter2pw", user_level=10)
+    bob = create_user(db, "bob", password="hunter2pw", user_level=10)
+    send_mail(db, alice, bob, "Meeting", _LETTER)
+
+    session = FakeSession(keys=["s", "0", "1", "b", "b", "b"])
+    lane = DatabaseLane(db_path)
+    asyncio.run(browse_mail(session, lane, alice))
+    lane.close()
+
+    _assert_letter_lines_kept(_visible_lines(session))
+    db.close()
+
+
+def test_the_review_screen_keeps_the_lines_and_shows_color_as_the_reader_will(tmp_path):
+    from netbbs.rendering.pipe_codes import cga_to_xterm
+
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
+    alice = create_user(db, "alice", password="hunter2pw", user_level=10)
+    create_user(db, "bob", password="hunter2pw", user_level=10)
+    session = FakeSession(
+        keys=["c", "c", "b"], lines=["bob", "Hello", "Hi Bob,", "|12red|07 news", "Alice", ""]
+    )
+    lane = DatabaseLane(db_path)
+    asyncio.run(browse_mail(session, lane, alice))
+    lane.close()
+
+    review = _written_text(session).split("Review composition", 1)[1]
+    lines = [line.strip() for line in re.split(r"\r?\n", _ANSI_ESCAPE_RE.sub("", review))]
+    assert "Hi Bob," in lines and "red news" in lines and "Alice" in lines
+    assert "|12" not in _ANSI_ESCAPE_RE.sub("", review)
+    assert f"\x1b[38;5;{cga_to_xterm(12)}mred" in review
+    db.close()
+
+
+def test_pipe_codes_in_mail_show_as_color(tmp_path):
+    from netbbs.rendering.pipe_codes import cga_to_xterm
+
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
+    alice = create_user(db, "alice", password="hunter2pw", user_level=10)
+    bob = create_user(db, "bob", password="hunter2pw", user_level=10)
+    send_mail(db, alice, bob, "Hello", "|12pipe color|07 and plain")
+
+    session = FakeSession(keys=["i", "0", "1", "b", "b", "b"])
+    lane = DatabaseLane(db_path)
+    asyncio.run(browse_mail(session, lane, bob))
+    lane.close()
+
+    assert "pipe color and plain" in _visible_text(session)
+    assert "|12" not in _visible_text(session)
+    assert f"\x1b[38;5;{cga_to_xterm(12)}mpipe color" in _written_text(session)
+    db.close()
+
+
+def test_a_reader_with_post_colors_off_sees_mail_plain(tmp_path):
+    from netbbs.net.post_color_preference import set_post_colors_enabled
+    from netbbs.rendering.pipe_codes import cga_to_xterm
+
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
+    alice = create_user(db, "alice", password="hunter2pw", user_level=10)
+    bob = create_user(db, "bob", password="hunter2pw", user_level=10)
+    set_post_colors_enabled(db, bob, False)
+    send_mail(db, alice, bob, "Hello", "|12pipe color|07 and plain")
+
+    session = FakeSession(keys=["i", "0", "1", "b", "b", "b"])
+    lane = DatabaseLane(db_path)
+    asyncio.run(browse_mail(session, lane, bob))
+    lane.close()
+
+    assert "pipe color and plain" in _visible_text(session)
+    assert "|12" not in _visible_text(session)
+    assert f"\x1b[38;5;{cga_to_xterm(12)}m" not in _written_text(session)
+    db.close()
+
+
+def test_link_mail_goes_through_the_same_filter(tmp_path):
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
+    alice = create_user(db, "alice", password="hunter2pw", user_level=10)
+    remote_identity = bootstrap_node_identity("farpoint")
+    esc = chr(27)
+    hostile = (
+        f"{esc}[2J{esc}[1;1HYour account is locked\n"
+        f"{esc}]0;evil{chr(7)}|10green|07 text"
+    )
+    _receive_link_mail(db, alice, f"bob@{remote_identity.fingerprint}", body=hostile)
+
+    session = FakeSession(keys=["i", "0", "1", "b", "b", "b"])
+    lane = DatabaseLane(db_path)
+    asyncio.run(browse_mail(session, lane, alice))
+    lane.close()
+
+    written = _written_text(session)
+    body = written[written.index("Date: "):]
+    assert f"{esc}[2J" not in body and f"{esc}[1;1H" not in body
+    assert f"{esc}]0;" not in written and "evil" not in written
+    assert "[2J" not in _visible_text(session)
+    assert "Your account is locked" in _visible_text(session)
+    assert "green text" in _visible_text(session)
+    db.close()
+
+
+def test_a_mail_reply_quotes_the_text_without_its_codes(tmp_path):
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
+    alice = create_user(db, "alice", password="hunter2pw", user_level=10)
+    bob = create_user(db, "bob", password="hunter2pw", user_level=10)
+    esc = chr(27)
+    send_mail(db, alice, bob, "Hello", f"|12red|07 line\n{esc}[31mescaped{esc}[0m line")
+
+    session = FakeSession(keys=["i", "0", "1", "r", "s", "b", "b", "b"], lines=["", "Answer", ""])
+    lane = DatabaseLane(db_path)
+    asyncio.run(browse_mail(session, lane, bob))
+    lane.close()
+
+    [sent] = list_sent(db, bob)
+    assert "> red line\n> escaped line\n" in sent.body
+    assert "|12" not in sent.body and "[31m" not in sent.body
+    db.close()
+
+
+def test_the_line_editor_keeps_pasted_color_in_mail(tmp_path):
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
+    alice = create_user(db, "alice", password="hunter2pw", user_level=10)
+    create_user(db, "bob", password="hunter2pw", user_level=10)
+    session = FakeSession(keys=["c", "c", "b"], lines=["bob", "Hello", "body", ""])
+    lane = DatabaseLane(db_path)
+    asyncio.run(browse_mail(session, lane, alice))
+    lane.close()
+
+    # To and Subject are not a body; the body's lines are read with it.
+    assert not any(session.pasted_color_offered[:2])
+    assert session.pasted_color_offered[2:] and all(session.pasted_color_offered[2:])
+    db.close()
+
+
+def test_the_fullscreen_editor_keeps_pasted_color_in_mail(tmp_path):
+    from netbbs.net.editor_preference import set_fullscreen_editor_enabled
+    from tests.test_login_flow_fullscreen_editor import FakeSession as FullscreenSession
+    from tests.test_login_flow_fullscreen_editor import _type
+
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
+    alice = create_user(db, "alice", password="hunter2pw", user_level=10)
+    create_user(db, "bob", password="hunter2pw", user_level=10)
+    set_fullscreen_editor_enabled(db, alice, True)
+    session = FullscreenSession(["c", "bob", "Subject"] + _type("Fullscreen body") + ["CTRL+O", "s", "b"])
+    lane = DatabaseLane(db_path)
+    asyncio.run(browse_mail(session, lane, alice))
+    lane.close()
+
+    assert session.pasted_color_offered is True
     db.close()

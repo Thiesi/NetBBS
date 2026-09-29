@@ -1267,18 +1267,18 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
         ),
         FieldSpec(
             key="post_colors", hotkey="t", menu_text=menu_key("t", " colors", prefix="Pos"),
-            label="Colors in board posts",
+            label="Colors in posts and mail",
             render=lambda d: "on" if d["post_colors"] else "off",
             prompt=live_choice_field(
                 "post_colors", [False, True],
                 persist=lambda lane, v: lane.run(set_post_colors_enabled, user, v),
             ),
-            brief="Show authors' colors in posts",
+            brief="Show authors' colors in posts and mail",
             help=(
-                "On a message board whose SysOp allows color, authors can color their posts "
-                "with pipe codes (|00-|23). On: those colors are shown. Off: the same posts "
-                "appear as plain text. Either way nothing in a post can move the cursor or "
-                "clear the screen."
+                "On a message board whose SysOp allows color, and in mail, authors can color "
+                "what they write with pipe codes (|00-|23). On: those colors are shown. Off: "
+                "the same posts and letters appear as plain text. Either way nothing in them "
+                "can move the cursor or clear the screen."
             ),
             section="Display",
         ),
