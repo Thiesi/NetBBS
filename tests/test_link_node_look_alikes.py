@@ -139,3 +139,50 @@ def test_the_node_map_qualifies_look_alike_names():
 
 def test_a_name_without_letters_or_digits_keeps_its_exact_key():
     assert look_alike_key("***") != look_alike_key("~~~")
+
+
+@pytest.mark.parametrize("worn", ["OutBound", "0utBound"])
+def test_wearing_a_renamed_nodes_old_name_names_that_old_name(db, tmp_path, worn):
+    # The familiar node renamed OutBound -> Harbor; the notice about a new
+    # key wearing (a look-alike of) "OutBound" names "OutBound", every run.
+    identity = bootstrap_node_identity(tmp_path / "renamed")
+    for name in ("OutBound", "Harbor"):
+        node = LinkNode(identity=identity)
+        save_peer(db, node.handle_hello(node.build_hello(
+            addresses=None, outgoing_only=True, created_at="2026-09-29T00:00:00+00:00",
+            friendly_name=name, canonical_dns_name="renamed.example.org",
+        )))
+    save_peer(db, _peer(tmp_path, "impostor", worn, "impostor.example.org"))
+
+    notices = _security_notices(db)
+    assert len(notices) == 1
+    assert notices[0].previous_friendly_name == "OutBound"
+    assert notices[0].previous_dns_name == "renamed.example.org"
+
+
+def _identity(fingerprint: str, name: str, dns: str | None):
+    from netbbs.link.node_profiles import NodeDisplayIdentity
+
+    return NodeDisplayIdentity(fingerprint, name, dns)
+
+
+@pytest.mark.parametrize(
+    ("first", "second", "confusable"),
+    [
+        (("OutBound", "outbound.example.org"), ("0utBound", None), True),
+        (("OutBound", None), ("Out Bound", None), True),
+        (("OutBound", "same.example.org"), ("0utBound", "same.example.org"), True),
+        # Both DNS names shown and different: the label tells them apart.
+        (("OutBound", "a.example.org"), ("OutBound", "b.example.org"), False),
+        # DNS names are never folded.
+        (("First", "outbound.example.org"), ("Second", "out-bound.example.org"), False),
+        (("OutBound", None), ("Harbor", None), False),
+    ],
+)
+def test_presentations_confusable(first, second, confusable):
+    from netbbs.link.node_profiles import presentations_confusable
+
+    a = _identity("a" * 32, *first)
+    b = _identity("b" * 32, *second)
+    assert presentations_confusable(a, b) is confusable
+    assert presentations_confusable(b, a) is confusable

@@ -412,6 +412,18 @@ def friendly_name_is_shared(db: Database, identity: NodeDisplayIdentity) -> bool
     return bool(owners - {identity.fingerprint})
 
 
+def presentations_confusable(first: NodeDisplayIdentity, second: NodeDisplayIdentity) -> bool:
+    """Whether a reader could take one node's full label for the other's
+    (issue #900): their friendly names read alike, and their DNS names do
+    not tell them apart -- one lacks a DNS name, or both have the same.
+    DNS names are compared exactly, never folded."""
+    if look_alike_key(first.friendly_name) != look_alike_key(second.friendly_name):
+        return False
+    if first.dns_name and second.dns_name:
+        return name_key(first.dns_name) == name_key(second.dns_name)
+    return True
+
+
 def known_nodes_named_like(
     db: Database, name: str, *, exclude: str | None = None
 ) -> list[NodeDisplayIdentity]:
@@ -654,18 +666,27 @@ def _record_identity_observation(db: Database, current: NodeDisplayIdentity, *, 
                 | _dns_claim_keys(row["canonical_dns_name"])
                 | _dns_claim_keys(row["previous_dns_name"])
             )
-            matched_claims = current_claims & historical_claims
-            if matched_claims:
-                matched_claim = next(iter(matched_claims))
-                collision = NodeDisplayIdentity(
-                    row["node_fingerprint"],
-                    current.friendly_name
-                    if ("exact", name_key(current.friendly_name)) == matched_claim
-                    else row["friendly_name"] or row["previous_friendly_name"] or UNKNOWN_NODE_NAME,
-                    current.dns_name
-                    if current.dns_name and ("exact", name_key(current.dns_name)) == matched_claim
-                    else row["canonical_dns_name"] or row["previous_dns_name"],
+            if current_claims & historical_claims:
+                # Name the familiar node by the claim that was matched, as
+                # it was spelled then -- a renamed node's old name when that
+                # is the one being worn -- and fall back to its latest.
+                current_friendly = _friendly_claim_keys(current.friendly_name)
+                friendly = next(
+                    (
+                        row[column] for column in ("friendly_name", "previous_friendly_name")
+                        if current_friendly & _friendly_claim_keys(row[column])
+                    ),
+                    row["friendly_name"] or row["previous_friendly_name"] or UNKNOWN_NODE_NAME,
                 )
+                current_dns = _dns_claim_keys(current.dns_name)
+                dns_name = next(
+                    (
+                        row[column] for column in ("canonical_dns_name", "previous_dns_name")
+                        if current_dns & _dns_claim_keys(row[column])
+                    ),
+                    row["canonical_dns_name"] or row["previous_dns_name"],
+                )
+                collision = NodeDisplayIdentity(row["node_fingerprint"], friendly, dns_name)
                 break
 
     if collision is not None:

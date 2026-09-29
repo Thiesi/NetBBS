@@ -17,7 +17,7 @@ from netbbs.auth.users import AuthError, User, get_user_by_username, list_users
 from netbbs.chat import ChatHub, DirectChatInvites, PresenceRegistry
 from netbbs.directory import get_vcard, has_bio, is_bio_visible
 from netbbs.link.boards import LinkContext
-from netbbs.link.node_profiles import identity_for_fingerprint, link_address_label, look_alike_key
+from netbbs.link.node_profiles import identity_for_fingerprint, link_address_label, presentations_confusable
 from netbbs.doors import list_doors
 from netbbs.messaging_preferences import accepts_direct_messages
 from netbbs.net.breadcrumb_preference import breadcrumb_collapsed_enabled
@@ -296,17 +296,18 @@ def _remote_who_entries(db: Database, link_context: LinkContext | None) -> list[
     if link_context is None or link_context.realtime_bridge is None:
         return []
     presence = link_context.realtime_bridge.remote_node_presence()
-    labels = {
-        fingerprint: identity_for_fingerprint(db, fingerprint).label
-        for fingerprint in presence
+    identities = {fingerprint: identity_for_fingerprint(db, fingerprint) for fingerprint in presence}
+    confusable = {
+        fingerprint for fingerprint, identity in identities.items()
+        if any(
+            presentations_confusable(identity, other)
+            for other_fingerprint, other in identities.items() if other_fingerprint != fingerprint
+        )
     }
-    label_owners: dict[str, set[str]] = {}
-    for fingerprint, label in labels.items():
-        label_owners.setdefault(look_alike_key(label), set()).add(fingerprint)
     return [
         _RemoteWhoEntry(
-            node_fingerprint=fingerprint, username=username, node_label=labels[fingerprint],
-            show_fingerprint=len(label_owners[look_alike_key(labels[fingerprint])]) > 1,
+            node_fingerprint=fingerprint, username=username, node_label=identities[fingerprint].label,
+            show_fingerprint=fingerprint in confusable,
         )
         for fingerprint, online in presence.items()
         for username in online

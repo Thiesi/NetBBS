@@ -13131,7 +13131,10 @@ look-alike node receive what a caller addressed to the real one.
 **Decision 2 — DNS names are not folded.** Registration already makes them
 unique, and `presentation_skeleton` drops `-` and `.`, so `out-bound.example.org`
 and `outbound.example.org` would become one. Screens that show a DNS name show
-all of it.
+all of it, so Who and the board-origin picker add a technical identity only
+where full labels could still be confused: the friendly names read alike and
+the DNS names do not tell the nodes apart, because one has none or both share
+it.
 
 **Decision 3 — this node's own look-alike name is a warning, not a refusal.** A
 SysOp who renames their node to read like a node it knows is told so and the
