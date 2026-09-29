@@ -36,6 +36,7 @@ from netbbs.permissions.levels import meets_level
 from netbbs.search import index_mail_without_commit, unindex_mail_without_commit
 from netbbs.storage.database import Database
 from netbbs.timeutil import utc_now_iso
+from netbbs.user_preferences import get_user_preference, set_user_preference
 
 # Generous but bounded, matching netbbs.directory's own byte-cap
 # precedent for the same reason (issue #32: a length cap alone doesn't
@@ -347,6 +348,9 @@ class MailMessage:
     # Both NULL for a letter to one person.
     mail_group_id: str | None = None
     mail_group_to: str | None = None
+    # When the recipient first opened it (issue #829): the time a read
+    # receipt shows. Mark unread clears `read_at`, never this.
+    first_read_at: str | None = None
 
     @property
     def is_read(self) -> bool:
@@ -1152,7 +1156,12 @@ def mark_read(db: Database, user: User, message: MailMessage) -> MailMessage:
     if user.id != message.recipient_user_id or message.is_read:
         return message
     read_at = utc_now_iso()
-    db.connection.execute("UPDATE mail_messages SET read_at = ? WHERE id = ?", (read_at, message.id))
+    # The first opening is the read receipt's time (issue #829), and it
+    # stays through Mark unread and a later reading.
+    db.connection.execute(
+        "UPDATE mail_messages SET read_at = ?, first_read_at = COALESCE(first_read_at, ?) WHERE id = ?",
+        (read_at, read_at, message.id),
+    )
     db.connection.commit()
     return get_mail(db, user, message.id)
 
@@ -1164,7 +1173,10 @@ def mark_unread(db: Database, user: User, message: MailMessage) -> MailMessage:
 
     An unread message is one the mailbox cap will not evict to make room
     (`_make_room_if_needed`), so marking one unread also keeps it -- the
-    same protection a message nobody has opened yet gets."""
+    same protection a message nobody has opened yet gets.
+
+    A read receipt (issue #829) is not taken back: `first_read_at` stays,
+    so the sender still sees when it was first read."""
     if user.id != message.recipient_user_id or not message.is_read:
         return message
     db.connection.execute(
@@ -1172,6 +1184,86 @@ def mark_unread(db: Database, user: User, message: MailMessage) -> MailMessage:
     )
     db.connection.commit()
     return get_mail(db, user, message.id)
+
+
+# -- read receipts (issue #829) ----------------------------------------------
+
+#: The per-caller preference: "1" (the default) lets senders see when the
+#: caller has read their mail, and lets the caller see receipts; "0" does
+#: neither.
+READ_RECEIPTS_PREFERENCE = "mail_read_receipts"
+
+#: A receipt's states. `RECEIPT_WITHHELD`: the recipient does not share
+#: receipts, which the sender is always told. `RECEIPT_HIDDEN`: the sender
+#: does not share them, so sees none. The others are what a receipt says.
+RECEIPT_READ = "read"
+RECEIPT_NOT_READ = "not_read"
+RECEIPT_DELETED_UNREAD = "deleted_unread"
+RECEIPT_WITHHELD = "withheld"
+RECEIPT_HIDDEN = "hidden"
+
+
+def shares_read_receipts(db: Database, user: User) -> bool:
+    """Whether `user` lets senders see when they have read their mail --
+    and so sees other people's receipts (reciprocal). On by default."""
+    return get_user_preference(db, user, READ_RECEIPTS_PREFERENCE, default="1") != "0"
+
+
+def set_shares_read_receipts(db: Database, user: User, shares: bool) -> None:
+    set_user_preference(db, user, READ_RECEIPTS_PREFERENCE, "1" if shares else "0")
+
+
+@dataclass(frozen=True)
+class ReadReceipt:
+    state: str
+    # The recipient's first reading, for `RECEIPT_READ` only.
+    read_at: str | None = None
+
+
+def read_receipts(db: Database, sender: User, messages: list[MailMessage]) -> dict[int, ReadReceipt]:
+    """What `sender` may see of whether each of their letters was read,
+    by letter id. Only local letters `sender` wrote to an account that
+    still exists have a receipt: Link mail, system mail and a deleted
+    account's letters are left out.
+
+    Both sides' preferences are read now, not when the letter was read: a
+    caller who turns receipts off hides the ones already given, and one who
+    turns them on again shows them again. A recipient who does not share
+    receipts is `RECEIPT_WITHHELD` whatever the sender's own setting -- the
+    one thing the sender is always told, so a letter nobody reports as read
+    is never taken for one not read yet."""
+    local = [
+        message for message in messages
+        if message.sender_user_id == sender.id and message.recipient_user_id is not None
+        and message.recipient_remote_address is None and not message.from_system
+    ]
+    if not local:
+        return {}
+    recipient_ids = sorted({message.recipient_user_id for message in local})
+    withheld: set[int] = set()
+    for chunk in _chunks(recipient_ids):
+        placeholders = ",".join("?" * len(chunk))
+        withheld.update(
+            row["user_id"] for row in db.connection.execute(
+                f"SELECT user_id FROM user_preferences WHERE key = ? AND value = '0' AND user_id IN ({placeholders})",
+                (READ_RECEIPTS_PREFERENCE, *chunk),
+            )
+        )
+    sender_shares = shares_read_receipts(db, sender)
+    receipts: dict[int, ReadReceipt] = {}
+    for message in local:
+        if message.recipient_user_id in withheld:
+            receipt = ReadReceipt(RECEIPT_WITHHELD)
+        elif not sender_shares:
+            receipt = ReadReceipt(RECEIPT_HIDDEN)
+        elif message.first_read_at is not None:
+            receipt = ReadReceipt(RECEIPT_READ, message.first_read_at)
+        elif message.recipient_deleted_at is not None:
+            receipt = ReadReceipt(RECEIPT_DELETED_UNREAD)
+        else:
+            receipt = ReadReceipt(RECEIPT_NOT_READ)
+        receipts[message.id] = receipt
+    return receipts
 
 
 def delete_for_recipient(db: Database, user: User, message: MailMessage) -> None:
@@ -1448,4 +1540,5 @@ def _row_to_message(row: sqlite3.Row) -> MailMessage:
         kept_at=row["kept_at"],
         mail_group_id=row["mail_group_id"],
         mail_group_to=row["mail_group_to"],
+        first_read_at=row["first_read_at"],
     )

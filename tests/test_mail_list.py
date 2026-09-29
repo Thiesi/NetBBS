@@ -459,8 +459,9 @@ def test_sent_is_a_table_and_back_returns_to_the_inbox(node):
 
     inbox, sent, inbox_again = session.screens()
     assert "NetBBS › Mail › Sent" in sent
-    assert re.search(r"#\s+To\s+Subject\s+Date", sent)
-    assert re.search(r"> 1  alice +Outgoing", sent)
+    # Local mail has a read receipt (issue #829), in the Status column.
+    assert re.search(r"#\s+To\s+Subject\s+Status\s+Date", sent)
+    assert re.search(r"> 1  alice +Outgoing +not read", sent)
     assert "1 sent message" in sent
     assert "NetBBS › Mail › Inbox" in inbox_again
 

@@ -3773,6 +3773,20 @@ MIGRATIONS = [
     ),
     Migration(
         description=(
+            "Issue #829: `mail_messages.first_read_at` -- when the recipient first opened the "
+            "letter, the time a read receipt shows its sender. Unlike `read_at` it survives "
+            "Mark unread, so a receipt, once given, stays. Every letter already read takes its "
+            "`read_at`: receipts are on by default, and whether one shows is decided when it is "
+            "shown, by both sides' current Profile preference, so a caller who turns receipts "
+            "off hides these too."
+        ),
+        sql="""
+        ALTER TABLE mail_messages ADD COLUMN first_read_at TEXT;
+        UPDATE mail_messages SET first_read_at = read_at WHERE read_at IS NOT NULL;
+        """,
+    ),
+    Migration(
+        description=(
             "Issue #830: `mail_file_refs` -- the files in this node's file areas a letter points "
             "at, one row per file, in the order attached (`position`). A file is named by its "
             "content-addressed `file_id`, which no later upload reuses, with its name, area and "

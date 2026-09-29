@@ -73,6 +73,12 @@ from netbbs.mail import (
     MailboxFullError,
     MailError,
     MailMessage,
+    RECEIPT_DELETED_UNREAD,
+    RECEIPT_HIDDEN,
+    RECEIPT_NOT_READ,
+    RECEIPT_READ,
+    RECEIPT_WITHHELD,
+    ReadReceipt,
     all_callers_recipients,
     block_link_sender,
     block_local_sender,
@@ -96,6 +102,7 @@ from netbbs.mail import (
     mark_read,
     mark_unread,
     new_mail_group_id,
+    read_receipts,
     recipient_display_label,
     send_mail,
     send_to_all_callers,
@@ -103,6 +110,7 @@ from netbbs.mail import (
     sender_display_label,
     sender_unblockable_reason,
     set_kept,
+    shares_read_receipts,
     split_link_address,
     thread_key,
     unblock,
@@ -298,7 +306,23 @@ _MARKER_WIDTH = len(_NEW_MARKER)
 _IDENTITY_FLAG = "!"
 _SUBJECT_MIN_WIDTH = 8
 _DELIVERY_HEADING = "Delivery"
-_STATUS_WIDTH = max([len(_DELIVERY_HEADING), *(len(label) for label in DELIVERY_STATUS_LABELS.values())])
+# Sent's read receipts (issue #829) share the Delivery column, which is
+# headed "Status" once a row shows one. A letter to several people shows one
+# summary: every copy that reports read, some, or none; "no receipt" when no
+# recipient shares receipts.
+_STATUS_HEADING = "Status"
+_RECEIPT_READ_ALL = "receipt_read"
+_RECEIPT_SOME_READ = "receipt_some_read"
+_RECEIPT_NONE_READ = "receipt_not_read"
+_RECEIPT_NOT_SHARED = "receipt_not_shared"
+_RECEIPT_STATUS_LABELS = {
+    _RECEIPT_READ_ALL: "read",
+    _RECEIPT_SOME_READ: "some read",
+    _RECEIPT_NONE_READ: "not read",
+    _RECEIPT_NOT_SHARED: "no receipt",
+}
+_STATUS_LABELS = {**DELIVERY_STATUS_LABELS, **_RECEIPT_STATUS_LABELS}
+_STATUS_WIDTH = max([len(_DELIVERY_HEADING), len(_STATUS_HEADING), *(len(label) for label in _STATUS_LABELS.values())])
 _HINT_MIN_HEIGHT = 20
 # From this height the list is set off by blank rows and rules; below it
 # every row goes to the mail (the 40x12 floor has none to spare).
@@ -426,6 +450,9 @@ class _MailRow:
     # In Sent, every copy of a letter to several people (issue #827), which
     # the one row stands for; empty for a letter to one person.
     copies: tuple[MailMessage, ...] = ()
+    # In Sent, the read-receipt summary (issue #829): a `_RECEIPT_*` key, or
+    # None when the row has none to show.
+    receipt: str | None = None
 
     @property
     def ids(self) -> list[int]:
@@ -444,11 +471,14 @@ class _MailRow:
         ]
         statuses = [status for status in statuses if status in DELIVERY_STATUS_LABELS]
         # A letter to several people shows the copy that needs the caller
-        # most: one that did not arrive, then one still on its way.
-        for wanted in ("bounced", "expired", "pending", RELAYED_DISPLAY_STATUS, "delivered"):
+        # most: one that did not arrive, then one still on its way, then
+        # whether its local copies were read (issue #829).
+        for wanted in ("bounced", "expired", "pending", RELAYED_DISPLAY_STATUS):
             if wanted in statuses:
                 return wanted
-        return None
+        if self.receipt is not None:
+            return self.receipt
+        return "delivered" if "delivered" in statuses else None
 
 
 def _cell(text: str) -> str:
@@ -505,8 +535,30 @@ def _mail_column_widths(
     return name_width, subject_width, date_width
 
 
+def _receipt_summary(receipts: list[ReadReceipt]) -> str | None:
+    """The Sent list's read state for a letter's local copies (issue #829):
+    whether every copy that reports its reading was read, some or none; that
+    no recipient shares receipts; or None with no receipt to show."""
+    reported = [receipt for receipt in receipts if receipt.state in (
+        RECEIPT_READ, RECEIPT_NOT_READ, RECEIPT_DELETED_UNREAD,
+    )]
+    if reported:
+        read = sum(receipt.state == RECEIPT_READ for receipt in reported)
+        if read == len(reported):
+            return _RECEIPT_READ_ALL
+        return _RECEIPT_SOME_READ if read else _RECEIPT_NONE_READ
+    if any(receipt.state == RECEIPT_WITHHELD for receipt in receipts):
+        return _RECEIPT_NOT_SHARED
+    return None
+
+
+def _status_heading(rows: list[_MailRow]) -> str:
+    return _STATUS_HEADING if any(row.status in _RECEIPT_STATUS_LABELS for row in rows) else _DELIVERY_HEADING
+
+
 def _mail_list_heading(
     widths: tuple[int, int, int], *, number_width: int, sent: bool, show_status: bool,
+    status_heading: str = _DELIVERY_HEADING,
 ) -> str:
     name_width, subject_width, date_width = widths
     parts = [f"{'#':>{number_width}}"]
@@ -515,7 +567,7 @@ def _mail_list_heading(
     parts.append(_pad("To" if sent else "From", name_width))
     parts.append(_pad("Subject", subject_width))
     if show_status:
-        parts.append(_pad(_DELIVERY_HEADING, _STATUS_WIDTH))
+        parts.append(_pad(status_heading, _STATUS_WIDTH))
     parts.append("Date")
     return colored(("  " + "  ".join(parts)).rstrip(), fg_color=LABEL_COLOR, bold=True)
 
@@ -555,7 +607,7 @@ def _mail_list_rows(
         number = f"{first_number + index:>{number_width}}"
         unread = not sent and not row.message.is_read
         marker = _NEW_MARKER if unread else ""
-        status = DELIVERY_STATUS_LABELS[row.status] if row.status else ""
+        status = _STATUS_LABELS[row.status] if row.status else ""
         if widths is None:
             # Prose, for a terminal too narrow for columns: which message
             # it is comes first; the message view shows the date.
@@ -626,10 +678,15 @@ async def _load_mail_rows(lane: DatabaseLane, user: User, *, sent: bool) -> list
     # Sent lists a letter to several people once (issue #827): its newest
     # copy stands for all of them.
     group_copies: dict[str, list[MailMessage]] = {}
+    receipts: dict[int, ReadReceipt] = {}
     if sent:
         for message in messages:
             if message.mail_group_id is not None:
                 group_copies.setdefault(message.mail_group_id, []).append(message)
+        # Receipts are reciprocal (issue #829): a caller who does not share
+        # them sees no read state in the list.
+        if await lane.run(shares_read_receipts, user):
+            receipts = await lane.run(read_receipts, user, messages)
     for message in messages:
         identity_changed = False
         if sent and message.mail_group_id is not None:
@@ -668,6 +725,11 @@ async def _load_mail_rows(lane: DatabaseLane, user: User, *, sent: bool) -> list
             identity_changed=identity_changed,
             copies=tuple(reversed(group_copies[message.mail_group_id]))
             if sent and message.mail_group_id is not None else (),
+            receipt=_receipt_summary([
+                receipts[copy.id]
+                for copy in (group_copies[message.mail_group_id] if message.mail_group_id is not None else [message])
+                if copy.id in receipts
+            ]) if sent else None,
         ))
     return rows
 
@@ -1374,6 +1436,7 @@ class _MailboxScreen:
             if widths is not None:
                 lines.append(_mail_list_heading(
                     widths, number_width=number_width, sent=self.sent, show_status=show_status,
+                    status_heading=_status_heading(self.all_rows),
                 ))
             if roomy:
                 lines.append(rule)
@@ -1425,6 +1488,7 @@ async def _message_view(
         node_name_gradient=session.node_name_gradient,
     )
     accent = await lane.run(effective_accent_color_256)
+    display_format, display_timezone = await lane.run(resolve_display_preferences)
     preamble: list[str] = []
     if to_label is not None:
         preamble.append(colored("To: ", fg_color=LABEL_COLOR) + colored(sanitize_text(to_label), fg_color=accent))
@@ -1449,6 +1513,12 @@ async def _message_view(
                     colored("Delivery: ", fg_color=LABEL_COLOR)
                     + colored(delivery, fg_color=_DELIVERY_COLORS.get(shown_status, VALUE_COLOR))
                 )
+        preamble.extend(await _read_receipt_lines(
+            lane, user, message, copies or [message],
+            when=lambda iso: format_for_display(
+                iso, override_format=display_format, override_timezone=display_timezone
+            ),
+        ))
     else:
         sender_label = await _display_sender_label(lane, message)
         preamble.append(
@@ -1466,7 +1536,6 @@ async def _message_view(
         # people went to (issue #827).
         received_to = await lane.run(group_to_label, message) or user.username
         preamble.append(colored("To: ", fg_color=LABEL_COLOR) + colored(sanitize_text(received_to), fg_color=accent))
-    display_format, display_timezone = await lane.run(resolve_display_preferences)
     displayed_date = format_for_display(
         message.created_at, override_format=display_format, override_timezone=display_timezone
     )
@@ -1493,6 +1562,81 @@ def _letter_file_refs(db: Database, message: MailMessage, copies: list[MailMessa
         if refs:
             return refs
     return []
+
+
+_RECEIPTS_OFF_TEXT = "not shown, as you don't share read receipts yourself (Profile)"
+
+
+async def _read_receipt_lines(
+    lane: DatabaseLane, user: User, message: MailMessage, copies: list[MailMessage],
+    *, when: Callable[[str], str],
+) -> list[str]:
+    """The read-receipt lines of a letter `user` sent (issue #829), for its
+    local copies; none for Link mail or a deleted account's copy.
+
+    A letter to one person has one `Read:` line. A letter to several people
+    names its recipients by what their receipts say -- read (with when),
+    not read yet, deleted unread, not shared -- a line each, which keeps
+    twenty recipients to four lines. Mail to all callers counts instead of
+    naming. A recipient who does not share receipts is always said to, even
+    to a sender who does not share them either: that is only their setting,
+    and it keeps "not read" from being guessed. Of everything else, a sender
+    who does not share receipts is told only that it is not shown."""
+    receipts = await lane.run(read_receipts, user, copies)
+    if not receipts:
+        return []
+
+    def line(label: str, text: str, color: int) -> str:
+        return colored(label, fg_color=LABEL_COLOR) + colored(text, fg_color=color)
+
+    if message.mail_group_id is None:
+        receipt = receipts.get(message.id)
+        if receipt is None:
+            return []
+        name = sanitize_text(await lane.run(copy_recipient_label, message))
+        if receipt.state == RECEIPT_READ and receipt.read_at:
+            return [line("Read: ", when(receipt.read_at), SUCCESS_COLOR)]
+        text, color = {
+            RECEIPT_NOT_READ: ("not yet", MUTED_COLOR),
+            RECEIPT_DELETED_UNREAD: ("no, deleted without being read", MUTED_COLOR),
+            RECEIPT_WITHHELD: (f"not shown, as {name} doesn't share read receipts", MUTED_COLOR),
+            RECEIPT_HIDDEN: (_RECEIPTS_OFF_TEXT, MUTED_COLOR),
+        }[receipt.state]
+        return [line("Read: ", text, color)]
+    states = [receipts[copy.id].state for copy in copies if copy.id in receipts]
+    if is_to_all_callers(message):
+        # Hundreds of names would be no list at all: a count, of those who
+        # share receipts only.
+        withheld = states.count(RECEIPT_WITHHELD)
+        others = f" ({withheld} more don't share them)" if withheld else ""
+        if RECEIPT_HIDDEN in states:
+            return [line("Read: ", _RECEIPTS_OFF_TEXT + others, MUTED_COLOR)]
+        sharing = len(states) - withheld
+        if not sharing:
+            return [line("Read: ", "not shown, as no recipient shares read receipts", MUTED_COLOR)]
+        read = states.count(RECEIPT_READ)
+        return [line("Read: ", f"by {read} of the {sharing} who share read receipts{others}", VALUE_COLOR)]
+    grouped: dict[str, list[str]] = {}
+    for copy in copies:
+        receipt = receipts.get(copy.id)
+        if receipt is None:
+            continue
+        name = sanitize_text(await lane.run(copy_recipient_label, copy))
+        if receipt.state == RECEIPT_READ and receipt.read_at:
+            name = f"{name} ({when(receipt.read_at)})"
+        grouped.setdefault(receipt.state, []).append(name)
+    lines: list[str] = []
+    for state, label, color in (
+        (RECEIPT_READ, "Read by: ", SUCCESS_COLOR),
+        (RECEIPT_NOT_READ, "Not read yet: ", MUTED_COLOR),
+        (RECEIPT_DELETED_UNREAD, "Deleted unread: ", MUTED_COLOR),
+        (RECEIPT_WITHHELD, "Don't share read receipts: ", MUTED_COLOR),
+    ):
+        if state in grouped:
+            lines.append(line(label, ", ".join(grouped[state]), color))
+    if RECEIPT_HIDDEN in grouped:
+        lines.append(line("Read: ", _RECEIPTS_OFF_TEXT, MUTED_COLOR))
+    return lines
 
 
 def _mail_body_mode(db: Database, user: User) -> str:
@@ -1578,6 +1722,10 @@ _DELIVERY_COLORS = {
     "delivered": SUCCESS_COLOR,
     "bounced": ERROR_COLOR,
     "expired": ERROR_COLOR,
+    _RECEIPT_READ_ALL: SUCCESS_COLOR,
+    _RECEIPT_SOME_READ: VALUE_COLOR,
+    _RECEIPT_NONE_READ: MUTED_COLOR,
+    _RECEIPT_NOT_SHARED: MUTED_COLOR,
 }
 
 
