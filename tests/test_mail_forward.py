@@ -127,6 +127,22 @@ def test_forward_from_sent_names_the_caller_as_sender(people):
     assert letter.body.endswith("\n\nSaturday?")
 
 
+def test_forward_of_sent_mail_to_a_deleted_account_names_it_as_sent_does(people):
+    """#818 keeps a deleted recipient's name; the header uses it."""
+    from netbbs.auth.users import SYSOP_LEVEL, delete_user
+
+    db_path, db, alice, bob, carol = people
+    sysop = create_user(db, "sysop", password="hunter2pw", user_level=SYSOP_LEVEL)
+    send_mail(db, alice, bob, "Plans", "Saturday?")
+    delete_user(db, bob, deleted_by=sysop)
+    session = FakeSession(keys=["s", "1", "f", "s", "b", "b", "b"], lines=["carol", "", "/done"])
+    session.terminal_width = 200
+    _run(db_path, session, alice)
+
+    [letter] = list_inbox(db, carol)
+    assert "\nFrom: alice\nTo: bob (deleted account)\n" in letter.body
+
+
 def test_forward_asks_for_the_recipient_with_the_to_prompts_own_checks(people):
     db_path, db, alice, bob, carol = people
     send_mail(db, alice, bob, "Hello", "Hi")
