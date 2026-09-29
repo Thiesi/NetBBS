@@ -55,10 +55,12 @@ def test_mrc_colors_are_rendered_or_stripped_per_viewer(db, lane, hub, presence,
             )
             raw = "\n".join(session.written)
             text = _text(session)
-            assert "<bob@Other (MRC)> blue words here" in text
+            # Issue #899 follow-up: an [MRC] badge in front, no "(MRC)" after the name.
+            assert "[MRC] <bob@Other> blue words here" in text
+            assert "(MRC)" not in text
             # The action bullet itself follows the viewer's Unicode-style
             # preference; what matters here is one name, then the words.
-            assert "bob@Other (MRC) waves" in text
+            assert "bob@Other waves" in text
             assert "[MRC] room topic: be excellent" in text
             assert "<bob>" not in text and "|12" not in text and "|14" not in text
             # CGA |12 light red, |09 light blue, |14 yellow -> xterm 9, 12, 11.
@@ -82,7 +84,7 @@ def test_scrollback_replay_renders_mrc_colors_the_same_way(db, lane, hub, presen
     async def scenario():
         session, _ = await _run(lane, hub, presence, channel, alice, ["/quit"])
         raw = "\n".join(session.written)
-        assert "<bob@Other (MRC)> earlier words" in _text(session)
+        assert "[MRC] <bob@Other> earlier words" in _text(session)
         assert fg(cga_to_xterm(12)) in raw
     asyncio.run(scenario())
 
@@ -197,7 +199,24 @@ def test_remote_nickname_color_survives_live_delivery_and_scrollback(db, lane, h
             assert fg(cga_to_xterm(11)) + "bob" in "\n".join(session.written)
             replay, _ = await _run(lane, hub, presence, channel, alice, ["/quit"], mrc_bridge=rig.bridge)
             assert fg(cga_to_xterm(11)) + "bob" in "\n".join(replay.written)
-            assert _text(replay).count("bob@Other (MRC)") == 1
+            assert _text(replay).count("[MRC] <bob@Other>") == 1
         finally:
             await rig.close()
     asyncio.run(scenario())
+
+
+def test_mrc_speaker_is_badged_and_its_site_has_its_own_color(db, channel, alice):
+    # Issue #899 follow-up: the site after the `@` in MRC_SITE_COLOR, never
+    # NODE_COLOR, so an MRC caller does not read as a linked one.
+    from netbbs.net import chat_flow
+    from netbbs.rendering import MRC_SITE_COLOR, MUTED_COLOR, NODE_COLOR, colored
+
+    message = record_message(
+        db, channel, kind="message", author_label="bob@Other (MRC)", author_fingerprint=None,
+        body="hi", external_source="mrc",
+    )
+    rendered = chat_flow._render_channel_message(db, channel, alice, message)
+
+    assert colored("[MRC] ", fg_color=MUTED_COLOR) in rendered
+    assert colored("@", fg_color=MUTED_COLOR) + colored("Other", fg_color=MRC_SITE_COLOR) in rendered
+    assert colored("Other", fg_color=NODE_COLOR) not in rendered

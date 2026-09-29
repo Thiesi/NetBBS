@@ -456,14 +456,14 @@ class _SessionThatDropsBobAfterEnteringPrivateMode(FakeSession):
 
     async def read_line(
         self, echo: bool = True, history=None, completer=None, *,
-        live_buffer=None, lock=None, list_candidates=None,
+        live_buffer=None, lock=None, list_candidates=None, viewport=None, **_ignored,
     ) -> str:
         if self._lines and self._lines[0] == "hello" and not self._dropped:
             self._dropped = True
             self._presence.leave("bob")
         return await super().read_line(
             echo=echo, history=history, completer=completer,
-            live_buffer=live_buffer, lock=lock, list_candidates=list_candidates,
+            live_buffer=live_buffer, lock=lock, list_candidates=list_candidates, viewport=viewport,
         )
 
 

@@ -574,6 +574,23 @@ def status_lastseen(nick: str, site: str, room: str, recorded: bool) -> MrcPacke
     return user_command(nick, site, room, f"STATUS LASTSEEN {'ON' if recorded else 'OFF'}")
 
 
+#: Ends every stored MRC author label: `user@site (MRC)`. Stored rows keep
+#: it; screens show the sender without it (`mrc_sender`) and mark the line
+#: with an `[MRC]` badge instead (issue #899 follow-up), since parentheses
+#: after a name now hold an account.
+MRC_LABEL_SUFFIX = " (MRC)"
+
+
+def mrc_author_label(handle: str, site: str) -> str:
+    """The stored `author_label` of a line from MRC."""
+    return f"{handle}@{site}{MRC_LABEL_SUFFIX}"
+
+
+def mrc_sender(author_label: str) -> str:
+    """`user@site` from a stored MRC `author_label`; any other label as is."""
+    return author_label.removesuffix(MRC_LABEL_SUFFIX)
+
+
 def display_handle(name: str) -> str:
     """A handle as the spec says to show it: "client must replace `_`
     by spaces when received from server" (fields 1 and 4). Display
