@@ -171,6 +171,61 @@ def grant_permissions(
     return _get_grant(db, target.id, object_type, object_id, community_id)
 
 
+def grant_everywhere(
+    db: Database,
+    target: User,
+    *,
+    board_permissions: BoardPermission,
+    channel_permissions: ChannelPermission,
+    granted_by: User,
+    community_id: int | None = None,
+) -> list[ModeratorGrant]:
+    """
+    Moderation of every board, file area and channel as one action (design
+    doc §5.2, issue #836 F131): the three blanket grants -- local, or
+    Community-blanket with `community_id` -- written and audited in one
+    transaction, so a SysOp never ends up with two of the three. Additive,
+    like `grant_permissions`.
+    """
+    from netbbs.moderation.log import record_action_without_commit
+
+    wanted = (
+        ("board", board_permissions),
+        ("file_area", board_permissions),
+        ("channel", channel_permissions),
+    )
+    for object_type, permissions in wanted:
+        _validate_permission_type(object_type, permissions)
+    db.connection.execute("BEGIN IMMEDIATE")
+    try:
+        for object_type, permissions in wanted:
+            row = _get_grant_row(db, target.id, object_type, None, community_id)
+            if row is None:
+                db.connection.execute(
+                    """
+                    INSERT INTO moderator_grants
+                        (user_id, object_type, object_id, permissions, granted_by_user_id, created_at, community_id)
+                    VALUES (?, ?, NULL, ?, ?, ?, ?)
+                    """,
+                    (target.id, object_type, int(permissions), granted_by.id, utc_now_iso(), community_id),
+                )
+            else:
+                db.connection.execute(
+                    "UPDATE moderator_grants SET permissions = ? WHERE id = ?",
+                    (row["permissions"] | int(permissions), row["id"]),
+                )
+            record_action_without_commit(
+                db, actor=granted_by, action="grant", object_type=object_type, object_id=None,
+                target_user_id=target.id, detail=_describe(_PERMISSION_ENUMS[object_type], int(permissions)),
+            )
+    except BaseException:
+        db.connection.rollback()
+        raise
+    else:
+        db.connection.commit()
+    return [_get_grant(db, target.id, object_type, None, community_id) for object_type, _ in wanted]
+
+
 def revoke_permissions(
     db: Database,
     target: User,

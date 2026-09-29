@@ -31,7 +31,7 @@ from netbbs.chat import (
 from netbbs.communities import Community, list_communities
 from netbbs.link.boards import LinkContext
 from netbbs.mail import unread_count as unread_mail_count
-from netbbs.net.admin_flow import admin_menu
+from netbbs.net.admin_flow import admin_menu, moderation_queue, staff_menu
 from netbbs.boards import list_boards
 from netbbs.chat.channels import list_channels
 from netbbs.files import list_file_areas
@@ -86,6 +86,13 @@ from netbbs.rendering import (
     sanitize_text,
     screen_title,
 )
+from netbbs.staff import (
+    count_moderation_items,
+    count_pending_accounts,
+    has_moderation_scope,
+    is_staff,
+    told_of_pending_accounts,
+)
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 from netbbs.timeutil import format_for_display, is_utc_zone_name, resolve_display_preferences, utc_now_iso
@@ -110,6 +117,7 @@ _MENU_ACTIVITY = {
     "i": "Invitations",
     "v": "Verify",
     "s": "SysOp",
+    "a": "Moderation",
     "l": "Logging off",
 }
 
@@ -286,6 +294,16 @@ async def _draw_main_menu(
         system_options.append(
             MenuEntry(label=menu_key("S", "ysOp"), brief="Node administration console")
         )
+    else:
+        # Issue #836 (design doc §5.2, §5.6): a moderator is told what waits
+        # for them, and a staff member reaches their own console.
+        if has_moderation_scope(db, user):
+            system_options.append(MenuEntry(
+                label=menu_key("a", f"tion ({count_moderation_items(db, user)})", prefix="Moder"),
+                brief="Held posts and uploads to decide",
+            ))
+        if is_staff(user):
+            system_options.append(MenuEntry(label=menu_key("S", "taff"), brief="Your staff console"))
     system_options.append(MenuEntry(label=menu_key("L", "ogoff"), brief="Disconnect from this node"))
 
     unicode_style = unicode_style_enabled(db, user)
@@ -341,6 +359,17 @@ async def _draw_main_menu(
         await session.write_line(
             colored(f"No boards yet: create one under SysOp {arrow} Content.", fg_color=MUTED_COLOR)
         )
+    if told_of_pending_accounts(user):
+        # Issue #835 (F071): only the console dashboard used to say that
+        # signups were waiting. Told to whoever can approve them (§5.6).
+        waiting = count_pending_accounts(db)
+        if waiting:
+            arrow = "\u2192" if unicode_style else "->"
+            where = f"SysOp {arrow} Users" if meets_level(user, SYSOP_LEVEL) else f"Staff {arrow} Accounts waiting"
+            await session.write_line(colored(
+                f"{waiting} account{'' if waiting == 1 else 's'} awaiting approval: {where}.",
+                fg_color=WARNING_COLOR,
+            ))
     if notice:
         await session.write_line(notice)
     # An outcome from a flow that unwound all the way back here (a download
@@ -831,6 +860,28 @@ async def _main_menu_loop(
                 else:
                     await session.write_line(
                         colored("SysOp menu is not available in this context.", fg_color=MUTED_COLOR)
+                    )
+                redraw = True
+            elif choice == "s" and is_staff(user):
+                await session.write_line("")
+                set_root_activity(session, "Staff console")
+                if lane is not None:
+                    await staff_menu(session, lane, user, node_controls=node_controls, link_context=link_context)
+                else:
+                    await session.write_line(
+                        colored("The staff console is not available in this context.", fg_color=MUTED_COLOR)
+                    )
+                redraw = True
+            elif choice == "a" and not meets_level(user, SYSOP_LEVEL) and has_moderation_scope(db, user):
+                await session.write_line("")
+                if lane is not None:
+                    await moderation_queue(
+                        session, lane, user, link_context=link_context,
+                        transfers=node_controls.transfers if node_controls is not None else None,
+                    )
+                else:
+                    await session.write_line(
+                        colored("Moderation is not available in this context.", fg_color=MUTED_COLOR)
                     )
                 redraw = True
             else:

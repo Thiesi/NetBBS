@@ -51,6 +51,8 @@ up: from a board to the list you picked it from, and from there to the menu.
 | **E-mail** | Read and send persistent NetBBS mail |
 | **Who's online** | See callers and available ways to contact them |
 | **Profile** | Change your public profile and personal preferences |
+| **Moderation** (key **A**) | Posts and uploads waiting for your decision, if the SysOp made you a moderator |
+| **Staff** | Your staff console, if the SysOp gave you staff permissions |
 
 Lists of boards and file areas keep the SysOp's order, so the number you
 remember for a board still picks it next time. **[O]rder** in a list sorts it
