@@ -661,7 +661,7 @@ rather than returning straight into its parent's redraw, where it would flash
 and vanish. The one exception is a picker with nothing to pick: it announces
 its empty message and returns, so the screen it returns to says it.
 
-A picker row carries one number: the two digits that select it on this page
+A picker row carries one number: the one that selects it on this page
 (issue #838). Rows used to show a second, permanent `(#N)` reference -- the
 item's database id -- for a `[G]oto #` command, so "02. (#1) Fountain Pens"
 asked a first-time caller to tell two numbers apart before choosing, and the
