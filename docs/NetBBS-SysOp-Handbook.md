@@ -260,7 +260,10 @@ need that behavior, arrange an external health check or supervisor yourself.
 NetBBS runs in the foreground. The service manager handles backgrounding.
 `systemctl stop netbbs` or `service netbbs stop` requests a graceful shutdown:
 callers are warned, then disconnected after the configured delay (60 seconds
-by default). Cleanup takes additional time. Increase the service stop timeout
+by default). With nobody connected, or once the last caller leaves, it stops
+without waiting out the delay. Change the delay under **Settings → Network &
+login limits**, or as `[shutdown] graceful_delay_seconds`. Cleanup takes
+additional time. Increase the service stop timeout
 if you raise that delay or configure slow-stopping door services.
 
 The Linux unit restricts writable paths to `/var/lib/netbbs`. **MANUAL:** extend
@@ -1292,7 +1295,8 @@ steps run in order, and a failure stops the rest and says why:
    - **yes** declares that your service manager restarts NetBBS when it exits.
    - **no** always stops after installing.
 
-   A restart warns callers and waits the configured shutdown delay. The node
+   A restart warns callers and waits the configured shutdown delay, or not at
+   all with nobody connected. The node
    then exits with status 75, and the service manager starts the new version.
    Without a restart, the screen tells you to restart the service yourself. Do
    it promptly: until then, the old version runs with the new files on disk.

@@ -1362,6 +1362,35 @@ def test_promote_demote_changes_level(db, lane, sysop):
     assert updated.user_level == 20
 
 
+class _SeedRecordingSession(FakeSession):
+    """Remembers the value each line read opened on."""
+
+    def __init__(self, inputs):
+        super().__init__(inputs)
+        self.seeds: list[str] = []
+
+    async def read_line(self, echo: bool = True, history=None, completer=None, **kwargs) -> str:
+        self.seeds.append(kwargs.get("initial", ""))
+        return await super().read_line(echo, history, completer, **kwargs)
+
+
+def test_level_prompt_opens_on_the_current_level(db, lane, sysop):
+    # Issue #845, F136: the level prompt showed `[10]` beside an empty line,
+    # while every Create/Edit screen opens its number in the line itself.
+    create_user(db, "alice", password="hunter2", user_level=10)
+    session = _SeedRecordingSession(["u", "p", "0", "1", "l", "20", "b", "b", "b"])
+    _run(session, lane, sysop)
+    assert "10" in session.seeds
+    assert "[10]" not in _visible(_written_text(session))
+
+
+def test_level_prompt_left_as_it_opened_changes_nothing(db, lane, sysop):
+    create_user(db, "alice", password="hunter2", user_level=10)
+    session = FakeSession(["u", "p", "0", "1", "l", "10", "b", "b", "b"])
+    _run(session, lane, sysop)
+    assert "is now level" not in _written_text(session)
+
+
 def test_promote_demote_shows_lockout_guard_message(db, lane, sysop):
     # sysop is the only user, and the only active SysOp -- demoting
     # them must be refused, with the message shown on screen, not a
