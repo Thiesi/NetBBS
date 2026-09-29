@@ -68,7 +68,7 @@ def _make_user(db: Database) -> User:
     return create_user(db, "alice", password="hunter2", user_level=0)
 
 
-def test_pending_private_message_shown_before_the_menu_on_entry(db):
+def test_pending_private_message_shown_above_the_menu_prompt_on_entry(db):
     async def scenario():
         mailbox = MessageMailbox()
         session = FakeSession(keys=["l"])  # logoff immediately
@@ -81,8 +81,26 @@ def test_pending_private_message_shown_before_the_menu_on_entry(db):
     session = asyncio.run(scenario())
     output = session.output
     assert "Private message from bob: hi there" in output
-    # It genuinely arrived *before* the menu, not just somewhere in the output.
-    assert output.index("Private message from bob") < output.index("Main menu")
+    # Carried into the menu, above its prompt (issue #823): written before
+    # the menu, a redraw in place cleared it unseen.
+    assert output.index("Main menu") < output.index("Private message from bob") < output.index("Choice")
+
+
+def test_pending_private_message_survives_the_redraw_in_place_clear(db):
+    from netbbs.net.redraw_preference import set_redraw_in_place_enabled
+
+    user = _make_user(db)
+    set_redraw_in_place_enabled(db, user, True)
+
+    async def scenario():
+        mailbox = MessageMailbox()
+        session = FakeSession(keys=["l"])
+        mailbox.deliver(session, "*** Private message from bob: still there", _T)
+        await main_menu._main_menu(session, db, object(), PresenceRegistry(), mailbox, InputHistory(), user)
+        return session
+
+    output = asyncio.run(scenario()).output
+    assert "still there" in output[output.rindex("\x1b[2J"):]
 
 
 def test_message_is_only_shown_once_not_on_every_redraw(db):

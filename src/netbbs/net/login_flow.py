@@ -50,6 +50,7 @@ from netbbs.mrc.bridge import MrcBridge
 from netbbs.net.char_input import InputHistory
 from netbbs.net.confirm import prompt_yes_no
 from netbbs.net.logoff_banner import load_logoff_banner
+from netbbs.net.mail_arrivals import watch_for_mail
 from netbbs.net.main_menu import _main_menu
 from netbbs.net.maintenance import LOCKDOWN_MESSAGE, LOCKDOWN_NOTICE, MAINTENANCE_MESSAGE, MaintenanceMode
 from netbbs.net.onboarding_flow import offer_onboarding
@@ -771,6 +772,7 @@ async def run_authenticated_session(
     completed_history_entry = None
     intentional_logoff = False
     watcher_task: asyncio.Task | None = None
+    mail_watch_task: asyncio.Task | None = None
     # Issue #762: onboarding, the Unicode question and the previous-callers
     # screen come before the main menu, which is what empties the trail.
     set_root_activity(session, "Logging in")
@@ -785,6 +787,9 @@ async def run_authenticated_session(
         watcher_task = asyncio.create_task(
             _watch_for_account_revocation(session, db, user, node_controls.session_registry)
         )
+        # Issue #823: mail that arrives while this caller is online is
+        # announced, live in chat and at the next screen elsewhere.
+        mail_watch_task = asyncio.create_task(watch_for_mail(session, db, user))
     try:
         if lane is not None and meets_level(user, SYSOP_LEVEL):
             await offer_onboarding(session, lane)
@@ -818,6 +823,11 @@ async def run_authenticated_session(
         ):
             await link_context.realtime_bridge.broadcast_node_presence_live(change="leave", username=user.username)
         completed_history_entry = record_session_end(db, history_id)
+        if mail_watch_task is not None:
+            # Its failure, if it had one, must not mask how the session
+            # ended; it is retrieved here and dropped.
+            mail_watch_task.cancel()
+            await asyncio.gather(mail_watch_task, return_exceptions=True)
         if watcher_task is not None:
             # Same cancel-then-await-swallowing-CancelledError shape
             # editor autosave tasks already use (GitHub issue #43) --
