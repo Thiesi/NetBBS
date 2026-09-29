@@ -87,6 +87,8 @@ _FOLD: dict[str, str] = {
     "€": "E", "£": "L", "¥": "Y", "¢": "c", "©": "c", "®": "r",
     "°": "o", "±": "+", "¿": "?", "¡": "!", "§": "S", "¶": "P",
     "¼": "4", "½": "2", "¾": "4", "µ": "u", "÷": "/",
+    # Spacing accents, whose decomposition is only a space and a mark.
+    "´": "'", "¨": '"', "¯": "-", "¸": ",", "ˆ": "^", "˜": "~", "˝": '"', "˘": "u", "˙": ".",
 }
 
 
@@ -101,7 +103,9 @@ def _encodable(text: str, charset: Charset) -> bool:
 def _fit(candidate: str, width: int, charset: Charset) -> str | None:
     """`candidate` padded to `width` columns, or None if it is too wide,
     empty for a visible character, or not encodable in `charset`."""
-    if not candidate or not _encodable(candidate, charset):
+    # A spacing accent (´ ¨ ¯) decomposes to a space and a combining
+    # mark: a blank is no substitute for a visible character.
+    if not candidate.strip() or not _encodable(candidate, charset):
         return None
     if any(char_width(c) == 0 or ord(c) < 0x20 for c in candidate):
         return None
@@ -158,11 +162,14 @@ def map_text(text: str, charset: Charset) -> str:
         j = i
         while j < n and unicodedata.combining(text[j]):
             j += 1
-        if j > i and char_width(ch) > 0:
-            composed = unicodedata.normalize("NFC", text[i - 1:j])
-            if len(composed) == 1:
-                ch = composed
-                i = j
+        if j > i:
+            if char_width(ch) > 0:
+                composed = unicodedata.normalize("NFC", text[i - 1:j])
+                if len(composed) == 1:
+                    ch = composed
+            # The marks have no width and map to nothing either way; skip
+            # the whole run once, so a long run is never scanned again.
+            i = j
         out.append(ch if ord(ch) < 0x80 else _map_char(ch, charset))
     return "".join(out)
 

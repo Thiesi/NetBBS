@@ -89,6 +89,21 @@ def test_a_combining_accent_composes_before_mapping():
     assert map_text("café", ASCII) == "cafe"
 
 
+def test_spacing_accents_never_become_blanks():
+    # Review on #936: they decompose to a space and a combining mark.
+    assert map_text("¯\\_(ツ)_/¯", ASCII) == "-\\_(??)_/-"
+    assert map_text("´", CP437) == "'"
+
+
+def test_a_long_run_of_combining_marks_is_mapped_in_linear_time():
+    import time
+
+    text = "a" + "́̂" * 25_000 + "b"
+    started = time.monotonic()
+    assert map_text(text, CP437) == "ab"
+    assert time.monotonic() - started < 2.0
+
+
 def test_wide_characters_fill_their_two_columns():
     assert map_text("東京", CP437) == "????"
     assert map_text("Ａ", ASCII) == "A "
