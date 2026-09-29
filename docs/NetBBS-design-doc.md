@@ -4482,8 +4482,10 @@ wording.
 A received letter is dated by its signed `created_at`, when its sender wrote
 it, so a letter that took days to arrive says so. A `created_at` more than
 five minutes ahead of the recipient node's clock (the skew Link's signed
-requests allow), or one that is not a timestamp, is replaced by the arrival
-time: the sender's clock cannot put a letter in the future. Inbox and Sent
+requests allow), one before 2000 (no NetBBS node wrote mail then, and a date
+near year 1 cannot be shown in a timezone west of UTC), or one that is not a
+timestamp, is replaced by the arrival time: the sender's clock cannot put a
+letter in the future or out of range. Inbox and Sent
 list mail by arrival (row id), not by that date, so late mail lands at the top
 of the inbox instead of below letters read long ago; making room in a full
 mailbox likewise removes the earliest-arrived read letter.

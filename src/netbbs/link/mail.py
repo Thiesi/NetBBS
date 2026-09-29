@@ -203,6 +203,11 @@ def _open_sealed(node_identity: NodeIdentity, ciphertext: bytes) -> bytes:
 # nodes, the same five minutes Link's signed requests allow. Anything
 # later is dated by its arrival instead.
 MAX_LINK_MAIL_CLOCK_SKEW = datetime.timedelta(minutes=5)
+# The earliest date a received letter may claim. No NetBBS node wrote mail
+# before this, and a date near year 1 cannot be shown in a timezone west of
+# UTC (`format_for_display` runs off the representable range), which would
+# take the whole inbox down (#878 review).
+EARLIEST_LINK_MAIL_DATE = datetime.datetime(2000, 1, 1, tzinfo=datetime.timezone.utc)
 
 
 def _written_at(created_at: object, arrived_at: str) -> str:
@@ -210,8 +215,9 @@ def _written_at(created_at: object, arrived_at: str) -> str:
 
     The sender's signed `created_at`, so a letter that took days to arrive
     says so rather than looking new. One dated beyond the clock-skew
-    allowance, or not a timestamp at all, is dated by its arrival instead:
-    the sender's clock cannot be trusted to put a letter in the future.
+    allowance, before `EARLIEST_LINK_MAIL_DATE`, or not a timestamp at all,
+    is dated by its arrival instead: the sender's clock cannot be trusted
+    to put a letter in the future or in an age no display can show.
     Mailbox order does not depend on this; it is arrival order."""
     if not isinstance(created_at, str):
         return arrived_at
@@ -219,7 +225,7 @@ def _written_at(created_at: object, arrived_at: str) -> str:
         written = parse_utc_iso(created_at)
     except ValueError:
         return arrived_at
-    if written > parse_utc_iso(arrived_at) + MAX_LINK_MAIL_CLOCK_SKEW:
+    if written < EARLIEST_LINK_MAIL_DATE or written > parse_utc_iso(arrived_at) + MAX_LINK_MAIL_CLOCK_SKEW:
         return arrived_at
     return utc_iso(written)
 

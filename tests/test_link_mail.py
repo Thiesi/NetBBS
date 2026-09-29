@@ -702,13 +702,13 @@ def test_a_received_letter_is_dated_when_its_sender_wrote_it(db, bob, node_ident
     assert row["created_at"] == "2026-01-01T07:30:00.000000Z"
 
 
-def test_a_letter_dated_in_the_future_is_dated_by_its_arrival(db, bob, node_identity, remote_node_identity):
+def test_a_letter_dated_in_the_future_or_before_2000_is_dated_by_its_arrival(db, bob, node_identity, remote_node_identity):
     import datetime
 
     now = datetime.datetime.now(datetime.timezone.utc)
     within = (now + datetime.timedelta(minutes=2)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
     beyond = (now + datetime.timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-    for created_at in (within, beyond, "yesterday-ish"):
+    for created_at in (within, beyond, "yesterday-ish", "0001-01-01T00:00:00.000000Z", "1999-12-31T23:59:59Z"):
         message = _incoming_message(
             node_identity, remote_node_identity, created_at=created_at, subject=created_at,
         )
