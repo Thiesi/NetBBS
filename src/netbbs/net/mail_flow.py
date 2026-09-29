@@ -50,7 +50,7 @@ from netbbs.link.trust import TrustState
 from netbbs.link.mail import LinkMailError, compose_link_message
 from netbbs.link.node_profiles import (
     ambiguous_node_guidance, link_address_label, unknown_node_guidance, unquote_reference,
-    identity_for_fingerprint, latest_identity_observation, resolve_stored_peer_reference,
+    identity_for_fingerprint, is_node_fingerprint, latest_identity_observation, resolve_stored_peer_reference,
 )
 from netbbs.mail import (
     MAX_MAIL_BODY_BYTES,
@@ -156,7 +156,7 @@ async def browse_mail(
             return
         elif choice == "i":
             await session.write_line("")
-            await _show_inbox(session, lane, user)
+            await _show_inbox(session, lane, user, link_context=link_context)
             await _render_mail_menu(session, lane, user, description_level, redraw_in_place, unicode_style, collapsed)
         elif choice == "s":
             await session.write_line("")
@@ -199,7 +199,9 @@ async def _render_mail_menu(
     await session.write("Choice: ")
 
 
-async def _show_inbox(session: Session, lane: DatabaseLane, user: User) -> None:
+async def _show_inbox(
+    session: Session, lane: DatabaseLane, user: User, *, link_context: LinkContext | None = None
+) -> None:
     description_level = await lane.run(menu_description_level, user)
     redraw_in_place = await lane.run(redraw_in_place_enabled, user)
     unicode_style = await lane.run(unicode_style_enabled, user)
@@ -240,7 +242,7 @@ async def _show_inbox(session: Session, lane: DatabaseLane, user: User) -> None:
         )
         if message is None:
             return
-        await _show_inbox_message(session, lane, user, message)
+        await _show_inbox_message(session, lane, user, message, link_context=link_context)
 
 
 async def _show_sent(session: Session, lane: DatabaseLane, user: User) -> None:
@@ -258,10 +260,7 @@ async def _show_sent(session: Session, lane: DatabaseLane, user: User) -> None:
         # project's declared scale (mailboxes are quota-bounded, design
         # doc §14) and no slower than today's per-item synchronous
         # lookups were.
-        recipient_labels: dict[int, str] = {}
-        for m in messages:
-            recipient = await lane.run(get_user_by_id, m.recipient_user_id)
-            recipient_labels[m.id] = recipient.username if recipient is not None else "(deleted account)"
+        recipient_labels = {m.id: await _display_recipient_label(lane, m) for m in messages}
 
         descriptions = {
             m.id: f"to {recipient_labels[m.id]} "
@@ -365,21 +364,52 @@ async def _show_message(
     )
 
 
-async def _display_sender_label(lane: DatabaseLane, message: MailMessage) -> str:
-    """Resolve a Link sender's technical home node only at render time."""
-    if "@" not in message.sender_label:
-        return message.sender_label
-    user_id, fingerprint = message.sender_label.split("@", 1)
+def _split_link_address(technical_address: str) -> tuple[str, str] | None:
+    """`(user, fingerprint)` of a stored `user@<home-node-fingerprint>`, or
+    `None` for a local name. Split at the last `@`: the user half comes from
+    a peer's signed payload and nothing holds it to the username grammar,
+    while a fingerprint never contains one."""
+    user, separator, fingerprint = technical_address.rpartition("@")
+    if not separator or not is_node_fingerprint(fingerprint):
+        return None
+    return user, fingerprint
+
+
+async def _display_link_address(lane: DatabaseLane, technical_address: str) -> str:
+    """Resolve a stored Link address's technical home node only at render
+    time; a local name is returned as it is."""
+    split = _split_link_address(technical_address)
+    if split is None:
+        return technical_address
+    user, fingerprint = split
     node_label = (await lane.run(identity_for_fingerprint, fingerprint)).label
-    return link_address_label(user_id, node_label)
+    return link_address_label(user, node_label)
+
+
+async def _display_sender_label(lane: DatabaseLane, message: MailMessage) -> str:
+    return await _display_link_address(lane, message.sender_label)
+
+
+async def _display_recipient_label(lane: DatabaseLane, message: MailMessage) -> str:
+    """Who a sent message went to: the remote address of Link mail (issue
+    #805), else the local recipient's current name."""
+    if message.recipient_remote_address is not None:
+        return await _display_link_address(lane, message.recipient_remote_address)
+    recipient = (
+        await lane.run(get_user_by_id, message.recipient_user_id)
+        if message.recipient_user_id is not None
+        else None
+    )
+    return recipient.username if recipient is not None else "(deleted account)"
 
 
 async def _link_mail_identity_warning(
     lane: DatabaseLane, technical_address: str,
 ) -> str | None:
-    if "@" not in technical_address:
+    split = _split_link_address(technical_address)
+    if split is None:
         return None
-    _user_id, fingerprint = technical_address.split("@", 1)
+    _user_id, fingerprint = split
     observation = await lane.run(latest_identity_observation, fingerprint)
     if observation is None or observation.severity != "security":
         return None
@@ -389,7 +419,10 @@ async def _link_mail_identity_warning(
     )
 
 
-async def _show_inbox_message(session: Session, lane: DatabaseLane, user: User, message: MailMessage) -> None:
+async def _show_inbox_message(
+    session: Session, lane: DatabaseLane, user: User, message: MailMessage,
+    *, link_context: LinkContext | None = None,
+) -> None:
     message = await lane.run(mark_read, user, message)
     actions = [
         ("r", menu_key("R", "eply")),
@@ -407,6 +440,33 @@ async def _show_inbox_message(session: Session, lane: DatabaseLane, user: User, 
             await lane.run(delete_for_recipient, user, message)
             announce(session, "Message deleted.")
             return
+        # The same subject rule and quote a board reply uses (issue #675).
+        subject = reply_subject(message.subject, max_bytes=MAX_MAIL_SUBJECT_BYTES)
+        link_sender = (
+            _split_link_address(message.sender_label) if message.sender_user_id is None else None
+        )
+        if link_sender is not None:
+            # Mail from another BBS has no local sender account; the reply
+            # goes back over Link to the address it came from (issue #805).
+            shown = await _display_sender_label(lane, message)
+            if link_context is None:
+                announce(
+                    session,
+                    f"This BBS is not linked with other BBSes right now, so a reply can't reach {shown}.",
+                    tone="error",
+                )
+                continue
+            checked = await lane.run(_check_link_reply_address, message.sender_label)
+            if isinstance(checked, str):
+                announce_styled(session, colored(checked, fg_color=ERROR_COLOR))
+                continue
+            await _compose_mail(
+                session, lane, user, prefill_link_address=message.sender_label,
+                prefill_subject=subject,
+                prefill_body=quote_body(message.body, author=shown) or None,
+                link_context=link_context,
+            )
+            continue
         sender = (
             await lane.run(get_user_by_id, message.sender_user_id)
             if message.sender_user_id is not None
@@ -415,17 +475,15 @@ async def _show_inbox_message(session: Session, lane: DatabaseLane, user: User, 
         if sender is None:
             announce(session, "That sender's account no longer exists -- can't reply.", tone="error")
             continue
-        # The same subject rule and quote a board reply uses (issue #675).
         await _compose_mail(
             session, lane, user, prefill_recipient=sender,
-            prefill_subject=reply_subject(message.subject, max_bytes=MAX_MAIL_SUBJECT_BYTES),
+            prefill_subject=subject,
             prefill_body=quote_body(message.body, author=message.sender_label) or None,
         )
 
 
 async def _show_sent_message(session: Session, lane: DatabaseLane, user: User, message: MailMessage) -> None:
-    recipient = await lane.run(get_user_by_id, message.recipient_user_id)
-    to_label = recipient.username if recipient is not None else "(deleted account)"
+    to_label = await _display_recipient_label(lane, message)
     actions = [("d", menu_key("D", "elete")), ("b", menu_key("B", "ack"))]
     page = 0
     while True:
@@ -445,6 +503,7 @@ async def _compose_mail(
     user: User,
     *,
     prefill_recipient: User | None = None,
+    prefill_link_address: str | None = None,
     prefill_subject: str = "",
     prefill_body: str | None = None,
     link_context: LinkContext | None = None,
@@ -453,9 +512,14 @@ async def _compose_mail(
     `link_context`, if given, lets the "To:" prompt accept a `user@
     node-name-or-dns` address (design doc) in addition to a
     plain local username -- routed to `netbbs.link.mail.compose_link_
-    message` instead of `netbbs.mail.send_mail`. Only checked on the
-    fresh-compose path: a reply always targets an already-resolved
-    local `User` (`prefill_recipient`), never a typed address.
+    message` instead of `netbbs.mail.send_mail`.
+
+    A reply is addressed for the caller: `prefill_recipient` to a local
+    account, or `prefill_link_address` -- the stored `user@<fingerprint>`
+    of a Link message's sender (issue #805) -- to another BBS. The latter
+    needs `link_context`; To shows the node by its current name, and the
+    message goes to that technical address unless the caller retypes To
+    on the review screen.
     """
     # Both entry points here are a hotkey (`[C]ompose`/`[R]eply`)
     # immediately followed by a `read_line()` prompt -- an Enter that
@@ -471,7 +535,13 @@ async def _compose_mail(
     if discard_buffered_enter is not None:
         await discard_buffered_enter()
 
-    if prefill_recipient is not None:
+    # The technical address a Link reply goes to, while To still shows it.
+    reply_address: str | None = None
+    if prefill_link_address is not None:
+        reply_address = prefill_link_address
+        recipient_text = await _display_link_address(lane, prefill_link_address)
+        await session.write_line(f"To: {sanitize_text(recipient_text)}")
+    elif prefill_recipient is not None:
         recipient_text = prefill_recipient.username
         await session.write_line(f"To: {sanitize_text(recipient_text)}")
     else:
@@ -565,7 +635,10 @@ async def _compose_mail(
             announce(session, "Message cancelled.", tone="muted")
             return
         if action is ReviewAction.EDIT_RECIPIENT:
-            recipient_text = await read_prefilled_field(session, "To", recipient_text)
+            edited = await read_prefilled_field(session, "To", recipient_text)
+            if edited != recipient_text:
+                reply_address = None
+            recipient_text = edited
             continue
         if action is ReviewAction.EDIT_SUBJECT:
             subject = await read_subject(session, max_bytes=MAX_MAIL_SUBJECT_BYTES, current=subject)
@@ -580,11 +653,14 @@ async def _compose_mail(
         if too_long is not None:
             continue
 
-        if link_context is not None and "@" in recipient_text:
+        if link_context is not None and (reply_address is not None or "@" in recipient_text):
             # The To prompt checks this too; the address may have been
             # edited from the review screen since, and a peer's standing
             # can change while the message is written.
-            checked = await lane.run(_check_link_recipient, recipient_text)
+            if reply_address is not None:
+                checked = await lane.run(_check_link_reply_address, reply_address)
+            else:
+                checked = await lane.run(_check_link_recipient, recipient_text)
             if isinstance(checked, str):
                 announce_styled(session, colored(checked, fg_color=ERROR_COLOR))
                 continue
@@ -674,6 +750,23 @@ def _check_link_recipient(db, recipient_text: str) -> _LinkRecipient | str:
     if refusal is not None:
         return refusal
     return _LinkRecipient(user=user, fingerprint=resolved)
+
+
+def _check_link_reply_address(db, technical_address: str) -> _LinkRecipient | str:
+    """Check the stored `user@<fingerprint>` a Link reply goes to (issue
+    #805) the way `_check_link_recipient` checks a typed address -- the
+    same refusal when this node will not send that peer mail -- in words
+    that fit an address the caller did not type."""
+    split = _split_link_address(technical_address)
+    if split is None:
+        return "This message has no address a reply could go to."
+    user, fingerprint = split
+    shown = sanitize_text(link_address_label(user, identity_for_fingerprint(db, fingerprint).label))
+    if not is_valid_user_part(user):
+        return f"{shown} is not an address mail can be sent to, so a reply can't reach it."
+    if resolve_stored_peer_reference(db, fingerprint, met_only=True) != fingerprint:
+        return f"This BBS is no longer linked with the BBS {shown} writes from, so a reply can't reach it."
+    return _check_link_recipient(db, f"{user}@{fingerprint}")
 
 
 def _too_long_to_send(subject: str, body: str) -> str | None:
