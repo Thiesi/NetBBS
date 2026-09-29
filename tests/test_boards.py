@@ -66,7 +66,7 @@ def test_get_nonexistent_board_fails(db):
         get_board_by_name(db, "nope")
 
 
-def test_list_boards_default_order_is_by_last_activity_most_recent_first(db, alice):
+def test_list_boards_activity_order_is_by_last_activity_most_recent_first(db, alice):
     # Creation-order sorting was explicitly rejected as the default (design
     # doc) in favor of "activity". With no posts on either board,
     # activity falls back to each board's own created_at, so the more
@@ -89,7 +89,7 @@ def test_list_boards_default_order_is_by_last_activity_most_recent_first(db, ali
     )
     db.connection.commit()
 
-    boards = list_boards(db)
+    boards = list_boards(db, order_by="activity")
     assert [b.name for b in boards] == ["second", "first"]
 
 
@@ -204,7 +204,7 @@ def test_list_boards_activity_does_not_surface_pending_posts(db, alice):
     db.connection.execute("UPDATE posts SET created_at = ? WHERE id = ?", ("2026-01-05T00:00:00.000000Z", post.id))
     db.connection.commit()
 
-    boards = list_boards(db)
+    boards = list_boards(db, order_by="activity")
     # The pending post's fresh timestamp must not bump "reviewed" ahead
     # of "other", which has real (if older) approved activity via its
     # own creation time -- a pending submission is invisible to
@@ -279,7 +279,7 @@ def test_list_boards_activity_excludes_effectively_expired_posts_before_any_swee
         == "approved"
     )  # confirms the sweep really never ran
 
-    boards = list_boards(db)
+    boards = list_boards(db, order_by="activity")
     # "stale"'s post's raw created_at (2020-06) is later than "fresh"'s
     # own creation time (2020-01-02) -- it would win on activity if
     # still (wrongly) being counted despite being 30+ days past its own

@@ -31,11 +31,11 @@ from netbbs.moderation.log import record_action, record_action_without_commit
 from netbbs.storage.database import Database
 from netbbs.timeutil import utc_now_iso
 
-# Mirrors netbbs.boards.boards._VALID_SORT_ORDERS exactly — same four
-# signals are meaningful for file areas as for boards: activity (most
-# recent upload), alphabetical, recent (newest area first), and volume
-# (file count).
-_VALID_SORT_ORDERS = ("activity", "alphabetical", "recent", "volume")
+# Mirrors netbbs.boards.boards._VALID_SORT_ORDERS exactly — the same
+# signals are meaningful for file areas as for boards: the SysOp's order
+# (the default, issue #839), activity (most recent upload), alphabetical,
+# recent (newest area first), and volume (file count).
+_VALID_SORT_ORDERS = ("sysop", "activity", "alphabetical", "recent", "volume")
 
 _logger = logging.getLogger(__name__)
 
@@ -77,6 +77,8 @@ class FileArea:
     # Zero-or-one, nullable FK (design doc §16), same shape as
     # Board.community_id.
     community_id: int | None
+    # The SysOp's order (issue #839), as `Board.position`.
+    position: int = 0
 
 
 def create_file_area(
@@ -221,13 +223,15 @@ def get_file_area_by_area_id(db: Database, area_id: str) -> FileArea | None:
     return _row_to_file_area(row) if row is not None else None
 
 
-def list_file_areas(db: Database, *, order_by: str = "activity") -> list[FileArea]:
+def list_file_areas(db: Database, *, order_by: str = "sysop") -> list[FileArea]:
     """
     List all file areas. Pinned areas always sort first, then the rest in
     the chosen `order_by` — identical semantics to
     `netbbs.boards.boards.list_boards`:
 
-      - "activity" (default): most recent *approved, non-expired*
+      - "sysop" (default, issue #839): the SysOp's order, `position`,
+        which `move_file_area` changes. A new area goes last.
+      - "activity": most recent *approved, non-expired*
         upload first (an area with no such files falls back to its own
         creation time) -- pending/expired entries don't count, same
         reasoning as list_boards (GitHub issue #36).
@@ -261,7 +265,11 @@ def list_file_areas(db: Database, *, order_by: str = "activity") -> list[FileAre
     if order_by not in _VALID_SORT_ORDERS:
         raise ValueError(f"order_by must be one of {_VALID_SORT_ORDERS}, got {order_by!r}")
 
-    if order_by == "alphabetical":
+    if order_by == "sysop":
+        rows = db.connection.execute(
+            "SELECT * FROM file_areas ORDER BY pinned DESC, position ASC, id ASC"
+        ).fetchall()
+    elif order_by == "alphabetical":
         rows = db.connection.execute(
             "SELECT * FROM file_areas ORDER BY pinned DESC, name COLLATE NOCASE ASC"
         ).fetchall()
@@ -364,6 +372,37 @@ def update_file_area(
     return updated
 
 
+def file_area_siblings(db: Database, area: FileArea) -> list[FileArea]:
+    """The areas `area` is ordered among -- same category, same pinned
+    flag -- as `netbbs.boards.boards.board_siblings`."""
+    return [
+        a for a in list_file_areas(db, order_by="sysop")
+        if a.category_id == area.category_id and a.pinned == area.pinned
+    ]
+
+
+def move_file_area(db: Database, area: FileArea, offset: int, *, moved_by: User) -> bool:
+    """Move `area` one place among `file_area_siblings` (issue #839), as
+    `netbbs.boards.boards.move_board` moves a board."""
+    siblings = file_area_siblings(db, area)
+    ids = [a.id for a in siblings]
+    if area.id not in ids:
+        raise FileAreaError(f"no such file area: {area.name!r}")
+    index = ids.index(area.id)
+    target = index + offset
+    if offset not in (-1, 1) or not 0 <= target < len(ids):
+        return False
+    here, there = siblings[index], siblings[target]
+    db.connection.execute("UPDATE file_areas SET position = ? WHERE id = ?", (there.position, here.id))
+    db.connection.execute("UPDATE file_areas SET position = ? WHERE id = ?", (here.position, there.id))
+    db.connection.commit()
+    record_action(
+        db, actor=moved_by, action="move_file_area", object_type="file_area", object_id=area.id,
+        detail=f"moved file area {area.name!r} to place {target + 1} of {len(ids)}",
+    )
+    return True
+
+
 def delete_file_area(db: Database, area: FileArea, *, deleted_by: User) -> None:
     """Permanently remove `area`, along with its files, any moderator
     grants scoped to it, and any per-user read-cursor/follow rows for
@@ -455,4 +494,6 @@ def _row_to_file_area(row: sqlite3.Row) -> FileArea:
         min_age=row["min_age"],
         name_requirement=row["name_requirement"],
         community_id=row["community_id"],
+        # Absent on a schema older than issue #839's migration.
+        position=row["position"] if "position" in row.keys() else 0,
     )

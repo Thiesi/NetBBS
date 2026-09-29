@@ -47,6 +47,11 @@ things in different places. **[B]ack** leaves most screens.
 | **Who's online** | See callers and available ways to contact them |
 | **Profile** | Change your public profile and personal preferences |
 
+Lists of boards and file areas keep the SysOp's order, so the number you
+remember for a board still picks it next time. **[O]rder** in a list sorts it
+another way, by activity, name, newest or size, just this once or from then
+on; **[S]ysOp's order** there puts it back.
+
 Some choices appear only when they have something to show or you have
 permission to use them. Search covers content held by this node, including
 carried NetBBS Link content; it is not a search of the entire network.

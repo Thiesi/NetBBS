@@ -85,7 +85,7 @@ def test_two_file_areas_have_different_content_ids_even_with_same_creator(db, al
 # -- list_file_areas sort orders -----------------------------------------
 
 
-def test_list_file_areas_default_order_is_by_last_activity_most_recent_first(db, alice):
+def test_list_file_areas_activity_order_is_by_last_activity_most_recent_first(db, alice):
     create_file_area(db, "first", creator=alice)
     create_file_area(db, "second", creator=alice)
     db.connection.execute(
@@ -98,7 +98,7 @@ def test_list_file_areas_default_order_is_by_last_activity_most_recent_first(db,
     )
     db.connection.commit()
 
-    areas = list_file_areas(db)
+    areas = list_file_areas(db, order_by="activity")
     assert [a.name for a in areas] == ["second", "first"]
 
 
@@ -206,7 +206,7 @@ def test_list_file_areas_activity_does_not_surface_pending_files(db, alice):
     db.connection.execute("UPDATE files SET created_at = ? WHERE id = ?", ("2026-01-05T00:00:00.000000Z", entry.id))
     db.connection.commit()
 
-    areas = list_file_areas(db)
+    areas = list_file_areas(db, order_by="activity")
     assert [a.name for a in areas] == ["other", "reviewed"]
 
 
@@ -235,7 +235,7 @@ def test_list_file_areas_activity_excludes_effectively_expired_files_before_any_
         == "approved"
     )  # confirms the sweep really never ran
 
-    areas = list_file_areas(db)
+    areas = list_file_areas(db, order_by="activity")
     # "stale"'s file's raw created_at (2020-06) is later than "fresh"'s
     # own creation time (2020-01-02) -- it would win on activity if
     # still (wrongly) being counted despite being 30+ days past its own
