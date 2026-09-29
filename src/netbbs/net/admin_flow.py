@@ -6702,9 +6702,19 @@ async def _user_detail_screen(
             blocked = await _redraw()
         elif choice == "l":
             await session.write_line("")
-            await write_prompt(session, f"New level for {target.username!r} [{target.user_level}]: ")
-            raw = (await session.read_line()).strip()
-            if raw:
+            # One style for a number (issue #845, F136): the value opens in
+            # the line to edit, as on every Create/Edit screen, instead of a
+            # `[current]` default beside an empty line.
+            await write_field_prompt(
+                session,
+                colored(f"New level for {target.username!r} ({_EDIT_HINT}):", fg_color=MUTED_COLOR),
+                hint=_EDIT_HINT,
+            )
+            try:
+                raw = (await _read_seeded_line(session, initial=str(target.user_level))).strip()
+            except InputCancelled:
+                raw = ""
+            if raw and raw != str(target.user_level):
                 try:
                     new_level = int(raw)
                 except ValueError:
@@ -12124,8 +12134,15 @@ def _delay_seconds_field(key: str = "delay_seconds") -> Callable[[Session, Datab
     mode/message already chosen)."""
 
     async def prompt(session: Session, lane: DatabaseLane, draft: dict) -> None:
-        await write_prompt(session, f"Delay in seconds [{draft[key]:g}]: ")
-        raw = (await session.read_line()).strip()
+        # Opens on the current value, like every other number in the console
+        # (issue #845, F136).
+        await write_field_prompt(
+            session, colored(f"Delay in seconds ({_EDIT_HINT}):", fg_color=MUTED_COLOR), hint=_EDIT_HINT,
+        )
+        try:
+            raw = (await _read_seeded_line(session, initial=_seconds_text(draft[key]))).strip()
+        except InputCancelled:
+            return
         if not raw:
             return
         try:
@@ -16026,6 +16043,12 @@ _CLEAR_HINT = "Enter saves, blank clears, Esc keeps"
 #: change" rather than turned into an error a caller would only ever see
 #: by deleting a value on purpose.
 _EDIT_HINT = "Enter saves, Esc cancels"
+
+
+def _seconds_text(value: float) -> str:
+    """A delay as the SysOp would type it: `60`, not `60.0`, and never the
+    6-significant-digit rounding `:g` would seed and save back."""
+    return str(int(value)) if float(value).is_integer() else repr(float(value))
 
 
 async def _read_seeded_line(session: Session, *, initial: str) -> str:
