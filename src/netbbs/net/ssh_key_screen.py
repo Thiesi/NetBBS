@@ -26,6 +26,7 @@ import nacl.signing
 
 from netbbs.auth.users import AuthError, User, add_ssh_key, list_ssh_keys, remove_ssh_key
 from netbbs.identity.keys import IdentityError, parse_verify_key
+from netbbs.net.char_input import InputCancelled
 from netbbs.net.confirm import prompt_yes_no
 from netbbs.net.session import Session, write_prompt
 from netbbs.rendering import ERROR_COLOR, LABEL_COLOR, METADATA_COLOR, MUTED_COLOR, action_bar, colored, menu_key, sanitize_text
@@ -150,7 +151,8 @@ def _looks_like_key(label: str) -> bool:
     """Whether a label is really a pasted key. Every other tool asks for the
     key first, so a caller who expects that pastes it into whatever comes
     first (issue #845, F109)."""
-    if label.startswith("ssh-"):
+    # A whole OpenSSH line has spaces; a label like "ssh-laptop" doesn't.
+    if label.startswith("ssh-") and " " in label:
         return True
     try:
         parse_verify_key(label)
@@ -172,8 +174,16 @@ async def _add_key(session: Session, lane: DatabaseLane, target: User, *, change
     except IdentityError as exc:
         await session.write_line(colored(f"Could not parse key: {exc}", fg_color=ERROR_COLOR))
         return target
-    await write_prompt(session, 'Label for this key (e.g. "phone", "laptop", blank to cancel): ')
-    label = (await session.read_line(initial=sanitize_text(_key_comment(text)))).strip()
+    # Opens on the key's own comment, if it has one; Enter takes what is
+    # shown and Escape backs out, as every seeded field does.
+    await write_prompt(session, 'Label for this key (e.g. "phone"; Enter saves, Esc cancels): ')
+    try:
+        label = (await session.read_line(
+            initial=sanitize_text(_key_comment(text)), cancellable=True,
+        )).strip()
+    except InputCancelled:
+        await session.write_line("")
+        return target
     if not label:
         return target
     if _looks_like_key(label):

@@ -94,6 +94,29 @@ def test_a_key_pasted_as_the_label_is_refused(db, lane):
     assert list_ssh_keys(db, owner) == []
 
 
+def test_a_label_merely_starting_with_ssh_is_accepted(db, lane):
+    owner = _key_owner(db)
+    session = FakeSession(["a", _openssh_line(_raw_key()), "ssh-laptop", "b"])
+    asyncio.run(manage_ssh_keys_screen(session, lane, owner, changed_by=owner))
+    assert [key.label for key in list_ssh_keys(db, owner)] == ["ssh-laptop"]
+
+
+def test_escape_at_the_label_adds_nothing(db, lane):
+    from netbbs.net.char_input import InputCancelled
+
+    class _EscAtLabel(FakeSession):
+        async def read_line(self, echo=True, history=None, completer=None, **kwargs):
+            if kwargs.get("cancellable") and kwargs.get("initial") == "kai@laptop":
+                self._inputs.pop(0)
+                raise InputCancelled()
+            return await super().read_line(echo, history, completer, **kwargs)
+
+    owner = _key_owner(db)
+    session = _EscAtLabel(["a", _openssh_line(_raw_key()), "ESC", "b"])
+    asyncio.run(manage_ssh_keys_screen(session, lane, owner, changed_by=owner))
+    assert list_ssh_keys(db, owner) == []
+
+
 def test_key_list_puts_the_fingerprint_on_its_own_line(db, lane):
     owner = _key_owner(db)
     session = FakeSession(["a", _openssh_line(_raw_key()), "laptop", "b"])
