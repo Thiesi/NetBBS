@@ -103,6 +103,12 @@ Check an unexpected node-identity warning with your SysOp. A node that has only 
 linked with this one cannot be written to yet: the To prompt says so, and mail
 opens once your SysOp establishes that node.
 
+**Reply** works on mail from another node too: the reply goes back to the
+address on its From line, with the same `Re:` subject and quote a local reply
+gets. If that node can't be written to any more, Reply says why instead of
+opening the message. **Sent** shows each message's recipient, with the full
+address for mail that went to another node.
+
 Channels marked **MRC** connect to a separate public chat network. Your handle
 and messages are visible there. MRC private messages are optional in your
 profile; they are not confidential from that network. Use `/mrc` for its help
