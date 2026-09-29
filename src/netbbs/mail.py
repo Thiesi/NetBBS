@@ -72,6 +72,11 @@ class MailMessage:
     # `user@<home-node-fingerprint>` for mail this node sent over Link,
     # whose `recipient_user_id` is NULL (issue #805).
     recipient_remote_address: str | None = None
+    # Link mail only (issue #806): 'pending', 'delivered', 'bounced' or
+    # 'expired', and the recipient node's reason code for a bounce. Local
+    # mail has neither.
+    link_delivery_status: str | None = None
+    link_delivery_reason: str | None = None
 
     @property
     def is_read(self) -> bool:
@@ -269,4 +274,6 @@ def _row_to_message(row: sqlite3.Row) -> MailMessage:
         sender_deleted_at=row["sender_deleted_at"],
         recipient_deleted_at=row["recipient_deleted_at"],
         recipient_remote_address=row["recipient_remote_address"],
+        link_delivery_status=row["link_delivery_status"],
+        link_delivery_reason=row["link_delivery_reason"],
     )

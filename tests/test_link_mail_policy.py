@@ -309,6 +309,15 @@ def _status(db, message):
     ).fetchone()[0]
 
 
+def _reason_and_notice(db, message):
+    row = db.connection.execute(
+        "SELECT link_delivery_reason, link_delivery_notice_pending FROM mail_messages "
+        "WHERE link_event_content_id = ?",
+        (message.content_id,),
+    ).fetchone()
+    return row["link_delivery_reason"], row["link_delivery_notice_pending"]
+
+
 def test_mail_held_by_this_nodes_policy_expires_when_its_work_item_dead_letters(tmp_path):
     sender, node, _remote, message = _held_mail(tmp_path)
     try:
@@ -319,6 +328,9 @@ def test_mail_held_by_this_nodes_policy_expires_when_its_work_item_dead_letters(
         assert item.status == "dead_lettered"
         assert item.last_error == POLICY_REFUSED_TARGET_ERROR
         assert _status(sender.db, message) == "expired"
+        # The sender is told why: this node's own policy, not a dead route
+        # (issue #806).
+        assert _reason_and_notice(sender.db, message) == ("own_policy", 1)
     finally:
         sender.close()
 
@@ -416,6 +428,9 @@ def test_a_recipient_policy_refusal_is_recorded_as_a_bounce_not_retried(tmp_path
     sender, recipient, message = _exchange(tmp_path, establish_sender_at_recipient=False)
     try:
         assert _status(sender.db, message) == "bounced"
+        # The recipient's reason code is kept for Sent and the sender's
+        # next main menu (issue #806).
+        assert _reason_and_notice(sender.db, message) == ("link_policy_node_probationary_read_only", 1)
         item = list_work_items(sender.db, kind=KIND_LINK_MAIL_DELIVERY)[0]
         assert item.status == "pushed"
         assert recipient.db.connection.execute("SELECT COUNT(*) FROM mail_messages").fetchone()[0] == 0

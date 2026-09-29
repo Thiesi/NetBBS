@@ -3550,4 +3550,21 @@ MIGRATIONS = [
         );
         """,
     ),
+    Migration(
+        description=(
+            "Issue #806: why Link mail was not delivered, and whether its sender has been told. "
+            "`link_delivery_reason` keeps the recipient node's bounce reason (a signed bounce's "
+            "reason, or the `link_policy_*` code of its trust-policy refusal); "
+            "`link_delivery_notice_pending` is 1 from the moment a sent message bounces or expires "
+            "until its sender has been told, at the main menu or in Sent. Mail that bounced "
+            "before this migration is not flagged."
+        ),
+        sql="""
+        ALTER TABLE mail_messages ADD COLUMN link_delivery_reason TEXT;
+        ALTER TABLE mail_messages ADD COLUMN link_delivery_notice_pending INTEGER NOT NULL DEFAULT 0;
+        CREATE INDEX idx_mail_messages_link_delivery_notice
+            ON mail_messages(sender_user_id)
+            WHERE link_delivery_notice_pending = 1;
+        """,
+    ),
 ]

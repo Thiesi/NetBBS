@@ -132,6 +132,21 @@ gets. If that node can't be written to any more, Reply says why instead of
 opening the message. **Sent** shows each message's recipient, with the full
 address for mail that went to another node.
 
+Mail to another node also shows where it stands, in Sent's list and on its
+Delivery line when you open it:
+
+- **Pending**: on its way; the other node has not confirmed it yet.
+- **Delivered**: it is in the recipient's mailbox.
+- **Bounced**: the other node sent it back, and the Delivery line says why,
+  for example that there is no user by that name there, that their mailbox
+  is full of unread mail, or that the node does not trust yours yet.
+- **Expired**: no route to that node worked before delivery gave up, so it
+  was not delivered.
+
+When mail bounces or expires you are told at the main menu, once, even if it
+happened while you were away. Opening the message in Sent counts as being
+told. To try again, send it anew.
+
 Channels marked **MRC** connect to a separate public chat network. Your handle
 and messages are visible there. MRC private messages are optional in your
 profile; they are not confidential from that network. Use `/mrc` for its help

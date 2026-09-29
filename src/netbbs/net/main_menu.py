@@ -27,6 +27,7 @@ from netbbs.chat import (
 )
 from netbbs.communities import Community, list_communities
 from netbbs.link.boards import LinkContext
+from netbbs.link.mail import acknowledge_delivery_notices, pending_delivery_notices
 from netbbs.mail import unread_count as unread_mail_count
 from netbbs.net.admin_flow import admin_menu, moderation_queue, staff_list_screen, staff_menu
 from netbbs.boards import list_boards
@@ -594,8 +595,15 @@ async def _main_menu_loop(
                 moderation_lines, moderation_ids = pending_moderation_notices(db, user)
                 for outcome, text in moderation_lines:
                     announce(session, text, tone="success" if outcome == "approved" else "error")
+                # Link mail of this caller's that bounced or expired, told
+                # once the same way, even if it happened while they were
+                # offline (issue #806).
+                delivery_lines, delivery_ids = pending_delivery_notices(db, user)
+                for text in delivery_lines:
+                    announce(session, text, tone="error")
                 await _draw_main_menu(session, db, mailbox, user, node_controls=node_controls, notice=notice)
                 acknowledge_moderation_notices(db, moderation_ids)
+                acknowledge_delivery_notices(db, delivery_ids)
                 notice = None
                 redraw = False
             set_root_activity(session, None)
