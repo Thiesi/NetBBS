@@ -1803,14 +1803,14 @@ async def _show_inbox_message(
         ]
         if block_target is not None:
             # Issue #817: a toggle, labelled by what it will do.
-            blocked = await lane.run(_is_blocked, user, block_target)
+            blocked = await lane.run(is_blocked, user, block_target)
             actions.append(("k", menu_key("k", " sender", prefix="Unbloc" if blocked else "Bloc")))
         actions.append(("b", menu_key("B", "ack")))
         choice, page = await _show_message(session, lane, user, message, to_label=None, actions=actions, page=page)
         if choice == "b":
             return
         if choice == "k":
-            text, tone = await lane.run(_toggle_block, user, block_target)
+            text, tone = await lane.run(toggle_block, user, block_target)
             announce(session, text, tone=tone)
             continue
         if choice == "f":
@@ -2029,27 +2029,30 @@ def _decode_files(text: str | None) -> list[FileRef]:
     return files[:MAX_FILE_REFS]
 
 
-# -- blocked senders (issue #817) ---------------------------------------------
+# -- blocked people (issues #817, #925) ----------------------------------------
 #
-# A caller blocks a sender from a letter they received (`Bloc[k] sender` on
-# its view, a toggle) or by name from Profile > Blocked senders, which lists
-# them and unblocks. Local senders are blocked by account id, Link senders by
-# the `user@<fingerprint>` address their mail came from. The rules --
-# who cannot be blocked, what the sender is told -- are `netbbs.mail`'s.
+# A caller blocks someone from a letter they received (`Bloc[k] sender` on
+# its view, a toggle), from Who's online (`Bloc[k]`, the same toggle), or by
+# name from Profile > Blocked people, which lists them and unblocks. Local
+# accounts are blocked by account id, Link users by their `user@<fingerprint>`
+# address. One list stops both mail and live messages (issue #925). The rules
+# -- who cannot be blocked, what the sender is told -- are `netbbs.mail`'s
+# for mail and `netbbs.messaging_preferences.live_message_refusal`'s for live
+# messages.
 
-_BLOCKED_NOTICE = "Blocked {name}: mail from them is refused from now on, and they are told so."
-_UNBLOCKED_NOTICE = "Unblocked {name}: their mail is accepted again."
+_BLOCKED_NOTICE = "Blocked {name}: their mail and live messages are refused from now on, and they are told so."
+_UNBLOCKED_NOTICE = "Unblocked {name}: their mail and live messages are accepted again."
 
 
 @dataclass(frozen=True)
-class _BlockTarget:
-    """Who `Bloc[k] sender` on a received letter acts on: a local account
-    by id, or a Link sender by address."""
+class BlockTarget:
+    """Who a `Bloc[k]` toggle acts on -- on a received letter or on Who's
+    online: a local account by id, or a Link user by address."""
     user_id: int | None
     address: str | None
 
 
-def _block_target(db: Database, reader: User, message: MailMessage) -> _BlockTarget | None:
+def _block_target(db: Database, reader: User, message: MailMessage) -> BlockTarget | None:
     """The sender a received letter's view can block, or `None`: system
     mail, a deleted account, the reader's own mail, and a SysOp of this
     node offer no block (`netbbs.mail.sender_unblockable_reason`)."""
@@ -2059,16 +2062,17 @@ def _block_target(db: Database, reader: User, message: MailMessage) -> _BlockTar
         sender = get_user_by_id(db, message.sender_user_id)
         if sender is None or sender_unblockable_reason(db, reader, sender) is not None:
             return None
-        return _BlockTarget(user_id=sender.id, address=None)
+        return BlockTarget(user_id=sender.id, address=None)
     if _split_link_address(message.sender_label) is not None:
-        return _BlockTarget(user_id=None, address=message.sender_label)
+        return BlockTarget(user_id=None, address=message.sender_label)
     return None
 
 
 _link_sender_name = link_address_display_label
 
 
-def _is_blocked(db: Database, reader: User, target: _BlockTarget) -> bool:
+def is_blocked(db: Database, reader: User, target: BlockTarget) -> bool:
+    """Whether `reader` blocks `target` (mail and live messages alike)."""
     if target.user_id is not None:
         sender = get_user_by_id(db, target.user_id)
         return sender is not None and blocks_local_sender(db, reader, sender)
@@ -2076,9 +2080,10 @@ def _is_blocked(db: Database, reader: User, target: _BlockTarget) -> bool:
     return blocks_link_sender(db, reader, target.address)
 
 
-def _toggle_block(db: Database, reader: User, target: _BlockTarget) -> tuple[str, str]:
-    """Block the sender if they are not blocked, else unblock them. Returns
-    the outcome line and its tone."""
+def toggle_block(db: Database, reader: User, target: BlockTarget) -> tuple[str, str]:
+    """Block `target` if they are not blocked, else unblock them. Returns
+    the outcome line and its tone. Shared by the letter view and Who's
+    online (issue #925)."""
     if target.user_id is not None:
         sender = get_user_by_id(db, target.user_id)
         if sender is None:
@@ -2158,8 +2163,8 @@ def _unblock_row(db: Database, user: User, row: _BlockedRow) -> tuple[str, str]:
 
 
 async def blocked_senders_screen(session: Session, lane: DatabaseLane, user: User) -> None:
-    """Profile > Blocked senders (issue #817): everyone `user` refuses mail
-    from, newest first. `[A]dd` blocks someone by name -- a local user, or
+    """Profile > Blocked people (issues #817, #925): everyone `user` refuses
+    mail and live messages from, newest first. `[A]dd` blocks someone by name -- a local user, or
     `name@TheirBBS` for someone on a linked BBS -- and `[U]nblock`, or
     picking a row, unblocks it. Each outcome is carried into the redraw."""
 
@@ -2168,7 +2173,7 @@ async def blocked_senders_screen(session: Session, lane: DatabaseLane, user: Use
 
     async def _add() -> list[_BlockedRow] | None:
         await session.write_line("")
-        await write_prompt(session, "Block mail from (a user name, or name@TheirBBS; empty cancels): ")
+        await write_prompt(session, "Block (a user name, or name@TheirBBS; empty cancels): ")
         try:
             text = (await session.read_line(cancellable=True)).strip()
         except InputCancelled:
@@ -2191,15 +2196,15 @@ async def blocked_senders_screen(session: Session, lane: DatabaseLane, user: Use
             name_of=lambda row: row.name,
             stable_id_of=lambda row: row.block.id,
             description_of=lambda row: row.where,
-            title="Blocked senders",
+            title="Blocked people",
             breadcrumb=("Profile",),
-            empty_message="You block no one. Mail from anyone reaches you.",
+            empty_message="You block no one. Mail and live messages from anyone reach you.",
             refresh=_reload,
             live_keys={"a": _add},
             item_keys={"u": _unblock},
             live_nav=[
-                MenuEntry(label=menu_key("A", "dd"), brief="Block mail from someone by name"),
-                MenuEntry(label=menu_key("U", "nblock"), brief="Accept their mail again"),
+                MenuEntry(label=menu_key("A", "dd"), brief="Block someone by name"),
+                MenuEntry(label=menu_key("U", "nblock"), brief="Accept their mail and messages again"),
             ],
             description_level=await lane.run(menu_description_level, user),
             redraw_in_place=await lane.run(redraw_in_place_enabled, user),

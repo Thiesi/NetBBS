@@ -401,23 +401,37 @@ a letter, you are back on the Sent list, with the new letter at the top and
 the result above the prompt (or on Find's results, if you opened the letter
 from there).
 
-To stop someone's mail, open a letter from them and press **Bloc[k]
-sender**; the same key, now **Unbloc[k] sender**, takes it back. It works
-for someone on this board and for someone on a linked node, who is blocked
-by their address there, so a node changing its name does not undo it.
-**Profile → Blocked mail senders** lists everyone you block, blocks
-someone by name (`alice`, or `alice@OtherNode`) before they have written,
-and unblocks with **[U]nblock** or by picking a row. Mail already in your
-Inbox stays there.
+To stop someone's mail and live messages, open a letter from them and
+press **Bloc[k] sender**, or pick them on **Who's online** and press
+**Bloc[k]**; the same key, now **Unbloc[k]**, takes it back. It works for
+someone on this board and for someone on a linked node, who is blocked by
+their address there, so a node changing its name does not undo it.
+**Profile → Blocked people** lists everyone you block, blocks someone by
+name (`alice`, or `alice@OtherNode`) before they have written, and unblocks
+with **[U]nblock** or by picking a row. Mail already in your Inbox stays
+there.
 
-A blocked sender is told: on this board the To prompt and Send say that
-you do not accept mail from them, and mail from another node bounces with
-that reason. It is never taken and quietly thrown away. The same works the
-other way: if you are told a recipient does not accept mail from you, they
-have blocked you. Two senders cannot be blocked: **System**, and this
-board's SysOp, who has to be able to reach every account on the board.
-Blocking covers mail only; live direct messages have their own setting in
-Profile.
+One block stops both their mail and their live messages: `/msg`,
+`/private`, `/dm` invitations, and messages and chat invitations from Who's
+online. If they are in a private conversation with you when you block
+them, it ends.
+
+A blocked person is told. On this board the To prompt and Send say that
+you do not accept mail from them, and `/msg`, `/private`, `/dm` and Who's
+online say you do not accept messages from them. Mail from another node
+bounces with that reason. It is never taken and quietly thrown away. The
+one exception is a live message from someone on another node: it is
+dropped without an answer, because live messages between nodes have no way
+to send one back. The same works the other way: if you are told someone
+does not accept mail or messages from you, they have blocked you. Two
+senders cannot be blocked: **System**, and this board's SysOp, who has to
+be able to reach every account on the board.
+
+A block does not hide what someone says in a chat channel everyone shares;
+ask a channel operator or the SysOp if someone is disrupting a channel. To
+stop live messages from everyone at once, turn off **Direct messages** in
+Profile; it applies to `/msg` and `/private` as well as `/dm` and Who's
+online, and does not stop mail.
 
 **Read receipts.** When you send mail to someone on this board, Sent shows
 whether they have read it: the list says `read` or `not read`, and the

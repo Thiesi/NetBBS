@@ -1249,7 +1249,7 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
         ),
         FieldSpec(
             key="accepts_dm", hotkey="m", menu_text=menu_key("M", "essages"),
-            label="Direct messages (Who's online)",
+            label="Direct messages",
             render=lambda d: "accepted" if d["accepts_dm"] else "not accepted",
             prompt=live_choice_field(
                 "accepts_dm", [False, True],
@@ -1257,24 +1257,28 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
             ),
             brief="Direct-message preferences",
             help=(
-                "Whether other callers can send you a direct/private chat message from the "
-                "Who's online screen. Doesn't affect linked-channel chat -- only direct, "
-                "one-to-one messages."
+                "Whether other callers can send you live one-to-one messages: /msg, /private, "
+                "a message from Who's online, a direct-chat invite (/dm), or a message from "
+                "someone on a linked BBS. Doesn't affect chat channels or mail. To stop one "
+                "person rather than everyone, block them (Blocked people, below)."
             ),
             section="Communication",
         ),
         FieldSpec(
-            key="blocked_senders", hotkey="o", menu_text=menu_key("o", "cked senders", prefix="Bl"),
-            label="Blocked mail senders",
+            key="blocked_senders", hotkey="o", menu_text=menu_key("o", "cked people", prefix="Bl"),
+            label="Blocked people",
             render=lambda d: f"{d['blocked_sender_count']} blocked" if d["blocked_sender_count"] else "(none)",
             prompt=_blocked_senders_prompt,
-            brief="Refuse mail from someone",
+            brief="Refuse mail and messages from someone",
             help=(
-                "Lists the senders whose mail you refuse, on this BBS and on linked BBSes, and lets "
-                "you block someone by name or unblock them. A blocked sender is told their letter "
-                "was refused. You can also block a sender from a letter they sent you. Mail from "
-                "the system and from this BBS's SysOp can't be blocked. Mail only: direct chat "
-                "messages have their own setting above."
+                "Lists the people you block, on this BBS and on linked BBSes, and lets you block "
+                "someone by name or unblock them. A block refuses their mail and their live "
+                "messages: /msg, /private, /dm and Who's online. Someone on this BBS is told you "
+                "don't accept mail or messages from them; someone on a linked BBS is told about "
+                "mail, while their live messages are dropped without a word. You can also block "
+                "someone from a letter they sent you or from Who's online. The system and this "
+                "BBS's SysOp can't be blocked. A block doesn't hide what someone says in a chat "
+                "channel."
             ),
             section="Communication",
         ),

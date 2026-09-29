@@ -354,7 +354,7 @@ def test_who_screen_refuses_to_message_an_opted_out_user(tmp_path):
             other_task.cancel()
             await asyncio.gather(other_task, return_exceptions=True)
 
-        assert "bob has opted out of receiving direct messages." in _written_text(session)
+        assert "bob has opted out of direct messages." in _written_text(session)
         assert other.written == []
 
     asyncio.run(scenario())
@@ -599,6 +599,6 @@ def test_profile_screen_toggles_direct_message_acceptance(tmp_path):
     # live_choice_field (issue #160's cursor-nav follow-up) has no
     # separate "X is now Y" confirmation of its own -- the redrawn
     # field's own "label: value" line is the confirmation.
-    assert "Direct messages (Who's online): not accepted" in squeezed(_visible(session))
+    assert "Direct messages: not accepted" in squeezed(_visible(session))
     lane.close()
     database.close()
