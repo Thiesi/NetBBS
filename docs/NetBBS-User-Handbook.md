@@ -79,6 +79,23 @@ for later; `/cancel` discards it. In the fullscreen editor, **Ctrl+G** shows
 help and **Ctrl+X** opens the exit choices, including **Keep draft & exit**.
 Both editors keep what you have typed if the connection drops.
 
+The fullscreen editor also has these keys:
+
+| Key | What it does |
+| --- | --- |
+| **Ctrl+K** | Cut the line. Press it again to add the next line. |
+| **Ctrl+Y** | Paste the cut lines. |
+| **Ctrl+W** | Delete the word before the cursor. In a browser, which closes the tab on Ctrl+W, use **Alt+Backspace**. |
+| **Ctrl+R** | Rewrap the quoted (`>`) paragraph under the cursor to fit the screen, keeping its `>`. |
+
+The status line shows how many characters you have used and the limit. The
+limit assumes the rest is plain letters: an accented letter or other special
+character takes more room and lowers it by one.
+
+Turn the fullscreen editor on or off in **Profile** with **Fullscreen editor
+(all writing)**. It is used for mail, posts, your bio and signature, and file
+descriptions.
+
 A draft comes back where you started it. A new post's draft is offered when
 you return to that board, a reply's when you reply to the same post or
 message again. An unfinished letter is shown on the mail screen under

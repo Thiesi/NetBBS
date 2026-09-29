@@ -33,6 +33,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from netbbs.net.char_input import EditorKey, EditorKeyKind
+from netbbs.net.composition import characters_over
 from netbbs.net.draft_storage import delete_draft, offer_draft_recovery, save_draft
 from netbbs.net.help_overlay import show_help
 from netbbs.net.session import Session, SessionClosedError, write_prompt
@@ -55,7 +56,7 @@ from netbbs.rendering import (
     truncate,
 )
 from netbbs.rendering.pipe_codes import PastedColor
-from netbbs.rendering.prose_buffer import ProseBuffer, logical_position, visual_position, wrap_lines
+from netbbs.rendering.prose_buffer import ProseBuffer, logical_position, rewrap_quote, visual_position, wrap_lines
 from netbbs.rendering.width import char_width, display_width
 
 DEFAULT_AUTOSAVE_INTERVAL_SECONDS = 30.0
@@ -74,6 +75,11 @@ _MIN_HEIGHT = 10
 
 # A header gives up its rows before the text drops below this many.
 _MIN_TEXT_ROWS = 4
+
+# Ctrl-R rewraps a quote to the screen's width, but no wider than this: a
+# reply is read on other people's screens, and 72 columns fits an
+# 80-column one with room to quote it again (issue #815).
+_REWRAP_MAX_WIDTH = 72
 
 _Color = int | tuple[int, int, int]
 # One styled run of a header row: text, color, bold.
@@ -101,6 +107,10 @@ class _EditorState:
     dirty: bool = False
     # Rows drawn above the text, fixed for the whole session (issue #813).
     header: list[list[_Run]] = field(default_factory=list)
+    # Ctrl-K's cut lines, which Ctrl-Y pastes (issue #815). Ctrl-K pressed
+    # again straight after adds the next line to them, as in nano.
+    cut_lines: list[str] = field(default_factory=list)
+    cutting: bool = False
 
 
 def _header_rows(header: EditorHeader | None, *, width: int, rows: int, unicode_style: bool) -> list[list[_Run]]:
@@ -129,6 +139,18 @@ def _header_rows(header: EditorHeader | None, *, width: int, rows: int, unicode_
 
 def _byte_length(text: str) -> int:
     return len(text.encode("utf-8"))
+
+
+def _size_in_characters(text: str, max_bytes: int) -> tuple[int, int]:
+    """`(used, limit)` for the status line's size counter (issue #815), in
+    characters, never bytes (issue #812). The limit is stored in UTF-8
+    bytes, so `limit` is how many characters the text holds at most if the
+    rest is plain letters: an accented letter takes two bytes and lowers it
+    by one. It reaches `used` when not even a plain letter fits."""
+    over = characters_over(text, max_bytes)
+    if over:
+        return len(text), len(text) - over
+    return len(text), len(text) + max_bytes - _byte_length(text)
 
 
 @records_activity("Writing")
@@ -278,9 +300,14 @@ async def edit_prose(
                         "  Page Up/Down   scroll by a screenful",
                         "  Enter          new line",
                         "  Backspace/Del  delete before / at the cursor",
+                        "  Ctrl+W         delete a word back (browser: Alt+Backspace)",
+                        "  Ctrl+K         cut the line; again adds the next line",
+                        "  Ctrl+Y         paste the cut lines",
+                        "  Ctrl+R         rewrap the quoted (>) paragraph",
                         "  Ctrl+O         save and finish",
                         "  Ctrl+X         exit -- Save, Keep draft & exit, Discard, or Cancel",
                         "  Ctrl+G         this help",
+                        "  Status line    line, column, characters used/limit",
                         "",
                         '"Keep draft & exit" saves what you have typed so far without',
                         "sending or posting it, then leaves -- nothing is lost. It is",
@@ -375,13 +402,48 @@ async def edit_prose(
 
 def _dispatch(state: _EditorState, key: EditorKey, width: int, height: int) -> bool:
     """Applies `key` to `state`. Returns True if the keystroke was
-    refused for being at `state.max_bytes` (GitHub issue #32) rather
-    than applied -- the caller sounds the bell for this, adapting
+    refused for being at `state.max_bytes` (GitHub issue #32), or had
+    nothing to act on -- Ctrl-Y with nothing cut, Ctrl-R off a quote
+    (issue #815) -- rather than applied. The caller sounds the bell for this, adapting
     `netbbs.rendering.ansi.reject_keystroke`'s "that key doesn't do
     anything here" convention to an editor that draws its own screen
     rather than relying on real terminal echo to visibly undo."""
     buffer = state.buffer
-    if key.kind == EditorKeyKind.LEFT:
+    cutting, state.cutting = state.cutting, False
+    if key.kind == EditorKeyKind.CTRL and key.char == "k":
+        if buffer.cursor_line == len(buffer.lines) - 1 and not buffer.lines[-1]:
+            return False  # the empty last line: nothing to cut
+        if not cutting:
+            state.cut_lines = []
+        state.cut_lines.append(buffer.cut_line())
+        state.cutting = True
+        state.dirty = True
+    elif key.kind == EditorKeyKind.CTRL and key.char == "y":
+        if not state.cut_lines:
+            return True
+        # Whole lines, so they go in above the cursor's line from its start;
+        # pasted mid-line they end it there, as in nano.
+        pasted = "\n".join(state.cut_lines) + "\n"
+        if _byte_length(buffer.to_text()) + _byte_length(pasted) > state.max_bytes:
+            return True
+        buffer.insert_text(pasted)
+        state.dirty = True
+    elif key.kind == EditorKeyKind.WORD_BACKSPACE or (key.kind == EditorKeyKind.CTRL and key.char == "w"):
+        buffer.delete_word_before()
+        state.dirty = True
+    elif key.kind == EditorKeyKind.CTRL and key.char == "r":
+        rewrapped = rewrap_quote(buffer.lines, buffer.cursor_line, min(width, _REWRAP_MAX_WIDTH))
+        if rewrapped is None:
+            return True
+        start, end, new_lines = rewrapped
+        after = buffer.lines[:start] + new_lines + buffer.lines[end:]
+        if _byte_length("\n".join(after)) > state.max_bytes:
+            return True
+        buffer.lines[:] = after
+        buffer.cursor_line = start + len(new_lines) - 1
+        buffer.cursor_col = len(new_lines[-1])
+        state.dirty = True
+    elif key.kind == EditorKeyKind.LEFT:
         buffer.move_left()
     elif key.kind == EditorKeyKind.RIGHT:
         buffer.move_right()
@@ -530,16 +592,20 @@ async def _flush(session: Session, state: _EditorState, width: int, height: int)
     display_col = display_width(row_text[: pos.col])
     top = len(state.header)
     screen_row = pos.row_index - state.scroll_row
-    status = (
-        f"Line {state.buffer.cursor_line + 1}  Col {state.buffer.cursor_col + 1}  "
-        f"Ctrl+O save  Ctrl+X exit  Ctrl+G help"
-    )
+    text = state.buffer.to_text()
+    used, limit = _size_in_characters(text, state.max_bytes)
+    size = f"{used}/{limit}"
     # GitHub issue #32: visible even outside the instant a keystroke
     # gets rejected at the ceiling, not just a flash-on-reject bell --
     # once at the limit it stays a standing fact about this document
-    # until something is deleted.
-    if _byte_length(state.buffer.to_text()) >= state.max_bytes:
-        status += "  AT LENGTH LIMIT"
+    # until something is deleted. Beside the count, ahead of the key
+    # hints, so a narrow screen cuts the hints rather than this.
+    if _byte_length(text) >= state.max_bytes:
+        size += " AT LENGTH LIMIT"
+    status = (
+        f"Line {state.buffer.cursor_line + 1}  Col {state.buffer.cursor_col + 1}  {size}  "
+        f"Ctrl+O save  Ctrl+X exit  Ctrl+G help"
+    )
     status = truncate(status, width)
     await session.write(move_cursor(top + height + _STATUS_ROW_OFFSET, 1))
     await session.write(clear_line())
