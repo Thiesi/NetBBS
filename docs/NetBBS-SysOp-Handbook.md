@@ -260,7 +260,11 @@ need that behavior, arrange an external health check or supervisor yourself.
 NetBBS runs in the foreground. The service manager handles backgrounding.
 `systemctl stop netbbs` or `service netbbs stop` requests a graceful shutdown:
 callers are warned, then disconnected after the configured delay (60 seconds
-by default). Cleanup takes additional time. Increase the service stop timeout
+by default). With nobody connected, or once the last caller leaves, it stops
+without waiting out the delay. A shutdown you schedule from the console keeps
+the delay you chose. Change the delay under **Settings → Network &
+login limits**, or as `[shutdown] graceful_delay_seconds`. Cleanup takes
+additional time. Increase the service stop timeout
 if you raise that delay or configure slow-stopping door services.
 
 The Linux unit restricts writable paths to `/var/lib/netbbs`. **MANUAL:** extend
@@ -400,6 +404,14 @@ administration; ordinary levels express your local policy. NetBBS refuses an
 account change that would leave no enabled, approved SysOp. Disabling an account
 revokes its access; deletion is permanent and requires its exact name. Existing
 content retains its recorded author label.
+
+A disabled account, and a signup still awaiting approval, receive no mail:
+callers here are told so at the To prompt, and Link mail bounces with "that
+account is not taking mail at the moment", which does not tell the other node
+the account is disabled. Mail already in a disabled account stays there until
+you enable it again. Deleting an account removes its own mail, but letters it
+sent or received stay in the other person's Sent or Inbox; their Sent shows
+the deleted recipient as, for example, `bob (deleted account)`.
 
 A level change, a granted or revoked identity-verifier permission, or a change
 to staff permissions reaches a caller who is already logged in without them
@@ -693,10 +705,25 @@ other. Deleting a board, channel or file area this node originated is still a
 real delete. Link status shows `carried/cap` for all three kinds and how many are
 offered and excluded.
 
-To carry a remote resource, use its Link browsing/carry actions. Carrying a message board
-creates a local browsable copy; file catalogues do not automatically download
-all file contents. Ask the other SysOp to verify both sides when first testing
+There is nothing to subscribe to: what an established peer shares arrives on
+its own, within the caps. A node's screen under **Link status → Peers** lists
+what this node already carries from it and, while it is on probation here,
+what it offers that is being held back. Carrying a message board creates a
+local browsable copy; file catalogues do not automatically download all file
+contents. Carried boards, channels and file areas appear in callers' **Message
+boards**, **Chat** and **Files** lists, outside any Community, because Link
+Communities do not exist; edit one and set its **Community** to put it in one
+of yours. Ask the other SysOp to verify both sides when first testing
 publication. Hello/discovery alone does not prove content arrived.
+
+Linking one of your own boards, channels or file areas sends it to the peers
+you have established, on a later sync pass. Its **NetBBS Link** rows then show,
+for each peer, whether it holds it, refused it because your node is on
+probation there, or is not sent it while it is on probation here. A node
+learns this only from peers it dials itself, so a peer that only dials yours
+reads "not known". **Fork of** is for a board that carries on another node's
+board under yours, for example after that one was closed; leave it empty for
+a board of your own.
 
 Asynchronous delivery can continue after a peer reconnects. Live chat and
 private messages require a working live session; a failed live message is not
@@ -733,7 +760,11 @@ this node refused, and how full your callers' mailboxes are.
   switches to by name): letters, unread, read, notices from the BBS itself, and
   how much of the 500-letter cap that is. A full inbox makes room by dropping
   its oldest read letter; an inbox full of unread mail refuses new mail, and a
-  Link sender gets a "mailbox full" bounce.
+  Link sender gets a "mailbox full" bounce. Callers see the same count in their
+  own Inbox header, a warning from 450, and a main-menu line when old read
+  mail was removed to make room.
+- In **Refused Link mail**, "the recipient's account is disabled or still
+  awaiting approval" is mail for an account that takes none at the moment.
 
 These screens never show what a letter says. Mail is private: you see counts,
 account names, senders and reasons, never a subject or a body, and a refused
@@ -742,12 +773,20 @@ encrypted to the recipient's *node*, not to the person, so a SysOp with access
 to the database could read it there; NetBBS gives you no screen for doing so.
 
 Your callers see each Link message's state in their **Sent** mail: pending,
-delivered, bounced (with the other node's reason in plain words) or expired.
-A caller whose mail bounces or expires is told once at their next main menu.
-One refusal never comes back as a bounce: mail left at a relay for a node
-that has *your* node quarantined or blocked. That node sends yours nothing,
-and the relay took the message, so it stays pending. Replaying an expired
-delivery from the **Outbox** puts it back to pending.
+with relay, delivered, bounced (with the other node's reason in plain words)
+or expired. A caller whose mail bounces or expires is told once at their next
+main menu.
+
+"With relay" is mail your node left at a relay because the recipient's node
+cannot be dialed directly. The relay is not the recipient, and one refusal
+never comes back as a bounce: mail for a node that has *your* node
+quarantined or blocked, which sends yours nothing. So if no answer comes back
+within 14 days of the handoff, the letter expires and its sender is told that
+no answer came back, so it may not have arrived. An answer that arrives later
+still counts: the letter turns delivered, or bounced. A relay keeps a letter
+well past those 14 days, so a recipient that is only slow to collect still
+answers in time. Replaying an expired delivery from the **Outbox** puts it
+back to pending.
 
 Mail arriving here is checked the way your own callers' mail is: a sender
 name that is not a valid address, a blank or oversized subject, or an
@@ -811,15 +850,39 @@ use a second address, or a protocol demultiplexer in front of both.
 Use **Link status** for peers and relay state, **Outbox** for pending or failed
 work, and **Diagnostics / Follow log** for explanations.
 
+Every node starts on probation with every other, in both directions. A peer
+on probation here sends nothing this node accepts, and this node sends it
+nothing of yours; your node is on probation at each peer the same way until
+that peer's SysOp establishes it. Automatic graduation takes at least 30 days,
+three days of contact and vouches from two trust domains, so on a node with no
+trusted reporters only **Establish** ends it. Establish a peer once you know who
+runs it, and ask its SysOp to establish yours. **Link status** counts the peers
+on probation here and says whether the peers your node dials still hold yours
+on probation; the SysOp console's LINK line counts them too.
+
 **Link status → Peers** is the node map: every node this one knows, as callers
 see it under **Directory → Node map** ("Nodes known to" your board), plus what
-callers do not see. Peer-list candidates are marked unverified and "never heard
+callers do not see. A node on probation here says when probation could end
+by itself and what is still missing; its **Exchange** rows say what is held
+back from it and whether it takes what yours sends. Peer-list candidates are marked unverified and "never heard
 from"; nodes you quarantine or block in any trust dimension are marked, with
 each dimension's state, because callers do not see them at all. Each node's
 screen adds its Link addresses, relay roles and reliability. Last heard is your
 own last contact with the node, or the time its newest descriptor says it was
 signed, never later than when you first stored it; a node not heard of for 30
 days is marked stale, not removed.
+
+**Link status** also shows what your node holds as a relay. When it relays
+for outgoing-only nodes, mail and delivery answers for them wait here until
+they dial in and collect them. The **Relay mailbox** line counts what is held,
+and a table below it lists each node held for, with how many envelopes it has
+(at most 50) and how long the oldest has waited, oldest first. Anything left
+uncollected for 30 days is dropped on the next sync pass, and the diagnostic
+log gets a warning naming the node and how many went. Neither end is told by
+your node, which cannot read or sign that mail; the sender's own node gives up
+on a letter handed to a relay after 14 days and tells its writer that no
+answer came back. A node whose count stays at 50 for weeks is most likely not
+coming back; the time limit clears it without you doing anything.
 
 A node's screen also acts on its trust, when it is a trust subject here (every
 node that has exchanged a hello with yours, or been introduced to it; not a
@@ -1071,8 +1134,8 @@ new lines. Storage garbage collection and draft pruning show the proposed work
 before confirmation; review it instead of deleting files directly.
 
 **Operations → Search indexes** compares what **Find** searches with the posts,
-files and chat messages themselves, and shows how many entries are missing,
-stale or left over. **Rebuild** replaces the indexes from that content; it
+files, chat messages and mail themselves, and shows how many entries are
+missing, stale or left over: counts only, never a letter's words. **Rebuild** replaces the indexes from that content; it
 cannot lose any. It also works from `python -m netbbs.admin`, and
 `python -m netbbs.search check|rebuild --db PATH` does the same from a script.
 
@@ -1115,10 +1178,38 @@ For the `netbbs.db` in this handbook's examples, the prefix is `netbbs_`. Press
 Placing the file does not turn it on. Each piece has its own switch, off by
 default, and callers keep seeing the built-in default until you open that
 piece's screen under **Settings → Mastheads & banners** and choose **Enable**.
-Its status line shows `disabled -- file: <name> (N bytes)` until you do, and
-**Preview** shows what callers will see. Enable refuses a missing file or one
-over 256 KiB. If a file that was enabled later goes missing or grows past that
-limit, callers get the default silently and the node logs a warning.
+Its status line shows `disabled -- file: <name> (N bytes)` until you do.
+**Preview** shows your saved art even while it is switched off, and says under
+it what callers see meanwhile; with nothing saved it says that too. Enable
+refuses a missing file or one over 256 KiB. If a file that was enabled later
+goes missing or grows past that limit, callers get the default silently and the
+node logs a warning.
+
+Empty rows at the bottom of a piece are not sent, so a banner drawn in the top
+seven rows of the 24-row editor takes seven rows on a caller's screen. Empty
+rows between parts of the art are kept.
+
+**Edit** opens the art editor on an 80x24 canvas. Typing (a space too) paints
+over whatever is at the cursor. At the end of a row the cursor stays put, so
+press **Enter** for the next row; **End** goes to just after the row's last
+character. Retyping a shorter line leaves the end of the old one in place:
+**Ctrl+K** clears from the cursor to the end of the row. **Ctrl+T** picks a
+block or line glyph, **Ctrl+P** and **Ctrl+B** the foreground and background
+colour, **Ctrl+L** repaints the screen, **Ctrl+G** lists every key, **Ctrl+O**
+saves, and **Ctrl+X** quits.
+
+The welcome gallery ends with three quiet designs for clubs that don't want
+neon: **Paper & Ink**, **Library Card** and **Garden Gate**.
+
+Before sign-in, a Telnet caller gets the node's own lines, arrows and default
+banner in plain ASCII, because classic BBS terminals such as SyncTERM read
+CP437 and would show Unicode as noise. A banner of your own is sent as you drew
+it, so one drawn with box or block characters still looks wrong in such a
+terminal. After sign-in, each caller's own Unicode or ASCII choice applies.
+
+**Settings → Previous callers** cycles through three states: the panel after
+login in its default neon style, the same panel plain (your header colour and
+a quiet heading), and hidden.
 
 ## State, backup, and recovery
 
@@ -1207,7 +1298,8 @@ magically reappear during restore.
 
 War Dialer has separate world capture and restore rules; see the
 [door guide](NetBBS-door-guide.md). Third-party installation directories are
-excluded unless **Backup → Door installations** is enabled. That option copies
+excluded unless **Backup → Door installations** is enabled. The Backup screen
+shows the door sections, and that option, only once a door is set up. That option copies
 them without stopping their writers and does not automatically restore them.
 Stop games/services first. A missing or unreadable requested installation fails
 the backup. Symlinks are copied as links, not followed to external data.
@@ -1360,8 +1452,9 @@ The application's `netbbs.log` rotates at 10 MiB with five retained backups
 Some lines are routine and need nothing from you. A caller who hangs up is one
 `INFO` line naming their address. Every node yours meets on NetBBS Link starts
 on probation here, and the log says once per node, since the node started,
-that its content is held back; a relay candidate that cannot be reached is
-also mentioned once. A `WARNING` or `ERROR` line, and any traceback, is worth
+that its content is held back. Your node is on probation at each peer in the
+same way, and the log says once per peer when one does not take what yours
+sends yet. A relay candidate that cannot be reached is also mentioned once. A `WARNING` or `ERROR` line, and any traceback, is worth
 reading.
 
 **Operations → Node log** reads that file from inside NetBBS, including from

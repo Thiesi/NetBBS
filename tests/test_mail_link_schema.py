@@ -272,3 +272,41 @@ def test_upgrading_keeps_existing_link_mail_and_flags_none_of_it(tmp_path, monke
         ]
     finally:
         upgraded.close()
+
+
+def test_upgrading_starts_no_relay_timeout_for_mail_already_pending(tmp_path, monkeypatch):
+    """Issue #874: mail pending before the upgrade cannot be told apart from
+    mail pushed directly, so none of it gets a relay handoff time, and the
+    sync pass never expires it as unanswered."""
+    from netbbs.link.mail import expire_unanswered_relay_mail
+    from netbbs.storage import database as database_module
+    from netbbs.storage.migrations import MIGRATIONS
+
+    index = next(i for i, m in enumerate(MIGRATIONS) if "Issue #874" in m.description)
+    monkeypatch.setattr(database_module, "MIGRATIONS", MIGRATIONS[:index])
+    old = Database(tmp_path / "node.db")
+    old.connection.execute(
+        "INSERT INTO users (username, password_hash, user_level, created_at) VALUES ('alice', 'x', 10, ?)", (_now(),)
+    )
+    old.connection.execute(
+        """
+        INSERT INTO mail_messages
+            (sender_user_id, sender_label, recipient_remote_address, subject, body, created_at,
+             link_event_content_id, link_delivery_status)
+        VALUES (1, 'alice', 'bob@abc', 'old', 'world', ?, 'content-old', 'pending')
+        """,
+        (_now(),),
+    )
+    old.connection.commit()
+    old.close()
+
+    monkeypatch.setattr(database_module, "MIGRATIONS", MIGRATIONS)
+    upgraded = Database(tmp_path / "node.db")
+    try:
+        assert expire_unanswered_relay_mail(upgraded) == 0
+        row = upgraded.connection.execute(
+            "SELECT link_delivery_status, link_relay_handoff_at FROM mail_messages"
+        ).fetchone()
+        assert tuple(row) == ("pending", None)
+    finally:
+        upgraded.close()

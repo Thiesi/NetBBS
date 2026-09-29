@@ -67,6 +67,7 @@ from netbbs.link.node_profiles import identity_for_fingerprint, link_address_lab
 from netbbs.link.work_items import KIND_LINK_MAIL_ACK, KIND_LINK_MAIL_DELIVERY, enqueue_work_item_without_commit
 from netbbs.mail import MailError
 from netbbs.rendering.width import cut_to_width
+from netbbs.search import index_mail_without_commit
 from netbbs.storage.database import Database
 from netbbs.timeutil import parse_utc_iso, utc_iso, utc_now_iso
 
@@ -143,6 +144,8 @@ def compose_link_message(
             json.dumps(message.to_dict()), message.content_id,
         ),
     )
+    # Searchable in the sender's Sent (issue #824), in the same transaction.
+    index_mail_without_commit(db, db.connection.execute("SELECT last_insert_rowid()").fetchone()[0])
     # Same transaction as the insert above (design doc §13.7): a crash
     # between the two must never leave a message with no work item ever
     # tracking its delivery.
@@ -279,9 +282,11 @@ def deliver_link_message(
     except AuthError:
         return _bounce("unknown_recipient")
     # The shared guest account has no mailbox (issue #816): every guest
-    # caller would read what arrived there.
-    if mail_module.mail_recipient_refusal(db, recipient) is not None:
-        return _bounce("no_mailbox")
+    # caller would read what arrived there. A disabled account or a signup
+    # awaiting approval takes no mail either (issue #818).
+    refused = mail_module.mail_recipient_bounce_reason(db, recipient)
+    if refused is not None:
+        return _bounce(refused)
     # The recipient blocked this sender (issue #817), by the address the
     # letter came from, never by the node's changeable display name.
     if mail_module.mail_sender_refusal(db, recipient, sender_address=sender_address) is not None:
@@ -308,17 +313,22 @@ def deliver_link_message(
         return _bounce("mailbox_full")
 
     arrived_at = utc_now_iso()
+    # No Sent copy of it exists on this node, so its sender side is deleted
+    # from the start and the recipient's delete removes the row (issue
+    # #818, the same as system mail).
     db.connection.execute(
         """
         INSERT INTO mail_messages
-            (sender_user_id, sender_label, recipient_user_id, subject, body, created_at, link_source_event_id)
-        VALUES (NULL, ?, ?, ?, ?, ?, ?)
+            (sender_user_id, sender_label, recipient_user_id, subject, body, created_at, link_source_event_id,
+             sender_deleted_at)
+        VALUES (NULL, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             sender_address, recipient.id, subject, body,
-            _written_at(message.payload.get("created_at"), arrived_at), message.content_id,
+            _written_at(message.payload.get("created_at"), arrived_at), message.content_id, arrived_at,
         ),
     )
+    index_mail_without_commit(db, db.connection.execute("SELECT last_insert_rowid()").fetchone()[0])
     db.connection.commit()
 
     accepted = build_link_message_accepted(
@@ -510,6 +520,50 @@ def expire_link_message_delivery(db: Database, content_id: str, *, reason: str |
     db.connection.commit()
 
 
+def record_relay_handoff(db: Database, content_id: str, *, now: str | None = None) -> None:
+    """This node left the still-pending letter `content_id` in a relay
+    mailbox for its recipient's node to collect (issue #874). The relay
+    is not the recipient: the letter stays `pending` until an accepted or
+    bounced answer arrives, but Sent now says it is with a relay, and
+    `expire_unanswered_relay_mail` gives up on it after
+    `RELAY_NO_ANSWER_TIMEOUT`."""
+    db.connection.execute(
+        "UPDATE mail_messages SET link_relay_handoff_at = ? "
+        "WHERE link_event_content_id = ? AND link_delivery_status = 'pending'",
+        (now or utc_now_iso(), content_id),
+    )
+    db.connection.commit()
+
+
+# How long a letter left at a relay waits for an answer before its sender is
+# told it may not have arrived (issue #874). Any retention limit on relay
+# mailboxes (issue #891) must stay longer than this, so a recipient that is
+# only slow to collect still answers inside it.
+RELAY_NO_ANSWER_TIMEOUT = datetime.timedelta(days=14)
+
+
+def expire_unanswered_relay_mail(db: Database, *, now: datetime.datetime | None = None) -> int:
+    """Expire every letter handed to a relay `RELAY_NO_ANSWER_TIMEOUT` ago
+    that is still `pending`, with reason `EXPIRED_NO_ANSWER`, and flag it
+    for its sender's next main menu (issue #874). Returns how many.
+
+    Nothing arrives to say such a letter failed: the recipient's node may
+    have refused it at pickup without a bounce (§12.4), or its answer was
+    lost. A late accepted or bounced answer still wins, the same way it
+    does over any other expiry. One indexed UPDATE, cheap enough for every
+    sync pass."""
+    cutoff = utc_iso((now or datetime.datetime.now(datetime.timezone.utc)) - RELAY_NO_ANSWER_TIMEOUT)
+    cursor = db.connection.execute(
+        "UPDATE mail_messages SET link_delivery_status = 'expired', link_delivery_reason = ?, "
+        "link_delivery_notice_pending = 1 "
+        "WHERE link_delivery_status = 'pending' AND link_relay_handoff_at IS NOT NULL "
+        "AND link_relay_handoff_at <= ?",
+        (EXPIRED_NO_ANSWER, cutoff),
+    )
+    db.connection.commit()
+    return cursor.rowcount
+
+
 def unexpire_link_message_delivery(db: Database, content_id: str) -> None:
     """The other half of `expire_link_message_delivery`, called when a
     SysOp replays a dead-lettered/cancelled `link_mail_delivery` work
@@ -519,7 +573,7 @@ def unexpire_link_message_delivery(db: Database, content_id: str) -> None:
     permanently `'expired'` even though delivery is being retried again."""
     db.connection.execute(
         "UPDATE mail_messages SET link_delivery_status = 'pending', link_delivery_reason = NULL, "
-        "link_delivery_notice_pending = 0 "
+        "link_delivery_notice_pending = 0, link_relay_handoff_at = NULL "
         "WHERE link_event_content_id = ? AND link_delivery_status = 'expired'",
         (content_id,),
     )
@@ -528,8 +582,14 @@ def unexpire_link_message_delivery(db: Database, content_id: str) -> None:
 
 # -- what the sender is told (issue #806) -----------------------------------
 
+# What Sent shows for a letter still `pending` that this node left at a relay
+# (issue #874). Not a stored status: `link_delivery_status` stays `pending`,
+# so every answer and expiry treats the letter as the pending mail it is.
+RELAYED_DISPLAY_STATUS = "relayed"
+
 DELIVERY_STATUS_LABELS = {
     "pending": "pending",
+    RELAYED_DISPLAY_STATUS: "with relay",
     "delivered": "delivered",
     "bounced": "bounced",
     "expired": "expired",
@@ -547,6 +607,7 @@ _BOUNCE_REASON_TEXT = {
     "undecryptable": "that BBS could not decrypt it, so it may have been sealed to a key that BBS no longer holds",
     "malformed": "that BBS could not accept it as a letter (a bad sender name, subject or body)",
     "no_mailbox": "that account takes no mail (it is the BBS's shared guest account)",
+    "recipient_unavailable": "that account is not taking mail at the moment",
     "link_policy_manual_block": "that BBS has blocked you or this BBS",
     "link_policy_node_quarantined": "that BBS has quarantined this BBS",
     "link_policy_node_probationary_read_only": "that BBS does not trust this BBS yet; its SysOp has to establish it",
@@ -560,21 +621,45 @@ _UNKNOWN_BOUNCE_TEXT = "that BBS refused it"
 # holding the peer as one it sends mail to, and never allowed it again
 # before the delivery gave up.
 EXPIRED_BY_OWN_POLICY = "own_policy"
+# Handed to a relay, and no answer came back in time (issue #874). Unlike every
+# other expiry, the letter may well have arrived.
+EXPIRED_NO_ANSWER = "no_answer"
 _EXPIRED_TEXT = {
     EXPIRED_BY_OWN_POLICY: "this BBS stopped exchanging mail with that BBS before it could be sent",
+    EXPIRED_NO_ANSWER: (
+        f"no answer came back in the {RELAY_NO_ANSWER_TIMEOUT.days} days since it was left at a relay "
+        "for that BBS, so it may not have arrived"
+    ),
 }
 _EXPIRED_NO_ROUTE_TEXT = "no route to that BBS worked before delivery gave up"
 
 
+def delivery_display_status(status: str | None, relay_handoff_at: str | None) -> str | None:
+    """The state Sent shows: the stored `link_delivery_status`, except that
+    a pending letter left at a relay shows as `RELAYED_DISPLAY_STATUS`
+    (issue #874)."""
+    if status == "pending" and relay_handoff_at:
+        return RELAYED_DISPLAY_STATUS
+    return status
+
+
 def delivery_explanation(status: str | None, reason: str | None) -> str | None:
     """One line saying where a sent Link message stands, for the Sent view
-    (issue #806). `None` for local mail, which has no delivery state."""
+    (issue #806). `status` is `delivery_display_status`'s. `None` for local
+    mail, which has no delivery state."""
     if status == "pending":
         return "Pending: that BBS has not confirmed it yet."
+    if status == RELAYED_DISPLAY_STATUS:
+        return (
+            "With a relay, no answer yet: it was left at a relay for that BBS to collect. "
+            f"If no answer comes back within {RELAY_NO_ANSWER_TIMEOUT.days} days, it expires."
+        )
     if status == "delivered":
         return "Delivered to the recipient's mailbox."
     if status == "bounced":
         return f"Bounced: {bounce_reason_text(reason)}."
+    if status == "expired" and reason == EXPIRED_NO_ANSWER:
+        return f"Expired: {expiry_reason_text(reason)}."
     if status == "expired":
         return f"Expired: {expiry_reason_text(reason)}. It was not delivered."
     return None
@@ -641,4 +726,6 @@ def _delivery_notice_text(db: Database, row) -> str:
     )
     if row["link_delivery_status"] == "bounced":
         return f'Your mail "{subject}" to {to_label} bounced: {bounce_reason_text(row["link_delivery_reason"])}.'
+    if row["link_delivery_reason"] == EXPIRED_NO_ANSWER:
+        return f'Your mail "{subject}" to {to_label} expired: {expiry_reason_text(EXPIRED_NO_ANSWER)}.'
     return f'Your mail "{subject}" to {to_label} was not delivered: {expiry_reason_text(row["link_delivery_reason"])}.'

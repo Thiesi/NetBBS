@@ -30,7 +30,12 @@ from netbbs.rendering.ansi import (
     set_scroll_region,
     strip_ansi,
 )
-from netbbs.rendering.ansi_art import decode_ansi_bytes, encode_ansi_bytes
+from netbbs.rendering.ansi_art import (
+    decode_ansi_bytes,
+    decode_banner_bytes,
+    encode_ansi_bytes,
+    trim_trailing_blank_rows,
+)
 from netbbs.rendering.ansi_parse import parse_ansi_into_buffer
 from netbbs.rendering.gradient import GRADIENTS, gradient_color, gradient_text, nearest_256
 from netbbs.rendering.layout import (
@@ -70,6 +75,7 @@ from netbbs.rendering.theme import (
     MUTED_COLOR,
     METADATA_COLOR,
     NICK_COLOR,
+    NODE_COLOR,
     PRIVILEGE_COLOR,
     RULE_COLOR,
     SELF_COLOR,
@@ -91,6 +97,7 @@ __all__ = [
     "clear_screen",
     "colored",
     "decode_ansi_bytes",
+    "decode_banner_bytes",
     "encode_ansi_bytes",
     "parse_ansi_into_buffer",
     "fg",
@@ -124,6 +131,7 @@ __all__ = [
     "SegmentColor",
     "colored_truncate",
     "reflow",
+    "trim_trailing_blank_rows",
     "truncate",
     "char_width",
     "cut_to_width",
@@ -152,6 +160,7 @@ __all__ = [
     "MUTED_COLOR",
     "METADATA_COLOR",
     "NICK_COLOR",
+    "NODE_COLOR",
     "PRIVILEGE_COLOR",
     "RULE_COLOR",
     "SELF_COLOR",

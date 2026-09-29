@@ -1480,10 +1480,18 @@ class DeferredEvents:
     to suppress a retry.
     """
 
-    # content_id -> (resource kind, resource id, waiting-for fingerprint or None, retry-at)
-    entries: dict[str, tuple[str, str, str | None, float]] = field(default_factory=dict)
+    # content_id -> (resource kind, resource id, waiting-for fingerprint or
+    # None, retry-at, held-from node fingerprint or None, genesis name or None)
+    entries: dict[str, tuple[str, str, str | None, float, str | None, str | None]] = field(
+        default_factory=dict
+    )
 
-    def defer(self, raw: dict, *, waiting_for: str | None, now: float) -> None:
+    def defer(
+        self, raw: dict, *, waiting_for: str | None, now: float, held_from: str | None = None
+    ) -> None:
+        """Set `raw` aside. `held_from` names the node whose trust state here
+        refused it, when that is why (issue #844): its SysOp is shown what
+        that node offers while it waits."""
         resource = _event_resource(raw)
         if resource is None:
             return
@@ -1496,18 +1504,21 @@ class DeferredEvents:
         self.entries.pop(content_id, None)
         while len(self.entries) >= _MAX_DEFERRED_EVENTS:
             self.entries.pop(next(iter(self.entries)))
-        self.entries[content_id] = (resource[0], resource[1], waiting_for, now + DEFERRED_EVENT_RETRY_SECONDS)
+        self.entries[content_id] = (
+            resource[0], resource[1], waiting_for, now + DEFERRED_EVENT_RETRY_SECONDS,
+            held_from, _genesis_name(raw) if held_from is not None else None,
+        )
 
     def release_identity(self, fingerprint: str) -> None:
         """An identity became known: retry what waited for it, and whatever
         waited for nothing nameable, since that is usually an event built on
         one of those."""
-        for content_id, (_kind, _resource, waiting_for, _retry) in list(self.entries.items()):
-            if waiting_for == fingerprint or waiting_for is None:
+        for content_id, (_kind, _resource, waiting_for, _retry, held_from, _name) in list(self.entries.items()):
+            if waiting_for == fingerprint or waiting_for is None or held_from == fingerprint:
                 del self.entries[content_id]
 
     def expire(self, now: float) -> None:
-        for content_id, (_kind, _resource, _waiting, retry_at) in list(self.entries.items()):
+        for content_id, (_kind, _resource, _waiting, retry_at, _held, _name) in list(self.entries.items()):
             if retry_at <= now:
                 del self.entries[content_id]
 
@@ -1515,9 +1526,67 @@ class DeferredEvents:
         """What to add to an inventory request: `{kind: {resource_id: {content_id}}}`."""
         self.expire(now)
         result: dict[str, dict[str, set[str]]] = {}
-        for content_id, (kind, resource, _waiting, _retry) in self.entries.items():
+        for content_id, (kind, resource, _waiting, _retry, _held, _name) in self.entries.items():
             result.setdefault(kind, {}).setdefault(resource, set()).add(content_id)
         return result
+
+    def held_from(self, fingerprint: str) -> "HeldBack":
+        """What this node is holding back from node `fingerprint` because of
+        its trust state here (issue #844): how many events, and the names of
+        the boards, channels and file areas among them, by kind."""
+        count = 0
+        names: dict[str, list[str]] = {}
+        for kind, _resource, _waiting, _retry, held, name in self.entries.values():
+            if held != fingerprint:
+                continue
+            count += 1
+            if name is not None and name not in names.setdefault(kind, []):
+                names[kind].append(name)
+        return HeldBack(count, {kind: tuple(sorted(found, key=str.casefold)) for kind, found in names.items()})
+
+
+@dataclass(frozen=True)
+class HeldBack:
+    """`DeferredEvents.held_from`'s answer. `names` maps an inventory kind
+    (`boards`, `channels`, `file_areas`) to the names of the resources whose
+    genesis is among the held events."""
+
+    count: int
+    names: dict[str, tuple[str, ...]]
+
+
+def _genesis_name(raw: dict) -> str | None:
+    """The name a held genesis event gives its resource, if it is one.
+
+    Unvalidated input: only a short string is kept, and the screens that
+    show it sanitize it like any other remote text."""
+    envelope = raw.get("envelope") if isinstance(raw, dict) else None
+    if not isinstance(envelope, dict) or envelope.get("object_type") not in _GENESIS_OBJECT_TYPES:
+        return None
+    payload = envelope.get("payload")
+    name = payload.get("name") if isinstance(payload, dict) else None
+    return name[:80] if isinstance(name, str) and name.strip() else None
+
+
+@dataclass
+class PeerExchange:
+    """What this node last learned about one peer it dials taking this node's
+    own content (issue #844). In memory, like the rest of a sync run's state:
+    a restart learns it again on the next pass.
+
+    `holds` is the genesis content IDs of this node's own linked boards,
+    channels and file areas that the peer is known to hold: it accepted
+    them from a push, or an inventory exchange that declared them did not
+    ask for them. `refused_reason` is the peer's trust-policy reason code
+    when it refused the last push (`link_policy_node_probationary_read_only`
+    for a peer that has this node on probation), else None."""
+
+    at: float = 0.0
+    holds: set[str] = field(default_factory=set)
+    refused_reason: str | None = None
+
+
+_GENESIS_OBJECT_TYPES = frozenset({"board_genesis", "channel_genesis", "file_area_genesis"})
 
 
 def _event_resource(raw: dict) -> tuple[str, str] | None:
@@ -1980,6 +2049,9 @@ class LinkNode:
     # candidate not reached) the node log has already explained once since
     # this process started, so they are not repeated on every sync pass.
     explained_in_log: set[str] = field(default_factory=set)
+    # Issue #844: per peer this node dials, what it last learned about that
+    # peer taking this node's own content. Memory only; see `PeerExchange`.
+    peer_exchange: dict[str, PeerExchange] = field(default_factory=dict)
 
     @property
     def peers(self) -> dict[str, "PeerRecord"]:

@@ -46,8 +46,8 @@ up: from a board to the list you picked it from, and from there to the menu.
 | **Files** | Every file area |
 | **Games** | Door games, when the SysOp has set some up |
 | **Communities** (key **O**) | Topics the SysOp set up, each with its own boards, chat channels, file areas and games |
-| **New scan** | See unread activity and resources you have not visited; Back from each one brings you back with the next new one ready for Enter, and **[R]eplies** opens the replies to your posts |
-| **Find** (key **/**) | Search posts, files and retained chat on this node. It does not search mail; the mailbox has its own **[F]ind** |
+| **New scan** | See unread activity and resources you have not visited; Back from each one brings you back with the next new one ready for Enter, **[R]eplies** opens the replies to your posts, and **[E]-mail** opens your mailbox, whose unread count is shown above the list |
+| **Find** (key **/**) | Search posts, files and retained chat on this node, and your own mail: your Inbox and Sent, never anyone else's. A letter opens as it does in the mailbox, and Back returns to the results. Mail is left out where the SysOp has not opened mail to you |
 | **E-mail** | Read and send persistent NetBBS mail, from the level the SysOp chose; not offered to the guest account |
 | **Who's online** | See callers and available ways to contact them |
 | **Profile** | Change your public profile and personal preferences |
@@ -72,11 +72,16 @@ On a moderated board, your post may wait for approval before others see it.
 You are told at the main menu when it is approved or rejected; a rejection
 also arrives as mail from **System**, with the reason and what you wrote.
 
+A post keeps the lines you write: a list, a short line or your sign-off stays
+as you typed it, and only a line too wide for the reader's screen wraps.
+
 The text editor shows its commands. In the line editor, a blank line starts
 a new paragraph; press Enter on an empty line twice, or type `/done`, to
 finish. `/insert N` writes the next lines before line N until you type
 `/end`, which is how you answer between the quoted lines of a reply; `/list`
-shows every line and where you are writing. `/exit` or `/quit` keeps a draft
+shows every line and where you are writing. A reply opens with the post
+quoted: `/unquote` removes the whole quote, and `/delete N-M` removes lines N
+to M, so you can keep only the part you answer. `/exit` or `/quit` keeps a draft
 for later; `/cancel` discards it. In the fullscreen editor, **Ctrl+G** shows
 help and **Ctrl+X** opens the exit choices, including **Keep draft & exit**.
 Both editors keep what you have typed if the connection drops.
@@ -87,6 +92,7 @@ The fullscreen editor also has these keys:
 | --- | --- |
 | **Ctrl+K** | Cut the line. Press it again to add the next line. |
 | **Ctrl+Y** | Paste the cut lines. |
+| **Ctrl+E** | Erase all the text, after a yes. **Ctrl+Y** brings it back. |
 | **Ctrl+W** | Delete the word before the cursor. In a browser, which closes the tab on Ctrl+W, use **Alt+Backspace**. |
 | **Ctrl+R** | Rewrap the quoted (`>`) paragraph under the cursor to fit the screen, keeping its `>`. |
 
@@ -107,7 +113,13 @@ never sent or posted by itself.
 
 Writing a message or a post opens a screen of its own. Mail asks who it is
 for first: a user name, or `name@TheirBBS` for someone on a linked BBS. An
-empty line or Esc there cancels. The fullscreen editor shows what you are
+empty line or Esc there cancels. Press Tab to complete a name, or, after the
+`@`, the name of a linked BBS; if several fit, they are listed under the
+prompt. Type `?` and press Enter for a list of everyone you can write to:
+people you had mail with lately first, then the linked BBSes, then the
+members of this board. Choose a BBS and you are asked for the person's user
+name there; `name@?` lists just the BBSes for that name. Only people who can
+receive mail from you are offered. The fullscreen editor shows what you are
 writing above the text: the recipient or board, and the subject. Nothing is
 sent or posted until you choose to on the review screen, which keeps To and
 Subject at the top and shows a long message a page at a time. Turn the
@@ -137,8 +149,14 @@ to speak. `/help` lists the commands available there.
 | `/dm user` | Invite someone online to a private direct chat |
 
 An alias is always shown with the username beside it, as `Quill|Copperplate`,
-so everyone can see who is speaking. An alias that reads like someone else's
+so everyone can see who is speaking: the alias first and in color, the
+username after it in gray. An alias that reads like someone else's
 username, or like a staff title such as "SysOp", is refused.
+
+Someone on a linked BBS is shown as `name@TheirBBS`, with their BBS in a color
+of its own. If two BBSes you are linked with share a name, the name gets its
+address added, like `alice@Twin BBS · twin.example.org`, so you can tell them
+apart.
 
 A direct-chat invitation opens on your main menu. If you are somewhere else
 on the board, a line tells you who invited you; go back to the main menu
@@ -150,11 +168,28 @@ contact fails, send mail explicitly—chat does not silently turn it into mail.
 
 Signed in as the board's guest, you have no mail: every guest shares that
 account, so its mailbox would be everyone's. Register an account of your own
-to send and receive mail. Mail sent to the guest account is refused. A SysOp
+to send and receive mail. Mail sent to the guest account is refused, and so
+is mail to an account that is disabled or still waiting for the SysOp's
+approval: the To prompt tells you, and mail from another node bounces with
+"that account is not taking mail at the moment". A SysOp
 can also open mail only from a certain access level; below it, the main menu
 offers no **E-mail**.
 
-**E-mail** opens on your Inbox, with how many messages are unread at the top.
+**E-mail** opens on your Inbox, with how many messages are unread at the top
+and how full it is: your mailbox holds 500 messages, and the header counts
+them, for example `120 of 500`. From 450 the Inbox warns you. At 500, each
+new message removes your oldest message you have already read; unread mail is
+never removed, and a mailbox full of unread mail turns new mail away until
+you read or delete some. If old mail was removed to make room, the main menu
+tells you how many messages went, once.
+
+You are told when mail arrives. The first main menu after you log in says how
+many unread messages wait, and **New scan** shows the count above its list.
+A message that arrives while you are online is announced with its sender and
+subject: at once in chat, straight away on an idle main menu or Inbox, and
+otherwise above the prompt of the next screen you reach. Nothing is written
+into a door game or an editor while you are in it; the notice waits until you
+leave.
 Each row shows who a message is from, its subject and its date, with `new`
 beside mail you have not opened yet. Move with Up/Down and press Enter, or
 press a row's number, to read a message. On a long list, **[N]ext page** and
@@ -170,8 +205,40 @@ press a row's number, to read a message. On a long list, **[N]ext page** and
 - **[U]nread** marks the highlighted message unread, or read without opening
   it. While you read a message, its own **[U]nread** does the same.
 
+You can also write to someone from where you found them, without typing
+their address. The compose screen opens with **To** filled in:
+
+- In the **Directory**, open a member's card and press **[M]ail**.
+- On **Who's online**, pick a caller and press **[E]-mail** (**[M]** there is
+  a live message). It works for a caller on a linked node, and for a caller
+  who has turned off live messages.
+- On **Previous callers**, press **[M]ail a caller** and type the caller's
+  number. A caller whose name is hidden there can't be written to from the
+  list.
+- While reading a post, **[M]ail author** answers its author privately, with
+  the post's `Re:` subject and a quote, as a reply on the board would have.
+  You don't need to be allowed to post on that board, and it works for a post
+  carried from a linked node too.
+
+After you send the letter, keep it or cancel it, you are back on the screen
+you came from, with the result above the prompt. None of these is offered
+for yourself, or while mail is closed to you. If the person can't be written
+to, for example the guest account or someone on a node that has only just
+linked with this one, you are told why when you press the key.
+
 A `!` before a sender's name means their node's identity has changed. The
 message explains it when you open it.
+
+To pass a letter on, open it -- in the Inbox or in Sent -- and press
+**[F]orward**. Type whom it is for at the To prompt, a name here or an
+address on a linked node. The subject gets `Fwd:` in front, and the letter
+goes whole under a short header saying whom it was from and to, when, and
+under what subject. What you type goes above it, as a note, and your
+signature goes under the note; in the line editor, `/end` writes at the end
+instead. A letter
+already at the size limit is too long to forward as it is: the review screen
+says by how much, and **[B]ody** lets you shorten it. Mail from **System**
+can be forwarded too.
 
 Mail from **System** was sent by the BBS itself, not by a person -- for
 example, when a moderator turns down a post you wrote, with their reason and
@@ -193,18 +260,25 @@ opens once your SysOp establishes that node.
 address on its From line, with the same `Re:` subject and quote a local reply
 gets. If that node can't be written to any more, Reply says why instead of
 opening the message. **Sent** shows each message's recipient, with the full
-address for mail that went to another node.
+address for mail that went to another node. Your copy stays in Sent even if
+the recipient's account is later deleted; it then reads, for example,
+`bob (deleted account)`.
 
 Mail to another node also shows where it stands, in Sent's list and on its
 Delivery line when you open it:
 
 - **Pending**: on its way; the other node has not confirmed it yet.
+- **With relay**: the other node can't be reached directly, so your BBS left
+  the letter at a relay for it to collect, and no answer has come back yet.
+  If none comes within 14 days, it expires.
 - **Delivered**: it is in the recipient's mailbox.
 - **Bounced**: the other node sent it back, and the Delivery line says why,
   for example that there is no user by that name there, that their mailbox
   is full of unread mail, or that the node does not trust yours yet.
 - **Expired**: no route to that node worked before delivery gave up, so it
-  was not delivered.
+  was not delivered. Mail left at a relay expires when no answer came back
+  in 14 days; it may still have arrived, and if an answer turns up later,
+  Sent shows it as delivered or bounced after all.
 
 A letter shows the way its writer typed it: each line stays a line, and
 only a line too wide for your screen wraps. Mail can be in color, written
@@ -214,7 +288,21 @@ reads as plain text.
 
 When mail bounces or expires you are told at the main menu, once, even if it
 happened while you were away. Opening the message in Sent counts as being
-told. To try again, send it anew.
+told. To try again, open it in Sent and press **Re[s]end**: the compose
+screen opens with the same recipient, subject and text, ready to send as a
+new letter, and the old one stays in Sent as it was. If the reason it failed
+still applies on this side -- for example your SysOp has since stopped mail
+to that node -- you are told so when you press the key or at Send. Resend is
+only offered for mail that bounced or expired: a letter that arrived, or may
+still arrive, would reach its reader twice.
+
+To follow up on a letter you sent, open it in Sent and press **[R]eply**.
+It writes to the letter's recipient, with `Re:` in front of the subject and
+your letter quoted, as a reply to mail you received would. You can't reply to
+a letter whose recipient's account has been deleted. After either key sends
+a letter, you are back on the Sent list, with the new letter at the top and
+the result above the prompt (or on Find's results, if you opened the letter
+from there).
 
 To stop someone's mail, open a letter from them and press **Bloc[k]
 sender**; the same key, now **Unbloc[k] sender**, takes it back. It works

@@ -1362,6 +1362,35 @@ def test_promote_demote_changes_level(db, lane, sysop):
     assert updated.user_level == 20
 
 
+class _SeedRecordingSession(FakeSession):
+    """Remembers the value each line read opened on."""
+
+    def __init__(self, inputs):
+        super().__init__(inputs)
+        self.seeds: list[str] = []
+
+    async def read_line(self, echo: bool = True, history=None, completer=None, **kwargs) -> str:
+        self.seeds.append(kwargs.get("initial", ""))
+        return await super().read_line(echo, history, completer, **kwargs)
+
+
+def test_level_prompt_opens_on_the_current_level(db, lane, sysop):
+    # Issue #845, F136: the level prompt showed `[10]` beside an empty line,
+    # while every Create/Edit screen opens its number in the line itself.
+    create_user(db, "alice", password="hunter2", user_level=10)
+    session = _SeedRecordingSession(["u", "p", "0", "1", "l", "20", "b", "b", "b"])
+    _run(session, lane, sysop)
+    assert "10" in session.seeds
+    assert "[10]" not in _visible(_written_text(session))
+
+
+def test_level_prompt_left_as_it_opened_changes_nothing(db, lane, sysop):
+    create_user(db, "alice", password="hunter2", user_level=10)
+    session = FakeSession(["u", "p", "0", "1", "l", "10", "b", "b", "b"])
+    _run(session, lane, sysop)
+    assert "is now level" not in _written_text(session)
+
+
 def test_promote_demote_shows_lockout_guard_message(db, lane, sysop):
     # sysop is the only user, and the only active SysOp -- demoting
     # them must be refused, with the message shown on screen, not a
@@ -1456,7 +1485,7 @@ def test_admin_can_attach_a_public_key_to_an_existing_password_account(db, lane,
     verify_key = nacl.signing.SigningKey.generate().verify_key
     raw_b64 = base64.b64encode(bytes(verify_key)).decode()
 
-    session = FakeSession(["u", "e", "0", "1", "k", "a", "phone", raw_b64, "b", "b", "b", "b"])
+    session = FakeSession(["u", "e", "0", "1", "k", "a", raw_b64, "phone", "b", "b", "b", "b"])
     _run(session, lane, sysop)
 
     updated = next(u for u in list_users(db) if u.username == "alice")
@@ -1470,7 +1499,7 @@ def test_attaching_a_duplicate_public_key_is_refused(db, lane, sysop):
     create_user(db, "bob", verify_key=verify_key, user_level=10)
     alice = create_user(db, "alice", password="hunter2", user_level=10)
 
-    session = FakeSession(["u", "e", "0", "1", "k", "a", "phone", raw_b64, "b", "b", "b", "b"])
+    session = FakeSession(["u", "e", "0", "1", "k", "a", raw_b64, "phone", "b", "b", "b", "b"])
     _run(session, lane, sysop)
 
     updated = next(u for u in list_users(db) if u.username == "alice")
@@ -4476,20 +4505,59 @@ def test_preview_screen_renders_resolved_banner_content(db, lane, sysop):
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "MY DISTINCTIVE BANNER TEXT" in text
-    assert "(showing your custom file)" in text
-    assert "generated truecolor/256-color showcase is intentionally bypassed" in _normalized_visible(text)
+    assert "(Your banner, as callers see it.)" in text
+    # Issue #841: no developer diagnostics on this screen.
+    assert "Capability:" not in text
 
 
-def test_preview_screen_when_disabled_shows_default_and_says_so(db, lane, sysop):
+def test_preview_screen_with_nothing_saved_shows_the_default_and_says_so(db, lane, sysop):
     # Trailing "x" dismisses the preview's own "Press any key to
     # continue..." wait (dogfood fix: the preview used to be cleared by
     # the menu's own immediate redraw before it could be read).
     session = FakeSession(["s", "m", "n", "w", "p", "x", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
+    text = _normalized_visible(_written_text(session))
+    assert "N E T B B S" in text
+    assert "(Nothing saved yet: callers see the default NetBBS banner.)" in text
+    assert "enabled=" not in text
+
+
+def test_preview_of_a_saved_but_disabled_banner_shows_the_saved_art(db, lane, sysop):
+    # Issue #841 (F037): right after "Saved ... Use [P]review", the preview
+    # showed the default NetBBS banner, someone else's art.
+    from netbbs.net.welcome_banner import banner_path
+
+    banner_path(db).write_bytes(b"MY SAVED PEN ART")
+    session = FakeSession(["s", "m", "n", "w", "p", "x", "b", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    text = _normalized_visible(_written_text(session))
+    assert "MY SAVED PEN ART" in text
+    assert "N E T B B S" not in text
+    assert "(Saved, but switched off: callers see the default NetBBS banner. [E]nable turns it on.)" in text
+
+
+def test_welcome_preview_over_telnet_shows_the_ascii_default_callers_get(db, lane, sysop):
+    # Review on #889: Telnet callers get the default banner in ASCII
+    # before sign-in, so a Telnet SysOp's preview shows that too.
+    session = FakeSession(["s", "m", "n", "w", "p", "x", "b", "b", "b", "b", "b"])
+    session.transport_name = "telnet"
+    _run(session, lane, sysop)
     text = _written_text(session)
-    assert "showing the DEFAULT banner" in text
-    assert "rendering: 256-color fallback" in text
-    assert "enabled=False" in text
+    start = text.index("Previewing the welcome banner")
+    preview = text[start:text.index("Press any key", start)]
+    assert "+====" in preview
+    assert "╔" not in preview
+
+
+def test_preview_of_an_oversized_saved_banner_says_why_it_is_not_shown(db, lane, sysop):
+    from netbbs.net.welcome_banner import MAX_BANNER_SIZE_BYTES, banner_path
+
+    banner_path(db).write_bytes(b"x" * (MAX_BANNER_SIZE_BYTES + 1))
+    session = FakeSession(["s", "m", "n", "w", "p", "x", "b", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    text = _normalized_visible(_written_text(session))
+    assert "(The saved file is over 256 KiB or can't be read: callers see the default NetBBS banner.)" in text
+    assert "N E T B B S" in text
 
 
 def test_preview_screen_color_depth_override_forces_truecolor(db, lane, sysop):
@@ -4508,8 +4576,7 @@ def test_preview_screen_color_depth_override_forces_truecolor(db, lane, sysop):
     session = FakeSession(["s", "m", "n", "w", "p", "x", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
-    assert "rendering: truecolor gradient" in text
-    assert "\x1b[38;2;" in text  # a real truecolor escape, not just the label
+    assert "\x1b[38;2;" in text  # a real truecolor escape
 
 
 def test_preview_screen_color_depth_override_forces_256_color(db, lane, sysop):
@@ -4525,7 +4592,7 @@ def test_preview_screen_color_depth_override_forces_256_color(db, lane, sysop):
     session.supports_truecolor = True
     _run(session, lane, sysop)
     text = _written_text(session)
-    assert "rendering: 256-color fallback" in text
+    assert "\x1b[38;5;" in text
     assert "\x1b[38;2;" not in text
 
 
@@ -4931,8 +4998,8 @@ def test_masthead_preview_screen_when_disabled_says_no_masthead_shown(db, lane, 
     session = FakeSession(["s", "m", "m", "m", "p", "x", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
-    assert "no masthead would be shown" in text
-    assert "enabled=False" in text
+    assert "(Nothing saved yet: callers see no masthead.)" in text
+    assert "enabled=" not in text
 
 
 def test_masthead_edit_option_opens_the_ansi_editor_and_a_save_round_trips_into_banner_path(db, lane, sysop):
@@ -5380,6 +5447,25 @@ def test_node_name_setting_a_new_name_persists_it(db, lane, sysop):
     assert get_node_display_name(db) == "My Cool BBS"
 
 
+def test_node_name_that_reads_like_a_known_node_is_set_with_a_warning(db, lane, sysop, tmp_path):
+    # Issue #900: warned, not refused.
+    from netbbs.config import get_node_display_name
+    from netbbs.link.node_identity import bootstrap_node_identity
+    from netbbs.link.protocol import LinkNode
+    from netbbs.link.store import save_peer
+
+    node = LinkNode(identity=bootstrap_node_identity(tmp_path / "outbound"))
+    save_peer(db, node.handle_hello(node.build_hello(
+        addresses=None, outgoing_only=True, created_at="2026-09-29T00:00:00+00:00",
+        friendly_name="OutBound", canonical_dns_name="outbound.example.org",
+    )))
+    session = FakeSession(["s", "n", "n", "0ut Bound", "b", "b", "b"])
+    _run(session, lane, sysop)
+    written = _normalized_visible(_written_text(session))
+    assert "Node name set to '0ut Bound', which reads like OutBound · outbound.example.org." in written
+    assert get_node_display_name(db) == "0ut Bound"
+
+
 def test_node_name_rejects_a_name_over_the_length_limit(db, lane, sysop):
     from netbbs.config import MAX_NODE_DISPLAY_NAME_LENGTH, get_node_display_name
 
@@ -5567,8 +5653,8 @@ def test_logoff_banner_preview_when_disabled_says_no_banner(db, lane, sysop):
     session = FakeSession(["s", "m", "n", "l", "p", "x", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
-    assert "no banner" in text.lower()
-    assert "enabled=False" in text
+    assert "(Nothing saved yet: callers see no banner.)" in text
+    assert "enabled=" not in text
 
 
 def test_logoff_banner_edit_round_trips_into_logoff_banner_path(db, lane, sysop):
@@ -6131,9 +6217,9 @@ def test_theme_colors_menu_shows_default_status_for_all_three_slots(db, lane, sy
     _run(session, lane, sysop)
     text = _visible(_written_text(session))  # the editor colors each field label separately
     assert "Accent: " in text and "Header: " in text and "Clock: " in text
-    # Issue #206's backup-only condensed status line stays on this nested
-    # screen; update status belongs only on its three actionable surfaces.
-    assert "Backup: " in text
+    # Neither backup nor update status follows the SysOp onto a nested
+    # screen (issue #845, F034).
+    assert "Backup: " not in text
     assert "Update: " not in text
     assert text.count("default") >= 3
 
@@ -6703,12 +6789,16 @@ def test_settings_shows_a_current_values_panel(db, lane, sysop):
 def test_settings_previous_callers_toggle_is_node_wide_and_audited(db, lane, sysop):
     from netbbs.session_history import previous_callers_enabled
 
+    from netbbs.session_history import previous_callers_plain
+
     assert previous_callers_enabled(db) is True
-    session = FakeSession(["s", "v", "b", "b"])
+    # Issue #841: neon, then plain, then hidden.
+    session = FakeSession(["s", "v", "v", "b", "b"])
     _run(session, lane, sysop)
 
     assert previous_callers_enabled(db) is False
     text = _visible(_written_text(session))
+    assert "Previous callers: shown after login, plain" in _normalized_visible(text)
     assert "Previous callers: hidden" in _normalized_visible(text)
     assert "vious callers" in text
     row = db.connection.execute(
@@ -6717,6 +6807,12 @@ def test_settings_previous_callers_toggle_is_node_wide_and_audited(db, lane, sys
     ).fetchone()
     assert row["actor_user_id"] == sysop.id
     assert row["detail"] == "enabled=false"
+
+    # A third press shows it again, in the default neon style.
+    session = FakeSession(["s", "v", "b", "b"])
+    _run(session, lane, sysop)
+    assert previous_callers_enabled(db) is True
+    assert previous_callers_plain(db) is False
 
 
 def test_settings_panel_reflects_a_changed_node_name(db, lane, sysop):
@@ -6787,87 +6883,37 @@ def test_settings_panel_sanitizes_the_timestamp_example(db, lane, sysop):
     assert "[31mFAKE" in text
 
 
-# -- condensed status line on nested screens (issue #206) --------------------
+# -- backup state lives on the dashboard, not on every screen (issue #845) ---
 
 
-def test_link_status_screen_shows_the_condensed_status_line(db, lane, sysop):
-    # GitHub issue #206's "broader scope" half: screens nested deeper than
-    # the five top-level submenus don't have node_controls/link_context
-    # available to show the richer full panel those already have, so they
-    # get this lighter backup-context line instead -- confirms
-    # a Shape-A site (the function already had `lane` in scope, so the line
-    # is computed and written inline, no caller threading needed).
-    from netbbs.backup import create_backup
+def test_dashboard_shows_the_backup_state(db, lane, sysop):
+    session = FakeSession(["b"])
+    _run(session, lane, sysop)
+    assert re.search(r"BACKUP +never", _visible(_written_text(session)))
 
-    identity_dir = db.path.parent / "netbbs_identity"
-    create_backup(db_path=db.path, identity_dir=identity_dir, destination=db.path.parent / "backup1")
 
+@pytest.mark.parametrize("keys", [
+    ["c", "d", "b", "b", "b"],       # Content > Doors
+    ["c", "m", "b", "b", "b"],       # Content > Message boards
+    ["c", "o", "b", "b", "b"],       # Content > Communities
+])
+def test_nested_screens_do_not_repeat_the_backup_line(db, lane, sysop, keys):
+    # F034: "Backup: never" followed a first-day SysOp onto every submenu,
+    # and she couldn't tell whether it was an error.
+    session = FakeSession(keys)
+    _run(session, lane, sysop)
+    text = _visible(_written_text(session))
+    nested = text[text.index("Choice:") :]  # past the dashboard's own panel
+    assert "Backup:" not in nested
+
+
+def test_link_status_screen_does_not_repeat_the_backup_line(db, lane, sysop):
     link_context = _link_context()
     session = FakeSession(["s", "l", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
     text = _visible(_written_text(session))
-    assert "Backup: " in text
-    assert "Update:" not in text
-
-
-def test_door_menu_shows_the_condensed_status_line(db, lane, sysop):
-    # A Shape-B site: _draw_door_menu takes no `lane` of its own -- the
-    # line is computed once in _door_menu (which has `lane`) and threaded
-    # through as a new `status_line` parameter, same as every other
-    # _draw_*_menu/_draw_*_detail/_draw_*_action screen in this rollout.
-    session = FakeSession(["c", "d", "b", "b", "b"])
-    _run(session, lane, sysop)
-    text = _visible(_written_text(session))
-    assert "Backup: never" in text
-    assert "Update:" not in text
-
-
-def test_nested_status_line_does_not_repeat_an_update_warning(db, lane, sysop):
-    from netbbs.selfupdate import record_check_outcome
-
-    record_check_outcome(db, "newer release available: v999.0.0")
-    session = FakeSession(["c", "d", "b", "b", "b"])
-    _run(session, lane, sysop)
-    text = _visible(_written_text(session))
-
-    assert "Backup: never" in text
-    assert "Update:" not in text
-    nested_status_lines = [line for line in text.split("\r\n") if "Backup:" in line]
-    assert nested_status_lines
-    assert all("newer release available" not in line for line in nested_status_lines)
-
-
-def test_condensed_status_line_formats_the_backup_time_per_display_preferences(db, lane, sysop):
-    # Code review follow-up (PR #216): this was the one place in the
-    # module still concatenating a stored timestamp raw (with its
-    # always-6-decimal storage precision and trailing "Z") instead of
-    # resolving the node's configured format/timezone through
-    # format_for_display like every other timestamp -- inconsistent with
-    # the Backup status screen and everywhere else a timestamp appears.
-    from netbbs.backup import create_backup
-
-    identity_dir = db.path.parent / "netbbs_identity"
-    create_backup(db_path=db.path, identity_dir=identity_dir, destination=db.path.parent / "backup1")
-
-    session = FakeSession(["c", "d", "b", "b", "b"])
-    _run(session, lane, sysop)
-    text = _written_text(session)
-    assert ".Z" not in text  # raw storage suffix never leaks through
-    assert re.search(r"Backup: \d{2}\.\d{2}\.\d{4} \d{2}:\d{2}", text), (
-        f"no display-formatted backup time found in {text!r}"
-    )
-
-
-def test_condensed_status_line_fits_a_narrow_terminal(db, lane, sysop):
-    # The backup-only nested line must still respect the terminal width.
-    session = FakeSession(["c", "d", "b", "b", "b"])
-    session.terminal_width = 40
-    _run(session, lane, sysop)
-    status_lines = [
-        line for line in _visible(_written_text(session)).split("\r\n") if "Backup:" in line
-    ]
-    assert status_lines, "condensed status line not found in output"
-    assert len(status_lines[0]) <= 40, f"condensed status line exceeded terminal width: {status_lines[0]!r}"
+    link_screen = text[text.index("Link status") :]
+    assert "Backup:" not in link_screen
 
 
 def test_user_picker_page_size_reserves_a_line_for_the_condensed_status_line(lane):
@@ -7006,13 +7052,46 @@ def test_timestamp_settings_screen_setting_a_timezone_fixes_the_chat_status_line
 
 
 def test_backup_status_shows_no_backup_yet_message(db, lane, sysop):
-    # A paged panel on an 80x24 terminal: the door-data section is a page on.
     session = FakeSession(["s", "k", "PAGE_DOWN", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _visible(_written_text(session))
     assert "NO BACKUP RECORDED" in text
     assert "No backup has been taken on this node yet." in text
+
+
+def test_backup_page_on_a_node_without_doors_says_so_in_one_line(db, lane, sysop, monkeypatch):
+    monkeypatch.delenv("WAR_DIALER_DB_PATH", raising=False)
+    # F066: page 1 was mostly Voidrunner, War Dialer and door-installation
+    # text on a node with no doors.
+    session = FakeSession(["s", "k", "PAGE_DOWN", "PAGE_DOWN", "b", "b", "b"])
+    _run(session, lane, sysop)
+    text = _visible(_written_text(session))
+    assert "No doors are set up, so backups hold no door data." in text
+    assert "Voidrunner" not in text
+    assert "DOOR INSTALLATION DIRECTORIES" not in text
+    assert "oor installations:" not in text
+
+
+def test_backup_page_shows_door_data_a_removed_door_left_behind(db, lane, sysop):
+    # A War Dialer world outlives its door and still goes into every backup,
+    # so the page must not say there is no door data (issue #845 review).
+    doors_dir = db.path.parent / (db.path.name + ".doors")
+    doors_dir.mkdir()
+    (doors_dir / "war-dialer.db").write_bytes(b"")
+    session = FakeSession(["s", "k", "PAGE_DOWN", "PAGE_DOWN", "PAGE_DOWN", "b", "b", "b"])
+    _run(session, lane, sysop)
+    text = _visible(_written_text(session))
+    assert "No doors are set up" not in text
+    assert "DOOR DATA IN A BACKUP" in text
+
+
+def test_backup_page_puts_the_schedule_before_door_data(db, lane, sysop, isolated_door_career_directory):
+    isolated_door_career_directory.mkdir()
+    session = FakeSession(["s", "k", "PAGE_DOWN", "PAGE_DOWN", "PAGE_DOWN", "b", "b", "b"])
+    _run(session, lane, sysop)
+    text = _visible(_written_text(session))
     assert "Voidrunner source:" in text
+    assert text.index("SCHEDULE") < text.index("DOOR DATA IN A BACKUP")
 
 
 def test_backup_status_pauses_for_a_keypress_before_returning(db, lane, sysop):
@@ -7090,7 +7169,7 @@ def test_backup_status_hides_history_section_with_only_one_backup(db, lane, syso
     _run(session, lane, sysop)
 
     text = _visible(_written_text(session))
-    assert "LAST BACKUP" in text and "DOOR INSTALLATION DIRECTORIES" in text
+    assert "LAST BACKUP" in text and "DOORS" in text
     assert "RECENT BACKUPS" not in text
 
 
@@ -7816,6 +7895,47 @@ def test_link_status_screen_shows_summary_counts(db, lane, sysop):
     assert "Linked boards: 1" in text
     assert "Known events: 1" in text
     assert "[P]eers" not in text  # no node on the map to pick from
+
+
+def test_link_status_screen_lists_relay_mail_per_recipient_with_its_oldest_deposit(db, lane, sysop):
+    """Issue #891: the relay view shows, per recipient, how much this node
+    holds for it and how long the oldest envelope has waited -- the only way
+    a SysOp can see a recipient that is not coming back before its mail is
+    dropped."""
+    from datetime import datetime, timedelta, timezone
+
+    from netbbs.link.events import build_link_message
+    from netbbs.link.node_identity import bootstrap_node_identity
+    from netbbs.link.relay_mailbox import deposit_relay_mailbox_envelope
+
+    sender = bootstrap_node_identity("sender")
+    recipient = "f" * 64
+
+    def _message(user):
+        return build_link_message(
+            signing_identity=sender.signing_key, home_node_fingerprint=sender.fingerprint,
+            local_user_id=user, recipient_home_node_fingerprint=recipient,
+            recipient_local_user_id="someone", confidentiality_tier="tier1_home_node_key",
+            ciphertext=b"opaque", created_at="2026-01-01T00:00:00+00:00",
+        )
+
+    oldest = _message("first")
+    deposit_relay_mailbox_envelope(db, recipient, oldest)
+    deposit_relay_mailbox_envelope(db, recipient, _message("second"))
+    twelve_days_ago = datetime.now(timezone.utc) - timedelta(days=12, hours=1)
+    db.connection.execute(
+        "UPDATE link_relay_mailbox SET received_at = ? WHERE content_id = ?",
+        (twelve_days_ago.strftime("%Y-%m-%dT%H:%M:%S.%fZ"), oldest.content_id),
+    )
+    db.connection.commit()
+
+    session = FakeSession(["s", "l", "PAGE_DOWN", "b", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop, link_context=_link_context()))
+
+    text = _normalized_visible(_written_text(session))
+    assert "Relay mailbox: 2 envelope(s) held for 1 recipient(s), each kept up to 30 days" in text
+    assert "Held for Envelopes Oldest" in text
+    assert "Unknown node ffffff 2/50 12 days ago" in text
 
 
 def test_link_status_screen_reads_the_current_node_name(db, lane, sysop):
@@ -9420,34 +9540,6 @@ def test_user_picker_keeps_an_active_search_across_a_sort(db, lane, sysop):
     assert "bob" not in after, "the search survived the re-sort"
 
 
-def test_user_picker_status_line_is_re_read_on_every_render(db, lane, sysop):
-    """Captured once, it kept reporting the backup state the screen
-    opened with -- while another session completed a backup, on a screen
-    that advertises Ctrl-R as the way to see current reality (issue
-    #537, Codex review)."""
-    import netbbs.net.admin_flow as admin
-
-    reads = []
-    original = admin._load_condensed_status_line
-
-    async def counting(lane_, *, unicode_style, terminal_width):
-        reads.append(len(reads) + 1)
-        return f"Status read {len(reads)}"
-
-    admin._load_condensed_status_line = counting
-    try:
-        create_user(db, "alice", password="hunter2", user_level=10)
-        # Open the list, press a live key (which redraws), then leave.
-        session = FakeSession(["u", "l", "l", "b", "b", "b"])
-        _run(session, lane, sysop)
-    finally:
-        admin._load_condensed_status_line = original
-
-    assert len(reads) >= 2, f"read {len(reads)} time(s); a redraw must re-read it"
-    text = _visible(_written_text(session))
-    assert f"Status read {len(reads)}" in text, "and the newest read is what is shown"
-
-
 def test_user_picker_forgets_a_search_that_found_nothing(db, lane, sysop):
     """Recording the query before checking for matches meant a search
     that found nothing still became the "active" one -- and the next
@@ -10169,8 +10261,8 @@ def test_a_trust_decision_about_a_node_stops_holding_back_what_it_sent(db, lane,
     register_subject(db, subject, first_accepted_at="2026-08-01T00:00:00.000000Z")
     link_context = _link_context()
     held = link_context.link_node.deferred_events
-    held.entries["c" * 64] = ("boards", "a" * 64, "remote-node", 9e12)
-    held.entries["d" * 64] = ("boards", "a" * 64, "some-other-node", 9e12)
+    held.entries["c" * 64] = ("boards", "a" * 64, "remote-node", 9e12, None, None)
+    held.entries["d" * 64] = ("boards", "a" * 64, "some-other-node", 9e12, None, None)
     session = FakeSession(
         [
             "s", "p", "s", "0", "1",

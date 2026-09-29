@@ -31,6 +31,7 @@ from netbbs.chat import (
 from netbbs.communities import Community, list_communities
 from netbbs.link.boards import LinkContext
 from netbbs.link.mail import acknowledge_delivery_notices, pending_delivery_notices
+from netbbs.mail import acknowledge_eviction_notice, pending_eviction_notice
 from netbbs.mail import unread_count as unread_mail_count
 from netbbs.net.admin_flow import admin_menu, moderation_queue, staff_list_screen, staff_menu
 from netbbs.boards import list_boards
@@ -39,13 +40,14 @@ from netbbs.files import list_file_areas
 from netbbs.net.board_flow import _browse_boards, visible_boards
 from netbbs.net.breadcrumb_preference import breadcrumb_collapsed_enabled
 from netbbs.boards.moderation_notices import acknowledge_moderation_notices, pending_moderation_notices
-from netbbs.net.notices import announce, write_notices
+from netbbs.net.notices import announce, announce_styled, write_notices
 from netbbs.net.char_input import HELP_KEY, REDRAW_KEY, InputHistory, reject_unhandled_key
 from netbbs.net.chat_flow import browse_channels, run_direct_chat_loop, visible_channels
 from netbbs.net.confirm import prompt_yes_no
 from netbbs.net.directory_flow import _browse_directory, _caller_who_screen
 from netbbs.net.door_flow import _visible_doors, browse_doors, has_visible_doors
 from netbbs.net.file_flow import browse_file_areas, visible_areas
+from netbbs.net.mail_arrivals import NOTICE_COLOR as NEW_MAIL_COLOR, arrival_event, login_mail_notice
 from netbbs.net.mail_flow import browse_mail, caller_mail_refusal
 from netbbs.net.main_menu_banner import load_main_menu_banner
 from netbbs.net.menu_description_preference import menu_description_level
@@ -230,8 +232,10 @@ async def _draw_main_menu(
     `notice`, if given, is a result line carried into this redraw (issue
     #659's access-change line) and shown just above the prompt.
     """
+    # Carried above the prompt like any other notice (issue #823): written
+    # here, before the redraw-in-place clear below, they were wiped unseen.
     for text, created_at in mailbox.flush(session):
-        await session.write_line(format_with_preference(db, user, text, created_at))
+        announce_styled(session, format_with_preference(db, user, text, created_at))
 
     has_mail = caller_mail_refusal(session, db, user) is None
     unread = unread_mail_count(db, user) if has_mail else 0
@@ -261,13 +265,15 @@ async def _draw_main_menu(
                 brief="Activity since your last visit",
                 detailed="Scan every accessible message board/chat channel/file area for activity since your last visit.",
             ),
-            # Issue #811: Find searches posts, files and retained chat --
-            # not mail, which only the mailbox's own folder-local [F]ind
-            # filters. Say so rather than promise a mail search.
+            # Find names what it searches (issue #811): the caller's own
+            # mail too (issue #824), for a caller mail is open to.
             MenuEntry(
                 label=menu_key("/", " Find"),
-                brief="Search posts, files, and chat",
-                detailed="Find posts, files, and retained chat on this node.",
+                brief="Search posts, files, chat, mail" if has_mail else "Search posts, files, and chat",
+                detailed=(
+                    "Find posts, files, retained chat, and your own mail on this node." if has_mail
+                    else "Find posts, files, and retained chat on this node."
+                ),
             ),
             # Issue #840 (F116): the main menu had no help at all.
             MenuEntry(label=menu_key("?", " Help"), brief="How this board works"),
@@ -575,8 +581,14 @@ async def _main_menu_loop(
     that one and redraws with the fresh account.
     """
     changed = registry.account_changed_event(session) if registry is not None else None
+    # Issue #823: set when mail arrived and its notice is waiting, so an
+    # idle menu redraws with it above the prompt and the unread count
+    # brought up to date.
+    mail_arrived = arrival_event(session)
     notice: str | None = None
     redraw = True
+    # The first draw is the one after login, which says what mail waits.
+    first_draw = True
     discard_typeahead = False
     while True:
         try:
@@ -609,17 +621,36 @@ async def _main_menu_loop(
                 moderation_lines, moderation_ids = pending_moderation_notices(db, user)
                 for outcome, text in moderation_lines:
                     announce(session, text, tone="success" if outcome == "approved" else "error")
+                # Mail's notices are told together, the Inbox first (issue
+                # #823): what waits there at login, what the cap removed
+                # from it, then the caller's own Link mail that came back.
+                mail_open = caller_mail_refusal(session, db, user) is None
+                if first_draw and mail_open:
+                    waiting = login_mail_notice(unread_mail_count(db, user))
+                    if waiting is not None:
+                        announce(session, waiting, color=NEW_MAIL_COLOR)
+                # Read mail the mailbox cap removed to make room, counted
+                # and told once (issue #818) -- never which messages. Held
+                # for a caller mail is closed to, who has no Inbox to see.
+                eviction_line, evicted = pending_eviction_notice(db, user) if mail_open else (None, 0)
+                if eviction_line is not None:
+                    announce(session, eviction_line, color=WARNING_COLOR)
                 # Link mail of this caller's that bounced or expired, told
                 # once the same way, even if it happened while they were
                 # offline (issue #806).
                 delivery_lines, delivery_ids = pending_delivery_notices(db, user)
                 for text in delivery_lines:
                     announce(session, text, tone="error")
+                if mail_arrived is not None:
+                    # Whatever it announced is drawn now.
+                    mail_arrived.clear()
                 await _draw_main_menu(session, db, mailbox, user, node_controls=node_controls, notice=notice)
                 acknowledge_moderation_notices(db, moderation_ids)
                 acknowledge_delivery_notices(db, delivery_ids)
+                acknowledge_eviction_notice(db, user, evicted)
                 notice = None
                 redraw = False
+                first_draw = False
             set_root_activity(session, None)
             key_task = asyncio.create_task(session.read_key())
             side_tasks: dict[str, asyncio.Task] = {}
@@ -637,6 +668,8 @@ async def _main_menu_loop(
                 # Issue #659: a promotion redraws an idle menu at once, so
                 # the new options appear without a keypress.
                 side_tasks["access"] = asyncio.create_task(changed.wait())
+            if mail_arrived is not None:
+                side_tasks["mail"] = asyncio.create_task(mail_arrived.wait())
             if side_tasks:
                 try:
                     done, _pending = await asyncio.wait(
@@ -662,6 +695,7 @@ async def _main_menu_loop(
                     raise
                 invite_task = side_tasks.get("invite")
                 access_task = side_tasks.get("access")
+                mail_task = side_tasks.get("mail")
                 if invite_task is not None and invite_task in done:
                     side_tasks.pop("invite")
                     stragglers = [key_task, *side_tasks.values()]
@@ -677,7 +711,8 @@ async def _main_menu_loop(
                     # decline or a lapsed invitation above its prompt.
                     redraw = True
                     continue
-                if access_task is not None and access_task in done and key_task not in done:
+                woken = [task for task in (access_task, mail_task) if task is not None and task in done]
+                if woken and key_task not in done:
                     for task in (key_task, *side_tasks.values()):
                         task.cancel()
                     await asyncio.gather(key_task, *side_tasks.values(), return_exceptions=True)
@@ -863,7 +898,8 @@ async def _main_menu_loop(
             elif choice == "r":
                 await session.write_line("")
                 await _previous_callers_screen(
-                    session, db, user, current_history_id=current_history_id
+                    session, db, user, current_history_id=current_history_id,
+                    lane=lane, link_context=link_context,
                 )
                 redraw = True
             elif choice == "w" and node_controls is not None:

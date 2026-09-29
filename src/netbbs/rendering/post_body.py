@@ -43,7 +43,7 @@ from typing import Iterator
 from netbbs.rendering.ansi import CSI, RESET, colored
 from netbbs.rendering.gradient import nearest_256
 from netbbs.rendering.pipe_codes import BACKGROUND_CODES, FOREGROUND_CODES, cga_to_xterm
-from netbbs.rendering.reflow import reflow, wrap_terminal_text
+from netbbs.rendering.reflow import wrap_terminal_text
 from netbbs.rendering.sanitize import sanitize_text
 from netbbs.rendering.theme import MUTED_COLOR
 from netbbs.rendering.width import char_width
@@ -334,31 +334,6 @@ def self_contained_rows(rows: list[str]) -> list[str]:
     return result
 
 
-def _collapse_whitespace(styled: str) -> str:
-    """Every run of whitespace as one space, leading and trailing
-    whitespace dropped -- with color codes taking no part: a code between
-    two spaces is not a word, so ``hello |12 world`` stays one space
-    apart (Codex review on #750)."""
-    parts: list[str] = []
-    pending_space = False
-    seen_text = False
-    position = 0
-    for match in _SGR_RE.finditer(styled + f"{CSI}m"):
-        for char in styled[position:match.start()]:
-            if char.isspace():
-                pending_space = seen_text
-                continue
-            if pending_space:
-                parts.append(" ")
-                pending_space = False
-            parts.append(char)
-            seen_text = True
-        if match.start() < len(styled):
-            parts.append(match.group(0))
-        position = match.end()
-    return "".join(parts)
-
-
 def _visible(text: str) -> str:
     return _SGR_RE.sub("", text)
 
@@ -383,41 +358,6 @@ def _strip_quote_marker(line: str) -> str:
     if rest.startswith(">"):
         rest = rest[1:].lstrip(" ")
     return prefix + rest
-
-
-def colored_body_rows(styled: str, width: int) -> list[str]:
-    """A `styled_post_body` result as reader rows at `width`: reflowed
-    prose, ``>`` quotes muted and rewrapped with their marker, blank lines
-    kept -- the same shape the plain reader gives a body -- with every
-    row standing alone."""
-    runs: list[tuple[str, list[str]]] = []
-    for raw_line in styled.split("\n"):
-        visible = _visible(raw_line).strip()
-        kind = "blank" if not visible else "quote" if visible.startswith(">") else "text"
-        if runs and runs[-1][0] == kind:
-            runs[-1][1].append(raw_line)
-        else:
-            runs.append((kind, [raw_line]))
-
-    # (is a quote row, content): the quote marker is added after the color
-    # state is settled, since its own reset would cancel the state a row
-    # restates.
-    rows: list[tuple[bool, str]] = []
-    for kind, raw_lines in runs:
-        if kind == "blank":
-            # A blank line may still carry a color change; keep it, empty.
-            rows.extend((False, "".join(m.group(0) for m in _SGR_RE.finditer(line))) for line in raw_lines)
-        elif kind == "quote":
-            paragraph = _collapse_whitespace(" ".join(_strip_quote_marker(line) for line in raw_lines))
-            rows.extend((True, wrapped) for wrapped in wrap_terminal_text(paragraph, max(1, width - 2)).split("\r\n"))
-        else:
-            paragraph = _collapse_whitespace(" ".join(raw_lines))
-            rows.extend((False, wrapped) for wrapped in wrap_terminal_text(paragraph, max(1, width)).split("\r\n"))
-    contents = self_contained_rows([content for _quote, content in rows])
-    return [
-        colored("> ", fg_color=MUTED_COLOR) + _muted_quote(content) if quote else content
-        for (quote, _raw), content in zip(rows, contents)
-    ]
 
 
 _MUTED = f"{CSI}38;5;{MUTED_COLOR}m"
@@ -465,8 +405,8 @@ def lined_body_rows(rendered: str, width: int) -> list[str]:
     greeting, list and signature are lines, not a paragraph to rewrap.
 
     ``>`` quote lines are muted and, when they wrap, keep their marker
-    on every row -- the same quote shape `colored_body_rows` gives a
-    post -- and every row stands alone, as in the board reader."""
+    on every row, and every row stands alone. Board posts share it
+    (issue #837)."""
     # (is a quote row, content): the quote marker is added after the color
     # state is settled, since its own reset would cancel the state a row
     # restates.
@@ -486,15 +426,18 @@ def lined_body_rows(rendered: str, width: int) -> list[str]:
 
 def post_body_rows(body: str, width: int, mode: str, *, truecolor: bool, layout: str = "prose") -> list[str]:
     """A post body as reader rows at `width`, in `mode`
-    (`netbbs.rendering.post_body.post_body_mode`): colored, or text laid
-    out by `quoted_body`. The one layout the reader, the review
-    preview and the pending-post screen share (issue #711).
+    (`netbbs.rendering.post_body.post_body_mode`). The one layout the
+    reader, the review preview and the pending-post screen share (issue
+    #711).
 
     A post written in the ANSI art editor (`layout` ``art``) keeps its
-    lines in every mode: `art_body_rows`. `layout` ``lines`` is a mail
-    body's (issue #809): filtered like a post, its lines kept by
-    `lined_body_rows`."""
-    if layout == "lines":
+    lines in every mode: `art_body_rows`. Every other body -- a board's
+    ``prose`` post, a letter's ``lines`` (issue #809) -- keeps the lines its
+    author wrote, through `lined_body_rows`: only a line wider than the
+    screen wraps. Board posts were reflowed into paragraphs until issue
+    #837, which joined lists, sign-offs ("73, Harold") and short lines, and
+    once joined a reply to the "... wrote:" line above it."""
+    if layout != "art":
         return lined_body_rows(render_post_body(body, mode, truecolor=truecolor), width)
     if layout == "art":
         # Its color is the SGR the editor wrote; a pipe code in it is painted
@@ -508,9 +451,6 @@ def post_body_rows(body: str, width: int, mode: str, *, truecolor: bool, layout:
         )
         signed = render_post_body(signature, mode, truecolor=truecolor) if signature else ""
         return art_body_rows(drawn + signed, width)
-    if mode == "color":
-        return colored_body_rows(styled_post_body(body, truecolor=truecolor), width)
-    return quoted_body(render_post_body(body, mode), width).split("\r\n")
 
 
 # -- art posts ------------------------------------------------------------------
@@ -631,43 +571,3 @@ def _hard_wrap(line: str, width: int) -> list[str]:
         position = match.end()
     rows.append("".join(current))
     return rows
-
-
-def quoted_body(body: str, width: int) -> str:
-    """Reflow `body`, coloring `>`-quoted lines in `MUTED_COLOR` (issue
-    #181). Runs `reflow()` per same-kind run of raw lines, not once over
-    the whole body: `reflow()` only paragraph-breaks on a *blank* line,
-    and otherwise collapses single line breaks and rewraps -- so a quote
-    immediately followed by a reply (no blank line between them, the
-    common case) would get merged into one rewrapped line, and a multi-
-    line quote's own wrapped continuation lines would lose their leading
-    `>` and go uncolored. Each quote run has its `>` prefix stripped,
-    gets reflowed as its own paragraph, and has `>` reapplied to every
-    wrapped line, so multi-line quotes wrap and color correctly too.
-
-    A blank line is its own third run kind, output verbatim, never
-    folded into an adjacent quote/text run's own `reflow()` call --
-    a blank separator at a quote/text boundary (`"> quoted\\n\\nreply"`)
-    would otherwise join a run's raw lines with a single `\\n`, one
-    short of the `\\n\\n` `reflow()` needs to even recognize a paragraph
-    break, silently dropping the authored blank line."""
-    runs: list[tuple[str, list[str]]] = []
-    for raw_line in body.split("\n"):
-        stripped_line = raw_line.strip()
-        kind = "blank" if not stripped_line else "quote" if stripped_line.startswith(">") else "text"
-        if runs and runs[-1][0] == kind:
-            runs[-1][1].append(raw_line)
-        else:
-            runs.append((kind, [raw_line]))
-
-    rendered: list[str] = []
-    for kind, raw_lines in runs:
-        if kind == "blank":
-            rendered.extend(raw_lines)
-        elif kind == "quote":
-            stripped = [line.split(">", 1)[1].lstrip(" ") for line in raw_lines]
-            for wrapped_line in reflow("\n".join(stripped), width=max(1, width - 2)).splitlines():
-                rendered.append(colored(f"> {wrapped_line}", fg_color=MUTED_COLOR))
-        else:
-            rendered.extend(reflow("\n".join(raw_lines), width=width).splitlines())
-    return "\r\n".join(rendered)

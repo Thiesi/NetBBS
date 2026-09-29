@@ -65,6 +65,9 @@ _MAX_LIFETIME = {
 _VOUCH_MAX_LIFETIME = timedelta(days=180)
 _FUTURE_TOLERANCE = timedelta(minutes=5)
 _RECOVERY_HOLD = timedelta(hours=24)
+# How long a node, and a caller, must have been known before probation can end.
+_NODE_PROBATION_AGE = timedelta(days=30)
+_USER_PROBATION_AGE = timedelta(days=14)
 
 
 @dataclass(frozen=True)
@@ -561,7 +564,7 @@ def _ordinary_state(
         if subject.kind == "node"
         else subject_row["first_accepted_at"]
     )
-    required_age = timedelta(days=30 if subject.kind == "node" else 14)
+    required_age = _NODE_PROBATION_AGE if subject.kind == "node" else _USER_PROBATION_AGE
     age_ok = now >= _parse_timestamp(first_value, field_name="first accepted") + required_age
     local_rows = db.connection.execute(
         """SELECT dimension, category FROM link_trust_local_observations
@@ -1087,6 +1090,60 @@ def get_effective_trust_state(
         recovery_started_at=row["recovery_started_at"],
         explanation=json.loads(row["explanation_json"]),
         evaluated_at=row["evaluated_at"],
+    )
+
+
+@dataclass(frozen=True)
+class NodeProbation:
+    """How far a node on probation here is from leaving it by itself
+    (issue #844), read from the last evaluation `_ordinary_state` stored.
+
+    `graduates_no_earlier_than` is the day the age requirement is met;
+    `vouch_reporters` is how many trusted reporters here may vouch for nodes,
+    since without two trust domains of them no node ever graduates on its
+    own and only the SysOp's Establish ends probation."""
+
+    known_since: str | None
+    graduates_no_earlier_than: str | None
+    activity_days: int
+    required_activity_days: int
+    vouch_domains: int
+    required_vouch_domains: int
+    vouch_reporters: int
+    active_triggers: int
+
+
+def node_probation(db: Database, fingerprint: str) -> NodeProbation | None:
+    """`NodeProbation` for node `fingerprint`, or None unless it is on
+    ordinary probation here: established, quarantined, blocked, held
+    probationary by an override, or not a subject at all."""
+    subject = TrustSubject.node(fingerprint)
+    row = db.connection.execute(
+        """SELECT e.reason_code, e.explanation_json, s.first_verified_hello_at
+           FROM link_trust_effective_states AS e
+           JOIN link_trust_subjects AS s ON s.subject_id = e.subject_id
+           WHERE e.subject_id = ? AND e.dimension = ? AND e.state = ?""",
+        (subject.subject_id, TrustDimension.IDENTITY_INTEGRITY.value, TrustState.PROBATIONARY.value),
+    ).fetchone()
+    if row is None or row["reason_code"] != "probation_requirements_incomplete":
+        return None
+    explanation = json.loads(row["explanation_json"])
+    known_since = row["first_verified_hello_at"]
+    graduates = None
+    if known_since:
+        graduates = _iso(_parse_timestamp(known_since, field_name="first verified hello") + _NODE_PROBATION_AGE)
+    reporters = db.connection.execute(
+        "SELECT COUNT(*) FROM link_trust_reporters WHERE can_vouch_nodes = 1"
+    ).fetchone()[0]
+    return NodeProbation(
+        known_since=known_since,
+        graduates_no_earlier_than=graduates,
+        activity_days=int(explanation.get("activity_days", 0)),
+        required_activity_days=int(explanation.get("required_activity_days", 3)),
+        vouch_domains=len(explanation.get("vouch_domains", ())),
+        required_vouch_domains=int(explanation.get("required_vouch_domains", 2)),
+        vouch_reporters=int(reporters),
+        active_triggers=int(explanation.get("active_trigger_count", 0)),
     )
 
 

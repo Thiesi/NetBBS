@@ -19,6 +19,7 @@ from netbbs.net.help_overlay import show_help
 from netbbs.net.notices import take_notices, write_notices
 from netbbs.net.session import Session, write_prompt
 from netbbs.net.session_activity import records_activity
+from netbbs.quoting import is_attribution
 from netbbs.rendering.width import display_width
 from netbbs.rendering.pipe_codes import PastedColor
 from netbbs.rendering.post_body import post_body_rows
@@ -230,7 +231,8 @@ async def _show_line_editor_help(session: Session, *, can_save_draft: bool) -> N
     await session.write_line("  /insert N   write the next lines before line N")
     await session.write_line("  /end        write the next lines at the end again")
     await session.write_line("  /edit N     replace line N")
-    await session.write_line("  /delete N   delete line N")
+    await session.write_line("  /delete N   delete line N (/delete N-M deletes lines N to M)")
+    await session.write_line("  /unquote    remove the quoted post (the \"> \" lines and who wrote them)")
     await session.write_line("  /cancel     discard the composition")
     if can_save_draft:
         # Dogfood feature request, issue #149: distinct from /cancel --
@@ -239,6 +241,28 @@ async def _show_line_editor_help(session: Session, *, can_save_draft: bool) -> N
     await session.write_line("  /help, /?   show these commands")
     await session.write_line("  //text      add a line beginning with /")
     await session.write_line("  A blank line starts a new paragraph.")
+    await session.write_line(f"  {FULLSCREEN_EDITOR_HINT}")
+
+
+# Where the other editor is (issue #837): the line editor is the default,
+# and nothing in it said a cursor-addressed one exists.
+FULLSCREEN_EDITOR_HINT = "Prefer arrow keys? Profile > [F]ullscreen editor switches to a fullscreen editor."
+
+
+def _quoted_lines(lines: list[str]) -> set[int]:
+    """The indexes of a reply's quote (issue #837): every "> " line, the
+    "<author> wrote:" line directly above a run of them, and the blank line
+    `quote_body` leaves under the run to write on. Removing them leaves only
+    what the caller wrote, which is how a reply without the quote is made."""
+    quoted = {index for index, line in enumerate(lines) if line.startswith(">")}
+    for index in sorted(quoted):
+        if index - 1 >= 0 and index - 1 not in quoted and is_attribution(lines[index - 1]):
+            quoted.add(index - 1)
+    for index in sorted(quoted):
+        after = index + 1
+        if after < len(lines) and after not in quoted and not lines[after].strip() and lines[index].startswith(">"):
+            quoted.add(after)
+    return quoted
 
 
 async def _show_lines(session: Session, lines: list[str], *, point: int | None = None) -> None:
@@ -258,9 +282,29 @@ async def _show_lines(session: Session, lines: list[str], *, point: int | None =
             await session.write_line(f"     {continuation}")
 
 
+def _is_line_number(text: str) -> bool:
+    """Digits `int()` accepts. `str.isdigit()` also takes "²" (AltGr+2 on a
+    German keyboard), which `int()` rejects -- a crash that ended the
+    session mid-composition (review on #902; as `picker._is_ascii_number`)."""
+    return bool(text) and text.isascii() and text.isdigit()
+
+
+def _parse_line_range(command: str, line_count: int) -> tuple[int, int] | None:
+    """`/delete N` or `/delete N-M` (issue #837): trimming a 19-line quote
+    took 17 commands, one per line."""
+    parts = command.split()
+    if len(parts) != 2:
+        return None
+    first, dash, last = parts[1].partition("-")
+    if not _is_line_number(first) or (dash and not _is_line_number(last)):
+        return None
+    start, end = int(first), int(last) if dash else int(first)
+    return (start, end) if 1 <= start <= end <= line_count else None
+
+
 def _parse_line_number(command: str, line_count: int, *, allow_end: bool = False) -> int | None:
     parts = command.split()
-    if len(parts) != 2 or not parts[1].isdigit():
+    if len(parts) != 2 or not _is_line_number(parts[1]):
         return None
     number = int(parts[1])
     maximum = line_count + 1 if allow_end else line_count
@@ -277,6 +321,7 @@ async def edit_line_body(
     draft_path: Path | None = None,
     keep_pasted_color: bool = False,
     offer_recovery: bool = True,
+    start_at: int | None = None,
 ) -> str | None:
     """Edit a logical-line body without cursor-addressed terminal UI.
 
@@ -315,6 +360,10 @@ async def edit_line_body(
     `netbbs.net.prose_editor.edit_prose`: pasted SGR color is typed in
     as pipe codes. One translator serves the whole body, so a color
     pasted on one line still counts on the next.
+
+    `start_at` starts the caller writing before that line (0-based), as
+    `/insert` would -- a forward's note goes above the letter it carries
+    (issue #822). The listing marks the place, and `/end` leaves it.
     """
     if offer_recovery and draft_path is not None and draft_path.exists():
         if await offer_draft_recovery(session):
@@ -323,8 +372,8 @@ async def edit_line_body(
             delete_draft(draft_path)
     lines = initial_text.split("\n") if initial_text is not None else []
     # Where the next typed line goes: the end, or before a line `/insert`
-    # named (issue #814).
-    point = len(lines)
+    # named (issue #814), or where the caller asked to start.
+    point = len(lines) if start_at is None else max(0, min(start_at, len(lines)))
     # The line just typed was blank: another one finishes.
     blank_pending = False
     # ...and whether that blank went into the text (the cap may refuse it).
@@ -338,8 +387,13 @@ async def edit_line_body(
         "Enter message text. A blank line starts a new paragraph; two blank lines or /done "
         f"review the draft;{exit_hint} /help or /? shows editing commands."
     )
+    await session.write_line(colored(f"({FULLSCREEN_EDITOR_HINT})", fg_color=MUTED_COLOR))
     if lines:
-        await _show_lines(session, lines)
+        await _show_lines(session, lines, point=point if point < len(lines) else None)
+        if _quoted_lines(lines):
+            await session.write_line(
+                colored("(/unquote removes the quote; /delete N-M removes some of its lines.)", fg_color=MUTED_COLOR)
+            )
 
     async def apply(candidate: list[str]) -> bool:
         # A cap refuses growth past it, not every change to a body that is
@@ -468,17 +522,33 @@ async def edit_line_body(
             await apply(candidate)
             continue
         if lowered.startswith("/delete"):
-            number = _parse_line_number(command, len(lines))
-            if number is None:
-                await session.write_line(colored(f"Usage: /delete N (1-{len(lines)})", fg_color=MUTED_COLOR))
-                continue
-            candidate = list(lines)
-            deleted = candidate.pop(number - 1)
-            if await apply(candidate):
-                if number - 1 < point:
-                    point -= 1
+            span = _parse_line_range(command, len(lines))
+            if span is None:
                 await session.write_line(
-                    colored(f"Deleted line {number}: {sanitize_text(deleted)}", fg_color=MUTED_COLOR)
+                    colored(f"Usage: /delete N or /delete N-M (1-{len(lines)})", fg_color=MUTED_COLOR)
+                )
+                continue
+            start, end = span
+            candidate = lines[:start - 1] + lines[end:]
+            deleted = lines[start - 1:end]
+            if await apply(candidate):
+                point -= len(range(start - 1, min(end, point)))
+                if start == end:
+                    said = f"Deleted line {start}: {sanitize_text(deleted[0])}"
+                else:
+                    said = f"Deleted lines {start}-{end}."
+                await session.write_line(colored(said, fg_color=MUTED_COLOR))
+            continue
+        if lowered == "/unquote":
+            quoted = _quoted_lines(lines)
+            if not quoted:
+                await session.write_line(colored("There is no quote to remove.", fg_color=MUTED_COLOR))
+                continue
+            if await apply([line for index, line in enumerate(lines) if index not in quoted]):
+                point -= sum(1 for index in quoted if index < point)
+                count = len(quoted)
+                await session.write_line(
+                    colored(f"Removed the quote ({count} line{'' if count == 1 else 's'}).", fg_color=MUTED_COLOR)
                 )
             continue
         if raw.startswith("//"):

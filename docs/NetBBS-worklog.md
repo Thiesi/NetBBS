@@ -1106,7 +1106,17 @@ messages.
   `sender_label`: a SysOp may create an account named "System".
 - System mail is written with `sender_deleted_at` already set: nobody's Sent
   holds it, so the recipient's delete must hard-delete the row, not leave it
-  behind with no one able to remove it.
+  behind with no one able to remove it. Received Link mail is written the
+  same way (issue #818).
+- `recipient_user_id IS NULL` means Link mail this node sent
+  (`recipient_remote_address` set) or local mail whose recipient's account
+  was deleted (neither; `recipient_label` keeps the name). Both user FKs are
+  ON DELETE SET NULL since migration 97, and the table's CHECK refuses a row
+  with neither recipient unless `recipient_deleted_at` is set. So any code
+  that removes a `users` row must first run
+  `netbbs.mail.release_mail_of_deleted_account_without_commit` in the same
+  transaction, as `delete_user` does; skipping it fails the DELETE with a
+  CHECK error rather than orphaning mail.
 - Read receipts are not part of the current model.
 - `created_at` is when a letter was written, not when it arrived: received
   Link mail keeps its sender's signed time (issue #808). Anything ordering a
@@ -1121,6 +1131,15 @@ messages.
 - `deliver_link_message` runs after the envelope is saved and marked known,
   so an exception there loses the letter with no answer to anyone; every
   failure must end in a bounce.
+- A relay deposit ends a letter's `link_mail_delivery` work item
+  (`record_success`), so no dead-letter will ever expire it. What gives up on
+  it is `link_relay_handoff_at` (issue #874): set when the deposit succeeds,
+  checked every sync pass by `expire_unanswered_relay_mail`, which expires
+  the letter as `no_answer` 14 days later. "With a relay" is a display state
+  derived from `pending` plus that column, not a stored status, so every
+  guard written against `'pending'` still covers it. The relay's own
+  retention (issue #891) must stay longer than that timeout, or a slow
+  recipient loses the letter while its sender still reads "no answer yet".
 
 ### Signature auto-append: idempotency, not a "first compose only" flag
 
@@ -1759,6 +1778,19 @@ to collect the affected root/file ids with a `SELECT` *before* running the
 bulk `UPDATE`/`DELETE`, since `reindex_post`/`reindex_file` need to be
 called once per affected id afterward and a set-based statement doesn't
 otherwise expose which rows it touched.
+
+`mail_search` (issue #824) is keyed by rowid = `mail_messages.id`, not an
+UNINDEXED id column: a letter is removed by rowid on every hard delete, and
+an FTS5 filter on an UNINDEXED column scans the whole table. Every
+`INSERT INTO mail_messages` must call `index_mail_without_commit` before its
+commit and every `DELETE FROM mail_messages` must call
+`unindex_mail_without_commit` (bulk deletes go through
+`netbbs.mail._delete_letters_without_commit`, which collects the ids first);
+the entry is private text, so a missed delete leaves words of a letter
+nobody has behind. Setting a side's `*_deleted_at` changes nothing in the
+index: whose mailbox a letter is in is read from the row at query time. A
+test that inserts a `mail_messages` row with raw SQL gets no index entry,
+so Find will not see its body.
 
 **Content-hash IDs are not orderable by recency (GitHub issue #68, fixed).**
 `_resolve_current_version` and `edit_post`'s own "current revision" lookup

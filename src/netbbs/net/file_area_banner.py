@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from netbbs.config import get_config, set_config
-from netbbs.rendering import RESET, decode_ansi_bytes
+from netbbs.rendering import RESET, decode_banner_bytes
 from netbbs.storage.database import Database
 
 _logger = logging.getLogger(__name__)
@@ -115,4 +115,4 @@ def load_file_area_banner(db: Database) -> str:
     # the real, dynamic file-area list is drawn immediately after this,
     # and must never inherit color state left open by the masthead's own
     # art.
-    return decode_ansi_bytes(data) + RESET
+    return decode_banner_bytes(data) + RESET

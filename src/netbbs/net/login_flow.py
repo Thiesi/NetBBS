@@ -24,6 +24,7 @@ piece every other screen module is ultimately reached through.
 from __future__ import annotations
 
 import asyncio
+import logging
 from enum import Enum, auto
 from pathlib import Path
 
@@ -50,6 +51,7 @@ from netbbs.mrc.bridge import MrcBridge
 from netbbs.net.char_input import InputHistory
 from netbbs.net.confirm import prompt_yes_no
 from netbbs.net.logoff_banner import load_logoff_banner
+from netbbs.net.mail_arrivals import watch_for_mail
 from netbbs.net.main_menu import _main_menu
 from netbbs.net.maintenance import LOCKDOWN_MESSAGE, LOCKDOWN_NOTICE, MAINTENANCE_MESSAGE, MaintenanceMode
 from netbbs.net.onboarding_flow import offer_onboarding
@@ -81,7 +83,7 @@ from netbbs.net.unicode_style_preference import (
     unicode_style_ever_set,
 )
 from netbbs.guest import guest_is_eligible, guest_login_for, pre_login_notice
-from netbbs.net.welcome_banner import load_welcome_banner
+from netbbs.net.welcome_banner import load_welcome_banner, pre_login_unicode_style
 from netbbs.permissions import meets_level
 from netbbs.rendering import (
     ACCENT_COLOR,
@@ -115,6 +117,8 @@ _MAX_LOGIN_ATTEMPTS = 3
 # for a real disable/delete, cheap enough that one extra SELECT per
 # live session per interval is a non-issue at this project's declared
 # scale (§14, dozens to low hundreds of concurrent sessions).
+_logger = logging.getLogger(__name__)
+
 _REVOCATION_CHECK_INTERVAL_SECONDS = 5.0
 
 # Bounds the watcher's own "you're disconnected" notice (GitHub issue
@@ -143,12 +147,10 @@ async def _write_connection_notice(
 ) -> None:
     """Render a terminal connection state without changing its outcome.
 
-    Unconditionally `unicode_style=True` (no `clear=`/ASCII-fallback
-    split like most other screens): this fires pre-authentication, with
-    no account/preference to look up yet, and NetBBS's Telnet transport
-    already sends every screen as UTF-8 regardless of any preference
-    (see `unicode_style_preference`'s own docstring) -- the same
-    reasoning `welcome_banner`'s default banner already uses. `db` is
+    This fires pre-authentication, with no account/preference to look
+    up yet, so its style follows the transport instead
+    (`welcome_banner.pre_login_unicode_style`, issue #841): plain ASCII
+    over Telnet, where CP437 terminals call from, Unicode elsewhere. `db` is
     read directly and synchronously here rather than via `lane.run`
     (issue #162's header-color sweep) -- every call site is a
     connection-lifecycle notice that fires before or around login, the
@@ -181,11 +183,11 @@ async def _write_connection_notice(
             title,
             breadcrumb=(),
             width=width,
-            unicode_style=True,
+            unicode_style=pre_login_unicode_style(session),
             header_color=header_color,
         )
     )
-    await session.write_line(status_badge(title.upper(), tone=tone, unicode_style=True))
+    await session.write_line(status_badge(title.upper(), tone=tone, unicode_style=pre_login_unicode_style(session)))
     await session.write_line(
         colored(reflow(detail, width=width), fg_color=METADATA_COLOR)
     )
@@ -382,7 +384,10 @@ async def _run_authenticated_session(
 
     try:
         await write_preformatted_line(
-            session, load_welcome_banner(db, truecolor=session.supports_truecolor)
+            session,
+            load_welcome_banner(
+                db, truecolor=session.supports_truecolor, unicode_style=pre_login_unicode_style(session)
+            ),
         )
         # Design doc -- node management, Thiesi's own request: shown to
         # *every* connecting client, SysOp-to-be or not -- account level
@@ -771,6 +776,7 @@ async def run_authenticated_session(
     completed_history_entry = None
     intentional_logoff = False
     watcher_task: asyncio.Task | None = None
+    mail_watch_task: asyncio.Task | None = None
     # Issue #762: onboarding, the Unicode question and the previous-callers
     # screen come before the main menu, which is what empties the trail.
     set_root_activity(session, "Logging in")
@@ -785,6 +791,9 @@ async def run_authenticated_session(
         watcher_task = asyncio.create_task(
             _watch_for_account_revocation(session, db, user, node_controls.session_registry)
         )
+        # Issue #823: mail that arrives while this caller is online is
+        # announced, live in chat and at the next screen elsewhere.
+        mail_watch_task = asyncio.create_task(watch_for_mail(session, db, user))
     try:
         if lane is not None and meets_level(user, SYSOP_LEVEL):
             await offer_onboarding(session, lane)
@@ -810,6 +819,10 @@ async def run_authenticated_session(
             current_history_id=history_id,
         )
     finally:
+        if mail_watch_task is not None:
+            # First, before anything here can raise: nothing else stops it,
+            # and it would poll for a session that is gone (review on #898).
+            mail_watch_task.cancel()
         presence.leave(user.username)
         if (
             not presence.is_online(user.username)
@@ -831,6 +844,16 @@ async def run_authenticated_session(
                 await watcher_task
             except asyncio.CancelledError:
                 pass
+        if mail_watch_task is not None:
+            # Retrieved last, so it adds no wait before the account watcher
+            # is stopped. A failure of its own is logged rather than raised
+            # from here, where it would mask how the session ended.
+            try:
+                await mail_watch_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                _logger.exception("New-mail watcher for %s failed", user.username)
 
     # GitHub issue #177: only reached when `_main_menu` returns normally,
     # not when it (or anything nested under it) raises -- which covers
@@ -1151,10 +1174,8 @@ async def _login(
             ),
             width=session.terminal_width,
             # Pre-authentication -- no account/preference to look up yet,
-            # and every screen is already sent as UTF-8 regardless (see
-            # `unicode_style_preference`'s own docstring), same reasoning
-            # `_write_connection_notice` and the welcome banner both use.
-            unicode_style=True,
+            # so the transport decides (see `_write_connection_notice`).
+            unicode_style=pre_login_unicode_style(session),
             header_color=effective_header_color_256(db),
         )
     )
@@ -1448,7 +1469,7 @@ async def _register_new_account(
                     f"(Attempt {attempt} of {_REGISTRATION_MAX_ATTEMPTS})"
                 ),
                 width=session.terminal_width,
-                unicode_style=True,  # pre-authentication -- see _write_connection_notice
+                unicode_style=pre_login_unicode_style(session),  # pre-authentication -- see _write_connection_notice
                 header_color=effective_header_color_256(db),
             )
         )

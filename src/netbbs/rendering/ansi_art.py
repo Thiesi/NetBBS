@@ -16,6 +16,8 @@ strip every escape sequence and destroy the art.
 
 from __future__ import annotations
 
+import re
+
 from netbbs.rendering.ansi import BOLD, RESET
 from netbbs.rendering.ansi import bg as ansi_bg
 from netbbs.rendering.ansi import bg_rgb as ansi_bg_rgb
@@ -45,6 +47,74 @@ def decode_ansi_bytes(data: bytes) -> str:
         return data.decode("utf-8")
     except UnicodeDecodeError:
         return data.decode("cp437")
+
+
+_CSI = re.compile(r"\x1b\[([0-9;?]*)([@-~])")
+
+
+def _sgr_paints_spaces(params: str, painting: bool) -> bool:
+    """Whether spaces are visible after the SGR sequence `params`, given
+    whether they were before: a background colour or reverse video paints
+    them, a reset or the default background (49) / no-reverse (27) stops
+    that. Background and reverse are tracked as one flag, which errs
+    towards keeping a row."""
+    values = params.split(";") if params else ["0"]
+    index = 0
+    while index < len(values):
+        value = int(values[index]) if values[index].isdigit() else 0
+        if value in (38, 48):
+            # 38/48;5;n and 38/48;2;r;g;b carry their own arguments.
+            if value == 48:
+                painting = True
+            index += 3 if index + 1 < len(values) and values[index + 1] == "5" else 5
+            continue
+        if value == 0:
+            painting = False
+        elif value == 7 or 40 <= value <= 47 or 100 <= value <= 107:
+            painting = True
+        elif value in (27, 49):
+            painting = False
+        index += 1
+    return painting
+
+
+def _blank_rows(rows: list[str]) -> list[bool]:
+    """For each row, whether it shows nothing: only spaces once its escape
+    sequences are removed, and never painted by a background colour or
+    reverse video -- including one set on an earlier row and still in
+    force, as art from TheDraw or PabloDraw leaves it (review on #889)."""
+    blank: list[bool] = []
+    painting = False
+    for row in rows:
+        painted = painting
+        for params, final in _CSI.findall(row):
+            if final == "m":
+                painting = _sgr_paints_spaces(params, painting)
+                painted = painted or painting
+        blank.append(not painted and not _CSI.sub("", row).strip(" \t\r"))
+    return blank
+
+
+def trim_trailing_blank_rows(text: str) -> str:
+    """`text` without the empty rows at its end (issue #841).
+
+    The art editor saves its whole canvas, 24 rows, blank ones included, so
+    a seven-line signup banner arrived with 17 empty rows under it and
+    scrolled its own text off an 80x25 screen before the caller could read
+    it. A row is empty when it holds only spaces and escape sequences that
+    paint nothing (no background colour, no reverse video). Rows inside the
+    art are kept, however empty: only the tail goes."""
+    rows = text.split("\n")
+    blank = _blank_rows(rows)
+    while rows and blank[len(rows) - 1]:
+        rows.pop()
+    return "\n".join(rows).rstrip("\r")
+
+
+def decode_banner_bytes(data: bytes) -> str:
+    """`decode_ansi_bytes` for art shown as a banner or masthead: decoded,
+    then trimmed of the empty rows at its end (`trim_trailing_blank_rows`)."""
+    return trim_trailing_blank_rows(decode_ansi_bytes(data))
 
 
 def encode_ansi_bytes(buffer: ScreenBuffer) -> bytes:

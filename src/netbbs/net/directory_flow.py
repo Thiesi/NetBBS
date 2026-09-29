@@ -17,12 +17,13 @@ from netbbs.auth.users import AuthError, User, get_user_by_username, list_users
 from netbbs.chat import ChatHub, DirectChatInvites, PresenceRegistry
 from netbbs.directory import get_vcard, has_bio, is_bio_visible
 from netbbs.link.boards import LinkContext
-from netbbs.link.node_profiles import identity_for_fingerprint, link_address_label, name_key
+from netbbs.link.node_profiles import identity_for_fingerprint, link_address_label, presentations_confusable
 from netbbs.doors import list_doors
 from netbbs.messaging_preferences import accepts_direct_messages
 from netbbs.net.breadcrumb_preference import breadcrumb_collapsed_enabled
 from netbbs.net.char_input import reject_unhandled_key
 from netbbs.net.chat_flow import run_direct_chat_invite_flow
+from netbbs.net.mail_flow import mail_open_to, mail_someone
 from netbbs.net.menu_description_preference import menu_description_level
 from netbbs.net.node_map_flow import (
     MAP_HOTKEY,
@@ -32,6 +33,7 @@ from netbbs.net.node_map_flow import (
     node_map_screen,
 )
 from netbbs.net.node_theme import effective_accent_color, effective_header_color
+from netbbs.net.notices import write_notices
 from netbbs.net.picker import pick_item
 from netbbs.net.redraw_preference import redraw_in_place_enabled
 from netbbs.net.session import Session, write_prompt
@@ -114,7 +116,7 @@ async def _browse_directory(
         )
         if selected is None:
             return
-        await _show_vcard(session, db, selected, user)
+        await _show_vcard(session, db, selected, user, lane=lane, link_context=link_context)
 
 
 def _directory_description(db: Database, target: User) -> str:
@@ -135,10 +137,51 @@ def _directory_description(db: Database, target: User) -> str:
     return f"[{bio_state}] member since {when}"
 
 
-async def _show_vcard(session: Session, db: Database, target: User, requesting_user: User) -> None:
+async def _show_vcard(
+    session: Session, db: Database, target: User, requesting_user: User, *,
+    lane: DatabaseLane | None = None, link_context: LinkContext | None = None,
+) -> None:
     """finger-style detail view — `get_vcard` already resolves
     visibility (always visible to yourself, otherwise only if the
-    target has opted in)."""
+    target has opted in).
+
+    Issue #821: a screen of its own, with `[M]ail` to write to the member
+    (not offered on your own card, nor while mail is closed to you) and
+    `[B]ack` to the directory. Before it the card was written and the
+    directory redrawn straight over it, so with redraw-in-place on it was
+    never seen. After a letter is sent or given up the card comes back,
+    with the outcome above its prompt."""
+    while True:
+        offer_mail = (
+            lane is not None and target.id != requesting_user.id
+            and await mail_open_to(session, lane, requesting_user)
+        )
+        await _draw_vcard(session, db, target, requesting_user)
+        entries = []
+        if offer_mail:
+            entries.append(MenuEntry(label=menu_key("M", "ail"), brief=f"Write to {sanitize_text(target.username)}"))
+        entries.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to the directory"))
+        await session.write_line(
+            "\r\n" + menu_row(
+                entries, width=session.terminal_width, height=session.terminal_height,
+                description_level=menu_description_level(db, requesting_user),
+            )
+        )
+        await write_notices(session)
+        await write_prompt(session, "Choice: ")
+        while True:
+            action = (await session.read_key()).lower()
+            if action == "b" or (offer_mail and action == "m"):
+                await session.write_line("")
+                break
+            await session.write(reject_unhandled_key(action))
+        if action == "b":
+            return
+        assert lane is not None  # offer_mail's own condition
+        await mail_someone(session, lane, requesting_user, recipient=target, link_context=link_context)
+
+
+async def _draw_vcard(session: Session, db: Database, target: User, requesting_user: User) -> None:
     vcard = get_vcard(db, target, requesting_user=requesting_user)
     when = format_for_display(vcard.created_at, db)
     username = sanitize_text(vcard.username)
@@ -253,17 +296,18 @@ def _remote_who_entries(db: Database, link_context: LinkContext | None) -> list[
     if link_context is None or link_context.realtime_bridge is None:
         return []
     presence = link_context.realtime_bridge.remote_node_presence()
-    labels = {
-        fingerprint: identity_for_fingerprint(db, fingerprint).label
-        for fingerprint in presence
+    identities = {fingerprint: identity_for_fingerprint(db, fingerprint) for fingerprint in presence}
+    confusable = {
+        fingerprint for fingerprint, identity in identities.items()
+        if any(
+            presentations_confusable(identity, other)
+            for other_fingerprint, other in identities.items() if other_fingerprint != fingerprint
+        )
     }
-    label_owners: dict[str, set[str]] = {}
-    for fingerprint, label in labels.items():
-        label_owners.setdefault(name_key(label), set()).add(fingerprint)
     return [
         _RemoteWhoEntry(
-            node_fingerprint=fingerprint, username=username, node_label=labels[fingerprint],
-            show_fingerprint=len(label_owners[name_key(labels[fingerprint])]) > 1,
+            node_fingerprint=fingerprint, username=username, node_label=identities[fingerprint].label,
+            show_fingerprint=fingerprint in confusable,
         )
         for fingerprint, online in presence.items()
         for username in online
@@ -321,11 +365,13 @@ async def _caller_who_screen(
     A target who has opted out (`netbbs.messaging_preferences.
     accepts_direct_messages`, default `True`) still appears in the list
     -- this screen answers "who's online", not "who's reachable" -- but
-    acting on them at all is refused up front, before offering either
-    action, with a plain explanation rather than a silently swallowed
-    attempt. Choosing not to receive unsolicited direct messages
-    reasonably also means not receiving direct-chat invites -- one
-    check gates both, not two independent ones.
+    neither live action is offered for them, with a plain explanation
+    rather than a silently swallowed attempt. Choosing not to receive
+    unsolicited direct messages reasonably also means not receiving
+    direct-chat invites -- one check gates both, not two independent ones.
+    It does not close mail (issue #821): `[E]-mail` is offered to anyone
+    listed, local or on a linked node, while mail is open to the caller,
+    and opens the compose screen addressed to them.
 
     `[I]nvite to chat` is only offered when both `direct_invites` and
     `lane` are given (`run_direct_chat_invite_flow` needs both) -- same
@@ -341,15 +387,44 @@ async def _caller_who_screen(
         ]
         return local + _remote_who_entries(db, link_context)
 
+    async def _choose(options: list[tuple[str, MenuEntry]]) -> str:
+        """Draw the action row, then read one of its keys."""
+        await session.write_line(
+            menu_row(
+                [entry for _, entry in options], width=session.terminal_width, height=session.terminal_height,
+                description_level=menu_description_level(db, user),
+            )
+        )
+        await write_prompt(session, "Choice: ")
+        keys = {key for key, _ in options}
+        while True:
+            action = (await session.read_key()).lower()
+            if action in keys:
+                await session.write_line("")
+                return action
+            await session.write(reject_unhandled_key(action))
+
+    _E_MAIL = ("e", MenuEntry(label=menu_key("E", "-mail"), brief="Write them a letter"))
+    _BACK = ("b", MenuEntry(label=menu_key("B", "ack"), brief="Return to Who's online"))
+
     async def _act_on(selected: _WhoEntry) -> bool:
         """Returns whether an outcome was written that the caller should
-        get to read before the list is redrawn over it."""
+        get to read before the list is redrawn over it. `[E]-mail` (issue
+        #821) announces its outcome instead, which the list shows above its
+        prompt, so it returns `False`."""
+        # Mail is offered to anyone listed, while mail is open to the caller
+        # (issue #816) -- it needs the lane `mail_someone` runs on.
+        mail_open = lane is not None and await mail_open_to(session, lane, user)
         if isinstance(selected, _RemoteWhoEntry):
             # Issue #168: a one-off live message across nodes, over a direct
             # or relayed real-time session; chat invites stay local-only.
             from netbbs.net.link_direct import send_live_direct_message
 
-            if lane is None or link_context is None or link_context.direct_chat is None:
+            live = lane is not None and link_context is not None and link_context.direct_chat is not None
+            # Link mail goes to their stable `user@<fingerprint>`, checked
+            # like a Link reply's address (issue #805).
+            offer_mail = mail_open and link_context is not None
+            if not live and not offer_mail:
                 await session.write_line(
                     colored(
                         f"{sanitize_text(selected.username)} is connected to a different linked node -- live "
@@ -368,7 +443,10 @@ async def _caller_who_screen(
                 "\r\n" + screen_title(
                     link_address_label(sanitize_text(selected.username), sanitize_text(node_label)),
                     breadcrumb=(session.node_display_name, "Who's online"),
-                    subtitle="Connected to a different linked node -- a live one-off message is available.",
+                    subtitle=(
+                        "Connected to a different linked node -- a live one-off message is available."
+                        if live else "Connected to a different linked node."
+                    ),
                     width=session.terminal_width,
                     clear=redraw_in_place_enabled(db, user),
                     unicode_style=unicode_style_enabled(db, user),
@@ -377,25 +455,23 @@ async def _caller_who_screen(
                     node_name_gradient=session.node_name_gradient,
                 )
             )
-            await session.write_line(
-                menu_row(
-                    [
-                        MenuEntry(label=menu_key("M", "essage"), brief="Send a one-off live message"),
-                        MenuEntry(label=menu_key("B", "ack"), brief="Return to Who's online"),
-                    ],
-                    width=session.terminal_width, height=session.terminal_height,
-                    description_level=menu_description_level(db, user),
-                )
-            )
-            await write_prompt(session, "Choice: ")
-            while True:
-                action = (await session.read_key()).lower()
-                if action in ("m", "b"):
-                    await session.write_line("")
-                    break
-                await session.write(reject_unhandled_key(action))
+            options = []
+            if live:
+                options.append(("m", MenuEntry(label=menu_key("M", "essage"), brief="Send a one-off live message")))
+            if offer_mail:
+                options.append(_E_MAIL)
+            options.append(_BACK)
+            action = await _choose(options)
             if action == "b":
                 return False
+            if action == "e":
+                assert lane is not None  # offer_mail's own condition
+                await mail_someone(
+                    session, lane, user, link_address=f"{selected.username}@{selected.node_fingerprint}",
+                    link_context=link_context,
+                )
+                return False
+            assert lane is not None and link_context is not None  # live's own condition
             await write_prompt(
                 session, f"Message to {link_address_label(sanitize_text(selected.username), sanitize_text(node_label))}: "
             )
@@ -416,18 +492,28 @@ async def _caller_who_screen(
             await session.write_line(colored("That account no longer exists.", fg_color=ERROR_COLOR))
             return True
 
-        if not accepts_direct_messages(db, target):
+        # Your own account, signed in on another connection, is listed too;
+        # mail to yourself is not offered.
+        offer_mail = mail_open and target.id != user.id
+        # Opting out of direct messages (and so of chat invites) is not
+        # opting out of mail (issue #821): such a caller is still offered
+        # [E]-mail, and told why nothing else is.
+        live = accepts_direct_messages(db, target)
+        if not live and not offer_mail:
             await session.write_line(
                 colored(f"{target.username} has opted out of receiving direct messages.", fg_color=MUTED_COLOR)
             )
             return True
 
-        offer_invite = direct_invites is not None and lane is not None
+        offer_invite = live and direct_invites is not None and lane is not None
         await session.write_line(
             "\r\n" + screen_title(
                 target.username,
                 breadcrumb=(session.node_display_name, "Who's online"),
-                subtitle="Choose how you would like to connect.",
+                subtitle=(
+                    "Choose how you would like to connect." if live
+                    else f"{target.username} has opted out of direct messages; e-mail still reaches them."
+                ),
                 width=session.terminal_width,
                 clear=redraw_in_place_enabled(db, user),
                 unicode_style=unicode_style_enabled(db, user),
@@ -435,25 +521,21 @@ async def _caller_who_screen(
                 header_color=effective_header_color(session, db),
             node_name_gradient=session.node_name_gradient)
         )
-        options = [MenuEntry(label=menu_key("M", "essage"), brief="Send a one-off message")]
+        options = []
+        if live:
+            options.append(("m", MenuEntry(label=menu_key("M", "essage"), brief="Send a one-off message")))
         if offer_invite:
-            options.append(MenuEntry(label=menu_key("I", "nvite to chat"), brief="Invite them to a direct chat"))
-        options.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to Who's online"))
-        await session.write_line(
-            menu_row(
-                options, width=session.terminal_width, height=session.terminal_height,
-                description_level=menu_description_level(db, user),
-            )
-        )
-        await write_prompt(session, "Choice: ")
-        while True:
-            action = (await session.read_key()).lower()
-            if action == "b" or action == "m" or (offer_invite and action == "i"):
-                await session.write_line("")
-                break
-            await session.write(reject_unhandled_key(action))
+            options.append(("i", MenuEntry(label=menu_key("I", "nvite to chat"), brief="Invite them to a direct chat")))
+        if offer_mail:
+            options.append(_E_MAIL)
+        options.append(_BACK)
+        action = await _choose(options)
 
         if action == "b":
+            return False
+        if action == "e":
+            assert lane is not None  # offer_mail's own condition
+            await mail_someone(session, lane, user, recipient=target, link_context=link_context)
             return False
         if action == "i":
             assert direct_invites is not None and lane is not None  # offer_invite's own condition

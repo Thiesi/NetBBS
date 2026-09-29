@@ -3627,4 +3627,122 @@ MIGRATIONS = [
         CREATE INDEX idx_mail_blocks_blocked_user ON mail_blocks(blocked_user_id);
         """,
     ),
+    Migration(
+        description=(
+            "Issue #818: deleting an account no longer deletes the Sent copies of the mail it "
+            "received. `mail_messages` is rebuilt (SQLite cannot change a foreign key in place; "
+            "the same child-table rebuild as the 'Link messages' migration, safe because no "
+            "table references mail_messages) with `recipient_user_id` ON DELETE SET NULL, like "
+            "`sender_user_id`, and a new `recipient_label`: the deleted recipient's name, which "
+            "the sender's Sent copy shows. `netbbs.mail.release_mail_of_deleted_account_"
+            "without_commit` marks the deleted account's side first, so the relaxed CHECK still "
+            "refuses a row with no recipient of either kind unless its recipient side is "
+            "deleted. Every column and index migrations 93-94 added is carried over. "
+            "Rows no one could see any more are cleaned up: mail with no local sender "
+            "(received over Link, or from an account already deleted) gets its sender side "
+            "marked deleted, so the recipient's delete removes it, and such rows the recipient "
+            "already deleted are removed now. Also `mail_eviction_notices`: how many read "
+            "messages the mailbox cap removed from an account since its owner was last told."
+        ),
+        sql="""
+        CREATE TABLE mail_messages_new (
+            id                            INTEGER PRIMARY KEY,
+            sender_user_id                INTEGER REFERENCES users(id) ON DELETE SET NULL,
+            sender_label                  TEXT NOT NULL,
+            recipient_user_id             INTEGER REFERENCES users(id) ON DELETE SET NULL,
+            recipient_remote_address      TEXT,
+            subject                       TEXT NOT NULL,
+            body                          TEXT NOT NULL,
+            created_at                    TEXT NOT NULL,
+            read_at                       TEXT,
+            sender_deleted_at             TEXT,
+            recipient_deleted_at          TEXT,
+            link_event_json               TEXT,
+            link_event_content_id         TEXT,
+            link_delivery_status          TEXT CHECK (
+                link_delivery_status IN ('pending', 'delivered', 'bounced', 'expired')
+                OR link_delivery_status IS NULL
+            ),
+            link_source_event_id          TEXT,
+            link_delivery_reason          TEXT,
+            link_delivery_notice_pending  INTEGER NOT NULL DEFAULT 0,
+            from_system                   INTEGER NOT NULL DEFAULT 0 CHECK (from_system IN (0, 1)),
+            recipient_label               TEXT,
+            CHECK (recipient_user_id IS NULL OR recipient_remote_address IS NULL),
+            CHECK (
+                recipient_user_id IS NOT NULL
+                OR recipient_remote_address IS NOT NULL
+                OR recipient_deleted_at IS NOT NULL
+            )
+        );
+        INSERT INTO mail_messages_new
+            (id, sender_user_id, sender_label, recipient_user_id, recipient_remote_address,
+             subject, body, created_at, read_at, sender_deleted_at, recipient_deleted_at,
+             link_event_json, link_event_content_id, link_delivery_status, link_source_event_id,
+             link_delivery_reason, link_delivery_notice_pending, from_system)
+            SELECT id, sender_user_id, sender_label, recipient_user_id, recipient_remote_address,
+                subject, body, created_at, read_at, sender_deleted_at, recipient_deleted_at,
+                link_event_json, link_event_content_id, link_delivery_status, link_source_event_id,
+                link_delivery_reason, link_delivery_notice_pending, from_system
+            FROM mail_messages;
+        DROP TABLE mail_messages;
+        ALTER TABLE mail_messages_new RENAME TO mail_messages;
+        CREATE INDEX idx_mail_messages_recipient
+            ON mail_messages(recipient_user_id, recipient_deleted_at, created_at);
+        CREATE INDEX idx_mail_messages_sender
+            ON mail_messages(sender_user_id, sender_deleted_at, created_at);
+        CREATE INDEX idx_mail_messages_link_event_content_id
+            ON mail_messages(link_event_content_id)
+            WHERE link_event_content_id IS NOT NULL;
+        CREATE INDEX idx_mail_messages_link_pending
+            ON mail_messages(link_delivery_status)
+            WHERE link_delivery_status = 'pending';
+        CREATE INDEX idx_mail_messages_link_delivery_notice
+            ON mail_messages(sender_user_id)
+            WHERE link_delivery_notice_pending = 1;
+
+        UPDATE mail_messages
+           SET sender_deleted_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+         WHERE sender_user_id IS NULL AND recipient_remote_address IS NULL AND sender_deleted_at IS NULL;
+        DELETE FROM mail_messages
+         WHERE sender_deleted_at IS NOT NULL AND recipient_deleted_at IS NOT NULL;
+
+        CREATE TABLE mail_eviction_notices (
+            user_id  INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+            evicted  INTEGER NOT NULL
+        );
+        """,
+    ),
+    Migration(
+        description=(
+            "Issue #874: `mail_messages.link_relay_handoff_at` -- when this node left a "
+            "still-pending Link letter in a relay mailbox for its recipient's node to collect. "
+            "The letter stays `pending`; Sent shows it as with a relay, and the sync pass "
+            "expires it with reason `no_answer` once 14 days pass with no answer. NULL for "
+            "every existing row: a pending letter cannot be told apart from one pushed "
+            "directly, so mail handed to a relay before this migration keeps waiting as before."
+        ),
+        sql="""
+        ALTER TABLE mail_messages ADD COLUMN link_relay_handoff_at TEXT;
+        CREATE INDEX idx_mail_messages_link_relay_handoff
+            ON mail_messages(link_relay_handoff_at)
+            WHERE link_delivery_status = 'pending' AND link_relay_handoff_at IS NOT NULL;
+        """,
+    ),
+    Migration(
+        description=(
+            "Issue #824: `mail_search`, an FTS5 table of every letter's subject and plain-text "
+            "body, so the main menu's Find searches the caller's own mail the way it searches "
+            "posts. One entry per `mail_messages` row, its rowid the letter's id, written and "
+            "removed with the row by `netbbs.mail`/`netbbs.link.mail` (`netbbs.search."
+            "index_mail_without_commit`/`unindex_mail_without_commit`). Whose mailbox a letter "
+            "is in is not indexed: Find reads that from the row. Every letter already stored "
+            "is indexed now."
+        ),
+        sql="""
+        CREATE VIRTUAL TABLE mail_search USING fts5(subject, body);
+        INSERT INTO mail_search (rowid, subject, body)
+        SELECT id, subject, netbbs_plain_post_body(body) FROM mail_messages;
+        """,
+    ),
 ]

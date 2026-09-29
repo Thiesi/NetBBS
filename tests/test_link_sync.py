@@ -1233,10 +1233,65 @@ def test_full_relay_round_trip_delivers_a_message_to_an_outgoing_only_recipient(
 
         # The relay's own mailbox is empty again -- picked up and cleared.
         assert bob.db.connection.execute("SELECT * FROM link_relay_mailbox").fetchone() is None
+
+        # Issue #874: alice's copy is not delivered on the relay's word. It
+        # stays pending (carol's acceptance cannot reach alice's made-up
+        # address here), with the handoff recorded for Sent and the timeout.
+        sent = alice.db.connection.execute(
+            "SELECT link_delivery_status, link_relay_handoff_at FROM mail_messages"
+        ).fetchone()
+        assert sent["link_delivery_status"] == "pending"
+        assert sent["link_relay_handoff_at"] is not None
     finally:
         alice.close()
         bob.close()
         carol.close()
+
+
+def test_the_sync_pass_expires_mail_left_at_a_relay_that_got_no_answer(tmp_path):
+    """Issue #874: a relay deposit ends the delivery work item, so the sync
+    pass itself gives up on the letter once 14 days pass with no answer,
+    and leaves a letter handed over more recently alone."""
+    from netbbs.link.sync import _push_pending_link_mail
+
+    alice_identity = bootstrap_node_identity("alice")
+    carol_identity = bootstrap_node_identity("carol")
+    alice = _NodeDb(tmp_path, "alice")
+    try:
+        _seed_peer(alice.db, carol_identity)
+        alice_user = create_user(alice.db, "alice", password="hunter2", user_level=10)
+        old = compose_link_message(
+            alice.db, alice_user, f"carol@{carol_identity.fingerprint}", "old", "b", node_identity=alice_identity,
+        )
+        recent = compose_link_message(
+            alice.db, alice_user, f"carol@{carol_identity.fingerprint}", "recent", "b",
+            node_identity=alice_identity,
+        )
+        # Both were deposited at a relay: their work items are done.
+        alice.db.connection.execute("UPDATE link_work_items SET status = 'pushed'")
+        alice.db.connection.execute(
+            "UPDATE mail_messages SET link_relay_handoff_at = ? WHERE link_event_content_id = ?",
+            ("2000-01-01T00:00:00.000000Z", old.content_id),
+        )
+        alice.db.connection.execute(
+            "UPDATE mail_messages SET link_relay_handoff_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
+            "WHERE link_event_content_id = ?",
+            (recent.content_id,),
+        )
+        alice.db.connection.commit()
+
+        asyncio.run(_push_pending_link_mail(LinkNode(identity=alice_identity), None, alice.lane))
+
+        rows = {
+            row["subject"]: tuple(row)[1:]
+            for row in alice.db.connection.execute(
+                "SELECT subject, link_delivery_status, link_delivery_reason, link_delivery_notice_pending "
+                "FROM mail_messages"
+            )
+        }
+        assert rows == {"old": ("expired", "no_answer", 1), "recent": ("pending", None, 0)}
+    finally:
+        alice.close()
 
 
 def test_full_relay_round_trip_delivers_an_acknowledgement_back_to_an_outgoing_only_sender(tmp_path):
@@ -4130,3 +4185,74 @@ def test_a_paged_diff_answers_an_undeclared_resource_only_on_its_own_page(tmp_pa
         assert board_event_diff(db, {}, limit=200, page=(other_page, 3), page_salt=salt) == ([], False)
     finally:
         net.close()
+
+
+# -- relay mailbox retention (issue #891) -----------------------------------
+
+
+def test_sync_pass_drops_relay_mail_held_past_the_retention_time(tmp_path, caplog):
+    """A relay holding mail for a node that never came back: each pass drops
+    what that node left uncollected past `RELAY_MAILBOX_RETENTION_DAYS`,
+    keeps what is younger, and says so in the SysOp-visible log. The prune
+    runs whatever the node's own mode; a node that stopped serving relays
+    still holds what it took before."""
+    from datetime import datetime, timedelta, timezone
+
+    from netbbs.link.events import build_link_message
+    from netbbs.link.relay_mailbox import (
+        RELAY_MAILBOX_RETENTION_DAYS,
+        deposit_relay_mailbox_envelope,
+        mailbox_holdings,
+    )
+
+    relay_node = LinkNode(identity=bootstrap_node_identity("relay"))
+    relay = _NodeDb(tmp_path, "relay")
+    sender = bootstrap_node_identity("sender")
+    stop_event = asyncio.Event()
+
+    def _message(user: str):
+        return build_link_message(
+            signing_identity=sender.signing_key,
+            home_node_fingerprint=sender.fingerprint,
+            local_user_id=user,
+            recipient_home_node_fingerprint="abandoned-recipient",
+            recipient_local_user_id="someone",
+            confidentiality_tier="tier1_home_node_key",
+            ciphertext=b"opaque",
+            created_at="2026-01-01T00:00:00+00:00",
+        )
+
+    old, young = _message("old"), _message("young")
+    deposit_relay_mailbox_envelope(relay.db, "abandoned-recipient", old)
+    deposit_relay_mailbox_envelope(relay.db, "abandoned-recipient", young)
+    expired_at = datetime.now(timezone.utc) - timedelta(days=RELAY_MAILBOX_RETENTION_DAYS + 1)
+    relay.db.connection.execute(
+        "UPDATE link_relay_mailbox SET received_at = ? WHERE content_id = ?",
+        (expired_at.strftime("%Y-%m-%dT%H:%M:%S.%fZ"), old.content_id),
+    )
+    relay.db.connection.commit()
+
+    def provider():
+        stop_event.set()  # one pass only
+        return _hello_for(relay_node)
+
+    async def scenario():
+        async with aiohttp.ClientSession() as session:
+            await run_link_sync(
+                relay_node, session, [], provider, relay.lane,
+                interval_seconds=60.0, stop_event=stop_event,
+            )
+
+    try:
+        with caplog.at_level(logging.WARNING, logger="netbbs.link"):
+            asyncio.run(scenario())
+        [holding] = mailbox_holdings(relay.db)
+        assert holding.count == 1
+        remaining = relay.db.connection.execute("SELECT content_id FROM link_relay_mailbox").fetchall()
+        assert [row["content_id"] for row in remaining] == [young.content_id]
+        assert any(
+            "dropped 1 envelope(s)" in record.getMessage() and "abandoned-recipient (1)" in record.getMessage()
+            for record in caplog.records
+        )
+    finally:
+        relay.close()

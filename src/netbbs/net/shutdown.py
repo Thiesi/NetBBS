@@ -103,6 +103,7 @@ async def _run_staged_countdown(
     message: str | None,
     default_text: Callable[[str], str],
     exclude_sysops: bool,
+    nobody_left: Callable[[], bool] | None = None,
 ) -> None:
     """
     Broadcasts now, then again at each of `_STAGE_THRESHOLDS_SECONDS`
@@ -132,8 +133,29 @@ async def _run_staged_countdown(
     irreversible side effect to unwind on the way out; the caller's own
     disconnect step, which only ever runs *after* this returns
     normally, is where "no longer safely cancellable" begins.
+
+    `nobody_left`, if given, ends the countdown early once it answers
+    True, checked at the start and about once a second: with nobody
+    connected there is no one to wait for (issue #845, F089 -- a restart
+    for a config tweak with nobody on still sat through "going down in 1
+    minute").
     """
     loop = asyncio.get_running_loop()
+
+    async def _wait(seconds: float) -> bool:
+        """Sleep `seconds`, or less if nobody is left; True if cut short."""
+        if nobody_left is None:
+            await asyncio.sleep(seconds)
+            return False
+        until = loop.time() + seconds
+        while (remaining := until - loop.time()) > 0:
+            if nobody_left():
+                return True
+            await asyncio.sleep(min(1.0, remaining))
+        return False
+
+    if nobody_left is not None and nobody_left():
+        return
 
     async def _broadcast(remaining_seconds: float) -> None:
         text = (
@@ -151,12 +173,13 @@ async def _run_staged_countdown(
     for threshold in _STAGE_THRESHOLDS_SECONDS:
         remaining = deadline - loop.time()
         if remaining > threshold:
-            await asyncio.sleep(remaining - threshold)
+            if await _wait(remaining - threshold):
+                return
             await _broadcast(threshold)
 
     remaining = deadline - loop.time()
-    if remaining > 0:
-        await asyncio.sleep(remaining)
+    if remaining > 0 and await _wait(remaining):
+        return
     await _broadcast(0)
 
 
@@ -376,6 +399,7 @@ async def run_shutdown_sequence(
     delay_seconds: float,
     shutdown_event: asyncio.Event,
     message: str | None = None,
+    stop_early_when_empty: bool = False,
 ) -> None:
     """
     What a signal -- or the in-session `[N]ode` admin menu -- actually
@@ -415,6 +439,12 @@ async def run_shutdown_sequence(
     back, matching `MaintenanceMode.activate()`'s own documented "no way
     back" claim from that point onward.
 
+    `stop_early_when_empty` (issue #845, F089) ends a graceful countdown
+    as soon as nobody is connected -- for a service-manager stop or
+    restart, whose delay is the configured default nobody chose for this
+    occasion. A SysOp's own [S]hutdown keeps the delay they picked even if
+    everyone, themselves included, leaves: they may be back to cancel it.
+
     Callers triggering this from *within* a live session (the admin
     menu) must not `await` it inline from that session's own call
     stack: the calling session's own task is one of the ones
@@ -438,6 +468,7 @@ async def run_shutdown_sequence(
                 message=message,
                 default_text=lambda phrase: f"\r\n*** This node is going down {phrase}. ***",
                 exclude_sysops=False,
+                nobody_left=(lambda: len(session_registry) == 0) if stop_early_when_empty else None,
             )
         except asyncio.CancelledError:
             maintenance.deactivate()

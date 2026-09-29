@@ -1644,6 +1644,9 @@ def _install_signal_handlers(
                 maintenance=maintenance,
                 delay_seconds=delay_seconds,
                 shutdown_event=shutdown_event,
+                # A service-manager stop or restart with nobody on has
+                # nobody to wait for (issue #845, F089).
+                stop_early_when_empty=True,
             )
         )
         # Design doc -- node management: registering a signal-triggered

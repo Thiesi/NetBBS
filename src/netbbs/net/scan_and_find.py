@@ -49,6 +49,8 @@ from netbbs.net.chat_flow import (
     list_visible_channels_for,
 )
 from netbbs.net.file_flow import enter_file_area
+from netbbs.mail import unread_count as unread_mail_count
+from netbbs.net.mail_flow import browse_mail, caller_mail_refusal, open_letter
 from netbbs.net.notices import announce, announce_styled
 from netbbs.net.node_theme import effective_accent_color, effective_header_color, effective_header_color_256
 from netbbs.net.picker import pick_item
@@ -56,15 +58,18 @@ from netbbs.rendering import GATE_COLOR, MenuEntry, SegmentColor, menu_key
 from netbbs.net.redraw_preference import redraw_in_place_enabled
 from netbbs.net.session import Session
 from netbbs.net.unicode_style_preference import unicode_style_enabled
-from netbbs.rendering import MUTED_COLOR, colored, sanitize_text, screen_title
+from netbbs.rendering import MUTED_COLOR, colored, reject_keystroke, sanitize_text, screen_title
+from netbbs.rendering.post_body import plain_post_body
 from netbbs.search import (
     ChannelMessageSearchHit,
     FileSearchHit,
+    MailSearchHit,
     PostSearchHit,
     file_jump_cursor,
     post_jump_cursor,
     search_channel_messages,
     search_files,
+    search_mail,
     search_posts,
 )
 from netbbs.storage.database import Database
@@ -175,7 +180,7 @@ async def _new_scan_screen(
     entering one from here is just the ordinary join.
     """
 
-    def _load(db: Database) -> tuple[list[_ScanItem], list[Post], dict[int, Board]]:
+    def _load(db: Database) -> tuple[list[_ScanItem], list[Post], dict[int, Board], int | None]:
         items: list[_ScanItem] = []
         boards_by_id: dict[int, Board] = {}
 
@@ -227,19 +232,35 @@ async def _new_scan_screen(
         # them there (review on #869).
         readable = {item.board.id for item in items if item.board is not None}
         replies = [reply for reply in unread_replies_to(db, user) if reply.board_id in readable]
-        return items, replies, boards_by_id
+        # Issue #823: the caller's unread mail, `None` for a caller mail is
+        # closed to (issue #816), who is told nothing about it.
+        mail = unread_mail_count(db, user) if caller_mail_refusal(session, db, user) is None else None
+        return items, replies, boards_by_id, mail
 
-    items, replies, boards_by_id = await lane.run(_load)
-    state = {"replies": replies, "boards": boards_by_id}
+    items, replies, boards_by_id, mail = await lane.run(_load)
+    state = {"replies": replies, "boards": boards_by_id, "mail": mail}
+
+    def _mail_summary() -> str | None:
+        """The caller's mail, the first line above the list (issue #823):
+        like the replies, it is theirs rather than a place, so it is a line
+        with a key and not a row."""
+        unread = state["mail"]
+        if unread is None:
+            return None
+        if not unread:
+            return colored("Mail: nothing unread.", fg_color=MUTED_COLOR)
+        return f"Mail: {unread} unread -- [E]-mail to read {'it' if unread == 1 else 'them'}"
 
     async def _replies_summary() -> str:
         """Replies to the caller, above the list on every redraw: the
         picker's masthead, so a redraw in place keeps it and [M]ark read
         brings it up to date (Codex review on #723)."""
         current, boards = state["replies"], state["boards"]
+        mail = _mail_summary()
         if not current:
-            return colored("Replies to you: none.", fg_color=MUTED_COLOR)
-        lines = [f"Replies to you: {len(current)} -- [R]eplies to read them"]
+            replies_none = colored("Replies to you: none.", fg_color=MUTED_COLOR)
+            return "\r\n".join(line for line in (mail, replies_none) if line)
+        lines = [*([mail] if mail else []), f"Replies to you: {len(current)} -- [R]eplies to read them"]
         for reply in current[:_REPLIES_SHOWN]:
             reply_board = boards.get(reply.board_id)
             board_label = sanitize_text(reply_board.name) if reply_board is not None else "unknown message board"
@@ -279,7 +300,7 @@ async def _new_scan_screen(
         highlight and every row number still name the row they did (Codex review
         on #723). Anything new goes last. Narrowed to followed items while
         that view is on."""
-        reloaded, state["replies"], state["boards"] = await lane.run(_load)
+        reloaded, state["replies"], state["boards"], state["mail"] = await lane.run(_load)
         place = {_identity(row): index for index, row in enumerate(shown["all"])}
         reloaded.sort(key=lambda row: place.get(_identity(row), len(place)))
         shown["all"] = reloaded
@@ -382,6 +403,15 @@ async def _new_scan_screen(
                 link_context=link_context, transfers=transfers,
             )
 
+    async def _read_mail() -> list[_ScanItem] | None:
+        """[E]-mail (issue #823): the mailbox, as the main menu opens it;
+        Back comes back to the scan with the count brought up to date."""
+        if state["mail"] is None:
+            await session.write(reject_keystroke())
+            return None
+        await browse_mail(session, lane, user, link_context=link_context)
+        return await _reload_in_place()
+
     async def _read_replies() -> list[_ScanItem] | None:
         """[R]eplies (issue #839, F121): the replies to the caller, one to
         a row. Picking one opens its board on that post; Back from the
@@ -433,13 +463,14 @@ async def _new_scan_screen(
             title="New scan",
             empty_message="Nothing accessible yet.",
             item_keys={"m": _mark_read, "f": _toggle_follow},
-            live_keys={"v": _toggle_followed_only, "r": _read_replies},
+            live_keys={"v": _toggle_followed_only, "r": _read_replies, "e": _read_mail},
             masthead=_replies_summary,
             live_nav=[
                 MenuEntry(label=menu_key("M", "ark read"), brief="Count a message board's posts as read"),
                 MenuEntry(label=menu_key("F", "ollow"), brief="Follow a board, channel or file area, or stop"),
                 MenuEntry(label=menu_key("V", "iew followed"), brief="Only what you follow, or everything again"),
                 MenuEntry(label=menu_key("R", "eplies"), brief="Read the replies to your posts"),
+                *([MenuEntry(label=menu_key("E", "-mail"), brief="Read your mail")] if state["mail"] is not None else []),
             ],
             redraw_in_place=redraw_in_place_enabled(db, user),
             unicode_style=unicode_style_enabled(db, user),
@@ -469,10 +500,11 @@ async def _new_scan_screen(
 @dataclass(frozen=True)
 class _SearchResultItem:
     """One row in issue #56's `[/] Find` results picker -- a matched post,
-    file, or retained channel message, already filtered to what `user`
-    can currently access (`search_posts`/`search_files`/
-    `search_channel_messages`'s own authorization). Built fresh per
-    query, never persisted.
+    file, retained channel message, or one of the caller's own letters
+    (issue #824), already filtered to what `user` can currently access
+    (`search_posts`/`search_files`/`search_channel_messages`/
+    `search_mail`'s own authorization). Built fresh per query, never
+    persisted.
 
     `result_index` (dogfood follow-up), not `id(item)`, is this item's
     `stable_id_of` -- a plain 1-based position in this one query's own
@@ -483,13 +515,14 @@ class _SearchResultItem:
     real, honest identifier here. It is not printed: rows show only the
     number that selects them (issue #838)."""
 
-    kind: str  # "post" | "file" | "channel_message"
+    kind: str  # "post" | "file" | "channel_message" | "mail"
     name: str
     description: str
     result_index: int
     post: PostSearchHit | None = None
     file: FileSearchHit | None = None
     message: ChannelMessageSearchHit | None = None
+    mail: MailSearchHit | None = None
 
 
 # A search result row renders as "  NN. name - description",
@@ -516,7 +549,8 @@ _SEARCH_RESULT_LIMIT = 20
 
 
 def _search_snippet(text: str) -> str:
-    text = text.strip()
+    # One line: a body's line breaks and indentation are not the row's.
+    text = " ".join(text.split())
     if len(text) <= _SEARCH_RESULT_SNIPPET_LENGTH:
         return text
     return text[:_SEARCH_RESULT_SNIPPET_LENGTH] + "..."
@@ -580,12 +614,21 @@ async def _find_screen(
     boards/files, scrollback is a bounded, revision-less ring buffer),
     the same limitation `_new_scan_screen`'s own channel dispatch
     already accepts.
+
+    The caller's own mail is searched too (issue #824) -- their Inbox and
+    Sent, never anyone else's (`netbbs.search.search_mail`) -- unless mail
+    is closed to them (`caller_mail_refusal`, issue #816), and a letter
+    opens in the mailbox's own message view (`open_letter`).
     """
+    mail_open = await lane.run(lambda db: caller_mail_refusal(session, db, user)) is None
     await session.write_line(
         "\r\n" + screen_title(
             "Search",
             breadcrumb=(session.node_display_name,),
-            subtitle="Find posts, files, and retained chat on this node.",
+            subtitle=(
+                "Find posts, files, retained chat, and your own mail on this node." if mail_open
+                else "Find posts, files, and retained chat on this node."
+            ),
             width=session.terminal_width,
             clear=redraw_in_place_enabled(db, user),
             unicode_style=unicode_style_enabled(db, user), collapsed=breadcrumb_collapsed_enabled(db, user),
@@ -647,6 +690,22 @@ async def _find_screen(
                 )
             )
             next_index += 1
+
+        # The caller's own letters (issue #824), for a caller mail is open
+        # to: no guest and nobody below the mail level (issue #816).
+        if mail_open:
+            mail_hits = search_mail(db, user, query, limit=_SEARCH_RESULT_LIMIT + 1)
+            truncated = truncated or len(mail_hits) > _SEARCH_RESULT_LIMIT
+            for hit in mail_hits[:_SEARCH_RESULT_LIMIT]:
+                where = f"to {hit.label}" if hit.sent else f"from {hit.label}"
+                items.append(
+                    _SearchResultItem(
+                        kind="mail", name=hit.message.subject,
+                        description=f"[MAIL] {where}: {_search_snippet(plain_post_body(hit.message.body))}",
+                        result_index=next_index, mail=hit,
+                    )
+                )
+                next_index += 1
         return items, truncated
 
     items, truncated = await lane.run(_load)
@@ -705,6 +764,15 @@ async def _find_screen(
                 session, lane, selected.file.area, user, initial_cursor=cursor,
                 link_context=link_context, transfers=transfers,
             )
+        elif selected.kind == "mail":
+            # The mailbox's own message view and actions; a letter deleted
+            # there leaves the results (issue #824).
+            still_there = await open_letter(
+                session, lane, user, selected.mail.message.id, sent=selected.mail.sent,
+                link_context=link_context,
+            )
+            if not still_there:
+                items = [item for item in items if item is not selected]
         else:
             await browse_channels(
                 session, lane, hub, presence, mailbox, history, user,
