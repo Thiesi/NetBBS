@@ -401,6 +401,14 @@ account change that would leave no enabled, approved SysOp. Disabling an account
 revokes its access; deletion is permanent and requires its exact name. Existing
 content retains its recorded author label.
 
+A disabled account, and a signup still awaiting approval, receive no mail:
+callers here are told so at the To prompt, and Link mail bounces with "that
+account is not taking mail at the moment", which does not tell the other node
+the account is disabled. Mail already in a disabled account stays there until
+you enable it again. Deleting an account removes its own mail, but letters it
+sent or received stay in the other person's Sent or Inbox; their Sent shows
+the deleted recipient as, for example, `bob (deleted account)`.
+
 A level change, a granted or revoked identity-verifier permission, or a change
 to staff permissions reaches a caller who is already logged in without them
 reconnecting. This also applies to a change made with `python -m
@@ -693,10 +701,25 @@ other. Deleting a board, channel or file area this node originated is still a
 real delete. Link status shows `carried/cap` for all three kinds and how many are
 offered and excluded.
 
-To carry a remote resource, use its Link browsing/carry actions. Carrying a message board
-creates a local browsable copy; file catalogues do not automatically download
-all file contents. Ask the other SysOp to verify both sides when first testing
+There is nothing to subscribe to: what an established peer shares arrives on
+its own, within the caps. A node's screen under **Link status → Peers** lists
+what this node already carries from it and, while it is on probation here,
+what it offers that is being held back. Carrying a message board creates a
+local browsable copy; file catalogues do not automatically download all file
+contents. Carried boards, channels and file areas appear in callers' **Message
+boards**, **Chat** and **Files** lists, outside any Community, because Link
+Communities do not exist; edit one and set its **Community** to put it in one
+of yours. Ask the other SysOp to verify both sides when first testing
 publication. Hello/discovery alone does not prove content arrived.
+
+Linking one of your own boards, channels or file areas sends it to the peers
+you have established, on a later sync pass. Its **NetBBS Link** rows then show,
+for each peer, whether it holds it, refused it because your node is on
+probation there, or is not sent it while it is on probation here. A node
+learns this only from peers it dials itself, so a peer that only dials yours
+reads "not known". **Fork of** is for a board that carries on another node's
+board under yours, for example after that one was closed; leave it empty for
+a board of your own.
 
 Asynchronous delivery can continue after a peer reconnects. Live chat and
 private messages require a working live session; a failed live message is not
@@ -733,7 +756,11 @@ this node refused, and how full your callers' mailboxes are.
   switches to by name): letters, unread, read, notices from the BBS itself, and
   how much of the 500-letter cap that is. A full inbox makes room by dropping
   its oldest read letter; an inbox full of unread mail refuses new mail, and a
-  Link sender gets a "mailbox full" bounce.
+  Link sender gets a "mailbox full" bounce. Callers see the same count in their
+  own Inbox header, a warning from 450, and a main-menu line when old read
+  mail was removed to make room.
+- In **Refused Link mail**, "the recipient's account is disabled or still
+  awaiting approval" is mail for an account that takes none at the moment.
 
 These screens never show what a letter says. Mail is private: you see counts,
 account names, senders and reasons, never a subject or a body, and a refused
@@ -811,9 +838,21 @@ use a second address, or a protocol demultiplexer in front of both.
 Use **Link status** for peers and relay state, **Outbox** for pending or failed
 work, and **Diagnostics / Follow log** for explanations.
 
+Every node starts on probation with every other, in both directions. A peer
+on probation here sends nothing this node accepts, and this node sends it
+nothing of yours; your node is on probation at each peer the same way until
+that peer's SysOp establishes it. Automatic graduation takes at least 30 days,
+three days of contact and vouches from two trust domains, so on a node with no
+trusted reporters only **Establish** ends it. Establish a peer once you know who
+runs it, and ask its SysOp to establish yours. **Link status** counts the peers
+on probation here and says whether the peers your node dials still hold yours
+on probation; the SysOp console's LINK line counts them too.
+
 **Link status → Peers** is the node map: every node this one knows, as callers
 see it under **Directory → Node map** ("Nodes known to" your board), plus what
-callers do not see. Peer-list candidates are marked unverified and "never heard
+callers do not see. A node on probation here says when probation could end
+by itself and what is still missing; its **Exchange** rows say what is held
+back from it and whether it takes what yours sends. Peer-list candidates are marked unverified and "never heard
 from"; nodes you quarantine or block in any trust dimension are marked, with
 each dimension's state, because callers do not see them at all. Each node's
 screen adds its Link addresses, relay roles and reliability. Last heard is your
@@ -1361,8 +1400,9 @@ The application's `netbbs.log` rotates at 10 MiB with five retained backups
 Some lines are routine and need nothing from you. A caller who hangs up is one
 `INFO` line naming their address. Every node yours meets on NetBBS Link starts
 on probation here, and the log says once per node, since the node started,
-that its content is held back; a relay candidate that cannot be reached is
-also mentioned once. A `WARNING` or `ERROR` line, and any traceback, is worth
+that its content is held back. Your node is on probation at each peer in the
+same way, and the log says once per peer when one does not take what yours
+sends yet. A relay candidate that cannot be reached is also mentioned once. A `WARNING` or `ERROR` line, and any traceback, is worth
 reading.
 
 **Operations → Node log** reads that file from inside NetBBS, including from

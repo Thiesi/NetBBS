@@ -134,7 +134,7 @@ def test_mail_opens_on_the_inbox_with_its_counts(node):
 
     screen = session.screens()[0]
     assert "NetBBS › Mail › Inbox" in screen
-    assert "1 unread message · 2 in all" in screen
+    assert "1 unread message · 2 of 500" in screen
     assert re.search(r"#\s+From\s+Subject\s+Date", screen)
     # No menu to pass through first.
     assert "[I]nbox" not in screen

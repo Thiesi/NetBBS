@@ -1074,6 +1074,13 @@ class WebSession(Session):
 SessionHandler = Callable[[Session], Awaitable[None]]
 
 
+async def _set_server_header(request: web.Request, response: web.StreamResponse) -> None:
+    """Name the server without its Python and aiohttp versions (issue #845,
+    F102): the default `Server: Python/3.13 aiohttp/3.14.3` tells a scanner
+    exactly what to look up."""
+    response.headers["Server"] = "NetBBS"
+
+
 class WebServer:
     """
     Web server producing `WebSession` objects and handing each to a
@@ -1127,6 +1134,7 @@ class WebServer:
 
     async def start(self) -> None:
         app = web.Application()
+        app.on_response_prepare.append(_set_server_header)
         app.router.add_get("/", self._handle_index)
         app.router.add_get("/ws", self._handle_websocket)
         app.router.add_static("/static/", _STATIC_DIR)
@@ -1174,6 +1182,11 @@ class WebServer:
             raise web.HTTPForbidden(text="WebSocket Origin is not allowed")
 
         ws = web.WebSocketResponse(max_msg_size=_MAX_WS_MESSAGE_SIZE)
+        if not ws.can_prepare(request).ok:
+            # A plain GET (a browser, a scanner) gets one plain sentence
+            # instead of aiohttp's own handshake diagnostics (issue #845,
+            # F102).
+            raise web.HTTPBadRequest(text="This address is for the NetBBS browser terminal.")
         await ws.prepare(request)
         session = WebSession(ws, request.remote)
         try:
