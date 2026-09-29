@@ -1106,7 +1106,17 @@ messages.
   `sender_label`: a SysOp may create an account named "System".
 - System mail is written with `sender_deleted_at` already set: nobody's Sent
   holds it, so the recipient's delete must hard-delete the row, not leave it
-  behind with no one able to remove it.
+  behind with no one able to remove it. Received Link mail is written the
+  same way (issue #818).
+- `recipient_user_id IS NULL` means Link mail this node sent
+  (`recipient_remote_address` set) or local mail whose recipient's account
+  was deleted (neither; `recipient_label` keeps the name). Both user FKs are
+  ON DELETE SET NULL since migration 97, and the table's CHECK refuses a row
+  with neither recipient unless `recipient_deleted_at` is set. So any code
+  that removes a `users` row must first run
+  `netbbs.mail.release_mail_of_deleted_account_without_commit` in the same
+  transaction, as `delete_user` does; skipping it fails the DELETE with a
+  CHECK error rather than orphaning mail.
 - Read receipts are not part of the current model.
 - `created_at` is when a letter was written, not when it arrived: received
   Link mail keeps its sender's signed time (issue #808). Anything ordering a

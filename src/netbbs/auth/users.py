@@ -1708,8 +1708,10 @@ def deletion_retires_username(db: Database, user: User) -> bool:
 
     Link mail is checked because it reaches an account *by name* without the
     account doing anything: `deliver_link_message` resolves the recipient by
-    username alone, stores the mail and acknowledges it, pending approval or
-    not, so a remote sender has been told the name is live.
+    username alone, stores the mail and acknowledges it, so a remote sender
+    has been told the name is live. Since issue #818 a pending signup's
+    Link mail bounces instead (`recipient_unavailable`), so only mail that
+    arrived before that release can make a pending name held.
 
     Reads only, so it is safe inside `delete_user`'s open transaction.
     Imported here: the Link package imports from this module.
@@ -1819,6 +1821,12 @@ def delete_user(db: Database, target: User, *, deleted_by: User, declining: bool
                 "INSERT OR REPLACE INTO retired_usernames (username, retired_at) VALUES (?, ?)",
                 (current.username, utc_now_iso()),
             )
+        # Issue #818: each letter's other side keeps its copy, and a letter
+        # nobody can see any more goes. Imported inside the function:
+        # `netbbs.mail` imports from this module.
+        from netbbs.mail import release_mail_of_deleted_account_without_commit
+
+        release_mail_of_deleted_account_without_commit(db, current)
         db.connection.execute("DELETE FROM users WHERE id = ?", (current.id,))
     except BaseException:
         db.connection.rollback()

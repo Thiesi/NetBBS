@@ -66,6 +66,7 @@ _REASON_TEXT = {
     "undecryptable": "it could not be decrypted with this node's key",
     "no_mailbox": "it was addressed to the guest account, which takes no mail",
     "blocked_by_recipient": "the recipient blocked its sender",
+    "recipient_unavailable": "the recipient's account is disabled or still awaiting approval",
 }
 
 #: Reasons a SysOp answers with trust: establishing, or lifting a block.
