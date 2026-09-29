@@ -31,6 +31,9 @@ _OWN_CANONICAL_DNS_CONFIG_KEY = "link_own_canonical_dns_claim"
 _OWN_IDENTITY_HISTORY_CONFIG_KEY = "link_own_identity_claim_history"
 UNKNOWN_NODE_NAME = "Unknown linked node"
 UNNAMED_NODE_NAME = "Unnamed linked node"
+#: Between a friendly name and what qualifies it. `·` is reserved in
+#: friendly names, so a qualified name never equals another node's name.
+NAME_QUALIFIER_SEPARATOR = " · "
 
 
 @dataclass(frozen=True)
@@ -48,7 +51,10 @@ class NodeDisplayIdentity:
         every such node look the same."""
         if self.friendly_name == UNKNOWN_NODE_NAME and self.fingerprint:
             return self.fingerprint
-        return f"{self.friendly_name} · {self.dns_name}" if self.dns_name else self.friendly_name
+        return (
+            f"{self.friendly_name}{NAME_QUALIFIER_SEPARATOR}{self.dns_name}"
+            if self.dns_name else self.friendly_name
+        )
 
 
 @dataclass(frozen=True)
@@ -250,12 +256,19 @@ def _identity_matches(identity: NodeDisplayIdentity, needle: str) -> bool:
     label a screen shows for it (`Name · dns.example`), or the start of its
     technical identity. The `·` in a label is reserved (a friendly name may
     not contain it), so a label can never be mistaken for another node's
-    name."""
+    name. `Name · abc123`, the form `qualified_node_name` gives a shared
+    name with no DNS name, is read as the friendly name plus the start of
+    the technical identity (issue #899)."""
+    name, separator, prefix = needle.rpartition(NAME_QUALIFIER_SEPARATOR)
     return (
         identity.dns_name == needle.rstrip(".")
         or name_key(identity.friendly_name) == needle
         or name_key(identity.label) == needle
         or fingerprint_prefix_matches(identity.fingerprint, needle)
+        or (
+            bool(separator) and name_key(identity.friendly_name) == name
+            and fingerprint_prefix_matches(identity.fingerprint, prefix)
+        )
     )
 
 
@@ -269,10 +282,57 @@ def link_address_label(user: str, node_label: str) -> str:
     user `alice@"Trusted Node"` and have its own posts read as another
     node's. `@` and `"` in it are shown as `?`: no real user name contains
     either, and the address a reader sees then has one `@`, the real one."""
+    user, node = link_address_parts(user, node_label)
+    return f"{user}@{node}"
+
+
+def link_address_parts(user: str, node_label: str) -> tuple[str, str]:
+    """The two halves `link_address_label` joins with `@`, for a caller
+    that styles them apart (the chat line, issue #899)."""
     user = user.replace("@", "?").replace('"', "?")
-    if "@" in node_label:
-        return f'{user}@"{node_label}"'
-    return f"{user}@{node_label}"
+    return user, (f'"{node_label}"' if "@" in node_label else node_label)
+
+
+def qualified_node_name(identity: NodeDisplayIdentity) -> str:
+    """How a node reads where its friendly name alone is not enough to
+    tell it apart: `Name · dns.example`, or `Name · abc123` -- the start
+    of its technical identity -- without a DNS name. Both forms resolve
+    back to the node when typed (`_identity_matches`)."""
+    if identity.friendly_name == UNKNOWN_NODE_NAME or identity.dns_name:
+        return identity.label
+    prefix = identity.fingerprint[:MIN_FINGERPRINT_PREFIX]
+    return f"{identity.friendly_name}{NAME_QUALIFIER_SEPARATOR}{prefix}"
+
+
+def friendly_name_is_shared(db: Database, identity: NodeDisplayIdentity) -> bool:
+    """Whether another node this BBS knows of, or this BBS itself, goes by
+    the same friendly name as `identity`."""
+    key = name_key(identity.friendly_name)
+    own_name = get_node_display_name(db)
+    if own_name and name_key(own_name) == key:
+        return True
+    for row in db.connection.execute(
+        "SELECT fingerprint, descriptor_json FROM link_known_identities WHERE fingerprint <> ?",
+        (identity.fingerprint,),
+    ):
+        if name_key(_identity_from_descriptor_json(row["fingerprint"], row["descriptor_json"]).friendly_name) == key:
+            return True
+    return False
+
+
+def short_node_name(db: Database, fingerprint: str) -> str:
+    """A node's name on a chat line (issue #899): the friendly name alone,
+    since the DNS name repeated on every line of a conversation cost more
+    width than it told anyone. A name another known node, or this BBS,
+    also goes by is qualified (`qualified_node_name`) so the two stay
+    distinguishable. A node never admitted reads as its fingerprint, as
+    `NodeDisplayIdentity.label` does."""
+    identity = identity_for_fingerprint(db, fingerprint)
+    if identity.friendly_name == UNKNOWN_NODE_NAME:
+        return identity.label
+    if friendly_name_is_shared(db, identity):
+        return qualified_node_name(identity)
+    return identity.friendly_name
 
 
 def unknown_node_guidance(reference: str) -> str:

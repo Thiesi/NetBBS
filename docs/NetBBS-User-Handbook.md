@@ -137,8 +137,14 @@ to speak. `/help` lists the commands available there.
 | `/dm user` | Invite someone online to a private direct chat |
 
 An alias is always shown with the username beside it, as `Quill|Copperplate`,
-so everyone can see who is speaking. An alias that reads like someone else's
+so everyone can see who is speaking: the alias first and in color, the
+username after it in gray. An alias that reads like someone else's
 username, or like a staff title such as "SysOp", is refused.
+
+Someone on a linked BBS is shown as `name@TheirBBS`, with their BBS in a color
+of its own. If two BBSes you are linked with share a name, the name gets its
+address added, like `alice@Twin BBS · twin.example.org`, so you can tell them
+apart.
 
 A direct-chat invitation opens on your main menu. If you are somewhere else
 on the board, a line tells you who invited you; go back to the main menu

@@ -190,7 +190,8 @@ def test_live_linked_channel_message_surfaces_an_undismissed_node_identity_colli
     rendered = chat_flow._render_channel_message(db, open_channel, alice, message)
 
     assert "Caution: this familiar node name has a different cryptographic identity." in rendered
-    assert "remote-user@Familiar Node" in rendered
+    # Two known nodes go by the name, so it keeps its DNS name (issue #899).
+    assert "<remote-user@Familiar Node · replacement.example.org>" in strip_ansi(rendered)
     assert "hello from the replacement" in rendered
 
 

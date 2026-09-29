@@ -32,7 +32,7 @@ from netbbs.link.node_map import (
     carried_from,
     relative_time,
 )
-from netbbs.link.node_profiles import name_key
+from netbbs.link.node_profiles import NodeDisplayIdentity, name_key, qualified_node_name
 from netbbs.link.enforcement import REASON_NODE_PROBATIONARY
 from netbbs.link.protocol import HeldBack, PeerExchange
 from netbbs.link.trust import NodeProbation, TrustDimension
@@ -280,8 +280,9 @@ def _count(value: int | None) -> str:
 def row_labels(entries: list[NodeMapEntry]) -> dict[str, str]:
     """Each row's NAME: the friendly name alone, so the column is not
     truncated -- except where two or more rows in the same list share one,
-    which then read "<friendly> · <dns>", or "<friendly> <first 6 of the
-    fingerprint>" without a DNS name, so they can be told apart."""
+    which then read as `qualified_node_name` gives them ("<friendly> ·
+    <dns>", or "<friendly> · <first 6 of the fingerprint>" without a DNS
+    name), so they can be told apart -- the same form a chat line uses."""
     counts: dict[str, int] = {}
     for entry in entries:
         key = name_key(entry.friendly_name)
@@ -290,10 +291,10 @@ def row_labels(entries: list[NodeMapEntry]) -> dict[str, str]:
     for entry in entries:
         if counts[name_key(entry.friendly_name)] < 2:
             labels[entry.fingerprint] = entry.friendly_name
-        elif entry.dns_name:
-            labels[entry.fingerprint] = f"{entry.friendly_name} · {entry.dns_name}"
         else:
-            labels[entry.fingerprint] = f"{entry.friendly_name} {entry.fingerprint[:6]}"
+            labels[entry.fingerprint] = qualified_node_name(
+                NodeDisplayIdentity(entry.fingerprint, entry.friendly_name, entry.dns_name)
+            )
     return labels
 
 
