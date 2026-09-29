@@ -153,8 +153,8 @@ async def download_ref(
 
 # -- attaching and fetching, for any writing that points at files ------------
 #
-# Mail has its own copies of these in `netbbs.net.mail_flow` (issue #830); a
-# board post (issue #842) uses these. They name what is written by `noun`.
+# A letter (issue #830) and a board post (issue #842) both use these. They
+# name what is written by `noun`.
 
 #: The review-screen keys that attach a file and take one off.
 ATTACH_KEY = "a"
