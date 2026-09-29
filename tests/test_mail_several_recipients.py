@@ -470,7 +470,7 @@ def test_write_to_all_callers_from_the_console_sends_and_says_what_happened(db, 
 
     outcome = re.sub(r"\x1b\[[0-9;]*m", "", "\n".join(take_notices(session)))
     assert "Sent to 1 caller." in outcome
-    assert "mailbox full of unread and kept mail: carol" in outcome
+    assert "mailbox full of unread mail: carol" in outcome
     assert "To all callers: 2 accounts that take mail, from you" in _visible_text(session)
     [copy] = [m for m in list_inbox(db, bob) if m.subject == "Downtime"]
     assert copy.sender_user_id == root.id

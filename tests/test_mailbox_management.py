@@ -3,7 +3,8 @@ deleting everything read, a Kept folder the cap never evicts from, and a
 listing by conversation.
 
 Before #828 a letter could only be deleted one at a time from its own view,
-and a mailbox at the cap evicted the oldest read letter whatever it was."""
+and a mailbox at the cap evicted the oldest read letter whatever it was.
+Since #921 Kept is outside the 500-letter cap and has a limit of its own."""
 
 from __future__ import annotations
 
@@ -13,13 +14,16 @@ import pytest
 
 from netbbs import mail as mail_module
 from netbbs.mail import (
+    KeptFullError,
     MailboxFullError,
     delete_letters,
     get_mail,
     inbox_count,
     inbox_sizes,
+    kept_count,
     list_inbox,
     list_sent,
+    mail_has_room,
     mark_read,
     send_mail,
     send_system_mail,
@@ -28,7 +32,7 @@ from netbbs.mail import (
     thread_subject,
 )
 from netbbs.net import mail_flow
-from netbbs.net.mail_flow import mailbox_capacity_note
+from netbbs.net.mail_flow import kept_capacity_note, mailbox_capacity_note
 from netbbs.rendering.width import display_width
 from tests.test_mail_list import FakeSession, _rows, _run, node  # noqa: F401  (fixture)
 
@@ -81,36 +85,98 @@ def test_deleting_sent_letters_leaves_the_recipients_copies(node):
     assert _indexed(db) == {first.id}
 
 
-def test_a_kept_letter_is_never_evicted_but_still_counts(node, monkeypatch):
+def test_a_kept_letter_is_never_evicted_and_does_not_count(node, monkeypatch):
+    """Issue #921: Kept is outside the cap, so keeping a letter makes room
+    in the Inbox, and the cap evicts only among the Inbox's read letters."""
     db, _lane, bob, alice, _carol = node
     monkeypatch.setattr(mail_module, "MAX_MAIL_PER_RECIPIENT", 3)
     oldest = mark_read(db, bob, send_mail(db, alice, bob, "Oldest", "body"))
     middle = mark_read(db, bob, send_mail(db, alice, bob, "Middle", "body"))
     send_mail(db, alice, bob, "Unread", "body")
     assert set_kept(db, bob, [oldest.id], kept=True) == 1
+    assert (inbox_count(db, bob), kept_count(db, bob)) == (2, 1)
 
+    # Room without evicting anything: the kept letter is not counted.
     send_mail(db, alice, bob, "New", "body")
+    assert get_mail(db, alice, middle.id).recipient_deleted_at is None
+    send_mail(db, alice, bob, "Newer", "body")
 
     # The oldest read letter that is not kept went; the kept one stayed.
-    assert {m.subject for m in list_inbox(db, bob)} == {"Oldest", "Unread", "New"}
+    assert {m.subject for m in list_inbox(db, bob)} == {"Oldest", "Unread", "New", "Newer"}
     assert get_mail(db, bob, oldest.id).kept_at is not None
     # Evicted from Bob's side; Alice's Sent copy is still hers.
     assert get_mail(db, alice, middle.id).recipient_deleted_at is not None
-    assert inbox_count(db, bob) == 3
+    assert (inbox_count(db, bob), kept_count(db, bob)) == (3, 1)
 
 
-def test_a_mailbox_full_of_unread_and_kept_mail_refuses_new_mail(node, monkeypatch):
+def test_a_mailbox_full_of_unread_mail_refuses_new_mail_whatever_is_kept(node, monkeypatch):
     db, _lane, bob, alice, _carol = node
     monkeypatch.setattr(mail_module, "MAX_MAIL_PER_RECIPIENT", 2)
     kept = mark_read(db, bob, send_mail(db, alice, bob, "Kept", "body"))
     set_kept(db, bob, [kept.id], kept=True)
     send_mail(db, alice, bob, "Unread", "body")
+    send_mail(db, alice, bob, "Unread too", "body")
 
-    with pytest.raises(MailboxFullError, match="unread or kept"):
+    # The group send's room check (issue #827) agrees with delivery.
+    assert not mail_has_room(db, bob)
+    with pytest.raises(MailboxFullError, match="every message is still unread"):
         send_mail(db, alice, bob, "Turned away", "body")
 
     [size] = inbox_sizes(db)
-    assert (size.total, size.unread, size.kept, size.evictable) == (2, 1, 1, 0)
+    assert (size.total, size.inbox, size.unread, size.kept, size.evictable) == (3, 2, 2, 1, 0)
+    # Keeping an unread letter makes room for the next.
+    set_kept(db, bob, [list_inbox(db, bob)[0].id], kept=True)
+    assert mail_has_room(db, bob)
+
+
+def test_keeping_is_refused_once_kept_is_full(node, monkeypatch):
+    db, _lane, bob, alice, _carol = node
+    monkeypatch.setattr(mail_module, "MAX_KEPT_PER_RECIPIENT", 2)
+    letters = [send_mail(db, alice, bob, f"Letter {n}", "body") for n in range(4)]
+    assert set_kept(db, bob, [letters[0].id, letters[1].id], kept=True) == 2
+
+    with pytest.raises(KeptFullError, match=r"Kept is full \(2 letters\) -- move some back to the Inbox"):
+        set_kept(db, bob, [letters[2].id], kept=True)
+    assert get_mail(db, bob, letters[2].id).kept_at is None
+    # Moving back is never refused, and makes room again.
+    assert set_kept(db, bob, [letters[0].id], kept=False) == 1
+    assert set_kept(db, bob, [letters[2].id], kept=True) == 1
+
+
+def test_a_bulk_keep_that_does_not_fit_keeps_none(node, monkeypatch):
+    """All or none: keeping as many as fit would leave an arbitrary part of
+    the marked letters behind."""
+    db, _lane, bob, alice, _carol = node
+    monkeypatch.setattr(mail_module, "MAX_KEPT_PER_RECIPIENT", 3)
+    letters = [send_mail(db, alice, bob, f"Letter {n}", "body") for n in range(5)]
+    set_kept(db, bob, [letters[0].id], kept=True)
+
+    with pytest.raises(KeptFullError, match="Kept has room for 2 more letters") as refused:
+        set_kept(db, bob, [letter.id for letter in letters[1:]], kept=True)
+    assert refused.value.room == 2
+    assert kept_count(db, bob) == 1
+    # Letters already kept, or not the caller's, are not counted against it.
+    other = send_mail(db, bob, alice, "Not bob's", "body")
+    assert set_kept(db, bob, [letters[0].id, letters[1].id, letters[2].id, other.id], kept=True) == 2
+
+
+def test_moving_letters_back_keeps_the_account_within_both_limits(node, monkeypatch):
+    """Moving kept letters back can take the Inbox past the cap, but an
+    account never holds more than the two limits together: new mail then
+    arrives only in place of a read letter."""
+    db, _lane, bob, alice, _carol = node
+    monkeypatch.setattr(mail_module, "MAX_MAIL_PER_RECIPIENT", 3)
+    monkeypatch.setattr(mail_module, "MAX_KEPT_PER_RECIPIENT", 2)
+    kept = [mark_read(db, bob, send_mail(db, alice, bob, f"Kept {n}", "body")) for n in range(2)]
+    set_kept(db, bob, [letter.id for letter in kept], kept=True)
+    for n in range(3):
+        mark_read(db, bob, send_mail(db, alice, bob, f"Inbox {n}", "body"))
+    set_kept(db, bob, [letter.id for letter in kept], kept=False)
+    assert (inbox_count(db, bob), kept_count(db, bob)) == (5, 0)
+
+    send_mail(db, alice, bob, "More", "body")
+
+    assert (inbox_count(db, bob), kept_count(db, bob)) == (5, 0)
 
 
 def test_keeping_only_touches_the_callers_own_inbox(node):
@@ -141,15 +207,20 @@ def test_a_conversation_is_its_correspondent_and_subject_without_prefixes(node):
     assert thread_key(sent, sent=True) == thread_key(send_mail(db, bob, alice, "Lunch?", "b"), sent=True)
 
 
-def test_the_capacity_note_counts_kept_mail_as_unremovable():
+def test_the_capacity_notes_speak_of_unread_mail_and_of_kept():
+    """Issue #921 took back #828's "unread and kept mail": the cap is about
+    the Inbox, and Kept says when it is full."""
     cap = mail_module.MAX_MAIL_PER_RECIPIENT
-    text, tone = mailbox_capacity_note(cap, cap - 5, kept_read=5)
-    assert tone == "error" and "unread and kept mail" in text and "stop keeping" in text
-    text, tone = mailbox_capacity_note(cap, cap - 5, kept_read=4)
+    text, tone = mailbox_capacity_note(cap, cap)
+    assert tone == "error" and "full of unread mail" in text and "kept" not in text.replace("Kept", "")
+    text, tone = mailbox_capacity_note(cap, cap - 5)
     assert tone == "warning" and "Kept" in text
-    # With nothing kept the #818 wording stands.
-    text, _tone = mailbox_capacity_note(cap, cap)
-    assert "full of unread mail" in text
+    assert "Unread mail is never removed." in mailbox_capacity_note(mail_module.MAILBOX_NEARLY_FULL, 0)[0]
+    assert kept_capacity_note(mail_module.MAX_KEPT_PER_RECIPIENT - 1) is None
+    assert kept_capacity_note(mail_module.MAX_KEPT_PER_RECIPIENT) == (
+        "Kept is full (100 letters): K[e]ep in the Inbox is refused until you move some back to the "
+        "Inbox or delete them."
+    )
 
 
 # -- the list ---------------------------------------------------------------------
@@ -224,7 +295,9 @@ def test_keep_moves_letters_to_kept_and_back(node):
     assert "NetBBS › Mail › Kept" in kept_screen
     assert re.search(r"> 1 +new +alice +Precious", kept_screen)
     assert "Mov[e] to Inbox" in kept_screen
-    assert "2 of 500" in kept_screen
+    # Each folder counts against its own limit (issue #921).
+    assert "1 of 100" in kept_screen and "of 500" not in kept_screen
+    assert "1 of 500" in screens[1]
     assert "Moved 1 message back to the Inbox." in screens[3]
     assert all(m.kept_at is None for m in list_inbox(db, bob))
 
@@ -364,3 +437,58 @@ def test_the_inbox_header_says_when_kept_mail_is_unread(node, width):
 
     header = " ".join(session.screens()[0].split())
     assert "1 unread in Kept" in header
+
+
+# -- Kept's own limit (issue #921) ------------------------------------------------
+
+
+def _full_kept(db, bob, alice, monkeypatch, limit=2):
+    monkeypatch.setattr(mail_module, "MAX_KEPT_PER_RECIPIENT", limit)
+    monkeypatch.setattr(mail_flow, "MAX_KEPT_PER_RECIPIENT", limit)
+    kept = [send_mail(db, alice, bob, f"Kept {n}", "body") for n in range(limit)]
+    set_kept(db, bob, [letter.id for letter in kept], kept=True)
+
+
+def test_keeping_from_the_list_is_refused_in_place_with_the_marks_kept(node, monkeypatch):
+    db, lane, bob, alice, _carol = node
+    _full_kept(db, bob, alice, monkeypatch)
+    send_mail(db, alice, bob, "One", "body")
+    send_mail(db, alice, bob, "Two", "body")
+    # m, m: mark both; e: keep -> refused; b: out.
+    session = FakeSession(["m", "m", "e", "b"])
+
+    _run(session, lane, bob)
+
+    refused = " ".join(session.screens()[-1].split())
+    assert "Kept is full (2 letters) -- move some back to the Inbox or delete them first." in refused
+    assert "2 marked" in refused
+    assert kept_count(db, bob) == 2
+
+
+def test_keeping_from_a_letter_is_refused_and_the_letter_stays_open(node, monkeypatch):
+    db, lane, bob, alice, _carol = node
+    _full_kept(db, bob, alice, monkeypatch)
+    letter = send_mail(db, alice, bob, "Precious", "body")
+    session = FakeSession(["1", "e", "b", "b"])
+
+    _run(session, lane, bob)
+
+    refused = " ".join(session.screens()[2].split())
+    assert "Kept is full (2 letters)" in refused
+    assert "Mail › Inbox › Precious" in refused
+    assert "K[e]ep" in refused
+    assert get_mail(db, bob, letter.id).kept_at is None
+
+
+def test_a_full_kept_folder_says_so(node, monkeypatch):
+    db, lane, bob, alice, _carol = node
+    _full_kept(db, bob, alice, monkeypatch)
+    session = FakeSession(["k", "b", "b"])
+
+    _run(session, lane, bob)
+
+    kept_screen = " ".join(session.screens()[1].split())
+    assert "2 of 2" in kept_screen
+    assert "Kept is full (2 letters): K[e]ep in the Inbox is refused" in kept_screen
+    # The Inbox counts only its own letters against the cap.
+    assert "0 of 500" in " ".join(session.screens()[0].split())

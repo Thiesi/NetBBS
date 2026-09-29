@@ -57,6 +57,13 @@ MAX_MAIL_PER_RECIPIENT = 500
 # (issue #818): nine in ten, so there is room to act before anything goes.
 MAILBOX_NEARLY_FULL = MAX_MAIL_PER_RECIPIENT * 9 // 10
 
+# Letters one account may keep in its Kept folder (issue #921). Kept mail
+# is outside `MAX_MAIL_PER_RECIPIENT` -- the cap is about unread mail, and
+# a kept letter is one its owner has dealt with -- so it has a bound of its
+# own: each account holds at most the two together. Keeping one more when
+# Kept is full is refused (`KeptFullError`), never made room for.
+MAX_KEPT_PER_RECIPIENT = 100
+
 # What the mailbox calls mail the BBS itself sent (issue #819). Shown for
 # any row whose `from_system` flag is set, never looked up by name: the
 # label stored with the row is only what the NOT NULL column holds.
@@ -339,6 +346,32 @@ def mail_sender_refusal(
     return SENDER_BLOCK_REFUSAL.format(name=recipient.username)
 
 
+class KeptFullError(MailError):
+    """Raised by `set_kept` when the letters to keep do not fit in the
+    caller's Kept folder (issue #921). Nothing is moved: a bulk keep is all
+    or none, as a letter to several people is (issue #827). `room` is how
+    many more Kept can take."""
+
+    def __init__(self, room: int) -> None:
+        self.room = room
+        super().__init__(kept_full_text(room))
+
+
+def kept_full_text(room: int) -> str:
+    """What the caller is told when keeping would take Kept past
+    `MAX_KEPT_PER_RECIPIENT`, with `room` letters still free there."""
+    if room <= 0:
+        return (
+            f"Kept is full ({MAX_KEPT_PER_RECIPIENT} letters) -- move some back to the Inbox "
+            "or delete them first."
+        )
+    letters = "1 more letter" if room == 1 else f"{room} more letters"
+    return (
+        f"Kept has room for {letters} (it holds {MAX_KEPT_PER_RECIPIENT}) -- mark fewer, or move "
+        "some back to the Inbox or delete them first."
+    )
+
+
 class MailboxFullError(Exception):
     """
     Raised when `send_mail` would otherwise have to silently destroy an
@@ -579,7 +612,7 @@ def send_system_mail_without_commit(
 def _make_room_if_needed(db: Database, recipient: User) -> None:
     if not make_room(db, recipient):
         raise MailboxFullError(
-            f"{recipient.username!r}'s mailbox is full and every message is unread or kept"
+            f"{recipient.username!r}'s mailbox is full and every message is still unread"
         )
 
 
@@ -592,9 +625,9 @@ def make_room(db: Database, recipient: User) -> bool:
 
     A read message from the system goes before any read letter (issue
     #819): a notice the BBS sent is not to push out mail a person wrote.
-    A kept letter (issue #828) is never evicted, read or not. It still
-    counts toward the cap, so a mailbox full of unread and kept mail
-    refuses new mail rather than lose any of it.
+    A kept letter (issue #828) is neither evicted nor counted: Kept has
+    its own bound, `MAX_KEPT_PER_RECIPIENT` (issue #921), enforced when a
+    letter is kept rather than when one arrives.
 
     Each eviction is counted for the owner (issue #818), who is told at
     their next main menu how many old messages went
@@ -655,10 +688,24 @@ def mailbox_full_text(recipient: User) -> str:
 
 def inbox_count(db: Database, user: User) -> int:
     """How many messages count toward `user`'s `MAX_MAIL_PER_RECIPIENT`:
-    every one in the inbox they have not deleted, read or not, kept (issue
-    #828) or not."""
+    every one in the Inbox they have not deleted, read or not. Kept letters
+    are not among them (issue #921); `kept_count` counts those."""
     return db.connection.execute(
-        "SELECT COUNT(*) AS n FROM mail_messages WHERE recipient_user_id = ? AND recipient_deleted_at IS NULL",
+        """
+        SELECT COUNT(*) AS n FROM mail_messages
+        WHERE recipient_user_id = ? AND recipient_deleted_at IS NULL AND kept_at IS NULL
+        """,
+        (user.id,),
+    ).fetchone()["n"]
+
+
+def kept_count(db: Database, user: User) -> int:
+    """How many letters `user` keeps, against `MAX_KEPT_PER_RECIPIENT`."""
+    return db.connection.execute(
+        """
+        SELECT COUNT(*) AS n FROM mail_messages
+        WHERE recipient_user_id = ? AND recipient_deleted_at IS NULL AND kept_at IS NOT NULL
+        """,
         (user.id,),
     ).fetchone()["n"]
 
@@ -677,7 +724,7 @@ def pending_eviction_notice(db: Database, user: User) -> tuple[str | None, int]:
     what = "your oldest read message was" if evicted == 1 else f"your {evicted} oldest read messages were"
     return (
         f"Your mailbox was full ({MAX_MAIL_PER_RECIPIENT} messages), so {what} removed to make room "
-        "for new mail. Unread and kept mail is never removed.",
+        "for new mail. Unread mail is never removed.",
         evicted,
     )
 
@@ -1174,7 +1221,8 @@ class InboxSize:
     # Notices from the BBS itself (issue #819); included in `total`.
     system: int
     # Letters the owner keeps (issue #828), read or not; included in
-    # `total`, and never evicted.
+    # `total`, but not counted toward the cap (issue #921): Kept has its
+    # own bound, `MAX_KEPT_PER_RECIPIENT`.
     kept: int = 0
     # Kept letters among the unread ones, so `evictable` counts each
     # letter once.
@@ -1185,6 +1233,12 @@ class InboxSize:
         return self.total - self.unread
 
     @property
+    def inbox(self) -> int:
+        """The letters counted toward `MAX_MAIL_PER_RECIPIENT`: the
+        Inbox's, without Kept (issue #921)."""
+        return self.total - self.kept
+
+    @property
     def evictable(self) -> int:
         """Letters the cap may evict to make room: read and not kept. At
         the cap with none, the inbox refuses new mail."""
@@ -1192,10 +1246,11 @@ class InboxSize:
 
 
 def inbox_sizes(db: Database) -> list[InboxSize]:
-    """Every account with mail in its inbox, the fullest first (by count, then
-    by unread mail, which the cap cannot make room by evicting). What counts is
-    what counts toward `MAX_MAIL_PER_RECIPIENT`: every message the recipient
-    has not deleted, system notices included."""
+    """Every account with mail, the fullest first: by what counts toward
+    `MAX_MAIL_PER_RECIPIENT` -- the Inbox, system notices included, kept
+    letters not (issue #921) -- then by unread mail, which the cap cannot
+    make room by evicting. `total` is every message the recipient has not
+    deleted, Kept included."""
     rows = db.connection.execute(
         """
         SELECT u.id AS user_id, u.username AS username, COUNT(m.id) AS total,
@@ -1205,7 +1260,7 @@ def inbox_sizes(db: Database) -> list[InboxSize]:
         FROM mail_messages m JOIN users u ON u.id = m.recipient_user_id
         WHERE m.recipient_deleted_at IS NULL
         GROUP BY u.id
-        ORDER BY total DESC, unread DESC, u.username COLLATE NOCASE
+        ORDER BY total - kept DESC, unread DESC, u.username COLLATE NOCASE
         """
     ).fetchall()
     return [
@@ -1452,9 +1507,34 @@ def delete_letters(db: Database, user: User, mail_ids: list[int], *, sent: bool)
 def set_kept(db: Database, user: User, mail_ids: list[int], *, kept: bool) -> int:
     """Move the letters among `mail_ids` in `user`'s Inbox to their Kept
     folder (`kept`), or back to the Inbox (issue #828). A kept letter is
-    one the mailbox cap never evicts (`make_room`)."""
+    one the mailbox cap neither evicts nor counts (`make_room`).
+
+    Kept holds `MAX_KEPT_PER_RECIPIENT` letters (issue #921). Keeping more
+    than fit raises `KeptFullError` and moves none: all or none, so a bulk
+    keep never leaves an arbitrary part of the marked letters behind.
+    Moving letters back is never refused, and can take the Inbox past
+    `MAX_MAIL_PER_RECIPIENT` by what was kept; the account still holds no
+    more than the two bounds together, since new mail then arrives only by
+    evicting a read letter (`make_room`)."""
     count = 0
     now = utc_now_iso()
+    if kept:
+        # Only the letters still in the Inbox are counted: a list can be a
+        # moment stale, and one already kept or gone is skipped.
+        to_keep = 0
+        for chunk in _chunks(sorted(set(mail_ids))):
+            marks = ",".join("?" * len(chunk))
+            to_keep += db.connection.execute(
+                f"""
+                SELECT COUNT(*) AS n FROM mail_messages
+                WHERE recipient_user_id = ? AND recipient_deleted_at IS NULL AND kept_at IS NULL
+                  AND id IN ({marks})
+                """,
+                (user.id, *chunk),
+            ).fetchone()["n"]
+        room = max(MAX_KEPT_PER_RECIPIENT - kept_count(db, user), 0)
+        if to_keep > room:
+            raise KeptFullError(room)
     for chunk in _chunks(sorted(set(mail_ids))):
         marks = ",".join("?" * len(chunk))
         if kept:

@@ -39,7 +39,9 @@ from netbbs.mail import (
     mark_read,
     send_mail,
     send_system_mail,
+    set_kept,
 )
+from netbbs.net import admin_flow
 from netbbs.net.admin_flow import admin_menu
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
@@ -357,6 +359,35 @@ def test_mailboxes_show_counts_and_never_a_subject(db, lane, sysop):
     assert "bob 1 1 0 0 0 0%" in text  # letters, unread, read, kept, system
     assert "Secret plans" not in text and "Nobody else" not in text
     assert "never a subject or a body" in text
+
+
+def test_mailboxes_count_the_cap_without_kept_letters(db, lane, sysop, monkeypatch):
+    """Issue #921: Kept is outside the cap, so "Of the cap" and the order
+    count the Inbox alone, while Letters still counts everything."""
+    monkeypatch.setattr(admin_flow, "MAX_MAIL_PER_RECIPIENT", 4)
+    alice = create_user(db, "alice", password="hunter2")
+    bob = create_user(db, "bob", password="hunter2")
+    carol = create_user(db, "carol", password="hunter2")
+    kept = [send_mail(db, alice, bob, f"Kept {n}", "body") for n in range(3)]
+    set_kept(db, bob, [letter.id for letter in kept], kept=True)
+    send_mail(db, alice, bob, "Inbox", "body")
+    send_mail(db, alice, carol, "One", "body")
+    send_mail(db, alice, carol, "Two", "body")
+
+    sizes = inbox_sizes(db)
+    assert [(size.username, size.total, size.inbox, size.kept) for size in sizes] == [
+        ("carol", 2, 2, 0),
+        ("bob", 4, 1, 3),
+    ]
+    session = FakeSession(["o", "m", "m", "b", "b", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop))
+
+    text = _normalized_visible(_written_text(session))
+    assert "Fullest: carol, 2 of 4" in text
+    assert "carol 2 2 0 0 0 50%" in text
+    assert "bob 4 4 0 3 0 25%" in text
+    assert "Kept is outside the cap and holds up to 100 letters of its own" in text
+    assert "unread and kept" not in text
 
 
 def test_the_sysop_establishes_a_refused_sender_node_from_the_refusal(db, lane, sysop):
