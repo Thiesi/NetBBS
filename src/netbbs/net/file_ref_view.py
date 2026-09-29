@@ -20,6 +20,7 @@ from netbbs.auth.users import User
 from netbbs.file_refs import (
     AVAILABLE,
     GONE,
+    MAX_FILE_REFS,
     FileRef,
     OpenedRef,
     attachable_files,
@@ -35,6 +36,7 @@ from netbbs.net.notices import announce
 from netbbs.net.picker import pick_item
 from netbbs.net.session import Session
 from netbbs.rendering import LABEL_COLOR, METADATA_COLOR, MUTED_COLOR, colored, sanitize_text
+from netbbs.rendering.menu import menu_key
 from netbbs.storage.execution import DatabaseLane
 
 #: What a reader who may not read a file's area is shown for it. Neither the
@@ -147,3 +149,92 @@ async def download_ref(
             mint=lambda: transfers.issue(direction=DOWNLOAD, user=user, area=area, file_id=entry.file_id),
             direction=DOWNLOAD, what=what_of(DOWNLOAD, area, entry), filename=entry.filename,
         )
+
+
+# -- attaching and fetching, for any writing that points at files ------------
+#
+# Mail has its own copies of these in `netbbs.net.mail_flow` (issue #830); a
+# board post (issue #842) uses these. They name what is written by `noun`.
+
+#: The review-screen keys that attach a file and take one off.
+ATTACH_KEY = "a"
+REMOVE_KEY = "r"
+
+
+def file_actions(files: list[FileRef], *, noun: str) -> list[tuple[str, str, str | None]]:
+    """The review screen's `[A]ttach file`, and `[R]emove file` once a file
+    is attached, as `review_composition`'s `extra_actions`."""
+    actions: list[tuple[str, str, str | None]] = [
+        (ATTACH_KEY, menu_key("A", "ttach file"), f"Point the {noun} at a file in a file area"),
+    ]
+    if files:
+        actions.append((REMOVE_KEY, menu_key("R", "emove file"), f"Take a file off the {noun}"))
+    return actions
+
+
+async def change_attached_files(
+    session: Session, lane: DatabaseLane, user: User, files: list[FileRef], key: str, *,
+    noun: str, breadcrumb: tuple[str, ...], style: dict,
+) -> list[FileRef]:
+    """`[A]ttach file` or `[R]emove file` on a review screen: the files
+    afterwards, with what happened announced for the review screen."""
+    if key == ATTACH_KEY:
+        if len(files) >= MAX_FILE_REFS:
+            announce(session, f"A {noun} can point at {MAX_FILE_REFS} files at most.", tone="error")
+            return files
+        ref = await choose_file_to_attach(session, lane, user, breadcrumb=breadcrumb, **style)
+        if ref is None:
+            return files
+        if any(attached.file_id == ref.file_id for attached in files):
+            announce(session, f"{sanitize_text(ref.filename)} is already attached.", tone="muted")
+            return files
+        announce(session, f"Attached {sanitize_text(ref.filename)}.", tone="muted")
+        return [*files, ref]
+    if not files:
+        return files
+    removed = files[0]
+    if len(files) > 1:
+        chosen = await pick_item(
+            session, files,
+            name_of=lambda item: item.filename,
+            stable_id_of=lambda item: files.index(item),
+            description_of=lambda item: f"in {item.area_name}",
+            title="Remove which file?",
+            breadcrumb=breadcrumb,
+            empty_message="No files are attached.",
+            **style,
+        )
+        if chosen is None:
+            return files
+        removed = chosen
+    announce(session, f"Removed {sanitize_text(removed.filename)}.", tone="muted")
+    return [ref for ref in files if ref is not removed]
+
+
+async def get_referenced_file(
+    session: Session, lane: DatabaseLane, user: User, refs: list[FileRef], *,
+    noun: str, breadcrumb: tuple[str, ...], style: dict, transfers: TransferGrants | None,
+) -> None:
+    """`[G]et file`: download the file `refs` point at, or with several, the
+    one the reader picks. Only a file they can open now is offered."""
+    opened = await open_refs(lane, user, refs)
+    available = [item.ref for item in opened if item.state == AVAILABLE]
+    if not available:
+        announce(session, f"None of the files in this {noun} is available to you.", tone="error")
+        return
+    ref = available[0]
+    if len(available) > 1:
+        chosen = await pick_item(
+            session, available,
+            name_of=lambda item: item.filename,
+            stable_id_of=lambda item: available.index(item),
+            description_of=lambda item: f"in {item.area_name}",
+            title="Download which file?",
+            breadcrumb=breadcrumb,
+            empty_message=f"None of the files in this {noun} is available to you.",
+            **style,
+        )
+        if chosen is None:
+            return
+        ref = chosen
+    await download_ref(session, lane, user, ref, transfers=transfers)

@@ -47,6 +47,7 @@ from netbbs.boards import (
     list_posts_page,
     set_post_exempt,
     set_post_pinned,
+    shown_post_refs,
     WITHDRAWN_PLACEHOLDER,
     list_post_revisions,
     tombstone_post,
@@ -79,6 +80,7 @@ from netbbs.link.boards import (
 )
 from netbbs.moderation import BoardPermission, has_permission
 from netbbs.mail import MAX_MAIL_SUBJECT_BYTES
+from netbbs.file_refs import FileRef, body_with_link_text, open_ref, refs_some_readers_cannot_open
 from netbbs.net.board_list_banner import load_board_list_banner
 from netbbs.net.breadcrumb_preference import breadcrumb_collapsed_enabled
 from netbbs.net.chat_flow import NAME_GATE_NOTE
@@ -97,10 +99,23 @@ from netbbs.net.confirm import prompt_yes_no
 from netbbs.net.detail_view import show_detail
 from netbbs.net.draft_storage import delete_draft, drafts_directory, load_draft
 from netbbs.net.editor_preference import fullscreen_editor_enabled
+from netbbs.net.file_ref_view import (
+    attached_rows,
+    change_attached_files,
+    file_actions,
+    get_referenced_file,
+    ref_rows,
+)
+from netbbs.net.file_transfer import TransferGrants
 from netbbs.net.help_overlay import show_help
 from netbbs.net.mail_flow import caller_mail_refusal, mail_someone, post_reply_key, split_link_address
 from netbbs.net.menu_description_preference import menu_description_level
-from netbbs.net.node_theme import effective_accent_color, effective_header_color, effective_header_color_256
+from netbbs.net.node_theme import (
+    effective_accent_color,
+    effective_accent_color_256,
+    effective_header_color,
+    effective_header_color_256,
+)
 from netbbs.net.notices import announce, pending_notice_rows, take_notices, write_notices
 from netbbs.net.picker import ListColumn, pick_item
 from netbbs.net.prose_editor import EditorHeader, edit_prose
@@ -169,12 +184,15 @@ async def _browse_boards(
     community_scoped: bool = False,
     title_prefix: str | None = None,
     link_context: LinkContext | None = None,
+    transfers: TransferGrants | None = None,
 ) -> None:
-    """Entry point: browse from the top level (no category selected yet)."""
+    """Entry point: browse from the top level (no category selected yet).
+    `transfers` is the node's browser-transfer grants, for downloading a
+    file a post points at (issue #842)."""
     await _browse_boards_in_category(
         session, db, user, category_id=None,
         community_id=community_id, community_scoped=community_scoped, title_prefix=title_prefix,
-        link_context=link_context,
+        link_context=link_context, transfers=transfers,
     )
 
 
@@ -201,6 +219,7 @@ async def _browse_boards_in_category(
     community_scoped: bool = False,
     title_prefix: str | None = None,
     link_context: LinkContext | None = None,
+    transfers: TransferGrants | None = None,
 ) -> None:
     """
     Browse boards within a category (or the top level, if `category_id`
@@ -413,7 +432,10 @@ async def _browse_boards_in_category(
             if board is None:
                 return
             reopen_at = board.id
-            await _show_board(session, db, board, user, link_context=link_context, breadcrumb=board_breadcrumb)
+            await _show_board(
+                session, db, board, user, link_context=link_context, breadcrumb=board_breadcrumb,
+                transfers=transfers,
+            )
             continue
 
         mixed: list[Category | Board] = [*categories_here, *boards_here]
@@ -462,10 +484,13 @@ async def _browse_boards_in_category(
             await _browse_boards_in_category(
                 session, db, user, category_id=selected.id,
                 community_id=community_id, community_scoped=community_scoped, title_prefix=title_prefix,
-                link_context=link_context,
+                link_context=link_context, transfers=transfers,
             )
         else:
-            await _show_board(session, db, selected, user, link_context=link_context, breadcrumb=board_breadcrumb)
+            await _show_board(
+                session, db, selected, user, link_context=link_context, breadcrumb=board_breadcrumb,
+                transfers=transfers,
+            )
 
 
 def _can_edit_post(db: Database, post: Post, user: User) -> bool:
@@ -856,6 +881,7 @@ async def _show_board(
     link_context: LinkContext | None = None,
     initial_cursor: tuple[str, str] | None = None,
     breadcrumb: tuple[str, ...] = ("Message boards",),
+    transfers: TransferGrants | None = None,
 ) -> None:
     """
     Show `board`, one bounded page of posts at a time (design doc,
@@ -1179,6 +1205,12 @@ async def _show_board(
                 held="post" if held else "edit" if post.root_post_id in page.held_edits else None,
             )
             body_rows = post_body_rows(post.body, width, body_mode, truecolor=truecolor, layout=post.layout)
+            # Files the post points at (issue #842), as this reader finds
+            # them: a file in an area closed to them is not named.
+            refs = shown_post_refs(db, post)
+            byline = [*byline, *ref_rows(
+                [open_ref(db, user, ref) for ref in refs], accent=effective_accent_color(session, db),
+            )]
             has_previous = index > 0 or (page.has_older and page.oldest_cursor is not None)
             has_next = index < len(page.posts) - 1 or (page.has_newer and page.newest_cursor is not None)
             actions = []
@@ -1196,6 +1228,8 @@ async def _show_board(
             )
             if mail_target is not None:
                 actions.append(("m", menu_key("M", "ail author")))
+            if refs and post.tombstoned_at is None:
+                actions.append(("g", menu_key("G", "et file")))
             # An edited or removed post's versions, for moderators only
             # (issue #675, decided with the maintainer).
             can_see_history = not held and (post.is_edited or post.tombstoned_at is not None) and has_permission(
@@ -1242,6 +1276,19 @@ async def _show_board(
             )
             if key == "b":
                 return index
+            if key == "g" and refs and post.tombstoned_at is None:
+                # Downloads run on a lane, as mail's do; the board page reads
+                # through `db`, so one is opened for the download.
+                file_lane = DatabaseLane(db.path)
+                try:
+                    await get_referenced_file(
+                        session, file_lane, user, refs, noun="post",
+                        breadcrumb=(*breadcrumb, board_name), style=_picker_style(session, db, user),
+                        transfers=transfers,
+                    )
+                finally:
+                    file_lane.close()
+                continue
             if key == "h" and can_see_history:
                 await _show_history(
                     session, db, board, post, user, breadcrumb=(session.node_display_name, *breadcrumb, board_name),
@@ -1393,7 +1440,7 @@ async def _show_board(
                 initial_body = _reply_quote(db, reply_to, board, name_requirement=name_requirement) or None
         published = {"done": False}
 
-        async def _commit(commit_subject: str, commit_body: str) -> bool:
+        async def _commit(commit_subject: str, commit_body: str, commit_files: list[FileRef]) -> bool:
             if reply_to is not None and _reply_target(db, reply_to, board) is None:
                 # Gone while the reply was written: the text stays in review
                 # to be copied or cancelled, not published under a post no
@@ -1401,7 +1448,8 @@ async def _show_board(
                 announce(session, "The post you are replying to is no longer available.", tone="error")
                 return False
             done = await _publish(
-                commit_subject, commit_body, parent_post_id=reply_to.root_post_id if reply_to else None
+                commit_subject, commit_body, parent_post_id=reply_to.root_post_id if reply_to else None,
+                files=commit_files,
             )
             published["done"] = published["done"] or done
             return done
@@ -1433,7 +1481,7 @@ async def _show_board(
                 announce(session, cancelled_notice, tone="muted")
             return False
         await _review_and_commit(
-            session, db, user, board, subject=subject, body=body, draft_path=draft_path,
+            session, db, user, board, subject=subject, body=body, draft_path=draft_path, files=[],
             commit_key="p", commit_label="ost", commit_brief="Publish this reply" if reply_to else "Publish this post",
             title=compose_title, breadcrumb=(*breadcrumb, board_name),
             cancelled_notice=cancelled_notice,
@@ -1477,21 +1525,24 @@ async def _show_board(
             # ends without one, and the signature would take its color.
             body = append_signature(body + "\x1b[0m", signature)
         await _review_and_commit(
-            session, db, user, board, subject=subject, body=body, draft_path=draft_path,
+            session, db, user, board, subject=subject, body=body, draft_path=draft_path, files=[],
             commit_key="p", commit_label="ost", commit_brief="Publish this post",
             title="New art post", breadcrumb=(*breadcrumb, board_name),
             cancelled_notice="Post cancelled.",
             draft_saved_notice="Draft saved -- the art editor offers it the next time you draw here.",
-            commit=lambda subject, body: _publish(subject, body, layout="art"),
+            commit=lambda subject, body, files: _publish(subject, body, layout="art", files=files),
             layout="art",
         )
         return True
 
     async def _publish(
-        subject: str, body: str, *, layout: str = "prose", parent_post_id: str | None = None
+        subject: str, body: str, *, layout: str = "prose", parent_post_id: str | None = None,
+        files: list[FileRef] | None = None,
     ) -> bool:
         try:
-            post = create_post(db, board, user, subject, body, layout=layout, parent_post_id=parent_post_id)
+            post = create_post(
+                db, board, user, subject, body, layout=layout, parent_post_id=parent_post_id, files=files,
+            )
         except PostError as exc:
             announce(session, f"Could not create post: {exc}", tone="muted")
             return False
@@ -1926,12 +1977,19 @@ async def _edit_existing_post(
             announce(session, "Edit cancelled.", tone="muted")
         return
 
-    async def _save(subject: str, body: str) -> bool:
-        if subject == post.subject and body == post.body:
+    # Only the author changes what their post points at (review on #913): a
+    # moderator's edit keeps the files as they are, and offers no file keys,
+    # so nothing is attached to someone else's post -- or to a carried one --
+    # checked only against the moderator's own access.
+    own_post = post.author_user_id is not None and post.author_user_id == user.id
+    current_files = shown_post_refs(db, post) if own_post else None
+
+    async def _save(subject: str, body: str, files: list[FileRef] | None) -> bool:
+        if subject == post.subject and body == post.body and files == current_files:
             announce(session, "No changes to save.", tone="muted")
             return True
         try:
-            edited = edit_post(db, post, board, subject=subject, body=body, edited_by=user)
+            edited = edit_post(db, post, board, subject=subject, body=body, edited_by=user, files=files)
         except PostError as exc:
             # Back to review with the revision intact: the editor already
             # deleted its draft on /done, so returning here would lose it.
@@ -1954,6 +2012,7 @@ async def _edit_existing_post(
 
     await _review_and_commit(
         session, db, user, board, subject=subject, body=body, draft_path=edit_draft_path, layout=post.layout,
+        files=current_files,
         commit_key="s", commit_label="ave", commit_brief="Save this edit",
         title="Edit post", breadcrumb=breadcrumb,
         cancelled_notice="Edit cancelled.",
@@ -1976,10 +2035,11 @@ async def _review_and_commit(
     commit_brief: str,
     cancelled_notice: str,
     draft_saved_notice: str,
-    commit: Callable[[str, str], Awaitable[bool]],
+    commit: Callable[[str, str, list[FileRef] | None], Awaitable[bool]],
     layout: str = "prose",
     title: str = "New post",
     breadcrumb: tuple[str, ...] = ("Message boards",),
+    files: list[FileRef] | None = None,
 ) -> None:
     """The review screen a new post and an edit both pass through
     before anything is stored: the draft is shown whole, its subject and
@@ -1996,15 +2056,26 @@ async def _review_and_commit(
 
     `title` names the composition ("New post", "Reply", "Edit post") and
     `breadcrumb` is the path to the board: the review screen is under
-    both, and the fullscreen editor's header shows the title (issue #813)."""
+    both, and the fullscreen editor's header shows the title (issue #813).
+
+    `files` are the files the post points at so far (issue #842), changed
+    here with `[A]ttach file` and `[R]emove file` and handed to `commit`
+    with the subject and body. `None` -- a moderator editing someone else's
+    post -- offers no file keys and hands `commit` `None`: the files stay."""
     body_mode = post_body_mode(
         board_allows_color=board.allow_color, reader_wants_color=post_colors_enabled(db, user)
     )
+    files = list(files) if files is not None else None
+    linked = is_board_linked(db, board)
     while True:
         # Said on arrival, in characters (issue #812), rather than by the
         # domain's byte-counting refusal at Publish: the editors stop a
         # body at the limit, but a signature is added after them.
         too_long = _too_long_to_post(subject, body)
+        if too_long is None and files and linked:
+            # Other nodes get a line naming each file at the end of the
+            # post (issue #842), which counts toward its length there.
+            too_long = _file_lines_too_long(body_with_link_text(db, body, files))
         if too_long is not None:
             announce(session, too_long, tone="error")
         action = await review_composition(
@@ -2025,7 +2096,24 @@ async def _review_and_commit(
             body_mode=body_mode,
             body_layout=layout,
             breadcrumb=(*breadcrumb, title),
+            extra_rows=(
+                _file_rows(db, board, files, accent=effective_accent_color(session, db), linked=linked)
+                if files is not None else ()
+            ),
+            extra_actions=file_actions(files, noun="post") if files is not None else (),
         )
+        if isinstance(action, str) and files is not None:
+            # `[A]ttach file` or `[R]emove file`: the pickers run on a lane,
+            # opened for as long as they are.
+            file_lane = DatabaseLane(db.path)
+            try:
+                files = await change_attached_files(
+                    session, file_lane, user, files, action, noun="post",
+                    breadcrumb=(*breadcrumb, title), style=_picker_style(session, db, user),
+                )
+            finally:
+                file_lane.close()
+            continue
         if action is ReviewAction.CANCEL:
             announce(session, cancelled_notice, tone="muted")
             return
@@ -2052,8 +2140,56 @@ async def _review_and_commit(
             continue
         if too_long is not None:
             continue
-        if await commit(subject, body):
+        if await commit(subject, body, files):
             return
+
+
+def _file_rows(db: Database, board: Board, files: list[FileRef], *, accent, linked: bool) -> list[str]:
+    """The review screen's rows for the files a post points at (issue #842):
+    each file, then what not every reader will get."""
+    rows = attached_rows(files, accent=accent)
+    if not files:
+        return rows
+    narrower = refs_some_readers_cannot_open(db, files, board)
+    if narrower:
+        names = ", ".join(sanitize_text(ref.filename) for ref in narrower)
+        rows.append(colored(
+            f"Not everyone who can read this board can open the file area of {names}; "
+            "they see only that a file is there.",
+            fg_color=MUTED_COLOR,
+        ))
+    if linked:
+        rows.append(colored(
+            "Readers on other BBSes get each file's name, size and file area as text at the end of the "
+            "post, not a download.",
+            fg_color=MUTED_COLOR,
+        ))
+    return rows
+
+
+def _file_lines_too_long(link_body: str) -> str | None:
+    """Why a post whose Link copy is `link_body` -- the body with its file
+    lines (issue #842) -- is too long to publish, or `None`."""
+    over = characters_over(link_body, MAX_BODY_BYTES)
+    if over:
+        return (
+            f"{too_long_message('With the file lines added for other BBSes, the post is', over)}"
+            " -- shorten it with [B]ody or [R]emove a file."
+        )
+    return None
+
+
+def _picker_style(session: Session, db: Database, user: User) -> dict:
+    """`pick_item`'s presentation arguments for the file pickers
+    (issue #842)."""
+    return {
+        "description_level": menu_description_level(db, user),
+        "redraw_in_place": redraw_in_place_enabled(db, user),
+        "unicode_style": unicode_style_enabled(db, user),
+        "collapsed": breadcrumb_collapsed_enabled(db, user),
+        "accent_color": effective_accent_color_256(db),
+        "header_color": effective_header_color_256(db),
+    }
 
 
 def _too_long_to_post(subject: str, body: str) -> str | None:

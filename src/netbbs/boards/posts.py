@@ -29,6 +29,14 @@ from netbbs.boards.limits import MAX_BODY_BYTES, MAX_SUBJECT_BYTES
 from netbbs.boards.moderation_notices import record_moderation_outcome
 from netbbs.communities import get_effective_min_age, get_effective_min_read_level, require_level_gate
 from netbbs.config import get_expiry_grace_period_days
+from netbbs.file_refs import (
+    MAX_FILE_REFS,
+    FileRef,
+    forget_orphaned_post_refs_without_commit,
+    post_refs,
+    sender_ref_problem,
+    write_post_refs_without_commit,
+)
 from netbbs.link.enforcement import envelope_content_visible, link_content_visible
 from netbbs.moderation import BoardPermission, has_permission, record_action
 from netbbs.permissions import require_level
@@ -119,9 +127,14 @@ def create_post(
     *,
     parent_post_id: str | None = None,
     layout: str = "prose",
+    files: list[FileRef] | None = None,
 ) -> Post:
     """
     Create a new post on `board`.
+
+    `files` (issue #842) are files in this node's file areas the post
+    points at (`netbbs.file_refs`), written with it. Each must be one
+    `author` can open now, and there may be at most `MAX_FILE_REFS`.
 
     `layout` (issue #711) is "art" for a body written in the ANSI art
     editor, whose lines are kept as drawn, and "prose" otherwise.
@@ -161,6 +174,10 @@ def create_post(
 
     if layout not in ("prose", "art"):
         raise PostError(f"invalid layout: {layout!r}")
+    files = list(files or [])
+    problem = sender_ref_problem(db, author, files, noun="post", verb="publish") if files else None
+    if problem is not None:
+        raise PostError(problem)
     status = "pending" if board.moderated else "approved"
     created_at = utc_now_iso()
     author_identifier = author.fingerprint or author.username
@@ -210,6 +227,7 @@ def create_post(
             # Apart from the INSERT, which stays valid on every schema a
             # post can be created on.
             db.connection.execute("UPDATE posts SET layout = ? WHERE post_id = ?", (layout, post_id))
+        write_post_refs_without_commit(db, post_id, files)
         db.connection.commit()
     except sqlite3.IntegrityError as exc:
         raise PostError(
@@ -342,9 +360,16 @@ def edit_post(
     body: str,
     edited_by: User,
     withdrawal: bool = False,
+    files: list[FileRef] | None = None,
 ) -> Post:
     """
-    Create a new revision of `post`. Never mutates the existing row in place: `post_id` is
+    Create a new revision of `post`.
+
+    `files` (issue #842) are the files the new revision points at. `None`
+    keeps the current revision's -- a moderator's edit, or any caller that
+    does not deal in files; a list replaces them. A file newly attached
+    must be one `edited_by` can open now; one already on the post is kept
+    as it is, shown as no longer available if it has gone. Never mutates the existing row in place: `post_id` is
     a content hash of the subject/body themselves
     (`netbbs.boards.content_id.compute_content_id`), so an in-place
     `UPDATE` would leave a row's own `post_id` silently mismatched
@@ -390,7 +415,18 @@ def edit_post(
     if current["tombstoned_at"] is not None:
         raise PostError("this post has been tombstoned and can no longer be edited")
 
-    if subject == current["subject"] and body == current["body"] and not withdrawal:
+    current_files = post_refs(db, current["post_id"])
+    if files is None:
+        files = [] if withdrawal else current_files
+    files = list(files)
+    added = [ref for ref in files if ref not in current_files]
+    problem = sender_ref_problem(db, edited_by, added, noun="post", verb="save") if added else None
+    if problem is None and len(files) > MAX_FILE_REFS:
+        problem = sender_ref_problem(db, edited_by, files, noun="post", verb="save")
+    if problem is not None:
+        raise PostError(problem)
+
+    if subject == current["subject"] and body == current["body"] and files == current_files and not withdrawal:
         # No-op edit (GitHub issue #41): every edit gets a fresh
         # created_at, which alone would produce a new content-addressed
         # post_id and make list_posts_page/_resolve_current_version
@@ -449,6 +485,7 @@ def edit_post(
                 *((1,) if withdrawal else ()),
             ),
         )
+        write_post_refs_without_commit(db, new_post_id, files)
         db.connection.commit()
     except sqlite3.IntegrityError as exc:
         raise PostError(
@@ -508,7 +545,7 @@ def withdraw_post(db: Database, post: Post, board: Board, *, withdrawn_by: User)
         raise PostError("this post is already withdrawn")
     return edit_post(
         db, post, board, subject=current["subject"], body=WITHDRAWN_PLACEHOLDER, edited_by=withdrawn_by,
-        withdrawal=True,
+        withdrawal=True, files=[],
     )
 
 
@@ -1152,6 +1189,7 @@ def delete_post(db: Database, post: Post, *, deleted_by: User, reason: str | Non
     if not deleted:
         db.connection.rollback()
         raise PostError("this post was already decided by another moderator")
+    forget_orphaned_post_refs_without_commit(db)
     if action == "reject":
         # A rejection is recorded, not only carried out (issue #692): for a
         # carried post the signed event is kept, and without this record
@@ -1690,10 +1728,26 @@ def _sweep_expired_posts(db: Database, board: Board) -> None:
         f"DELETE FROM posts WHERE {_deletable_where}",
         (board.id, deletion_cutoff),
     )
+    forget_orphaned_post_refs_without_commit(db)
     db.connection.commit()
 
     for root_post_id in expiring_roots | deleting_roots:
         reindex_post(db, board.id, root_post_id)
+
+
+def shown_post_refs(db: Database, post: Post) -> list[FileRef]:
+    """The files `post` points at as its reader sees it (issue #842): a held
+    post's own, else those of its newest approved revision -- the one
+    `_resolve_current_version` takes the text from, since a listed post
+    carries its root's `post_id`."""
+    if post.status == "pending":
+        return post_refs(db, post.post_id)
+    latest = db.connection.execute(
+        "SELECT post_id FROM posts WHERE root_post_id = ? AND board_id = ? AND status = 'approved' "
+        "ORDER BY id DESC LIMIT 1",
+        (post.root_post_id, post.board_id),
+    ).fetchone()
+    return post_refs(db, latest["post_id"] if latest is not None else post.post_id)
 
 
 def _row_to_post(row: sqlite3.Row, *, is_edited: bool = False) -> Post:

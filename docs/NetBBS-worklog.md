@@ -1137,6 +1137,12 @@ messages.
   so a freed id is reused by the next letter; any new per-letter side table
   must be cleaned there, not by a foreign key: `mail_messages` stays
   unreferenced so that rebuilding it never cascades.
+- `post_file_refs` (issue #842) has no foreign key either, and posts rows are
+  hard-deleted in several places (`delete_post`, the expiry sweep,
+  `delete_board`, purging a hidden carried board). Each calls
+  `netbbs.file_refs.forget_orphaned_post_refs_without_commit` before it
+  commits; a new delete of posts rows must too. The post-ref helpers check
+  that the table exists, because migrations older than it write posts.
 - Writing several copies atomically needs the `_without_commit` senders
   (`send_mail_without_commit`, `send_system_mail_without_commit`,
   `compose_link_message(commit=False)`), and `make_room` no longer commits
