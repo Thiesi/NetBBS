@@ -723,10 +723,11 @@ def door_data_left_behind(db_path: Path) -> bool:
     the same places `create_backup` looks. The Backup screen says "no door
     data" only when this is False (issue #845)."""
     node = db_path.resolve()
+    override = os.environ.get("WAR_DIALER_DB_PATH")
     return (
         voidrunner_save_directory(db_path)[0].is_dir()
         or (node.parent / (node.name + ".doors") / "war-dialer.db").exists()
-        or bool(os.environ.get("WAR_DIALER_DB_PATH"))
+        or bool(override and Path(override).expanduser().exists())
         or _door_outbound_root_for(db_path).is_dir()
     )
 
