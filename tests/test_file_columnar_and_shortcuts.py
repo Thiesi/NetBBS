@@ -321,7 +321,7 @@ def test_download_via_direct_number_shortcut(tmp_path, monkeypatch):
     db = Database(db_path)
     area, user = _setup_area(db, count=2, monkeypatch=monkeypatch)
     # Pressing '1' downloads the 1st file on the page (pkg0.tar.gz)
-    session = FakeSession(keys=["1"])
+    session = FakeSession(keys=["1", "b"])
     lane = DatabaseLane(db_path)
 
     asyncio.run(_show_area(session, lane, area, user))
@@ -337,7 +337,7 @@ def test_download_via_second_number_shortcut(tmp_path, monkeypatch):
     db = Database(db_path)
     area, user = _setup_area(db, count=2, monkeypatch=monkeypatch)
     # Pressing '2' downloads the 2nd file on the page (pkg1.tar.gz)
-    session = FakeSession(keys=["2"])
+    session = FakeSession(keys=["2", "b"])
     lane = DatabaseLane(db_path)
 
     asyncio.run(_show_area(session, lane, area, user))
@@ -355,7 +355,7 @@ def test_download_key_on_a_single_file_page_needs_no_number(tmp_path, monkeypatc
     db_path = tmp_path / "node.db"
     db = Database(db_path)
     area, user = _setup_area(db, count=1, monkeypatch=monkeypatch)
-    session = FakeSession(keys=["d"])
+    session = FakeSession(keys=["d", "b"])
     lane = DatabaseLane(db_path)
 
     asyncio.run(_show_area(session, lane, area, user))
@@ -374,7 +374,7 @@ def test_download_key_on_a_multi_file_page_picks_through_the_picker(tmp_path, mo
     db_path = tmp_path / "node.db"
     db = Database(db_path)
     area, user = _setup_area(db, count=2, monkeypatch=monkeypatch)
-    session = FakeSession(keys=["d", "0", "1"])
+    session = FakeSession(keys=["d", "0", "1", "b"])
     lane = DatabaseLane(db_path)
 
     asyncio.run(_show_area(session, lane, area, user))

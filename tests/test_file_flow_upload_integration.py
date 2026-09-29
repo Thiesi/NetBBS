@@ -221,7 +221,7 @@ def test_upload_exceeding_the_node_limit_leaves_no_temp_file_and_no_entry(db, la
     payload = b"x" * 1000
 
     client_to_server, server_to_client = _BytePipe(), _BytePipe()
-    server_session = _ServerSession(["u"], read_pipe=client_to_server, write_pipe=server_to_client)
+    server_session = _ServerSession(["u", "b"], read_pipe=client_to_server, write_pipe=server_to_client)
     client_session = _ClientSession(read_pipe=server_to_client, write_pipe=client_to_server)
 
     async def scenario():

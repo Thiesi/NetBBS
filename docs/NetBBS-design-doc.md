@@ -2031,6 +2031,15 @@ upload as a whole may cost the node that plus a small fixed framing allowance,
 whatever its shape: preamble, part headers and every part before or after the
 file count, and a request past the bound is refused (issue #511).
 
+A finished upload is reported both ways (issue #842). The terminal that minted
+the link is told when the file is stored, and whether it waits for approval,
+as an outcome on its next screen; Ctrl-L on the file list looks again, and the
+browser page sends it once its upload is done. The HTTP answer is JSON for the
+browser terminal's own `fetch()` and for scripts, and a short page for a form
+submitted from a browser tab (a request that accepts `text/html`), which used
+to be left on raw JSON. A failed Zmodem transfer leaves the caller on the file
+list and names `[W]eb transfer` when the node can mint links.
+
 A `HEAD` on a transfer link answers with the status a `GET` would, the reason in
 `X-NetBBS-Transfer-Message`, and spends nothing. The browser page relies on it:
 it probes a download first and starts it only on a yes, so a refused download is
