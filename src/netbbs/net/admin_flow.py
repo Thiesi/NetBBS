@@ -1651,7 +1651,7 @@ def _away_panel_lines(state: dict[str, object], *, width: int, unicode_style: bo
         return []
     text = f"You are marked {describe_away(notice, state['away_since'])}. A[w]ay ends it."
     return [
-        colored(line, fg_color=WARNING_COLOR)
+        colored(f"  {line}", fg_color=WARNING_COLOR)
         for line in _wrap_panel_sentence(sanitize_text(text), prefix="  ", width=width, unicode_style=unicode_style)
     ]
 
@@ -1718,6 +1718,39 @@ async def _away_screen(session: Session, lane: DatabaseLane, user: User) -> None
         return
 
 
+def _grants_seen_by(db: Database, viewer: User, grants: Sequence) -> str:
+    """A moderator's grants in words, leaving out any that would name
+    something `viewer` can't see -- a hidden Community, a board, area or
+    channel their level or age keeps from them (review on #870). A grant
+    over every board or area names nothing, so it always shows."""
+    from netbbs.net.board_flow import visible_boards
+    from netbbs.net.chat_flow import list_visible_channels_for
+    from netbbs.net.file_flow import visible_areas
+
+    if is_usable_sysop(viewer):
+        shown = list(grants)
+    else:
+        seen = {
+            "board": {b.id for b in visible_boards(db, viewer, community_id=None, community_scoped=False)},
+            "file_area": {a.id for a in visible_areas(db, viewer)},
+            "channel": {c.id for c in list_visible_channels_for(db, viewer)},
+        }
+        shown = []
+        for grant in grants:
+            if grant.object_id is not None:
+                visible = grant.object_id in seen[grant.object_type]
+            elif grant.community_id is not None:
+                community = get_community(db, grant.community_id)
+                visible = community is not None and not community.hidden
+            else:
+                visible = True
+            if visible:
+                shown.append(grant)
+    if not shown:
+        return "moderates content you can't open"
+    return "; ".join(describe_grant(db, grant) for grant in shown)
+
+
 async def staff_list_screen(session: Session, lane: DatabaseLane, user: User) -> None:
     """
     Who runs the node (design doc §5.6, issue #836): every usable SysOp,
@@ -1725,18 +1758,21 @@ async def staff_list_screen(session: Session, lane: DatabaseLane, user: User) ->
     last session, and any away notice. For members; the main menu offers
     it to everyone but guests.
     """
-    def _load(db: Database) -> tuple[list, dict[int, str | None], dict[int, str | None]]:
+    def _load(db: Database) -> tuple[list, dict[int, str | None], dict[int, str | None], dict[int, str]]:
         entries = list_staff(db)
         last_on = {entry.user.id: _date_of(db, entry.user.last_login_at) for entry in entries}
         away_since = {entry.user.id: _date_of(db, entry.away.since) if entry.away else None for entry in entries}
-        return entries, last_on, away_since
+        looks_after = {
+            entry.user.id: entry.looks_after or _grants_seen_by(db, user, entry.grants) for entry in entries
+        }
+        return entries, last_on, away_since, looks_after
 
-    entries, last_on, away_since = await lane.run(_load)
+    entries, last_on, away_since, looks_after = await lane.run(_load)
     rows = [
         [
             (sanitize_text(entry.user.username), AUTHOR_COLOR),
             entry.role,
-            sanitize_text(entry.looks_after),
+            sanitize_text(looks_after[entry.user.id]),
             (last_on[entry.user.id] or "never", DATE_COLOR),
         ]
         for entry in entries

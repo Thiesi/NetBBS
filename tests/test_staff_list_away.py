@@ -133,7 +133,7 @@ def test_the_staff_list_names_sysops_staff_and_moderators_in_that_order(db, syso
         ("InkWell", "SysOp"), ("Copperplate", "Staff"), ("OldNib", "Moderator"),
     ]
     assert entries[1].looks_after == "approve accounts, manage accounts"
-    assert entries[2].looks_after == 'board "Trading Post": approve'
+    assert [grant.object_id for grant in entries[2].grants] == [board.id]
     assert helper  # used above
 
 
@@ -224,3 +224,28 @@ def test_a_bad_date_is_refused_without_setting_anything(db, lane, sysop):
     asyncio.run(admin_menu(session, lane, sysop))
     assert away_notice(db, sysop) is None
     assert "not a date like" in _visible(_written_text(session))
+
+
+def test_the_staff_list_names_nothing_a_member_cannot_see(db, lane, sysop):
+    # Review on #870: a moderator's grants name boards and Communities.
+    from netbbs.communities import create_community
+
+    mod = create_user(db, "OldNib", password="hunter2")
+    secret = create_board(db, "Inner circle", creator=sysop, min_read_level=200)
+    hidden = create_community(db, "Back room", creator=sysop, hidden=True)
+    open_board = create_board(db, "Trading Post", creator=sysop)
+    for object_id, community_id in ((secret.id, None), (None, hidden.id), (open_board.id, None)):
+        grant_permissions(
+            db, mod, object_type="board", object_id=object_id, community_id=community_id,
+            permissions=BoardPermission.APPROVE, granted_by=sysop,
+        )
+    carol = create_user(db, "carol", password="hunter2")
+    session = FakeSession(["b"])
+    asyncio.run(staff_list_screen(session, lane, carol))
+    text = " ".join(_visible(_written_text(session)).split())
+    assert "Trading Post" in text
+    assert "Inner circle" not in text and "Back room" not in text
+
+    session = FakeSession(["b"])
+    asyncio.run(staff_list_screen(session, lane, sysop))
+    assert "Inner circle" in " ".join(_visible(_written_text(session)).split())

@@ -30,7 +30,7 @@ from netbbs.boards.posts import count_pending_posts
 from netbbs.files import FileArea, list_file_areas
 from netbbs.files.entries import count_pending_files
 from netbbs.moderation.log import record_action
-from netbbs.moderation.roles import BoardPermission, describe_grant, has_permission, list_grants_for_user
+from netbbs.moderation.roles import BoardPermission, ModeratorGrant, has_permission, list_grants_for_user
 from netbbs.storage.database import Database
 from netbbs.timeutil import format_for_display, get_node_timezone, utc_now_iso
 
@@ -213,8 +213,12 @@ def describe_away(notice: AwayNotice, since_date: str) -> str:
 class StaffListEntry:
     user: User
     role: str  # "SysOp", "Staff" or "Moderator"
+    # What a SysOp or staff member looks after, in words. A moderator's is
+    # their `grants` instead: which of them a member may read about depends
+    # on what that member may see (review on #870), so the screen words them.
     looks_after: str
     away: AwayNotice | None
+    grants: tuple[ModeratorGrant, ...] = ()
 
 
 def list_staff(db: Database, *, today: datetime.date | None = None) -> list[StaffListEntry]:
@@ -242,9 +246,7 @@ def list_staff(db: Database, *, today: datetime.date | None = None) -> list[Staf
         else:
             grants = list_grants_for_user(db, user)
             if grants:
-                moderators.append(StaffListEntry(
-                    user, "Moderator", "; ".join(describe_grant(db, grant) for grant in grants), None
-                ))
+                moderators.append(StaffListEntry(user, "Moderator", "", None, tuple(grants)))
     return sysops + staff + moderators
 
 
