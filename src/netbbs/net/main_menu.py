@@ -47,7 +47,7 @@ from netbbs.net.confirm import prompt_yes_no
 from netbbs.net.directory_flow import _browse_directory, _caller_who_screen
 from netbbs.net.door_flow import _visible_doors, browse_doors, has_visible_doors
 from netbbs.net.file_flow import browse_file_areas, visible_areas
-from netbbs.net.mail_arrivals import NOTICE_COLOR as NEW_MAIL_COLOR, arrival_event, login_mail_notice
+from netbbs.net.mail_arrivals import arrival_event, login_mail_notice, notice_color, waiting_mail_counts
 from netbbs.net.mail_flow import browse_mail, caller_mail_refusal
 from netbbs.net.main_menu_banner import load_main_menu_banner
 from netbbs.net.menu_description_preference import menu_description_level
@@ -266,12 +266,13 @@ async def _draw_main_menu(
                 detailed="Scan every accessible message board/chat channel/file area for activity since your last visit.",
             ),
             # Find names what it searches (issue #811): the caller's own
-            # mail too (issue #824), for a caller mail is open to.
+            # mail too (issue #824), for a caller mail is open to -- named
+            # first, as its results are listed first (issue #918).
             MenuEntry(
                 label=menu_key("/", " Find"),
-                brief="Search posts, files, chat, mail" if has_mail else "Search posts, files, and chat",
+                brief="Search mail, posts, files, chat" if has_mail else "Search posts, files, and chat",
                 detailed=(
-                    "Find posts, files, retained chat, and your own mail on this node." if has_mail
+                    "Find your own mail, posts, files, and retained chat on this node." if has_mail
                     else "Find posts, files, and retained chat on this node."
                 ),
             ),
@@ -335,8 +336,10 @@ async def _draw_main_menu(
     # own header (now the mailbox's, `_MailboxScreen`) settled this wording as
     # "message(s)"; matching it here fixes both the missing pluralization
     # and a term the app wasn't even using consistently with itself.
+    # The unread count in the highlight colour, the accent beside the
+    # caller's name (issue #917): news, not a warning.
     mail_status = (
-        (f"{unread} unread message{'' if unread == 1 else 's'}", WARNING_COLOR)
+        (f"{unread} unread message{'' if unread == 1 else 's'}", effective_accent_color(session, db))
         if unread
         else ("mail caught up", SUCCESS_COLOR)
     )
@@ -456,9 +459,45 @@ def _main_menu_prompt(db: Database, user: User, node_controls: NodeControls | No
     return f"{time_str} {tag}Choice: "
 
 
+def pending_invitations_notice(db: Database, user: User) -> str | None:
+    """The line the first main menu after login shows about pending chat
+    channel invitations (GitHub issue #42), or `None` when there are none.
+
+    Deliberately brief (a count, not the channel names or inviters):
+    `[I]nvitations` on the same menu shows the detail and stays there for
+    as long as anything is pending. Told once, on the first draw only --
+    the menu redraws on every return from a screen. Before issue #923 it
+    was written at login, ahead of the menu's redraw-in-place clear, which
+    wiped it unseen."""
+    count = len(list_pending_invitations_for_user(db, user))
+    if not count:
+        return None
+    return (
+        f"You have {count} pending chat channel invitation{'' if count == 1 else 's'} -- "
+        f"[I]nvitations to see {'it' if count == 1 else 'them'}."
+    )
+
+
+def login_drain_notice(user: User, node_controls: NodeControls | None) -> str | None:
+    """The warning the first main menu after login gives a non-SysOp while a
+    drain is scheduled (design doc §13.8), or `None`. A caller who connects,
+    or reconnects after an earlier drain pass, would otherwise learn of it
+    only by being disconnected. A SysOp is never drained, so is not told.
+    Measured when the menu draws, so it agrees with the prompt's
+    `[DRAINING]` tag beneath it."""
+    if node_controls is None or meets_level(user, SYSOP_LEVEL) or not node_controls.drain_scheduler.is_scheduled():
+        return None
+    remaining = node_controls.drain_scheduler.remaining_seconds()
+    return colored(
+        "Note: this node is currently being drained for maintenance -- "
+        f"you will be disconnected in about {format_remaining_seconds(remaining)}.",
+        fg_color=ALERT_COLOR, bold=True,
+    )
+
+
 async def _show_pending_invitations(session: Session, db: Database, user: User) -> None:
-    """The on-demand full-detail view `netbbs.net.login_flow._announce_
-    pending_invitations`'s brief notice points to -- channel name,
+    """The on-demand full-detail view `pending_invitations_notice`'s brief
+    login notice points to -- channel name,
     inviter, and when, for every currently pending invitation. No
     accept/reject action lives here: `/join <channel>` from the channel
     picker remains the one way to accept (design doc's "reuse /join"
@@ -587,7 +626,8 @@ async def _main_menu_loop(
     mail_arrived = arrival_event(session)
     notice: str | None = None
     redraw = True
-    # The first draw is the one after login, which says what mail waits.
+    # The first draw is the one after login, which says what is waiting:
+    # a drain, mail, chat invitations (issue #923).
     first_draw = True
     discard_typeahead = False
     while True:
@@ -615,6 +655,12 @@ async def _main_menu_loop(
                 if fresh is not None:
                     notice = _access_change_notice(user, fresh) or notice
                     user = _adopt_account(session, registry, fresh)
+                if first_draw:
+                    # A drain under way, told first (issue #923): written at
+                    # login, before this menu's clear, it was wiped unseen.
+                    drain_line = login_drain_notice(user, node_controls)
+                    if drain_line is not None:
+                        announce_styled(session, drain_line)
                 # What moderators decided on this caller's held posts, told
                 # once (issue #678) -- acknowledged only once the menu that
                 # shows them has been drawn.
@@ -626,9 +672,13 @@ async def _main_menu_loop(
                 # from it, then the caller's own Link mail that came back.
                 mail_open = caller_mail_refusal(session, db, user) is None
                 if first_draw and mail_open:
-                    waiting = login_mail_notice(unread_mail_count(db, user))
+                    # Both counts (issue #917): what arrived since the last
+                    # call, and everything unread.
+                    waiting = login_mail_notice(
+                        *waiting_mail_counts(db, user, current_history_id=current_history_id)
+                    )
                     if waiting is not None:
-                        announce(session, waiting, color=NEW_MAIL_COLOR)
+                        announce(session, waiting, color=notice_color(db))
                 # Read mail the mailbox cap removed to make room, counted
                 # and told once (issue #818) -- never which messages. Held
                 # for a caller mail is closed to, who has no Inbox to see.
@@ -641,6 +691,16 @@ async def _main_menu_loop(
                 delivery_lines, delivery_ids = pending_delivery_notices(db, user)
                 for text in delivery_lines:
                     announce(session, text, tone="error")
+                # Chat after mail: the channel invitations waiting at login
+                # (issue #923), then any queued `/msg` lines, which
+                # `_draw_main_menu` carries.
+                if first_draw:
+                    invitations = pending_invitations_notice(db, user)
+                    if invitations is not None:
+                        announce(session, invitations, tone="muted")
+                # Queued once: a draw an unwind interrupts leaves them queued
+                # for the redraw, which must not queue them again.
+                first_draw = False
                 if mail_arrived is not None:
                     # Whatever it announced is drawn now.
                     mail_arrived.clear()
@@ -650,7 +710,6 @@ async def _main_menu_loop(
                 acknowledge_eviction_notice(db, user, evicted)
                 notice = None
                 redraw = False
-                first_draw = False
             set_root_activity(session, None)
             key_task = asyncio.create_task(session.read_key())
             side_tasks: dict[str, asyncio.Task] = {}
@@ -800,6 +859,7 @@ async def _main_menu_loop(
                         session, db, lane, hub, presence, mailbox, history, user, link_context=link_context,
                         mrc_bridge=node_controls.mrc_bridge if node_controls is not None else None,
                         transfers=node_controls.transfers if node_controls is not None else None,
+                        current_history_id=current_history_id,
                     )
                 else:
                     await session.write_line(

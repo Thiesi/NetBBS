@@ -24,14 +24,15 @@ def db(tmp_path):
 
 
 @pytest.mark.parametrize("width", [80, 40])
-def test_find_names_posts_files_chat_and_mail(db, width):
+def test_find_names_mail_posts_files_and_chat(db, width):
     lena = create_user(db, "lena_h", password="hunter2", user_level=10)
     session = _MenuSession(["l", "y"])
     session.terminal_width = width
     _menu(db, session, lena)
     text = _visible_text(session)
 
-    assert "Search posts, files, chat, mail" in text
+    # Mail first, as its results are (issue #918).
+    assert "Search mail, posts, files, chat" in text
 
 
 @pytest.mark.parametrize("width", [80, 40])

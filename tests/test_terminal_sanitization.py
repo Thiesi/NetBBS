@@ -88,7 +88,7 @@ class FakeSession:
 
     async def read_line(
         self, echo: bool = True, history=None, completer=None, *,
-        live_buffer=None, lock=None, list_candidates=None,
+        live_buffer=None, lock=None, list_candidates=None, viewport=None, **_ignored,
     ) -> str:
         # Falls back to "" (an empty Enter-press) once scripted input
         # runs out, rather than raising -- simpler than every test

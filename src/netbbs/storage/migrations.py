@@ -3832,4 +3832,42 @@ MIGRATIONS = [
         );
         """,
     ),
+    Migration(
+        description=(
+            "Issue #922: `mail_messages.first_read_shared` -- 1 when the sender and the recipient "
+            "both shared read receipts at the letter's first reading (`first_read_at`), else 0. A "
+            "receipt shows only if both shared then and both share now, so neither side can turn "
+            "receipts on for a moment to see what was read while they were off. A letter already "
+            "read gets 1 unless its sender or its recipient has receipts off now: no released "
+            "version had the switch (receipts on for everyone), so on an upgrade from a release "
+            "every past reading counts as shared; a database that ran the unreleased #829 code "
+            "has no record of when a caller switched, and their current setting is the closest "
+            "proxy, erring toward not showing."
+        ),
+        sql="""
+        ALTER TABLE mail_messages ADD COLUMN first_read_shared INTEGER NOT NULL DEFAULT 0;
+        UPDATE mail_messages SET first_read_shared = 1
+        WHERE first_read_at IS NOT NULL
+          AND sender_user_id IS NOT NULL
+          AND recipient_user_id IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM user_preferences p
+              WHERE p.key = 'mail_read_receipts' AND p.value = '0'
+                AND p.user_id IN (mail_messages.sender_user_id, mail_messages.recipient_user_id)
+          );
+        """,
+    ),
+    Migration(
+        description=(
+            "Issue #919: `mail_messages.resent_at` -- when the sender last sent a Link letter "
+            "that bounced or expired again with Resend, so Sent can show it as `resent` rather "
+            "than as a failure still waiting on them. Set on the sender's copy the resend went "
+            "to (for a letter to several people, on each copy resent); the new letter is a row "
+            "of its own. NULL for every other letter, and for every existing one: nothing "
+            "recorded which failed letters were resent before."
+        ),
+        sql="""
+        ALTER TABLE mail_messages ADD COLUMN resent_at TEXT;
+        """,
+    ),
 ]

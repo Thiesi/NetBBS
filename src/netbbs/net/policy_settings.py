@@ -34,6 +34,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from netbbs.config import get_config, set_config_without_commit
+from netbbs.digits import is_ascii_number
 from netbbs.storage.database import Database
 
 _logger = logging.getLogger(__name__)
@@ -235,7 +236,7 @@ def parse_text(setting: PolicySetting, text: str) -> Any:
             return False
         raise PolicyValueError(f"{setting.label} must be yes or no.")
     try:
-        return int(text) if setting.kind is int and text.lstrip("+-").isdigit() else float(text)
+        return int(text) if setting.kind is int and is_ascii_number(text.lstrip("+-")) else float(text)
     except ValueError as exc:
         raise PolicyValueError(f"{setting.label} must be a number.") from exc
 

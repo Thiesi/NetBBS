@@ -155,6 +155,11 @@ def test_parse_text_reads_lists_and_numbers():
     assert parse_text(BY_KEY["link.relay_serving_enabled"], "no") is False
 
 
+def test_parse_text_refuses_a_superscript_digit_as_a_number():
+    with pytest.raises(PolicyValueError, match="must be a number"):
+        parse_text(BY_KEY["link.max_peers"], "²")
+
+
 def test_startup_snapshot_records_effective_values_and_overrides(db):
     config = NodeConfig(explicit_keys=frozenset({"link.max_peers", "database.path"}))
     record_startup_policy(db, config)

@@ -38,6 +38,7 @@ import math
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Mapping, Sequence, TypeVar
 
+from netbbs.digits import is_ascii_number
 from netbbs.net.char_input import CANCEL_KEY, HELP_KEY, REDRAW_KEY, REFRESH_KEY, Completer, EditorKey, EditorKeyKind
 from netbbs.net.help_overlay import show_help
 from netbbs.rendering.ansi import strip_ansi
@@ -227,13 +228,6 @@ def _pad_cell(text: str, width: int, *, align_right: bool) -> str:
         text = truncate_to_width(text, width, ellipsis="…" if width > 1 else "")
     padding = " " * max(0, width - display_width(text))
     return padding + text if align_right else text + padding
-
-
-def _is_ascii_number(text: str) -> bool:
-    """Digits `int()` accepts. `str.isdigit()` also accepts "²" and other
-    Unicode digits `int()` rejects, which crashed a picker reading one
-    from a UTF-8 terminal (review of #859)."""
-    return bool(text) and text.isascii() and text.isdigit()
 
 
 def _table_widths(terminal_width: int, columns: Sequence[ListColumn]) -> int | None:
@@ -1431,7 +1425,7 @@ async def pick_item(
                 raw = (await session.read_line()).strip()
                 target = (
                     page_items[int(raw) - 1]
-                    if _is_ascii_number(raw) and 1 <= int(raw) <= len(page_items)
+                    if is_ascii_number(raw) and 1 <= int(raw) <= len(page_items)
                     else None
                 )
                 if target is None:
@@ -1467,7 +1461,7 @@ async def pick_item(
             await session.write_line("")
             return created
 
-        if _is_ascii_number(char):
+        if is_ascii_number(char):
             second = await _read_navigable_key(session, distinguish_ctrl_h=True)
             second_char = (
                 second.char if second.kind == EditorKeyKind.CHAR and second.char is not None else None
@@ -1483,7 +1477,7 @@ async def pick_item(
                 continue
             if second_char is not None:
                 await session.write(second_char)
-            if second_char is None or not _is_ascii_number(second_char):
+            if second_char is None or not is_ascii_number(second_char):
                 # The first digit is always echoed just above. A second
                 # key that was itself an ordinary character (including
                 # a non-digit one) was just echoed the same way; a

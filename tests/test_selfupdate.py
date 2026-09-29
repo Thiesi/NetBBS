@@ -64,6 +64,9 @@ from netbbs.storage.database import Database
         ("2.1.9", "2.2.0", True),
         ("2.1.0", "2.1.0-rc1", False),  # pre-release suffix truncates to equal
         ("1.9.0", "1.10.0", True),  # numeric comparison, not lexicographic
+        # "²" passes isdigit() but not int(): a suffix, not a crash (#928).
+        ("7.13.0", "v7.14²", True),
+        ("7.13.0", "v7.13.0²", False),
     ],
 )
 def test_is_newer(current, candidate, expected):

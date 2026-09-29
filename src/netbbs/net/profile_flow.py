@@ -84,6 +84,7 @@ from netbbs.net.prose_editor import EditorHeader, edit_prose
 from netbbs.net.redraw_preference import redraw_in_place_enabled, set_redraw_in_place_enabled
 from netbbs.net.resource_editor import Draft, FieldSpec, edit_resource_draft, live_choice_field
 from netbbs.net.session import Session, write_prompt
+from netbbs.digits import is_ascii_number
 from netbbs.net.sort_ui import SORT_MODE_LABELS
 from netbbs.net.password_screen import manage_password_screen
 from netbbs.net.ssh_key_screen import manage_ssh_keys_screen
@@ -633,7 +634,7 @@ async def _previous_callers_screen(
             typed = ""
         if not typed:
             continue
-        if not typed.isdigit() or not 1 <= int(typed) <= len(entries):
+        if not is_ascii_number(typed) or not 1 <= int(typed) <= len(entries):
             announce(session, f"There is no caller {typed} on this list.", tone="error")
             continue
         target = _previous_caller_mail_target(db, entries[int(typed) - 1], user, viewer_is_sysop=viewer_is_sysop)
@@ -1291,9 +1292,10 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
                 "folder when you first opened it, and you see the same for mail you send. It "
                 "works both ways: turn it off and no one sees when you read their mail, and you "
                 "no longer see when anyone reads yours. Off also hides the receipts already given; "
-                "turning it on again shows them again. A sender is told that you don't share "
-                "receipts, so your unread-looking letter isn't taken for one you haven't read. "
-                "Mail to and from other BBSes never has read receipts."
+                "turning it on again shows them again. Mail read while either of you had receipts "
+                "off never shows as read, even after you both turn them on. A sender is told that "
+                "you don't share receipts, so your unread-looking letter isn't taken for one you "
+                "haven't read. Mail to and from other BBSes never has read receipts."
             ),
             section="Communication",
         ),

@@ -351,6 +351,14 @@ class MailMessage:
     # When the recipient first opened it (issue #829): the time a read
     # receipt shows. Mark unread clears `read_at`, never this.
     first_read_at: str | None = None
+    # Whether the sender and the recipient both shared read receipts at
+    # that first reading (issue #922). A reading made while either did not
+    # is never a receipt, whatever they share later.
+    first_read_shared: bool = False
+    # When the sender last sent this Link letter again after it bounced or
+    # expired (issue #919); NULL otherwise. The new letter is a row of its
+    # own, and this one keeps its status and reason.
+    resent_at: str | None = None
 
     @property
     def is_read(self) -> bool:
@@ -1054,6 +1062,30 @@ def unread_count(db: Database, user: User) -> int:
     return row["n"]
 
 
+def unread_count_since(db: Database, user: User, since: str) -> int:
+    """How many of `user`'s unread letters reached this node at or after
+    `since` (issue #917, "new since your last call").
+
+    By arrival, not by `created_at`: a letter received over Link is dated
+    by its sender's signed time (issue #808), which can be well before it
+    arrived -- a letter held by a relay for a day is still new to its
+    reader. Such a row records its arrival as `sender_deleted_at`, set on
+    insert because no Sent copy of it exists here and never changed after
+    (it has no local sender to delete it). Every other letter -- local,
+    system, and Link mail stored before that column was set on receipt --
+    is dated when it was stored, so `created_at` is its arrival."""
+    row = db.connection.execute(
+        """
+        SELECT COUNT(*) AS n FROM mail_messages
+        WHERE recipient_user_id = ? AND recipient_deleted_at IS NULL AND read_at IS NULL
+          AND (CASE WHEN link_source_event_id IS NOT NULL THEN COALESCE(sender_deleted_at, created_at)
+                    ELSE created_at END) >= ?
+        """,
+        (user.id, since),
+    ).fetchone()
+    return row["n"]
+
+
 MailKey = tuple[int, str]
 
 
@@ -1157,10 +1189,24 @@ def mark_read(db: Database, user: User, message: MailMessage) -> MailMessage:
         return message
     read_at = utc_now_iso()
     # The first opening is the read receipt's time (issue #829), and it
-    # stays through Mark unread and a later reading.
+    # stays through Mark unread and a later reading. Whether both sides
+    # shared receipts is recorded with it (issue #922): a reading made
+    # while either did not never becomes a receipt, so neither side can
+    # turn receipts on for a moment to see what was read while off.
+    # (SQLite evaluates every SET expression against the row as it was.)
+    shared = (
+        message.sender_user_id is not None
+        and _shares_read_receipts_by_id(db, message.recipient_user_id)
+        and _shares_read_receipts_by_id(db, message.sender_user_id)
+    )
     db.connection.execute(
-        "UPDATE mail_messages SET read_at = ?, first_read_at = COALESCE(first_read_at, ?) WHERE id = ?",
-        (read_at, read_at, message.id),
+        """
+        UPDATE mail_messages SET read_at = ?,
+            first_read_shared = CASE WHEN first_read_at IS NULL THEN ? ELSE first_read_shared END,
+            first_read_at = COALESCE(first_read_at, ?)
+        WHERE id = ?
+        """,
+        (read_at, 1 if shared else 0, read_at, message.id),
     )
     db.connection.commit()
     return get_mail(db, user, message.id)
@@ -1195,10 +1241,11 @@ READ_RECEIPTS_PREFERENCE = "mail_read_receipts"
 
 #: A receipt's states. `RECEIPT_WITHHELD`: the recipient does not share
 #: receipts, which the sender is always told. `RECEIPT_HIDDEN`: the sender
-#: does not share them, so sees none. The others are what a receipt says.
+#: does not share them, so sees none. The others are what a receipt says;
+#: a letter deleted unopened is `RECEIPT_NOT_READ` (issue #922), so the
+#: recipient's deletion stays their own.
 RECEIPT_READ = "read"
 RECEIPT_NOT_READ = "not_read"
-RECEIPT_DELETED_UNREAD = "deleted_unread"
 RECEIPT_WITHHELD = "withheld"
 RECEIPT_HIDDEN = "hidden"
 
@@ -1207,6 +1254,13 @@ def shares_read_receipts(db: Database, user: User) -> bool:
     """Whether `user` lets senders see when they have read their mail --
     and so sees other people's receipts (reciprocal). On by default."""
     return get_user_preference(db, user, READ_RECEIPTS_PREFERENCE, default="1") != "0"
+
+
+def _shares_read_receipts_by_id(db: Database, user_id: int) -> bool:
+    row = db.connection.execute(
+        "SELECT value FROM user_preferences WHERE user_id = ? AND key = ?", (user_id, READ_RECEIPTS_PREFERENCE)
+    ).fetchone()
+    return row is None or row["value"] != "0"
 
 
 def set_shares_read_receipts(db: Database, user: User, shares: bool) -> None:
@@ -1226,12 +1280,16 @@ def read_receipts(db: Database, sender: User, messages: list[MailMessage]) -> di
     still exists have a receipt: Link mail, system mail and a deleted
     account's letters are left out.
 
-    Both sides' preferences are read now, not when the letter was read: a
-    caller who turns receipts off hides the ones already given, and one who
-    turns them on again shows them again. A recipient who does not share
-    receipts is `RECEIPT_WITHHELD` whatever the sender's own setting -- the
-    one thing the sender is always told, so a letter nobody reports as read
-    is never taken for one not read yet."""
+    A reading is a receipt only if both sides shared receipts when it
+    happened (`first_read_shared`, issue #922) *and* both share them now: a
+    caller who turns receipts off hides the ones already given, turning them
+    on again shows those again, but a reading made while either side had
+    them off never shows -- so neither can switch receipts on for a moment
+    to peek. Such a reading, and a letter deleted unopened, read as
+    `RECEIPT_NOT_READ`. A recipient who does not share receipts is
+    `RECEIPT_WITHHELD` whatever the sender's own setting -- the one thing
+    the sender is always told, so a letter nobody reports as read is never
+    taken for one not read yet."""
     local = [
         message for message in messages
         if message.sender_user_id == sender.id and message.recipient_user_id is not None
@@ -1256,10 +1314,8 @@ def read_receipts(db: Database, sender: User, messages: list[MailMessage]) -> di
             receipt = ReadReceipt(RECEIPT_WITHHELD)
         elif not sender_shares:
             receipt = ReadReceipt(RECEIPT_HIDDEN)
-        elif message.first_read_at is not None:
+        elif message.first_read_at is not None and message.first_read_shared:
             receipt = ReadReceipt(RECEIPT_READ, message.first_read_at)
-        elif message.recipient_deleted_at is not None:
-            receipt = ReadReceipt(RECEIPT_DELETED_UNREAD)
         else:
             receipt = ReadReceipt(RECEIPT_NOT_READ)
         receipts[message.id] = receipt
@@ -1541,4 +1597,6 @@ def _row_to_message(row: sqlite3.Row) -> MailMessage:
         mail_group_id=row["mail_group_id"],
         mail_group_to=row["mail_group_to"],
         first_read_at=row["first_read_at"],
+        first_read_shared=bool(row["first_read_shared"]),
+        resent_at=row["resent_at"],
     )

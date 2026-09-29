@@ -585,6 +585,16 @@ class LineViewport:
         self.col = column
         self.drawn = drawn
 
+    def at_left_edge(self) -> None:
+        """The terminal cursor has been put back at the window's left
+        edge by someone else -- chat's pinned-row repaint, which redraws
+        the prompt with absolute positioning (issue #926). The scroll
+        position is kept, so the repaint shows the same stretch of text
+        the editor last drew."""
+        self.col = 0
+        self.drawn = 0
+        self._reanchor = False
+
     def reset(self) -> None:
         """Forget where the cursor was -- for a caller that has just
         written a newline, after which the window starts over."""
@@ -732,6 +742,11 @@ class LiveInputBuffer:
 
     text: str = ""
     cursor: int = 0
+    # The editor's own window when the read scrolls (issue #926), so a
+    # concurrent repaint of the pinned row draws the same stretch of the
+    # line around the cursor instead of the head of it. `None` when the
+    # read does not scroll.
+    window: LineViewport | None = None
 
     def update(self, line: list[str], cursor: int) -> None:
         self.text = "".join(line)
@@ -895,6 +910,46 @@ async def apply_tab_completion(
         await write("".join(line))
         await write(move_cursor(display_width("".join(line[cursor:])), forward=False))
     return cursor
+
+
+def line_viewport(
+    viewport: int | Callable[[], int] | None, *, owns_row: bool
+) -> LineViewport | None:
+    """The window for a `read_line` given `viewport` (issue #546), or
+    `None` for one that does not scroll. Shared by both line editors --
+    `_read_line_editable` here and `netbbs.net.web.WebSession`'s copy."""
+    if viewport is None:
+        return None
+    return LineViewport(viewport() if callable(viewport) else viewport, owns_row=owns_row)
+
+
+async def _discard(_text: str) -> None:
+    return None
+
+
+async def complete_in_window(
+    write: WriteFunc, window: LineViewport,
+    completer: Completer, line: list[str], cursor: int,
+    *, list_candidates: CandidateListPrinter | None, last_candidates: LastCandidateList,
+) -> int:
+    """Tab in a scrolling line (issue #926). `apply_tab_completion` draws
+    incrementally, which would leave the window's idea of the cursor
+    column disagreeing with the terminal, so here it edits `line` without
+    drawing and the window redraws afterwards. A candidate list goes out
+    through `list_candidates` when there is one (chat's pinned row), else
+    on its own line above, after which the window starts a fresh row.
+
+    Returns the new cursor; the caller redraws the window with it."""
+
+    async def list_above(candidates: Sequence[str], _text: str, _cursor: int) -> None:
+        await write("\r\n" + "  ".join(candidates) + "\r\n")
+        window.reset()
+
+    return await apply_tab_completion(
+        _discard, completer, line, cursor,
+        list_candidates=list_candidates if list_candidates is not None else list_above,
+        last_candidates=last_candidates,
+    )
 
 
 def _push_back(source: ByteSource, byte: int) -> None:
@@ -1115,21 +1170,12 @@ async def _read_line_editable(
     # be free to scroll on any edit, including one that would otherwise
     # have been a single character appended at the cursor. Without one --
     # every caller that has not opted in -- the incremental writes below
-    # are exactly what they were.
-    #
-    # Ignored when a `completer` is supplied: `apply_tab_completion` does
-    # its own incremental drawing, which would leave the window's idea of
-    # the cursor column disagreeing with the terminal. No caller combines
-    # the two, and a completion prompt (chat commands, a picker search)
-    # is short by nature.
-    window = (
-        LineViewport(
-            viewport() if callable(viewport) else viewport,
-            owns_row=viewport_owns_row,
-        )
-        if viewport is not None and completer is None
-        else None
-    )
+    # are exactly what they were. Tab completes without drawing and the
+    # window redraws (`complete_in_window`), so chat, which completes,
+    # can scroll too (issue #926).
+    window = line_viewport(viewport, owns_row=viewport_owns_row)
+    if live_buffer is not None:
+        live_buffer.window = window
 
     async def show() -> None:
         if window is not None:
@@ -1222,7 +1268,15 @@ async def _read_line_editable(
                     continue
 
                 if b == _TAB:
-                    if completer is not None:
+                    if completer is not None and window is not None:
+                        cursor = await complete_in_window(
+                            write, window, completer, line, cursor,
+                            list_candidates=list_candidates, last_candidates=last_candidates,
+                        )
+                        if live_buffer is not None:
+                            live_buffer.update(line, cursor)
+                        await show()
+                    elif completer is not None:
                         cursor = await apply_tab_completion(
                             write, completer, line, cursor,
                             list_candidates=list_candidates, last_candidates=last_candidates,

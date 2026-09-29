@@ -47,7 +47,7 @@ up: from a board to the list you picked it from, and from there to the menu.
 | **Games** | Door games, when the SysOp has set some up |
 | **Communities** (key **O**) | Topics the SysOp set up, each with its own boards, chat channels, file areas and games |
 | **New scan** | See unread activity and resources you have not visited; Back from each one brings you back with the next new one ready for Enter, **[R]eplies** opens the replies to your posts, and **[E]-mail** opens your mailbox, whose unread count is shown above the list |
-| **Find** (key **/**) | Search posts, files and retained chat on this node, and your own mail: your Inbox and Sent, never anyone else's. A letter opens as it does in the mailbox, and Back returns to the results. Mail is left out where the SysOp has not opened mail to you |
+| **Find** (key **/**) | Search your own mail (your Inbox and Sent, never anyone else's) and the posts, files and retained chat on this node. Mail results come first, up to 20 of each kind. A letter opens as it does in the mailbox, and Back returns to the results. Mail is left out where the SysOp has not opened mail to you |
 | **E-mail** | Read and send persistent NetBBS mail, from the level the SysOp chose; not offered to the guest account |
 | **Who's online** | See callers and available ways to contact them |
 | **Profile** | Change your public profile and personal preferences |
@@ -225,7 +225,11 @@ stop keeping some. If old mail was removed to make room, the main menu tells
 you how many messages went, once.
 
 You are told when mail arrives. The first main menu after you log in says how
-many unread messages wait, and **New scan** shows the count above its list.
+many messages arrived since your last call and how many are unread in all,
+for example "3 new since your last call, 7 unread in all"; on your
+first call it gives just the unread count, and with nothing unread it says
+nothing. **New scan** shows the same counts above its list. Mail news is
+shown in the node's highlight colour, not the warning colour.
 A message that arrives while you are online is announced with its sender and
 subject: at once in chat, straight away on an idle main menu or Inbox, and
 otherwise above the prompt of the next screen you reach. Nothing is written
@@ -335,6 +339,9 @@ Delivery line when you open it:
   was not delivered. Mail left at a relay expires when no answer came back
   in 14 days; it may still have arrived, and if an answer turns up later,
   Sent shows it as delivered or bounced after all.
+- **Resent**: it bounced or expired, and you sent it again with
+  **Re[s]end**. The new copy is a letter of its own in Sent, with its own
+  state.
 
 A letter shows the way its writer typed it: each line stays a line, and
 only a line too wide for your screen wraps. Mail can be in color, written
@@ -346,17 +353,24 @@ When mail bounces or expires you are told at the main menu, once, even if it
 happened while you were away. Opening the message in Sent counts as being
 told. To try again, open it in Sent and press **Re[s]end**: the compose
 screen opens with the same recipient, subject and text, ready to send as a
-new letter, and the old one stays in Sent as it was. If the reason it failed
-still applies on this side -- for example your SysOp has since stopped mail
-to that node -- you are told so when you press the key or at Send. Resend is
-only offered for mail that bounced or expired: a letter that arrived, or may
-still arrive, would reach its reader twice.
+new letter. Once it is sent you are back on the Sent list, and the old
+letter reads **resent** there; opening it shows when, on a `Resent:` line
+under its Delivery line, and the key reads **Re[s]end again**. If you sent
+the resend to someone else instead, the old letter stays as it was. If the
+reason it failed still applies on this side -- for example your SysOp has
+since stopped mail to that node -- you are told so when you press the key
+or at Send. Resend is only offered for mail that bounced or expired: a
+letter that arrived, or may still arrive, would reach its reader twice.
+**[R]eply** and **[F]orward** on a letter in Sent also bring you back to
+the Sent list once the new letter is sent.
 
 A letter to several people is one row in Sent, with everyone's names under
 To. Opening it shows a Delivery line for each person on another node, and
 the list shows the one that needs you most -- a bounce before a letter still
 on its way. **Re[s]end** there sends the letter again only to those whose
-copy bounced or expired; **[R]eply** writes to them all again; **[D]elete**
+copy bounced or expired and was not resent yet; the list reads **resent**
+once every one of them was, and the key then reads **Re[s]end again**.
+**[R]eply** writes to them all again; **[D]elete**
 removes it from Sent for everyone it went to (their copies stay theirs).
 When you receive such a letter, its To line shows everyone it went to, and
 **Reply [a]ll** writes to its sender and everyone else on it, where
@@ -406,14 +420,19 @@ Profile.
 whether they have read it: the list says `read` or `not read`, and the
 opened letter has a `Read:` line with the time they first opened it (marking
 it unread again does not take that back). A letter to several people lists
-who has read it, who hasn't yet, and who deleted it unread. The same goes the
+who has read it and who hasn't yet. A letter deleted without being opened
+simply reads as not read: nobody learns that you deleted it. The same goes the
 other way: whoever writes to you sees when you first open their letter.
 
 This is on for everyone unless they turn it off, and it works both ways. In
 **Profile → E[x]change read receipts** ("Let senders see when I've read their
 mail") you can turn it off: then no one sees when you read their mail, and you
 no longer see when anyone reads yours. Turning it off also hides the receipts
-you already gave; turning it on again shows them again. A sender is told that
+you already gave; turning it on again shows them again. But a letter opened
+while either of you had receipts off never shows as read, even once you both
+turn them back on -- so nobody can switch receipts on for a moment to see what
+you read while they were off, and what you read while yours were off stays
+unreported. A sender is told that
 you don't share read receipts (`no receipt` in their Sent list), so an
 unread-looking letter isn't taken for one you haven't read -- they learn your
 setting, never whether you read it. Mail to or from another BBS, and mail
@@ -429,6 +448,9 @@ room with its user count and topic, or use `/join room`. Tab completes MRC
 subcommands, room names and recipients for `/mrc msg`.
 If opening a room is refused, the reason stays visible in the picker while
 you choose another room or go back.
+
+A line from MRC starts with **[MRC]**, and its sender reads `nick@theirBBS`,
+with their BBS in a color of its own.
 
 The status bar separates people **here** (including their away count) from
 people on **MRC**. Remote away counts are unavailable; `?` means the roster

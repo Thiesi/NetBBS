@@ -218,6 +218,13 @@ def test_default_fetch_bounds_the_response_body(monkeypatch):
     with pytest.raises(ReliableNodesError, match="exceeds"):
         _default_fetch(RELIABLE_NODES_URL)
 
+    class _Superscript(_Response):
+        # Headers decode as Latin-1, which has "²": isdigit() but not int() (#928).
+        headers = {"Content-Length": "²"}
+
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: _Superscript(b"{}"))
+    assert _default_fetch(RELIABLE_NODES_URL) == b"{}"
+
 
 @pytest.mark.parametrize("exc", [
     ConnectionResetError("peer reset"),
