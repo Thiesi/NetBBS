@@ -435,6 +435,9 @@ subcommands, room names and recipients for `/mrc msg`.
 If opening a room is refused, the reason stays visible in the picker while
 you choose another room or go back.
 
+A line from MRC starts with **[MRC]**, and its sender reads `nick@theirBBS`,
+with their BBS in a color of its own.
+
 The status bar separates people **here** (including their away count) from
 people on **MRC**. Remote away counts are unavailable; `?` means the roster
 has not arrived, and stale readings are labeled. Profile's MRC color switch

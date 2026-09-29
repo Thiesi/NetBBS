@@ -39,6 +39,7 @@ from netbbs.files.areas import FileArea, list_file_areas
 from netbbs.files.entries import count_listed_files
 from netbbs.link.boards import LinkContext
 from netbbs.mrc.bridge import MrcBridge
+from netbbs.mrc.protocol import MRC_LABEL_SUFFIX, mrc_sender
 from netbbs.net.board_flow import _show_board
 from netbbs.net.breadcrumb_preference import breadcrumb_collapsed_enabled
 from netbbs.net.char_input import InputHistory
@@ -581,6 +582,15 @@ def _looks_like_attempted_boolean_syntax(query: str) -> bool:
     return any(token.lower() in _BOOLEAN_LOOKING_WORDS for token in query.split())
 
 
+def _chat_hit_author(author_label: str) -> str:
+    """Who said a chat line Find turned up. An MRC sender reads `(on MRC)`,
+    as `/who` has it, not the stored `(MRC)`, which after a name now reads
+    as an account (issue #899)."""
+    if author_label.endswith(MRC_LABEL_SUFFIX):
+        return f"{mrc_sender(author_label)} (on MRC)"
+    return author_label
+
+
 async def _find_screen(
     session: Session,
     db: Database,
@@ -691,7 +701,7 @@ async def _find_screen(
             items.append(
                 _SearchResultItem(
                     kind="channel_message", name=_search_snippet(hit.body),
-                    description=f"[CHAT] #{hit.channel.name} by {hit.author_label}",
+                    description=f"[CHAT] #{hit.channel.name} by {_chat_hit_author(hit.author_label)}",
                     result_index=next_index, message=hit,
                 )
             )

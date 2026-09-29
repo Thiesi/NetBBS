@@ -54,7 +54,7 @@ class FakeSession(_PickerFakeSession):
 
     async def read_line(
         self, echo: bool = True, history=None, completer=None, *,
-        live_buffer=None, lock=None, list_candidates=None,
+        live_buffer=None, lock=None, list_candidates=None, viewport=None, **_ignored,
     ) -> str:
         if not self._inputs:
             raise AssertionError("FakeSession.read_line() called with no more scripted input")

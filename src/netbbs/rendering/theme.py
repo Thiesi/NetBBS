@@ -75,6 +75,11 @@ NODE_COLOR = 116  # pale turquoise — the linked node after the `@` of a chat
                   # who is talking and where from. Paler than NICK_COLOR's
                   # saturated azure, which can sit on the next line, and not
                   # gold, which is the speaker's own name beside it
+MRC_SITE_COLOR = 146  # pale lavender — the BBS after the `@` of an MRC
+                      # speaker, its own shade so an MRC site never reads
+                      # as a linked node (NODE_COLOR) -- the two are
+                      # addressed and trusted differently. The `[MRC]`
+                      # badge in front of the line says where it came from
 VERIFIED_COLOR = 82  # vivid green — a SysOp-verified real name (design doc),
                      # applied to the whole "(=name=)" unit at render time,
                      # directly from the trusted attested_value, never derived from

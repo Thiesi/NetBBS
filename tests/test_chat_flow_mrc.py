@@ -111,7 +111,7 @@ class _QueueSession(FakeSession):
         super().__init__([])
         self.inputs: asyncio.Queue[str] = asyncio.Queue()
 
-    async def read_line(self, echo=True, history=None, completer=None, *, live_buffer=None, lock=None, list_candidates=None):
+    async def read_line(self, echo=True, history=None, completer=None, *, live_buffer=None, lock=None, list_candidates=None, **_ignored):
         return await self.inputs.get()
 
 
@@ -278,8 +278,7 @@ def test_inbound_mrc_line_is_rendered_as_an_external_author(db, lane, hub, prese
                 lane, hub, presence, channel, alice, ["/quit"], mrc_bridge=rig.bridge, while_joined=push,
             )
             text = _text(session)
-            assert "bob@Other (MRC)" in text
-            assert "greetings from afar" in text
+            assert "[MRC] <bob@Other> greetings from afar" in text
             # The remote line's own SGR was stripped at the wire boundary.
             assert "\x1b[31m" not in "\n".join(session.written)
             recorded = [m for m in get_scrollback(db, channel) if m.kind == "message"]
