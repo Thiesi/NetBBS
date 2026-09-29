@@ -44,6 +44,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import socket
+from collections import deque
 from typing import Awaitable, Callable
 
 from netbbs.net import char_input
@@ -54,7 +55,8 @@ from netbbs.net.session import (
     clamp_terminal_size,
     wait_until_drained,
 )
-from netbbs.rendering.charset import CP437
+from netbbs.net.terminal_detect import classify_terminal_types
+from netbbs.rendering.charset import ASCII, CP437
 from netbbs.rendering.pipe_codes import PastedColor
 
 # Telnet protocol constants (RFC 854, plus NAWS from RFC 1073 and
@@ -76,6 +78,9 @@ NEW_ENVIRON_SEND = 1
 NEW_ENVIRON_VAR = 0
 NEW_ENVIRON_VALUE = 1
 NEW_ENVIRON_USERVAR = 3
+TTYPE = 0x18  # RFC 1091 TERMINAL-TYPE
+TTYPE_IS = 0
+TTYPE_SEND = 1
 
 _logger = logging.getLogger(__name__)
 
@@ -92,6 +97,20 @@ DEFAULT_STOP_TIMEOUT_SECONDS = 5.0
 _MAX_SUBNEGOTIATION_BODY = 1024
 _SUBNEGOTIATION_TIMEOUT = 1.0
 
+# How long the first screen waits for the client to say which terminal it
+# is (TTYPE, issue #929): the answer decides the character set that screen
+# is sent in. A client that answers or refuses ends the wait at once.
+DEFAULT_TERMINAL_TYPE_WAIT_SECONDS = 1.0
+
+# RFC 1091 cycling: ask again after a name nothing recognises, up to this
+# many names, stopping when the client repeats itself.
+_MAX_TERMINAL_TYPES = 3
+
+# Keystrokes kept while the first screen waits for TTYPE. Nobody types a
+# screenful before the first screen; a client that sends more ends the
+# wait early instead of growing the buffer (review on #942).
+_MAX_EARLY_INPUT = 1024
+
 
 class TelnetSession(Session):
     transport_name = "telnet"
@@ -104,9 +123,17 @@ class TelnetSession(Session):
         peer_address: str | None = None,
         *,
         close_timeout_seconds: float = DEFAULT_STOP_TIMEOUT_SECONDS,
+        terminal_type_wait_seconds: float = DEFAULT_TERMINAL_TYPE_WAIT_SECONDS,
     ):
         self._reader = reader
         self._writer = writer
+        self._terminal_type_wait_seconds = terminal_type_wait_seconds
+        # TTYPE: "idle" until requested, then "requested" (DO sent),
+        # "asking" (the client said WILL; SEND sent), "done".
+        self._ttype_state = "idle"
+        # Keystrokes that arrived while the first screen waited for TTYPE:
+        # real caller input, served before anything read later.
+        self._early_input: deque[int] = deque()
         # Where `read_byte_with_timeout` is inside a Telnet command, so that
         # none of its bytes count as caller input (issue #762).
         self._peek_command: str | None = None
@@ -194,10 +221,82 @@ class TelnetSession(Session):
         )
         self._writer.write(bytes([IAC, WILL, BINARY]))
         self._writer.write(bytes([IAC, DO, BINARY]))
+        # Last, so every earlier byte sequence stays where tests expect it.
+        self._writer.write(bytes([IAC, DO, TTYPE]))
+        self._ttype_state = "requested"
         try:
             await self._writer.drain()
         except CLIENT_DISCONNECT_ERRORS as exc:
             raise SessionClosedError("client disconnected during negotiation") from exc
+        await self._await_terminal_type()
+
+    async def _await_terminal_type(self) -> None:
+        """Wait, at most `terminal_type_wait_seconds`, for the client to
+        report its terminal type or refuse to, then choose the character
+        set (design doc §3.2): a recognised name decides it, anything else
+        gets ASCII until the caller settles it after login.
+
+        This is the one negotiation the first screen waits for, because the
+        first screen is exactly what a wrong guess garbles. Only the first
+        byte of each read is bounded by the deadline, so a Telnet command
+        is never cut in half; everything the client sends is interpreted
+        as usual (NAWS, NEW-ENVIRON), and data bytes -- a caller typing
+        early -- are kept for the reads that follow."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._terminal_type_wait_seconds
+        while self._ttype_state != "done":
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
+            try:
+                first = await asyncio.wait_for(self._read_raw_byte(), timeout=remaining)
+            except asyncio.TimeoutError:
+                break
+            # The rest of a command is bounded too: a client that sends IAC
+            # and then nothing must not hold the connection open forever.
+            try:
+                value = await asyncio.wait_for(self._interpret_byte(first), timeout=_SUBNEGOTIATION_TIMEOUT)
+            except asyncio.TimeoutError as exc:
+                raise SessionClosedError("Telnet command timed out during negotiation") from exc
+            if value is not None:
+                self._early_input.append(value)
+                if len(self._early_input) >= _MAX_EARLY_INPUT:
+                    break
+        self._ttype_state = "done"
+        charset, certain = classify_terminal_types(self.terminal_types)
+        self.output_charset = charset if charset is not None else ASCII
+        self.charset_certain = certain
+
+    async def _send_terminal_type_request(self) -> None:
+        try:
+            self._writer.write(bytes([IAC, SB, TTYPE, TTYPE_SEND, IAC, SE]))
+            await self._writer.drain()
+        except CLIENT_DISCONNECT_ERRORS as exc:
+            raise SessionClosedError("client disconnected during negotiation") from exc
+
+    async def _on_terminal_type_option(self, command: int) -> None:
+        if self._ttype_state != "requested":
+            return
+        if command == WILL:
+            self._ttype_state = "asking"
+            await self._send_terminal_type_request()
+        elif command == WONT:
+            self._ttype_state = "done"
+
+    async def _on_terminal_type(self, name: str) -> None:
+        if self._ttype_state != "asking":
+            return
+        known = [existing.lower() for existing in self.terminal_types]
+        if not name or name.lower() in known:
+            # RFC 1091: repeating the last name means the list is exhausted.
+            self._ttype_state = "done"
+            return
+        self.terminal_types = (*self.terminal_types, name)
+        recognised, _certain = classify_terminal_types([name])
+        if recognised is not None or len(self.terminal_types) >= _MAX_TERMINAL_TYPES:
+            self._ttype_state = "done"
+            return
+        await self._send_terminal_type_request()
 
     async def _send_text(self, text: str) -> None:
         # Normalize all line endings to CRLF (RFC 854's correct Telnet
@@ -337,11 +436,19 @@ class TelnetSession(Session):
         every higher-level read in this class (via
         `netbbs.net.char_input`).
         """
+        if self._early_input:
+            return self._early_input.popleft()
+        return await self._interpret_byte(await self._read_raw_byte())
+
+    async def _read_raw_byte(self) -> int:
         try:
-            b = (await self._reader.readexactly(1))[0]
+            return (await self._reader.readexactly(1))[0]
         except (asyncio.IncompleteReadError, *CLIENT_DISCONNECT_ERRORS) as exc:
             raise SessionClosedError("client disconnected during read") from exc
 
+    async def _interpret_byte(self, b: int) -> int | None:
+        """The data byte `b` is, or None if it starts a Telnet command,
+        which is read to its end and acted on."""
         if b == IAC:
             try:
                 next_byte = (await self._reader.readexactly(1))[0]
@@ -354,9 +461,11 @@ class TelnetSession(Session):
                 return 0xFF
             if next_byte in (WILL, WONT, DO, DONT):
                 try:
-                    await self._reader.readexactly(1)  # option byte, ignored
+                    option = (await self._reader.readexactly(1))[0]
                 except (asyncio.IncompleteReadError, *CLIENT_DISCONNECT_ERRORS) as exc:
                     raise SessionClosedError("client disconnected during read") from exc
+                if option == TTYPE:
+                    await self._on_terminal_type_option(next_byte)
                 return None
             if next_byte == SB:
                 await self._handle_subnegotiation()
@@ -379,6 +488,8 @@ class TelnetSession(Session):
         pre-existing limitation carried over unchanged from before this
         module's character-mode logic moved to `char_input`.
         """
+        if self._early_input:
+            return self._early_input.popleft()
         try:
             peek = await asyncio.wait_for(self._reader.read(1), timeout=timeout)
         except (asyncio.TimeoutError, *CLIENT_DISCONNECT_ERRORS):
@@ -462,6 +573,8 @@ class TelnetSession(Session):
                 self.terminal_width, _ = clamp_terminal_size(width, self.terminal_height)
             if height > 0:
                 _, self.terminal_height = clamp_terminal_size(self.terminal_width, height)
+        elif option == TTYPE and body[:1] == bytes([TTYPE_IS]):
+            await self._on_terminal_type(body[1:].decode("ascii", errors="replace").strip()[:64])
         elif option == NEW_ENVIRON and body[:1] == bytes([NEW_ENVIRON_IS]):
             # Tolerant of malformed bodies -- worst case, `variables`
             # ends up empty and supports_truecolor simply stays at its
@@ -581,11 +694,13 @@ class TelnetServer:
         session_handler: SessionHandler,
         *,
         stop_timeout_seconds: float = DEFAULT_STOP_TIMEOUT_SECONDS,
+        terminal_type_wait_seconds: float = DEFAULT_TERMINAL_TYPE_WAIT_SECONDS,
     ):
         self._host = host
         self._port = port
         self._session_handler = session_handler
         self._stop_timeout_seconds = stop_timeout_seconds
+        self._terminal_type_wait_seconds = terminal_type_wait_seconds
         self._server: asyncio.base_events.Server | None = None
         # Every admitted connection's writer, negotiating or not, so
         # `stop` can abort whatever hasn't closed on its own. The
@@ -671,7 +786,8 @@ class TelnetServer:
         peer = writer.get_extra_info("peername")
         peer_address = peer[0] if peer else None
         session = TelnetSession(
-            reader, writer, peer_address, close_timeout_seconds=self._stop_timeout_seconds
+            reader, writer, peer_address, close_timeout_seconds=self._stop_timeout_seconds,
+            terminal_type_wait_seconds=self._terminal_type_wait_seconds,
         )
         self._writers.add(writer)
         try:

@@ -267,6 +267,15 @@ class Session(ABC):
     #: output (a door's stream) is in it too. Stays UTF-8 until the
     #: caller's terminal or preference says otherwise.
     output_charset: Charset = UTF8
+    #: Whether `output_charset` came from something the terminal said for
+    #: certain. False for a Telnet terminal that reported no known type
+    #: (it gets ASCII) or only `ansi`, and for an SSH terminal type on
+    #: neither list: such a caller is asked after login which sample line
+    #: looks right (`netbbs.net.terminal_detect`).
+    charset_certain: bool = True
+    #: The terminal types the client reported, in order (Telnet TTYPE, or
+    #: the SSH PTY request's terminal type).
+    terminal_types: tuple[str, ...] = ()
 
     #: The server-side copy of this caller's screen (issue #764), created
     #: on the first write. See `screen_copy`.

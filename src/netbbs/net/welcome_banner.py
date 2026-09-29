@@ -48,6 +48,7 @@ from netbbs.rendering import (
     gradient_text,
     nearest_256,
 )
+from netbbs.rendering.charset import ASCII, UTF8
 from netbbs.rendering.layout import double_frame
 from netbbs.storage.database import Database
 
@@ -262,15 +263,14 @@ _ASCII_BANNER = str.maketrans({"╔": "+", "╗": "+", "╚": "+", "╝": "+", "
 
 def pre_login_unicode_style(session: object) -> bool:
     """Whether the screens a caller sees before signing in may use
-    Unicode box, rule and arrow characters (issue #841, F073).
+    Unicode box, rule and arrow characters (issues #841, #929).
 
-    Not over Telnet: that is where classic BBS terminals such as SyncTERM
-    call from, and they read bytes as CP437, so a UTF-8 rule arrived as
-    three characters of noise, before the caller had any chance to ask
-    for plain ASCII (that question comes after login, per account). The
-    browser and SSH clients read UTF-8. After login the caller's own
-    preference applies everywhere."""
-    return getattr(session, "transport_name", None) != "telnet"
+    Follows the character set detected for the connection (design doc
+    §3.2): a UTF-8 or CP437 terminal gets the decorated chrome, and
+    `Session.write` maps it for CP437. A Telnet client that did not say
+    which terminal it is gets ASCII, where the plain variants read better
+    than mapped ones. After login the caller's own preference applies."""
+    return getattr(session, "output_charset", UTF8) != ASCII
 
 
 def load_welcome_banner(db: Database, *, truecolor: bool = False, unicode_style: bool = True) -> str:

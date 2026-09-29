@@ -25,7 +25,7 @@ def _typed(charset, keystrokes: bytes, *, read_key: bool = False):
         server = await _run_server(handler)
         try:
             reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
-            await skip_initial_negotiation(reader)
+            await skip_initial_negotiation(reader, writer)
             writer.write(keystrokes)
             await writer.drain()
             for _ in range(200):
@@ -82,7 +82,7 @@ def test_a_cursor_navigated_screen_reads_cp437_characters():
         server = await _run_server(handler)
         try:
             reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
-            await skip_initial_negotiation(reader)
+            await skip_initial_negotiation(reader, writer)
             writer.write(bytes([0x82, 0xC3]))  # é, then a lone box piece
             await writer.drain()
             for _ in range(200):
