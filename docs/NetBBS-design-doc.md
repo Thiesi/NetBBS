@@ -2442,8 +2442,14 @@ for a caller mail is open to (`caller_mail_refusal`):
   come before them, and a drain warning (§13.8) before those; the count of
   pending chat channel invitations and any queued `/msg` lines follow them
   (issue #923). Ahead of all of these is the outcome of a question answered
-  during login (the Unicode-style check, a first-run choice), which answers
-  the last thing the caller did.
+  during login (the character-set check, a first-run choice), which answers
+  the last thing the caller did. First of all is the login line itself,
+  "Welcome, <name> › level N › Ctrl-L redraws" (issue #949). Like every
+  notice there it is shown once and not again after Ctrl-L, and it is
+  written nowhere before the menu, in either redraw mode: with
+  redraw-in-place on the menu's clear wiped it unseen, and with it off it
+  would be shown twice. It is built after the login questions, so the
+  character-set answer decides its separator.
 - *In New scan.* A `Mail:` line heads the summary above the list with the
   login notice's two counts ("Mail: 3 new since your last call, 7 unread
   in all"; on a first call `Mail: N unread`), counted from the same
