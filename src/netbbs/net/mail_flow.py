@@ -2393,7 +2393,9 @@ def _recipient_label(db, recipient_text: str, link_enabled: bool) -> str:
     typed -- and a Link address by the name its node goes by. Text that
     names no one yet (a `[T]o` edit Send will refuse) is shown as typed."""
     if link_enabled and "@" in recipient_text:
-        checked = _check_link_recipient(db, recipient_text)
+        # Named by its node even where Send will refuse that node: the
+        # address may be kept by technical identity (issue #826).
+        checked = _resolve_link_address(db, recipient_text)
         if isinstance(checked, str):
             return recipient_text
         return link_address_label(checked.user, identity_for_fingerprint(db, checked.fingerprint).label)

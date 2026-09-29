@@ -376,3 +376,26 @@ def test_tab_through_the_real_line_editor_types_the_address(db):
 
     assert asyncio.run(scenario(b"bob@n\t\r\n")).strip() == "bob@Nib & Quill"
     assert asyncio.run(scenario(b"bob@Nib & q\t\r\n")).strip() == "bob@Nib & Quill"
+
+
+def test_an_address_send_refuses_is_still_shown_by_its_nodes_name(db, db_path):
+    """Kept by technical identity, but read by name: a peer still on
+    probation, chosen at [T]o, shows as its name, not a fingerprint."""
+    alice = _user(db, "alice")
+    node_identity = bootstrap_node_identity("roanoke")
+    farpoint = bootstrap_node_identity("farpoint")
+    newcomer = bootstrap_node_identity("newcomer")
+    link_context = _link_context_with_known_peer(db, node_identity, farpoint)
+    _link_context_with_known_peer(db, node_identity, newcomer, friendly_name="Newcomer", established=False)
+    session = FakeSession(
+        keys=["c", "t", "s", "c", "b"], lines=["bob@Farpoint", "Hello", "Body", "/done", "bob@Newcomer"],
+    )
+    session.terminal_width = 200
+    lane = DatabaseLane(db_path)
+    asyncio.run(browse_mail(session, lane, alice, link_context=link_context))
+    lane.close()
+
+    text = _visible_text(session)
+    assert "is newly linked; mail opens once the SysOp establishes it." in text
+    assert newcomer.fingerprint not in text
+    assert "bob@Newcomer · farpoint.example.org" in text
