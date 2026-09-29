@@ -3085,10 +3085,12 @@ async def _send_to_several(
     ]
     for recipient in recipients:
         if recipient.address is not None:
+            # Each Link recipient's node on its own (review on #910): the
+            # caution names whose node it is.
             warning = await _link_mail_identity_warning(lane, recipient.address)
             if warning is not None:
-                await session.write_line(colored(warning, fg_color=MUTED_COLOR, bold=True))
-                break
+                name = sanitize_text(await _display_link_address(lane, recipient.address))
+                await session.write_line(colored(f"{name}: {warning}", fg_color=MUTED_COLOR, bold=True))
     node_identity = link_context.node_identity if link_context is not None else None
     try:
         count = await lane.run(
