@@ -75,7 +75,7 @@ def test_set_nick_allows_own_username(db, alice):
     assert get_nick(db, alice) == "alice"
 
 
-@pytest.mark.parametrize("nick", ["Deep|Parse", "InkWell[sysop]", "<bob>", "*** notice", "~Deep~", "|", "Ann (bob)", "(", ")"])
+@pytest.mark.parametrize("nick", ["Deep|Parse", "InkWell[sysop]", "<bob>", "*** notice", "~Deep~", "|", "Ann (bob)", "(", ")", "Ann （bob）", "Ann ⁽bob⁾", "Ann ❨bob❩", "{x}"])
 def test_set_nick_rejects_characters_the_chat_screen_frames_names_with(db, alice, nick):
     # Issue #843: the separator, a status-bar tag's brackets, a speaker's
     # angle brackets, the "*" of /me and notices, the old "~" marker.

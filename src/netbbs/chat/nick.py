@@ -30,6 +30,8 @@ storage underneath.
 
 from __future__ import annotations
 
+import unicodedata
+
 from netbbs.auth.users import User, presentation_name_problem
 from netbbs.rendering import MUTED_COLOR, NICK_COLOR, colored, sanitize_text
 from netbbs.storage.database import Database
@@ -53,6 +55,20 @@ def account_suffix(username: str) -> str:
 # notices. "~" and "|" were earlier alias markers; an alias holding one
 # would read as two names.
 _RESERVED_NICK_CHARACTERS = "()|[]<>*~"
+
+
+def _reserved_characters_in(nick: str) -> list[str]:
+    """The characters of `nick` that are reserved or read as one: a
+    fullwidth `（`, a small or superscript parenthesis -- anything that
+    compatibility-folds (NFKC) to a reserved character -- and any other
+    opening or closing bracket (Unicode Ps/Pe), such as `❨`. A look-alike
+    parenthesis would forge the account marker as well as a real one."""
+    return sorted({
+        ch for ch in nick
+        if ch in _RESERVED_NICK_CHARACTERS
+        or any(folded in _RESERVED_NICK_CHARACTERS for folded in unicodedata.normalize("NFKC", ch))
+        or unicodedata.category(ch) in ("Ps", "Pe")
+    })
 
 
 class NickError(Exception):
@@ -84,7 +100,7 @@ def set_nick(db: Database, user: User, nick: str) -> None:
     if len(nick) > MAX_NICK_LENGTH:
         raise NickError(f"alias cannot exceed {MAX_NICK_LENGTH} characters")
 
-    reserved = sorted({ch for ch in nick if ch in _RESERVED_NICK_CHARACTERS})
+    reserved = _reserved_characters_in(nick)
     if reserved:
         raise NickError(f"alias cannot contain {' '.join(reserved)}")
 
@@ -105,7 +121,7 @@ def get_nick(db: Database, user: User) -> str | None:
     would show as `Ann (bob) (mallory)` -- two accounts, one forged. It
     is dropped rather than rewritten; its owner can set a new one."""
     value = get_user_preference(db, user, _NICK_KEY)
-    if not value or any(ch in _RESERVED_NICK_CHARACTERS for ch in value):
+    if not value or _reserved_characters_in(value):
         return None
     return value
 

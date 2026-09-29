@@ -3890,7 +3890,7 @@ _COMMAND_INFO: dict[str, tuple[str, str]] = {
     "dm": ("/dm <user>", "Invite an online user to a live, fullscreen direct chat."),
     "help": ("/help [command]", "List available commands, or show detail for one."),
     "me": ("/me <action>", 'Send an action message (e.g. "* alice waves").'),
-    "nick": ("/nick [name]", "Set a display alias, shown as alias|username; a bare /nick clears it."),
+    "nick": ("/nick [name]", "Set a display alias, shown as alias (username); a bare /nick clears it."),
     "clear": ("/clear", "Clear your own screen (alias: /cls). Cosmetic only, nothing else changes."),
     "away": ("/away [message]", "Mark yourself away, or clear away status."),
     "timestamps": ("/timestamps [on|off]", "Toggle chat timestamps, or set them on/off explicitly."),

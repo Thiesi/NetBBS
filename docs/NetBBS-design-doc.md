@@ -2183,7 +2183,8 @@ live stream the alias leads in its own color and `(username)` follows muted
 with the name its owner chose. It may not contain `( ) | [ ] < > * ~`: the
 parentheses that hold the account, a status-bar tag's brackets, the angle
 brackets around a speaker, the `*` of actions and notices, and the two earlier
-alias markers. It may not read as another local account's username, or, unless its
+alias markers -- nor any character that reads as one of these (one that
+compatibility-folds to it, like a fullwidth `（`) or any other Unicode bracket. It may not read as another local account's username, or, unless its
 owner is a SysOp, as a staff title: a reserved name from §4.2 or anything
 containing `sysop`. "Reads as" is §4.2's skeleton, applied after accents are
 dropped, Cyrillic and Greek look-alikes become Latin letters, and everything but
