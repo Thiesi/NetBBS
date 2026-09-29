@@ -139,9 +139,36 @@ def test_every_reason_a_sender_can_be_told_has_words_for_the_sysop_too():
     assert set(_BOUNCE_REASON_TEXT) - {"blocked_sender"} <= set(_REASON_TEXT)
 
 
+def test_one_node_cannot_crowd_other_nodes_out_of_the_log(db, monkeypatch):
+    """A direct push is refused unverified, so its letters cost the pusher
+    nothing to invent; its share of the log is capped."""
+    import netbbs.link.mail_refusals as refusals
+
+    monkeypatch.setattr(refusals, "MAX_LINK_MAIL_REFUSALS_KEPT", 4)
+    monkeypatch.setattr(refusals, "MAX_LINK_MAIL_REFUSALS_PER_NODE", 2)
+    _sender, early = _mail("early")
+    record_link_mail_refusal(db, early.to_dict(), "link_policy_manual_block", via=VIA_RELAY)
+    flooder = bootstrap_node_identity("flooder")
+    for name in ("a", "b", "c", "d", "e"):
+        _other, message = _mail(name)
+        record_link_mail_refusal(
+            db, message.to_dict(), "link_policy_node_probationary_read_only", via=VIA_DIRECT,
+            sender_node_fingerprint=flooder.fingerprint,
+        )
+    kept = list_link_mail_refusals(db)
+    assert [refusal.sender_node_fingerprint for refusal in kept].count(flooder.fingerprint) == 2
+    assert any(refusal.sender_user == "early" for refusal in kept)
+
+
 def test_an_unreadable_letter_is_not_recorded_and_does_not_raise(db):
     record_link_mail_refusal(db, {"envelope": {"payload": {}}}, "malformed", via=VIA_DIRECT)
     record_link_mail_refusal(db, {}, "malformed", via=VIA_DIRECT)
+    # A float anywhere makes the content id itself refuse (ContentIdError),
+    # and the push it came in is still to be answered with a clean 403.
+    _sender, message = _mail()
+    raw = message.to_dict()
+    raw["envelope"]["payload"]["created_at"] = 1.5
+    record_link_mail_refusal(db, raw, "link_policy_node_probationary_read_only", via=VIA_DIRECT)
     assert list_link_mail_refusals(db) == []
 
 

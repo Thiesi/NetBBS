@@ -728,7 +728,7 @@ this node refused, and how full your callers' mailboxes are.
   takes you to that subject's trust screen to establish or block it. A letter
   refused because its node is on probation is the common case: establish the
   node, and the sender's next attempt is delivered. The list keeps the 500 most
-  recent refusals.
+  recent refusals, and no more than 50 from any one node.
 - **Mailboxes** lists every account with mail, fullest first (**Order**
   switches to by name): letters, unread, read, notices from the BBS itself, and
   how much of the 500-letter cap that is. A full inbox makes room by dropping

@@ -5128,8 +5128,9 @@ malformed or undecryptable letter) -- is kept in `link_mail_refusals`: the
 sender's home node and user name, the reason code, how it arrived, when it was
 first and last refused, and how many times. One row per letter (its
 `content_id`), so a sender retrying by another route counts up rather than
-adding rows; bounded to the 500 most recent, because the sender decides how
-many letters arrive. A direct push is refused before its letters' signatures
+adding rows; bounded to the 500 most recent, and 50 from any one node,
+because the sender decides how many letters arrive and a pushed letter is
+recorded before its signature is checked. A direct push is refused before its letters' signatures
 are checked, so there the node on record is the one that authenticated the
 push, and a letter naming another home node is not believed about its sender's
 name; a push that reached this node for another node (a stale address) is not

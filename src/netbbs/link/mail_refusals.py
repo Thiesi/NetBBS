@@ -15,9 +15,11 @@ What a row holds, and what it deliberately does not:
   tool that showed what a refused letter said would be a way to read mail
   sent to someone else. A refused letter's ciphertext is not kept either.
 
-The log is bounded (`MAX_LINK_MAIL_REFUSALS_KEPT`, the newest by last refusal
+The log is bounded (`MAX_LINK_MAIL_REFUSALS_KEPT` in all and
+`MAX_LINK_MAIL_REFUSALS_PER_NODE` from one node, the newest by last refusal
 win) because the sender decides how many letters it sends: a node on
-probation here must not be able to grow this table without limit.
+probation here must not be able to grow this table without limit, or crowd
+every other node's refusals out of it.
 
 Plain, synchronous and `db`-first like the rest of `netbbs.link`: async
 callers dispatch through `DatabaseLane`.
@@ -34,6 +36,11 @@ from netbbs.timeutil import utc_now_iso
 
 #: At most this many refused letters are kept; the oldest go first.
 MAX_LINK_MAIL_REFUSALS_KEPT = 500
+#: And at most this many from any one node, so that one node sending letters
+#: by the hundred -- a direct push is refused before its letters' signatures
+#: are checked, so they cost it nothing to invent -- cannot push every other
+#: node's refusals out of the log.
+MAX_LINK_MAIL_REFUSALS_PER_NODE = 50
 
 #: How the refused letter reached this node.
 VIA_DIRECT = "direct"
@@ -104,7 +111,7 @@ def record_link_mail_refusal(
         sender = message.payload.get("sender") or {}
         claimed_home = sender.get("home_node_fingerprint")
         user = sender.get("local_user_id")
-    except (KeyError, TypeError, ValueError, AttributeError):
+    except Exception:  # noqa: BLE001 -- unverified input; any failure means "not a letter"
         return
     home = sender_node_fingerprint or claimed_home
     if not isinstance(home, str) or not home:
@@ -130,6 +137,15 @@ def record_link_mail_refusal(
                 content_id, home, user[:_MAX_USER_LENGTH] if user else None,
                 str(reason)[:_MAX_REASON_LENGTH], via, now, now,
             ),
+        )
+        db.connection.execute(
+            """
+            DELETE FROM link_mail_refusals WHERE sender_node_fingerprint = ? AND id NOT IN (
+                SELECT id FROM link_mail_refusals WHERE sender_node_fingerprint = ?
+                ORDER BY last_refused_at DESC, id DESC LIMIT ?
+            )
+            """,
+            (home, home, MAX_LINK_MAIL_REFUSALS_PER_NODE),
         )
         db.connection.execute(
             """
