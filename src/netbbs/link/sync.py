@@ -705,13 +705,18 @@ async def _push_own_events(
     exchange.holds &= own_genesis
     if wanted is not None:
         exchange.holds |= (own_genesis & declared) - set(wanted)
+    if own_genesis and own_genesis <= exchange.holds:
+        # It holds everything of this node's: whatever it refused before,
+        # it takes this node's content now, pushed or pulled.
+        exchange.refused_reason = None
     if not to_push:
         return
     for index in range(0, len(to_push), MAX_EVENTS_PER_REQUEST):
         try:
             await push_events(node, session, seed_url, to_push[index:index + MAX_EVENTS_PER_REQUEST])
         except LinkPolicyRefused as exc:
-            exchange.refused_reason = exc.reason_code
+            # The peer's own text, kept for the SysOp's screens: bounded.
+            exchange.refused_reason = exc.reason_code[:80]
             if exc.reason_code == REASON_NODE_PROBATIONARY:
                 # The peer's ordinary state for a node it has just met, not a
                 # fault: said once, like probation here (issue #834).

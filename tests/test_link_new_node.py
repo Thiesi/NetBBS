@@ -232,6 +232,50 @@ def test_a_peer_that_took_a_linked_board_is_recorded_as_holding_it(tmp_path):
         seed.close()
 
 
+def test_a_peer_that_holds_everything_is_no_longer_shown_refusing(tmp_path, monkeypatch):
+    """A refusal recorded on an earlier pass does not outlive the peer taking
+    everything: once an exchange shows it holds all of this node's linked
+    resources, with nothing left to push, the refusal is cleared."""
+    from netbbs.link import sync
+
+    identity = bootstrap_node_identity("dialer")
+    node = LinkNode(identity=identity)
+    local = _NodeDb(tmp_path, "dialer")
+    creator = create_user(local.db, "margo", password="hunter2", user_level=10)
+    genesis = link_board(local.db, create_board(local.db, "Inks", creator=creator), node_identity=identity)
+    node.peer_exchange["peer"] = PeerExchange(at=1.0, refused_reason=REASON_NODE_PROBATIONARY)
+
+    async def no_push(*_args, **_kwargs):
+        return []
+
+    monkeypatch.setattr(sync, "push_events", no_push)
+    try:
+        asyncio.run(sync._push_own_events(
+            node, None, "http://peer", local.lane, wanted=[], peer_fingerprint="peer",
+            fallback_offsets={}, declared=frozenset({genesis.content_id}),
+        ))
+        exchange = node.peer_exchange["peer"]
+        assert exchange.holds == {genesis.content_id}
+        assert exchange.refused_reason is None
+    finally:
+        local.close()
+
+
+def test_a_refusal_for_another_reason_is_not_read_as_acceptance(db, lane):
+    sysop = create_user(db, "sysop", password="hunter2", user_level=SYSOP_LEVEL)
+    link_context, peer = _link_context_with_peer(db)
+    for dimension in (TrustDimension.IDENTITY_INTEGRITY, TrustDimension.RESOURCE_BEHAVIOR):
+        set_trust_override(db, TrustSubject.node(peer.fingerprint), dimension, TrustState.ESTABLISHED, reason="known")
+    board = create_board(db, "Inks", creator=sysop)
+    link_context.link_node.boards[board.board_id] = link_board(db, board, node_identity=link_context.node_identity)
+    link_context.link_node.peer_exchange[peer.fingerprint] = PeerExchange(
+        at=datetime.now(timezone.utc).timestamp(), refused_reason="link_policy_node_quarantined" + "x" * 500,
+    )
+    text = _run(FakeSession(["s", "l", "b", "b", "b", "b"]), lane, sysop, link_context)
+    assert "Your node at peers: refused by 1 of 1 peer(s) this node dials" in text
+    assert "accepted by" not in text
+
+
 def test_what_a_peer_holds_reads_the_same_everywhere():
     now = datetime(2026, 9, 29, tzinfo=timezone.utc)
     at = now.timestamp() - 120
@@ -242,6 +286,8 @@ def test_what_a_peer_holds_reads_the_same_everywhere():
     assert own_content_at_peer("established", held, "g2", now=now)[0].startswith("not yet")
     refused = PeerExchange(at=at, refused_reason=REASON_NODE_PROBATIONARY)
     assert "your node is on probation there" in own_content_at_peer("established", refused, "g1", now=now)[0]
+    odd = PeerExchange(at=at, refused_reason="link_policy_" + "x" * 500)
+    assert len(own_content_at_peer("established", odd, "g1", now=now)[0]) < 140
     assert own_content_at_peer("established", held, own_total=2, now=now)[0].startswith("holds 1 of your 2")
 
 

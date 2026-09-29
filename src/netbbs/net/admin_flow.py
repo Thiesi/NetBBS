@@ -9823,11 +9823,17 @@ async def _probation_summary(lane: DatabaseLane, link_context: LinkContext) -> l
         color=WARNING_COLOR if waiting else MUTED_COLOR,
     )]
     asked = [fp for fp in peers if states[fp] == TrustState.ESTABLISHED and fp in node.peer_exchange]
-    refused = [fp for fp in asked if node.peer_exchange[fp].refused_reason == REASON_NODE_PROBATIONARY]
-    if refused:
+    refused = [fp for fp in asked if node.peer_exchange[fp].refused_reason is not None]
+    if refused and all(node.peer_exchange[fp].refused_reason == REASON_NODE_PROBATIONARY for fp in refused):
         at_peers = (
             f"on probation at {len(refused)} of {len(asked)} peer(s) this node dials -- they hold back "
             "what yours sends until their SysOps establish it",
+            WARNING_COLOR,
+        )
+    elif refused:
+        at_peers = (
+            f"refused by {len(refused)} of {len(asked)} peer(s) this node dials, on probation or "
+            "restricted there -- each node's screen under Peers says why",
             WARNING_COLOR,
         )
     elif not _own_linked_genesis(link_context):

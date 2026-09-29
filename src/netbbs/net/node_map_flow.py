@@ -133,7 +133,7 @@ def probation_rows(
 def _refusal_text(reason: str) -> str:
     if reason == REASON_NODE_PROBATIONARY:
         return "refused: your node is on probation there, until its SysOp establishes yours"
-    return f"refused by its trust policy ({sanitize_text(reason)})"
+    return f"refused by its trust policy ({sanitize_text(reason)[:80]})"
 
 
 def own_content_at_peer(
