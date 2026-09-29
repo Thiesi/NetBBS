@@ -2748,22 +2748,34 @@ each recipient first opened it.
 - **What a receipt says**: the time of the *first* reading
   (`mail_messages.first_read_at`, set by `mark_read`, kept through Mark
   unread and later readings -- a receipt once given is not taken back by
-  hiding the letter from oneself), `not yet`, or `deleted without being
-  read` when the recipient deleted it unopened. A copy whose recipient's
-  account was deleted shows none.
-- **Decided when shown.** `netbbs.mail.read_receipts` applies both sides'
-  *current* preference each time: turning receipts off hides those already
-  given, and turning them on again shows them again (the reading is still
-  recorded while off, so the switch only ever hides). Letters read before
-  the upgrade keep their reading as their receipt: the migration copies
-  `read_at`, so receipts are on for existing callers and existing mail
-  alike, and a caller who minds turns them off.
+  hiding the letter from oneself), or `not yet`. A letter the recipient
+  deleted unopened is `not yet` too (issue #922): their deletion is theirs,
+  and "deleted unread" told the sender more than whether it was read. A copy
+  whose recipient's account was deleted shows none.
+- **Shared then and shared now** (issue #922). The first reading records
+  whether the sender and the recipient both shared receipts at that moment
+  (`mail_messages.first_read_shared`). `netbbs.mail.read_receipts` shows a
+  receipt only if both shared then *and* both share now. So turning
+  receipts off hides those already given and turning them on again shows
+  them again, but a reading made while either side had them off never
+  becomes a receipt: a sender who keeps receipts off cannot switch them on
+  for a moment to see what was read in the meantime, and a recipient who
+  reads while opted out does not hand that reading over by opting back in.
+  Such a reading shows as `not yet`. Deciding purely at display time (the
+  #829 model) was rejected for exactly that peek. Letters read before the
+  upgrade keep their reading as their receipt: the migrations copy
+  `read_at` and count it as shared, as receipts were on for everyone by
+  default, and a caller who minds turns them off. (A reading whose sender or
+  recipient has receipts off at the upgrade is not counted as shared: only
+  a database that ran the unreleased #829 code can hold one, and it keeps
+  no record of when the switch was made, so the backfill errs toward not
+  showing.)
 - **Local mail only.** Link mail carries no receipt (nothing goes over
   Link), and neither does mail from the system, which has no sender to tell.
 - **Sent.** A letter to one person has a `Read:` line under its To. A
   letter to several people groups its local copies by receipt -- `Read by:`
-  (each with its time), `Not read yet:`, `Deleted unread:`, `Don't share
-  read receipts:` -- which keeps its twenty recipients to four lines beside
+  (each with its time), `Not read yet:`, `Don't share read receipts:` --
+  which keeps its twenty recipients to three lines beside
   the Link copies' Delivery lines. Mail to all callers only counts: `Read:
   by N of the M who share read receipts (K more don't share them)`. The
   list's Delivery column, headed Status once it shows a receipt, says
