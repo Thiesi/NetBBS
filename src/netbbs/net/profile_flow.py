@@ -84,6 +84,7 @@ from netbbs.net.prose_editor import EditorHeader, edit_prose
 from netbbs.net.redraw_preference import redraw_in_place_enabled, set_redraw_in_place_enabled
 from netbbs.net.resource_editor import Draft, FieldSpec, edit_resource_draft, live_choice_field
 from netbbs.net.session import Session, write_prompt
+from netbbs.digits import is_ascii_number
 from netbbs.net.sort_ui import SORT_MODE_LABELS
 from netbbs.net.password_screen import manage_password_screen
 from netbbs.net.ssh_key_screen import manage_ssh_keys_screen
@@ -633,7 +634,7 @@ async def _previous_callers_screen(
             typed = ""
         if not typed:
             continue
-        if not typed.isdigit() or not 1 <= int(typed) <= len(entries):
+        if not is_ascii_number(typed) or not 1 <= int(typed) <= len(entries):
             announce(session, f"There is no caller {typed} on this list.", tone="error")
             continue
         target = _previous_caller_mail_target(db, entries[int(typed) - 1], user, viewer_is_sysop=viewer_is_sysop)

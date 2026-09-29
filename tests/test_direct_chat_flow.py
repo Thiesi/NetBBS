@@ -66,7 +66,7 @@ class FakeSession(Session):
 
     async def read_line(
         self, echo: bool = True, history=None, completer=None, *,
-        live_buffer=None, lock=None, list_candidates=None,
+        live_buffer=None, lock=None, list_candidates=None, viewport=None, **_ignored,
     ) -> str:
         return await self._lines.get()
 
@@ -589,7 +589,7 @@ def test_partial_input_survives_incoming_direct_chat_output_and_resize(tmp_path)
     try:
         alice = create_user(database, "alice", password="hunter2", user_level=10)
         bob = create_user(database, "bob", password="hunter2", user_level=10)
-        prompt_hel = f"{chat_flow._input_prompt(accent_color=chat_flow.ACCENT_COLOR, unicode_style=False)}hel"
+        prompt_hel = f"{chat_flow._input_prompt(accent_color=chat_flow.ACCENT_COLOR, unicode_style=False)}\x1b[Khel"
 
         async def scenario():
             hub = ChatHub()

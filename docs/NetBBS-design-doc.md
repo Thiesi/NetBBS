@@ -2202,6 +2202,21 @@ Local chat includes bounded persistent channel scrollback, presence, away
 state, invitations/membership, `/who`, `/whois`, `/names`, `/list`, `/join`,
 `/leave`, `/topic`, completion, and online private conversation.
 
+Chat's input row -- in a channel, an MRC room and a direct chat -- scrolls a
+line wider than the terminal within the row, with `<` and `>` marking text out
+of view, as every other prompt does since issue #546 (issue #926). The row is
+the terminal's last, outside the scroll region, so a soft wrap there has no row
+to go to and overwrote the line. Tab completion edits the line and the window
+redraws, and the repaint after an incoming message or a status update draws the
+same window around the cursor, not the head of the line.
+
+A line from MRC is marked by an `[MRC]` badge in front of it, and its sender is
+`nick@site`: the nick in its MRC color, the `@` muted, the site in a color of
+its own that a linked node never uses (`MRC_SITE_COLOR`). Stored rows keep
+`user@site (MRC)`; screens drop the suffix, since a parenthesis after a name
+holds an account (§16, issue #899), and `/who`, `/names` and Find say
+`(on MRC)`.
+
 Chat `/help` is a width- and height-aware command table. It aligns descriptions
 in one column, colors command names, parameters, and descriptions as distinct
 fields, and paginates within the scrolling region while preserving chat's three
@@ -2276,7 +2291,7 @@ picker's own "Multi Relay Chat" section, never Link-able, and retired
 once idle (§16, issue #300). Bridging changes nothing about the channel's
 own model: local traffic is recorded and delivered exactly as before and
 then relayed; inbound MRC lines are recorded as external, unverifiable
-authors (`user@site (MRC)`) that never enter trust evaluation; private
+authors (stored as `user@site (MRC)`, shown badged `[MRC]`, §6.3) that never enter trust evaluation; private
 MRC messages are never delivered. The caller is told on joining that
 their handle becomes visible on that network, and a caller already inside
 a channel when the SysOp maps or remaps it is told before anything they

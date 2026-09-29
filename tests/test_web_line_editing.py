@@ -15,6 +15,7 @@ wiring specifically.
 from __future__ import annotations
 
 import asyncio
+import re
 
 import aiohttp
 
@@ -241,3 +242,36 @@ def test_mid_line_insert_between_cjk_characters_produces_the_expected_wire_messa
     # must both be "\x1b[2D", not "\x1b[1D" the way a character-count
     # would produce.
     assert messages == ["你", "好", "\x1b[2D", "\x1b[K", "X好", "\x1b[2D"]
+
+
+# -- Completion in a scrolling line (issue #926) -----------------------
+
+
+def test_tab_completion_in_a_scrolling_line_completes_and_never_overruns_the_row():
+    # Chat completes and, since #926, scrolls: the web editor must do both
+    # at once, the same way `char_input._read_line_editable` does.
+    received, drawn = [], []
+
+    async def handler(session: Session):
+        received.append(await session.read_line(
+            completer=lambda text: ["/whois"] if text == "/whoi" else [], viewport=20,
+        ))
+
+    async def scenario():
+        server = await _run_server(handler)
+        try:
+            async with aiohttp.ClientSession() as client:
+                async with client.ws_connect(f"http://127.0.0.1:{server.port}/ws") as ws:
+                    await ws.send_json({"type": "key", "data": "x" * 40 + _HOME + "/whoi\t\r"})
+                    while True:
+                        msg = await ws.receive_json(timeout=2)
+                        drawn.append(msg["data"])
+                        if msg["data"].endswith("\r\n"):
+                            break
+        finally:
+            await server.stop()
+
+    asyncio.run(scenario())
+    assert received == ["/whois " + "x" * 40]
+    printed_runs = re.split(r"\x1b\[[0-9;]*[A-Za-z]|\r\n", "".join(drawn))
+    assert max(len(run) for run in printed_runs) < 20

@@ -65,6 +65,8 @@ from netbbs.net.char_input import (
     InputHistory,
     LastCandidateList,
     LineViewport,
+    complete_in_window,
+    line_viewport,
     _grapheme_end,
     _grapheme_start,
     LiveInputBuffer,
@@ -656,14 +658,9 @@ class WebSession(Session):
         # behaves differently over web than over Telnet/SSH. xterm.js
         # soft-wraps and clamps `CSI D`/`CSI C` to one row exactly as a
         # real terminal does, so the bug and the fix are identical here.
-        window = (
-            LineViewport(
-                viewport() if callable(viewport) else viewport,
-                owns_row=viewport_owns_row,
-            )
-            if viewport is not None and completer is None
-            else None
-        )
+        window = line_viewport(viewport, owns_row=viewport_owns_row)
+        if live_buffer is not None:
+            live_buffer.window = window
 
         async def show() -> None:
             if window is not None:
@@ -856,7 +853,15 @@ class WebSession(Session):
                         continue
 
                     if char == _TAB:
-                        if completer is not None:
+                        if completer is not None and window is not None:
+                            cursor = await complete_in_window(
+                                self.write, window, completer, line, cursor,
+                                list_candidates=list_candidates, last_candidates=last_candidates,
+                            )
+                            if live_buffer is not None:
+                                live_buffer.update(line, cursor)
+                            await show()
+                        elif completer is not None:
                             cursor = await apply_tab_completion(
                                 self.write, completer, line, cursor,
                                 list_candidates=list_candidates, last_candidates=last_candidates,
