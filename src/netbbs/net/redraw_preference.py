@@ -51,7 +51,7 @@ def set_redraw_in_place_enabled(db: Database, user: User, enabled: bool) -> None
 def start_new_account_redrawing_in_place(db: Database, user: User) -> None:
     """A new account starts with in-place redraw on, however it was made:
     signed up, created in the console, or the first SysOp created at
-    install (issue #840). Only signup did it, so the field test's SysOp
+    install (issue #840). The first SysOp was left out, so the field test's SysOp
     got the scrolling screens every one of her callers did not. Existing
     accounts keep the resolve default above."""
     set_redraw_in_place_enabled(db, user, True)
