@@ -285,7 +285,7 @@ def test_name_requirement_allows_entry_once_attested(db, lane, hub, presence, al
     from netbbs.attestation import attest_name
     from netbbs.auth.users import set_can_verify_identity
 
-    alice = set_can_verify_identity(db, alice, True, changed_by=alice)
+    alice = set_can_verify_identity(db, alice, True, changed_by=create_user(db, "admin", password="hunter2", user_level=255))
     attest_name(db, bob, "Bob Smith", verifier=alice)
     create_channel(db, "verified-only", creator=alice, name_requirement="verified")
 

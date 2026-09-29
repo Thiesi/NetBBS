@@ -2399,7 +2399,26 @@ always worth surfacing.
 Selecting an item from new scan jumps directly into that resource
 pre-positioned at the first unread item — mechanically, calling the
 resource's own existing keyset-pagination entry point with `after=` set to
-the user's stored cursor, not a new navigation primitive.
+the user's stored cursor, not a new navigation primitive. When that item is
+on the newest page, the jump opens the newest page with the cursor on it
+(issue #839): a page starting at the first unread left out every read post
+and numbered the rest from 01, so the number a caller remembered from an
+ordinary visit picked nothing. Only a caller with more unread than a page
+holds gets the page that starts at the first one. `[/] Find` jumps the same
+way.
+
+New scan is a walk, not a one-shot list (issue #839). Back from a board,
+channel or area opened from it comes back to it, reloaded in place, with the
+cursor on the next row that has something waiting, and a line above the
+prompt naming it, so Enter after Enter goes through everything new. A board
+or area never visited counts as having something when it holds anything, and
+its row says how much ("not yet visited, 3 posts") rather than only "not yet
+visited". `[R]eplies` lists the replies to the caller's posts, one to a row;
+picking one opens its board with the cursor on it.
+
+Back from a board or file area opened from a list returns to that list, on
+the row left, and Back from a category's list to the list above it (issue
+#839). They used to return past the list, to whichever menu had opened it.
 
 #### Local search
 

@@ -66,7 +66,7 @@ def test_disabling_the_account_mid_chat_disconnects_on_the_next_message(tmp_path
         user = create_user(db, "alice", password="hunter2", user_level=10)
         channel = create_channel(db, "lobby", creator=user)
 
-        set_user_disabled(db, user, True, changed_by=user)
+        set_user_disabled(db, user, True, changed_by=create_user(db, "admin", password="hunter2", user_level=255))
 
         session, action = asyncio.run(
             _run(lane, ChatHub(), PresenceRegistry(), MessageMailbox(), channel, user, ["hello"])
@@ -84,7 +84,7 @@ def test_deleting_the_account_mid_chat_disconnects_on_the_next_message(tmp_path)
     db = Database(tmp_path / "node.db")
     lane = DatabaseLane(db.path)
     try:
-        sysop = create_user(db, "sysop", password="hunter2", user_level=100)
+        sysop = create_user(db, "sysop", password="hunter2", user_level=255)
         user = create_user(db, "alice", password="hunter2", user_level=10)
         channel = create_channel(db, "lobby", creator=sysop)
 
@@ -112,7 +112,7 @@ def test_the_check_also_catches_an_empty_line_not_just_a_real_message(tmp_path):
         user = create_user(db, "alice", password="hunter2", user_level=10)
         channel = create_channel(db, "lobby", creator=user)
 
-        set_user_disabled(db, user, True, changed_by=user)
+        set_user_disabled(db, user, True, changed_by=create_user(db, "admin", password="hunter2", user_level=255))
 
         session, action = asyncio.run(
             _run(lane, ChatHub(), PresenceRegistry(), MessageMailbox(), channel, user, [""])
@@ -132,7 +132,7 @@ def test_the_check_also_catches_a_slash_command_not_just_a_plain_message(tmp_pat
         user = create_user(db, "alice", password="hunter2", user_level=10)
         channel = create_channel(db, "lobby", creator=user)
 
-        set_user_disabled(db, user, True, changed_by=user)
+        set_user_disabled(db, user, True, changed_by=create_user(db, "admin", password="hunter2", user_level=255))
 
         session, action = asyncio.run(
             _run(lane, ChatHub(), PresenceRegistry(), MessageMailbox(), channel, user, ["/topic"])
@@ -188,7 +188,7 @@ def test_disabling_the_account_mid_chat_still_broadcasts_a_leave_notice(tmp_path
             while hub.participant_count(channel.name) < 1:
                 await asyncio.sleep(0)
 
-            set_user_disabled(db, alice, True, changed_by=alice)
+            set_user_disabled(db, alice, True, changed_by=create_user(db, "admin", password="hunter2", user_level=255))
             alice_session, alice_action = await _run(
                 lane, hub, presence, mailbox, channel, alice, ["hello"]
             )

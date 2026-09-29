@@ -3527,6 +3527,16 @@ MIGRATIONS = [
     ),
     Migration(
         description=(
+            "Issue #836: `users.staff_permissions` -- the staff permissions a SysOp gives an "
+            "account below 255 (approve accounts, manage accounts, moderate everything; design "
+            "doc §5.6), as a bitmask. 0 for every existing account, so nothing changes on upgrade."
+        ),
+        sql="""
+        ALTER TABLE users ADD COLUMN staff_permissions INTEGER NOT NULL DEFAULT 0;
+        """,
+    ),
+    Migration(
+        description=(
             "Issue #806: why Link mail was not delivered, and whether its sender has been told. "
             "`link_delivery_reason` keeps the recipient node's bounce reason (a signed bounce's "
             "reason, or the `link_policy_*` code of its trust-policy refusal); "

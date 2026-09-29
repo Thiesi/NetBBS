@@ -401,9 +401,10 @@ account change that would leave no enabled, approved SysOp. Disabling an account
 revokes its access; deletion is permanent and requires its exact name. Existing
 content retains its recorded author label.
 
-A level change, or a granted or revoked identity-verifier permission, reaches
-a caller who is already logged in without them reconnecting. This also applies
-to a change made with `python -m netbbs.admin`, within a few seconds. A raised
+A level change, a granted or revoked identity-verifier permission, or a change
+to staff permissions reaches a caller who is already logged in without them
+reconnecting. This also applies to a change made with `python -m
+netbbs.admin`, within a few seconds. A raised
 level shows on their main menu. A lowered one takes them out of whatever they
 were doing, a door game included, and back to the main menu with a line naming
 their new level. Text they were composing is kept as a draft.
@@ -433,6 +434,47 @@ Access can also depend on resource-specific grants, verified age, and verified
 name. Raising a level does not replace identity verification. When access looks
 wrong, inspect both the account and the resource's effective settings, including
 Community defaults.
+
+### Sharing the work: staff permissions
+
+To hand someone the node's routine work without making them a second SysOp,
+give them **staff permissions** instead of level 255. Open their account
+under **Users** and choose **Staff**:
+
+| Permission | What it allows |
+| --- | --- |
+| Approve accounts | Approve or decline signups waiting under approval-required registration |
+| Manage accounts | Disable and re-enable accounts, reset passwords, set levels from 0 to 254 |
+| Moderate everything | Act as moderator on every board, file area and chat channel, local and carried |
+
+**Co-SysOp** on the same screen sets all three in one step. Every change asks
+for confirmation first and is audit-logged, and you can remove any permission
+on its own later. The account's level stays whatever it was.
+
+A staff member never acts on a level-255 account or on another staff member,
+so they cannot demote, disable or lock out you or each other, and they cannot
+widen their own permissions. They cannot raise anyone to 255, delete an
+account, grant staff permissions or moderator grants, or reach Settings, Link,
+Node, DNS or backups.
+
+The **Privileges** group on an account's detail screen shows its staff
+permissions, the identity-verifier permission, and every moderator grant it
+holds, such as `board "News": approve`.
+
+A staff member sees **[S]taff** on their main menu instead of [S]ysOp. It
+opens a reduced console that counts what waits for them and offers only what
+their permissions reach: **Accounts waiting** with approve accounts,
+**Users** with manage accounts, and **Moderation** when they moderate
+anything. These are your own screens with fewer actions: a staff member can
+open your account or another staff member's, but only to look.
+
+Whoever can approve accounts, you included, is told on the main menu when
+signups are waiting ("2 accounts awaiting approval"). A moderator who may
+approve posts or uploads anywhere sees **Moderation (n)** on the main menu,
+with how many wait, and it opens one queue across every board and file area
+their grants cover. To make someone a moderator of everything local in one
+step, grant a moderator with the scope **blanket across everything**: it
+writes the board, file area and channel grants together.
 
 ### Verified age and names
 

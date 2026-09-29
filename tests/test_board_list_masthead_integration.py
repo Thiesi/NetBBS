@@ -118,10 +118,10 @@ def test_masthead_also_shown_when_drilling_into_a_category(db, alice):
     # "0", "1" (read one keystroke at a time, like a real 2-digit
     # selection) picks the (sole) category from the top-level mixed
     # list; "b" then backs out of the category's own flat board list.
-    session = FakeSession(["0", "1", "b"])
+    session = FakeSession(["0", "1", "b", "b"])
     asyncio.run(board_flow._browse_boards(session, db, alice))
     text = _written_text(session)
-    assert text.count("MY CUSTOM BOARD MASTHEAD") == 2
+    assert text.count("MY CUSTOM BOARD MASTHEAD") == 3
 
 
 def test_masthead_with_redraw_in_place_clears_before_the_masthead_not_after(db, alice):
