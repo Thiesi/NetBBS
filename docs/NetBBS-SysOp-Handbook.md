@@ -496,6 +496,13 @@ make someone a moderator. Grant only the scope required; use approval queues
 and the audit log to review actions. Chat moderation commands are used inside
 the channel by someone with the appropriate authority.
 
+A read or write grant on a board or file area lets its holder past that
+resource's minimum read or write level. To let a helper post on an
+announcements board whose write level is 255, grant them the **Read and post**
+preset on it rather than raising their level (**Read only** opens reading
+alone). The grant opens that board or area only, never another, and the
+minimum age and verified-name requirements still apply.
+
 The [user handbook](NetBBS-User-Handbook.md) covers posting, drafts, follows,
 search, mail, and everyday chat. **New scan** and **Find** only show content the
 caller can access on this node, including carried linked content.

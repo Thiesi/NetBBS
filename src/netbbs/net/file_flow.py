@@ -60,9 +60,9 @@ from netbbs.auth.users import User, get_user_by_id
 from netbbs.communities import (
     get_community,
     get_effective_min_age,
-    get_effective_min_read_level,
-    get_effective_min_write_level,
     get_effective_name_requirement,
+    meets_read_gate,
+    meets_write_gate,
 )
 from netbbs.config import get_max_upload_bytes
 from netbbs.files import (
@@ -124,7 +124,6 @@ from netbbs.net.session import Session
 from netbbs.net.session_activity import records_activity
 from netbbs.net.sort_ui import SORT_MODE_LABELS, prompt_sort_change
 from netbbs.moderation import BoardPermission, has_permission
-from netbbs.permissions import meets_level
 from netbbs.net.menu_description_preference import menu_description_level
 from netbbs.net.redraw_preference import redraw_in_place_enabled
 from netbbs.net.breadcrumb_preference import breadcrumb_collapsed_enabled
@@ -230,7 +229,7 @@ def visible_areas(
     module's own docstring for why."""
     areas = [
         a for a in list_file_areas(db)
-        if meets_level(user, get_effective_min_read_level(db, a)) and meets_age(db, user, get_effective_min_age(db, a))
+        if meets_read_gate(db, user, a) and meets_age(db, user, get_effective_min_age(db, a))
     ]
     if community_scoped:
         areas = [a for a in areas if a.community_id == community_id]
@@ -280,7 +279,7 @@ async def _browse_areas_in_category(
         # event loop.
         all_areas = [
             a for a in list_file_areas(db, order_by=order_by)
-            if meets_level(user, get_effective_min_read_level(db, a))
+            if meets_read_gate(db, user, a)
             and meets_age(db, user, get_effective_min_age(db, a))
         ]
         if community_scoped:
@@ -869,7 +868,7 @@ async def _show_area(
             page = list_files_page(db, area, user, with_pinned=True)
         effective_name_requirement = get_effective_name_requirement(db, area)
         can_write = (
-            meets_level(user, get_effective_min_write_level(db, area))
+            meets_write_gate(db, user, area)
             and meets_age(db, user, get_effective_min_age(db, area))
             and meets_name_requirement(db, user, effective_name_requirement)
         )

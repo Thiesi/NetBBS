@@ -21186,10 +21186,19 @@ async def _pick_moderator_scope(
 
 
 
-_MODERATOR_PRESETS = ["full", "limited"]
+_MODERATOR_PRESETS = ["full", "limited", "post", "read"]
+
+#: Presets that are access, not moderation (issue #836): a read or write
+#: grant lets its holder past a board's or file area's level gate. Chat
+#: channels have no read/write split.
+_ACCESS_PRESETS = {"post", "read"}
 
 
 def _moderator_preset_label(object_type: str | None, preset: str) -> str:
+    if preset == "post":
+        return "Read and post (past the level gates)" if object_type != "channel" else "Read and post (not for channels)"
+    if preset == "read":
+        return "Read only (past the read level)" if object_type != "channel" else "Read only (not for channels)"
     if object_type == "channel":
         return "Full moderator (edit+moderate+manage members)" if preset == "full" else "Moderator only"
     if object_type is None:
@@ -21198,6 +21207,10 @@ def _moderator_preset_label(object_type: str | None, preset: str) -> str:
 
 
 def _moderator_preset_permissions(object_type: str, preset: str):
+    if preset in _ACCESS_PRESETS:
+        if object_type == "channel":
+            raise ModeratorGrantError("read and post grants are for boards and file areas; channels use their level")
+        return BoardPermission.READ | BoardPermission.WRITE if preset == "post" else BoardPermission.READ
     if object_type == "channel":
         if preset == "full":
             return ChannelPermission.EDIT | ChannelPermission.MODERATE | ChannelPermission.MANAGE_MEMBERS
@@ -21316,11 +21329,14 @@ async def _grant_moderator_screen(session: Session, lane: DatabaseLane, actor: U
             render=lambda d: _moderator_preset_label(d["object_type"], d["preset"]),
             prompt=choice_field("preset", _MODERATOR_PRESETS),
             step=choice_step("preset", _MODERATOR_PRESETS),
-            brief="Full, or approve/moderate only",
+            brief="Moderator, approver, or access",
             help=(
                 "Full moderator can edit, delete/moderate, and (for boards/areas) approve or (for "
                 "channels) manage members. The limited preset only approves (boards/areas) or "
-                "only moderates (channels)."
+                "only moderates (channels). Read and post, and read only, are access rather than "
+                "moderation: they let the holder past that board's or file area's minimum level, "
+                "such as posting on an announcements board with write level 255. Age and "
+                "verified-name requirements still apply."
             ),
         ),
     ]
