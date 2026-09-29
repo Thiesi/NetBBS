@@ -291,8 +291,8 @@ UTF-8, and Telnet doubles the 0xFF byte (CP437's non-breaking space) as RFC 854
 requires. Raw byte paths keep their own rules. A Zmodem transfer is binary and
 bypasses the mapping. A door that speaks CP437 reaches a CP437 session
 unchanged; any other combination is transcoded in `DoorTerminal`, in both
-directions. SysOp ANSI art is decoded to Unicode (§3.3) and mapped like any
-other text, so art authored in CP437 reaches a CP437 terminal byte for byte.
+directions. SysOp ANSI art is decoded to Unicode when it is loaded and mapped
+like any other text, so art authored in CP437 reaches a CP437 terminal byte for byte.
 
 **How the set is chosen.** A caller's preference is Auto (the default), Unicode,
 CP437 or ASCII, and an explicit choice always wins over detection. Auto means:
@@ -7689,11 +7689,11 @@ Completed product work informed by dogfood includes:
   256-color rendering remains equivalent and readable. Profile diagnostics
   state the transport's detected capability or limitation; the banner preview
   no longer does, since a SysOp read it as developer output (issue #841). A
-  custom SysOp banner bypasses the generated showcase. Before sign-in a Telnet
-  caller's character set comes from TTYPE detection and an SSH caller's from
-  the PTY terminal type (§3.2, issue #929). An undetected Telnet caller gets
-  everything in ASCII, the SysOp's banner included, and CP437 terminals such as
-  SyncTERM get CP437. Both
+  custom SysOp banner bypasses the generated showcase. Before sign-in the
+  node's own chrome is plain ASCII over Telnet, where CP437 terminals such as
+  SyncTERM call from, and Unicode on the web and SSH; a custom banner is sent
+  as authored either way (issue #841). Issue #929 is replacing this with a
+  character set per session (§3.2). Both
   Telnet's and SSH's initial banners are shown before capability negotiation
   completes -- Telnet's can precede NEW-ENVIRON, and SSH's own pre-auth
   banner (asyncssh's `send_auth_banner`, sent from `begin_auth` before any
