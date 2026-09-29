@@ -299,7 +299,7 @@ def test_profile_ssh_public_key_self_service_adds_a_key(db, lane, alice):
     verify_key = nacl.signing.SigningKey.generate().verify_key
     raw_b64 = base64.b64encode(bytes(verify_key)).decode()
 
-    session = FakeSession(["k", "a", "phone", raw_b64, "b", "b"])
+    session = FakeSession(["k", "a", raw_b64, "phone", "b", "b"])
     asyncio.run(profile_flow._edit_profile(session, lane, alice))
 
     updated = login_flow.get_user_by_username(db, "alice")
@@ -308,7 +308,7 @@ def test_profile_ssh_public_key_self_service_adds_a_key(db, lane, alice):
 
 
 def test_profile_ssh_public_key_self_service_rejects_an_unparseable_key(db, lane, alice):
-    session = FakeSession(["k", "a", "phone", "not a real key", "b", "b"])
+    session = FakeSession(["k", "a", "not a real key", "b", "b"])
     asyncio.run(profile_flow._edit_profile(session, lane, alice))
 
     updated = login_flow.get_user_by_username(db, "alice")
@@ -327,7 +327,7 @@ def test_profile_ssh_public_key_self_service_refuses_a_key_already_in_use(db, la
     raw_b64 = base64.b64encode(bytes(verify_key)).decode()
     create_user(db, "bob", verify_key=verify_key, user_level=10)
 
-    session = FakeSession(["k", "a", "phone", raw_b64, "b", "b"])
+    session = FakeSession(["k", "a", raw_b64, "phone", "b", "b"])
     asyncio.run(profile_flow._edit_profile(session, lane, alice))
 
     updated = login_flow.get_user_by_username(db, "alice")
@@ -414,7 +414,7 @@ def test_main_menu_refreshes_the_session_user_after_a_profile_key_change(db, lan
 
     session = FakeSession(
         [
-            "p", "PAGE_DOWN", "PAGE_DOWN", "PAGE_DOWN", "k", "a", "phone", raw_b64, "b", "b",
+            "p", "PAGE_DOWN", "PAGE_DOWN", "PAGE_DOWN", "k", "a", raw_b64, "phone", "b", "b",
             "p", "PAGE_DOWN", "PAGE_DOWN", "PAGE_DOWN", "b", "l", "y",
         ]
     )

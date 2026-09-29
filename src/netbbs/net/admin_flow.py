@@ -3150,7 +3150,7 @@ async def _link_participation_sections(lane: DatabaseLane) -> tuple[list[Section
         Section("What accepting means", [Note(
             "Accepting dials these nodes as seeds after your own configured ones and, for a node that "
             "can't be reached from the internet directly, uses them as relays. It hands them no say over "
-            "your content and is not a trust decision about anyone (design doc §16, issue #219)."
+            "your content and is not a trust decision about anyone."
         )]),
     ], participation
 
@@ -6493,16 +6493,15 @@ _USER_DETAIL_HELP: dict[str, tuple[str, str]] = {
     ),
     "s": (
         "Staff",
-        "Staff permissions (design doc §5.6): approve accounts, manage accounts (disable/"
+        "Staff permissions: approve accounts, manage accounts (disable/"
         "enable, password reset, levels up to 254) and moderate everything. Co-SysOp sets "
         "all three. A staff member never acts on level 255 or on other staff, and can't "
         "grant anything.",
     ),
     "i": (
         "Can verify identity",
-        "A narrow, SysOp-grantable permission (design doc §18) letting this account "
-        "perform age/name attestation for other callers -- independent of the four "
-        "moderator scope tiers.",
+        "Lets this account confirm other callers' age or real name. It is separate "
+        "from moderator grants and staff permissions.",
     ),
     "k": (
         "Public key",
@@ -22419,7 +22418,7 @@ async def _grant_moderator_screen(session: Session, lane: DatabaseLane, actor: U
             brief="Narrow the grant to one Community",
             help=(
                 "For a blanket grant only: limit it to the boards/areas/channels of one Community "
-                "instead of the whole node (design doc, Community-blanket tier)."
+                "instead of the whole node."
             ),
         ),
         FieldSpec(
