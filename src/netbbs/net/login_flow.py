@@ -24,6 +24,7 @@ piece every other screen module is ultimately reached through.
 from __future__ import annotations
 
 import asyncio
+import logging
 from enum import Enum, auto
 from pathlib import Path
 
@@ -116,6 +117,8 @@ _MAX_LOGIN_ATTEMPTS = 3
 # for a real disable/delete, cheap enough that one extra SELECT per
 # live session per interval is a non-issue at this project's declared
 # scale (§14, dozens to low hundreds of concurrent sessions).
+_logger = logging.getLogger(__name__)
+
 _REVOCATION_CHECK_INTERVAL_SECONDS = 5.0
 
 # Bounds the watcher's own "you're disconnected" notice (GitHub issue
@@ -843,9 +846,14 @@ async def run_authenticated_session(
                 pass
         if mail_watch_task is not None:
             # Retrieved last, so it adds no wait before the account watcher
-            # is stopped; a failure of its own must not mask how the
-            # session ended.
-            await asyncio.gather(mail_watch_task, return_exceptions=True)
+            # is stopped. A failure of its own is logged rather than raised
+            # from here, where it would mask how the session ended.
+            try:
+                await mail_watch_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                _logger.exception("New-mail watcher for %s failed", user.username)
 
     # GitHub issue #177: only reached when `_main_menu` returns normally,
     # not when it (or anything nested under it) raises -- which covers
