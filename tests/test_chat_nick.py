@@ -7,13 +7,13 @@ import pytest
 from netbbs.auth.users import create_user
 from netbbs.chat.nick import (
     MAX_NICK_LENGTH,
-    NICK_MARKER,
     NickError,
     chat_stream_label,
     display_label,
     get_nick,
     set_nick,
 )
+from netbbs.rendering.ansi import strip_ansi
 from netbbs.storage.database import Database
 
 
@@ -75,17 +75,56 @@ def test_set_nick_allows_own_username(db, alice):
     assert get_nick(db, alice) == "alice"
 
 
-def test_set_nick_rejects_the_reserved_marker_character(db, alice):
-    # NICK_MARKER is reserved for chat_stream_label to attach
-    # unambiguously -- must never be something /nick itself would
-    # accept as real alias content.
-    with pytest.raises(NickError):
-        set_nick(db, alice, f"Deep{NICK_MARKER}Parse")
+@pytest.mark.parametrize("nick", ["Deep|Parse", "InkWell[sysop]", "<bob>", "*** notice", "~Deep~", "|"])
+def test_set_nick_rejects_characters_the_chat_screen_frames_names_with(db, alice, nick):
+    # Issue #843: the separator, a status-bar tag's brackets, a speaker's
+    # angle brackets, the "*" of /me and notices, the old "~" marker.
+    with pytest.raises(NickError, match="cannot contain"):
+        set_nick(db, alice, nick)
 
 
-def test_set_nick_rejects_a_nick_that_is_only_the_marker(db, alice):
-    with pytest.raises(NickError):
-        set_nick(db, alice, NICK_MARKER)
+@pytest.fixture
+def inkwell(db):
+    return create_user(db, "InkWell", password="hunter2", user_level=255)
+
+
+@pytest.mark.parametrize("nick", ["InkWeII", "Ink Well", "ink_well", "lnkwell", "\u0406nkWell", "Ínkwéll", "1nkWe11"])
+def test_set_nick_rejects_look_alikes_of_the_sysops_username(db, alice, inkwell, nick):
+    # F106: every one of these was accepted and read as the SysOp.
+    with pytest.raises(NickError, match="SysOp"):
+        set_nick(db, alice, nick)
+
+
+@pytest.mark.parametrize("nick", ["B0B", "b o b", "b.o.b"])
+def test_set_nick_rejects_look_alikes_of_any_other_username(db, alice, bob, nick):
+    with pytest.raises(NickError, match="another caller"):
+        set_nick(db, alice, nick)
+
+
+@pytest.mark.parametrize("nick", [
+    "SysOp", "Sys Op", "The SysOp", "Admin", "moderator", "Staff", "5ysop",
+    # Greek and Cyrillic capitals that read as Latin ones (Claude review):
+    # a Greek Upsilon, a Cyrillic S and O, and a Greek-lettered "ADMIN".
+    "S\u03a5SOP", "\u0405YS\u041eP", "\u0391D\u039cI\u039d",
+])
+def test_set_nick_rejects_staff_titles(db, alice, nick):
+    with pytest.raises(NickError, match="staff title"):
+        set_nick(db, alice, nick)
+
+
+def test_a_sysop_may_take_a_staff_title_as_alias(db, inkwell):
+    set_nick(db, inkwell, "SysOp")
+    assert get_nick(db, inkwell) == "SysOp"
+
+
+def test_look_alike_of_own_username_is_allowed(db, alice):
+    set_nick(db, alice, "Al1ce")
+    assert get_nick(db, alice) == "Al1ce"
+
+
+def test_ordinary_aliases_with_spaces_and_accents_still_work(db, alice, bob):
+    set_nick(db, alice, "Dame Plume de l'Encre")
+    assert get_nick(db, alice) == "Dame Plume de l'Encre"
 
 
 # -- display_label --------------------------------------------------------
@@ -113,11 +152,11 @@ def test_chat_stream_label_is_bare_username_when_no_nick(db, alice):
     assert chat_stream_label(db, alice) == "alice"
 
 
-def test_chat_stream_label_marks_and_colors_the_nick_when_set(db, alice):
+def test_chat_stream_label_colors_the_nick_and_shows_the_username(db, alice):
+    # Issue #843: never the alias alone in the live stream.
     set_nick(db, alice, "DeepParse")
     label = chat_stream_label(db, alice)
-    assert f"{NICK_MARKER}DeepParse{NICK_MARKER}" in label
-    assert "alice" not in label
+    assert strip_ansi(label) == "DeepParse|alice"
     assert "\x1b[" in label  # actually colored, not plain text
 
 

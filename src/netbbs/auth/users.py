@@ -9,6 +9,7 @@ import asyncio
 import base64
 import re
 import sqlite3
+import unicodedata
 import weakref
 from dataclasses import dataclass
 from enum import IntFlag, auto
@@ -411,6 +412,82 @@ def username_skeleton(name: str) -> str:
     return folded.translate(_SKELETON_FOLD)
 
 
+_RESERVED_SKELETONS = frozenset(username_skeleton(word) for word in SELF_SERVICE_RESERVED_USERNAMES)
+
+
+# Cyrillic and Greek letters that render like Latin ones, folded onto the
+# Latin letter they look like. Free text can contain them, usernames cannot,
+# so only `presentation_skeleton` needs this. Capitals are folded before
+# casefolding and small letters after it, because a capital and its small
+# letter can look like different Latin letters (Claude review): Greek "Η"
+# reads as H, its small "η" as n.
+_SCRIPT_CAPITAL_FOLD = str.maketrans({
+    "А": "A", "В": "B", "Е": "E", "Ё": "E", "З": "3", "І": "I", "Ї": "I", "Ј": "J", "К": "K",
+    "М": "M", "Н": "H", "О": "O", "Р": "P", "С": "C", "Т": "T", "У": "Y", "Х": "X", "Ѕ": "S",
+    "Ԁ": "D", "Ԛ": "Q", "Ԝ": "W",
+    "Α": "A", "Β": "B", "Ε": "E", "Ζ": "Z", "Η": "H", "Ι": "I", "Κ": "K", "Μ": "M", "Ν": "N",
+    "Ο": "O", "Ρ": "P", "Τ": "T", "Υ": "Y", "Χ": "X",
+})
+_SCRIPT_FOLD = str.maketrans({
+    "а": "a", "в": "b", "е": "e", "ё": "e", "з": "3", "і": "i", "ї": "i", "ј": "j", "к": "k",
+    "м": "m", "н": "h", "о": "o", "п": "n", "р": "p", "с": "c", "т": "t", "у": "y", "х": "x",
+    "ѕ": "s", "ԁ": "d", "ԛ": "q", "ԝ": "w",
+    "α": "a", "β": "b", "ε": "e", "η": "n", "ι": "i", "κ": "k", "ν": "v", "ο": "o", "ρ": "p",
+    "τ": "t", "υ": "u", "χ": "x",
+})
+
+
+def presentation_skeleton(text: str) -> str:
+    """`username_skeleton` for free text a caller chooses to be shown as
+    -- a chat alias, a display name (issue #843). Accents are dropped,
+    Cyrillic and Greek look-alikes become Latin, and everything but
+    letters and digits goes, spaces and brackets included, before the
+    username folding runs. "Ink Well", "InkWeII" and "Іnkwell" (a
+    Cyrillic І) all read as "InkWell"."""
+    decomposed = unicodedata.normalize("NFKD", text)
+    bare = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+    latin = bare.translate(_SCRIPT_CAPITAL_FOLD).casefold().translate(_SCRIPT_FOLD)
+    return username_skeleton("".join(ch for ch in latin if ch.isalnum()))
+
+
+def _reads_as_staff_title(skeleton: str) -> bool:
+    """Whether a name, already reduced to its skeleton, reads as one of
+    the staff titles in `SELF_SERVICE_RESERVED_USERNAMES` or contains
+    "sysop" anywhere."""
+    return skeleton in _RESERVED_SKELETONS or "sysop" in skeleton
+
+
+def presentation_name_problem(
+    db: Database, name: str, *, owner: User, protect_every_username: bool
+) -> str | None:
+    """Why `owner` may not present themselves as `name`, in words for
+    that caller, or `None` if they may (issue #843).
+
+    A name that reads as a staff title ("SysOp", "Admin", "InkWell
+    sysop") is refused unless `owner` is a SysOp. So is one that reads
+    as a SysOp's username, and, with `protect_every_username`, one that
+    reads as any other account's username. `owner`'s own username never
+    counts against them. Local accounts only: a Link or MRC name is
+    shown with its node or network beside it, and is not an alias this
+    node grants."""
+    skeleton = presentation_skeleton(name)
+    if not skeleton:
+        return None
+    if owner.user_level < SYSOP_LEVEL and _reads_as_staff_title(skeleton):
+        return f"{name!r} reads as a staff title"
+    for row in db.connection.execute("SELECT id, username, user_level FROM users"):
+        if row["id"] == owner.id:
+            continue
+        is_sysop = row["user_level"] >= SYSOP_LEVEL
+        if not (protect_every_username or is_sysop):
+            continue
+        if username_skeleton(row["username"]) == skeleton:
+            if is_sysop:
+                return f"{name!r} is too close to the name of this node's SysOp"
+            return f"{name!r} is too close to another caller's username"
+    return None
+
+
 def self_service_username_problem(db: Database, username: str) -> str | None:
     """Why a caller may not register `username` for themselves, in words
     for that caller, or `None` if they may (issue #835).
@@ -431,7 +508,7 @@ def self_service_username_problem(db: Database, username: str) -> str | None:
     except AuthError as exc:
         return str(exc)
     skeleton = username_skeleton(username)
-    if skeleton in {username_skeleton(word) for word in SELF_SERVICE_RESERVED_USERNAMES} or "sysop" in skeleton:
+    if _reads_as_staff_title(skeleton):
         return f"{username!r} is reserved on this node"
     taken = db.connection.execute(
         "SELECT 1 FROM users WHERE username = ? COLLATE NOCASE", (username,)
