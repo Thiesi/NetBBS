@@ -2617,6 +2617,50 @@ the last comma, and `?` as the last address opens the list for it.
   mail tools are; a To-prompt keyword for everyone would be one no caller
   could find and a SysOp could type by accident.
 
+**Read receipts** (issue #829). The sender of local mail sees in Sent when
+each recipient first opened it.
+- **On by default, opt-out, reciprocal.** Profile's `E[x]change read
+  receipts` ("Let senders see when I've read their mail", the user
+  preference `mail_read_receipts`, default on) is one switch for both
+  directions: off, no sender sees when the caller read their mail, and the
+  caller sees no one's receipts. Opt-in was rejected as a feature nobody
+  would turn on; one-way opt-out (hide mine, still see theirs) was rejected
+  as unfair, the model most messengers use too.
+- **The opted-out marker.** A recipient who does not share receipts is
+  always named as such in the sender's view (`Read: not shown, as bob
+  doesn't share read receipts`, or on a letter to several people `Don't
+  share read receipts: bob`) -- also to a sender who has opted out
+  themselves -- and Sent's list says `no receipt`. It reveals only a
+  setting, and without it a letter never reported as read would be taken for
+  one not read yet. A sender who does not share receipts is told everything
+  else only as "not shown" in the view, and their list has no read states at
+  all (the list's column would otherwise say nothing but `no receipt`).
+- **What a receipt says**: the time of the *first* reading
+  (`mail_messages.first_read_at`, set by `mark_read`, kept through Mark
+  unread and later readings -- a receipt once given is not taken back by
+  hiding the letter from oneself), `not yet`, or `deleted without being
+  read` when the recipient deleted it unopened. A copy whose recipient's
+  account was deleted shows none.
+- **Decided when shown.** `netbbs.mail.read_receipts` applies both sides'
+  *current* preference each time: turning receipts off hides those already
+  given, and turning them on again shows them again (the reading is still
+  recorded while off, so the switch only ever hides). Letters read before
+  the upgrade keep their reading as their receipt: the migration copies
+  `read_at`, so receipts are on for existing callers and existing mail
+  alike, and a caller who minds turns them off.
+- **Local mail only.** Link mail carries no receipt (nothing goes over
+  Link), and neither does mail from the system, which has no sender to tell.
+- **Sent.** A letter to one person has a `Read:` line under its To. A
+  letter to several people groups its local copies by receipt -- `Read by:`
+  (each with its time), `Not read yet:`, `Deleted unread:`, `Don't share
+  read receipts:` -- which keeps its twenty recipients to four lines beside
+  the Link copies' Delivery lines. Mail to all callers only counts: `Read:
+  by N of the M who share read receipts (K more don't share them)`. The
+  list's Delivery column, headed Status once it shows a receipt, says
+  `read`, `not read`, `some read` (a group, of the copies that report) or
+  `no receipt`; a Link copy that bounced, expired or is on its way still
+  wins, as the more urgent state.
+
 **How a body reads** (issue #809). A letter keeps its writer's lines: the
 message view, Sent's view and the review screen show every line as written,
 and wrap only a line wider than the terminal, at a word

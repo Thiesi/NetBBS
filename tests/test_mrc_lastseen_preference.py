@@ -4,6 +4,7 @@ LASTSEEN opt-out, on by default -- and the Profile field."""
 from __future__ import annotations
 
 import asyncio
+import re
 
 import pytest
 
@@ -49,7 +50,8 @@ def test_profile_screen_toggles_it(db, alice):
         session = FakeSession(["w", "b"])
         asyncio.run(profile_flow._edit_profile(session, lane, alice))
         text = _visible(_written_text(session))
-        assert "MRC may remember when you were last seen: no" in text
+        # Values sit in a shared column (#529), however wide the longest label.
+        assert re.search(r"MRC may remember when you were last seen: +no", text)
         assert mrc_lastseen_recorded(db, alice) is False
         session = FakeSession(["w", "b"])
         asyncio.run(profile_flow._edit_profile(session, lane, alice))
