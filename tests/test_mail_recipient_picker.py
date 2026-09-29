@@ -2,7 +2,9 @@
 Finding someone to write to at the To prompt (issue #826): Tab completion,
 the `?` list, recent correspondents, and that nothing offered is someone
 the caller could not write to or see -- and that what is picked still
-goes through every check a typed address does.
+goes through every check a typed address does. The list also shows, with
+the reason and no number, who the caller can't write to (issue #920); Tab
+does not offer them.
 """
 
 from __future__ import annotations
@@ -11,20 +13,34 @@ import asyncio
 
 import pytest
 
-from netbbs.auth.users import create_user, set_user_disabled
+from netbbs.auth.users import create_user, get_user_by_id, set_user_disabled
 from netbbs.guest import set_guest_user
 from netbbs.link.node_identity import bootstrap_node_identity
-from netbbs.mail import block_local_sender, recent_correspondents, send_mail, send_system_mail
+from netbbs.link.trust import TrustDimension, TrustState, TrustSubject, register_subject, set_trust_override
+from netbbs.mail import (
+    DISABLED_RECIPIENT_TAG,
+    PENDING_RECIPIENT_TAG,
+    SENDER_BLOCK_TAG,
+    block_local_sender,
+    mail_recipient_refusal,
+    mail_sender_refusal,
+    recent_correspondents,
+    send_mail,
+    send_system_mail,
+)
 from netbbs.net.mail_flow import browse_mail
 from netbbs.net.mail_recipients import (
     MAX_LISTED_MATCHES,
+    NOT_LINKED_TAG,
     RecipientCompleter,
     gather_address_book,
+    link_mail_refusal,
     picker_request,
 )
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 from tests.test_mail_flow import (
+    _TRUST_NOW,
     FakeSession,
     _link_context_with_known_peer,
     _receive_link_mail,
@@ -65,10 +81,24 @@ def _names(choices):
     return [choice.label for choice in choices]
 
 
+def _reachable(choices):
+    return [choice.label for choice in choices if choice.refusal is None]
+
+
+def _quarantine_node(db, fingerprint):
+    subject = TrustSubject.node(fingerprint)
+    register_subject(db, subject, first_accepted_at=_TRUST_NOW, now_iso=_TRUST_NOW)
+    set_trust_override(
+        db, subject, TrustDimension.RESOURCE_BEHAVIOR, TrustState.QUARANTINED, reason="test", now_iso=_TRUST_NOW,
+    )
+
+
 # -- who is offered ----------------------------------------------------------
 
 
-def test_the_book_leaves_out_everyone_mail_could_not_reach(db):
+def test_the_book_lists_who_mail_cannot_reach_with_the_reason(db):
+    """Issue #920: someone the caller can't write to is listed with why,
+    not left out -- except the caller and the guest account."""
     alice = _user(db, "alice")
     sysop = create_user(db, "root", password="hunter2pw", user_level=255)
     _user(db, "bob")
@@ -82,8 +112,49 @@ def test_the_book_leaves_out_everyone_mail_could_not_reach(db):
 
     book = gather_address_book(db, alice, link_enabled=False)
 
-    assert _names(book.people) == ["bob", "root"]
+    assert [(choice.label, choice.refusal) for choice in book.people] == [
+        ("bob", None),
+        ("gone", "account disabled"),
+        ("grumpy", "doesn't accept your mail"),
+        ("newbie", "awaiting approval"),
+        ("root", None),
+    ]
     assert book.nodes == ()
+
+
+def test_the_lists_reasons_are_the_to_prompts_refusals(db):
+    """One check says both: the tag the list shows comes from the same
+    refusal whose sentence the To prompt answers with."""
+    alice = _user(db, "alice")
+    sysop = create_user(db, "root", password="hunter2pw", user_level=255)
+    gone = _user(db, "gone")
+    set_user_disabled(db, gone, True, changed_by=sysop)
+    newbie = _user(db, "newbie", pending_approval=True)
+    grumpy = _user(db, "grumpy")
+    block_local_sender(db, grumpy, alice)
+
+    assert (DISABLED_RECIPIENT_TAG, PENDING_RECIPIENT_TAG, SENDER_BLOCK_TAG) == (
+        "account disabled", "awaiting approval", "doesn't accept your mail",
+    )
+    assert mail_recipient_refusal(db, get_user_by_id(db, gone.id)) == "gone's account is disabled, so it can't receive mail."
+    assert mail_recipient_refusal(db, newbie) == (
+        "newbie's account is still waiting for approval, so it can't receive mail yet."
+    )
+    assert mail_sender_refusal(db, grumpy, sender=alice) == "grumpy does not accept mail from you."
+
+    node_identity = bootstrap_node_identity("roanoke")
+    newcomer = bootstrap_node_identity("newcomer")
+    closed = bootstrap_node_identity("closed")
+    _link_context_with_known_peer(db, node_identity, newcomer, friendly_name="Newcomer", established=False)
+    _link_context_with_known_peer(db, node_identity, closed, friendly_name="Closed")
+    _quarantine_node(db, closed.fingerprint)
+    probation = link_mail_refusal(db, newcomer.fingerprint)
+    assert probation.tag == NOT_LINKED_TAG == "not linked yet"
+    assert probation.sentence == (
+        "Newcomer · farpoint.example.org is not linked yet; mail opens once the SysOp establishes it."
+    )
+    shut = link_mail_refusal(db, closed.fingerprint)
+    assert shut.tag is None and shut.sentence == "Mail to Closed · farpoint.example.org is closed on this BBS."
 
 
 def test_recent_correspondents_come_first_newest_first_each_once(db):
@@ -103,30 +174,40 @@ def test_recent_correspondents_come_first_newest_first_each_once(db):
     assert [choice.recent for choice in book.people] == [True, True, False]
 
 
-def test_a_recent_correspondent_who_no_longer_takes_mail_is_not_offered(db):
+def test_a_recent_correspondent_who_no_longer_takes_mail_stays_recent_with_why(db):
     alice = _user(db, "alice")
     bob = _user(db, "bob")
     send_mail(db, bob, alice, "hi", "x")
     block_local_sender(db, bob, alice)
 
-    assert _names(gather_address_book(db, alice, link_enabled=False).people) == []
+    [choice] = gather_address_book(db, alice, link_enabled=False).people
+    assert (choice.label, choice.recent, choice.refusal) == ("bob", True, "doesn't accept your mail")
 
 
-def test_linked_bbses_offered_are_only_those_this_bbs_sends_mail_to(db):
+def test_linked_bbses_on_probation_are_listed_as_not_linked_yet(db):
     alice = _user(db, "alice")
     node_identity = bootstrap_node_identity("roanoke")
     farpoint = bootstrap_node_identity("farpoint")
     newcomer = bootstrap_node_identity("newcomer")
+    closed = bootstrap_node_identity("closed")
     _link_context_with_known_peer(db, node_identity, farpoint)
     _link_context_with_known_peer(db, node_identity, newcomer, friendly_name="Newcomer", established=False)
+    _link_context_with_known_peer(db, node_identity, closed, friendly_name="Closed")
+    _quarantine_node(db, closed.fingerprint)
     _receive_link_mail(db, alice, f"bob@{farpoint.fingerprint}")
     _receive_link_mail(db, alice, f"nina@{newcomer.fingerprint}")
+    _receive_link_mail(db, alice, f"zed@{closed.fingerprint}")
 
     book = gather_address_book(db, alice, link_enabled=True)
 
-    assert [(node.text, node.completion) for node in book.nodes] == [(farpoint.fingerprint, "Farpoint")]
-    assert [(p.text, p.label) for p in book.people] == [
-        (f"bob@{farpoint.fingerprint}", "bob@Farpoint · farpoint.example.org"),
+    # A node whose mail the SysOp closed is left out, and so is its caller.
+    assert [(node.text, node.completion, node.refusal) for node in book.nodes] == [
+        (farpoint.fingerprint, "Farpoint", None),
+        (newcomer.fingerprint, "Newcomer", "not linked yet"),
+    ]
+    assert sorted((p.text, p.label, p.refusal) for p in book.people) == [
+        (f"bob@{farpoint.fingerprint}", "bob@Farpoint · farpoint.example.org", None),
+        (f"nina@{newcomer.fingerprint}", "nina@Newcomer · farpoint.example.org", "not linked yet"),
     ]
     # Link off: neither the nodes nor Link correspondents.
     off = gather_address_book(db, alice, link_enabled=False)
@@ -153,6 +234,28 @@ def test_tab_completes_member_names_ignoring_case(db):
     assert sorted(completer("B")) == ["Bobby", "bob"]
     assert completer("x") == []
     assert completer("alice") == []
+
+
+def test_tab_offers_only_whom_the_caller_can_write_to(db):
+    """Issue #920: the list shows the rest with why; completion types only
+    an address the To prompt will take."""
+    alice = _user(db, "alice")
+    sysop = create_user(db, "root", password="hunter2pw", user_level=255)
+    _user(db, "bob")
+    gone = _user(db, "bobby")
+    set_user_disabled(db, gone, True, changed_by=sysop)
+    grumpy = _user(db, "bobo")
+    block_local_sender(db, grumpy, alice)
+    _user(db, "bobnew", pending_approval=True)
+    node_identity = bootstrap_node_identity("roanoke")
+    _link_context_with_known_peer(db, node_identity, bootstrap_node_identity("farpoint"))
+    newcomer = bootstrap_node_identity("newcomer")
+    _link_context_with_known_peer(db, node_identity, newcomer, friendly_name="Fargone", established=False)
+    _receive_link_mail(db, alice, f"bobz@{newcomer.fingerprint}")
+    completer, _ = _completer(db, alice)
+
+    assert completer("bo") == ["bob"]
+    assert completer("x@far") == ["x@Farpoint"]
 
 
 def test_tab_after_the_at_sign_completes_a_linked_bbs(db):
@@ -275,6 +378,68 @@ def test_question_mark_lists_people_and_the_choice_is_sent_to(db, db_path):
     assert "Message sent." in text
     row = db.connection.execute("SELECT recipient_user_id, subject FROM mail_messages").fetchone()
     assert (row["recipient_user_id"], row["subject"]) == (carol.id, "Hello")
+
+
+def test_the_list_shows_who_cant_be_written_to_without_a_number(db, db_path):
+    """Issue #920: a row the caller can't pick shows `-` and the reason, and
+    the numbers count only the rows that can be picked: 01 bob, - gone,
+    02 root."""
+    alice = _user(db, "alice")
+    sysop = create_user(db, "root", password="hunter2pw", user_level=255)
+    _user(db, "bob")
+    gone = _user(db, "gone")
+    set_user_disabled(db, gone, True, changed_by=sysop)
+    session = FakeSession(keys=["c", "0", "2", "s", "b"], lines=["?", "Hello", "Hi there", "/done"])
+    lane = DatabaseLane(db_path)
+    asyncio.run(browse_mail(session, lane, alice))
+    lane.close()
+
+    text = _visible_text(session)
+    assert "  01. bob\n" in text
+    assert "   -  gone - account disabled\n" in text
+    assert "  02. root\n" in text
+    row = db.connection.execute("SELECT recipient_user_id FROM mail_messages").fetchone()
+    assert row["recipient_user_id"] == sysop.id
+
+
+def test_a_list_of_only_unreachable_people_still_opens_and_picks_nothing(db, db_path):
+    alice = _user(db, "alice")
+    grumpy = _user(db, "grumpy")
+    block_local_sender(db, grumpy, alice)
+    # "1" and Enter reaches no row: bell, then Back, then an empty To.
+    session = FakeSession(keys=["c", "1", "\r", "b", "b"], lines=["?", ""])
+    lane = DatabaseLane(db_path)
+    asyncio.run(browse_mail(session, lane, alice))
+    lane.close()
+
+    text = _visible_text(session)
+    assert "   -  grumpy - doesn't accept your mail" in text
+    assert db.connection.execute("SELECT COUNT(*) FROM mail_messages").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize(("width", "height"), [(80, 24), (40, 12)])
+def test_the_list_with_unreachable_rows_fits_the_terminal(db, db_path, width, height):
+    """Every row stays one terminal line, `-` or number, so the page budget
+    holds at the smallest supported size and at the classic one."""
+    alice = _user(db, "alice")
+    sysop = create_user(db, "root", password="hunter2pw", user_level=255)
+    for index in range(30):
+        account = _user(db, f"member{index:02d}")
+        if index % 3 == 0:
+            set_user_disabled(db, account, True, changed_by=sysop)
+    session = FakeSession(keys=["c", "b", "b"], lines=["?", ""])
+    session.terminal_width, session.terminal_height = width, height
+    lane = DatabaseLane(db_path)
+    asyncio.run(browse_mail(session, lane, alice))
+    lane.close()
+
+    text = _visible_text(session)
+    start = text.index("Write to")
+    page = text[start: text.index("Choice: ", start)]
+    rows = page.split("\n")
+    assert len(rows) <= height - 1
+    assert all(len(row) <= width for row in rows)
+    assert "-  member00 - account disabled" in page
 
 
 def test_leaving_the_list_asks_to_again(db, db_path):
@@ -400,6 +565,6 @@ def test_an_address_send_refuses_is_still_shown_by_its_nodes_name(db, db_path):
     lane.close()
 
     text = _visible_text(session)
-    assert "is newly linked; mail opens once the SysOp establishes it." in text
+    assert "is not linked yet; mail opens once the SysOp establishes it." in text
     assert newcomer.fingerprint not in text
     assert "bob@Newcomer · farpoint.example.org" in text

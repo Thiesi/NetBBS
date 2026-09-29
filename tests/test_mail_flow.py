@@ -881,7 +881,7 @@ def test_compose_refuses_a_peer_still_on_probation_at_the_to_prompt(tmp_path):
     asyncio.run(browse_mail(session, lane, alice, link_context=link_context))
 
     text = _visible_text(session)
-    assert "Farpoint · farpoint.example.org is newly linked; mail opens once the SysOp establishes it." in text
+    assert "Farpoint · farpoint.example.org is not linked yet; mail opens once the SysOp establishes it." in text
     assert text.count("To: ") == 2
     assert "Subject:" not in text
     assert "Message sent." not in text
@@ -909,7 +909,7 @@ def test_compose_refuses_a_probationary_peer_chosen_from_the_review_screen(tmp_p
     asyncio.run(browse_mail(session, lane, alice, link_context=link_context))
 
     text = _visible_text(session)
-    assert "Newcomer · farpoint.example.org is newly linked; mail opens once the SysOp establishes it." in text
+    assert "Newcomer · farpoint.example.org is not linked yet; mail opens once the SysOp establishes it." in text
     assert "Message sent." not in text
     assert db.connection.execute("SELECT COUNT(*) FROM mail_messages").fetchone()[0] == 0
     lane.close()
@@ -1239,7 +1239,7 @@ def test_reply_to_link_mail_from_a_peer_now_on_probation_is_refused_as_at_the_to
     asyncio.run(browse_mail(session, lane, alice, link_context=link_context))
 
     text = _visible_text(session)
-    assert f"{_FARPOINT} is newly linked; mail opens once the SysOp establishes it." in text
+    assert f"{_FARPOINT} is not linked yet; mail opens once the SysOp establishes it." in text
     assert "Subject:" not in text
     assert "Message sent." not in text
     assert _remote_rows(db) == []

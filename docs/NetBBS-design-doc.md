@@ -2927,21 +2927,36 @@ completion, as chat's): a member's name, the address of a recent
 correspondent, and after `@` the name of a linked BBS; several matches are
 listed under the prompt, wrapped, and more than 24 are counted instead. `?`
 and Enter opens a list (`pick_item`) of everyone the caller can write to:
-recent correspondents first, then the linked BBSes, then the members. On a
+recent correspondents first, then the members, then the linked BBSes. On a
 node with Link on, `name@?` lists just the linked BBSes for that name, and a
 BBS chosen from the full list asks for the user name there. `?` works at the
 review screen's `[T]o` too.
 - Recent correspondents are the last ten people named by letters still in the
   caller's own Inbox and Sent (`netbbs.mail.recent_correspondents`), local and
   Link. System mail, a deleted sender and letters to oneself name no one.
-- Only people mail can reach are offered: never the caller, the guest
-  account, a disabled account or a signup awaiting approval
-  (`mail_recipient_refusal`), or someone who blocked the caller
-  (`mail_sender_refusal`); on Link only met nodes this node sends mail to
-  (§12.4), so a node still on probation is not listed. The Directory lists
-  every account; the To prompt's list is narrower on purpose, since offering
-  an address that is then refused helps no one. Leaving a blocker out tells
-  the caller no more than the To prompt's own honest refusal does.
+- The list also shows who the caller can't write to right now, with the
+  reason, and does not let them be picked (issue #920): someone who blocked
+  the caller, "doesn't accept your mail" (`mail_sender_refusal`); a disabled
+  account, "account disabled", and a signup awaiting approval, "awaiting
+  approval" (`mail_recipient_refusal`); and on Link a met node still on
+  probation (§12.4), "not linked yet". Such a row is muted, has `-` where
+  the number goes and takes no number, so the numbers count only what can be
+  picked; the highlight steps over it, and a search whose one match it is
+  shows it rather than choosing it (`pick_item`'s `selectable_of`). Each row
+  is one line either way, so the page budget is unchanged at 80x24 and
+  40x12. Still left out: the caller, the guest account, which has no mailbox
+  rather than a state that can change, and a node whose mail the SysOp closed
+  (quarantined or blocked). Leaving people out made a missing name look like
+  a typo or a missing account; the operator accepted that the list tells
+  callers about blocks and account states, which the To prompt's refusal
+  already said to anyone who typed the name.
+- The reason is the same check's: `MailRefusal` carries the To prompt's
+  sentence and the list's words together (`mail_recipient_refusal_detail`,
+  `mail_sender_refusal_detail`, `link_mail_refusal`), so the two can't drift
+  apart.
+- Tab offers only what can be picked: a completion is an address the To
+  prompt would take. The list is where a caller learns why someone is
+  missing from it.
 - A pick is only text in To: the To prompt checks it exactly as a typed
   address, and Send checks again. Nothing new is checked, so `mail_someone`
   keeps the same checks as the To prompt.
@@ -5936,7 +5951,7 @@ whole was never registered (above), so its node is what the SysOp acts on.
 
 The sending node applies its own policy before anything is queued: a caller
 addressing a peer this node still holds on probation is told at the To prompt
-that "<node> is newly linked; mail opens once the SysOp establishes it", and a
+that "<node> is not linked yet; mail opens once the SysOp establishes it", and a
 quarantined or blocked peer that mail to it is closed. Mail queued before a
 peer lost standing waits in the outbox, expires when its work item
 dead-letters, and is woken on the next sync pass once the policy allows the
