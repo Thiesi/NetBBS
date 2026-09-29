@@ -93,6 +93,7 @@ from netbbs.auth.users import (
     list_users,
     release_retired_username,
     describe_staff_permissions,
+    is_usable_sysop,
     set_can_verify_identity,
     set_staff_permissions,
     set_user_disabled,
@@ -466,12 +467,14 @@ from netbbs.mrc.settings import (
     validate_mrc_settings,
 )
 from netbbs.mrc.protocol import sanitize_room
+from netbbs.staff import count_moderation_items, count_pending_accounts, has_moderation_scope, moderation_scope
 from netbbs.moderation.roles import (
     BoardPermission,
     ChannelPermission,
     ModeratorGrantError,
     describe_grant,
     get_grant,
+    grant_everywhere,
     grant_permissions,
     has_permission,
     list_grants_for_community,
@@ -1485,6 +1488,112 @@ async def admin_menu(
                                    link_context=link_context, state=dashboard_state)
         else:
             await session.write(reject_unhandled_key(choice))
+
+
+async def staff_menu(
+    session: Session,
+    lane: DatabaseLane,
+    user: User,
+    *,
+    node_controls: NodeControls | None = None,
+    link_context: LinkContext | None = None,
+) -> None:
+    """
+    The Staff console (design doc §5.6, issue #836): the reduced console a
+    staff member reaches from `[S]taff` on the main menu. Its landing view
+    counts what waits for them, and it offers only the screens their
+    permissions reach -- the accounts waiting for approval, the account
+    list, the moderation queue -- which are the SysOp console's own screens
+    (`_pick_and_edit_user`, `_pending_review_screen`), narrowed by the
+    actor rather than copied. Nothing here reaches Settings, Link, Node,
+    DNS or backups.
+
+    Callers gate entry on `netbbs.staff.is_staff`. The console re-checks at
+    every key, like the SysOp's (issue #659): once the operator holds no
+    staff permission, it closes.
+    """
+    await _draw_staff_menu(session, lane, user)
+    while True:
+        choice = (await session.read_key()).lower()
+        fresh = await lane.run(current_account, user)
+        if fresh is None or not fresh.staff_permissions or fresh.user_level >= SYSOP_LEVEL:
+            await session.write_line(colored("\r\nYour account no longer has staff access.", fg_color=ALERT_COLOR))
+            return
+        user = fresh
+        if choice == "b":
+            await session.write_line("")
+            return
+        if choice == "r":
+            pass
+        elif choice == "a" and user.has_staff(StaffPermission.APPROVE_ACCOUNTS):
+            await session.write_line("")
+            await _pick_and_edit_user(
+                session, lane, user, node_controls, title="Waiting for approval", pending_only=True
+            )
+        elif choice == "u" and user.has_staff(StaffPermission.MANAGE_ACCOUNTS):
+            await session.write_line("")
+            await _pick_and_edit_user(session, lane, user, node_controls, title="Accounts")
+        elif choice == "m" and await lane.run(has_moderation_scope, user):
+            await session.write_line("")
+            await _pending_review_screen(
+                session, lane, user, link_context=link_context,
+                transfers=node_controls.transfers if node_controls is not None else None,
+            )
+        else:
+            await session.write(reject_unhandled_key(choice))
+            continue
+        await _draw_staff_menu(session, lane, user)
+
+
+async def _draw_staff_menu(session: Session, lane: DatabaseLane, user: User) -> None:
+    def _load(db: Database) -> dict[str, object]:
+        return {
+            "pending_accounts": count_pending_accounts(db),
+            "moderates": has_moderation_scope(db, user),
+            "held": count_moderation_items(db, user),
+            "description_level": menu_description_level(db, user),
+            "redraw_in_place": redraw_in_place_enabled(db, user),
+            "unicode_style": unicode_style_enabled(db, user),
+            "collapsed": breadcrumb_collapsed_enabled(db, user),
+            "header_color": effective_header_color_256(db),
+        }
+
+    state = await lane.run(_load)
+    unicode_style = state["unicode_style"]
+    await session.write_line(
+        "\r\n" + screen_title(
+            "Staff console",
+            breadcrumb=(session.node_display_name,),
+            subtitle=f"Your staff permissions: {describe_staff_permissions(user.staff_permissions)}.",
+            width=session.terminal_width,
+            clear=state["redraw_in_place"],
+            unicode_style=unicode_style, collapsed=state["collapsed"],
+            header_color=state["header_color"], node_name_gradient=session.node_name_gradient,
+        )
+    )
+    counts: list[Field] = []
+    if user.has_staff(StaffPermission.APPROVE_ACCOUNTS):
+        waiting = state["pending_accounts"]
+        counts.append(Field(
+            "Waiting for approval", str(waiting), color=WARNING_COLOR if waiting else MUTED_COLOR,
+        ))
+    if state["moderates"]:
+        held = state["held"]
+        counts.append(Field("Held for moderation", str(held), color=WARNING_COLOR if held else MUTED_COLOR))
+    panel_rows = await _write_sections(session, [Section(None, counts)], unicode_style=unicode_style) if counts else 0
+    options: list[MenuEntry] = []
+    if user.has_staff(StaffPermission.APPROVE_ACCOUNTS):
+        options.append(MenuEntry(label=menu_key("A", "ccounts waiting"), brief="Approve or decline signups"))
+    if user.has_staff(StaffPermission.MANAGE_ACCOUNTS):
+        options.append(MenuEntry(label=menu_key("U", "sers"), brief="Levels, disabling, passwords"))
+    if state["moderates"]:
+        options.append(MenuEntry(label=menu_key("M", "oderation"), brief="Held posts and uploads"))
+    options.append(MenuEntry(label=menu_key("R", "efresh"), brief="Redraw with current numbers"))
+    options.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to the main menu"))
+    await session.write_line(
+        "\r\n" + _fitted_menu(options, state["description_level"], session=session, used_rows=panel_rows + 5)
+    )
+    await _choice_prompt(session)
 
 
 async def _operator_lost_sysop(
@@ -5565,7 +5674,9 @@ def _user_columns(user: User) -> list[str | tuple[str, SegmentColor]]:
     ]
 
 
-async def _pick_target_user(session: Session, lane: DatabaseLane, actor: User, *, title: str) -> User | None:
+async def _pick_target_user(
+    session: Session, lane: DatabaseLane, actor: User, *, title: str, pending_only: bool = False
+) -> User | None:
     """
     The single screen every `[U]sers` submenu entry reaches a target
     account through (design doc -- Thiesi's own dogfood-testing report).
@@ -5606,6 +5717,9 @@ async def _pick_target_user(session: Session, lane: DatabaseLane, actor: User, *
     def _load(db: Database) -> list[User]:
         _, ascending_order, descending_order = _USER_SORT_MODES[mode]
         users = list_users(db, order_by=descending_order if descending else ascending_order)
+        if pending_only:
+            # The Staff console's accounts waiting for approval (issue #836).
+            users = [u for u in users if u.pending_approval]
         if visibility == "active_only":
             return [u for u in users if u.disabled_at is None]
         if visibility == "disabled_only":
@@ -5615,7 +5729,7 @@ async def _pick_target_user(session: Session, lane: DatabaseLane, actor: User, *
     unicode_style = await lane.run(unicode_style_enabled, actor)
     users = await lane.run(_load)
     if not users:
-        _announce_line(session, "\r\nNo registered users yet.")
+        _announce_line(session, "\r\nNo accounts are waiting for approval." if pending_only else "\r\nNo registered users yet.")
         return None
 
     def _standing_label() -> str:
@@ -5703,16 +5817,17 @@ async def _pick_target_user(session: Session, lane: DatabaseLane, actor: User, *
         # screen is open used to leave it saying "never" until the SysOp
         # left and came back -- on a screen that advertises Ctrl-R
         # (Codex review).
-        masthead=lambda: _load_condensed_status_line(
+        masthead=(lambda: _load_condensed_status_line(
             lane, unicode_style=unicode_style, terminal_width=session.terminal_width
-        ),
+        )) if is_usable_sysop(actor) else "",
         accent_color=await lane.run(effective_accent_color_256),
         header_color=await lane.run(effective_header_color_256),
     )
 
 
 async def _pick_and_edit_user(
-    session: Session, lane: DatabaseLane, actor: User, node_controls: NodeControls | None, *, title: str
+    session: Session, lane: DatabaseLane, actor: User, node_controls: NodeControls | None, *, title: str,
+    pending_only: bool = False,
 ) -> None:
     """
     Every per-user action funnels through here now (design doc -- node
@@ -5726,7 +5841,7 @@ async def _pick_and_edit_user(
     SysOp who only meant to promote someone can still also disable them
     right there without leaving and re-picking them a second time.
     """
-    target = await _pick_target_user(session, lane, actor, title=title)
+    target = await _pick_target_user(session, lane, actor, title=title, pending_only=pending_only)
     if target is not None:
         await _user_detail_screen(session, lane, actor, target, node_controls)
 
@@ -5767,6 +5882,7 @@ async def _draw_user_detail(
     collapsed: bool,
     *,
     selected: str | None = None,
+    allowed: frozenset[str] | None = None,
 ) -> bool:
     """Returns whether `target` is currently on the local blocklist --
     unlike `disabled_at`, blocked status isn't a field on `User` itself,
@@ -5781,13 +5897,18 @@ async def _draw_user_detail(
     that line's own `>` cursor -- `None` (nothing arrow-highlighted yet,
     or a `[A]pprove`/`[D]elete`/`[B]ack` action, none of which are
     arrow-selectable fields, matching `edit_resource_draft`'s own
-    Save/Back convention) renders identically to before this feature."""
+    Save/Back convention) renders identically to before this feature.
+
+    `allowed` (issue #836) narrows the menu to what a staff member may do
+    (`_user_detail_keys`) and leaves out the node's health line, which is
+    the SysOp's; `None` is the SysOp's full screen."""
     await session.write_line(
         "\r\n" + screen_title(sanitize_text(target.username),
             breadcrumb=(session.node_display_name,), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
             header_color=await lane.run(effective_header_color_256), node_name_gradient=session.node_name_gradient)
     )
-    await session.write_line(await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width))
+    if allowed is None:
+        await session.write_line(await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width))
     accent = await lane.run(effective_accent_color_256)
 
     def _editable(hotkey: str, label: str, value: str, *, color: int = VALUE_COLOR) -> Field:
@@ -5865,22 +5986,30 @@ async def _draw_user_detail(
             Note(f"Answer: {sanitize_text(signup_answer.answer)}"),
         ]))
     panel_rows = await _write_sections(session, sections, unicode_style=unicode_style)
+    offered = allowed if allowed is not None else _ALL_USER_DETAIL_KEYS
     options = []
-    if target.pending_approval:
+    if target.pending_approval and "a" in offered:
         options.append(MenuEntry(label=menu_key("A", "pprove"), brief="Approve this pending signup"))
-    options.append(MenuEntry(label=menu_key("L", "evel"), brief="Change this user's access level"))
-    options.append(MenuEntry(label=menu_key("T", "oggle enable/disabled"), brief="Enable or disable this account"))
-    options.append(MenuEntry(label=menu_key("S", "taff"), brief="Staff permissions, Co-SysOp preset"))
-    options.append(MenuEntry(label=menu_key("I", "dentity verification"), brief="Grant/revoke attestation rights"))
-    options.append(MenuEntry(label=menu_key("K", "ey"), brief="View/replace this user's SSH key"))
-    options.append(MenuEntry(label=menu_key("P", "assword"), brief="Set or clear this user's password"))
-    options.append(MenuEntry(label=menu_key("R", "estrict login"), brief="Block or unblock this account"))
+    if "l" in offered:
+        options.append(MenuEntry(label=menu_key("L", "evel"), brief="Change this user's access level"))
+    if "t" in offered:
+        options.append(MenuEntry(label=menu_key("T", "oggle enable/disabled"), brief="Enable or disable this account"))
+    if "s" in offered:
+        options.append(MenuEntry(label=menu_key("S", "taff"), brief="Staff permissions, Co-SysOp preset"))
+    if "i" in offered:
+        options.append(MenuEntry(label=menu_key("I", "dentity verification"), brief="Grant/revoke attestation rights"))
+    if "k" in offered:
+        options.append(MenuEntry(label=menu_key("K", "ey"), brief="View/replace this user's SSH key"))
+    if "p" in offered:
+        options.append(MenuEntry(label=menu_key("P", "assword"), brief="Set or clear this user's password"))
+    if "r" in offered:
+        options.append(MenuEntry(label=menu_key("R", "estrict login"), brief="Block or unblock this account"))
     options.append(MenuEntry(label=menu_key("H", "istory"), brief="Admin actions on this account"))
-    if target.pending_approval:
+    if target.pending_approval and "d" in offered:
         # Issue #835: turning down a signup is routine, and used to need
         # the full permanent-delete warning and typed-name confirmation.
         options.append(MenuEntry(label=menu_key("D", "ecline"), brief="Turn down this signup"))
-    else:
+    elif "d" in offered:
         options.append(MenuEntry(label=menu_key("D", "elete"), brief="Permanently remove this user"))
     options.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to the picker"))
     await session.write_line(
@@ -5892,6 +6021,32 @@ async def _draw_user_detail(
 
 
 _USER_DETAIL_FIELD_ORDER = ("l", "t", "r", "k", "p", "s", "i")
+
+#: Every action key on the account detail -- what a SysOp gets.
+_ALL_USER_DETAIL_KEYS = frozenset("altrkpsihd")
+
+
+def _user_detail_keys(actor: User, target: User) -> frozenset[str]:
+    """
+    The account-detail actions `actor` is offered on `target` (design doc
+    §5.6). A SysOp gets all of them. A staff member gets `[H]istory`, and
+    -- only on an account below 255 holding no staff permission -- level,
+    enable/disable and password with manage accounts, approve and decline
+    with approve accounts. Never keys, the blocklist, staff, identity
+    verification, or deleting an account.
+
+    Presentation only: the mutators check again against the database, so
+    a permission revoked while this screen is open refuses the action.
+    """
+    if is_usable_sysop(actor):
+        return _ALL_USER_DETAIL_KEYS
+    keys = {"h"}
+    within_reach = target.user_level < SYSOP_LEVEL and not target.staff_permissions
+    if within_reach and actor.has_staff(StaffPermission.MANAGE_ACCOUNTS):
+        keys |= {"l", "t", "p"}
+    if within_reach and target.pending_approval and actor.has_staff(StaffPermission.APPROVE_ACCOUNTS):
+        keys |= {"a", "d"}
+    return frozenset(keys)
 
 
 def _grant_summaries(db: Database, target: User) -> list[str]:
@@ -6077,41 +6232,48 @@ async def _user_detail_screen(
     collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
     redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
     selected: str | None = None
-    blocked = await _draw_user_detail(
-        session, lane, target, description_level, redraw_in_place, unicode_style, collapsed, selected=selected
-    )
+
+    async def _redraw() -> bool:
+        # Recomputed on every draw: an approval or a level change can move
+        # the account in or out of a staff member's reach.
+        nonlocal allowed, field_order
+        allowed = _user_detail_keys(actor, target)
+        field_order = tuple(key for key in _USER_DETAIL_FIELD_ORDER if key in allowed)
+        return await _draw_user_detail(
+            session, lane, target, description_level, redraw_in_place, unicode_style, collapsed,
+            selected=selected, allowed=allowed if allowed != _ALL_USER_DETAIL_KEYS else None,
+        )
+
+    allowed: frozenset[str] = _ALL_USER_DETAIL_KEYS
+    field_order: tuple[str, ...] = _USER_DETAIL_FIELD_ORDER
+    blocked = await _redraw()
     while True:
         key = await _read_user_detail_key(session)
 
         if key.kind == EditorKeyKind.UP:
-            index = _USER_DETAIL_FIELD_ORDER.index(selected) if selected in _USER_DETAIL_FIELD_ORDER else 0
-            selected = _USER_DETAIL_FIELD_ORDER[(index - 1) % len(_USER_DETAIL_FIELD_ORDER)]
-            blocked = await _draw_user_detail(
-                session, lane, target, description_level, redraw_in_place, unicode_style, collapsed, selected=selected
-            )
+            if not field_order:
+                continue
+            index = field_order.index(selected) if selected in field_order else 0
+            selected = field_order[(index - 1) % len(field_order)]
+            blocked = await _redraw()
             continue
         if key.kind == EditorKeyKind.DOWN:
-            index = _USER_DETAIL_FIELD_ORDER.index(selected) if selected in _USER_DETAIL_FIELD_ORDER else -1
-            selected = _USER_DETAIL_FIELD_ORDER[(index + 1) % len(_USER_DETAIL_FIELD_ORDER)]
-            blocked = await _draw_user_detail(
-                session, lane, target, description_level, redraw_in_place, unicode_style, collapsed, selected=selected
-            )
+            if not field_order:
+                continue
+            index = field_order.index(selected) if selected in field_order else -1
+            selected = field_order[(index + 1) % len(field_order)]
+            blocked = await _redraw()
             continue
         if key.kind == EditorKeyKind.ESCAPE:
             if selected is not None:
                 selected = None
-                blocked = await _draw_user_detail(
-                    session, lane, target, description_level, redraw_in_place, unicode_style, collapsed,
-                    selected=selected,
-                )
+                blocked = await _redraw()
                 continue
             await session.write("\a")
             continue
         if key.kind == EditorKeyKind.CTRL and key.char == "h":
             await _show_user_detail_help(session, lane, selected=selected, unicode_style=unicode_style)
-            blocked = await _draw_user_detail(
-                session, lane, target, description_level, redraw_in_place, unicode_style, collapsed, selected=selected
-            )
+            blocked = await _redraw()
             continue
         if key.kind == EditorKeyKind.ENTER or (key.kind == EditorKeyKind.CHAR and key.char == " "):
             if selected is None:
@@ -6126,12 +6288,9 @@ async def _user_detail_screen(
                 # character, never as `EditorKeyKind.CTRL` -- same dual
                 # path `edit_resource_draft` itself handles.
                 await _show_user_detail_help(session, lane, selected=selected, unicode_style=unicode_style)
-                blocked = await _draw_user_detail(
-                    session, lane, target, description_level, redraw_in_place, unicode_style, collapsed,
-                    selected=selected,
-                )
+                blocked = await _redraw()
                 continue
-            if choice in _USER_DETAIL_FIELD_ORDER:
+            if choice in field_order:
                 selected = choice
         else:
             # Left/Right/Backspace/Tab/Home/End/Page Up/Page Down --
@@ -6142,14 +6301,17 @@ async def _user_detail_screen(
         if choice == "b":
             await session.write_line("")
             return
+        elif choice not in allowed:
+            # Design doc §5.6: a staff member sees the account, but only the
+            # actions their permissions cover, and none on a SysOp or
+            # another staff member.
+            await session.write(reject_unhandled_key(choice))
         elif choice == "a" and target.pending_approval:
             await session.write_line("")
             if await prompt_yes_no(session, "Approve this account so it can log in?", default=False):
                 target = await lane.run(approve_pending_user, target, approved_by=actor)
                 _announce_line(session, f"{target.username!r} approved.")
-            blocked = await _draw_user_detail(
-                session, lane, target, description_level, redraw_in_place, unicode_style, collapsed, selected=selected,
-            )
+            blocked = await _redraw()
         elif choice == "l":
             await session.write_line("")
             await write_prompt(session, f"New level for {target.username!r} [{target.user_level}]: ")
@@ -6167,9 +6329,7 @@ async def _user_detail_screen(
                     else:
                         _announce_line(session, f"{target.username!r} is now level {target.user_level}.")
                         _request_live_access_recheck(node_controls, target)
-            blocked = await _draw_user_detail(
-                session, lane, target, description_level, redraw_in_place, unicode_style, collapsed, selected=selected,
-            )
+            blocked = await _redraw()
         elif choice == "t":
             await session.write_line("")
             currently_disabled = target.disabled_at is not None
@@ -6186,9 +6346,7 @@ async def _user_detail_screen(
                     )
                     if target.disabled_at is not None:
                         await _revoke_live_sessions(session, node_controls, target, actor)
-            blocked = await _draw_user_detail(
-                session, lane, target, description_level, redraw_in_place, unicode_style, collapsed, selected=selected,
-            )
+            blocked = await _redraw()
         elif choice == "i":
             await session.write_line("")
             new_state = "revoke" if target.can_verify_identity else "grant"
@@ -6203,22 +6361,16 @@ async def _user_detail_screen(
                     f"{'yes' if target.can_verify_identity else 'no'}."
                 )
                 _request_live_access_recheck(node_controls, target)
-            blocked = await _draw_user_detail(
-                session, lane, target, description_level, redraw_in_place, unicode_style, collapsed, selected=selected,
-            )
+            blocked = await _redraw()
         elif choice == "s":
             target = await _staff_permissions_screen(session, lane, actor, target, node_controls)
-            blocked = await _draw_user_detail(
-                session, lane, target, description_level, redraw_in_place, unicode_style, collapsed, selected=selected,
-            )
+            blocked = await _redraw()
         elif choice == "k":
             # SysOp-assisted counterpart to the self-service Profile
             # `[K]` field (`netbbs.net.login_flow`'s own `_edit_profile`)
             # -- both now open the same shared `manage_ssh_keys_screen`.
             target = await manage_ssh_keys_screen(session, lane, target, changed_by=actor)
-            blocked = await _draw_user_detail(
-                session, lane, target, description_level, redraw_in_place, unicode_style, collapsed, selected=selected,
-            )
+            blocked = await _redraw()
         elif choice == "p":
             # Issue #611: the SysOp-assisted counterpart to the Profile
             # `[A]ccount password` field -- the same shared
@@ -6226,9 +6378,7 @@ async def _user_detail_screen(
             # it skip the current-password proof for someone else's
             # account, and what the audit row names.
             target = await manage_password_screen(session, lane, target, changed_by=actor)
-            blocked = await _draw_user_detail(
-                session, lane, target, description_level, redraw_in_place, unicode_style, collapsed, selected=selected,
-            )
+            blocked = await _redraw()
         elif choice == "r":
             await session.write_line("")
             action_word = "Unrestrict" if blocked else "Restrict"
@@ -6249,14 +6399,10 @@ async def _user_detail_screen(
                     else:
                         _announce_line(session, f"{target.username!r} is now blocked from logging in.")
                         await _revoke_live_sessions(session, node_controls, target, actor)
-            blocked = await _draw_user_detail(
-                session, lane, target, description_level, redraw_in_place, unicode_style, collapsed, selected=selected,
-            )
+            blocked = await _redraw()
         elif choice == "h":
             await _user_history_screen(session, lane, actor, target)
-            blocked = await _draw_user_detail(
-                session, lane, target, description_level, redraw_in_place, unicode_style, collapsed, selected=selected,
-            )
+            blocked = await _redraw()
         elif choice == "d" and target.pending_approval:
             await session.write_line("")
             if await prompt_yes_no(
@@ -6270,17 +6416,13 @@ async def _user_detail_screen(
                 else:
                     _announce_line(session, f"{target.username!r}'s signup declined.")
                     return
-            blocked = await _draw_user_detail(
-                session, lane, target, description_level, redraw_in_place, unicode_style, collapsed, selected=selected,
-            )
+            blocked = await _redraw()
         elif choice == "d":
             await session.write_line("")
             deleted = await _delete_user_confirm(session, lane, actor, target, node_controls)
             if deleted:
                 return
-            blocked = await _draw_user_detail(
-                session, lane, target, description_level, redraw_in_place, unicode_style, collapsed, selected=selected,
-            )
+            blocked = await _redraw()
         else:
             await session.write(reject_unhandled_key(choice))
 
@@ -17253,7 +17395,12 @@ def _load_pending_items(
     cap = MAX_QUEUE_ITEMS + 1
     posts: list[tuple[Post, Board]] = []
     entries: list[tuple[FileEntry, FileArea]] = []
-    if node_wide:
+    scope = moderation_scope(db, actor) if node_wide else None
+    if scope is not None:
+        # A moderator's `Moderation (n)` queue (design doc §5.2): one queue
+        # across what their grants cover, drawn like the SysOp's.
+        boards, areas = scope
+    if node_wide and scope is None:
         # One bounded query each, however many boards and areas there are
         # (Codex review on #795).
         boards_by_id = {board.id: board for board in list_boards(db)}
@@ -17332,7 +17479,8 @@ async def _pending_review_screen(
     link_context: LinkContext | None = None, transfers: Any = None,
 ) -> None:
     """Every held post and upload on the node in one queue (issue #678),
-    so a SysOp need not open each board and area to find what waits."""
+    so a SysOp need not open each board and area to find what waits -- or,
+    for anyone else, every one their grants let them decide (issue #836)."""
     while True:
         loaded = await lane.run(_load_pending_items, actor)
         selected = await _pick_pending_item(
@@ -17347,6 +17495,16 @@ async def _pending_review_screen(
             await _file_action_screen(
                 session, lane, actor, selected.entry, selected.area, link_context=link_context, transfers=transfers,
             )
+
+
+async def moderation_queue(
+    session: Session, lane: DatabaseLane, actor: User, *,
+    link_context: LinkContext | None = None, transfers: Any = None,
+) -> None:
+    """`Moderation (n)` on the main menu (design doc §5.2, issue #836): the
+    node-wide queue, narrowed by `_load_pending_items` to the boards and
+    areas `actor` approves on -- one queue, not a visit to each board."""
+    await _pending_review_screen(session, lane, actor, link_context=link_context, transfers=transfers)
 
 
 async def _pending_posts_screen(
@@ -21254,6 +21412,7 @@ async def _pick_moderator_scope(
         menu_key("x", "", prefix="blanket across all boards "),
         menu_key("y", "", prefix="blanket across all areas "),
         menu_key("z", "", prefix="blanket across all channels "),
+        menu_key("e", "verything", prefix="blanket across "),
     ]
     await session.write_line("Scope:")
     await write_prompt(session, f"{action_bar(scope_options, width=session.terminal_width)}: ")
@@ -21300,6 +21459,9 @@ async def _pick_moderator_scope(
         object_type, label = "file_area", "all file areas (blanket)"
     elif scope_key == "z":
         object_type, label = "channel", "all chat channels (blanket)"
+    elif scope_key == "e":
+        # Issue #836 (F131): boards, areas and channels in one grant.
+        object_type, label = _EVERYWHERE, "every board, file area and chat channel (blanket)"
     else:
         _announce_line(session, colored("Not a valid scope.", fg_color=MUTED_COLOR))
         return None
@@ -21309,6 +21471,11 @@ async def _pick_moderator_scope(
 
 
 _MODERATOR_PRESETS = ["full", "limited"]
+
+#: `_pick_moderator_scope`'s "every kind at once" scope (issue #836) --
+#: not an object type; `_grant_moderator_screen` writes it as the three
+#: blanket grants through `grant_everywhere`.
+_EVERYWHERE = "everywhere"
 
 
 def _moderator_preset_label(object_type: str | None, preset: str) -> str:
@@ -21435,7 +21602,9 @@ async def _grant_moderator_screen(session: Session, lane: DatabaseLane, actor: U
         ),
         FieldSpec(
             key="preset", hotkey="p", menu_text=menu_key("P", "reset"), label="Preset",
-            render=lambda d: _moderator_preset_label(d["object_type"], d["preset"]),
+            render=lambda d: _moderator_preset_label(
+                None if d["object_type"] == _EVERYWHERE else d["object_type"], d["preset"]
+            ),
             prompt=choice_field("preset", _MODERATOR_PRESETS),
             step=choice_step("preset", _MODERATOR_PRESETS),
             brief="Full, or approve/moderate only",
@@ -21456,6 +21625,17 @@ async def _grant_moderator_screen(session: Session, lane: DatabaseLane, actor: U
         label = draft["label"]
         if community is not None:
             label = f"{label} scoped to Community {community.name!r}"
+        if draft["object_type"] == _EVERYWHERE:
+            preset_label = _moderator_preset_label(None, draft["preset"])
+            await lane.run(
+                grant_everywhere,
+                draft["user"],
+                board_permissions=_moderator_preset_permissions("board", draft["preset"]),
+                channel_permissions=_moderator_preset_permissions("channel", draft["preset"]),
+                granted_by=actor, community_id=community.id if community is not None else None,
+            )
+            _announce_line(session, f"Granted {preset_label} on {label} to {draft['user'].username!r}.")
+            return True
         preset_label = _moderator_preset_label(draft["object_type"], draft["preset"])
         await lane.run(
             grant_permissions,

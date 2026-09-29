@@ -46,6 +46,8 @@ things in different places. **[B]ack** leaves most screens.
 | **E-mail** | Read and send persistent NetBBS mail |
 | **Who's online** | See callers and available ways to contact them |
 | **Profile** | Change your public profile and personal preferences |
+| **Moderation** (key **A**) | Posts and uploads waiting for your decision, if the SysOp made you a moderator |
+| **Staff** | Your staff console, if the SysOp gave you staff permissions |
 
 Some choices appear only when they have something to show or you have
 permission to use them. Search covers content held by this node, including

@@ -22,7 +22,7 @@ import sqlite3
 from dataclasses import dataclass, replace
 
 from netbbs.attestation import meets_age
-from netbbs.auth.users import SYSOP_LEVEL, User
+from netbbs.auth.users import SYSOP_LEVEL, StaffPermission, User
 from netbbs.boards.boards import Board
 from netbbs.boards.content_id import compute_content_id
 from netbbs.boards.limits import MAX_BODY_BYTES, MAX_SUBJECT_BYTES
@@ -1412,7 +1412,9 @@ def list_node_pending_posts(db: Database, *, requesting_user: User, limit: int) 
     node-wide queue (issue #678) -- one bounded query however many boards
     the node carries (Codex review on #795). SysOp only: a SysOp may
     decide on every board, so no board is left out."""
-    require_level(requesting_user, SYSOP_LEVEL)
+    if not requesting_user.has_staff(StaffPermission.MODERATE_ALL):
+        # Moderate everything (design doc §5.6) decides on every one too.
+        require_level(requesting_user, SYSOP_LEVEL)
     # A board this node excluded from a carried Link keeps its rows, but no
     # screen lists it: its held posts must not take the queue's places
     # (Codex review on #795).
