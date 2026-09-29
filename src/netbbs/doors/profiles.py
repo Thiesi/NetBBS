@@ -237,8 +237,23 @@ class DoorProfile:
             raise ProfileError(f"invalid door profile: {exc}") from exc
 
 
-def preflight(door, session=None) -> list[str]:
-    """Read-only checks; executing a test is a separate, explicit SysOp action."""
+def terminal_too_small(profile, session) -> bool:
+    """True when a fixed-geometry profile will not fit the caller's terminal.
+
+    The caller's problem, not the SysOp's: the launcher reports it as its own
+    outcome rather than as a setup failure (issue #956). A browser door is
+    exempt, because its terminal is resized to the profile's geometry.
+    """
+    return bool(session is not None and getattr(session, "_door_stream", None) is None and profile.width
+                and (session.terminal_width < profile.width or session.terminal_height < profile.height))
+
+
+def preflight(door, session=None, *, check_terminal=True) -> list[str]:
+    """Read-only checks; executing a test is a separate, explicit SysOp action.
+
+    `check_terminal=False` leaves out the caller-terminal size check, for the
+    launcher, which reports that one separately (see `terminal_too_small`).
+    """
     profile = door.profile
     problems = []
     if profile:
@@ -270,8 +285,7 @@ def preflight(door, session=None) -> list[str]:
             problems.extend(preflight_vm(profile, door.executable_path))
         if os.name != "posix" and (profile.endpoint != "stdio" or profile.adapter in ("dosbox", "vm")):
             problems.append("This profile requires POSIX (NetBSD/Linux); Windows is development-only.")
-        if (session is not None and getattr(session, "_door_stream", None) is None and profile.width
-                and (session.terminal_width < profile.width or session.terminal_height < profile.height)):
+        if check_terminal and terminal_too_small(profile, session):
             problems.append(f"Terminal must be at least {profile.width}x{profile.height}.")
         if session is not None and profile.encoding == "raw" and getattr(session, "_door_stream", None) is not None:
             problems.append("Web doors require a utf-8 or cp437 profile; explicitly raw bytes are native-terminal only.")
