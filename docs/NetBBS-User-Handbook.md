@@ -549,7 +549,8 @@ your terminal:
 - **Auto**, the default, follows what your terminal reports when you connect.
 - **Unicode** suits modern terminals and the browser.
 - **CP437** suits classic BBS terminals such as SyncTERM, and shows ANSI art as
-  it was drawn.
+  it was drawn. SyncTERM's Home, End, Page Up, Page Down, Insert and Delete
+  keys work as they do in other terminals.
 - **ASCII** is plain text that any terminal shows.
 
 If your terminal did not say which it is, NetBBS asks once after you log in

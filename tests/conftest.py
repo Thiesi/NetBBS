@@ -25,6 +25,7 @@ import pytest
 
 import netbbs.auth.passwords as passwords_module
 import netbbs.identity.keys as keys_module
+import netbbs.net.ssh as ssh_module
 
 
 def pytest_configure(config):
@@ -88,6 +89,15 @@ def _no_real_network(monkeypatch):
     monkeypatch.setattr(socket, "getaddrinfo", _local_only_getaddrinfo)
     for variable in _PROXY_VARIABLES:
         monkeypatch.delenv(variable, raising=False)
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _fast_rsa_host_keys(monkeypatch):
+    # Every SSH test server on a fresh database generates an RSA host key
+    # (issue #964); 3072 bits costs about 0.3 s each. None of the tests
+    # are about RSA's strength, as with Argon2id below.
+    monkeypatch.setattr(ssh_module, "RSA_HOST_KEY_BITS", 1024)
     yield
 
 
