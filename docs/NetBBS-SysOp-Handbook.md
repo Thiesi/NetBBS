@@ -1349,7 +1349,7 @@ Files, keys, and game saves also live outside it. For `/var/lib/netbbs/netbbs.db
 | Uploaded content | `/var/lib/netbbs/netbbs_files/` |
 | Node identity | Configured `identity_dir` |
 | Managed-DNS state and credentials | Database plus credential files beside it |
-| SSH host key and custom banners | Files beside the database that begin with its file name minus `.db`, e.g. `netbbs_ssh_host_key` and `netbbs_welcome_banner.ans` (see [Custom banners and mastheads](#custom-banners-and-mastheads)) |
+| SSH host key and custom banners | Files beside the database that begin with its file name minus `.db`, e.g. `netbbs_ssh_host_key`, `netbbs_ssh_host_key_rsa` and `netbbs_welcome_banner.ans` (see [Custom banners and mastheads](#custom-banners-and-mastheads)) |
 | War Dialer world | `/var/lib/netbbs/netbbs.db.doors/war-dialer.db`, unless overridden |
 | Voidrunner careers | `/var/lib/netbbs/netbbs.db.doors/voidrunner/`, unless `VOIDRUNNER_SAVE_DIR` overrides it (a node upgraded from the old default copies the service account's `~/.netbbs/voidrunner_saves/` there at its first start) |
 | Third-party games | Each door's installation directory and any author-documented external state |
@@ -1554,6 +1554,7 @@ DNS registration, or backups is a separate, deliberate operator action.
 | A caller forgot their password, or you are locked out | Set a new password from the account's detail screen (**Password**), or run `python -m netbbs.admin reset-password USERNAME` on the host. Nothing recovers the old one. |
 | You think `signing.identity` or `transport.identity` leaked | Replace that key as **Compromised** under **Link status → Keys**, or with `python -m netbbs.admin rotate-key signing --compromised` while the node is stopped. The address and reputation stay; see [Node keys](#node-keys). If `root.identity` leaked too, as it does with a whole copied identity directory or backup, rotation is no remedy: the holder can authorize keys of their own, and only a new node identity ends that. |
 | SSH import fails on NetBSD | Check pkgsrc libraries and `LD_LIBRARY_PATH`; see installation above. |
+| An SSH client cannot connect, e.g. SyncTERM says "Error -20 activating session" | The node offers an Ed25519 host key and, for clients without Ed25519 such as older SyncTERM builds, an RSA one (`netbbs_ssh_host_key_rsa`, created at the first start that lacks it). Make sure the node was restarted after upgrading so the RSA key exists. A caller who connected before sees a new fingerprint only if their client picks the RSA key. |
 | Caller cannot log in | Check maintenance mode, pending approval, disabled account, and login throttling before resetting credentials. |
 | Caller can read but cannot contribute | Check write/join gates, age/name attestations, moderator grants, and inherited Community settings. |
 | Browser terminal or upload fails | Check HTTPS proxy/WebSocket forwarding, upload limits, web listener, and `public_url`. |

@@ -93,3 +93,25 @@ def classify_terminal_types(names: Iterable[str]) -> tuple[Charset | None, bool]
         if name.startswith(UTF8_TERMINAL_PREFIXES):
             return UTF8, True
     return None, False
+
+
+#: Terminals that send SyncTERM's editing keys (issue #964; CTerm manual,
+#: "Sequences sent by SyncTERM"): ESC[K for End, ESC[V/ESC[U for Page
+#: Up/Down, ESC[@ for Insert, and with DECBKM set, its default, 0x7F for
+#: Delete and 0x08 for Backspace. `ansi-bbs` is the termcap entry
+#: SyncTERM's author publishes. Everywhere else 0x7F is the Backspace key,
+#: as PuTTY and xterm send it, and those bare sequences are screen output.
+SYNCTERM_KEY_TERMINALS = frozenset({"syncterm", "ansi-bbs"})
+
+
+def sends_syncterm_keys(session: object) -> bool:
+    """Whether this caller's terminal sends SyncTERM's editing keys. The
+    first name the client reported that means anything decides, the same
+    rule `classify_terminal_types` follows."""
+    for raw in getattr(session, "terminal_types", ()):
+        name = raw.strip().lower()
+        if name in SYNCTERM_KEY_TERMINALS:
+            return True
+        if name in CP437_TERMINALS or name in LIKELY_CP437_TERMINALS or name.startswith(UTF8_TERMINAL_PREFIXES):
+            return False
+    return False
