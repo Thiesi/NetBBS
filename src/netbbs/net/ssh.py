@@ -65,7 +65,12 @@ from netbbs.net.signup_text import pending_approval_notice, username_problem_lin
 from netbbs.staff import approvers_away_line
 from netbbs.net.throttle import LoginThrottle
 from netbbs.net.welcome_banner import load_welcome_banner
-from netbbs.net.terminal_detect import classify_terminal_types, clean_terminal_type, describe_detection
+from netbbs.net.terminal_detect import (
+    classify_terminal_types,
+    clean_terminal_type,
+    describe_detection,
+    terminal_wraps_immediately,
+)
 from netbbs.rendering import strip_ansi
 from netbbs.rendering.charset import ASCII, UTF8, map_text
 from netbbs.rendering.pipe_codes import PastedColor
@@ -122,6 +127,53 @@ def ensure_host_key(db: Database) -> Path:
         key.write_private_key(path)
         _logger.info("generated new SSH host key at %s", path)
     return path
+
+
+#: Size of the RSA host key a node generates (issue #964). 3072 bits is
+#: NIST's recommendation beyond 2030 and what OpenSSH generates by default.
+RSA_HOST_KEY_BITS = 3072
+
+#: The only signature algorithms the RSA host key is offered under. SHA-1
+#: `ssh-rsa` is deprecated and never offered.
+RSA_HOST_KEY_ALGORITHMS = (b"rsa-sha2-512", b"rsa-sha2-256")
+
+
+def ensure_rsa_host_key(db: Database) -> Path:
+    """This node's RSA SSH host key (`<db_path>_ssh_host_key_rsa`),
+    generated on first use, the same way as the Ed25519 one.
+
+    A second key because some classic BBS clients cannot use Ed25519
+    (issue #964): SyncTERM's Cryptlib-based builds, before 2026-04, knew
+    only `ecdsa-sha2-nistp256`, `rsa-sha2-256` and `ssh-rsa` host keys, and
+    a node offering only `ssh-ed25519` failed there with "Error -20
+    activating session". RSA is the one both Cryptlib's table and every
+    other client always have."""
+    path = db.path.parent / f"{db.path.stem}_ssh_host_key_rsa"
+    if not path.exists():
+        key = asyncssh.generate_private_key("ssh-rsa", key_size=RSA_HOST_KEY_BITS)
+        key.write_private_key(path)
+        _logger.info("generated new RSA SSH host key at %s", path)
+    return path
+
+
+def ensure_host_keys(db: Database) -> list[Path]:
+    """Every host key this node serves, most preferred first: Ed25519,
+    then RSA. A node from before issue #964 gains its RSA key on its first
+    start after upgrading; its Ed25519 key, and so its fingerprint for
+    existing callers, stays the same."""
+    return [ensure_host_key(db), ensure_rsa_host_key(db)]
+
+
+def _server_host_keypairs(paths: list[Path]) -> list:
+    """The host keys to hand to asyncssh, with the RSA key restricted to
+    `RSA_HOST_KEY_ALGORITHMS`: asyncssh would otherwise also offer the
+    SHA-1 `ssh-rsa` and ssh.com variants for it."""
+    keypairs = asyncssh.load_keypairs([str(path) for path in paths])
+    for keypair in keypairs:
+        if keypair.algorithm == b"ssh-rsa":
+            keypair.host_key_algorithms = RSA_HOST_KEY_ALGORITHMS
+            keypair.sig_algorithms = RSA_HOST_KEY_ALGORITHMS
+    return keypairs
 
 
 class SSHSession(Session):
@@ -181,6 +233,7 @@ class SSHSession(Session):
         self.terminal_types = (terminal_type,) if terminal_type else ()
         charset, self.charset_certain = classify_terminal_types(self.terminal_types)
         self.output_charset = self.detected_charset = charset if charset is not None else UTF8
+        self.terminal_wraps_immediately = terminal_wraps_immediately(self.terminal_types)
         _logger.info(describe_detection(
             "SSH", self.peer_address, names=self.terminal_types,
             outcome="PTY request" if terminal_type else "no PTY terminal type",
@@ -758,7 +811,7 @@ class SSHServer:
         return self._acceptor.get_port()
 
     async def start(self) -> None:
-        host_key_path = ensure_host_key(self._db)
+        host_keys = _server_host_keypairs(ensure_host_keys(self._db))
         extra_options: dict = {}
         if self._login_timeout is not None:
             extra_options["login_timeout"] = self._login_timeout
@@ -771,7 +824,7 @@ class SSHServer:
             ),
             self._host,
             self._port,
-            server_host_keys=[str(host_key_path)],
+            server_host_keys=host_keys,
             process_factory=self._handle_process,
             encoding=None,
             line_editor=False,

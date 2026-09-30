@@ -45,7 +45,7 @@ from netbbs.rendering.ansi import strip_ansi
 from netbbs.rendering.charset import ellipsis_for
 from netbbs.rendering.reflow import wrap_terminal_text
 from netbbs.net.notices import announce, with_notices
-from netbbs.net.session import Session, write_preformatted_line, write_prompt
+from netbbs.net.session import Session, physical_terminal_width, write_preformatted_line, write_prompt
 from netbbs.rendering import (
     ACCENT_COLOR,
     ERROR_COLOR,
@@ -598,6 +598,10 @@ async def pick_item(
             # the choice prompt below the viewport, the same way every
             # other unpaid-for row in this budget did.
             width, _ = _dimensions()
+            # Art is wrapped at the terminal's real width, a column wider
+            # than the layout width on a terminal that wraps immediately
+            # (issue #964).
+            width += physical_terminal_width(session) - session.terminal_width
             wrapped = wrap_terminal_text(masthead_text, max(1, width))
             lines += wrapped.count("\r\n") + 1
         if columns:

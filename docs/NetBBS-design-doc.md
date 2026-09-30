@@ -323,6 +323,16 @@ SSH PTY request) and the character set chosen, so a SysOp can read what a
 client calls itself. Reported names are kept to printable ASCII and 40
 characters before they are stored or logged.
 
+**Keys from classic terminals (issue #964).** SyncTERM sends BBS-convention
+sequences for some editing keys (CTerm manual, "Sequences sent by SyncTERM"):
+`ESC[K` for End, `ESC[V` and `ESC[U` for Page Up and Page Down, `ESC[@` for
+Insert. Its Backspace sends 0x08 and its Delete 0x7F, while PuTTY and xterm
+send 0x7F for Backspace. All of these are read as SyncTERM's keys only when the
+first recognised terminal type is `syncterm` or `ansi-bbs`. Everywhere else
+0x7F stays Backspace, and a bare `ESC[K` or `ESC[@` is pasted screen output
+(erase in line, insert character), discarded as before. Only input decoding
+changes: the same bytes sent by NetBBS are still screen commands.
+
 After login, a caller whose set was not settled -- an unknown terminal, or one
 that reported only `ansi` -- is asked once which of two sample lines looks
 right: the same frame sent as UTF-8 and as CP437, or neither, which means
@@ -333,6 +343,38 @@ ASCII, and every other account moves to Auto. Screens that still vary their
 decoration by style use the decorated variant unless the caller's preference is
 ASCII; a CP437 session gets it mapped. An undetected terminal gets ASCII only
 until the question after login settles it.
+
+**Terminals that wrap at once (issue #964).** SyncTERM, like DOS ANSI.SYS,
+moves to the next line the moment it writes a character in the last column;
+xterm and its descendants wait for the next character. On the first kind, a
+row exactly as wide as the screen followed by CR LF leaves a blank line, and
+writing the bottom-right cell scrolls the screen. NetBBS avoids both without
+any screen knowing about it:
+
+- `Session.terminal_width`, the width every screen lays out in, is one column
+  less than the width the terminal reported (`Session.physical_width`) when the
+  session `wraps_immediately`. No generated row reaches the last column, so no
+  row double-spaces and nothing writes the bottom-right cell. Classic BBS
+  software did the same by designing for 79 columns.
+- Which terminals: only one whose type is recognised as a modern UTF-8 emulator
+  (the list above) is trusted to wait. A CP437 name, `ansi`, an unknown name or
+  no answer at all counts as wrapping at once, and so does a caller who chose
+  CP437, since only classic terminals read it. The cost of a wrong guess on a
+  modern terminal is one unused column; the cost the other way is a
+  double-spaced, scrolling screen.
+- Art keeps the full width. SysOp banners and mastheads go through
+  `write_preformatted_line`, which wraps at `physical_width`, so 80-column art
+  keeps all 80 columns. On a terminal that wraps at once, a row that fills the
+  width is sent without its CR LF, because the terminal has already moved to
+  the next line. Banner files also lose the plain spaces at the end of each
+  row when they are loaded (`trim_row_ends`): the art editor saves every row
+  of its 80-column canvas in full, so a 60-column banner arrived as rows of
+  exactly 80. Spaces painted by a background colour or reverse video stay.
+- Doors, the break-in screen copy and the web terminal's door resize use
+  `physical_width`: a door is told the terminal's real size and draws for it
+  itself. The ANSI art editor's canvas stays 80 columns wide; its status line
+  on the bottom row is cut to `terminal_width`, so it never writes the last
+  cell.
 
 A SysOp may override three of the node's branding colors -- accent (board/
 channel/user names and other navigable-item branding), header (section
@@ -6668,7 +6710,7 @@ every other replaced artifact. None of this makes receipt retention a
 publication ledger: it restores the same bounded, best-effort record a running
 node keeps, and a door still must not infer exactly-once publication from it.
 
-A node's recoverable state is not only its database — it is fifteen
+A node's recoverable state is not only its database — it is sixteen
 artifacts, today scattered across derived, `db_path`-relative filenames
 with no single existing tool that treats them as one recoverable set:
 
@@ -6678,6 +6720,7 @@ with no single existing tool that treats them as one recoverable set:
 | Content blobs | `db_path.parent / f"{db_path.stem}_files"` (git-style `xx/xxxx...` sharding; excludes its own `.incoming/` staging subdirectory, which is always crash-orphan garbage — see `purge_incoming_staging`) | `netbbs.files.storage` |
 | Node identity | `identity_dir` (`root.identity`, `signing.identity`, `transport.identity`, `transitions.json`) | `netbbs.link.node_identity` |
 | SSH host key | `db_path.parent / f"{db_path.stem}_ssh_host_key"` | `netbbs.net.ssh.ensure_host_key`, once, at first startup |
+| SSH RSA host key | `db_path.parent / f"{db_path.stem}_ssh_host_key_rsa"` | `netbbs.net.ssh.ensure_rsa_host_key`, once, at the first startup that lacks it (issue #964). 3072 bits, offered as `rsa-sha2-512` and `rsa-sha2-256` only, never SHA-1 `ssh-rsa`, after Ed25519. It exists for clients without Ed25519 host keys, such as SyncTERM's Cryptlib-based builds |
 | Managed-DNS credential | `db_path.parent / f"{db_path.stem}_managed_dns_credential"` | `netbbs.managed_dns.credential`, once, at registration (§16 Decision 7, issue #201) |
 | Managed-DNS rename credentials | Previous credential plus the temporary credential-transition journal beside `db_path`; restore preserves the presence and absence of the primary, previous, and journal artifacts | `netbbs.managed_dns.credential`, during a managed-name transition |
 | Welcome banner | `db_path.parent / f"{db_path.stem}_welcome_banner.ans"` | SysOp, via the welcome-banner menu screen |
@@ -6694,7 +6737,7 @@ A backup covering only the database silently loses the SSH host key (every
 client gets a MITM warning on next connect after restore) and, far more
 seriously, the Link node identity (root-key custody is explicitly "part of
 ordinary node backup and restore" per §4.5's node identity model, not a
-separate ceremony) — so this design treats all fifteen as one atomic backup
+separate ceremony) — so this design treats all sixteen as one atomic backup
 operation, never a DB-only one.
 
 **Mechanism**: a new `netbbs.backup` module (synchronous, path-based — no

@@ -395,7 +395,7 @@ class WebSession(Session):
             # were real dimensions -- excluded explicitly rather than
             # silently treating them as 1/0.
             cols, rows = event.get("cols"), event.get("rows")
-            width, height = self._pre_door_size or (self.terminal_width, self.terminal_height)
+            width, height = self._pre_door_size or (self.physical_width, self.terminal_height)
             if isinstance(cols, int) and not isinstance(cols, bool) and cols > 0:
                 width, _ = clamp_terminal_size(cols, height)
             if isinstance(rows, int) and not isinstance(rows, bool) and rows > 0:
@@ -509,7 +509,7 @@ class WebSession(Session):
             # session's size -- which the screen copy and a break-in chat are
             # drawn at (issues #764, #765) -- follows it, and the browser's own
             # size is kept for when the door ends.
-            self._pre_door_size = (self.terminal_width, self.terminal_height)
+            self._pre_door_size = (self.physical_width, self.terminal_height)
             self.terminal_width, self.terminal_height = clamp_terminal_size(width, height)
         try:
             await self._ws.send_json({"type": "door_mode", "active": True,

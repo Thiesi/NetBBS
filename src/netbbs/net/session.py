@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Awaitable, Callable
 
 from netbbs.rendering.charset import CP437, UTF8, Charset, map_text
 from netbbs.rendering.pipe_codes import PastedColor
-from netbbs.rendering.reflow import wrap_terminal_text
+from netbbs.rendering.reflow import fills_last_column, wrap_terminal_text
 from netbbs.rendering.terminal_emulator import TerminalEmulator
 
 _logger = logging.getLogger(__name__)
@@ -92,6 +92,15 @@ def clamp_terminal_size(width: int, height: int) -> tuple[int, int]:
     )
 
 
+def physical_terminal_width(session: object) -> int:
+    """The width the caller's terminal reported (issue #964): what a door is
+    told and what art is drawn in, as opposed to `Session.terminal_width`,
+    the width screens lay out in, which is a column narrower on a terminal
+    that wraps immediately. Tolerates a minimal test double."""
+    width = getattr(session, "physical_width", None)
+    return width if isinstance(width, int) else getattr(session, "terminal_width", 80)
+
+
 class SessionClosedError(Exception):
     """
     Raised when the client disconnects while a read or write is in
@@ -129,8 +138,37 @@ class Session(ABC):
     #: request, a future web terminal via JS reporting the xterm.js
     #: viewport. Screens/output code should read these rather than
     #: assuming a fixed width.
-    terminal_width: int = 80
+    #:
+    #: `terminal_width` is the width screens may lay out in. On a terminal
+    #: that wraps as soon as it writes the last column (`wraps_immediately`,
+    #: issue #964) it is one less than the terminal's real width, so no
+    #: generated row ever reaches the last column: a full-width row followed
+    #: by CR LF would leave a blank line there, and the bottom-right cell
+    #: would scroll the screen. Assigning it sets `physical_width`, the
+    #: width the terminal reported, which art, doors and the screen copy use.
+    physical_width: int = 80
     terminal_height: int = 24
+
+    #: Whether the terminal type said this terminal wraps immediately
+    #: (`netbbs.net.terminal_detect.terminal_wraps_immediately`). Set by the
+    #: transport once it knows the terminal type; see `wraps_immediately`.
+    terminal_wraps_immediately: bool = False
+
+    @property
+    def terminal_width(self) -> int:
+        width = self.physical_width
+        return width - 1 if width > 1 and self.wraps_immediately else width
+
+    @terminal_width.setter
+    def terminal_width(self, value: int) -> None:
+        self.physical_width = value
+
+    @property
+    def wraps_immediately(self) -> bool:
+        """Whether this terminal moves to the next line as soon as it writes
+        the last column (issue #964): its terminal type says so, or the
+        caller chose CP437, which only classic terminals read."""
+        return self.terminal_wraps_immediately or self.output_charset == CP437
 
     #: Whether this session's client is known to support 24-bit
     #: truecolor (`CSI 38;2;r;g;bm`), for `netbbs.rendering.gradient.
@@ -382,7 +420,7 @@ class Session(ABC):
         output can tell (issue #764): the SysOp's snoop view reads it, and
         a break-in chat repaints the caller from it. Follows the
         terminal's reported size."""
-        width, height = self.terminal_width, self.terminal_height
+        width, height = self.physical_width, self.terminal_height
         if self._screen_copy is None:
             self._screen_copy = TerminalEmulator(width, height)
         else:
@@ -539,10 +577,10 @@ class Session(ABC):
                 # Stable means: no output reached the copy and the terminal
                 # kept its size while the repaint -- and the held prefix after
                 # it -- were on their way.
-                before = (self._copy_generation, self.terminal_width, self.terminal_height)
+                before = (self._copy_generation, self.physical_width, self.terminal_height)
                 await self.write_through(self.screen_copy().restore_ansi())
                 await self._send_held_prefix()
-                if before == (self._copy_generation, self.terminal_width, self.terminal_height):
+                if before == (self._copy_generation, self.physical_width, self.terminal_height):
                     break
             else:
                 # Output kept arriving during every repaint (a busy door on a
@@ -805,5 +843,25 @@ async def write_preformatted_line(session: Session, text: str) -> None:
     terminal's right edge.  Ordinary human-readable text must use ``write_line``
     or ``write_prompt``.
     """
-    width = max(1, getattr(session, "terminal_width", 80))
-    await session.write(wrap_terminal_text(text, width) + "\r\n")
+    await session.write(preformatted_rows(session, text))
+
+
+def preformatted_rows(session: object, text: str) -> str:
+    """What `write_preformatted_line` sends for `text`, line ending included.
+
+    Art is drawn for the terminal's real width (`physical_terminal_width`),
+    not the column-narrower layout width, so 80-column art keeps all 80
+    columns on a classic terminal. On a terminal that wraps as soon as it
+    writes the last column (issue #964), a row that fills the width is
+    already followed by a line break, so its CR LF is left out: sent anyway,
+    it would leave a blank line under every full-width row."""
+    width = max(1, physical_terminal_width(session))
+    rows = wrap_terminal_text(text, width).split("\r\n")
+    if not getattr(session, "wraps_immediately", False):
+        return "\r\n".join(rows) + "\r\n"
+    parts: list[str] = []
+    for row in rows:
+        parts.append(row)
+        if not fills_last_column(row, width):
+            parts.append("\r\n")
+    return "".join(parts)

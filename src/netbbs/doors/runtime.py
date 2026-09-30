@@ -32,7 +32,7 @@ from netbbs.doors.profiles import preflight, terminal_too_small
 from netbbs.net.color_depth_preference import effective_truecolor
 from netbbs.timeutil import resolve_display_preferences
 from netbbs.net.unicode_style_preference import unicode_style_enabled
-from netbbs.net.session import SessionClosedError
+from netbbs.net.session import SessionClosedError, physical_terminal_width
 from netbbs.net.session_activity import records_activity
 from netbbs.moderation.log import record_action
 from netbbs.rendering.charset import CP437, UTF8, encode_text, input_codec
@@ -115,7 +115,7 @@ def _minted_once(db, key: str) -> str:
 def _write_door_info(db, workdir, session, player, war_dialer=False, session_limit_seconds=None,
                      door_id=None, rehearsal=False):
     info = {"handle": player.username, "user_id": player.id,
-            "terminal_width": session.terminal_width, "terminal_height": session.terminal_height,
+            "terminal_width": physical_terminal_width(session), "terminal_height": session.terminal_height,
             "color_depth": "truecolor" if effective_truecolor(session, db, player) else "256",
             "node_name": session.node_display_name,
             "door_api": DOOR_API_VERSION,
@@ -619,7 +619,7 @@ async def _forward_resize(session, proc, info_path, info, *, published, pty_fd=N
     last = published
     while True:
         await asyncio.sleep(interval)
-        current = (session.terminal_width, session.terminal_height)
+        current = (physical_terminal_width(session), session.terminal_height)
         if current == last or not all(current):
             continue
         last = current
@@ -824,7 +824,7 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
             raise ValueError("\n".join(problems))
         # Checked after setup, so a door that is broken as well says so first.
         if profile and terminal_too_small(profile, session):
-            raise _TerminalTooSmall(f"Terminal is {session.terminal_width}x{session.terminal_height}; "
+            raise _TerminalTooSmall(f"Terminal is {physical_terminal_width(session)}x{session.terminal_height}; "
                                     f"the door needs at least {profile.width}x{profile.height}.")
         world_path = await lane.run(war_dialer_world_path, door)
         if problem := await asyncio.to_thread(war_dialer_path_problem, door, world_path):
@@ -839,7 +839,7 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
                                    effective_wall_limit(profile, wall_time_limit_seconds), door.id,
                                    rehearsal)
         info = json.loads(info_path.read_text(encoding="utf-8"))
-        width = profile.width if profile and profile.width else session.terminal_width
+        width = profile.width if profile and profile.width else physical_terminal_width(session)
         height = profile.height if profile and profile.height else session.terminal_height
         env = _door_environment(info_path, world_path,
                                 await lane.run(voidrunner_save_dir))
