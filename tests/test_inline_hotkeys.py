@@ -45,9 +45,11 @@ def test_highlight_hotkeys_handles_a_key_inside_a_word():
 def test_highlight_hotkeys_keeps_a_base_colour_around_the_keys():
     text = highlight_hotkeys("[R]otate", color=LABEL_COLOR)
     assert strip_ansi(text) == "[R]otate"
-    # The text after the key is drawn in the base colour again, not left
-    # in the terminal's default after the key's reset.
+    # The text after the key, and the brackets around it, are drawn in the
+    # base colour, not left in the terminal's default after the key's reset.
     assert colored("otate", fg_color=LABEL_COLOR) in text
+    assert text.startswith(colored("[", fg_color=LABEL_COLOR))
+    assert colored("]", fg_color=LABEL_COLOR) in text
 
 
 def test_highlight_hotkeys_leaves_text_without_keys_alone():

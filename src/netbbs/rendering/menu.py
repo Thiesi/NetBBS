@@ -80,7 +80,9 @@ def highlight_hotkeys(text: str, *, color: Color | None = None) -> str:
     position = 0
     for match in _BRACKETED_KEY.finditer(text):
         parts.append(_in_color(text[position:match.start()], color))
-        parts.append(menu_key(match.group(1), capitalize=True))
+        # The brackets take the text's colour too; only the key is the menu's.
+        key = colored(match.group(1), fg_color=MENU_KEY_COLOR, bold=True)
+        parts.append(_in_color("[", color) + key + _in_color("]", color))
         position = match.end()
     if not parts:
         return _in_color(text, color)
