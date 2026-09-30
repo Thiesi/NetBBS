@@ -299,7 +299,8 @@ requires. Raw byte paths keep their own rules. A Zmodem transfer is binary and
 bypasses the mapping. A door that speaks CP437 reaches a CP437 session
 unchanged; any other combination is transcoded in `DoorTerminal`, in both
 directions. SysOp ANSI art is decoded to Unicode when it is loaded and mapped
-like any other text, so art authored in CP437 reaches a CP437 terminal byte for byte.
+like any other text, so art authored in CP437 reaches a CP437 terminal byte for
+byte ("SysOp art: storage and SAUCE" below covers what the art path adds).
 
 **How the set is chosen.** A caller's preference is Auto (the default), Unicode,
 CP437 or ASCII, and an explicit choice always wins over detection. Auto means:
@@ -389,6 +390,59 @@ any screen knowing about it:
   match what the caller actually sees. The ANSI art editor's canvas stays 80
   columns wide; its status line on the bottom row is cut to `terminal_width`,
   so it never writes the last cell.
+
+**SysOp art: storage and SAUCE (issue #929).** A banner or masthead is the
+`.ans` file on disk, exactly as uploaded or saved; there is no second copy in
+the database, so a SysOp editing the file over SFTP changes what callers see.
+Everything below happens when the file is read, and is cached by the file's
+modification time:
+
+- A SAUCE record ([spec](https://www.acid.org/info/sauce/sauce.htm)) is parsed
+  and removed before display: the 128-byte record, its optional comment block
+  (`COMNT` plus 64 bytes per line) and the EOF byte (0x1A) that precedes them.
+  Without this, scene art showed its title, author and group as junk under the
+  picture. A file without SAUCE is read as before: UTF-8 if it decodes as
+  UTF-8, CP437 otherwise. A SAUCE record marks the file as classic ANSI art,
+  so it is always read as CP437.
+- CP437 art uses the pictographs of the control range (☺ ♥ ♪ ► ⌂ and the
+  rest). On the art path only, bytes 0x01–0x1F other than BEL, BS, TAB, LF,
+  CR, EOF and ESC, and 0x7F, are those glyphs, not control characters. A CP437
+  session gets the original byte back, a UTF-8 session the Unicode glyph, and
+  an ASCII session a plain substitute. Elsewhere those bytes stay controls.
+- iCE colours: classic art uses the blink attribute to mean a bright
+  background. Art that sets blink together with a background colour is shown
+  with the bright background and no blink, for every session, whether or not
+  SAUCE sets the iCE flag.
+- SAUCE width (TInfo1): art wider than the caller's `physical_width` is not
+  drawn -- the screen falls back to what it shows without art (the default
+  welcome banner, no masthead) instead of wrapping every row.
+- SAUCE font (TInfoS): "IBM VGA" and its 437 variants are CP437. Any other
+  font or code page is still decoded as CP437, and the SysOp console's banner
+  screen warns that the art was made for another font.
+- Title, author and group appear in the SysOp console's banner status and
+  preview. The welcome banner can also carry a caller-facing credit line under
+  the art, "art: Title by Author/Group" with missing parts left out; a SysOp
+  toggle, off by default.
+- The ANSI art editor writes a SAUCE record when it saves: width, lines, font
+  "IBM VGA", the iCE flag, and any title, author and group the loaded file had.
+
+**Art with live slots (issue #929, being built).** A SysOp can draw menu art
+that NetBBS fills in per caller. Tokens drawn in the art mark where: `{menu
+WxH}` for the caller's live item list, `{user N}`, `{mail N}` and the other
+fields for live values, and `{prompt}` for the prompt. A token's top-left cell
+is its position, its size is written in the token, and the colour it is drawn
+in is the style of what fills it. Tokens are plain ASCII so they survive
+CP437, UTF-8 and every art editor. Art only decorates: the items are the ones
+the caller may use, computed as for the generated menu, so a token can never
+show an item a caller cannot use or hide one they can. When the caller's
+items do not fit the region, that draw uses the generated menu instead and the
+node logs it once; the console's check warns when a level-255 SysOp's menu
+would not fit. ASCII callers, a terminal smaller than the art, and art that
+fails the check get the generated menu too. Art narrower than the screen is
+drawn left-aligned, and the prompt goes below the art unless a `{prompt}`
+token places it. The main menu comes first, then the welcome and logoff
+fields; the Boards, Chat and Files lists need a list region with paging and
+get their own design.
 
 A SysOp may override three of the node's branding colors -- accent (board/
 channel/user names and other navigable-item branding), header (section
@@ -14017,6 +14071,39 @@ later. The CTerm device-attributes answer (`CSI = 67;84;101;114;109;… c`) woul
 also identify SyncTERM on any transport, but is not used until TTYPE proves too
 weak. SysOp art storage with SAUCE, art with live slots, hand-drawn menu items
 and animation pacing are later steps of #929 and build on this layer.
+
+### Issue #929 — SysOp art: SAUCE and live slots — decided
+
+Steps 3 and 4 of #929. Normative description: §3.2, "SysOp art: storage and
+SAUCE" and "Art with live slots".
+
+**Decision 1 — the `.ans` file is the only source.** SAUCE, pictographs and
+iCE colours are handled when the file is read. Rejected: a normalised copy in
+the database with its metadata, which would give two sources of truth while
+SysOps edit art files over SFTP, and would need a migration.
+
+**Decision 2 — the art path owns the control-range pictographs.** Only art
+treats 0x01–0x1F and 0x7F as glyphs; everywhere else they stay controls, so
+caller text cannot smuggle control bytes in by calling them art.
+
+**Decision 3 — iCE colours for everyone.** Blink with a background colour
+becomes a bright background on every session. Rejected: switching the
+terminal into iCE mode with CTerm's own sequence, which only SyncTERM
+understands and would still leave UTF-8 terminals blinking.
+
+**Decision 4 — too-wide art falls back.** Rejected: wrapping or cutting it,
+which turns a drawing into noise.
+
+**Decision 5 — plain tokens in the art, not ENiGMA½-style codes plus a theme
+file.** ENiGMA½ marks views with `%VM1`-style codes and sets their size and
+style in a separate `theme.hjson`. `{menu WxH}` tokens keep position, size and
+style in the one file the SysOp draws, and give the console something to
+check. Rejected for the same reason: region definitions in SAUCE comments,
+which editors strip and nobody sees.
+
+**Decision 6 — items that do not fit fall back to the generated menu.**
+Rejected: filling the region and moving the rest behind a "more" entry, which
+silently moves items a caller can use out of sight.
 
 ### SFTP over the SSH transport — declined
 
