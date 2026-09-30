@@ -323,11 +323,24 @@ async def _read_raw_byte(session: Session) -> int:
     transport-level action (Telnet negotiation, an SSH resize
     notification) with no data significance — same "loop past `None`"
     contract `netbbs.net.char_input` already uses against the same
-    `Session.read_byte`."""
+    `Session.read_byte`. A byte handed back by `_push_back` comes first."""
+    pending = getattr(session, "_zmodem_pushback", None)
+    if pending:
+        return pending.pop()
     while True:
         b = await session.read_byte()
         if b is not None:
             return b
+
+
+def _push_back(session: Session, b: int) -> None:
+    """Return one byte read too far, so the next `_read_raw_byte` gets it
+    first. Only `_skip_hex_line_end` needs this, for at most one byte."""
+    pending = getattr(session, "_zmodem_pushback", None)
+    if pending is None:
+        pending = []
+        session._zmodem_pushback = pending
+    pending.append(b)
 
 
 async def _read_bulk_raw_byte(session: Session) -> int:
@@ -449,6 +462,30 @@ async def _read_hex_header_body(session: Session) -> tuple[bytes, bool]:
     return body, True
 
 
+# Headers whose frame goes on with a data subpacket (ZSINIT's attention
+# string, ZFILE's file info, ZDATA's file data, ZCOMMAND's command).
+_HEADERS_WITH_DATA = frozenset({ZSINIT, ZFILE, ZDATA, ZCOMMAND})
+
+
+async def _skip_hex_line_end(session: Session) -> None:
+    """Consume the CR and LF that end a hex header, read with the high bit
+    stripped, as lrzsz's `zrhhdr` does ("throw away possible cr/lf").
+
+    Only needed before a data subpacket: after any other header the
+    scanner skips them as noise, but a subpacket reader would take them
+    for data and fail the CRC (issue #963: `sz -e` opens with a hex
+    ZSINIT). A byte that isn't the expected CR or LF is handed back, so a
+    sender that leaves them out loses nothing. The data must follow
+    anyway, so these reads carry the bulk idle bound, not a short one."""
+    b = await _read_bulk_raw_byte(session)
+    if b & 0x7F != 0x0D:
+        _push_back(session, b)
+        return
+    b = await _read_bulk_raw_byte(session)
+    if b & 0x7F != 0x0A:
+        _push_back(session, b)
+
+
 async def _read_header(session: Session) -> tuple[int, int]:
     """
     Scan for and decode the next header, returning `(frame_type,
@@ -492,6 +529,8 @@ async def _scan_header(session: Session) -> _Header:
             if not valid or _crc16(body[:5]) != (body[5] << 8) | body[6]:
                 continue
             payload, crc32 = body[:5], False
+            if payload[0] in _HEADERS_WITH_DATA:
+                await _skip_hex_line_end(session)
         elif kind in (ZBIN, ZBIN32):
             payload = bytearray()
             for _ in range(5):
@@ -646,7 +685,18 @@ def _binary_transfer(session: Session):
     """Keep Zmodem's frames out of the session's screen copy (issue #764).
     A duck-typed session without the hook simply has no copy to protect."""
     mark = getattr(session, "binary_transfer", None)
-    return mark() if mark is not None else contextlib.nullcontext()
+    return _clearing_pushback(session, mark() if mark is not None else contextlib.nullcontext())
+
+
+@contextlib.contextmanager
+def _clearing_pushback(session: Session, inner):
+    """No byte handed back by `_push_back` outlives its transfer."""
+    try:
+        with inner:
+            yield
+    finally:
+        if getattr(session, "_zmodem_pushback", None):
+            session._zmodem_pushback.clear()
 
 
 async def _await_no_break_in(session: Session) -> None:

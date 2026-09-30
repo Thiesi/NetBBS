@@ -918,3 +918,67 @@ def test_a_flood_of_flow_control_bytes_in_a_crc_is_refused(monkeypatch):
             await zmodem_module._read_zdle_byte(session)
 
     asyncio.run(scenario())
+
+
+# -- the CR LF that ends a hex header (issue #963, found against real lrzsz)
+
+
+# `sz -e` opens with a hex ZSINIT whose attention-string subpacket follows
+# the header's CR LF directly. Captured from lrzsz 0.12.21rc on Debian.
+_SZ_E_OPENING = (
+    b"rz\r**\x18B00000000000000\r\x8a\x11"
+    b"**\x18B02000000400c47\r\x8a\x11"
+    b"\x18@\x18k\xdd\xcd\x11"
+)
+
+
+def test_a_hex_zsinit_from_sz_minus_e_is_acknowledged_not_cancelled(tmp_path):
+    async def scenario():
+        _, receiver = _session_pair()
+        receiver._read_pipe.feed(_SZ_E_OPENING)
+        receiver._read_pipe.close()
+        with pytest.raises(Exception):
+            await zmodem_module.receive_file(receiver, max_bytes=1000, dest_path=tmp_path / "in")
+        return bytes(receiver._write_pipe._buffer)
+
+    sent = asyncio.run(scenario())
+    # ZACK for the ZSINIT. Before the fix its CRC failed and the receiver
+    # aborted instead; the abort here comes only from the replay ending.
+    assert b"**\x18B03" in sent
+
+
+def _read_after_hex_header(stream: bytes):
+    async def scenario():
+        pipe = _BytePipe()
+        pipe.feed(stream)
+        session = FakeSession(read_pipe=pipe, write_pipe=_BytePipe())
+        header = await zmodem_module._scan_header(session)
+        data, terminator = await zmodem_module._read_subpacket(session)
+        return header, data, terminator
+
+    return asyncio.run(scenario())
+
+
+def _subpacket(data: bytes) -> bytes:
+    crc = zmodem_module._crc16(data + bytes([zmodem_module.ZCRCW]))
+    return (
+        zmodem_module._zdle_encode(data)
+        + bytes([zmodem_module.ZDLE, zmodem_module.ZCRCW])
+        + zmodem_module._zdle_encode(bytes([crc >> 8, crc & 0xFF]))
+    )
+
+
+@pytest.mark.parametrize("frame_type", [zmodem_module.ZSINIT, zmodem_module.ZFILE, zmodem_module.ZDATA])
+def test_a_subpacket_after_a_hex_header_starts_after_its_cr_lf(frame_type):
+    stream = zmodem_module._hex_header(frame_type) + _subpacket(b"hello")
+    header, data, _ = _read_after_hex_header(stream)
+    assert header.frame_type == frame_type
+    assert data == b"hello"
+
+
+def test_a_hex_header_without_its_cr_lf_loses_no_data():
+    # A sender that leaves the line end out: the first data byte is handed back.
+    header_only = zmodem_module._hex_header(zmodem_module.ZDATA).split(b"\r")[0]
+    header, data, _ = _read_after_hex_header(header_only + _subpacket(b"data"))
+    assert header.frame_type == zmodem_module.ZDATA
+    assert data == b"data"
