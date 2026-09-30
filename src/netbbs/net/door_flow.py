@@ -28,7 +28,7 @@ from netbbs.net.menu_description_preference import menu_description_level
 from netbbs.net.node_theme import effective_accent_color_256, effective_header_color_256
 from netbbs.net.picker import pick_item
 from netbbs.net.redraw_preference import redraw_in_place_enabled
-from netbbs.net.session import Session
+from netbbs.net.session import Session, physical_terminal_width
 from netbbs.net.session_activity import records_activity
 from netbbs.net.unicode_style_preference import unicode_style_enabled
 from netbbs.permissions import meets_level
@@ -210,7 +210,7 @@ async def _report_door_result(session: Session, door: Door, result: DoorRunResul
     elif result.reason == "terminal_too_small":
         # The caller's to fix, so it is not sent to the SysOp (issue #956).
         message = (f"{door.name} needs a terminal of at least {door.profile.width}x{door.profile.height}; "
-                   f"yours is {session.terminal_width}x{session.terminal_height}. "
+                   f"yours is {physical_terminal_width(session)}x{session.terminal_height}. "
                    "Enlarge your window and try again.")
     elif result.reason == "busy":
         message = f"{door.name} is in use. Please try again when another caller has finished."

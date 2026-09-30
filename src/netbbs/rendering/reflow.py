@@ -98,6 +98,50 @@ def wrap_terminal_text(text: str, width: int) -> str:
     )
 
 
+def fills_last_column(row: str, width: int) -> bool:
+    """Whether writing `row` from the left edge ends with a character in the
+    last of `width` columns (issue #964). A terminal that wraps as soon as
+    it writes the last column is then already on the next line, so a CR LF
+    after the row would leave a blank line. Cursor movement and carriage
+    returns are followed, as `wrap_terminal_text` follows them."""
+    column = 0
+    saved_column = 0
+    full = False
+
+    def advance(fragment: str) -> None:
+        nonlocal column, full
+        for ch in fragment:
+            if ch == "\r":
+                column, full = 0, False
+                continue
+            if ch == "\b":
+                column, full = max(0, column - 1), False
+                continue
+            columns = char_width(ch)
+            if columns == 0:
+                continue
+            if full or column + columns > width:
+                # The terminal already moved (or now moves) to the next line.
+                column = 0
+            column += columns
+            full = column >= width
+            if full:
+                column = 0
+
+    position = 0
+    for match in ANSI_ESCAPE_RE.finditer(row):
+        advance(row[position : match.start()])
+        effect = _cursor_effect(match.group(0), width)
+        if effect is not None:
+            column, saved_column = _apply_cursor_effect(
+                effect, column=column, saved_column=saved_column, width=width
+            )
+            full = False
+        position = match.end()
+    advance(row[position:])
+    return full
+
+
 def _wrap_terminal_line(text: str, width: int) -> list[str]:
     """Wrap one logical line while retaining safe ANSI behavior."""
     # raw bytes, visible character, display width, optional cursor operation

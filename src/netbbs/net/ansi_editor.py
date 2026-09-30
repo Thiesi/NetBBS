@@ -495,7 +495,13 @@ async def _flush(session: Session, state: _EditorState) -> None:
     # a narrow terminal, never the help hint that exists specifically to
     # be discoverable. Position/color state and "how do I get help"
     # both fit comfortably within 80 columns even in the worst case.
-    status = truncate(status, state.buffer.width)
+    #
+    # Nor may it reach the terminal's last column on a terminal that wraps
+    # as soon as it writes it (issue #964): the status line sits on the
+    # bottom row, where that wrap scrolls the whole screen up a line on
+    # every redraw. `terminal_width` is already a column short there; the
+    # canvas itself keeps its full width.
+    status = truncate(status, min(state.buffer.width, session.terminal_width))
     await session.write(move_cursor(state.buffer.height + _STATUS_ROW_OFFSET, 1))
     await session.write(clear_line())
     await session.write(colored(status, fg_color=MUTED_COLOR))

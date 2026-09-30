@@ -65,7 +65,12 @@ from netbbs.net.signup_text import pending_approval_notice, username_problem_lin
 from netbbs.staff import approvers_away_line
 from netbbs.net.throttle import LoginThrottle
 from netbbs.net.welcome_banner import load_welcome_banner
-from netbbs.net.terminal_detect import classify_terminal_types, clean_terminal_type, describe_detection
+from netbbs.net.terminal_detect import (
+    classify_terminal_types,
+    clean_terminal_type,
+    describe_detection,
+    terminal_wraps_immediately,
+)
 from netbbs.rendering import strip_ansi
 from netbbs.rendering.charset import ASCII, UTF8, map_text
 from netbbs.rendering.pipe_codes import PastedColor
@@ -228,6 +233,7 @@ class SSHSession(Session):
         self.terminal_types = (terminal_type,) if terminal_type else ()
         charset, self.charset_certain = classify_terminal_types(self.terminal_types)
         self.output_charset = self.detected_charset = charset if charset is not None else UTF8
+        self.terminal_wraps_immediately = terminal_wraps_immediately(self.terminal_types)
         _logger.info(describe_detection(
             "SSH", self.peer_address, names=self.terminal_types,
             outcome="PTY request" if terminal_type else "no PTY terminal type",

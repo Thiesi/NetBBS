@@ -825,7 +825,7 @@ def test_session_reports_initial_terminal_size(db):
     sizes = []
 
     async def handler(session: Session):
-        sizes.append((session.terminal_width, session.terminal_height))
+        sizes.append((session.physical_width, session.terminal_height))
 
     async def scenario():
         server = await _run_server(db, handler)
@@ -903,7 +903,7 @@ def test_terminal_resize_mid_session_updates_session_size(db):
     async def handler(session: Session):
         for _ in range(2):
             await session.read_key()
-            sizes.append((session.terminal_width, session.terminal_height))
+            sizes.append((session.physical_width, session.terminal_height))
 
     async def scenario():
         server = await _run_server(db, handler)
@@ -935,7 +935,7 @@ def test_absurd_initial_terminal_size_is_clamped(db):
     sizes = []
 
     async def handler(session: Session):
-        sizes.append((session.terminal_width, session.terminal_height))
+        sizes.append((session.physical_width, session.terminal_height))
 
     async def scenario():
         server = await _run_server(db, handler)
