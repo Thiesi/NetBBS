@@ -2169,8 +2169,7 @@ cannot, which for most callers meant no transfer at all.
 
 NetBBS speaks Zmodem the way lrzsz does, because that is what terminals are
 built against (issue #963; the first version only ever talked to itself and
-no real client could complete a transfer). A download opens with `rz
-` and a
+no real client could complete a transfer). A download opens with `rz\r` and a
 ZRQINIT in the hex header form, an upload with a hex ZRINIT: those are the
 patterns a terminal's auto-start watches for. Every header read accepts hex,
 CRC-16 and CRC-32 binary headers. ZCRCW ends a frame, and the next one opens
