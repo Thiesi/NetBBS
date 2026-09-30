@@ -14,6 +14,7 @@ the specific byte sequences each test cares about.
 from __future__ import annotations
 
 import asyncio
+import re
 import socket
 import time
 
@@ -897,8 +898,18 @@ def test_line_length_is_capped():
             await skip_initial_negotiation(reader, writer)
             writer.write(b"a" * 5000 + b"\r\n")
             await writer.drain()
-            echoed = await reader.readexactly(4096 + 1 + 2)
-            assert echoed == b"a" * 4096 + b"\a" + b"\r\n"
+            # A scrolling line redraws its row on every keystroke, far
+            # more than `readuntil`'s buffer limit; read until the CRLF.
+            echoed = b""
+            while not echoed.endswith(b"\r\n"):
+                echoed += await asyncio.wait_for(reader.read(65536), timeout=10)
+            # One bell, and nothing after it but the Enter's CRLF: every
+            # character past the cap was dropped without an echo. The
+            # line scrolls sideways once it reaches the edge (issue
+            # #964), so no run of echoed text is wider than the row.
+            assert echoed.count(b"\a") == 1
+            assert echoed.endswith(b"\a\r\n")
+            assert max(len(run) for run in re.split(rb"\x1b\[[0-9;]*[A-Za-z]", echoed)) <= 80
             writer.close()
             await writer.wait_closed()
         finally:

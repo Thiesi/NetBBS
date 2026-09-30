@@ -66,8 +66,11 @@ from netbbs.net.char_input import (
     InputHistory,
     LastCandidateList,
     LineViewport,
+    DeferredWindow,
     complete_in_window,
     line_viewport,
+    masked_echo,
+    prompt_viewport,
     _grapheme_end,
     _grapheme_start,
     LiveInputBuffer,
@@ -612,19 +615,24 @@ class WebSession(Session):
         blocked = 1
         self._clicks_blocked += blocked
         try:
+            viewport_deferred = viewport is None
+            if viewport is None:
+                viewport = prompt_viewport(self)
             if not echo:
                 with secret_input(self):
-                    return await self._read_line_masked()
+                    return await self._read_line_masked(viewport)
             return await self._read_line_editable(
                 history, completer, live_buffer=live_buffer, lock=lock,
                 list_candidates=list_candidates, initial=initial, cancellable=cancellable,
                 viewport=viewport, viewport_owns_row=viewport_owns_row, pasted_color=pasted_color,
+                viewport_deferred=viewport_deferred,
             )
         finally:
             self._clicks_blocked -= blocked
 
-    async def _read_line_masked(self) -> str:
+    async def _read_line_masked(self, viewport: int | Callable[[], int] | None = None) -> str:
         line: list[str] = []
+        shown = 0
         while True:
             char = await self._read_char()
             if char in (_CR, _LF):
@@ -632,17 +640,17 @@ class WebSession(Session):
             if char in (_BS, _DEL):
                 if line:
                     line.pop()
-                    await self.write("\b \b")
+                    shown = await masked_echo(self.write, shown, len(line), viewport)
                 continue
             if char == KILL_LINE_KEY:
-                await self.write("\b \b" * len(line))
                 line.clear()
+                shown = await masked_echo(self.write, shown, 0, viewport)
                 continue
             if ord(char) < 0x20:
                 continue
             if len(line) < _MAX_LINE_LENGTH:
                 line.append(char)
-                await self.write("*")
+                shown = await masked_echo(self.write, shown, len(line), viewport)
         await self.write("\r\n")
         return "".join(line)
 
@@ -659,6 +667,7 @@ class WebSession(Session):
         viewport: int | Callable[[], int] | None = None,
         viewport_owns_row: bool = False,
         pasted_color: PastedColor | None = None,
+        viewport_deferred: bool = False,
     ) -> str:
         # Issue #529, mirroring `netbbs.net.char_input._read_line_
         # editable` exactly -- this transport is a separate
@@ -676,8 +685,23 @@ class WebSession(Session):
         # soft-wraps and clamps `CSI D`/`CSI C` to one row exactly as a
         # real terminal does, so the bug and the fix are identical here.
         window = line_viewport(viewport, owns_row=viewport_owns_row)
+        # Issue #964, mirrored: a default viewport waits until the line
+        # reaches the edge (`char_input.DeferredWindow`).
+        deferred: DeferredWindow | None = None
+        if viewport_deferred and window is not None and viewport is not None:
+            deferred = DeferredWindow(window, viewport)
+            if deferred.fits(line):
+                window = None
+            else:
+                deferred = None
         if live_buffer is not None:
             live_buffer.window = window
+
+        async def write(text: str) -> None:
+            if deferred is not None:
+                await deferred.write(self.write, text)
+            else:
+                await self.write(text)
 
         async def show() -> None:
             if window is not None:
@@ -685,13 +709,13 @@ class WebSession(Session):
                     # Re-read every render: a browser tab resized
                     # mid-edit changes this (Codex review).
                     window.resize(viewport())
-                await window.render(self.write, line, cursor)
+                await window.render(write, line, cursor)
 
         if line:
             if window is not None:
                 await show()
             else:
-                await self.write("".join(line))
+                await write("".join(line))
         overwrite = False
         history_index = 0
         saved_in_progress: list[str] | None = None
@@ -709,6 +733,8 @@ class WebSession(Session):
             # once regardless of which branch below returns/continues.
             async with (lock if lock is not None else contextlib.nullcontext()):
                 try:
+                    if deferred is not None:
+                        deferred.begin(line, cursor)
                     # Mirrors char_input._read_line_editable's own
                     # identical reset -- see LastCandidateList's docstring.
                     if item != _TAB:
@@ -741,7 +767,7 @@ class WebSession(Session):
                                 if window is not None:
                                     await show()
                                 else:
-                                    await self.write(move_cursor(char_width(line[cursor]), forward=False))
+                                    await write(move_cursor(char_width(line[cursor]), forward=False))
                         elif key == "RIGHT":
                             if cursor < len(line):
                                 width = char_width(line[cursor])
@@ -749,14 +775,14 @@ class WebSession(Session):
                                 if window is not None:
                                     await show()
                                 else:
-                                    await self.write(move_cursor(width, forward=True))
+                                    await write(move_cursor(width, forward=True))
                         elif key == "HOME":
                             if cursor > 0:
                                 if window is not None:
                                     cursor = 0
                                     await show()
                                 else:
-                                    await self.write(
+                                    await write(
                                         move_cursor(display_width("".join(line[:cursor])), forward=False)
                                     )
                                     cursor = 0
@@ -766,7 +792,7 @@ class WebSession(Session):
                                     cursor = len(line)
                                     await show()
                                 else:
-                                    await self.write(
+                                    await write(
                                         move_cursor(display_width("".join(line[cursor:])), forward=True)
                                     )
                                     cursor = len(line)
@@ -777,7 +803,7 @@ class WebSession(Session):
                                     await show()
                                 else:
                                     await redraw_tail(
-                                        self.write, move_back=0, edit_pos=cursor,
+                                        write, move_back=0, edit_pos=cursor,
                                         line=line, new_cursor=cursor,
                                     )
                         elif key == "INSERT":
@@ -799,10 +825,10 @@ class WebSession(Session):
                                 line = recalled
                                 cursor = len(line)
                                 if window is not None:
-                                    await window.render(self.write, line, cursor)
+                                    await window.render(write, line, cursor)
                                 else:
                                     await redraw_tail(
-                                        self.write, move_back=move_back, edit_pos=0,
+                                        write, move_back=move_back, edit_pos=0,
                                         line=line, new_cursor=cursor,
                                     )
                         continue
@@ -823,7 +849,7 @@ class WebSession(Session):
                         cursor = 0
                         if window is not None:
                             window.reset()
-                        await self.write("\r\n")
+                        await write("\r\n")
                         break
 
                     if char == _ESC and cancellable:
@@ -858,7 +884,7 @@ class WebSession(Session):
                                 await show()
                             else:
                                 await redraw_tail(
-                                    self.write, move_back=move_back, edit_pos=cursor,
+                                    write, move_back=move_back, edit_pos=cursor,
                                     line=line, new_cursor=cursor,
                                 )
                         continue
@@ -866,13 +892,13 @@ class WebSession(Session):
                     if char == KILL_LINE_KEY:
                         # Ctrl-U (issue #812), through the one helper both
                         # line editors share.
-                        cursor = await kill_line(self.write, window, line, cursor, show)
+                        cursor = await kill_line(write, window, line, cursor, show)
                         continue
 
                     if char == _TAB:
                         if completer is not None and window is not None:
                             cursor = await complete_in_window(
-                                self.write, window, completer, line, cursor,
+                                write, window, completer, line, cursor,
                                 list_candidates=list_candidates, last_candidates=last_candidates,
                             )
                             if live_buffer is not None:
@@ -880,7 +906,7 @@ class WebSession(Session):
                             await show()
                         elif completer is not None:
                             cursor = await apply_tab_completion(
-                                self.write, completer, line, cursor,
+                                write, completer, line, cursor,
                                 list_candidates=list_candidates, last_candidates=last_candidates,
                             )
                         continue
@@ -899,7 +925,7 @@ class WebSession(Session):
                         if window is not None:
                             await show()
                         elif same_width:
-                            await self.write(char)
+                            await write(char)
                         else:
                             # Width mismatch (e.g. overwriting a CJK
                             # character with an ASCII one) -- mirrors
@@ -907,7 +933,7 @@ class WebSession(Session):
                             # see that call site's comment for why a
                             # plain write isn't enough here.
                             await redraw_tail(
-                                self.write, move_back=0, edit_pos=edit_pos, line=line, new_cursor=cursor
+                                write, move_back=0, edit_pos=edit_pos, line=line, new_cursor=cursor
                             )
                         continue
 
@@ -920,13 +946,19 @@ class WebSession(Session):
                     if window is not None:
                         await show()
                     elif cursor == len(line):
-                        await self.write(char)
+                        await write(char)
                     else:
                         await redraw_tail(
-                            self.write, move_back=0, edit_pos=edit_pos,
+                            write, move_back=0, edit_pos=edit_pos,
                             line=line, new_cursor=cursor,
                         )
                 finally:
+                    if deferred is not None:
+                        window = await deferred.end(self.write, line, cursor)
+                        if window is not None:
+                            deferred = None
+                            if live_buffer is not None:
+                                live_buffer.window = window
                     if live_buffer is not None:
                         live_buffer.update(line, cursor)
 
