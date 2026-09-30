@@ -22,8 +22,8 @@
 [38;5;248m    Boards, areas, channels & more[0m       [38;5;248m    Create and review complete backups[0m
   [[1m[38;5;46mO[0m]perations                             [[1m[38;5;46mD[0m]NS
 [38;5;248m    Observe the node, fix trouble[0m        [38;5;248m    Managed netbbs.org name status[0m
-  [[1m[38;5;46mS[0m]ettings
-[38;5;248m    Durable node configuration[0m
+  [[1m[38;5;46mS[0m]ettings                               A[[1m[38;5;46mw[0m]ay
+[38;5;248m    Durable node configuration[0m           [38;5;248m    Tell members you're away[0m
   [[1m[38;5;46mR[0m]efresh
 [38;5;248m    Redraw with current numbers[0m
   [[1m[38;5;46mB[0m]ack

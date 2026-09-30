@@ -215,7 +215,7 @@ async def capture_files(tmp: Path) -> str:
         uploads = [
             ("backup-rotate.sh", people["otto"], b"#!/bin/sh\n# keep seven days of node backups\n" * 3,
              "Nightly backup rotation, seven days retained."),
-            ("netbbs-7.5.0.tar.gz", people["keeper"], b"\x1f\x8b" + b"\x00" * 2_736_000,
+            ("netbbs-7.14.0.tar.gz", people["keeper"], b"\x1f\x8b" + b"\x00" * 3_954_000,
              "The current release, source distribution."),
             ("ansi-preset-pack.zip", people["wren"], b"PK\x03\x04" + b"\x00" * 48_000,
              "Twelve masthead presets, 80 and 132 columns."),
@@ -258,12 +258,12 @@ async def capture_boards(tmp: Path) -> str:
         board = create_board(db, "Announcements", creator=people["keeper"],
                              description="Node news and release notes")
         posts = [
-            (people["keeper"], "NetBBS 7.5.0 is up",
+            (people["keeper"], "NetBBS 7.14.0 is up",
              "Guest login, a readable palette and a backup that no longer\n"
              "quietly skips Voidrunner careers. Notes are in the releases page."),
             (people["wren"], "Masthead preset pack",
              "Twelve presets in the file area, 80 and 132 columns both."),
-            (people["otto"], "Re: NetBBS 7.5.0 is up",
+            (people["otto"], "Re: NetBBS 7.14.0 is up",
              "The file listing finally reads as a table over ssh. Thank you."),
             (people["keeper"], "Link sync window moved to 04:00",
              "Quieter for everyone, and it stops colliding with the backup."),
@@ -340,6 +340,8 @@ async def capture_mainmenu(tmp: Path) -> str:
         preset = next(p for p in MAIN_MENU_BANNER_PRESETS if p.key == "outrun_sunset_strip")
         main_menu_banner_path(db).write_bytes(load_main_menu_banner_preset(preset))
         set_main_menu_banner_enabled(db, True)
+        # A node with content: an empty one tells its SysOp where to start.
+        create_board(db, "Announcements", creator=people["keeper"])
 
         session = CaptureSession(width=80)
         await _draw_main_menu(session, db, MessageMailbox(), people["keeper"],
@@ -373,15 +375,15 @@ async def capture_chat(tmp: Path) -> str:
         people = _people(db)
         channel = create_channel(db, "lobby", creator=people["keeper"],
                                  description="General chat")
-        channel = set_topic(db, channel, "release day: 7.5.0", set_by=people["keeper"])
+        channel = set_topic(db, channel, "release day: 7.14.0", set_by=people["keeper"])
         said = [
             ("join", "wren", None),
-            ("message", "wren", "evening -- did the 7.5.0 wheel land yet?"),
+            ("message", "wren", "evening -- did the 7.14.0 wheel land yet?"),
             ("join", "otto", None),
-            ("message", "keeper", "it did. the file listing is a real table now"),
-            ("message", "otto", "just pulled it. the cursor is finally visible over ssh"),
-            ("message", "wren", "timestamps on by default is the one I wanted"),
-            ("message", "keeper", "that one changes for everybody, so it is in the notes"),
+            ("message", "keeper", "it did. you can reply to link mail now"),
+            ("message", "otto", "just pulled it. syncterm draws the boxes right at last"),
+            ("message", "wren", "read receipts are the one I wanted"),
+            ("message", "keeper", "those are on for everybody, so it is in the notes"),
             ("action", "otto", "reads the notes properly this time"),
             ("message", "wren", "anyone else on the link tonight? quiet over here"),
             ("message", "keeper", "two peers up. sync window moved to 04:00 last week"),
@@ -487,7 +489,7 @@ async def capture_console(tmp: Path) -> str:
         ):
             board = create_board(db, name, creator=people["keeper"], description=description)
             if name == "Announcements":
-                create_post(db, board, people["keeper"], "NetBBS 7.5.0 is up",
+                create_post(db, board, people["keeper"], "NetBBS 7.14.0 is up",
                             "Notes are on the releases page.")
         create_file_area(db, "Utilities", creator=people["keeper"],
                          description="Node utilities and helper scripts")
