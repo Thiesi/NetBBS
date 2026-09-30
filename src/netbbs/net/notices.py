@@ -10,7 +10,9 @@ caller lands on, where the eye already is.
 Started in the SysOp console (`netbbs.net.admin_flow`) and shared from here,
 so a caller's board, file area, review screen and picker follow the same
 rule. A screen that draws a prompt calls `write_notices` just before it; a
-picker shows pending outcomes above its list by itself (`with_notices`).
+picker reads pending outcomes at each render and draws them above its own
+prompt by itself -- including one its own keys announce while it is open
+([N]ew scan's [M]ark read, issue #710).
 
 Keyed weakly by session, so a notice can never outlive the connection it was
 meant for or reach another caller's screen. A stand-in session that holds a
@@ -22,7 +24,6 @@ from __future__ import annotations
 
 import re
 import weakref
-from collections.abc import Awaitable, Callable
 
 from netbbs.net.session import Session
 from netbbs.rendering import ERROR_COLOR, MUTED_COLOR, SUCCESS_COLOR, colored, sanitize_text
@@ -85,20 +86,3 @@ async def write_notices(session: Session) -> None:
     """Write every pending outcome, for a screen about to draw its prompt."""
     for line in take_notices(session):
         await session.write_line(line)
-
-
-def with_notices(
-    session: Session, masthead: str | Callable[[], Awaitable[str]]
-) -> str | Callable[[], Awaitable[str]]:
-    """`masthead` extended with whatever is pending on `session`, for a
-    picker: re-read on each render, so an outcome is there for the draw
-    after it was announced and gone once a key has redrawn the list. That
-    includes an outcome the picker's own keys announce while it is open
-    ([N]ew scan's [M]ark read, issue #710), so the check is made at each
-    render, not once when the picker opens (Codex review on #723)."""
-
-    async def _masthead() -> str:
-        own = (await masthead()) if callable(masthead) else masthead
-        return "\r\n".join(part for part in (own, *take_notices(session)) if part)
-
-    return _masthead

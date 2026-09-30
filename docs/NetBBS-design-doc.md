@@ -811,7 +811,10 @@ returning to a menu is wiped by that menu's clear before it can be read. So a
 console action *announces* its outcome -- `'General' deleted.`, a rejected
 field value, "Cancelled.", an empty list's "No message boards yet." -- and
 whichever console screen is drawn next shows it directly above its prompt: a
-menu, a detail panel, a draft editor, or a picker. It is shown once, to the
+menu, a detail panel, a draft editor, or a picker. A picker used to draw it
+with its masthead, above the title, which started the whole screen a row down
+until the next redraw (issue #964); it is drawn under the list's keys like
+everywhere else. It is shown once, to the
 session whose action produced it, and is gone at the next redraw. What is more
 than a line is a screen of its own instead: a maintenance action (prune drafts,
 GC storage, repair carried posts), an empty log, and one entry's detail are
@@ -2444,7 +2447,7 @@ cannot see occupancy, states what a rename does to anyone inside.
 A channel that closes while callers are inside it — the SysOp deletes it, hides
 a carried Link channel (§16, issue #683), or retires an MRC room a caller
 opened — moves every one of them back to the channel list at once, where the
-line "#name was closed by the SysOp." is shown above the list; no keypress is
+line "#name was closed by the SysOp." is shown above its prompt; no keypress is
 asked for (issue #716). Their live Link subscription and MRC presence end the
 way `/leave` ends them. A closed channel gets no `leave` line: a deleted one has
 nowhere to hold it, and a hidden one keeps its scrollback exactly as it was for
