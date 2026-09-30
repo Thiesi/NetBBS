@@ -2117,6 +2117,25 @@ SyncTERM, NetRunner, Qodem, Tera Term, ZOC, MobaXterm, minicom. It is a protocol
 Terminal, an ordinary OpenSSH client and this project's own browser terminal
 cannot, which for most callers meant no transfer at all.
 
+NetBBS speaks Zmodem the way lrzsz does, because that is what terminals are
+built against (issue #963; the first version only ever talked to itself and
+no real client could complete a transfer). A download opens with `rz` and a
+ZRQINIT in the hex header form, an upload with a hex ZRINIT: those are the
+patterns a terminal's auto-start watches for. Every header read accepts hex,
+CRC-16 and CRC-32 binary headers. ZCRCW ends a frame, and the next one opens
+with a fresh ZDATA header. The sender streams when the receiver says it can
+(CANFDX and CANOVIO) and honours ZRPOS at any point, which covers both resume
+and error recovery; the receiver asks for data again after a CRC error or a
+frame at the wrong offset, up to a fixed number of times. A transfer ends with
+ZFIN both ways and `OO`, and what the terminal still sends is read off the line
+so it can't arrive as keystrokes. Five Ctrl-X from the caller cancel; a
+transfer NetBBS gives up on sends CAN×10, BS×10 so the terminal stops too.
+Deliberately left out: sending with CRC-32 (not asked for, since TCP already
+checks every byte), run-length encoding, compression, encryption, remote
+commands, and more than one file per transfer (later files in a batch get
+ZSKIP). `tests/test_zmodem_lrzsz.py` runs real `sz`/`rz` where lrzsz is
+installed and is skipped otherwise.
+
 **A session-bound HTTP link** for everyone else, served by the same aiohttp
 application as the web terminal. The file screen adapts to the transport: Zmodem
 where it can be carried, a link where it cannot, and `[W]eb transfer` for a
