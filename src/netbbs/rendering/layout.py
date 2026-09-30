@@ -492,6 +492,16 @@ _DESCRIPTION_INDENT = "    "
 _MIN_ENTRIES_PER_COLUMN = 2
 
 
+def _column_padding(cell: str, column_width: int) -> int:
+    """Spaces that bring `cell` to `column_width` before the gutter.
+
+    A cell that exactly fills its column (an entry whose description was
+    cut to fit) needs none: the gutter already separates it from the next
+    column. A floor of one space here put every such row's next column one
+    position further right than the others (issue #964)."""
+    return max(0, column_width - visible_width(cell))
+
+
 def _entry_block_lines(entry: MenuEntry, *, description_level: str, available_width: int) -> list[str]:
     """One entry's own line(s): just the label at `"off"`, plus one
     more line for its description text (`.detailed` at the `"detailed"`
@@ -564,7 +574,7 @@ def _flat_entry_columns(
             parts = []
             for i, cell in enumerate(cells):
                 if i < len(cells) - 1:
-                    padding = " " * max(1, column_width - visible_width(cell))
+                    padding = " " * _column_padding(cell, column_width)
                     parts.append(cell + padding + " " * _COLUMN_GUTTER)
                 else:
                     parts.append(cell)
@@ -678,7 +688,7 @@ def menu_grid(
                 parts = []
                 for i, cell in enumerate(cells):
                     if i < len(cells) - 1:
-                        padding = " " * max(1, column_width - visible_width(cell))
+                        padding = " " * _column_padding(cell, column_width)
                         parts.append(cell + padding + " " * _COLUMN_GUTTER)
                     else:
                         parts.append(cell)

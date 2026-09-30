@@ -1222,23 +1222,18 @@ async def _choice_prompt(session: Session) -> None:
 
 
 async def pick_item(session: Session, items, *, masthead="", **kwargs):
-    """`picker.pick_item`, with whatever the console's last action announced
-    shown above the list -- a picker is as likely as a menu to be the next
-    screen drawn (lifting one chat restriction returns to the list of the
-    rest). The picker re-reads a callable masthead on every render and counts
-    its rows, so the outcome is there for the first draw and gone once a key
-    has redrawn the list."""
-    async def _masthead() -> str:
-        own = (await masthead()) if callable(masthead) else masthead
-        return "\r\n".join(part for part in (own, *_take_notices(session)) if part)
-
+    """`picker.pick_item`, for the console. A picker is as likely as a menu
+    to be the next screen drawn (lifting one chat restriction returns to the
+    list of the rest); it shows whatever the console's last action announced
+    above its own prompt, on the first draw, and it is gone once a key has
+    redrawn the list."""
     # The picker's own answer to an empty list that nothing can change is to
     # print `empty_message` and return -- straight into the console menu whose
     # redraw erases it. Announced instead, it is on that menu when it draws.
     if not items and kwargs.get("refresh") is None and kwargs.get("on_create") is None:
         _announce(session, kwargs["empty_message"], color=MUTED_COLOR)
         return None
-    return await _pick_item(session, items, masthead=_masthead, **kwargs)
+    return await _pick_item(session, items, masthead=masthead, **kwargs)
 
 
 async def edit_resource_draft(session: Session, lane: DatabaseLane, **kwargs):
@@ -12077,9 +12072,9 @@ async def _who_screen(session: Session, lane: DatabaseLane, actor: User, node_co
     # established for format_for_display generally.
     display_format, display_timezone = await lane.run(resolve_display_preferences)
     if entries:
-        # Shown by the picker itself, above the list: written before it, the
+        # Shown by the picker itself, above its prompt: written before it, the
         # picker's clear erased the one line that says what selecting does.
-        _announce(session, "Select a session below to disconnect it.", color=MUTED_COLOR)
+        _announce(session, "Select a session to disconnect it.", color=MUTED_COLOR)
     selected = await pick_item(
         session, entries,
         name_of=_session_name,

@@ -391,9 +391,10 @@ def test_view_followed_narrows_the_list_and_back(db, lane, alice):
     follow(db, alice, "file_area", area.id)
     session = _run_main_menu(db, lane, alice, ["n", "v", "v", "b", "l", "y"])
     text = _visible_text(session)
-    # Each outcome is written above the list it redrew.
-    following_only = text.split("Showing what you follow.")[1].split("Showing everything.")[0]
-    everything = text.split("Showing everything.")[1]
+    # Each outcome is written below the list it redrew, above its prompt
+    # (issue #964).
+    following_only = text.split("Showing what you follow.")[0].rsplit("New scan", 1)[1]
+    everything = text.split("Showing everything.")[0].rsplit("New scan", 1)[1]
     assert "zebras" in following_only and "aardvarks" not in following_only
     assert "zebras" in everything and "aardvarks" in everything
 
@@ -468,8 +469,9 @@ def test_unfollowing_in_the_followed_view_keeps_the_row_there(db, lane, alice):
     # [V]iew followed, then [F]ollow row 1 (zebras, the only one) off.
     session = _run_main_menu(db, lane, alice, ["n", "v", "f", "1", "b", "l", "y"])
     text = _visible_text(session)
-    after = text.split("No longer following zebras.")[1]
-    assert "zebras" in after and "aardvarks" not in after.split("Choice")[0]
+    # The outcome sits above the prompt of the list it redrew (issue #964).
+    redrawn = text.split("No longer following zebras.")[0].rsplit("New scan", 1)[1]
+    assert "zebras" in redrawn and "aardvarks" not in redrawn
     assert not is_following(db, alice, "file_area", area.id)
 
 

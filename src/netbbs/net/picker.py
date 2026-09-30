@@ -44,7 +44,7 @@ from netbbs.net.help_overlay import show_help
 from netbbs.rendering.ansi import strip_ansi
 from netbbs.rendering.charset import ellipsis_for
 from netbbs.rendering.reflow import wrap_terminal_text
-from netbbs.net.notices import announce, with_notices
+from netbbs.net.notices import announce, take_notices
 from netbbs.net.session import Session, write_preformatted_line, write_prompt
 from netbbs.rendering import (
     ACCENT_COLOR,
@@ -600,6 +600,11 @@ async def pick_item(
             width, _ = _dimensions()
             wrapped = wrap_terminal_text(masthead_text, max(1, width))
             lines += wrapped.count("\r\n") + 1
+        if notice_lines:
+            # Drawn above the prompt, not up here, but a row is a row: the
+            # page gives way to it wherever it sits.
+            width, _ = _dimensions()
+            lines += sum(wrap_terminal_text(line, max(1, width)).count("\r\n") + 1 for line in notice_lines)
         if columns:
             width, _ = _dimensions()
             if _table_widths(width, columns) is not None:
@@ -688,17 +693,25 @@ async def pick_item(
     # Ctrl-R as a way to see current reality.
     #
     # An outcome the caller's last action announced (`netbbs.net.notices`,
-    # issue #680) rides along the same way: a picker is often the screen a
+    # issue #680) is read at each render too: a picker is often the screen a
     # finished action returns to, and its redraw would erase a written line.
-    # The static text is known before the first render, as it always was:
-    # the first page is sized with it. Notices join it at each render.
+    # It is drawn directly above the prompt, like every other screen's
+    # outcome (design doc §3.5), not with the masthead: above the title it
+    # pushed the whole screen down a row until the next redraw (issue #964).
+    # The static masthead is known before the first render, as it always
+    # was: the first page is sized with it.
     masthead_text = "" if callable(masthead) else masthead
-    masthead = with_notices(session, masthead)
+    notice_lines: list[str] = []
 
     async def _refresh_masthead() -> None:
-        nonlocal masthead_text
+        nonlocal masthead_text, notice_lines
         if callable(masthead):
             masthead_text = await masthead()
+        notice_lines = take_notices(session)
+
+    async def _write_notices() -> None:
+        for line in notice_lines:
+            await session.write_line(line)
 
     def _masthead_prefix() -> str:
         # Same clear_screen()-ordering hazard `_draw_main_menu`'s own
@@ -883,6 +896,7 @@ async def pick_item(
                 if standing:
                     await session.write_line(colored(f"\r\n{standing}", fg_color=MUTED_COLOR))
             await session.write_line(f"\r\n{trailer}")
+            await _write_notices()
             await session.write("Choice: ")
             return []
 
@@ -1201,6 +1215,7 @@ async def pick_item(
             await session.write_line(f"\r\n{nav}")
             for wrapped in wrap_to_width(trailer, render_width):
                 await session.write_line(wrapped)
+        await _write_notices()
         await session.write("Choice: ")
         return page_items
 
