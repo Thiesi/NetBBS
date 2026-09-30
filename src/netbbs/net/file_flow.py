@@ -2823,7 +2823,7 @@ async def send_file_to_caller(
     node_name_gradient=session.node_name_gradient)
     await session.write_line(f"\r\n{heading}")
     await session.write_line(
-        f"Sending {entry_filename!r} by Zmodem — your terminal should start receiving by itself. "
+        f"Starting Zmodem send of {entry_filename!r} — your terminal should start receiving by itself. "
         "Ctrl-X five times cancels."
     )
     try:
