@@ -260,6 +260,12 @@ def _ssh_host_key_path_for(db_path: Path) -> Path:
     return db_path.parent / f"{db_path.stem}_ssh_host_key"
 
 
+def _ssh_rsa_host_key_path_for(db_path: Path) -> Path:
+    """Mirrors `netbbs.net.ssh.ensure_rsa_host_key`'s own derived path
+    (issue #964)."""
+    return db_path.parent / f"{db_path.stem}_ssh_host_key_rsa"
+
+
 def _welcome_banner_path_for(db_path: Path) -> Path:
     """Mirrors `netbbs.net.welcome_banner.banner_path`'s own derived
     path."""
@@ -312,6 +318,7 @@ def _extra_artifact_paths(db_path: Path) -> tuple[Path, ...]:
     """Known node paths, including optional artifacts absent from an archive."""
     return (
         _ssh_host_key_path_for(db_path),
+        _ssh_rsa_host_key_path_for(db_path),
         _welcome_banner_path_for(db_path),
         _main_menu_banner_path_for(db_path),
         _logoff_banner_path_for(db_path),
