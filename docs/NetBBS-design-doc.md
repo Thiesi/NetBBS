@@ -858,6 +858,14 @@ keeps a one-row window over the buffer and scrolls it to follow the cursor, so a
 value wider than the terminal is edited like any other. A value longer than the
 editor's own buffer cap still falls back to the older prompt, blank-keeps-it and
 all, and says so.
+Every single-line prompt scrolls this way, not only those that ask for it (issue
+#964): an answer that outgrew the row after a long prompt used to wrap onto a
+second row, where Backspace could not reach the text before the wrap. A prompt
+that passes no window gets one sized to the columns its prompt left, read from
+the session's screen copy. While the answer fits it echoes character by
+character as before; the keystroke that would reach the edge hands over to the
+window. A masked answer stops showing `*` at the edge instead, so it never
+wraps either.
 With redraw-in-place enabled, the selected text, optional-integer, age,
 integer, float or optional-text field is edited at its displayed value row.
 The existing Choice row carries the editing key hint; no typing prompt opens
