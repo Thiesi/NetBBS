@@ -544,7 +544,7 @@ def test_voidrunner_backup_does_not_ignore_directories_named_like_temporary_file
         create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")
 
 
-@pytest.mark.parametrize("suffix", ["_ssh_host_key", "_welcome_banner.ans", "_main_menu_banner.ans", "_logoff_banner.ans",
+@pytest.mark.parametrize("suffix", ["_ssh_host_key", "_ssh_host_key_rsa", "_welcome_banner.ans", "_main_menu_banner.ans", "_logoff_banner.ans",
                                    "_new_account_banner_before.ans", "_new_account_banner_after.ans", "_board_list_banner.ans",
                                    "_file_area_banner.ans", "_chat_channel_picker_banner.ans", "-wal", "-shm", "-journal"])
 def test_voidrunner_restore_protects_node_paths_absent_from_the_archive(tmp_path, db_path, identity_dir, suffix):
@@ -815,6 +815,7 @@ def _seed_full_node(db_path, identity_dir) -> NodeIdentity:
     identity.save(identity_dir)
 
     _ssh_host_key_path(db_path).write_bytes(b"fake ssh host key")
+    (db_path.parent / f"{db_path.stem}_ssh_host_key_rsa").write_bytes(b"fake rsa host key")
     _managed_dns_credential_path(db_path).write_text("fake managed-dns credential")
     _managed_dns_previous_credential_path(db_path).write_text("fake previous managed-dns credential")
     _welcome_banner_path(db_path).write_text("fake banner")
@@ -943,6 +944,7 @@ def test_create_backup_captures_all_ordinary_artifacts(tmp_path, db_path, identi
     assert (destination / "identity" / "root.identity").exists()
     assert (destination / "identity" / "transitions.json").exists()
     assert (destination / f"{db_path.stem}_ssh_host_key").read_bytes() == b"fake ssh host key"
+    assert (destination / f"{db_path.stem}_ssh_host_key_rsa").read_bytes() == b"fake rsa host key"
     assert (destination / f"{db_path.stem}_managed_dns_credential").read_text() == "fake managed-dns credential"
     assert (destination / f"{db_path.stem}_managed_dns_previous_credential").read_text() == "fake previous managed-dns credential"
     assert (destination / f"{db_path.stem}_welcome_banner.ans").read_text() == "fake banner"
