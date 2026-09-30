@@ -22,10 +22,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import datetime
 import random
 import re
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 # `tests.*` (the fake hub, and the scripted FakeSession the chat tests use)
@@ -286,6 +288,29 @@ async def capture(exchanges: int) -> str:
         db.close()
 
 
+#: The evening the dialogue is set in. Chat stamps every line with the time
+#: it arrived, so a capture taken over breakfast would say "evening all"
+#: at 09:05 (review on #979).
+EVENING = datetime.datetime(2026, 9, 12, 21, 24, tzinfo=datetime.timezone.utc)
+
+
+def pin_clock_to_the_evening() -> None:
+    """Point every `utc_now_iso` the chat path imported at a clock that
+    starts at `EVENING` and runs at real speed, so lines keep their order."""
+    from netbbs import timeutil
+
+    started = time.monotonic()
+
+    def evening_now_iso() -> str:
+        moment = EVENING + datetime.timedelta(seconds=time.monotonic() - started)
+        return moment.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+    real = timeutil.utc_now_iso
+    for name, module in list(sys.modules.items()):
+        if name.startswith("netbbs") and getattr(module, "utc_now_iso", None) is real:
+            module.utc_now_iso = evening_now_iso
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("output", type=Path, help="raw ANSI capture to write")
@@ -293,6 +318,7 @@ def main() -> None:
                         help=f"how many of the {len(LIVE)} scripted lines to play")
     args = parser.parse_args()
 
+    pin_clock_to_the_evening()
     snapshot = asyncio.run(capture(args.exchanges))
     # Bytes, not text: see the note in website_ansi_to_html.py.
     args.output.write_bytes(snapshot.encode("utf-8"))
