@@ -221,6 +221,20 @@ class StaffListEntry:
     grants: tuple[ModeratorGrant, ...] = ()
 
 
+#: Board and file-area bits that are access, not moderation: a read or
+#: read-and-post grant lets its holder past a level gate (issue #868) but
+#: makes them nobody's moderator.
+_ACCESS_BITS = BoardPermission.READ | BoardPermission.WRITE
+
+
+def _moderates(grant: ModeratorGrant) -> bool:
+    """Whether `grant` carries any moderation, so its holder belongs on the
+    Staff list. Every channel bit moderates; channels have no access bits."""
+    if grant.object_type == "channel":
+        return bool(grant.permissions)
+    return bool(grant.permissions & ~int(_ACCESS_BITS))
+
+
 def list_staff(db: Database, *, today: datetime.date | None = None) -> list[StaffListEntry]:
     """
     Who runs the node, for every member (design doc §5.6): usable SysOps,
@@ -244,7 +258,7 @@ def list_staff(db: Database, *, today: datetime.date | None = None) -> list[Staf
                 away_notice(db, user, today=today),
             ))
         else:
-            grants = list_grants_for_user(db, user)
+            grants = [grant for grant in list_grants_for_user(db, user) if _moderates(grant)]
             if grants:
                 moderators.append(StaffListEntry(user, "Moderator", "", None, tuple(grants)))
     return sysops + staff + moderators

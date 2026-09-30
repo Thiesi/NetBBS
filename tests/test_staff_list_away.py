@@ -137,6 +137,33 @@ def test_the_staff_list_names_sysops_staff_and_moderators_in_that_order(db, syso
     assert helper  # used above
 
 
+def test_a_read_or_post_grant_alone_does_not_make_a_moderator(db, sysop):
+    board = create_board(db, "Announcements", creator=sysop)
+    poster = create_user(db, "Quill", password="hunter2")
+    reader = create_user(db, "Blot", password="hunter2")
+    mixed = create_user(db, "Serif", password="hunter2")
+    grant_permissions(
+        db, poster, object_type="board", object_id=board.id,
+        permissions=BoardPermission.READ | BoardPermission.WRITE, granted_by=sysop,
+    )
+    grant_permissions(
+        db, reader, object_type="file_area", object_id=None, permissions=BoardPermission.READ, granted_by=sysop
+    )
+    grant_permissions(
+        db, mixed, object_type="board", object_id=board.id,
+        permissions=BoardPermission.READ | BoardPermission.WRITE, granted_by=sysop,
+    )
+    grant_permissions(
+        db, mixed, object_type="board", object_id=None, permissions=BoardPermission.APPROVE, granted_by=sysop
+    )
+    entries = list_staff(db)
+    assert [(e.user.username, e.role) for e in entries] == [("InkWell", "SysOp"), ("Serif", "Moderator")]
+    # Only the grant that moderates is described.
+    assert [(grant.object_id, grant.permissions) for grant in entries[1].grants] == [
+        (None, int(BoardPermission.APPROVE))
+    ]
+
+
 def test_the_staff_list_screen_shows_last_session_dates_and_who_is_away(db, lane, sysop):
     set_away(db, sysop, "At a pen show", node_today(db) + datetime.timedelta(days=3))
     carol = create_user(db, "carol", password="hunter2")

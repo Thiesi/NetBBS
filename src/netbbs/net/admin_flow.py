@@ -22697,10 +22697,10 @@ async def _grant_moderator_screen(session: Session, lane: DatabaseLane, actor: U
             permissions=_moderator_preset_permissions(draft["object_type"], draft["preset"]),
             granted_by=actor, community_id=community.id if community is not None else None,
         )
+        # Access presets make nobody a moderator, so nobody joins the Staff list.
+        staff_list_note = "" if draft["preset"] in _ACCESS_PRESETS else " Members see moderators on the Staff list."
         _announce_line(
-            session,
-            f"Granted {preset_label} on {label} to {draft['user'].username!r}. "
-            "Members see moderators on the Staff list.",
+            session, f"Granted {preset_label} on {label} to {draft['user'].username!r}.{staff_list_note}",
         )
         return True
 
