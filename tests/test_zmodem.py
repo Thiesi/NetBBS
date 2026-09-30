@@ -884,3 +884,37 @@ def test_several_frames_of_every_awkward_byte_round_trip():
     payload = (bytes([0xFF, 0x18, 0x11, 0x13, 0x91, 0x93, 0x0D, 0x0A, 0x2A, 0x7F]) + bytes(range(256))) * 600
     _, data = _round_trip("big.bin", payload)
     assert data == payload
+
+
+def test_a_flood_of_flow_control_bytes_still_hits_the_subpacket_cap(monkeypatch, tmp_path):
+    """Unescaped XON/XOFF are dropped on read, but still count against
+    _MAX_SUBPACKET_BYTES: a peer streaming nothing else can't keep the
+    receiver busy forever on the idle timeout alone (PR #969 review)."""
+    monkeypatch.setattr(zmodem_module, "_MAX_SUBPACKET_BYTES", 8)
+
+    async def scenario():
+        sender_session, receiver_session = _session_pair()
+        receiver_task = asyncio.create_task(
+            receive_file(receiver_session, max_bytes=10_000_000, dest_path=tmp_path / "incoming")
+        )
+        await _wait_for_header(sender_session)
+        await _send_header(sender_session, ZFILE)
+        await _send_subpacket(sender_session, b"x.bin\x00", ZCRCW)
+        await _wait_for_header(sender_session)
+        await _send_header(sender_session, ZDATA, 0)
+        await sender_session.write_raw(bytes([0x11, 0x13]) * 50)
+        with pytest.raises(ZmodemError, match="no terminator"):
+            await receiver_task
+
+    asyncio.run(scenario())
+
+
+def test_a_flood_of_flow_control_bytes_in_a_crc_is_refused(monkeypatch):
+    monkeypatch.setattr(zmodem_module, "_MAX_SUBPACKET_BYTES", 8)
+
+    async def scenario():
+        session = _reader(bytes([0x11]) * 50 + b"A")
+        with pytest.raises(ZmodemError, match="flood"):
+            await zmodem_module._read_zdle_byte(session)
+
+    asyncio.run(scenario())

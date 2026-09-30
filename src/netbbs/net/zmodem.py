@@ -363,9 +363,15 @@ async def _read_zdle_byte(session: Session, *, read_raw=_read_raw_byte) -> int:
     `_read_bulk_raw_byte`, so its own CRC-byte reads get the same
     per-byte idle bound as every other byte in the bulk-transfer phase.
     """
+    skipped = 0
     while True:
         b = await read_raw(session)
         if b in _FLOW_CONTROL:
+            # Counted, so a peer sending nothing but XON/XOFF can't keep
+            # this read alive forever on the idle timeout alone.
+            skipped += 1
+            if skipped > _MAX_SUBPACKET_BYTES:
+                raise ZmodemError("flow-control flood with no data")
             continue
         if b != ZDLE:
             return b
@@ -552,12 +558,20 @@ async def _read_subpacket(session: Session, *, crc32: bool = False) -> tuple[byt
     follows the header that opened the frame."""
     data = bytearray()
     terminator = None
+    skipped = 0
     while terminator is None:
         b = await _read_bulk_raw_byte(session)
         if b in _FLOW_CONTROL:
+            # Skipped bytes count against the same cap as data: otherwise
+            # a peer streaming only XON/XOFF would never trip it.
+            skipped += 1
+            if len(data) + skipped > _MAX_SUBPACKET_BYTES:
+                raise ZmodemError(
+                    f"data subpacket exceeded {_MAX_SUBPACKET_BYTES} bytes with no terminator"
+                )
             continue
         if b != ZDLE:
-            if len(data) >= _MAX_SUBPACKET_BYTES:
+            if len(data) + skipped >= _MAX_SUBPACKET_BYTES:
                 raise ZmodemError(
                     f"data subpacket exceeded {_MAX_SUBPACKET_BYTES} bytes with no terminator"
                 )
@@ -569,7 +583,7 @@ async def _read_subpacket(session: Session, *, crc32: bool = False) -> tuple[byt
         if b2 in _TERMINATORS:
             terminator = b2
         else:
-            if len(data) >= _MAX_SUBPACKET_BYTES:
+            if len(data) + skipped >= _MAX_SUBPACKET_BYTES:
                 raise ZmodemError(
                     f"data subpacket exceeded {_MAX_SUBPACKET_BYTES} bytes with no terminator"
                 )
