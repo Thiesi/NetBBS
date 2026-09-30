@@ -866,6 +866,14 @@ the session's screen copy. While the answer fits it echoes character by
 character as before; the keystroke that would reach the edge hands over to the
 window. A masked answer stops showing `*` at the edge instead, so it never
 wraps either.
+A key a caller can press is highlighted wherever it is offered, not only on
+menus (issue #974): a prompt that lists its choices in running text
+("Unsaved changes. [S]ave, [D]iscard, or [C]ancel?") and a detail-panel label
+that names a key ("[R]otate") colour the bracketed key as a menu entry does
+(`highlight_hotkeys`). A key merely mentioned in explanatory prose -- a
+notice's "use [P]review to check it", a help page -- stays plain, the way the
+help screens write keys. A test keeps prompts and menu labels from writing a
+bare `[X]word` again.
 With redraw-in-place enabled, the selected text, optional-integer, age,
 integer, float or optional-text field is edited at its displayed value row.
 The existing Choice row carries the editing key hint; no typing prompt opens

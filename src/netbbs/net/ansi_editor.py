@@ -60,6 +60,7 @@ from netbbs.rendering import (
     diff_ansi,
     encode_ansi_bytes,
     full_render_ansi,
+    highlight_hotkeys,
     move_cursor,
     parse_ansi_into_buffer,
     truncate,
@@ -528,7 +529,7 @@ async def _confirm_quit(session: Session) -> str:
     other than S/D defaults to "cancel" (dropping the SysOp back into
     the editor with nothing lost), same fallback `read_line`'s
     startswith-based check used before."""
-    await write_prompt(session, "\r\nUnsaved changes. [S]ave, [D]iscard, or [C]ancel? ")
+    await write_prompt(session, highlight_hotkeys("\r\nUnsaved changes. [S]ave, [D]iscard, or [C]ancel? "))
     answer = (await session.read_key()).lower()
     if answer == "s":
         return "save"
