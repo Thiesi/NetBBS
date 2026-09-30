@@ -927,6 +927,48 @@ async def apply_tab_completion(
     return cursor
 
 
+def prompt_viewport(source: object) -> Callable[[], int] | None:
+    """The columns left after a prompt, for a `read_line` whose caller
+    did not pass a `viewport` (issue #964): every single-line read
+    scrolls sideways instead of wrapping, because a terminal's Backspace
+    never moves up a row and the text before a wrap could not be
+    corrected.
+
+    Where the prompt ended comes from the session's screen copy (issue
+    #764), which follows every write. The count is against
+    `terminal_width`, so a terminal that wraps at its last column (issue
+    #964) never has that column written. `None` for a source that keeps
+    no screen copy -- the line then echoes exactly as it always did."""
+    screen_copy = getattr(source, "screen_copy", None)
+    if not callable(screen_copy) or not isinstance(getattr(source, "terminal_width", None), int):
+        return None
+    try:
+        screen = screen_copy()
+        # A prompt that filled the row leaves the cursor on its last
+        # cell with a wrap pending: nothing is free after it.
+        start = int(screen.col) + (1 if getattr(screen, "_wrap_pending", False) else 0)
+    except Exception:  # pragma: no cover - a copy bug must never cost a caller their input
+        return None
+    return lambda: max(1, int(getattr(source, "terminal_width", 80)) - start)
+
+
+def full_row_viewport(source: object) -> Callable[[], int]:
+    """The whole row, for a line that starts at column 0."""
+    return lambda: max(1, int(getattr(source, "terminal_width", 80)))
+
+
+async def default_viewport(source: object, write: WriteFunc) -> Callable[[], int] | None:
+    """`prompt_viewport`, except that a prompt which left fewer than two
+    columns (issue #964) gets its answer on a fresh row: one column is no
+    room to edit in, and none at all would put the first keystroke on
+    the row below."""
+    viewport = prompt_viewport(source)
+    if viewport is not None and viewport() < 2:
+        await write("\r\n")
+        viewport = full_row_viewport(source)
+    return viewport
+
+
 def line_viewport(
     viewport: int | Callable[[], int] | None, *, owns_row: bool
 ) -> LineViewport | None:
@@ -936,6 +978,87 @@ def line_viewport(
     if viewport is None:
         return None
     return LineViewport(viewport() if callable(viewport) else viewport, owns_row=owns_row)
+
+
+class DeferredWindow:
+    """A `LineViewport` held back until the line needs it (issue #964).
+
+    Every `read_line` scrolls now, but most answers are short, and a
+    window redraws the whole row on every keystroke. So a read that got
+    its viewport by default (`prompt_viewport`) echoes exactly as it
+    always did, incrementally, while the line fits: each keystroke's
+    writes are held, and sent unchanged when the line still fits the
+    room left after the prompt. The first keystroke that would reach the
+    edge has its writes dropped instead, and the window takes over from
+    the row as it was before that keystroke. Shared by both line
+    editors."""
+
+    def __init__(
+        self, window: LineViewport, viewport: int | Callable[[], int],
+        full_row: Callable[[], int] | None = None,
+    ):
+        self.window = window
+        self._viewport = viewport
+        self._full_row = full_row
+        self.pending: list[str] | None = None
+        self._before = (0, 0)
+
+    def room(self) -> int:
+        return max(1, self._viewport() if callable(self._viewport) else self._viewport)
+
+    def fits(self, line: Sequence[str]) -> bool:
+        # Short of the room, not up to it: a line ending in the last
+        # column leaves a terminal's wrap pending, and the Backspace that
+        # follows then moves from the wrong column.
+        return display_width("".join(line)) < self.room()
+
+    def begin(self, line: Sequence[str], cursor: int) -> None:
+        self.pending = []
+        self._before = (display_width("".join(line[:cursor])), display_width("".join(line)))
+
+    async def write(self, write: WriteFunc, text: str) -> None:
+        if self.pending is None:
+            await write(text)
+        else:
+            self.pending.append(text)
+
+    async def end(self, write: WriteFunc, line: Sequence[str], cursor: int) -> LineViewport | None:
+        """Send the keystroke's writes, or hand over to the window;
+        returns the window once it has taken over."""
+        pieces, self.pending = self.pending or [], None
+        window = self.window
+        if any("\n" in piece for piece in pieces):
+            # Enter, or Tab listing its candidates above a reprint of the
+            # line at column 0 of a fresh row. Piece by piece, exactly as
+            # written: a web caller receives each write as its own
+            # message.
+            for piece in pieces:
+                await write(piece)
+            if not line or self._full_row is None:
+                return None
+            # The line now starts its own row, with the whole width.
+            self._viewport = self._full_row
+            window.owns_row = True
+            if self.fits(line):
+                return None
+            window.resize(self.room())
+            # The reprint wrapped. Its trailing `CSI D` cannot leave the
+            # last of the rows it filled, so wherever it put the cursor,
+            # that row is the one to count up from: re-anchor from the
+            # end of the reprint, not from the logical cursor.
+            window.drawn = display_width("".join(line))
+            window.col = window.drawn
+            window._reanchor = True
+            await window.render(write, list(line), cursor)
+            return window
+        if self.fits(line):
+            for piece in pieces:
+                await write(piece)
+            return None
+        window.resize(self.room())
+        window.col, window.drawn = self._before
+        await window.render(write, list(line), cursor)
+        return window
 
 
 async def _discard(_text: str) -> None:
@@ -1093,20 +1216,46 @@ async def read_line(
     the cursor. Everywhere else a pasted SGR is dropped, as it always
     was: a username or a subject has no use for ``|04``.
     """
+    viewport_deferred = viewport is None
+    if viewport is None:
+        viewport = await default_viewport(source, write)
     if not echo:
         with secret_input(source):
-            return await _read_line_masked(source, write)
+            return await _read_line_masked(source, write, viewport)
     return await _read_line_editable(
         source, write, history, completer, live_buffer=live_buffer, lock=lock,
         list_candidates=list_candidates, initial=initial, cancellable=cancellable,
         viewport=viewport, viewport_owns_row=viewport_owns_row, pasted_color=pasted_color,
+        viewport_deferred=viewport_deferred,
     )
 
 
-async def _read_line_masked(source: ByteSource, write: WriteFunc) -> str:
+async def masked_echo(
+    write: WriteFunc, shown: int, length: int, viewport: int | Callable[[], int] | None
+) -> int:
+    """Bring a masked field's row of `*` from `shown` to `length`, never
+    past the columns `viewport` leaves (issue #964): a password longer
+    than the row keeps its extra characters unshown, so the field never
+    wraps and Backspace can always reach what it erases. Returns how
+    many are shown now. Shared by both line editors."""
+    if viewport is not None:
+        room = viewport() if callable(viewport) else viewport
+        length = min(length, max(0, room - 1))
+    if length > shown:
+        await write("*" * (length - shown))
+    elif length < shown:
+        await write("\b \b" * (shown - length))
+    return length
+
+
+async def _read_line_masked(
+    source: ByteSource, write: WriteFunc, viewport: int | Callable[[], int] | None = None
+) -> str:
     """The original simple behavior, preserved as-is for masked
-    (password) reads — see `read_line`'s docstring for why."""
+    (password) reads — see `read_line`'s docstring for why. It only
+    stops showing more `*` than the row has room for (`masked_echo`)."""
     line: list[str] = []
+    shown = 0
     while True:
         b = await _read_byte(source)
         if b is None:
@@ -1123,12 +1272,12 @@ async def _read_line_masked(source: ByteSource, write: WriteFunc) -> str:
         if b in (_BS, _DEL):
             if line:
                 line.pop()
-                await write("\b \b")
+                shown = await masked_echo(write, shown, len(line), viewport)
             continue
 
         if b == _KILL:
-            await write("\b \b" * len(line))
             line.clear()
+            shown = await masked_echo(write, shown, 0, viewport)
             continue
 
         if b == _ESC:
@@ -1147,7 +1296,7 @@ async def _read_line_masked(source: ByteSource, write: WriteFunc) -> str:
 
         if len(line) < _MAX_LINE_LENGTH:
             line.append(char)
-            await write("*")
+            shown = await masked_echo(write, shown, len(line), viewport)
 
     await write("\r\n")
     return "".join(line)
@@ -1167,6 +1316,7 @@ async def _read_line_editable(
     viewport: int | Callable[[], int] | None = None,
     viewport_owns_row: bool = False,
     pasted_color: PastedColor | None = None,
+    viewport_deferred: bool = False,
 ) -> str:
     # `initial` (issue #529) starts the buffer populated and the cursor
     # at its end, so the caller can edit an existing value instead of
@@ -1192,8 +1342,24 @@ async def _read_line_editable(
     # window redraws (`complete_in_window`), so chat, which completes,
     # can scroll too (issue #926).
     window = line_viewport(viewport, owns_row=viewport_owns_row)
+    # A viewport this read got by default (issue #964) waits until the
+    # line reaches the edge; see `DeferredWindow`.
+    deferred: DeferredWindow | None = None
+    if viewport_deferred and window is not None and viewport is not None:
+        deferred = DeferredWindow(window, viewport, full_row_viewport(source))
+        if deferred.fits(line):
+            window = None
+        else:
+            deferred = None
     if live_buffer is not None:
         live_buffer.window = window
+    send = write
+
+    async def write(text: str) -> None:  # noqa: F811 - the held-back writer, issue #964
+        if deferred is not None:
+            await deferred.write(send, text)
+        else:
+            await send(text)
 
     async def show() -> None:
         if window is not None:
@@ -1242,6 +1408,8 @@ async def _read_line_editable(
         # concurrent redraw.
         async with (lock if lock is not None else contextlib.nullcontext()):
             try:
+                if deferred is not None:
+                    deferred.begin(line, cursor)
                 # Any keystroke other than Tab itself invalidates a
                 # pending "the last thing that happened was an unresolved
                 # multi-candidate Tab press" -- see `LastCandidateList`'s
@@ -1479,6 +1647,12 @@ async def _read_line_editable(
                         write, move_back=0, edit_pos=edit_pos, line=line, new_cursor=cursor
                     )
             finally:
+                if deferred is not None:
+                    window = await deferred.end(send, line, cursor)
+                    if window is not None:
+                        deferred = None
+                        if live_buffer is not None:
+                            live_buffer.window = window
                 if live_buffer is not None:
                     live_buffer.update(line, cursor)
 
