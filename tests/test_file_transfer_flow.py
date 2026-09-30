@@ -23,6 +23,7 @@ from netbbs.net.char_input import EditorKey, EditorKeyKind
 from netbbs.net.file_transfer import TransferGrants
 from netbbs.net import file_flow
 from netbbs.net.file_flow import _show_area
+from netbbs.net.notices import take_notices
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 
@@ -487,7 +488,7 @@ def test_an_upload_link_tells_the_terminal_when_the_file_arrives(db, lane, alice
     stored = upload_file(db, area, alice, "copperplate-week1.png", b"a practice page")
     grant.on_stored(stored)
 
-    assert "Uploaded 'copperplate-week1.png' (15 B) to [Practice pages]." in session.visible_output
+    assert "Uploaded 'copperplate-week1.png' (15 B) to Practice pages." in session.visible_output
 
 
 def test_an_upload_waiting_for_approval_says_so(db, lane, alice, grants):
@@ -495,7 +496,7 @@ def test_an_upload_waiting_for_approval_says_so(db, lane, alice, grants):
     area = create_file_area(db, "critique", creator=sysop, moderated=True)
     session = FakeSession()
 
-    tell = file_flow._tell_of_upload(session, area)
+    tell = file_flow._tell_of_upload(session, area, accent=220)
     tell(upload_file(db, area, alice, "page.png", b"ink"))
 
     assert "Uploaded 'page.png'" in session.visible_output
@@ -508,7 +509,7 @@ def test_a_link_does_not_keep_a_hung_up_session_alive(db, lane, alice):
 
     area = create_file_area(db, "docs", creator=alice)
     session = FakeSession()
-    tell = file_flow._tell_of_upload(session, area)
+    tell = file_flow._tell_of_upload(session, area, accent=220)
     gone = weakref.ref(session)
     del session
     gc.collect()
@@ -542,6 +543,51 @@ def test_ctrl_l_on_an_empty_area_shows_its_first_file(db, lane, alice, grants):
 
     after = session.visible_output.split("has no files yet", 1)[1]
     assert "first-page.png" in after
+
+
+class _StoredWhileWaitingSession(FakeSession):
+    """A listing whose caller's browser upload is stored while the screen
+    waits for a key; the next key only moves the cursor (issue #964)."""
+
+    def __init__(self, arrive, **kwargs):
+        super().__init__(**kwargs)
+        self._arrive = arrive
+        self._arrived = False
+
+    async def read_editor_key(self, *, distinguish_ctrl_h: bool = False) -> EditorKey:
+        if not self._arrived:
+            self._arrived = True
+            self._arrive()
+            return EditorKey(EditorKeyKind.DOWN)
+        return await super().read_editor_key(distinguish_ctrl_h=distinguish_ctrl_h)
+
+
+def test_a_browser_upload_shows_in_the_list_at_the_next_render(db, lane, alice, grants):
+    area = create_file_area(db, "Practice pages", creator=alice)
+    upload_file(db, area, alice, "first.txt", b"x")
+
+    def arrive():
+        tell = file_flow._tell_of_upload(session, area, accent=220)
+        tell(upload_file(db, area, alice, "copperplate-week1.png", b"a practice page"))
+
+    session = _StoredWhileWaitingSession(arrive)
+    asyncio.run(_show_area(session, lane, area, alice, transfers=grants))
+
+    after = session.visible_output.split("1 file on this page", 1)[1]
+    # Read again without Ctrl-L: the file is listed under its outcome's render.
+    assert "2 files on this page" in after
+    assert "copperplate-week1.png" in after.split("Uploaded", 1)[0]
+
+
+def test_the_upload_outcome_names_the_area_in_the_accent_color(db, lane, alice):
+    area = create_file_area(db, "Practice pages", creator=alice)
+    session = FakeSession()
+    file_flow._tell_of_upload(session, area, accent=220)(upload_file(db, area, alice, "page.png", b"ink"))
+
+    raw = "".join(take_notices(session))
+    # Its own color, not the green of the rest of the line (issue #964).
+    assert "38;5;220mPractice pages" in raw
+    assert "[Practice pages]" not in raw
 
 
 class _NoZmodemClient(FakeSession):
