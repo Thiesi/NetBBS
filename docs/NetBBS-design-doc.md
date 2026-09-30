@@ -314,7 +314,12 @@ CP437 or ASCII, and an explicit choice always wins over detection. Auto means:
   everything included: NetBBS's own chrome and the SysOp's banner.
 - SSH uses the terminal type from the PTY request, with the same lists; SyncTERM
   sends `syncterm` over SSH too. The pre-authentication banner goes out before
-  any channel exists, so it is always ASCII.
+  any channel exists, so it is always ASCII. Until authentication completes the
+  server sends no SSH_MSG_IGNORE padding (asyncssh would otherwise put one in
+  front of every packet): Cryptlib, which SyncTERM 1.9 uses, gives up after
+  more than three no-op packets in a row counting the one that ends them, and
+  IGNORE, BANNER, IGNORE, FAILURE was four (issue #964). The padding protects
+  CBC ciphers only, and none is offered.
 - The browser terminal is always UTF-8.
 
 Each Telnet and SSH connection logs one INFO line with the terminal types the
@@ -370,11 +375,20 @@ any screen knowing about it:
   row when they are loaded (`trim_row_ends`): the art editor saves every row
   of its 80-column canvas in full, so a 60-column banner arrived as rows of
   exactly 80. Spaces painted by a background colour or reverse video stay.
+- An art post (issue #711) is art too: its body lays out at `physical_width`
+  (`post_body_width`) in the reader, the version history, the review screen and
+  the moderation queue, so an 80-column drawing keeps its last column. Those
+  screens write each row through `write_laid_out_row`, which sends a row wider
+  than `terminal_width` -- only art can be -- the way `write_preformatted_line`
+  does, and every other row as an ordinary line.
 - Doors, the break-in screen copy and the web terminal's door resize use
   `physical_width`: a door is told the terminal's real size and draws for it
-  itself. The ANSI art editor's canvas stays 80 columns wide; its status line
-  on the bottom row is cut to `terminal_width`, so it never writes the last
-  cell.
+  itself. The screen copy also wraps where the caller's terminal does: on one
+  that wraps at once it moves to the next line on the last column, and scrolls
+  at the bottom-right cell, so the SysOp's snoop view and a break-in repaint
+  match what the caller actually sees. The ANSI art editor's canvas stays 80
+  columns wide; its status line on the bottom row is cut to `terminal_width`,
+  so it never writes the last cell.
 
 A SysOp may override three of the node's branding colors -- accent (board/
 channel/user names and other navigable-item branding), header (section
@@ -2172,7 +2186,7 @@ cannot, which for most callers meant no transfer at all.
 
 NetBBS speaks Zmodem the way lrzsz does, because that is what terminals are
 built against (issue #963; the first version only ever talked to itself and
-no real client could complete a transfer). A download opens with `rz` and a
+no real client could complete a transfer). A download opens with `rz\r` and a
 ZRQINIT in the hex header form, an upload with a hex ZRINIT: those are the
 patterns a terminal's auto-start watches for. Every header read accepts hex,
 CRC-16 and CRC-32 binary headers. ZCRCW ends a frame, and the next one opens

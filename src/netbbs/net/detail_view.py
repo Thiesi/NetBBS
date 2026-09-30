@@ -20,7 +20,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from netbbs.net.char_input import EditorKey, EditorKeyKind, reject_unhandled_key
-from netbbs.net.session import Session, write_prompt
+from netbbs.net.session import Session, write_laid_out_row, write_prompt
 from netbbs.rendering import MUTED_COLOR, action_bar, clear_screen, colored, menu_key
 from netbbs.rendering.detail import Section, paginate, render_sections
 from netbbs.rendering.reflow import wrap_terminal_text
@@ -113,8 +113,10 @@ async def show_detail(
         # self-drawn console screen shows its own (`admin_flow._choice_prompt`).
         rows.extend(message_rows)
         lead = clear_screen() if redraw_in_place else "\r\n"
+        # A section may hold an art post's rows (issue #964), drawn for
+        # the terminal's real width: `write_laid_out_row` keeps them whole.
         for index, row in enumerate(rows):
-            await session.write_line((lead if index == 0 else "") + row)
+            await write_laid_out_row(session, (lead if index == 0 else "") + row)
         await write_prompt(session, "Choice: ")
 
         while True:

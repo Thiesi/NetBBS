@@ -1017,7 +1017,24 @@ async def _show_area(
     async def _render_and_advance_cursor(current_page: FileEntryPage, highlighted: int | None = None) -> None:
         """The one place every render in this loop funnels through
         (issue #56) -- advances `user`'s file-area read cursor to
-        whatever is now newest on screen."""
+        whatever is now newest on screen.
+
+        Also where an upload that arrived since the last render shows up
+        (issue #964): a Zmodem upload, or one through a browser link that
+        stored it while this screen waited for a key. The listing is read
+        again, with the cursor on the new file, so the "press [E] on the
+        listing" the outcome says is something the caller can do."""
+        nonlocal page, describable_pending
+        arrived = _take_arrival(session, area)
+        if arrived is not None:
+            page = await lane.run(list_files_page, area, user, with_pinned=True)
+            pending_uploads = await lane.run(lambda db: list_pending_files(db, area, requesting_user=user))
+            describable_pending = [entry for entry in pending_uploads if _may_describe(entry)]
+            current_page = page
+            highlighted = next(
+                (index for index, listed in enumerate(page.entries) if listed.file_id == arrived), None
+            )
+            _set_highlight(highlighted)
         await _render_area_page(
             session, lane, area_name, current_page, can_write=can_write, name_requirement=effective_name_requirement,
             can_describe=_can_describe(current_page),
@@ -1032,6 +1049,11 @@ async def _show_area(
         if current_page.entries:
             await lane.run(record_file_area_seen, user, area, current_page.entries[-1])
 
+    def _set_highlight(value: int | None) -> None:
+        nonlocal highlighted
+        highlighted = value
+
+    highlighted: int | None = None
     if not page.entries:
         header_color = await lane.run(effective_header_color_256)
         heading = screen_title(
@@ -1048,7 +1070,7 @@ async def _show_area(
         await session.write_line(f"\r\n{state}")
     else:
         # A [N]ew scan or [/] Find jump starts with the cursor on its target.
-        highlighted: int | None = jump["highlight"]
+        highlighted = jump["highlight"]
         await _render_and_advance_cursor(page, highlighted=highlighted)
         while True:
             kind, target, new_h = await _read_file_choice(session, page, highlighted)
@@ -1088,10 +1110,12 @@ async def _show_area(
                     continue
                 if await _handle_upload(
                     session, lane, area, user, link_context=link_context, transfers=transfers
-                ) is not False:
+                ) is None:
                     return
-                # The browser is uploading, or a Zmodem upload failed; the
-                # caller is still here either way.
+                # Back on the listing whatever happened (issue #964): a
+                # finished upload shows up in it, with the cursor on it, so
+                # [E] describes it at once; a browser upload is still on its
+                # way; a failed one leaves [W]eb transfer here to try.
                 await _render_and_advance_cursor(page, highlighted=highlighted)
                 continue
             elif kind == "refresh":
@@ -1387,14 +1411,15 @@ async def _show_area(
             await session.write_line("")
             if await _handle_upload(
                 session, lane, area, user, link_context=link_context, transfers=transfers
-            ) is False:
-                # The browser is uploading the area's first file, or a
-                # Zmodem upload failed; staying here is the whole point,
-                # since this is the screen the file will appear on (Codex
-                # review).
-                if await _still_empty():
-                    continue
-                await _show_area(session, lane, area, user, link_context=link_context, transfers=transfers)
+            ) is None:
+                return
+            # The browser is uploading the area's first file, or a Zmodem
+            # upload failed; staying here is the whole point, since this is
+            # the screen the file will appear on (Codex review). A finished
+            # upload opens the listing, on the new file (issue #964).
+            if await _still_empty():
+                continue
+            await _show_area(session, lane, area, user, link_context=link_context, transfers=transfers)
             return
         if choice == "w" and transfers is not None and supports_zmodem(session):
             await session.write_line("")
@@ -2291,7 +2316,50 @@ def what_of(direction: str, area: FileArea, entry: FileEntry | None) -> str:
     return f"download {sanitize_text(entry.filename)!r}" if entry is not None else "download"
 
 
-def _tell_of_upload(session: Session, area: FileArea) -> Callable[[FileEntry], None]:
+#: Uploads stored for a session's file area since its listing last drew
+#: (issue #964): area id -> the newest arrival's file id. Keyed weakly by
+#: session, as notices are, so an upload through a browser link that
+#: outlives its caller leaves nothing behind.
+_arrivals: "weakref.WeakKeyDictionary[Session, dict[int, int]]" = weakref.WeakKeyDictionary()
+
+
+def _mark_arrival(session: Session, area: FileArea, entry: FileEntry) -> None:
+    """Note that `entry` was stored in `area` for `session`'s caller, so the
+    listing reads itself again at its next render (`_take_arrival`)."""
+    _arrivals.setdefault(session, {})[area.id] = entry.file_id
+
+
+def _take_arrival(session: Session, area: FileArea) -> int | None:
+    """The file id of an upload to `area` since the listing last drew, if
+    any, and forget it."""
+    return _arrivals.get(session, {}).pop(area.id, None)
+
+
+def _upload_outcome(entry: FileEntry, area_name: str, *, accent: int) -> str:
+    """The line that says an upload arrived (issue #842), with the area it
+    went to in the node's accent color (issue #964): the name a caller who
+    uploads to several areas needs to see, not buried in one green line."""
+    return (
+        colored(
+            f"Uploaded {sanitize_text(entry.filename)!r} ({_format_size(entry.size_bytes)}) to ",
+            fg_color=SUCCESS_COLOR,
+        )
+        + colored(sanitize_text(area_name), fg_color=accent, bold=True)
+        + colored(".", fg_color=SUCCESS_COLOR)
+    )
+
+
+def _announce_upload(session: Session, area: FileArea, entry: FileEntry, *, accent: int) -> None:
+    """Every word about a stored upload, Zmodem's and a browser link's alike:
+    where it went, whether it waits for approval, and the next screen's
+    listing read again so it shows the file (`_mark_arrival`)."""
+    announce_styled(session, _upload_outcome(entry, area.name, accent=accent))
+    if entry.status == "pending":
+        announce(session, "It waits for approval before other callers can see it.", tone="muted")
+    _mark_arrival(session, area, entry)
+
+
+def _tell_of_upload(session: Session, area: FileArea, *, accent: int) -> Callable[[FileEntry], None]:
     """What an upload link reports back to the terminal that asked for it
     (issue #842). The file arrives over HTTP, somewhere this session never
     sees, so without this the caller got no word that it worked.
@@ -2300,15 +2368,12 @@ def _tell_of_upload(session: Session, area: FileArea) -> Callable[[FileEntry], N
     other result is. Holds the session weakly: a link outlives a caller
     who hung up, and must not keep their session alive for ten minutes."""
     owner = weakref.ref(session)
-    area_name = area.name
 
     def tell(entry: FileEntry) -> None:
         live = owner()
         if live is None:
             return
-        announce(live, f"Uploaded {entry.filename!r} ({_format_size(entry.size_bytes)}) to [{area_name}].")
-        if entry.status == "pending":
-            announce(live, "It waits for approval before other callers can see it.", tone="muted")
+        _announce_upload(live, area, entry, accent=accent)
 
     return tell
 
@@ -2333,12 +2398,15 @@ async def _offer_transfer_link(
     caller has to understand, so both facts are stated every time
     rather than documented somewhere they will not look.
     """
+    accent = await lane.run(effective_accent_color_256)
     await offer_grant(
         session, transfers,
         mint=lambda: transfers.issue(
             direction=direction, user=user, area=area,
             file_id=entry.file_id if entry is not None else None,
-            on_stored=_tell_of_upload(session, area) if direction == UPLOAD else None,
+            on_stored=(
+                _tell_of_upload(session, area, accent=accent) if direction == UPLOAD else None
+            ),
         ),
         direction=direction, what=what_of(direction, area, entry),
         filename=entry.filename if entry is not None else None,
@@ -2585,18 +2653,15 @@ async def _handle_upload(
     §9.2/§11.2).
     """
     # Returns whether the session itself carried a transfer (Codex
-    # review). A Zmodem upload owns the byte stream and ends with the
-    # screen gone, so the caller is dropped back to the menu afterwards
-    # as it always was; a browser upload happens somewhere else entirely
-    # and the caller is still sitting in the file area, which is where
-    # the file they are about to send should appear.
+    # review): True for a Zmodem upload, False for a browser link or a
+    # failed transfer. Either way the caller goes back to the listing
+    # (issue #964), where a stored file now shows, cursor on it.
     #
-    # Call sites test `is False`, not truthiness: only an explicit
-    # "I did not use the session" keeps the screen open. A stand-in
-    # that returns `None` -- a test double written before this contract,
-    # or a future caller that forgets -- therefore behaves the way every
-    # caller did before it existed, rather than looping on a screen
-    # whose input source has nothing left to give.
+    # Call sites test `is None`, not truthiness: only an explicit answer
+    # keeps the screen open. A stand-in that returns `None` -- a test
+    # double written before this contract, or a future caller that
+    # forgets -- closes the screen, rather than looping on one whose input
+    # source has nothing left to give.
     if not supports_zmodem(session):
         # This transport could never carry the transfer (issue #475),
         # so it is not started: a browser link is the whole of what
@@ -2721,14 +2786,7 @@ async def _handle_upload(
         _point_at_browser_transfer(session, transfers, direction=UPLOAD)
         # Back to the list (issue #842), where [W]eb transfer is.
         return False
-    announce_styled(
-        session,
-        colored(
-            f"\r\nUploaded {sanitize_text(entry.filename)!r} ({_format_size(entry.size_bytes)}) "
-            f"to [{sanitize_text(area.name)}].",
-            fg_color=SUCCESS_COLOR,
-        )
-    )
+    _announce_upload(session, area, entry, accent=await lane.run(effective_accent_color_256))
     if entry.description:
         announce_styled(session, colored("Description read from FILE_ID.DIZ:", fg_color=MUTED_COLOR))
         for line in entry.description.splitlines():

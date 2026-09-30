@@ -562,7 +562,7 @@ from netbbs.net.resource_editor import (
     edit_resource_draft as _edit_resource_draft,
     text_field,
 )
-from netbbs.net.session import Session, write_preformatted_line, write_prompt
+from netbbs.net.session import Session, post_body_width, write_preformatted_line, write_prompt
 from netbbs.net.session_activity import records_activity
 from netbbs.net.session_registry import SessionSummary
 from netbbs.net.shutdown import (
@@ -18625,7 +18625,7 @@ async def _post_action_screen(
         )
         # As the board's readers will see it, in every mode (issue #711).
         body_rows = post_body_rows(
-            post.body, session.terminal_width, body_mode, truecolor=truecolor, layout=post.layout
+            post.body, post_body_width(session, post.layout), body_mode, truecolor=truecolor, layout=post.layout
         )
         # What the moderator is deciding about, then the post itself under its
         # own heading, with the pin and exempt state the toggles change.
@@ -18672,7 +18672,8 @@ async def _post_action_screen(
                     current.status, "Current text"
                 ),
                 [Styled(post_body_rows(
-                    current.body, session.terminal_width, body_mode, truecolor=truecolor, layout=current.layout
+                    current.body, post_body_width(session, current.layout), body_mode, truecolor=truecolor,
+                    layout=current.layout,
                 ))],
             ))
         choice, page = await show_detail(
