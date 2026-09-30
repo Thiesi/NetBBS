@@ -2626,7 +2626,10 @@ async def _handle_upload(
         header_color=await lane.run(effective_header_color_256),
     node_name_gradient=session.node_name_gradient)
     await session.write_line(f"\r\n{heading}")
-    await session.write_line("Start your terminal's Zmodem send (sz) now. Waiting for the transfer to begin...")
+    await session.write_line(
+        "Your terminal should offer its Zmodem upload now; if it doesn't, start its Zmodem send (sz). "
+        "Ctrl-X five times cancels."
+    )
     temp_path = await lane.run(new_incoming_temp_path)
     max_upload_bytes = await lane.run(get_max_upload_bytes)
     try:
@@ -2819,7 +2822,10 @@ async def send_file_to_caller(
         header_color=await lane.run(effective_header_color_256),
     node_name_gradient=session.node_name_gradient)
     await session.write_line(f"\r\n{heading}")
-    await session.write_line(f"Starting Zmodem send of {entry_filename!r} — accept the transfer in your terminal.")
+    await session.write_line(
+        f"Starting Zmodem send of {entry_filename!r} — your terminal should start receiving by itself. "
+        "Ctrl-X five times cancels."
+    )
     try:
         # download_file reads content-addressed storage directly from
         # disk by hash/path -- it never took a `db` parameter, so

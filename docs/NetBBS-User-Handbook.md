@@ -514,8 +514,11 @@ Open a file area and select an upload or download action. Use the browser
 transfer controls, a browser link offered by the node, or a Zmodem-capable
 terminal client. Browser links require the SysOp to configure the web
 listener. PuTTY and ordinary SSH clients do not provide Zmodem by themselves.
-If a Zmodem transfer fails, you stay on the file list: press **[W]** there for
-a browser link instead.
+A Zmodem terminal such as SyncTERM starts its side of the transfer by itself:
+it saves a download, or asks which file to upload. If yours doesn't, start its
+Zmodem receive or send by hand. Press **Ctrl-X** five times to cancel a
+transfer. If a Zmodem transfer fails, you stay on the file list: press **[W]**
+there for a browser link instead.
 
 When you upload through a browser link, the terminal tells you once the file
 has arrived, and whether it waits for approval before others can see it. In

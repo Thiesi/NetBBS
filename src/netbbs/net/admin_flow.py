@@ -13186,8 +13186,9 @@ async def _receive_sysop_upload(
 
     if supports_zmodem(session):
         await session.write_line(
-            f"Start your terminal's Zmodem send (sz) now. The file is saved as "
-            f"{target.destination.name}, whatever it is called on your side. Waiting for the transfer..."
+            f"Your terminal should offer its Zmodem upload now; if it doesn't, start its Zmodem send (sz). "
+            f"The file is saved as {target.destination.name}, whatever it is called on your side. "
+            f"Ctrl-X five times cancels."
         )
         temp_path = await lane.run(new_incoming_temp_path)
         try:
