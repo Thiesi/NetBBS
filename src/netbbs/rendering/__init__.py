@@ -32,6 +32,7 @@ from netbbs.rendering.ansi import (
 )
 from netbbs.rendering.ansi_art import (
     decode_ansi_bytes,
+    decode_art_bytes,
     decode_banner_bytes,
     encode_ansi_bytes,
     trim_trailing_blank_rows,
@@ -99,6 +100,7 @@ __all__ = [
     "clear_screen",
     "colored",
     "decode_ansi_bytes",
+    "decode_art_bytes",
     "decode_banner_bytes",
     "encode_ansi_bytes",
     "parse_ansi_into_buffer",
