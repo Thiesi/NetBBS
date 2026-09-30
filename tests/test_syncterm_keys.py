@@ -14,7 +14,7 @@ import asyncio
 import pytest
 
 from netbbs.net.char_input import EditorKeyKind, read_editor_key, read_line
-from netbbs.net.terminal_detect import delete_key_sends_del
+from netbbs.net.terminal_detect import sends_syncterm_keys
 from tests.test_char_input import FakeByteSource, Writer
 
 
@@ -101,9 +101,17 @@ def test_syncterms_delete_at_a_password_prompt_deletes_nothing():
 
 
 def test_the_decision_follows_any_reported_name():
-    assert delete_key_sends_del(_Terminal(b"", terminal_types=("SyncTERM",)))
-    assert delete_key_sends_del(_Terminal(b"", terminal_types=("some-unknown", "syncterm")))
+    assert sends_syncterm_keys(_Terminal(b"", terminal_types=("SyncTERM",)))
+    assert sends_syncterm_keys(_Terminal(b"", terminal_types=("some-unknown", "syncterm")))
     # The first name we recognise decides, as for the character set.
-    assert not delete_key_sends_del(_Terminal(b"", terminal_types=("xterm", "syncterm")))
-    assert not delete_key_sends_del(_Terminal(b"", terminal_types=("xterm",)))
-    assert not delete_key_sends_del(FakeByteSource(b""))
+    assert not sends_syncterm_keys(_Terminal(b"", terminal_types=("xterm", "syncterm")))
+    assert not sends_syncterm_keys(_Terminal(b"", terminal_types=("xterm",)))
+    assert not sends_syncterm_keys(FakeByteSource(b""))
+
+
+@pytest.mark.parametrize("terminal_types", [(), ("xterm",), ("putty",)])
+def test_other_terminals_discard_bare_erase_and_insert_sequences(terminal_types):
+    # Pasted ANSI output: ESC[K (erase in line) and ESC[@ (insert character)
+    # are not End and Insert there, so neither moves the cursor nor turns
+    # on overwrite.
+    assert _line(b"abc\x1b[H\x1b[KX\x1b[@Y\r", terminal_types=terminal_types) == "XYabc"

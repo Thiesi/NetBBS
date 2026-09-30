@@ -326,12 +326,12 @@ characters before they are stored or logged.
 **Keys from classic terminals (issue #964).** SyncTERM sends BBS-convention
 sequences for some editing keys (CTerm manual, "Sequences sent by SyncTERM"):
 `ESC[K` for End, `ESC[V` and `ESC[U` for Page Up and Page Down, `ESC[@` for
-Insert. No other terminal sends these as keys, so every session reads them.
-Its Backspace sends 0x08 and its Delete 0x7F, while PuTTY and xterm send 0x7F
-for Backspace, so 0x7F means Delete only when the first recognised terminal
-type is `syncterm` or `ansi-bbs`; everywhere else it stays Backspace. Only
-input decoding changes: the same bytes sent by NetBBS are still screen
-commands.
+Insert. Its Backspace sends 0x08 and its Delete 0x7F, while PuTTY and xterm
+send 0x7F for Backspace. All of these are read as SyncTERM's keys only when the
+first recognised terminal type is `syncterm` or `ansi-bbs`. Everywhere else
+0x7F stays Backspace, and a bare `ESC[K` or `ESC[@` is pasted screen output
+(erase in line, insert character), discarded as before. Only input decoding
+changes: the same bytes sent by NetBBS are still screen commands.
 
 After login, a caller whose set was not settled -- an unknown terminal, or one
 that reported only `ansi` -- is asked once which of two sample lines looks

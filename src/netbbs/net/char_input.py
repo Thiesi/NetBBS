@@ -44,7 +44,7 @@ from enum import Enum, auto
 from typing import Awaitable, Callable, Protocol, Sequence
 
 from netbbs.net.session import SessionClosedError, secret_input
-from netbbs.net.terminal_detect import delete_key_sends_del
+from netbbs.net.terminal_detect import sends_syncterm_keys
 from netbbs.rendering.ansi import reject_keystroke
 from netbbs.rendering.charset import input_codec
 from netbbs.rendering.pipe_codes import PastedColor
@@ -200,10 +200,15 @@ _CSI_FINAL_TO_KEY: dict[int, str] = {
     0x44: "LEFT",
     0x48: "HOME",
     0x46: "END",
-    # SyncTERM's BBS-convention keys (issue #964; CTerm manual, "Sequences
-    # sent by SyncTERM"): End is ESC[K, Page Up ESC[V, Page Down ESC[U,
-    # Insert ESC[@. No other terminal sends these as keys, so they are
-    # read the same for everyone.
+}
+
+# SyncTERM's BBS-convention keys (issue #964; CTerm manual, "Sequences
+# sent by SyncTERM"): End is ESC[K, Page Up ESC[V, Page Down ESC[U, Insert
+# ESC[@. Read only from a terminal that said it is SyncTERM: from anyone
+# else a bare ESC[K or ESC[@ is pasted ANSI output (erase in line, insert
+# character), and turning it into End or an overwrite toggle would change
+# the line being typed (Claude review).
+_SYNCTERM_CSI_FINAL_TO_KEY: dict[int, str] = {
     0x4B: "END",
     0x56: "PAGE_UP",
     0x55: "PAGE_DOWN",
@@ -1112,7 +1117,7 @@ async def _read_line_masked(source: ByteSource, write: WriteFunc) -> str:
                 await _consume_optional_lf_or_nul(source)
             break
 
-        if b == _DEL and delete_key_sends_del(source):
+        if b == _DEL and sends_syncterm_keys(source):
             continue  # SyncTERM's Delete key (issue #964): nothing under a masked cursor
 
         if b in (_BS, _DEL):
@@ -1206,7 +1211,7 @@ async def _read_line_editable(
             else:
                 await redraw_tail(write, move_back=0, edit_pos=cursor, line=line, new_cursor=cursor)
 
-    del_is_delete = delete_key_sends_del(source)
+    del_is_delete = sends_syncterm_keys(source)
 
     if line:
         if window is not None:
@@ -1692,7 +1697,7 @@ async def read_editor_key(
         if b == _BS and distinguish_ctrl_h:
             return EditorKey(EditorKeyKind.CTRL, char="h")
 
-        if b == _DEL and delete_key_sends_del(source):
+        if b == _DEL and sends_syncterm_keys(source):
             return EditorKey(EditorKeyKind.DELETE)  # SyncTERM's Delete key (issue #964)
 
         if b in (_BS, _DEL):
@@ -1846,10 +1851,12 @@ async def _consume_optional_lf_or_nul(source: ByteSource) -> None:
         _push_back(source, peek)
 
 
-def _decode_csi(params: bytes, final_byte: int) -> str | ColorCode | None:
+def _decode_csi(params: bytes, final_byte: int, *, syncterm: bool = False) -> str | ColorCode | None:
     if final_byte == 0x6D and all(b == 0x3B or 0x30 <= b <= 0x39 for b in params):  # 'm'
         return ColorCode(params.decode("ascii"))
     if not params:
+        if syncterm and final_byte in _SYNCTERM_CSI_FINAL_TO_KEY:
+            return _SYNCTERM_CSI_FINAL_TO_KEY[final_byte]
         return _CSI_FINAL_TO_KEY.get(final_byte)
     if final_byte == 0x7E:
         return _CSI_TILDE_TO_KEY.get(params)
@@ -1919,7 +1926,8 @@ async def _read_escape_sequence(source: ByteSource) -> str | ColorCode | None:
             if consumed > _MAX_ESCAPE_SEQUENCE_LENGTH:
                 raise SessionClosedError("terminal escape sequence is too long")
             if 0x40 <= b <= 0x7E:
-                return _decode_csi(bytes(params), b)  # final byte of the CSI sequence
+                # final byte of the CSI sequence
+                return _decode_csi(bytes(params), b, syncterm=sends_syncterm_keys(source))
             params.append(b)
     elif next_byte == 0x4F:  # 'O' — SS3 sequence, always exactly one more byte
         letter = await _read_byte_with_timeout(source, _FOLLOWUP_BYTE_TIMEOUT)
