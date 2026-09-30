@@ -65,6 +65,22 @@ def describe_detection(
     )
 
 
+def terminal_wraps_immediately(names: Iterable[str]) -> bool:
+    """Whether the terminal moves to the next line as soon as it writes the
+    last column, as DOS ANSI.SYS, SyncTERM and other classic BBS terminals
+    do (issue #964), rather than waiting for the next character as xterm
+    and its descendants do.
+
+    Only a terminal recognised as a modern UTF-8 emulator is trusted to
+    wait. A CP437 name, `ansi`, an unknown name or no name at all is
+    treated as wrapping at once: losing one column on a modern terminal
+    that didn't say what it is costs little, while a classic terminal
+    treated as modern gets a blank line after every full-width row and a
+    scrolled screen whenever the bottom-right cell is written."""
+    charset, _certain = classify_terminal_types(names)
+    return charset != UTF8
+
+
 def classify_terminal_types(names: Iterable[str]) -> tuple[Charset | None, bool]:
     """The character set the first recognised name means, and whether
     that is certain. `(None, False)` if no name is recognised."""

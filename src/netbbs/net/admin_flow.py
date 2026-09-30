@@ -13128,7 +13128,7 @@ async def _welcome_banner_gallery_screen(
         preset = selection[1]
         data = load_welcome_banner_preset(preset)
         await session.write_line(colored(f"\r\nPreviewing {preset.name!r}:", fg_color=MUTED_COLOR))
-        await session.write_line(decode_banner_bytes(data) + RESET)
+        await write_preformatted_line(session, decode_banner_bytes(data) + RESET)
 
         if not await _preview_apply_choice(session, f"Apply {preset.name!r} as the welcome banner"):
             continue
@@ -13462,7 +13462,7 @@ async def _welcome_banner_filesystem_screen(
 
         data = path.read_bytes()
         await session.write_line(colored(f"\r\nPreviewing {path.name!r}:", fg_color=MUTED_COLOR))
-        await session.write_line(decode_banner_bytes(data) + RESET)
+        await write_preformatted_line(session, decode_banner_bytes(data) + RESET)
 
         if not await _preview_apply_choice(session, f"Load {path.name!r} as the welcome banner"):
             continue
@@ -13693,7 +13693,7 @@ async def _main_menu_banner_gallery_screen(
         preset = selection[1]
         data = load_main_menu_banner_preset(preset)
         await session.write_line(colored(f"\r\nPreviewing {preset.name!r}:", fg_color=MUTED_COLOR))
-        await session.write_line(decode_banner_bytes(data) + RESET)
+        await write_preformatted_line(session, decode_banner_bytes(data) + RESET)
 
         if not await _preview_apply_choice(session, f"Apply {preset.name!r} as the masthead"):
             continue
@@ -13766,7 +13766,7 @@ async def _main_menu_banner_filesystem_screen(
 
         data = path.read_bytes()
         await session.write_line(colored(f"\r\nPreviewing {path.name!r}:", fg_color=MUTED_COLOR))
-        await session.write_line(decode_banner_bytes(data) + RESET)
+        await write_preformatted_line(session, decode_banner_bytes(data) + RESET)
 
         if not await _preview_apply_choice(session, f"Load {path.name!r} as the masthead"):
             continue
@@ -14048,7 +14048,7 @@ async def _logoff_banner_gallery_screen(
         preset = selection[1]
         data = load_logoff_banner_preset(preset)
         await session.write_line(colored(f"\r\nPreviewing {preset.name!r}:", fg_color=MUTED_COLOR))
-        await session.write_line(decode_banner_bytes(data) + RESET)
+        await write_preformatted_line(session, decode_banner_bytes(data) + RESET)
 
         if not await _preview_apply_choice(session, f"Apply {preset.name!r} as the logoff banner"):
             continue
@@ -14119,7 +14119,7 @@ async def _logoff_banner_filesystem_screen(
 
         data = path.read_bytes()
         await session.write_line(colored(f"\r\nPreviewing {path.name!r}:", fg_color=MUTED_COLOR))
-        await session.write_line(decode_banner_bytes(data) + RESET)
+        await write_preformatted_line(session, decode_banner_bytes(data) + RESET)
 
         if not await _preview_apply_choice(session, f"Load {path.name!r} as the logoff banner"):
             continue
@@ -14323,7 +14323,7 @@ async def _new_account_banner_before_gallery_screen(
         preset = selection[1]
         data = load_new_account_banner_before_preset(preset)
         await session.write_line(colored(f"\r\nPreviewing {preset.name!r}:", fg_color=MUTED_COLOR))
-        await session.write_line(decode_banner_bytes(data) + RESET)
+        await write_preformatted_line(session, decode_banner_bytes(data) + RESET)
 
         if not await _preview_apply_choice(session, f"Apply {preset.name!r} as the new-account (before) banner"):
             continue
@@ -14396,7 +14396,7 @@ async def _new_account_banner_before_filesystem_screen(
 
         data = path.read_bytes()
         await session.write_line(colored(f"\r\nPreviewing {path.name!r}:", fg_color=MUTED_COLOR))
-        await session.write_line(decode_banner_bytes(data) + RESET)
+        await write_preformatted_line(session, decode_banner_bytes(data) + RESET)
 
         if not await _preview_apply_choice(session, f"Load {path.name!r} as the new-account (before) banner"):
             continue
@@ -14602,7 +14602,7 @@ async def _new_account_banner_after_gallery_screen(
         preset = selection[1]
         data = load_new_account_banner_after_preset(preset)
         await session.write_line(colored(f"\r\nPreviewing {preset.name!r}:", fg_color=MUTED_COLOR))
-        await session.write_line(decode_banner_bytes(data) + RESET)
+        await write_preformatted_line(session, decode_banner_bytes(data) + RESET)
 
         if not await _preview_apply_choice(session, f"Apply {preset.name!r} as the new-account (after) banner"):
             continue
@@ -14675,7 +14675,7 @@ async def _new_account_banner_after_filesystem_screen(
 
         data = path.read_bytes()
         await session.write_line(colored(f"\r\nPreviewing {path.name!r}:", fg_color=MUTED_COLOR))
-        await session.write_line(decode_banner_bytes(data) + RESET)
+        await write_preformatted_line(session, decode_banner_bytes(data) + RESET)
 
         if not await _preview_apply_choice(session, f"Load {path.name!r} as the new-account (after) banner"):
             continue
@@ -14954,7 +14954,7 @@ async def _board_list_masthead_gallery_screen(
         preset = selection[1]
         data = load_board_list_masthead_preset(preset)
         await session.write_line(colored(f"\r\nPreviewing {preset.name!r}:", fg_color=MUTED_COLOR))
-        await session.write_line(decode_banner_bytes(data) + RESET)
+        await write_preformatted_line(session, decode_banner_bytes(data) + RESET)
 
         if not await _preview_apply_choice(session, f"Apply {preset.name!r} as the board list masthead"):
             continue
@@ -15027,7 +15027,7 @@ async def _board_list_masthead_filesystem_screen(
 
         data = path.read_bytes()
         await session.write_line(colored(f"\r\nPreviewing {path.name!r}:", fg_color=MUTED_COLOR))
-        await session.write_line(decode_banner_bytes(data) + RESET)
+        await write_preformatted_line(session, decode_banner_bytes(data) + RESET)
 
         if not await _preview_apply_choice(session, f"Load {path.name!r} as the board list masthead"):
             continue
@@ -15227,7 +15227,7 @@ async def _file_area_masthead_gallery_screen(
         preset = selection[1]
         data = load_file_area_masthead_preset(preset)
         await session.write_line(colored(f"\r\nPreviewing {preset.name!r}:", fg_color=MUTED_COLOR))
-        await session.write_line(decode_banner_bytes(data) + RESET)
+        await write_preformatted_line(session, decode_banner_bytes(data) + RESET)
 
         if not await _preview_apply_choice(session, f"Apply {preset.name!r} as the file area masthead"):
             continue
@@ -15298,7 +15298,7 @@ async def _file_area_masthead_filesystem_screen(
 
         data = path.read_bytes()
         await session.write_line(colored(f"\r\nPreviewing {path.name!r}:", fg_color=MUTED_COLOR))
-        await session.write_line(decode_banner_bytes(data) + RESET)
+        await write_preformatted_line(session, decode_banner_bytes(data) + RESET)
 
         if not await _preview_apply_choice(session, f"Load {path.name!r} as the file area masthead"):
             continue
@@ -15502,7 +15502,7 @@ async def _chat_channel_picker_masthead_gallery_screen(
         preset = selection[1]
         data = load_chat_channel_picker_masthead_preset(preset)
         await session.write_line(colored(f"\r\nPreviewing {preset.name!r}:", fg_color=MUTED_COLOR))
-        await session.write_line(decode_banner_bytes(data) + RESET)
+        await write_preformatted_line(session, decode_banner_bytes(data) + RESET)
 
         if not await _preview_apply_choice(session, f"Apply {preset.name!r} as the chat channel picker masthead"):
             continue
@@ -15575,7 +15575,7 @@ async def _chat_channel_picker_masthead_filesystem_screen(
 
         data = path.read_bytes()
         await session.write_line(colored(f"\r\nPreviewing {path.name!r}:", fg_color=MUTED_COLOR))
-        await session.write_line(decode_banner_bytes(data) + RESET)
+        await write_preformatted_line(session, decode_banner_bytes(data) + RESET)
 
         if not await _preview_apply_choice(session, f"Load {path.name!r} as the chat channel picker masthead"):
             continue

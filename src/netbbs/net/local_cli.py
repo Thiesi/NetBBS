@@ -72,6 +72,16 @@ class LocalCLISession(Session):
         self._width_override = value
 
     @property
+    def physical_width(self) -> int:
+        # A local terminal is never laid out a column short (issue #964):
+        # the width it reports is the width screens use.
+        return self.terminal_width
+
+    @physical_width.setter
+    def physical_width(self, value: int) -> None:
+        self._width_override = value
+
+    @property
     def terminal_height(self) -> int:
         if self._height_override is not None:
             return self._height_override
