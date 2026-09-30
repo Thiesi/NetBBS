@@ -22679,6 +22679,8 @@ async def _grant_moderator_screen(session: Session, lane: DatabaseLane, actor: U
         label = draft["label"]
         if community is not None:
             label = f"{label} scoped to Community {community.name!r}"
+        # Access presets make nobody a moderator, so nobody joins the Staff list.
+        staff_list_note = "" if draft["preset"] in _ACCESS_PRESETS else " Members see moderators on the Staff list."
         if draft["object_type"] == _EVERYWHERE:
             preset_label = _moderator_preset_label(_EVERYWHERE, draft["preset"])
             await lane.run(
@@ -22688,7 +22690,9 @@ async def _grant_moderator_screen(session: Session, lane: DatabaseLane, actor: U
                 channel_permissions=_moderator_preset_permissions("channel", draft["preset"]),
                 granted_by=actor, community_id=community.id if community is not None else None,
             )
-            _announce_line(session, f"Granted {preset_label} on {label} to {draft['user'].username!r}.")
+            _announce_line(
+                session, f"Granted {preset_label} on {label} to {draft['user'].username!r}.{staff_list_note}",
+            )
             return True
         preset_label = _moderator_preset_label(draft["object_type"], draft["preset"])
         await lane.run(
@@ -22698,9 +22702,7 @@ async def _grant_moderator_screen(session: Session, lane: DatabaseLane, actor: U
             granted_by=actor, community_id=community.id if community is not None else None,
         )
         _announce_line(
-            session,
-            f"Granted {preset_label} on {label} to {draft['user'].username!r}. "
-            "Members see moderators on the Staff list.",
+            session, f"Granted {preset_label} on {label} to {draft['user'].username!r}.{staff_list_note}",
         )
         return True
 

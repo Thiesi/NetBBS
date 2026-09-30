@@ -31,6 +31,7 @@ from netbbs.moderation.roles import (
 )
 from netbbs.net.admin_flow import _grant_moderator_screen, moderation_queue, staff_menu
 from netbbs.net.main_menu import _draw_main_menu
+from netbbs.net.notices import pending_notices
 from netbbs.permissions import InsufficientLevelError
 from netbbs.staff import count_moderation_items, has_moderation_scope, told_of_pending_accounts
 from netbbs.storage.database import Database
@@ -284,3 +285,22 @@ def test_the_grant_screen_offers_everything_at_once(db, lane, sysop):
     asyncio.run(_grant_moderator_screen(session, lane, sysop))
     carol = get_user_by_username(db, "carol")
     assert sorted(g.object_type for g in list_grants_for_user(db, carol)) == ["board", "channel", "file_area"]
+    assert "Members see moderators on the Staff list." in _visible("".join(pending_notices(session)))
+
+
+@pytest.mark.parametrize(("preset_steps", "moderates"), [(0, True), (2, False), (3, False)])
+def test_only_a_moderating_grant_mentions_the_staff_list(db, lane, sysop, monkeypatch, preset_steps, moderates):
+    board = create_board(db, "Announcements", creator=sysop)
+    create_user(db, "carol", password="hunter2")
+
+    async def _one_board(*_args, **_kwargs):
+        return "board", board.id, "board 'Announcements'"
+
+    monkeypatch.setattr("netbbs.net.admin_flow._pick_moderator_scope", _one_board)
+    # User carol (01), the one board, the preset cycled from full, save.
+    session = FakeSession(["u", "0", "1", "o", *["p"] * preset_steps, "s"])
+    asyncio.run(_grant_moderator_screen(session, lane, sysop))
+    # The outcome is queued for the next screen, not written here.
+    text = _visible("".join(pending_notices(session)))
+    assert "Granted" in text
+    assert ("Members see moderators on the Staff list." in text) is moderates

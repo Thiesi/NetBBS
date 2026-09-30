@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import datetime
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from netbbs.auth.users import (
     SYSOP_LEVEL,
@@ -221,6 +221,24 @@ class StaffListEntry:
     grants: tuple[ModeratorGrant, ...] = ()
 
 
+#: Board and file-area bits that are access, not moderation: a read or
+#: read-and-post grant lets its holder past a level gate (issue #868) but
+#: makes them nobody's moderator.
+_ACCESS_BITS = BoardPermission.READ | BoardPermission.WRITE
+
+
+def _moderation_part(grant: ModeratorGrant) -> ModeratorGrant | None:
+    """`grant` with its access bits dropped, or `None` when nothing is left:
+    what of it the Staff list names. Grants on one object share a row, so a
+    board's "Read and post" and its "Limited" moderator merge into one
+    (review on #977). Every channel bit moderates; channels have no access
+    bits."""
+    if grant.object_type == "channel":
+        return grant if grant.permissions else None
+    permissions = grant.permissions & ~int(_ACCESS_BITS)
+    return replace(grant, permissions=permissions) if permissions else None
+
+
 def list_staff(db: Database, *, today: datetime.date | None = None) -> list[StaffListEntry]:
     """
     Who runs the node, for every member (design doc §5.6): usable SysOps,
@@ -244,7 +262,7 @@ def list_staff(db: Database, *, today: datetime.date | None = None) -> list[Staf
                 away_notice(db, user, today=today),
             ))
         else:
-            grants = list_grants_for_user(db, user)
+            grants = [part for part in map(_moderation_part, list_grants_for_user(db, user)) if part is not None]
             if grants:
                 moderators.append(StaffListEntry(user, "Moderator", "", None, tuple(grants)))
     return sysops + staff + moderators
