@@ -69,8 +69,9 @@ from netbbs.net.char_input import (
     DeferredWindow,
     complete_in_window,
     line_viewport,
+    default_viewport,
+    full_row_viewport,
     masked_echo,
-    prompt_viewport,
     _grapheme_end,
     _grapheme_start,
     LiveInputBuffer,
@@ -617,7 +618,7 @@ class WebSession(Session):
         try:
             viewport_deferred = viewport is None
             if viewport is None:
-                viewport = prompt_viewport(self)
+                viewport = await default_viewport(self, self.write)
             if not echo:
                 with secret_input(self):
                     return await self._read_line_masked(viewport)
@@ -689,7 +690,7 @@ class WebSession(Session):
         # reaches the edge (`char_input.DeferredWindow`).
         deferred: DeferredWindow | None = None
         if viewport_deferred and window is not None and viewport is not None:
-            deferred = DeferredWindow(window, viewport)
+            deferred = DeferredWindow(window, viewport, full_row_viewport(self))
             if deferred.fits(line):
                 window = None
             else:

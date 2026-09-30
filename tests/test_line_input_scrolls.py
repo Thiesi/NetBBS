@@ -116,3 +116,35 @@ def test_the_viewport_is_what_the_prompt_left():
     terminal.screen.feed(_PROMPT)
     viewport = prompt_viewport(terminal)
     assert viewport is not None and viewport() == _WIDTH - len(_PROMPT)
+
+
+def test_a_prompt_that_fills_the_row_gets_its_answer_on_a_fresh_row():
+    # Review: the cursor sits on the prompt's last cell with a wrap
+    # pending, so there is no room after it at all.
+    prompt = "x" * _WIDTH
+    terminal = _Terminal(b"abc")
+    terminal.screen.feed(prompt)
+    result = asyncio.run(read_line(terminal, terminal.write))
+    assert result == "abc"
+    rows = terminal.screen.text_rows()
+    assert rows[0] == prompt
+    assert rows[1].rstrip() == "abc"
+
+
+def test_tab_listing_candidates_moves_the_line_to_its_own_row():
+    # Review: Tab's candidate list reprints the line at column 0 of a
+    # fresh row, so from then on the whole row is the room.
+    def complete(word: str) -> list[str]:
+        return ["Alpha" + "q" * 60, "Alpha" + "r" * 60]
+
+    typed = b"Alpha\t\t" + b"z" * 70
+    terminal = _Terminal(typed)
+    terminal.screen.feed(_PROMPT)
+    result = asyncio.run(read_line(terminal, terminal.write, completer=complete))
+    assert result.startswith("Alpha") and result.endswith("z" * 70)
+    rows = [row.rstrip() for row in terminal.screen.text_rows()]
+    # Row 0 is the prompt, rows 1-2 the candidate list; the line is
+    # reprinted on row 3 and fits the whole row there, so it shows in
+    # full rather than scrolling within the prompt's old room.
+    assert rows[3] == "Alpha" + "z" * 70
+    assert rows[4] == ""

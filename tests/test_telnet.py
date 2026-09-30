@@ -902,7 +902,9 @@ def test_line_length_is_capped():
             # more than `readuntil`'s buffer limit; read until the CRLF.
             echoed = b""
             while not echoed.endswith(b"\r\n"):
-                echoed += await asyncio.wait_for(reader.read(65536), timeout=10)
+                chunk = await asyncio.wait_for(reader.read(65536), timeout=10)
+                assert chunk, f"connection closed before the Enter's CRLF; got {echoed!r}"
+                echoed += chunk
             # One bell, and nothing after it but the Enter's CRLF: every
             # character past the cap was dropped without an echo. The
             # line scrolls sideways once it reaches the edge (issue

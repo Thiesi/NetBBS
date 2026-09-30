@@ -943,10 +943,30 @@ def prompt_viewport(source: object) -> Callable[[], int] | None:
     if not callable(screen_copy) or not isinstance(getattr(source, "terminal_width", None), int):
         return None
     try:
-        start = int(screen_copy().col)
+        screen = screen_copy()
+        # A prompt that filled the row leaves the cursor on its last
+        # cell with a wrap pending: nothing is free after it.
+        start = int(screen.col) + (1 if getattr(screen, "_wrap_pending", False) else 0)
     except Exception:  # pragma: no cover - a copy bug must never cost a caller their input
         return None
     return lambda: max(1, int(getattr(source, "terminal_width", 80)) - start)
+
+
+def full_row_viewport(source: object) -> Callable[[], int]:
+    """The whole row, for a line that starts at column 0."""
+    return lambda: max(1, int(getattr(source, "terminal_width", 80)))
+
+
+async def default_viewport(source: object, write: WriteFunc) -> Callable[[], int] | None:
+    """`prompt_viewport`, except that a prompt which left fewer than two
+    columns (issue #964) gets its answer on a fresh row: one column is no
+    room to edit in, and none at all would put the first keystroke on
+    the row below."""
+    viewport = prompt_viewport(source)
+    if viewport is not None and viewport() < 2:
+        await write("\r\n")
+        viewport = full_row_viewport(source)
+    return viewport
 
 
 def line_viewport(
@@ -973,9 +993,13 @@ class DeferredWindow:
     the row as it was before that keystroke. Shared by both line
     editors."""
 
-    def __init__(self, window: LineViewport, viewport: int | Callable[[], int]):
+    def __init__(
+        self, window: LineViewport, viewport: int | Callable[[], int],
+        full_row: Callable[[], int] | None = None,
+    ):
         self.window = window
         self._viewport = viewport
+        self._full_row = full_row
         self.pending: list[str] | None = None
         self._before = (0, 0)
 
@@ -1002,13 +1026,32 @@ class DeferredWindow:
         """Send the keystroke's writes, or hand over to the window;
         returns the window once it has taken over."""
         pieces, self.pending = self.pending or [], None
-        if any("\n" in piece for piece in pieces) or self.fits(line):
-            # Piece by piece, exactly as they were written: a web
-            # caller receives each write as its own message.
+        window = self.window
+        if any("\n" in piece for piece in pieces):
+            # Enter, or Tab listing its candidates above a reprint of the
+            # line at column 0 of a fresh row. Piece by piece, exactly as
+            # written: a web caller receives each write as its own
+            # message.
+            for piece in pieces:
+                await write(piece)
+            if not line or self._full_row is None:
+                return None
+            # The line now starts its own row, with the whole width.
+            self._viewport = self._full_row
+            window.owns_row = True
+            if self.fits(line):
+                return None
+            window.resize(self.room())
+            window.col = display_width("".join(line[:cursor]))
+            window.drawn = display_width("".join(line))
+            # The reprint may already have wrapped; start the row again.
+            window._reanchor = True
+            await window.render(write, list(line), cursor)
+            return window
+        if self.fits(line):
             for piece in pieces:
                 await write(piece)
             return None
-        window = self.window
         window.resize(self.room())
         window.col, window.drawn = self._before
         await window.render(write, list(line), cursor)
@@ -1172,7 +1215,7 @@ async def read_line(
     """
     viewport_deferred = viewport is None
     if viewport is None:
-        viewport = prompt_viewport(source)
+        viewport = await default_viewport(source, write)
     if not echo:
         with secret_input(source):
             return await _read_line_masked(source, write, viewport)
@@ -1300,7 +1343,7 @@ async def _read_line_editable(
     # line reaches the edge; see `DeferredWindow`.
     deferred: DeferredWindow | None = None
     if viewport_deferred and window is not None and viewport is not None:
-        deferred = DeferredWindow(window, viewport)
+        deferred = DeferredWindow(window, viewport, full_row_viewport(source))
         if deferred.fits(line):
             window = None
         else:
