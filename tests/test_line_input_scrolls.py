@@ -148,3 +148,31 @@ def test_tab_listing_candidates_moves_the_line_to_its_own_row():
     # full rather than scrolling within the prompt's old room.
     assert rows[3] == "Alpha" + "z" * 70
     assert rows[4] == ""
+
+
+def test_a_reprint_that_wrapped_is_redrawn_from_its_first_row():
+    # Re-review: when Tab's candidate list reprints a line that is wider
+    # than the whole row and the cursor is mid-line, the reprint's `CSI D`
+    # clamps on its last row. The window must count up from there, not
+    # from where the logical cursor is.
+    from netbbs.net.char_input import DeferredWindow, LineViewport
+
+    terminal = _Terminal(b"")
+    line = list("w" * 100)
+    cursor = 10
+    deferred = DeferredWindow(LineViewport(18), lambda: 18, lambda: _WIDTH)
+    deferred.begin(line, cursor)
+
+    async def replay() -> None:
+        await deferred.write(terminal.write, "\r\nfirst  second\r\n")
+        await deferred.write(terminal.write, "".join(line))
+        await deferred.write(terminal.write, "\x1b[90D")
+        await deferred.end(terminal.write, line, cursor)
+
+    asyncio.run(replay())
+    rows = [row.rstrip() for row in terminal.screen.text_rows()]
+    assert rows[1] == "first  second"
+    # One row, starting where the reprint started; the row below it is
+    # cleared rather than left holding the reprint's wrapped tail.
+    assert rows[2].strip().startswith("w") and len(rows[2]) <= _WIDTH
+    assert rows[3] == ""

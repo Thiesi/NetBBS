@@ -1042,9 +1042,12 @@ class DeferredWindow:
             if self.fits(line):
                 return None
             window.resize(self.room())
-            window.col = display_width("".join(line[:cursor]))
+            # The reprint wrapped. Its trailing `CSI D` cannot leave the
+            # last of the rows it filled, so wherever it put the cursor,
+            # that row is the one to count up from: re-anchor from the
+            # end of the reprint, not from the logical cursor.
             window.drawn = display_width("".join(line))
-            # The reprint may already have wrapped; start the row again.
+            window.col = window.drawn
             window._reanchor = True
             await window.render(write, list(line), cursor)
             return window
