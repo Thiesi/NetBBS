@@ -1821,9 +1821,12 @@ def test_who_screen_explains_what_selecting_a_session_does(db, lane, sysop):
         finally:
             node_controls.session_registry.leave(session)
         text = _visible(_written_text(session))
-        # Shown by the picker itself, above its list -- written before it, the
-        # picker's own clear erased it under redraw-in-place.
-        assert text.index("Select a session below to disconnect it.") < text.index("page 1/1, 1 total")
+        # Shown by the picker itself, directly above its prompt -- written
+        # before it, the picker's own clear erased it under redraw-in-place;
+        # above the title, it pushed the screen down a row (issue #964).
+        hint = text.index("Select a session to disconnect it.")
+        assert text.index("page 1/1, 1 total") < hint
+        assert text[hint:].split("\n", 1)[1].startswith("Choice:")
 
     asyncio.run(scenario())
 
@@ -5168,6 +5171,20 @@ def test_door_gallery_selecting_an_entry_shows_details_then_opens_the_editor_dir
     assert "Interpreter (default, editable next):" in text
     assert "retro_trivia.py" in text
     assert list_doors(db) == []
+
+
+def test_a_door_registered_from_the_gallery_is_announced_above_the_prompt(db, lane, sysop):
+    """Issue #964: the gallery list the registration returns to drew the
+    confirmation above its title, so the whole screen started a row down
+    until the next redraw. It belongs directly above the prompt."""
+    session = FakeSession(["c", "d", "g", "0", "1", "s", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    text = _visible(_written_text(session))
+    notice = text.index("Registered door 'Retro Trivia'.")
+    # The gallery redrawn after the save: its title comes before the notice,
+    # and the prompt directly after it.
+    assert text.rindex("Door gallery", 0, notice) > text.rindex("Choice:", 0, notice)
+    assert text[notice:].split("\n", 1)[1].startswith("Choice:")
 
 
 def test_door_gallery_description_is_word_wrapped_to_terminal_width(db, lane, sysop):
