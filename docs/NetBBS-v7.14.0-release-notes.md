@@ -667,7 +667,7 @@ This is steps 1 and 2 of #929 (#934, #936, #940, #941, #942, #943, #952).
 
 For callers:
 
-- **Four character sets.** Each session now sends its text in UTF-8, CP437 or
+- **Three character sets.** Each session now sends its text in UTF-8, CP437 or
   plain ASCII. Screens are still composed the same way; the text is mapped
   as it goes out. Frames, rules and symbols become their CP437 equivalents,
   or ASCII ones (`+`, `|`, `-`, `=`) where CP437 has none. A replacement
