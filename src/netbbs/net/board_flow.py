@@ -124,7 +124,7 @@ from netbbs.net.prose_editor import EditorHeader, edit_prose
 from netbbs.net.ansi_editor import edit_ansi_art
 from netbbs.net.post_color_preference import post_colors_enabled
 from netbbs.net.redraw_preference import redraw_in_place_enabled
-from netbbs.net.session import Session, write_prompt
+from netbbs.net.session import Session, post_body_width, write_prompt
 from netbbs.net.session_activity import records_activity
 from netbbs.net.sort_ui import SORT_MODE_LABELS, prompt_sort_change
 from netbbs.net.unicode_style_preference import unicode_style_enabled
@@ -1206,7 +1206,10 @@ async def _show_board(
                 separator=separator, width=width,
                 held="post" if held else "edit" if post.root_post_id in page.held_edits else None,
             )
-            body_rows = post_body_rows(post.body, width, body_mode, truecolor=truecolor, layout=post.layout)
+            body_rows = post_body_rows(
+                post.body, post_body_width(session, post.layout), body_mode, truecolor=truecolor,
+                layout=post.layout,
+            )
             # Files the post points at (issue #842), as this reader finds
             # them: a file in an area closed to them is not named.
             refs = shown_post_refs(db, post)
@@ -2594,7 +2597,8 @@ async def _show_history(
                 session,
                 title=title,
                 sections=[Section(None, [Styled(post_body_rows(
-                    version.body, session.terminal_width, body_mode, truecolor=truecolor, layout=post.layout,
+                    version.body, post_body_width(session, post.layout), body_mode, truecolor=truecolor,
+                    layout=post.layout,
                 ))])],
                 actions=[("b", menu_key("B", "ack"))],
                 redraw_in_place=redraw_in_place,

@@ -185,7 +185,7 @@ def test_upload_via_show_area_streams_to_storage_with_no_leftover_temp_file(db, 
     payload = b"hello from a real zmodem upload" * 100  # spans multiple subpackets
 
     client_to_server, server_to_client = _BytePipe(), _BytePipe()
-    server_session = _ServerSession(["u"], read_pipe=client_to_server, write_pipe=server_to_client)
+    server_session = _ServerSession(["u", "b"], read_pipe=client_to_server, write_pipe=server_to_client)
     client_session = _ClientSession(read_pipe=server_to_client, write_pipe=client_to_server)
 
     async def scenario():
@@ -254,7 +254,7 @@ def test_uploading_a_zip_with_file_id_diz_describes_it(db, lane, alice):
     payload = buffer.getvalue()
 
     client_to_server, server_to_client = _BytePipe(), _BytePipe()
-    server_session = _ServerSession(["u"], read_pipe=client_to_server, write_pipe=server_to_client)
+    server_session = _ServerSession(["u", "b"], read_pipe=client_to_server, write_pipe=server_to_client)
     client_session = _ClientSession(read_pipe=server_to_client, write_pipe=client_to_server)
 
     async def scenario():
@@ -280,7 +280,7 @@ def test_uploading_a_file_with_no_diz_says_so_and_points_at_the_editor(db, lane,
     payload = b"just a text file, no archive at all"
 
     client_to_server, server_to_client = _BytePipe(), _BytePipe()
-    server_session = _ServerSession(["u"], read_pipe=client_to_server, write_pipe=server_to_client)
+    server_session = _ServerSession(["u", "b"], read_pipe=client_to_server, write_pipe=server_to_client)
     client_session = _ClientSession(read_pipe=server_to_client, write_pipe=client_to_server)
 
     async def scenario():
@@ -309,7 +309,7 @@ def _link_context():
 
 def _upload(db, lane, area, user, filename, payload, *, link_context=None):
     client_to_server, server_to_client = _BytePipe(), _BytePipe()
-    server_session = _ServerSession(["u"], read_pipe=client_to_server, write_pipe=server_to_client)
+    server_session = _ServerSession(["u", "b"], read_pipe=client_to_server, write_pipe=server_to_client)
     client_session = _ClientSession(read_pipe=server_to_client, write_pipe=client_to_server)
 
     async def scenario():
@@ -421,3 +421,35 @@ def test_uploading_into_a_carried_area_announces_nothing(db, lane, alice):
         "SELECT link_event_json FROM files WHERE file_id = ?", (entry.file_id,)
     ).fetchone()["link_event_json"] is None
     assert load_own_file_area_events(db, link_context.node_identity.fingerprint) == []
+
+
+def test_a_finished_upload_stays_on_the_listing_with_the_new_file_in_it(db, lane, alice):
+    """Issue #964: the outcome says "press [E] on the listing", so the
+    caller lands on that listing, read again, the new file in it -- not
+    back on the area list, where the file was nowhere to be seen."""
+    from netbbs.files.entries import upload_file
+
+    area = create_file_area(db, "docs", creator=alice)
+    upload_file(db, area, alice, "older.txt", b"already here")
+    payload = b"the new one"
+
+    client_to_server, server_to_client = _BytePipe(), _BytePipe()
+    server_session = _ServerSession(["u", "b"], read_pipe=client_to_server, write_pipe=server_to_client)
+    client_session = _ClientSession(read_pipe=server_to_client, write_pipe=client_to_server)
+
+    async def scenario():
+        server_task = asyncio.create_task(file_flow._show_area(server_session, lane, area, alice))
+        client_task = asyncio.create_task(zmodem.send_file(client_session, "fresh.txt", payload))
+        await asyncio.wait_for(server_task, timeout=5)
+        try:
+            await asyncio.wait_for(client_task, timeout=1)
+        except Exception:
+            pass
+
+    asyncio.run(scenario())
+
+    after = _visible_text(server_session).split("Zmodem transfer", 1)[1]
+    listing, outcome = after.split("Uploaded 'fresh.txt'", 1)
+    assert "2 files on this page" in listing
+    assert "fresh.txt" in listing
+    assert "press [E] on the listing" in outcome

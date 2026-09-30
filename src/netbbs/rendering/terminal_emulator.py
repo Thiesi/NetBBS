@@ -178,11 +178,18 @@ def pen_sgr(pen: Pen) -> str:
 
 
 class TerminalEmulator:
-    """A `width` x `height` terminal, fed text as it was sent."""
+    """A `width` x `height` terminal, fed text as it was sent.
 
-    def __init__(self, width: int, height: int) -> None:
+    `wraps_immediately` models a terminal that moves to the next line as soon
+    as it writes the last column (SyncTERM and DOS ANSI.SYS, issue #964),
+    rather than waiting for the next character the way xterm does: a copy of
+    such a caller's screen has to wrap, and scroll at the bottom-right cell,
+    exactly where theirs does."""
+
+    def __init__(self, width: int, height: int, *, wraps_immediately: bool = False) -> None:
         self.width = max(1, min(width, _MAX_WIDTH))
         self.height = max(1, min(height, _MAX_HEIGHT))
+        self.wraps_immediately = wraps_immediately
         self._reset()
 
     def _reset(self) -> None:
@@ -407,6 +414,17 @@ class TerminalEmulator:
             self._rows[self.row][self.col + 1] = replace(cell, char="")
         self.col += width
         if self.col >= self.width:
+            self._last_column_written()
+
+    def _last_column_written(self) -> None:
+        """The cursor has passed the last column: xterm waits there for the
+        next character; a terminal that wraps immediately is already on the
+        next line."""
+        if self.wraps_immediately:
+            self.col = 0
+            self._linefeed()
+            self._wrap_pending = False
+        else:
             self.col = self.width - 1
             self._wrap_pending = True
 
@@ -441,8 +459,7 @@ class TerminalEmulator:
             self.col += take
             start += take
             if self.col >= width:
-                self.col = width - 1
-                self._wrap_pending = True
+                self._last_column_written()
 
     def _split_wide(self, row: int, start: int, end: int) -> None:
         """Before cells `start`..`end` are overwritten, blank the other half
