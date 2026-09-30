@@ -7,8 +7,12 @@ valid menu inputs should visually stand out.
 
 from __future__ import annotations
 
+import re
+
 from netbbs.rendering.ansi import colored
 from netbbs.rendering.theme import MENU_KEY_COLOR
+
+Color = int | tuple[int, int, int]
 
 
 def menu_key(key: str, rest: str = "", *, prefix: str = "", capitalize: bool = False) -> str:
@@ -53,3 +57,38 @@ def menu_key(key: str, rest: str = "", *, prefix: str = "", capitalize: bool = F
     display_key = key if capitalize else (key.lower() if prefix else key)
     highlighted = colored(display_key, fg_color=MENU_KEY_COLOR, bold=True)
     return f"{prefix}[{highlighted}]{rest}"
+
+
+# One key in brackets, not a word or a number: `[S]`, never `[10]` or `[ok]`.
+_BRACKETED_KEY = re.compile(r"\[([A-Za-z0-9])\]")
+
+
+def highlight_hotkeys(text: str, *, color: Color | None = None) -> str:
+    """`text` with every bracketed key coloured the way `menu_key` colours
+    it (issue #974), for a prompt that offers its keys in running text:
+    ``"Unsaved changes. [S]ave, [D]iscard, or [C]ancel? "``. The brackets
+    stay, so ASCII-only and colourless terminals still show the keys.
+
+    `color`, when given, is the colour of everything but the keys -- the
+    key's reset would otherwise drop the rest of the text back to the
+    terminal's default.
+
+    Only for text whose keys answer what is on screen. A key merely
+    mentioned in prose ("use [P]review to check it") stays plain, the way
+    the help screens write keys."""
+    parts: list[str] = []
+    position = 0
+    for match in _BRACKETED_KEY.finditer(text):
+        parts.append(_in_color(text[position:match.start()], color))
+        # The brackets take the text's colour too; only the key is the menu's.
+        key = colored(match.group(1), fg_color=MENU_KEY_COLOR, bold=True)
+        parts.append(_in_color("[", color) + key + _in_color("]", color))
+        position = match.end()
+    if not parts:
+        return _in_color(text, color)
+    parts.append(_in_color(text[position:], color))
+    return "".join(parts)
+
+
+def _in_color(text: str, color: Color | None) -> str:
+    return colored(text, fg_color=color) if color is not None and text else text

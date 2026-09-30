@@ -51,6 +51,7 @@ from netbbs.rendering import (
     colored,
     diff_ansi,
     full_render_ansi,
+    highlight_hotkeys,
     move_cursor,
     sanitize_text,
     truncate,
@@ -640,7 +641,7 @@ async def _flush(session: Session, state: _EditorState, width: int, height: int)
 
 async def _confirm_erase(session: Session) -> bool:
     """Ctrl+E's question (issue #837): one keystroke, Y erases."""
-    await write_prompt(session, "\r\nErase all the text? Ctrl+Y brings it back. [Y]es or [N]o? ")
+    await write_prompt(session, highlight_hotkeys("\r\nErase all the text? Ctrl+Y brings it back. [Y]es or [N]o? "))
     return (await session.read_key()).lower() == "y"
 
 
@@ -652,7 +653,7 @@ async def _confirm_quit(session: Session) -> str:
     it, instead of forcing a choice between finishing now or losing the
     work."""
     await write_prompt(
-        session, "\r\nUnsaved changes. [S]ave, [K]eep draft & exit, [D]iscard, or [C]ancel? "
+        session, highlight_hotkeys("\r\nUnsaved changes. [S]ave, [K]eep draft & exit, [D]iscard, or [C]ancel? ")
     )
     answer = (await session.read_key()).lower()
     if answer == "s":

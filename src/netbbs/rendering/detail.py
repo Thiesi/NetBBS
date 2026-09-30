@@ -26,6 +26,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 from netbbs.rendering.ansi import colored
+from netbbs.rendering.menu import highlight_hotkeys
 from netbbs.rendering.sanitize import sanitize_text
 from netbbs.rendering.theme import (
     LABEL_COLOR,
@@ -147,7 +148,9 @@ def _field_lines(row: Field, *, column: int, width: int) -> list[str]:
     if row.selected:
         head = colored(f"> {label}:", fg_color=row.accent, bold=True)
     else:
-        head = colored(f"{_INDENT}{label}:", fg_color=LABEL_COLOR)
+        # A label that offers a key ("[R]otate") shows it the way a menu does
+        # (issue #974); any other label is untouched.
+        head = highlight_hotkeys(f"{_INDENT}{label}:", color=LABEL_COLOR)
     value_column = len(_INDENT) + column + 2
     stacked = label_size > column or value_column > width - _MIN_VALUE_WIDTH
     # A styled value (a badge, a gauge) cannot be wrapped, so one that does not
