@@ -55,7 +55,12 @@ from netbbs.net.session import (
     clamp_terminal_size,
     wait_until_drained,
 )
-from netbbs.net.terminal_detect import classify_terminal_types, clean_terminal_type, describe_detection
+from netbbs.net.terminal_detect import (
+    classify_terminal_types,
+    clean_terminal_type,
+    describe_detection,
+    terminal_wraps_immediately,
+)
 from netbbs.rendering.charset import ASCII, CP437
 from netbbs.rendering.pipe_codes import PastedColor
 
@@ -268,6 +273,7 @@ class TelnetSession(Session):
         charset, certain = classify_terminal_types(self.terminal_types)
         self.output_charset = self.detected_charset = charset if charset is not None else ASCII
         self.charset_certain = certain
+        self.terminal_wraps_immediately = terminal_wraps_immediately(self.terminal_types)
         outcome = self._ttype_outcome or ("answered" if self.terminal_types else "no answer")
         _logger.info(describe_detection(
             "telnet", self.peer_address, names=self.terminal_types, outcome=outcome,

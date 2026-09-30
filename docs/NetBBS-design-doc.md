@@ -334,6 +334,38 @@ decoration by style use the decorated variant unless the caller's preference is
 ASCII; a CP437 session gets it mapped. An undetected terminal gets ASCII only
 until the question after login settles it.
 
+**Terminals that wrap at once (issue #964).** SyncTERM, like DOS ANSI.SYS,
+moves to the next line the moment it writes a character in the last column;
+xterm and its descendants wait for the next character. On the first kind, a
+row exactly as wide as the screen followed by CR LF leaves a blank line, and
+writing the bottom-right cell scrolls the screen. NetBBS avoids both without
+any screen knowing about it:
+
+- `Session.terminal_width`, the width every screen lays out in, is one column
+  less than the width the terminal reported (`Session.physical_width`) when the
+  session `wraps_immediately`. No generated row reaches the last column, so no
+  row double-spaces and nothing writes the bottom-right cell. Classic BBS
+  software did the same by designing for 79 columns.
+- Which terminals: only one whose type is recognised as a modern UTF-8 emulator
+  (the list above) is trusted to wait. A CP437 name, `ansi`, an unknown name or
+  no answer at all counts as wrapping at once, and so does a caller who chose
+  CP437, since only classic terminals read it. The cost of a wrong guess on a
+  modern terminal is one unused column; the cost the other way is a
+  double-spaced, scrolling screen.
+- Art keeps the full width. SysOp banners and mastheads go through
+  `write_preformatted_line`, which wraps at `physical_width`, so 80-column art
+  keeps all 80 columns. On a terminal that wraps at once, a row that fills the
+  width is sent without its CR LF, because the terminal has already moved to
+  the next line. Banner files also lose the plain spaces at the end of each
+  row when they are loaded (`trim_row_ends`): the art editor saves every row
+  of its 80-column canvas in full, so a 60-column banner arrived as rows of
+  exactly 80. Spaces painted by a background colour or reverse video stay.
+- Doors, the break-in screen copy and the web terminal's door resize use
+  `physical_width`: a door is told the terminal's real size and draws for it
+  itself. The ANSI art editor's canvas stays 80 columns wide; its status line
+  on the bottom row is cut to `terminal_width`, so it never writes the last
+  cell.
+
 A SysOp may override three of the node's branding colors -- accent (board/
 channel/user names and other navigable-item branding), header (section
 titles and frame borders), and clock (the main-menu prompt's time display)

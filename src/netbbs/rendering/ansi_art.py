@@ -112,10 +112,55 @@ def trim_trailing_blank_rows(text: str) -> str:
     return "\n".join(rows).rstrip("\r")
 
 
+_SGR_OR_CHAR = re.compile(r"\x1b\[[0-9;?]*[@-~]|.", re.DOTALL)
+
+
+def _trim_row_end(row: str, painting: bool) -> tuple[str, bool]:
+    """`row` without the plain spaces at its end, and whether spaces are
+    painted once the row is over. Styling codes after the last kept
+    character stay, because they carry into the next row."""
+    cut = 0
+    position = 0
+    for token in _SGR_OR_CHAR.findall(row):
+        position += len(token)
+        match = _CSI.fullmatch(token)
+        if match is not None and match.group(2) == "m":
+            painting = _sgr_paints_spaces(match.group(1), painting)
+            continue
+        if token in (" ", "\t") and not painting:
+            continue
+        # Visible content, a painted blank, or a control (a cursor move, a
+        # carriage return) that the art may rely on.
+        cut = position
+    tail = "".join(token for token in _SGR_OR_CHAR.findall(row[cut:]) if _CSI.fullmatch(token))
+    return row[:cut] + tail, painting
+
+
+def trim_row_ends(text: str) -> str:
+    """`text` with each row's trailing plain spaces removed (issue #964).
+
+    The art editor saves every row of its 80-column canvas in full, so a
+    60-column banner reached the caller as rows of exactly 80 columns. A
+    terminal that wraps as soon as it writes the last column (SyncTERM,
+    DOS ANSI.SYS) then turned each row's CR LF into a second line break,
+    double-spacing the art. A space painted by a background colour or
+    reverse video is kept, including one painted by a colour set on an
+    earlier row, as `trim_trailing_blank_rows` decides it."""
+    rows = text.split("\n")
+    painting = False
+    trimmed: list[str] = []
+    for row in rows:
+        carriage_return = row.endswith("\r")
+        body, painting = _trim_row_end(row[:-1] if carriage_return else row, painting)
+        trimmed.append(body + ("\r" if carriage_return else ""))
+    return "\n".join(trimmed)
+
+
 def decode_banner_bytes(data: bytes) -> str:
     """`decode_ansi_bytes` for art shown as a banner or masthead: decoded,
-    then trimmed of the empty rows at its end (`trim_trailing_blank_rows`)."""
-    return trim_trailing_blank_rows(decode_ansi_bytes(data))
+    trimmed of the plain spaces at the end of each row (`trim_row_ends`)
+    and of the empty rows at its end (`trim_trailing_blank_rows`)."""
+    return trim_trailing_blank_rows(trim_row_ends(decode_ansi_bytes(data)))
 
 
 def encode_ansi_bytes(buffer: ScreenBuffer) -> bytes:

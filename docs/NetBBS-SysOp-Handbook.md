@@ -1321,6 +1321,12 @@ Every caller gets text in the character set their terminal reads:
     terminal called itself and which character set it got, for example
     `telnet caller 203.0.113.9 terminal type: 'syncterm' (answered); character
     set cp437 (certain)`. Look there if a caller's screen looks wrong.
+  - Classic terminals such as SyncTERM jump to the next line as soon as they
+    fill the last column. NetBBS lays out every screen one column narrower for
+    them, so nothing gets double-spaced and the screen doesn't scroll when the
+    bottom row is written. Your banners keep their full width. Plain spaces at
+    the end of each banner row are dropped when it's shown, so draw background
+    colours out to the edge if a row should reach it.
 - **After sign-in:**
   - Each caller's own **Profile → Unicode or CP437** choice applies.
   - A caller whose terminal wasn't recognised is asked once which of two sample

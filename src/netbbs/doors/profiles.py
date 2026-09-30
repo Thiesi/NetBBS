@@ -262,7 +262,7 @@ def terminal_too_small(profile, session) -> bool:
     exempt, because its terminal is resized to the profile's geometry.
     """
     return bool(session is not None and getattr(session, "_door_stream", None) is None and profile.width
-                and (session.terminal_width < profile.width or session.terminal_height < profile.height))
+                and (getattr(session, "physical_width", session.terminal_width) < profile.width or session.terminal_height < profile.height))
 
 
 def preflight(door, session=None, *, check_terminal=True) -> list[str]:
