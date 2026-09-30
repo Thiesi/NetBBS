@@ -44,6 +44,7 @@ from enum import Enum, auto
 from typing import Awaitable, Callable, Protocol, Sequence
 
 from netbbs.net.session import SessionClosedError, secret_input
+from netbbs.net.terminal_detect import delete_key_sends_del
 from netbbs.rendering.ansi import reject_keystroke
 from netbbs.rendering.charset import input_codec
 from netbbs.rendering.pipe_codes import PastedColor
@@ -199,6 +200,14 @@ _CSI_FINAL_TO_KEY: dict[int, str] = {
     0x44: "LEFT",
     0x48: "HOME",
     0x46: "END",
+    # SyncTERM's BBS-convention keys (issue #964; CTerm manual, "Sequences
+    # sent by SyncTERM"): End is ESC[K, Page Up ESC[V, Page Down ESC[U,
+    # Insert ESC[@. No other terminal sends these as keys, so they are
+    # read the same for everyone.
+    0x4B: "END",
+    0x56: "PAGE_UP",
+    0x55: "PAGE_DOWN",
+    0x40: "INSERT",
 }
 
 # Recognized CSI "tilde" forms: ESC [ <param> ~ -- the alternate Home/
@@ -1103,6 +1112,9 @@ async def _read_line_masked(source: ByteSource, write: WriteFunc) -> str:
                 await _consume_optional_lf_or_nul(source)
             break
 
+        if b == _DEL and delete_key_sends_del(source):
+            continue  # SyncTERM's Delete key (issue #964): nothing under a masked cursor
+
         if b in (_BS, _DEL):
             if line:
                 line.pop()
@@ -1186,6 +1198,16 @@ async def _read_line_editable(
                 window.resize(viewport())
             await window.render(write, line, cursor)
 
+    async def delete_under_cursor() -> None:
+        if cursor < len(line):
+            del line[cursor]
+            if window is not None:
+                await show()
+            else:
+                await redraw_tail(write, move_back=0, edit_pos=cursor, line=line, new_cursor=cursor)
+
+    del_is_delete = delete_key_sends_del(source)
+
     if line:
         if window is not None:
             await show()
@@ -1250,6 +1272,11 @@ async def _read_line_editable(
                         window.reset()
                     await write("\r\n")
                     break
+
+                if b == _DEL and del_is_delete:
+                    # SyncTERM's Delete key (issue #964).
+                    await delete_under_cursor()
+                    continue
 
                 if b in (_BS, _DEL):
                     if cursor > 0:
@@ -1340,14 +1367,7 @@ async def _read_line_editable(
                                 await write(move_cursor(display_width("".join(line[cursor:])), forward=True))
                                 cursor = len(line)
                     elif key == "DELETE":
-                        if cursor < len(line):
-                            del line[cursor]
-                            if window is not None:
-                                await show()
-                            else:
-                                await redraw_tail(
-                                    write, move_back=0, edit_pos=cursor, line=line, new_cursor=cursor
-                                )
+                        await delete_under_cursor()
                     elif key == "INSERT":
                         overwrite = not overwrite
                     elif key in ("UP", "DOWN") and history is not None:
@@ -1671,6 +1691,9 @@ async def read_editor_key(
 
         if b == _BS and distinguish_ctrl_h:
             return EditorKey(EditorKeyKind.CTRL, char="h")
+
+        if b == _DEL and delete_key_sends_del(source):
+            return EditorKey(EditorKeyKind.DELETE)  # SyncTERM's Delete key (issue #964)
 
         if b in (_BS, _DEL):
             return EditorKey(EditorKeyKind.BACKSPACE)

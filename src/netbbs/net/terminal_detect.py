@@ -77,3 +77,23 @@ def classify_terminal_types(names: Iterable[str]) -> tuple[Charset | None, bool]
         if name.startswith(UTF8_TERMINAL_PREFIXES):
             return UTF8, True
     return None, False
+
+
+#: Terminals whose Delete key sends 0x7F and Backspace 0x08 (issue #964):
+#: SyncTERM with DECBKM set, its default (CTerm manual, "Sequences sent by
+#: SyncTERM"). `ansi-bbs` is the termcap entry SyncTERM's author publishes.
+#: Everywhere else 0x7F is the Backspace key, as PuTTY and xterm send it.
+DEL_IS_DELETE_TERMINALS = frozenset({"syncterm", "ansi-bbs"})
+
+
+def delete_key_sends_del(session: object) -> bool:
+    """Whether 0x7F from this caller is their Delete key, not Backspace.
+    The first name the client reported that means anything decides, the
+    same rule `classify_terminal_types` follows."""
+    for raw in getattr(session, "terminal_types", ()):
+        name = raw.strip().lower()
+        if name in DEL_IS_DELETE_TERMINALS:
+            return True
+        if name in CP437_TERMINALS or name in LIKELY_CP437_TERMINALS or name.startswith(UTF8_TERMINAL_PREFIXES):
+            return False
+    return False
