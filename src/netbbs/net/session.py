@@ -21,7 +21,9 @@ from typing import TYPE_CHECKING, Awaitable, Callable
 from netbbs.rendering.charset import CP437, UTF8, Charset, map_text
 from netbbs.rendering.pipe_codes import PastedColor
 from netbbs.rendering.reflow import fills_last_column, wrap_terminal_text
+from netbbs.rendering.ansi import strip_ansi
 from netbbs.rendering.terminal_emulator import TerminalEmulator
+from netbbs.rendering.width import display_width
 
 _logger = logging.getLogger(__name__)
 
@@ -90,6 +92,18 @@ def clamp_terminal_size(width: int, height: int) -> tuple[int, int]:
         max(1, min(width, _MAX_TERMINAL_WIDTH)),
         max(1, min(height, _MAX_TERMINAL_HEIGHT)),
     )
+
+
+def post_body_width(session: object, layout: str) -> int:
+    """The width a post body lays out in. An art post (issue #711) is drawn
+    for the terminal's real width, as a banner is, so an 80-column drawing
+    keeps its last column on a terminal that wraps immediately (issue #964);
+    every other body lays out in `Session.terminal_width`. The rows are then
+    written with `write_preformatted_line`, which leaves out the CR LF after
+    a row that fills the width."""
+    if layout == "art":
+        return physical_terminal_width(session)
+    return getattr(session, "terminal_width", 80)
 
 
 def physical_terminal_width(session: object) -> int:
@@ -419,12 +433,15 @@ class Session(ABC):
         """What this caller's terminal shows now, as far as NetBBS's own
         output can tell (issue #764): the SysOp's snoop view reads it, and
         a break-in chat repaints the caller from it. Follows the
-        terminal's reported size."""
+        terminal's reported size, and wraps where it does: at once on a
+        terminal that wraps as soon as it writes the last column (issue
+        #964), else the xterm way."""
         width, height = self.physical_width, self.terminal_height
         if self._screen_copy is None:
             self._screen_copy = TerminalEmulator(width, height)
         else:
             self._screen_copy.resize(width, height)
+        self._screen_copy.wraps_immediately = self.wraps_immediately
         return self._screen_copy
 
     def _copy_output(self, text: str) -> None:
@@ -844,6 +861,18 @@ async def write_preformatted_line(session: Session, text: str) -> None:
     or ``write_prompt``.
     """
     await session.write(preformatted_rows(session, text))
+
+
+async def write_laid_out_row(session: Session, row: str) -> None:
+    """Write one row of a screen that laid its rows out itself (a detail
+    view, the review screen). A row wider than the layout width can only be
+    art drawn for the terminal's real width -- an art post's body, issue
+    #964 -- and goes out as art does (`write_preformatted_line`), keeping its
+    last column; every other row is an ordinary `write_line`."""
+    if display_width(strip_ansi(row).rsplit("\r\n", 1)[-1]) > session.terminal_width:
+        await write_preformatted_line(session, row)
+    else:
+        await session.write_line(row)
 
 
 def preformatted_rows(session: object, text: str) -> str:

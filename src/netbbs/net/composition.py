@@ -17,7 +17,7 @@ from netbbs.net.char_input import CANCEL_KEY, HELP_KEY, EditorKey, EditorKeyKind
 from netbbs.net.draft_storage import delete_draft, load_draft, offer_draft_recovery, save_draft
 from netbbs.net.help_overlay import show_help
 from netbbs.net.notices import take_notices, write_notices
-from netbbs.net.session import Session, write_prompt
+from netbbs.net.session import Session, post_body_width, write_laid_out_row, write_prompt
 from netbbs.net.session_activity import records_activity
 from netbbs.digits import is_ascii_number
 from netbbs.quoting import is_attribution
@@ -747,7 +747,9 @@ async def review_composition(
     if body_mode is None:
         body_rows = _preview_body(body, width).split("\n")
     else:
-        body_rows = list(post_body_rows(body, width, body_mode, truecolor=truecolor, layout=body_layout))
+        body_rows = list(post_body_rows(
+            body, post_body_width(session, body_layout), body_mode, truecolor=truecolor, layout=body_layout
+        ))
     blocks = render_sections([Section(None, [Styled(body_rows)])], width=width, unicode_style=unicode_style)
     # An outcome carried in from the step before (a refused Send, a subject
     # too long) stays above the prompt until a page is turned, as on
@@ -852,8 +854,10 @@ async def review_composition(
         # this redraw would erase a line written before it (issue #680).
         rows.extend(message_rows)
         lead = clear_screen() if redraw_in_place else "\r\n"
+        # An art post's rows are drawn for the terminal's real width (issue
+        # #964): `write_laid_out_row` keeps them whole.
         for index, row in enumerate(rows):
-            await session.write_line((lead if index == 0 else "") + row)
+            await write_laid_out_row(session, (lead if index == 0 else "") + row)
         await session.write("Choice: ")
 
     await draw()

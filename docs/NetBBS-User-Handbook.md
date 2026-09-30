@@ -518,12 +518,15 @@ A Zmodem terminal such as SyncTERM starts its side of the transfer by itself:
 it saves a download, or asks which file to upload. If yours doesn't, start its
 Zmodem receive or send by hand. Press **Ctrl-X** five times to cancel a
 transfer. If a Zmodem transfer fails, you stay on the file list: press **[W]**
-there for a browser link instead.
+there for a browser link instead. After a Zmodem upload you are back on the
+file list too, with the cursor on the new file, so **[E]** describes it
+straight away.
 
 When you upload through a browser link, the terminal tells you once the file
 has arrived, and whether it waits for approval before others can see it. In
-the browser terminal the list updates by itself; elsewhere, press Ctrl-L on
-the file list to see the new file.
+the browser terminal the list updates by itself; elsewhere the list shows the
+new file the next time it is drawn, for example when you press Ctrl-L. The
+message names the file area the file went to in its own color.
 
 Treat a transfer link like a password: it grants access to that transfer.
 Links expire; request a fresh one if needed. A remote file may first need

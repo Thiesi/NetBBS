@@ -15,12 +15,21 @@ import re
 import pytest
 
 from netbbs.net.ansi_editor import edit_ansi_art
-from netbbs.net.session import Session, physical_terminal_width, preformatted_rows
+from netbbs.net.session import (
+    Session,
+    physical_terminal_width,
+    post_body_width,
+    preformatted_rows,
+    write_laid_out_row,
+)
 from netbbs.net.ssh import SSHSession
 from netbbs.net.terminal_detect import terminal_wraps_immediately
 from netbbs.rendering.ansi_art import decode_banner_bytes, trim_row_ends
 from netbbs.rendering.charset import CP437, UTF8
+from netbbs.rendering.ansi import strip_ansi
+from netbbs.rendering.post_body import post_body_rows
 from netbbs.rendering.reflow import fills_last_column
+from netbbs.rendering.terminal_emulator import TerminalEmulator
 from tests.test_ansi_editor import FakeSession as EditorSession
 from tests.test_terminal_detect import _Process, _connect
 from tests.test_telnet import answer_terminal_type
@@ -186,3 +195,63 @@ def test_art_editor_status_line_never_reaches_the_last_column(tmp_path):
     ]
     assert status
     assert all(len(line) <= 79 for line in status)
+
+
+# -- art posts and the screen copy (issue #964, findings 9 and 10) -----------
+
+
+def test_an_art_post_is_laid_out_for_the_terminals_real_width():
+    session = _Session(width=80, wraps=True)
+    assert post_body_width(session, "art") == 80
+    assert post_body_width(session, "prose") == 79
+    assert post_body_width(_Session(width=80, wraps=False), "art") == 80
+
+
+def test_an_80_column_art_post_keeps_its_last_column_on_a_classic_terminal():
+    session = _Session(width=80, wraps=True)
+    drawing = "#" * 80 + "\n" + "=" * 10
+    rows = post_body_rows(drawing, post_body_width(session, "art"), "plain", truecolor=False, layout="art")
+    assert [strip_ansi(row) for row in rows] == ["#" * 80, "=" * 10]
+
+    async def scenario():
+        for row in rows:
+            await write_laid_out_row(session, row)
+
+    asyncio.run(scenario())
+    sent = strip_ansi("".join(session.written))
+    # Whole, and with no CR LF after the full row: the terminal is already
+    # on the next line.
+    assert sent == "#" * 80 + "=" * 10 + "\r\n"
+
+
+def test_an_ordinary_laid_out_row_is_an_ordinary_line():
+    session = _Session(width=80, wraps=True)
+    asyncio.run(write_laid_out_row(session, "Choice"))
+    assert "".join(session.written) == "Choice\r\n"
+
+
+def test_the_screen_copy_wraps_where_a_classic_terminal_does():
+    copy = TerminalEmulator(10, 3, wraps_immediately=True)
+    copy.feed("#" * 10 + "\r\nnext")
+    # The full row already moved the cursor down: CR LF adds a blank row.
+    assert copy.text_rows() == ["#" * 10, " " * 10, "next" + " " * 6]
+
+
+def test_the_screen_copy_scrolls_at_the_bottom_right_cell_on_a_classic_terminal():
+    copy = TerminalEmulator(4, 2, wraps_immediately=True)
+    copy.feed("aaaa" + "bbbb")
+    assert copy.text_rows() == ["bbbb", "    "]
+    assert (copy.row, copy.col) == (1, 0)
+
+
+def test_the_screen_copy_waits_to_wrap_like_xterm_otherwise():
+    copy = TerminalEmulator(10, 3)
+    copy.feed("#" * 10 + "\r\nnext")
+    assert copy.text_rows() == ["#" * 10, "next" + " " * 6, " " * 10]
+
+
+def test_a_sessions_screen_copy_follows_its_terminal():
+    session = _Session(width=10, wraps=True)
+    assert session.screen_copy().wraps_immediately
+    session.terminal_wraps_immediately = False
+    assert not session.screen_copy().wraps_immediately
