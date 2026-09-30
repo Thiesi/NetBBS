@@ -91,8 +91,7 @@ class CaptureSession(FakeSession):
         super().__init__([])
         self.inputs: asyncio.Queue[str] = asyncio.Queue()
 
-    async def read_line(self, echo=True, history=None, completer=None, *,
-                        live_buffer=None, lock=None, list_candidates=None):
+    async def read_line(self, echo=True, history=None, completer=None, **kwargs):
         return await self.inputs.get()
 
 

@@ -94,9 +94,14 @@ async def capture() -> str:
         register("Global War", "dos-global-war",
                  "DOS 2.7, turn-based conquest.",
                  install_dir="/var/games/netbbs/globalwar")
-        register("Voidrunner", "native-stdio", "Native NetBBS door, sandboxed.")
+        register("Voidrunner", "native-stdio", "Native bundled space game.")
         register("Retro Trivia", "native-stdio", "Native bundled quiz door.")
         register("Barren Realms Elite", "remote-doorparty", "Operator-run tunnel.")
+        # The picker never shows the codes file; its path only has to be
+        # absolute on the machine taking the capture.
+        bbslink = preset("remote-bbslink")["profile"]["options"]
+        register("BBSLink", "remote-bbslink", "Dozens of classic doors from one service.",
+                 options=dict(bbslink, credential_file=str(tmp / "bbslink.credentials.json")))
 
         session = CaptureSession()
         await browse_doors(session, lane, caller)
