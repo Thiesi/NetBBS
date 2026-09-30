@@ -38,6 +38,7 @@ from typing import Awaitable, Callable
 
 import asyncssh
 import nacl.signing
+from asyncssh.constants import MSG_IGNORE
 
 from netbbs.auth.users import (
     MIN_REGISTRATION_PASSWORD_LENGTH,
@@ -103,6 +104,47 @@ DEFAULT_STOP_TIMEOUT_SECONDS = 5.0
 # benefit from the traffic), so there's nothing a SysOp would tune.
 SSH_KEEPALIVE_INTERVAL_SECONDS = 30.0
 SSH_KEEPALIVE_COUNT_MAX = 3
+
+
+def _drop_ignore_padding_before_auth(conn: asyncssh.SSHServerConnection) -> None:
+    """
+    Stop asyncssh putting an empty SSH_MSG_IGNORE in front of every packet
+    it sends while the caller is still authenticating (issue #964, finding
+    13).
+
+    asyncssh sends that IGNORE ahead of each encrypted packet past key
+    exchange. Cryptlib's client, which SyncTERM 1.9 uses, reads handshake
+    packets in a loop that skips IGNORE, DEBUG and USERAUTH_BANNER and gives
+    up once the loop has run more than three times, counting the packet
+    that ends it (session/ssh2_rd.c, `readHSPacketSSH2`). The pre-auth
+    banner therefore reached it as IGNORE, BANNER, IGNORE, FAILURE, and
+    SyncTERM failed with "Error -30 activating session". Without the
+    padding it's BANNER, FAILURE.
+
+    The padding is a countermeasure for CBC ciphers' predictable IVs, and
+    this server offers none: asyncssh's defaults here are ChaCha20-Poly1305,
+    AES-GCM and AES-CTR only. Once authentication completes it is left
+    exactly as asyncssh does it.
+
+    The IGNORE is sent through `conn.send_packet`, looked up on the
+    instance, from inside the send of the packet it precedes, so a wrapper
+    on the instance sees it while that outer send is in progress.
+    """
+    send_packet = getattr(conn, "send_packet", None)
+    if send_packet is None or not hasattr(conn, "_auth_complete"):
+        return
+    sending: list[bool] = []
+
+    def send_without_preauth_padding(pkttype: int, *args: bytes, **kwargs) -> None:
+        if pkttype == MSG_IGNORE and sending and not conn._auth_complete:
+            return
+        sending.append(True)
+        try:
+            send_packet(pkttype, *args, **kwargs)
+        finally:
+            sending.pop()
+
+    conn.send_packet = send_without_preauth_padding  # type: ignore[method-assign]
 
 
 def ensure_host_key(db: Database) -> Path:
@@ -425,6 +467,7 @@ class _NetBBSSSHServer(asyncssh.SSHServer):
         peer = conn.get_extra_info("peername")
         self._peer_address = peer[0] if peer else None
         self._conn = conn
+        _drop_ignore_padding_before_auth(conn)
         if self._on_connection_made is not None:
             self._on_connection_made(conn)
 
