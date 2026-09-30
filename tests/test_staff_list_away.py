@@ -164,6 +164,21 @@ def test_a_read_or_post_grant_alone_does_not_make_a_moderator(db, sysop):
     ]
 
 
+def test_access_bits_merged_into_a_moderator_grant_are_not_listed(db, sysop):
+    board = create_board(db, "Announcements", creator=sysop)
+    mod = create_user(db, "Serif", password="hunter2")
+    # Both land in one grant row for the board.
+    grant_permissions(
+        db, mod, object_type="board", object_id=board.id,
+        permissions=BoardPermission.READ | BoardPermission.WRITE, granted_by=sysop,
+    )
+    grant_permissions(
+        db, mod, object_type="board", object_id=board.id, permissions=BoardPermission.APPROVE, granted_by=sysop
+    )
+    [entry] = [e for e in list_staff(db) if e.role == "Moderator"]
+    assert [grant.permissions for grant in entry.grants] == [int(BoardPermission.APPROVE)]
+
+
 def test_the_staff_list_screen_shows_last_session_dates_and_who_is_away(db, lane, sysop):
     set_away(db, sysop, "At a pen show", node_today(db) + datetime.timedelta(days=3))
     carol = create_user(db, "carol", password="hunter2")
