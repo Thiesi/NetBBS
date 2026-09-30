@@ -514,7 +514,7 @@ under **Users** and choose **Staff**:
 | --- | --- |
 | Approve accounts | Approve or decline signups waiting under approval-required registration |
 | Manage accounts | Disable and re-enable accounts, reset passwords, set levels from 0 to 254 |
-| Moderate everything | Act as moderator on every board, file area and chat channel, local and carried |
+| Moderate everything | Act as moderator on every board, file area and chat channel, local and carried. It also lets them read and post on every board and file area whatever its level; age and verified-name gates still apply |
 
 **Co-SysOp** on the same screen sets all three in one step. Every change asks
 for confirmation first and is audit-logged, and you can remove any permission

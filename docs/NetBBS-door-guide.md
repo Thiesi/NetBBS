@@ -394,7 +394,7 @@ not configure a scheduler, remote storage, or automatic deletion.
 | Global War 2.7 DOS demo | DOSBox-X built-in UART | NetBSD game creation; NetBSD/Debian saved waiting-game re-entry and normal quit; a full three-player match is not certified |
 | TradeWars 2002 3.09 DOS demo | DOSBox-X + BNU 1.70 | NetBSD player/ship/planet creation; NetBSD/Debian persistent universe re-entry and normal quit |
 | Remote RFC 1282 | Operator-run SSH/TLS tunnel, provider access | Real loopback handshake tests; live third-party accounts not certified |
-| BBSLink | Provider codes; plaintext HTTP + Telnet | Protocol and account confirmed live by a standalone probe from a NetBSD 11 node (issue #565); the connector's handshake, Telnet negotiation, refusal and handshake serialisation are tested against loopback fakes. NetBBS itself against the live service is not yet certified |
+| BBSLink | Provider codes; plaintext HTTP + Telnet | NetBBS's connector verified against the live service from a NetBSD 11 lab node over SSH, Telnet and the web terminal at 80x24 (issue #565): picker to game, identity, CP437 output, exit, provider down, refused codes and a second caller turned away. A session reaching the time limit, 8-bit caller input and several callers with `max_sessions` raised are not certified |
 | Foreign-platform VM | External qemu 11.1 + the SysOp's guest image | NetBSD 11 amd64 (itself a VMware guest), `tcg`, recipe Alpine guest: capability probe, and Amiga Empire 0.13.1 (Linux x86_64, static) player creation, persistent re-entry, normal quit and caller hangup. `nvmm`/`kvm` and other guests are not certified; the runtime contract is tested against a fake qemu on every host |
 
 On both NetBSD and Debian, native and DOS serial fixtures pass over real Telnet, SSH and
@@ -1572,6 +1572,9 @@ before launch, as for any remote service.
 - **Guests:** the user number is the account's, so everybody signed in as the
   guest account would share one BBSLink player. Keep the door's play level
   above the guest account's, and start at SysOp only.
+- **Test copies:** BBSLink keys players by system code plus user number, so a
+  lab or staging copy of a node that uses the node's codes plays as the
+  node's own callers. Give a test node codes of its own.
 - **No files, no outbound hook:** BBSLink shares nothing with this node, so
   there is no drop file and [outbound posting](#letting-a-door-post-to-boards-and-chat)
   cannot apply.
