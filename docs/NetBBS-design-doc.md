@@ -394,8 +394,7 @@ any screen knowing about it:
 **SysOp art: storage and SAUCE (issue #929).** A banner or masthead is the
 `.ans` file on disk, exactly as uploaded or saved; there is no second copy in
 the database, so a SysOp editing the file over SFTP changes what callers see.
-Everything below happens when the file is read, and is cached by the file's
-modification time:
+Everything below happens each time the file is read:
 
 - A SAUCE record ([spec](https://www.acid.org/info/sauce/sauce.htm)) is parsed
   and removed before display: the 128-byte record, its optional comment block
