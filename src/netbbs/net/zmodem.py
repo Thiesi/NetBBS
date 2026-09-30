@@ -504,10 +504,11 @@ async def _scan_header(session: Session) -> _Header:
                     continue
                 crc32 = True
         else:
-            # ZDLE CAN counts towards a cancel; anything else is noise
-            # that merely looked like the start of a header.
+            # ZDLE CAN is two CANs towards a cancel (ZDLE is the same
+            # byte); anything else is noise that merely looked like the
+            # start of a header.
             if kind == CAN:
-                cans = 1
+                cans = 2
             continue
         position = payload[1] | (payload[2] << 8) | (payload[3] << 16) | (payload[4] << 24)
         return _Header(payload[0], position, crc32)
