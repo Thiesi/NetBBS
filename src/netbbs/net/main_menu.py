@@ -70,7 +70,7 @@ from netbbs.net.profile_flow import (
 )
 from netbbs.net.redraw_preference import redraw_in_place_enabled
 from netbbs.net.scan_and_find import _find_screen, _new_scan_screen
-from netbbs.net.session import Session, write_preformatted_line, write_prompt
+from netbbs.net.session import Session, write_prompt
 from netbbs.net.session_activity import activity, set_root_activity
 from netbbs.net.session_registry import ActiveSessionRegistry
 from netbbs.net.shutdown import NodeControls, format_remaining_seconds
