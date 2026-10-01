@@ -458,10 +458,12 @@ token places it. The main menu, welcome and logoff banners use slots today;
 the three lists, hand-drawn items and pacing below are being built.
 
 *List screens.* The Boards, file areas and Chat channels lists take a `{list
-WxH}` region. The current page fills it, one row per entry: the page number,
-the name, and one compact column the screen chooses (unread posts for boards,
-files for areas, people for channels). Descriptions and full tables appear
-only on the generated list. A page holds as many entries as the region has
+WxH}` region. The current page fills it, one row per entry: the number to
+press for it, the name, and one compact column the screen chooses (unread
+posts for boards, files for areas, people for channels). A channel whose name
+requirement the caller does not meet shows "needs verification" in that
+column instead, so the gate note §3.6 requires survives in art too.
+Descriptions and full tables appear only on the generated list. A page holds as many entries as the region has
 rows; numbering, one-digit selection, browser clicks, search and the paging
 keys work as on the generated list, and the navigation block and prompt go
 below the art unless `{prompt}` places it. The cursor row is drawn reversed in
