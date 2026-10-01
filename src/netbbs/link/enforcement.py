@@ -8,6 +8,7 @@ storage, and rendering code.  Callers dispatch it through ``DatabaseLane``.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from enum import StrEnum
 import json
 from typing import Any
@@ -17,6 +18,7 @@ from netbbs.link.trust import (
     TrustState,
     TrustSubject,
     get_effective_trust_state,
+    record_activity,
     register_subject,
 )
 from netbbs.storage.database import Database
@@ -81,6 +83,57 @@ def ensure_event_author_subject(
         now = accepted_at or utc_now_iso()
         register_subject(db, subject, first_accepted_at=now, now_iso=now)
     return subject
+
+
+def record_direct_activity(db: Database, fingerprint: str, *, now_iso: str | None = None) -> None:
+    """Count today as a day of verified direct interaction with node
+    `fingerprint` (design doc §12.4, issue #1035): a hello completed in
+    either direction, or a push it made that this node accepted. Three such
+    UTC dates are one of the conditions for graduating from probation."""
+    now_value = now_iso or utc_now_iso()
+    ensure_node_subject(db, fingerprint, accepted_at=now_value)
+    _record_activity_day(db, TrustSubject.node(fingerprint), direct=True, now_iso=now_value)
+
+
+def record_author_activity(
+    db: Database, envelope: dict[str, Any], *, now_iso: str | None = None
+) -> TrustSubject | None:
+    """Register an accepted event's author, as `ensure_event_author_subject`
+    does, and count today as a day of accepted activity for a remote user
+    (design doc §12.4, issue #1035). A node author's days come from direct
+    interaction instead (`record_direct_activity`): content a carrier
+    brings is not an interaction with its origin."""
+    now_value = now_iso or utc_now_iso()
+    subject = ensure_event_author_subject(db, envelope, accepted_at=now_value)
+    if subject is not None and subject.kind == "user":
+        _record_activity_day(db, subject, direct=False, now_iso=now_value)
+    return subject
+
+
+def _record_activity_day(db: Database, subject: TrustSubject, *, direct: bool, now_iso: str) -> None:
+    """One write per subject per UTC date: `record_activity` recomputes the
+    subject's trust, which a busy author must not pay for on every event."""
+    # A restricted subject banks no days (review of #1038). Policy lets a
+    # quarantined node still say hello and rotate keys, so without this it
+    # could gather three days while quarantined and graduate straight to
+    # established when its trigger clears. Every hook site goes through here.
+    restricted = db.connection.execute(
+        """SELECT 1 FROM link_trust_effective_states
+           WHERE subject_id = ? AND state IN ('quarantined', 'blocked')""",
+        (subject.subject_id,),
+    ).fetchone()
+    if restricted is not None:
+        return
+    moment = datetime.fromisoformat(now_iso.replace("Z", "+00:00")).astimezone(timezone.utc)
+    activity_date = moment.date().isoformat()
+    row = db.connection.execute(
+        """SELECT direct FROM link_trust_activity_days
+           WHERE subject_id = ? AND activity_date = ?""",
+        (subject.subject_id, activity_date),
+    ).fetchone()
+    if row is not None and row["direct"] >= int(direct):
+        return
+    record_activity(db, subject, activity_date=activity_date, direct=direct, now_iso=now_iso)
 
 
 def _state(db: Database, subject: TrustSubject, dimension: TrustDimension) -> TrustState:
