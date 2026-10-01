@@ -6579,7 +6579,10 @@ confirmed key compromise also requires SysOp review or verified root-key
 recovery; scoped resource/content restrictions may recover automatically.
 
 Effective state is a persisted projection recomputed transactionally on input
-changes and startup. For every restriction the SysOp can inspect the subject,
+changes, at startup, and on every Link sync pass. The last is for changes due to
+time alone (a recovery hold's release, an override's or a signal's expiry,
+probation's age requirement), which have no input change of their own; without
+it a running node applied them only at its next restart (issue #802). For every restriction the SysOp can inspect the subject,
 dimension, effects, rule/threshold, evidence, counted domains/weights, times,
 overrides, audit history, and requirements for release. Caller-facing behavior
 states that local policy restricted content/delivery without claiming a
