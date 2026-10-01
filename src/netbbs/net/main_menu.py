@@ -51,7 +51,7 @@ from netbbs.net.door_flow import _visible_doors, browse_doors, has_visible_doors
 from netbbs.net.file_flow import browse_file_areas, visible_areas
 from netbbs.net.mail_arrivals import NOTICE_COLOR as NEW_MAIL_COLOR, arrival_event, login_mail_notice, waiting_mail_counts
 from netbbs.net.mail_flow import browse_mail, caller_mail_refusal
-from netbbs.net.art_pacing import MAIN_MENU_ART, art_speed, write_paced_art, write_paced_text
+from netbbs.net.art_pacing import MAIN_MENU_ART, art_speed, write_paced_art, write_paced_art_text
 from netbbs.net.main_menu_banner import load_main_menu_banner, load_main_menu_slot_art
 from netbbs.net.menu_description_preference import menu_description_level
 from netbbs.net.node_theme import (
@@ -70,7 +70,11 @@ from netbbs.net.profile_flow import (
 )
 from netbbs.net.redraw_preference import redraw_in_place_enabled
 from netbbs.net.scan_and_find import _find_screen, _new_scan_screen
-from netbbs.net.session import Session, write_prompt
+from netbbs.net.session import (
+    Session,
+    physical_terminal_width,
+    write_prompt,
+)
 from netbbs.net.session_activity import activity, set_root_activity
 from netbbs.net.session_registry import ActiveSessionRegistry
 from netbbs.net.shutdown import NodeControls, format_remaining_seconds
@@ -416,7 +420,7 @@ async def _draw_main_menu(
         (f"level {user.user_level}", VALUE_COLOR),
         *([mail_status] if has_mail else []),
     ]
-    masthead = load_main_menu_banner(db)
+    masthead = load_main_menu_banner(db, max_width=physical_terminal_width(session))
     redraw = redraw_in_place_enabled(db, user)
     title = screen_title(
         "Main menu",
@@ -576,7 +580,7 @@ async def _draw_slot_main_menu(
         return False
     # Paced on the first main menu of the connection only (issue #929),
     # revealed top to bottom.
-    await write_paced_text(session, plan.text, speed=speed, once=MAIN_MENU_ART)
+    await write_paced_art_text(session, plan.text, speed=speed, once=MAIN_MENU_ART)
     await session.write(move_cursor(art.height + 1, 1))
     for line in extra_lines:
         await session.write_line(line)

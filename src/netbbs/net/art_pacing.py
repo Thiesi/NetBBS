@@ -32,7 +32,7 @@ import time
 from collections.abc import Awaitable, Callable
 
 from netbbs.config import get_config, set_config
-from netbbs.net.session import Session, preformatted_rows, write_art_text
+from netbbs.net.session import Session, prepare_art_text, preformatted_rows, send_art_text
 from netbbs.rendering.charset import ASCII
 from netbbs.storage.database import Database
 
@@ -104,15 +104,17 @@ def _played(session: Session) -> set[str]:
 async def write_paced_art(session: Session, text: str, *, speed: int, once: str) -> None:
     """`write_preformatted_line` for art that may be paced: `text` is laid
     out the same way, then sent at `speed` if `will_pace` says so."""
-    rows = preformatted_rows(session, text)
-    await _write_paced(session, rows, speed=speed, once=once, write=lambda part: write_art_text(session, part))
+    await write_paced_art_text(session, preformatted_rows(session, text), speed=speed, once=once)
 
 
-async def write_paced_text(session: Session, text: str, *, speed: int, once: str) -> None:
-    """`Session.write` for screen text that may be paced, such as slot art
-    already drawn into cursor-positioned rows (`render_slot_art`): it is
-    revealed top to bottom."""
-    await _write_paced(session, text, speed=speed, once=once, write=session.write)
+async def write_paced_art_text(session: Session, text: str, *, speed: int, once: str) -> None:
+    """`write_art_text` for laid-out art that may be paced, such as slot art
+    drawn into cursor-positioned rows (`render_slot_art`), revealed top to
+    bottom. The whole art is prepared once (`prepare_art_text`: iCE colours,
+    CTerm's bright backgrounds), so no chunk loses a colour state an earlier
+    chunk set."""
+    prepared = prepare_art_text(session, text)
+    await _write_paced(session, prepared, speed=speed, once=once, write=lambda part: send_art_text(session, part))
 
 
 async def _write_paced(

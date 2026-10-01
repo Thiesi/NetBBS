@@ -10,9 +10,17 @@ import asyncio
 import pytest
 
 from netbbs.net import art_pacing, char_input
-from netbbs.net.art_pacing import MAX_PACED_SECONDS, pace, set_art_speed, art_speed, will_pace, write_paced_art
-from netbbs.rendering.ansi_art import decode_banner_bytes, revisits_rows
-from netbbs.rendering.charset import ASCII, UTF8
+from netbbs.net.art_pacing import (
+    MAX_PACED_SECONDS,
+    art_speed,
+    pace,
+    set_art_speed,
+    will_pace,
+    write_paced_art,
+    write_paced_art_text,
+)
+from netbbs.rendering.ansi_art import decode_banner_bytes, decode_banner_bytes_fitting, revisits_rows
+from netbbs.rendering.charset import ASCII, CP437, UTF8
 
 ESC = "\x1b"
 
@@ -189,6 +197,11 @@ def test_an_ansimation_keeps_its_row_ends() -> None:
     assert decode_banner_bytes(frame) == frame.decode()
 
 
+def test_an_ansimation_that_fits_keeps_its_row_ends_too() -> None:
+    frame = b"\x1b[1;1HHELLO   \r\n\x1b[1;1HHI     \r\n"
+    assert decode_banner_bytes_fitting(frame, 80) == frame.decode()
+
+
 def test_still_art_is_still_trimmed() -> None:
     still = b"HELLO     \r\n\r\n"
     assert not revisits_rows(still.decode())
@@ -197,3 +210,17 @@ def test_still_art_is_still_trimmed() -> None:
 
 def test_the_art_kinds_have_their_own_speeds() -> None:
     assert art_pacing.WELCOME_ART != art_pacing.MAIN_MENU_ART
+
+
+def test_paced_art_is_prepared_once_so_no_chunk_loses_its_colours() -> None:
+    # iCE colours (blink + background) become a bright background, and a
+    # CP437 terminal gets CTerm's bright-background mode around the whole art
+    # once -- not around every chunk.
+    session = _Stub()
+    session.output_charset = CP437
+    art = f"{ESC}[5;44m" + "x" * 100 + f"{ESC}[0m"
+    _run(write_paced_art_text(session, art, speed=2400, once="main_menu"))
+    sent = "".join(session.writes)
+    assert len(session.writes) > 1
+    assert sent.startswith(f"{ESC}[?33h") and sent.endswith(f"{ESC}[?33l")
+    assert sent.count(f"{ESC}[?33h") == 1

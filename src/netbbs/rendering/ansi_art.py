@@ -201,10 +201,92 @@ def decode_banner_bytes(data: bytes) -> str:
     and of the empty rows at its end (`trim_trailing_blank_rows`). Art that
     goes back to earlier rows (`revisits_rows`, an ANSImation) is left as
     drawn: a trimmed space there would leave part of an earlier frame."""
-    text = decode_ansi_bytes(data)
+    return trim_still_art(decode_ansi_bytes(data))
+
+
+def trim_still_art(text: str) -> str:
+    """`trim_row_ends` and `trim_trailing_blank_rows`, except for art that
+    goes back over rows it drew (`revisits_rows`, an ANSImation): its
+    trailing spaces may be erasing an earlier frame (issue #929)."""
     if revisits_rows(text):
         return text
     return trim_trailing_blank_rows(trim_row_ends(text))
+
+
+def decode_banner_bytes_fitting(data: bytes, max_width: int | None) -> str | None:
+    """`decode_banner_bytes`, or `None` when the art's SAUCE record says it
+    was drawn wider than `max_width` columns (issue #929): a screen shows
+    what it shows without art rather than wrap every row of the drawing.
+    `max_width` None means no limit is known (an SSH auth banner)."""
+    text, sauce = decode_art_bytes(data)
+    if max_width is not None and sauce is not None and sauce.width is not None and sauce.width > max_width:
+        return None
+    return trim_still_art(text)
+
+
+_BASIC_BACKGROUNDS = range(40, 48)
+_BRIGHT_BACKGROUND_OFFSET = 60  # 40-47 -> 100-107
+
+
+def ice_to_bright_background(text: str) -> str:
+    """Art with iCE colours made explicit (issue #929): blink set together
+    with one of the eight basic background colours becomes that colour's
+    bright variant (40-47 -> 100-107) and no blink. Classic art used the
+    blink attribute that way (iCE colours), and every terminal that does
+    not would make the art blink instead. Blink without a background
+    colour is left alone, and so is everything else in the art."""
+    blink = False
+    background: int | None = None  # a basic background (40-47), if set
+    blink_shown = False  # whether the terminal currently has blink on
+
+    def rewrite(match: re.Match[str]) -> str:
+        nonlocal blink, background, blink_shown
+        if match.group(2) != "m":
+            return match.group(0)
+        raw = match.group(1)
+        if "?" in raw:
+            return match.group(0)
+        params = [p for p in raw.split(";")] if raw else ["0"]
+        out: list[str] = []
+        touched = False
+        i = 0
+        while i < len(params):
+            value = int(params[i]) if is_ascii_number(params[i]) else 0
+            if value == 0:
+                blink, background, blink_shown = False, None, False
+                out.append(params[i] or "0")
+            elif value in (5, 6):
+                blink, touched = True, True
+            elif value == 25:
+                blink, touched = False, True
+            elif value in _BASIC_BACKGROUNDS:
+                background, touched = value, True
+            elif value in (38, 48) and i + 1 < len(params):
+                extra = 2 if params[i + 1] == "5" else 4 if params[i + 1] == "2" else 0
+                if value == 48:
+                    background, touched = None, True
+                out.extend(params[i : i + 1 + extra])
+                i += extra
+            else:
+                if value == 49 or 100 <= value <= 107:
+                    background, touched = None, True
+                out.append(params[i])
+            i += 1
+        if touched:
+            ice = blink and background is not None
+            if background is not None:
+                out.append(str(background + (_BRIGHT_BACKGROUND_OFFSET if ice else 0)))
+            want_blink = blink and not ice
+            if want_blink and not blink_shown:
+                out.append("5")
+            elif not want_blink and blink_shown:
+                out.append("25")
+            blink_shown = want_blink
+        if not out:
+            return ""
+        return f"\x1b[{';'.join(out)}m"
+
+    return _CSI.sub(rewrite, text)
 
 
 def encode_ansi_bytes(buffer: ScreenBuffer) -> bytes:
