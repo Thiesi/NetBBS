@@ -5195,6 +5195,43 @@ def test_slot_preview_counts_whos_online_and_ignores_the_sysops_own_mail(db, sys
     assert "[W]ho's online" not in "".join(_visible(e) for e in main_menu_entries(session, db, sysop).labels)
 
 
+def test_masthead_preview_in_slots_mode_says_when_the_art_is_switched_off(db, lane, sysop):
+    from netbbs.net.banner_presets import load_main_menu_banner_preset
+    from netbbs.net.main_menu_banner import SLOTS_MODE, main_menu_banner_path, set_main_menu_art_mode
+
+    _keys, preset = _slot_preset_keys()
+    main_menu_banner_path(db).write_bytes(load_main_menu_banner_preset(preset))
+    set_main_menu_art_mode(db, SLOTS_MODE)  # enabled is still off
+    session = FakeSession(["s", "m", "m", "m", "p", " ", " ", "b", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    assert _visible(_written_text(session)).count("it's switched off. Use [E]nable.") == 2
+
+
+def test_every_slot_sample_fits_a_sysops_longest_menu(db, sysop):
+    from netbbs.net.banner_presets import MAIN_MENU_BANNER_PRESETS, load_main_menu_banner_preset
+    from netbbs.net.main_menu import slot_menu_preview
+    from netbbs.rendering import decode_banner_bytes
+    from netbbs.rendering.art_slots import layout_menu_slot, parse_slot_art
+
+    samples = [p for p in MAIN_MENU_BANNER_PRESETS if p.mode == "slots"]
+    assert len(samples) >= 2
+    for preset in samples:
+        art = parse_slot_art(decode_banner_bytes(load_main_menu_banner_preset(preset)))
+        assert art.problems == (), preset.key
+        for level in (None, 0):
+            plan = slot_menu_preview(FakeSession(), db, sysop, art, level=level)
+            assert plan.text is not None, (preset.key, level, plan.reason)
+        # Every optional item at once, with long counts: the longest menu
+        # any caller can have (main_menu_entries' full set).
+        longest = [
+            "[M]essage boards", "[C]hat", "[F]iles", "[G]ames", "C[o]mmunities", "[N]ew scan", "[/] Find",
+            "[?] Help", "[D]irectory", "[P]rofile", "[E]-mail (999 unread)", "[H]istory", "P[r]evious callers",
+            "[W]ho's online", "S[t]aff list", "[I]nvitations", "[V]erify", "[S]ysOp", "Moder[a]tion (999)",
+            "[S]taff", "[L]ogoff",
+        ]
+        assert layout_menu_slot(longest, art.menu.width, art.menu.height) is not None, preset.key
+
+
 def test_masthead_gallery_applying_a_slot_preset_makes_it_the_menu(db, lane, sysop):
     from netbbs.net.banner_presets import load_main_menu_banner_preset
     from netbbs.net.main_menu_banner import SLOTS_MODE, main_menu_art_mode, main_menu_banner_path

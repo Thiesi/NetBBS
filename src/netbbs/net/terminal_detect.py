@@ -95,6 +95,29 @@ def classify_terminal_types(names: Iterable[str]) -> tuple[Charset | None, bool]
     return None, False
 
 
+#: Terminals that show direct colour (`CSI 38;2;R;G;B m`) but send no
+#: COLORTERM (issue #986). CTerm documents SGR 38/48 direct colour, kept
+#: in an internal temporary palette big enough for a 132x60 screen of
+#: unique colours (CTerm manual, `src/conio/cterm.adoc` at tag
+#: `syncterm-1.9`, "Select Graphic Rendition"). `ansi-bbs` and `ansi`
+#: stay out: those names also cover genuinely 16-colour clients.
+TRUECOLOR_TERMINALS = frozenset({"syncterm"})
+
+
+def terminal_supports_truecolor(names: Iterable[str]) -> bool:
+    """Whether the terminal type says the client shows truecolor. The
+    first name the client reported that means anything decides, the same
+    rule `classify_terminal_types` follows. An explicit COLORTERM still
+    beats this; the transports only ask when a client sent none."""
+    for raw in names:
+        name = raw.strip().lower()
+        if name in TRUECOLOR_TERMINALS:
+            return True
+        if name in CP437_TERMINALS or name in LIKELY_CP437_TERMINALS or name.startswith(UTF8_TERMINAL_PREFIXES):
+            return False
+    return False
+
+
 #: Terminals that send SyncTERM's editing keys (issue #964; CTerm manual,
 #: "Sequences sent by SyncTERM"): ESC[K for End, ESC[V/ESC[U for Page
 #: Up/Down, ESC[@ for Insert, and with DECBKM set, its default, 0x7F for

@@ -13572,9 +13572,9 @@ async def _draw_main_menu_banner_menu(
                 MenuEntry(label=menu_key("P", "review"), brief="Show it as callers see it"),
                 MenuEntry(
                     label=menu_key("M", "ode"),
-                    brief="Use the art as the menu itself" if mode == MASTHEAD_MODE else "Show the art above the menu",
+                    brief="Make the art the menu itself" if mode == MASTHEAD_MODE else "Show the art above the menu",
                 ),
-                MenuEntry(label=menu_key("C", "heck"), brief="List the art's slots and whether the menu fits"),
+                MenuEntry(label=menu_key("C", "heck"), brief="Slots, problems and menu fit"),
                 MenuEntry(label=menu_key("E", "nable"), brief="Turn the masthead on"),
                 MenuEntry(label=menu_key("D", "isable"), brief="Turn the masthead off"),
                 MenuEntry(label=menu_key("i", "t", prefix="Ed"), brief="Edit the masthead art"),
@@ -13722,9 +13722,16 @@ async def _preview_main_menu_slot_art(session: Session, lane: DatabaseLane, acto
         await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
         await session.read_any_key()
         return
+    # [D]isable leaves the mode alone, so a switched-off banner still lands
+    # here: say under each draw that callers get the plain menu meanwhile.
+    enabled = await lane.run(is_main_menu_banner_enabled)
     for intro, level in (("as you see it", None), ("as a level-0 caller sees it", 0)):
         # The art clears the screen, so what is being shown is said below it.
         await _write_slot_art_preview(session, lane, actor, art, level=level)
+        if not enabled:
+            await session.write_line(colored(
+                "Callers don't see this art yet: it's switched off. Use [E]nable.", fg_color=WARNING_COLOR
+            ))
         await session.write_line(colored(f"(the main menu {intro}) Press any key to continue...", fg_color=MUTED_COLOR))
         await session.read_any_key()
 
