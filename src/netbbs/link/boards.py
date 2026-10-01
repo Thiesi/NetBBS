@@ -42,6 +42,7 @@ from netbbs.link.enforcement import decide_event_authorship, ensure_event_author
 from netbbs.link.events import (
     BOARD_CLOSURE_OBJECT_TYPE,
     BOARD_ORIGIN_TRANSFER_OFFER_OBJECT_TYPE,
+    BOARD_POSTING_MODES,
     BOARD_POST_EDIT_OBJECT_TYPE,
     BOARD_POST_MODERATOR_EDIT_OBJECT_TYPE,
     BOARD_POST_OBJECT_TYPE,
@@ -51,6 +52,7 @@ from netbbs.link.events import (
     BoardOriginTransferAccepted,
     BoardOriginTransferOffer,
     BoardPost,
+    BoardPosting,
     BoardPostEdit,
     BoardPostModeratorEdit,
     BoardPostTombstone,
@@ -59,6 +61,7 @@ from netbbs.link.events import (
     build_board_origin_transfer_accepted,
     build_board_origin_transfer_offer,
     build_board_post,
+    build_board_posting,
     build_board_post_edit,
     build_board_post_moderator_edit,
     build_board_post_tombstone,
@@ -532,8 +535,13 @@ def materialize_carried_post(
             payload["board_id"],
         ),
     )
-    if _rejected_here(db, post.content_id) or not _remote_author_meets_board_identity_policy(
-        db, payload["author"], board_row
+    if (
+        _rejected_here(db, post.content_id)
+        or not _remote_author_meets_board_identity_policy(db, payload["author"], board_row)
+        # Design doc §9.5, issue #1021: a closed board takes no new post,
+        # from anywhere -- not only from this node's own callers.
+        or board_row["link_closed_at"] is not None
+        or not _posting_allows(db, board_row, payload)
     ):
         # The signed event is kept, only its projection is refused -- which is
         # what makes the rebuild path below a real recovery rather than a
@@ -1021,6 +1029,98 @@ def materialize_carried_board_closure(db: Database, closure: BoardClosure, *, co
     db.connection.execute(
         "UPDATE boards SET link_closed_at = ? WHERE board_id = ? AND link_closed_at IS NULL",
         (closure.payload["created_at"], board_id),
+    )
+    if commit:
+        db.connection.commit()
+
+
+def _posting_allows(db: Database, board_row, payload: dict) -> bool:
+    """Whether the board's posting setting (design doc §9.3, issue #993)
+    lets this carried `board_post` in: under `origin_only` only an author
+    whose home is the board's current origin, and under `origin_threads`
+    anyone's reply but only such an author's new thread. The reply test
+    reads the signed `parent_post_id`, not whether the parent is here."""
+    # Absent only while an upgrade test runs this on an older schema.
+    mode = board_row["link_posting"] if "link_posting" in board_row.keys() else None
+    if mode is None or mode == "anyone":
+        return True
+    if mode == "origin_threads" and payload.get("parent_post_id") is not None:
+        return True
+    origin = board_row["link_origin_fingerprint"] or BoardGenesis.from_dict(
+        json.loads(board_row["link_genesis_json"])
+    ).payload["origin_fingerprint"]
+    return payload["author"].get("home_node_fingerprint") == origin
+
+
+def board_posting_mode(db: Database, board: Board) -> str:
+    """The posting setting in force on `board`: `anyone` unless its origin
+    set otherwise (design doc §9.3, issue #993)."""
+    row = db.connection.execute("SELECT link_posting FROM boards WHERE id = ?", (board.id,)).fetchone()
+    return (row["link_posting"] if row is not None else None) or "anyone"
+
+
+def posting_here(db: Database, board: Board, *, own_fingerprint: str | None) -> str:
+    """What this node's own callers may post on `board`: `all`, `replies`
+    or `none`. The origin's callers may always post; elsewhere the board's
+    posting setting decides. A board that is not Linked is `all`."""
+    mode = board_posting_mode(db, board)
+    if mode == "anyone" or not is_board_linked(db, board):
+        return "all"
+    if own_fingerprint is not None and board_origin_fingerprint(db, board) == own_fingerprint:
+        return "all"
+    return "replies" if mode == "origin_threads" else "none"
+
+
+def posting_refusal(db: Database, board: Board, *, own_fingerprint: str | None, is_reply: bool) -> str | None:
+    """Why this node's callers may not post this on `board`, or `None`.
+    Checked before a post is written, so a refused post is never created
+    here to sit unsent."""
+    allowed = posting_here(db, board, own_fingerprint=own_fingerprint)
+    if allowed == "all" or (allowed == "replies" and is_reply):
+        return None
+    if allowed == "replies":
+        return "Only the board's origin node starts threads here; you can reply."
+    return "Only the board's origin node posts on this board."
+
+
+def set_board_posting(
+    db: Database, board: Board, posting: str, *, node_identity: NodeIdentity,
+) -> BoardPosting:
+    """Set who may post on `board`, as its current origin (design doc §9.3,
+    issue #993): sign a `board_posting`, keep it as this node's own latest
+    (re-pushed and served like its lifecycle event), and apply it here.
+    Raises `LinkBoardsError` if `board` is not Linked, this node is not its
+    origin, or the mode is unknown."""
+    if posting not in BOARD_POSTING_MODES:
+        raise LinkBoardsError(f"unknown posting mode {posting!r}")
+    if not is_board_linked(db, board):
+        raise LinkBoardsError(f"board {board.name!r} is not Linked")
+    if board_origin_fingerprint(db, board) != node_identity.fingerprint:
+        raise LinkBoardsError(f"this node is not board {board.name!r}'s current origin")
+    event = build_board_posting(
+        signing_identity=node_identity.signing_key,
+        origin_fingerprint=node_identity.fingerprint,
+        board_id=board.board_id,
+        posting=posting,
+        created_at=utc_now_iso(),
+    )
+    db.connection.execute(
+        "UPDATE boards SET link_posting = ?, link_posting_at = ?, link_posting_json = ? WHERE id = ?",
+        (posting, event.payload["created_at"], json.dumps(event.to_dict()), board.id),
+    )
+    db.connection.commit()
+    return event
+
+
+def materialize_carried_board_posting(db: Database, posting: BoardPosting, *, commit: bool = True) -> None:
+    """Apply a received `board_posting` (design doc §9.3, issue #993) if it
+    is newer than the setting in force; `handle_events` already checked it
+    is signed by the board's current origin. Posts already shown stay."""
+    payload = posting.payload
+    db.connection.execute(
+        """UPDATE boards SET link_posting = ?, link_posting_at = ?
+            WHERE board_id = ? AND (link_posting_at IS NULL OR link_posting_at < ?)""",
+        (payload["posting"], payload["created_at"], payload["board_id"], payload["created_at"]),
     )
     if commit:
         db.connection.commit()
@@ -1835,11 +1935,15 @@ def load_own_board_events(db: Database, own_fingerprint: str) -> list[_OwnBoardE
     """
     events: list[_OwnBoardEvent] = []
     for row in db.connection.execute(
-        "SELECT link_genesis_json, link_lifecycle_json FROM boards WHERE link_genesis_json IS NOT NULL AND link_hidden_at IS NULL"
+        "SELECT link_genesis_json, link_lifecycle_json, link_posting_json FROM boards "
+        "WHERE link_genesis_json IS NOT NULL AND link_hidden_at IS NULL"
     ):
         genesis = BoardGenesis.from_dict(json.loads(row["link_genesis_json"]))
         if genesis.payload["origin_fingerprint"] == own_fingerprint:
             events.append(genesis)
+        if row["link_posting_json"] is not None:
+            # Issue #993: only ever this node's own, set as origin.
+            events.append(BoardPosting.from_dict(json.loads(row["link_posting_json"])))
         if row["link_lifecycle_json"] is not None:
             raw = json.loads(row["link_lifecycle_json"])
             lifecycle_object_type = raw["envelope"]["object_type"]

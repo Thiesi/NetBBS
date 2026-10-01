@@ -149,10 +149,22 @@ def _board_gates(db: Database) -> list[Gate]:
             community_name=community,
             conditions=age + _name_condition(get_effective_name_requirement(db, board)),
             off="closed" if linked and is_board_closed(db, board) else None,
-            # Issue #993: posts carried in from other nodes are not held to it.
-            note="local callers only" if linked else None,
+            note=_linked_write_note(db, board) if linked else None,
         ))
     return gates
+
+
+def _linked_write_note(db: Database, board: Board) -> str:
+    """What a Linked board's write level does not cover (issue #993): it
+    holds only this node's callers, and the origin's posting setting decides
+    who else gets in."""
+    from netbbs.link.boards import board_posting_mode
+
+    return {
+        "anyone": "local callers only",
+        "origin_threads": "origin starts threads",
+        "origin_only": "origin's callers only",
+    }[board_posting_mode(db, board)]
 
 
 def _area_gates(db: Database) -> list[Gate]:

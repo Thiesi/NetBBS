@@ -304,12 +304,14 @@ from netbbs.files.entries import (
     set_file_pinned,
 )
 from netbbs.identity.keys import IdentityError, parse_verify_key
+from netbbs.link.events import BOARD_POSTING_MODES
 from netbbs.link.boards import (
     LinkBoardsError,
     LinkContext,
     accept_board_origin_transfer,
     board_origin_fingerprint,
     carried_board_count,
+    board_posting_mode,
     close_board_if_linked,
     is_board_closed,
     is_board_linked,
@@ -318,6 +320,7 @@ from netbbs.link.boards import (
     offer_board_origin_transfer,
     queue_approved_board_post_if_linked,
     rebuild_carried_post_materialization,
+    set_board_posting,
 )
 from netbbs.link.channels import LinkChannelsError, carried_channel_count, is_channel_linked, link_channel
 from netbbs.link.diagnostics import (
@@ -18325,6 +18328,29 @@ async def _board_detail_screen(
                 description_level=description_level, redraw_in_place=redraw_in_place,
                 unicode_style=unicode_style, collapsed=collapsed,
             )
+        elif choice == "w" and link_context is not None and linked and is_origin and not is_closed:
+            # A toggle steps (design doc §3.5): anyone, then this node starts
+            # threads, then only this node posts. Only the latest setting is
+            # pushed, at the next sync pass.
+            current = await lane.run(board_posting_mode, board)
+            following = BOARD_POSTING_MODES[(BOARD_POSTING_MODES.index(current) + 1) % len(BOARD_POSTING_MODES)]
+            try:
+                posting = await lane.run(
+                    set_board_posting, board, following, node_identity=link_context.node_identity,
+                )
+            except LinkBoardsError as exc:
+                _announce_line(session, colored(f"Could not change who posts: {exc}", fg_color=MUTED_COLOR))
+            else:
+                link_context.link_node.known_event_ids.add(posting.content_id)
+                link_context.link_node.events[posting.content_id] = posting.to_dict()
+                _announce_line(
+                    session, f"Who posts on {board.name!r}: {_POSTING_LABELS[following]}. Sent on the next sync pass.",
+                )
+            is_origin, has_incoming_offer, is_closed = await _draw_board_detail(
+                session, lane, board, linked=linked, link_context=link_context,
+                description_level=description_level, redraw_in_place=redraw_in_place,
+                unicode_style=unicode_style, collapsed=collapsed,
+            )
         elif choice == "c" and link_context is not None and linked and is_origin and not is_closed:
             await session.write_line("")
             await _close_board_screen(session, lane, board, link_context)
@@ -18648,6 +18674,14 @@ async def _transfer_board_origin_screen(
     _announce_line(session, "Offer sent -- it will be pushed to peers on the next sync pass.")
 
 
+# Issue #993: the posting setting in the board screen's words.
+_POSTING_LABELS = {
+    "anyone": "anyone",
+    "origin_threads": "the origin's callers start threads; anyone replies",
+    "origin_only": "the origin's callers only",
+}
+
+
 async def _close_board_screen(session: Session, lane: DatabaseLane, board: Board, link_context: LinkContext) -> None:
     """
     `[C]lose board` (design doc §9.5, issue #88): the current origin's
@@ -18843,6 +18877,8 @@ async def _draw_board_detail(
                 else _linked_node_label(link_context, origin_fingerprint)
             )
             link_rows.append(Field("Origin", origin_label))
+            # Issue #993: who may post, as the origin set it.
+            link_rows.append(Field("Who posts", _POSTING_LABELS[await lane.run(board_posting_mode, board)]))
             if not is_origin:
                 peer = link_context.link_node.peers.get(origin_fingerprint)
                 if peer is not None and is_board_origin_orphaned(peer):
@@ -18887,6 +18923,8 @@ async def _draw_board_detail(
     ):
         options.append(MenuEntry(label=menu_key("T", "ransfer origin"), brief="Hand off origin to a peer"))
         options.append(MenuEntry(label=menu_key("C", "lose message board"), brief="Stop accepting new posts"))
+    if link_context is not None and linked and is_origin and not is_closed:
+        options.append(MenuEntry(label=menu_key("W", "ho posts"), brief="Anyone, or this node starts threads/posts"))
     if has_incoming_offer:
         options.append(MenuEntry(label=menu_key("A", "ccept transfer"), brief="Accept incoming origin transfer"))
     options.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to the list"))
