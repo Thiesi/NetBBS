@@ -6553,6 +6553,16 @@ A remote user starts probationary independently. Default graduation requires:
 - no active trigger in any applicable dimension;
 - one authorized user vouch, or explicit SysOp establishment.
 
+A node's day of direct interaction is a hello completed in either direction or
+a push from it that this node accepted. A user's day of activity is an
+accepted event they authored, whichever node delivered it. Content a carrier
+brings is not an interaction with the node that originated it. Each counts once
+per UTC date, and only where trust policy is enforced (issue #1035; before it,
+nothing recorded these days and no subject graduated automatically). A subject
+quarantined or blocked in any dimension banks no days, and only days after its
+most recent quarantine or block count toward graduation: recovery returns to
+probation, and probation starts its count again.
+
 A home node's identity vouch binds an opaque user ID to that node; it is not a
 behavioral vouch. Probation does not follow a changed home node or signing
 identity without a future signed identity-transition protocol.
