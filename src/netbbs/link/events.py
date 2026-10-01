@@ -407,11 +407,11 @@ SEALED_ATTESTATIONS_CAPABILITY = "sealed_attestations"
 its mailbox for a node it relays for, and as a recipient, by direct push or
 from its own relays. An issuer sends one only to a recipient advertising this,
 and deposits it only at a relay advertising it; an older relay would refuse
-the unknown type, and an older recipient would never pick it up. Advertised
-once this node can also apply what it picks up."""
+the unknown type, and an older recipient would never pick it up."""
 
 LINK_CAPABILITIES: tuple[str, ...] = (
     INVENTORY_NOT_CARRIED_CAPABILITY, INVENTORY_PAGES_CAPABILITY, CHANNEL_RELAY_CAPABILITY,
+    SEALED_ATTESTATIONS_CAPABILITY,
 )
 """Every optional behaviour this version advertises in its own descriptor."""
 

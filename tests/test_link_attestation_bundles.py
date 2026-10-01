@@ -33,7 +33,6 @@ from netbbs.link.relay_mailbox import (
 from netbbs.link.transport import (
     LinkTransportError,
     deposit_into_relay_mailbox,
-    pickup_from_relay_mailbox,
     pickup_from_relay_mailbox_all,
 )
 from netbbs.storage.database import Database
@@ -212,9 +211,9 @@ def test_a_relay_refuses_a_bundle_for_a_node_it_does_not_relay_for(tmp_path, cas
                         _bundle(cast["issuer"], cast["recipient"]),
                     )
                 # And the mail-only pickup keeps its old shape.
-                assert await pickup_from_relay_mailbox(
+                assert (await pickup_from_relay_mailbox_all(
                     session, f"http://127.0.0.1:{server.port}", _hello_for(LinkNode(identity=cast["recipient"]))
-                ) == []
+                )).envelopes == []
         finally:
             await server.stop()
 
