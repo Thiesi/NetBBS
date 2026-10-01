@@ -158,3 +158,15 @@ def test_render_uses_the_given_ellipsis():
 def test_render_without_menu_rows_leaves_the_region_blank():
     art = parse_slot_art("{menu 10x1}")
     assert strip_ansi(render_slot_art(art, fields={}, menu_rows=None)).strip() == ""
+
+
+def test_too_many_slots_are_refused_without_checking_every_pair():
+    art = parse_slot_art("\r\n".join(["{user} " * 10] * 7) + "\r\n{menu 5x1}")
+    assert any("use at most 64" in p for p in art.problems)
+
+
+def test_a_huge_menu_size_costs_no_more_than_the_art():
+    art = parse_slot_art("{menu 999x999}")
+    assert any("runs past column 80" in p for p in art.problems)
+    assert any("runs past row 200" in p for p in art.problems)
+    assert art.height == 200

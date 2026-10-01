@@ -15,7 +15,7 @@ filled-in content should take:
   token's own length without `N`), cut to fit.
 
 Plain tokens rather than ENiGMA-style `%VM1` codes plus a theme file
-(design doc §3.2, "Art with live slots"): they survive every art
+(issue #929's step-4 decisions): they survive every art
 editor, CP437 and UTF-8 alike, carry their size with them, and can be
 checked from the art alone. A brace pair that isn't one of these names
 is art, left as drawn.
@@ -50,6 +50,9 @@ MENU_COLUMN_GAP = 2
 #: only bounds the work for a file that claims more.
 MAX_ART_WIDTH = 200
 _MAX_ART_HEIGHT = 200
+#: More slots than any menu art needs; past it the art is refused rather
+#: than checked pair by pair.
+MAX_SLOTS = 64
 
 _TOKEN = re.compile(r"\{(menu|prompt|" + "|".join(FIELD_NAMES) + r")(?: ([0-9]{1,3})(?:x([0-9]{1,3}))?)?\}")
 
@@ -66,8 +69,11 @@ class Slot:
     height: int
     cell: Cell
 
-    def cells(self) -> set[tuple[int, int]]:
-        return {(r, c) for r in range(self.row, self.row + self.height) for c in range(self.col, self.col + self.width)}
+    def overlaps(self, other: "Slot") -> bool:
+        return (
+            self.row < other.row + other.height and other.row < self.row + self.height
+            and self.col < other.col + other.width and other.col < self.col + self.width
+        )
 
 
 @dataclass(frozen=True)
@@ -123,14 +129,19 @@ def parse_slot_art(text: str, *, width: int = 80, require_menu: bool = True) -> 
             problems.append(f"{_describe(slot)} runs past column {width}")
         if slot.row + slot.height > _MAX_ART_HEIGHT:
             problems.append(f"{_describe(slot)} runs past row {_MAX_ART_HEIGHT}")
-    for index, first in enumerate(found):
-        for second in found[index + 1:]:
-            if first.cells() & second.cells():
-                problems.append(f"{_describe(first)} overlaps {_describe(second)}")
+    if len(found) > MAX_SLOTS:
+        problems.append(f"{len(found)} slots; use at most {MAX_SLOTS}")
+    else:
+        for index, first in enumerate(found):
+            for second in found[index + 1:]:
+                if first.overlaps(second):
+                    problems.append(f"{_describe(first)} overlaps {_describe(second)}")
 
     height = _drawn_height(buffer, width)
     for slot in found:
         height = max(height, min(slot.row + slot.height, _MAX_ART_HEIGHT))
+    # A slot is never drawn past the art's own width or the row cap, so a
+    # token claiming a huge size costs no more than the art itself.
     return SlotArt(
         buffer=buffer, width=width, height=max(height, 1),
         menu=menus[0] if menus else None, prompt=prompts[0] if prompts else None,

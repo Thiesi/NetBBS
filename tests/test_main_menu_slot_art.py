@@ -174,3 +174,25 @@ def test_the_prompt_goes_below_the_art_without_a_prompt_slot(tmp_path):
     assert screen[6] == "end of art"
     assert screen[7].startswith("Choice:")
     db.close()
+
+
+def test_the_console_masthead_preview_explains_slots_mode(tmp_path):
+    from netbbs.net.admin_flow import _preview_main_menu_banner_screen
+    from netbbs.storage.execution import DatabaseLane
+
+    db, user = _setup(tmp_path)
+
+    class ConsoleSession(FakeSession):
+        async def read_any_key(self):
+            return " "
+
+    session = ConsoleSession()
+    lane = DatabaseLane(db.path)
+    try:
+        asyncio.run(_preview_main_menu_banner_screen(session, lane, user))
+    finally:
+        lane.close()
+    text = "".join(session.written)
+    assert "the main menu itself, not a masthead" in text
+    assert "no masthead" not in text
+    db.close()
