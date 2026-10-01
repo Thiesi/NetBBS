@@ -414,7 +414,9 @@ from netbbs.link.trust import (
     configure_trust_anchor,
     configure_trust_domain,
     configure_trusted_reporter,
+    ALL_CATEGORIES,
     get_effective_trust_state,
+    known_categories,
     node_probation,
     is_registered_subject,
     list_sole_authorities,
@@ -564,7 +566,7 @@ from netbbs.net.resource_editor import (
     text_field,
 )
 from netbbs.net.session import (
-    Session, physical_terminal_width, post_body_width, write_preformatted_line, write_prompt,
+    Session, physical_terminal_width, post_body_width, write_art_text, write_preformatted_line, write_prompt,
 )
 from netbbs.rendering.charset import ellipsis_for
 from netbbs.net.session_activity import records_activity
@@ -647,8 +649,10 @@ from netbbs.net.ansi_editor import edit_ansi_art
 from netbbs.net.welcome_banner import (
     MAX_BANNER_SIZE_BYTES,
     banner_path,
+    is_welcome_banner_credit_enabled,
     load_welcome_banner,
     pre_login_unicode_style,
+    set_welcome_banner_credit_enabled,
     set_welcome_banner_enabled,
     welcome_banner_status,
 )
@@ -798,6 +802,7 @@ from netbbs.file_refs import open_ref, post_refs
 from netbbs.net.file_ref_view import ref_rows
 from netbbs.rendering.post_body import post_body_mode, post_body_rows
 from netbbs.rendering.reflow import wrap_terminal_text
+from netbbs.rendering.sauce import Sauce, split_sauce
 from netbbs.net import notices as _notices
 from netbbs.guest import (
     guest_user,
@@ -1424,13 +1429,27 @@ def _audit_details_text(details: dict) -> str:
     return "; ".join(_pairs(details or {}, ""))
 
 
-def _banner_status_section(status, *, unicode_style: bool) -> Section:
+def _banner_status_section(
+    status,
+    *,
+    unicode_style: bool,
+    sauce: Sauce | None = None,
+    credit_line: bool | None = None,
+    too_wide: str = "no art",
+) -> Section:
     """Whether a banner or masthead is switched on, and the state of the file
     behind it -- the two facts every one of these seven menus leads with. They
     were one run-on line (`disabled -- file: x.ans (missing)`); a missing file
     behind an enabled banner is the case worth seeing, and now reads in red
-    on a row of its own."""
-    return Section("Status", [
+    on a row of its own.
+
+    A file with a SAUCE record (issue #929) also shows its credit, the width
+    it was drawn for, and a warning when it was made for a font other than
+    CP437's; the caller reads the record off the event loop
+    (`_banner_sauce`). `too_wide` is what a caller whose terminal is
+    narrower than the art sees instead. `credit_line` is the welcome
+    banner's caller-facing credit setting, shown when given."""
+    fields = [
         Field(
             "Shown to callers",
             status_badge("ENABLED", tone="success", unicode_style=unicode_style) if status.enabled
@@ -1440,7 +1459,38 @@ def _banner_status_section(status, *, unicode_style: bool) -> Section:
         Field("File", status.path.name, color=METADATA_COLOR),
         Field("On disk", _format_bytes(status.size_bytes), color=VALUE_COLOR) if status.exists
         else Field("On disk", "missing", color=ERROR_COLOR if status.enabled else MUTED_COLOR),
-    ])
+    ]
+    if sauce is not None:
+        credit = "".join(ch for ch in sauce.credit if ch.isprintable())
+        fields.append(Field("Art", credit or "(no credit in its SAUCE record)", color=VALUE_COLOR if credit else MUTED_COLOR))
+        if sauce.width is not None:
+            fields.append(Field("Drawn for", f"{sauce.width} columns; narrower terminals get {too_wide}", color=VALUE_COLOR))
+        if not sauce.font_is_cp437:
+            font = "".join(ch for ch in sauce.font if ch.isprintable())
+            fields.append(Field("Font", f"made for {font}; shown with CP437's characters", color=WARNING_COLOR))
+    if credit_line is not None:
+        fields.append(Field("Credit line", "shown under the banner" if credit_line else "off", color=VALUE_COLOR if credit_line else MUTED_COLOR))
+    return Section("Status", fields)
+
+
+def _toggle_welcome_banner_credit(db: Database, actor: User) -> bool:
+    """Flip whether callers see the art's credit under the welcome banner,
+    audited; returns the new setting."""
+    shown = not is_welcome_banner_credit_enabled(db)
+    set_welcome_banner_credit_enabled(db, shown)
+    record_action(db, actor=actor, action="set_welcome_banner_credit", detail="on" if shown else "off")
+    return shown
+
+
+def _banner_sauce(status) -> Sauce | None:
+    """The SAUCE record of the file behind `status`, or `None` when there is
+    no file, it is over the size limit, or it has no record."""
+    if not status.exists or (status.size_bytes or 0) > _SAVED_BANNER_READ_LIMIT:
+        return None
+    try:
+        return split_sauce(status.path.read_bytes())[1]
+    except OSError:
+        return None
 
 
 def _yes_no(value: bool) -> str:
@@ -4858,8 +4908,8 @@ def _parse_reporter_scopes(value: str) -> list[tuple[TrustDimension, str]]:
         dimension, separator, category = item.strip().partition(":")
         if not separator or not category:
             raise ValueError("scopes must use dimension:category, separated by commas")
-        normalized = TrustDimension(dimension)
-        result.append((normalized, category))
+        normalized = TrustDimension(dimension.strip())
+        result.append((normalized, category.strip()))
     if not result:
         raise ValueError("at least one reporter scope is required")
     return result
@@ -4979,7 +5029,8 @@ async def _trust_reporters_screen(session: Session, lane: DatabaseLane, actor: U
                 brief="dimension:category, by commas",
                 help=(
                     "Which evidence this reporter may speak to, as dimension:category pairs separated by "
-                    "commas -- e.g. identity_integrity:signed_equivocation, content_conduct:spam."
+                    "commas -- e.g. identity_integrity:signed_equivocation, content_conduct:spam. "
+                    "dimension:* grants every category of that dimension, listed by name once saved."
                 ),
             ),
             FieldSpec(
@@ -5010,7 +5061,20 @@ async def _trust_reporters_screen(session: Session, lane: DatabaseLane, actor: U
                 can_vouch_nodes=draft["can_vouch_nodes"], can_vouch_users=draft["can_vouch_users"],
                 actor_user_id=actor.id,
             )
-            listing.say("Trusted reporter changed and audited.")
+            # Issue #745: a scope that matches nothing used to look like any
+            # other grant. A category this version does not know is still kept
+            # (a later version may define it), but the SysOp hears about it.
+            unknown = [
+                f"{dimension.value}:{category}" for dimension, category in scopes
+                if category != ALL_CATEGORIES and category not in known_categories(dimension)
+            ]
+            if unknown:
+                listing.say(
+                    "Trusted reporter changed and audited. Not a category this version knows, so "
+                    f"it has no effect yet: {', '.join(unknown)}."
+                )
+            else:
+                listing.say("Trusted reporter changed and audited.")
             return True
 
         await _trust_editor(
@@ -12902,6 +12966,12 @@ async def _welcome_banner_menu(session: Session, lane: DatabaseLane, actor: User
             await session.write_line("")
             await _upload_banner_piece(session, lane, actor, path_of=banner_path, label="the welcome banner", audit_action="upload_welcome_banner")
             await _draw_welcome_banner_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed)
+        elif choice == "c":
+            await session.write_line("")
+            shown = await lane.run(_toggle_welcome_banner_credit, actor)
+            _announce(session, "Callers now see the art's credit under your banner." if shown
+                      else "The art's credit is no longer shown under your banner.")
+            await _draw_welcome_banner_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed)
         elif choice == HELP_KEY:
             await session.write_line("")
             header_color = await lane.run(effective_header_color_256)
@@ -12923,7 +12993,15 @@ async def _draw_welcome_banner_menu(
     await session.write_line("\r\n" + screen_title("Welcome banner",
             breadcrumb=(session.node_display_name, "Settings", "Mastheads & banners", "Banners"), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
             header_color=await lane.run(effective_header_color_256), node_name_gradient=session.node_name_gradient))
-    await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style)], unicode_style=unicode_style)
+    credit_line = await lane.run(is_welcome_banner_credit_enabled)
+    await _write_sections(
+        session,
+        [_banner_status_section(
+            status, unicode_style=unicode_style, sauce=await asyncio.to_thread(_banner_sauce, status),
+            credit_line=credit_line, too_wide="the default banner",
+        )],
+        unicode_style=unicode_style,
+    )
     await session.write_line(
         "\r\n" + _menu_row(
             [
@@ -12931,6 +13009,7 @@ async def _draw_welcome_banner_menu(
                 MenuEntry(label=menu_key("E", "nable"), brief="Turn the banner on"),
                 MenuEntry(label=menu_key("D", "isable"), brief="Turn the banner off"),
                 MenuEntry(label=menu_key("i", "t", prefix="Ed"), brief="Edit the banner text"),
+                MenuEntry(label=menu_key("C", "redit line"), brief="Credit the art under the banner"),
                 MenuEntry(label=menu_key("G", "allery"), brief="Apply a bundled sample banner"),
                 MenuEntry(label=menu_key("F", "rom disk"), brief="Load your own .ans from this node"),
                 MenuEntry(label=menu_key("U", "pload"), brief="Send an .ans from your computer"),
@@ -13583,7 +13662,8 @@ async def _draw_main_menu_banner_menu(
     await session.write_line("\r\n" + screen_title("Main-menu masthead",
             breadcrumb=(session.node_display_name, "Settings", "Mastheads & banners", "Mastheads"), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
             header_color=await lane.run(effective_header_color_256), node_name_gradient=session.node_name_gradient))
-    await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style)], unicode_style=unicode_style)
+    sauce = await asyncio.to_thread(_banner_sauce, status)
+    await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style, sauce=sauce)], unicode_style=unicode_style)
     await session.write_line("")
     await _write_wrapped_subtitle(
         session,
@@ -13735,7 +13815,7 @@ async def _write_slot_art_preview(
             colored(f"Callers like this get the generated menu instead: {plan.reason}.", fg_color=WARNING_COLOR)
         )
         return
-    await session.write(plan.text)
+    await write_art_text(session, plan.text)
     await session.write(move_cursor(art.height + 1, 1))
 
 
@@ -14098,7 +14178,8 @@ async def _draw_logoff_banner_menu(
         "Shown above the ordinary Goodbye message on an intentional Log off only -- never on an idle "
         "timeout, kick, or account revocation.",
     )
-    await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style)], unicode_style=unicode_style)
+    sauce = await asyncio.to_thread(_banner_sauce, status)
+    await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style, sauce=sauce)], unicode_style=unicode_style)
     await session.write_line(
         "\r\n" + _menu_row(
             [
@@ -14369,7 +14450,8 @@ async def _draw_new_account_banner_before_menu(
         "Shown once, right when a caller starts self-service signup -- before the Create "
         "account prompts, never repeated on a fixable retry.",
     )
-    await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style)], unicode_style=unicode_style)
+    sauce = await asyncio.to_thread(_banner_sauce, status)
+    await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style, sauce=sauce)], unicode_style=unicode_style)
     await session.write_line(
         "\r\n" + _menu_row(
             [
@@ -14648,7 +14730,8 @@ async def _draw_new_account_banner_after_menu(
         "Shown once self-service signup succeeds -- covers both an immediate login and a "
         "pending-approval account, alongside the existing message either way.",
     )
-    await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style)], unicode_style=unicode_style)
+    sauce = await asyncio.to_thread(_banner_sauce, status)
+    await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style, sauce=sauce)], unicode_style=unicode_style)
     await session.write_line(
         "\r\n" + _menu_row(
             [
@@ -15185,7 +15268,8 @@ async def _draw_board_list_masthead_menu(
         "Shown above every board-browsing view -- the top level, a category, or a "
         "Community.",
     )
-    await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style)], unicode_style=unicode_style)
+    sauce = await asyncio.to_thread(_banner_sauce, status)
+    await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style, sauce=sauce)], unicode_style=unicode_style)
     await session.write_line("")
     await _write_wrapped_subtitle(session, _list_art_mode_line(mode))
     await session.write_line(
@@ -15479,7 +15563,8 @@ async def _draw_file_area_masthead_menu(
         "Shown above every file-area-browsing view -- the top level, a category, or a "
         "Community.",
     )
-    await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style)], unicode_style=unicode_style)
+    sauce = await asyncio.to_thread(_banner_sauce, status)
+    await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style, sauce=sauce)], unicode_style=unicode_style)
     await session.write_line("")
     await _write_wrapped_subtitle(session, _list_art_mode_line(mode))
     await session.write_line(
@@ -15771,7 +15856,8 @@ async def _draw_chat_channel_picker_masthead_menu(
         "Shown above every channel-picker view -- the top level, a category, or a "
         "Community. Never inside a live channel.",
     )
-    await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style)], unicode_style=unicode_style)
+    sauce = await asyncio.to_thread(_banner_sauce, status)
+    await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style, sauce=sauce)], unicode_style=unicode_style)
     await session.write_line("")
     await _write_wrapped_subtitle(session, _list_art_mode_line(mode))
     await session.write_line(

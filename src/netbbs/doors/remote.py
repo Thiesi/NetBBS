@@ -14,6 +14,10 @@ from pathlib import Path
 
 _CONNECT_ATTEMPT_SECONDS = 2
 
+#: The longest `terminal_type` accepted. RFC 1282 servers commonly read the
+#: terminal-type field into a buffer of about 64 bytes.
+MAX_TERMINAL_TYPE_LENGTH = 64
+
 
 def validate_remote(profile):
     options = profile.options
@@ -43,7 +47,30 @@ def validate_remote(profile):
             _field(options.get(key, default), {"handle": "probe", "user_id": 1})
         except (ValueError, KeyError) as exc:
             raise ValueError(f"Invalid provider {key} template: {exc}") from exc
+    if "terminal_type" in options:
+        terminal_type(profile)
     return host, port
+
+
+def terminal_type(profile) -> bytes:
+    """The RFC 1282 terminal-type field, without its NUL (issue #983).
+
+    `ansi/<baud>` unless the profile sets `terminal_type`, which is then sent
+    exactly as written. Door servers built on Synchronet read this field to
+    pick a game (`xtrn=LORD`) or a section (`xtrn_sec=GAMES`), so one
+    registration can open one game. Fixed per registration, like
+    `service_name`: printable ASCII with no spaces and no `{...}`
+    substitution, so nothing a caller does reaches it."""
+    value = profile.options.get("terminal_type")
+    if value is None:
+        return f"ansi/{profile.baud}".encode()
+    if (not isinstance(value, str) or not value or len(value) > MAX_TERMINAL_TYPE_LENGTH
+            or any(not 0x21 <= ord(c) <= 0x7E for c in value) or "{" in value or "}" in value):
+        raise ValueError(
+            f"terminal_type must be 1-{MAX_TERMINAL_TYPE_LENGTH} printable ASCII characters, "
+            "with no spaces and no {...} substitutions, e.g. xtrn=LORD"
+        )
+    return value.encode("ascii")
 
 
 def _credentials(path):
@@ -146,7 +173,7 @@ class RemoteEndpoint:
 async def connect_remote(profile, info, width, height):
     host, port = validate_remote(profile)
     local, remote = identity_fields(profile, info)
-    handshake = b"\x00" + local + remote + f"ansi/{profile.baud}".encode() + b"\x00"
+    handshake = b"\x00" + local + remote + terminal_type(profile) + b"\x00"
     loop = asyncio.get_running_loop()
     async with asyncio.timeout(10):
         addresses = await loop.getaddrinfo(host, port, type=socket.SOCK_STREAM)

@@ -124,7 +124,7 @@ from netbbs.net.node_theme import effective_accent_color_256, effective_header_c
 from netbbs.net.notices import announce, announce_styled, write_notices
 from netbbs.net.picker import pick_item
 from netbbs.net.prose_editor import EditorHeader, edit_prose
-from netbbs.net.session import Session
+from netbbs.net.session import Session, physical_terminal_width
 from netbbs.net.session_activity import records_activity
 from netbbs.net.sort_ui import SORT_MODE_LABELS, prompt_sort_change
 from netbbs.moderation import BoardPermission, has_permission
@@ -323,7 +323,7 @@ async def _browse_areas_in_category(
     # file-area browsing this recursive function reaches (top level, a
     # category, a Community's scope), matching
     # `board_flow._browse_boards_in_category`'s own identical wiring.
-    area_masthead = await lane.run(load_file_area_banner)
+    area_masthead = await lane.run(load_file_area_banner, max_width=physical_terminal_width(session))
     # The SysOp's art as the list itself (issue #929), or None.
     area_slot_art = await lane.run(load_file_area_slot_art)
     area_slot_fields = (

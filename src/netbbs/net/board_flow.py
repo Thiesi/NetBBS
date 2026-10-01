@@ -125,7 +125,7 @@ from netbbs.net.prose_editor import EditorHeader, edit_prose
 from netbbs.net.ansi_editor import edit_ansi_art
 from netbbs.net.post_color_preference import post_colors_enabled
 from netbbs.net.redraw_preference import redraw_in_place_enabled
-from netbbs.net.session import Session, post_body_width, write_prompt
+from netbbs.net.session import Session, physical_terminal_width, post_body_width, write_prompt
 from netbbs.net.session_activity import records_activity
 from netbbs.net.sort_ui import SORT_MODE_LABELS, prompt_sort_change
 from netbbs.net.unicode_style_preference import unicode_style_enabled
@@ -294,7 +294,7 @@ async def _browse_boards_in_category(
     # category, a Community's scope), not only the very
     # first unfiltered screen, matching this feature's own scoping
     # decision.
-    board_masthead = load_board_list_banner(db)
+    board_masthead = load_board_list_banner(db, max_width=physical_terminal_width(session))
     # The SysOp's art as the list itself (issue #929), or None.
     board_slot_art = load_board_list_slot_art(db)
     board_slot_fields = list_slot_fields(session, db, user) if board_slot_art is not None else None

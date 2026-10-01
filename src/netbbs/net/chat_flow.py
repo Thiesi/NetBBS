@@ -183,7 +183,7 @@ from netbbs.net.picker import pick_item
 from netbbs.net.redraw_preference import redraw_in_place_enabled
 from netbbs.net.breadcrumb_preference import breadcrumb_collapsed_enabled
 from netbbs.net.unicode_style_preference import unicode_style_enabled
-from netbbs.net.session import Session, SessionClosedError, write_prompt
+from netbbs.net.session import Session, SessionClosedError, physical_terminal_width, write_prompt
 from netbbs.net.session_activity import records_activity
 from netbbs.net.session_registry import ActiveSessionRegistry
 from netbbs.net.sort_ui import SORT_MODE_LABELS, prompt_sort_change
@@ -621,7 +621,7 @@ async def _pick_channel(
     # Never the inside of a live channel -- see chat_channel_picker_
     # banner's own module docstring for why that's a categorically
     # different rendering model, not just one level deeper.
-    channel_masthead = await lane.run(load_chat_channel_picker_banner)
+    channel_masthead = await lane.run(load_chat_channel_picker_banner, max_width=physical_terminal_width(session))
     # The SysOp's art as the list itself (issue #929), or None.
     channel_slot_art = await lane.run(load_chat_channel_picker_slot_art)
     channel_slot_fields = (

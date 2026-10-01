@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from netbbs.config import get_config, set_config
-from netbbs.rendering import RESET, decode_banner_bytes
+from netbbs.rendering import RESET, decode_banner_bytes_fitting
 from netbbs.net.list_art import FILE_AREA, MASTHEAD_MODE, list_art_mode, load_list_slot_art
 from netbbs.rendering.art_slots import SlotArt
 from netbbs.storage.database import Database
@@ -74,7 +74,7 @@ def file_area_banner_status(db: Database) -> FileAreaBannerStatus:
     )
 
 
-def load_file_area_banner(db: Database) -> str:
+def load_file_area_banner(db: Database, *, max_width: int | None = None) -> str:
     """Resolves the masthead to prepend above every file-area-browsing
     view: the SysOp's custom file if enabled and usable, or `""` (no
     masthead -- today's file-area list, unchanged) otherwise.
@@ -119,7 +119,13 @@ def load_file_area_banner(db: Database) -> str:
     # the real, dynamic file-area list is drawn immediately after this,
     # and must never inherit color state left open by the masthead's own
     # art.
-    return decode_banner_bytes(data) + RESET
+    text = decode_banner_bytes_fitting(data, max_width)
+    if text is None:
+        # Its SAUCE record says it was drawn wider than this caller's
+        # terminal (issue #929): wrapping every row would turn it to noise.
+        _logger.info("file area banner at %s is wider than %d columns -- showing nothing", path, max_width)
+        return ""
+    return text + RESET
 
 
 def load_file_area_slot_art(db: Database) -> SlotArt | None:
