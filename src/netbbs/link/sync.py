@@ -264,6 +264,7 @@ from netbbs.link.transport import (
     deposit_trust_objects,
     dial_hello,
     persist_accepted_events,
+    persist_stale_copy_changes,
     RelayPickup,
     pickup_from_relay_mailbox_all,
     send_attestation_bundle,
@@ -554,6 +555,10 @@ async def run_link_sync(
         await retry_pending_attestations(node, lane)
         await _forget_retired_attestations(lane)
         await _reevaluate_trust_over_time(node, lane)
+        # Issue #672: a compromise learned from a hello this pass (a direct
+        # peer's chain) has no batch of its own to sweep after.
+        node.sweep_compromised_copies()
+        await persist_stale_copy_changes(lane, node)
         # Issue #891: mail held here as a relay that its recipient never
         # came back for. Every pass, whatever this node's own mode: a node
         # that stopped serving relays still holds what it took before.

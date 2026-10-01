@@ -3965,6 +3965,20 @@ MIGRATIONS = [
     ),
     Migration(
         description=(
+            "Issue #672: `link_events.stale_signer` -- set on a stored copy that verifies only under "
+            "a key its signer has since marked compromised, naming that signer. Such a copy is not "
+            "declared in inventory and not served, so it is asked for again and replaced in place "
+            "by the signer's re-signed copy, which clears the column. The projection (post, line, "
+            "file) is untouched throughout. NULL for every existing row: the running node marks "
+            "what it finds stale at its next sync pass."
+        ),
+        sql="""
+        ALTER TABLE link_events ADD COLUMN stale_signer TEXT;
+        CREATE INDEX idx_link_events_stale ON link_events(stale_signer) WHERE stale_signer IS NOT NULL;
+        """,
+    ),
+    Migration(
+        description=(
             "Issue #632 (design doc §16): sealed attestation bundles a relay holds for a recipient "
             "it relays for. One slot per (issuer, recipient): a newer bundle from the same issuer "
             "replaces the older one, since a bundle is a complete snapshot. Kept apart from "
