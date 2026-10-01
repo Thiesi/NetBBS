@@ -33,6 +33,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import stat
 from pathlib import Path
 from typing import Awaitable, Callable
 
@@ -147,6 +149,55 @@ def _drop_ignore_padding_before_auth(conn: asyncssh.SSHServerConnection) -> None
     conn.send_packet = send_without_preauth_padding  # type: ignore[method-assign]
 
 
+#: Whether file mode bits say who can read a file here (not on Windows).
+_POSIX_MODES = os.name != "nt"
+
+
+def _write_private_host_key(key: asyncssh.SSHKey, path: Path) -> None:
+    """Save a new host key owner-only (0600), atomically (issue #976).
+
+    asyncssh's own `write_private_key` opens the file with a plain
+    `open()`, so the key took the process umask's mode -- world-readable
+    under the common 022 -- and any local account could read it and
+    pose as this node to SSH callers. The same temp-then-rename shape as
+    `netbbs.managed_dns.credential.save_credential`: the temp file is
+    created 0600, so the key is never readable by anyone else, even
+    briefly."""
+    tmp_path = path.with_name(path.name + ".tmp")
+    fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0),
+                 stat.S_IRUSR | stat.S_IWUSR)
+    try:
+        # O_CREAT's mode is ignored when a stale temp file already exists.
+        if hasattr(os, "fchmod"):
+            os.fchmod(fd, stat.S_IRUSR | stat.S_IWUSR)
+        with os.fdopen(fd, "wb") as handle:
+            fd = -1
+            handle.write(key.export_private_key())
+    finally:
+        if fd >= 0:
+            os.close(fd)
+    tmp_path.replace(path)
+
+
+def _restrict_host_key(path: Path) -> None:
+    """Take group and other access away from an existing host key.
+
+    A key written before issue #976, or restored from a backup taken
+    then, kept the umask's mode. Fixed at the next start, and logged so
+    the SysOp knows the key was readable and can judge whether to rotate
+    it. POSIX only: Windows mode bits do not describe who can read a
+    file."""
+    if not _POSIX_MODES:
+        return
+    mode = stat.S_IMODE(path.stat().st_mode)
+    if mode & (stat.S_IRWXG | stat.S_IRWXO):
+        os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
+        _logger.warning(
+            "SSH host key %s was readable by other accounts (mode %04o); "
+            "restricted it to its owner (0600)", path, mode,
+        )
+
+
 def ensure_host_key(db: Database) -> Path:
     """
     Load this node's persistent SSH host key, generating and saving one
@@ -166,8 +217,10 @@ def ensure_host_key(db: Database) -> Path:
     path = db.path.parent / f"{db.path.stem}_ssh_host_key"
     if not path.exists():
         key = asyncssh.generate_private_key("ssh-ed25519")
-        key.write_private_key(path)
+        _write_private_host_key(key, path)
         _logger.info("generated new SSH host key at %s", path)
+    else:
+        _restrict_host_key(path)
     return path
 
 
@@ -193,8 +246,10 @@ def ensure_rsa_host_key(db: Database) -> Path:
     path = db.path.parent / f"{db.path.stem}_ssh_host_key_rsa"
     if not path.exists():
         key = asyncssh.generate_private_key("ssh-rsa", key_size=RSA_HOST_KEY_BITS)
-        key.write_private_key(path)
+        _write_private_host_key(key, path)
         _logger.info("generated new RSA SSH host key at %s", path)
+    else:
+        _restrict_host_key(path)
     return path
 
 
