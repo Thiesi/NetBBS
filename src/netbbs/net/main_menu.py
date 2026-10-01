@@ -150,11 +150,14 @@ class MainMenuEntries:
 
 
 def main_menu_entries(
-    session: Session, db: Database, user: User, node_controls: NodeControls | None = None
+    session: Session, db: Database, user: User, node_controls: NodeControls | None = None,
+    *, whos_online: bool | None = None,
 ) -> MainMenuEntries:
     """The main menu's items for `user`, in its three sections -- the one
     list both the generated menu and slot art (issue #929) draw, so art
-    can never offer something the generated menu wouldn't."""
+    can never offer something the generated menu wouldn't. `whos_online`
+    overrides whether `[W]ho's online` is offered (a running node always
+    offers it; the console's preview has no node controls to ask)."""
     has_mail = caller_mail_refusal(session, db, user) is None
     unread = unread_mail_count(db, user) if has_mail else 0
     mail_label = f"-mail ({unread} unread)" if unread else "-mail"
@@ -216,7 +219,7 @@ def main_menu_entries(
                 ),
             ),
     ]
-    if node_controls is not None:
+    if (node_controls is not None) if whos_online is None else whos_online:
         personal_options.append(
             MenuEntry(label=menu_key("W", "ho's online"), brief="See who's connected now")
         )
@@ -515,14 +518,31 @@ def plan_slot_main_menu(
     return SlotMenuPlan(text, "drawn as slot art", prompt_at_slot)
 
 
+#: Rows the console's check leaves below the art: one result line, as a
+#: running node often shows (a carried outcome, the SysOp's "no boards yet").
+PREVIEW_ROWS_BELOW = 1
+
+
 def slot_menu_preview(session: Session, db: Database, user: User, art: SlotArt, *, level: int | None = None) -> SlotMenuPlan:
-    """The slot main menu as `user` would see it -- or as a caller at
-    `level`, approximated by `user` at that level with no staff
-    permissions -- for the SysOp console's preview and check."""
-    who = user if level is None else replace(user, user_level=level, staff_permissions=0, can_verify_identity=False)
-    entries = main_menu_entries(session, db, who)
+    """The slot main menu as `user` would see it on a running node -- or as
+    a new caller at `level` with no mail, invitations or grants of their
+    own -- for the SysOp console's preview and check. A running node
+    always offers `[W]ho's online`, so the preview does too, and one result
+    line is budgeted below the art."""
+    if level is None:
+        who = user
+    else:
+        # A stand-in account that matches no row: the SysOp's own unread
+        # mail, invitations and moderator grants are keyed by their id.
+        who = replace(
+            user, id=-1, username="caller", user_level=level, staff_permissions=0, can_verify_identity=False,
+            pending_approval=False,
+        )
+    entries = main_menu_entries(session, db, who, whos_online=True)
     fields = _slot_fields(session, db, who, None, has_mail=entries.has_mail, unread=entries.unread)
-    return plan_slot_main_menu(session, art, entries.labels, fields, rows_below=0, prompt="Choice: ")
+    return plan_slot_main_menu(
+        session, art, entries.labels, fields, rows_below=PREVIEW_ROWS_BELOW, prompt="Choice: "
+    )
 
 
 async def _draw_slot_main_menu(

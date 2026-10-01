@@ -5142,6 +5142,59 @@ def test_masthead_menu_check_lists_slots_problems_and_fit(db, lane, sysop):
     assert "Problem: no {menu WxH} slot" in _visible(_written_text(session))
 
 
+def test_masthead_menu_check_says_when_callers_do_not_see_the_art(db, lane, sysop):
+    from netbbs.net.main_menu_banner import (
+        SLOTS_MODE,
+        main_menu_banner_path,
+        set_main_menu_art_mode,
+        set_main_menu_banner_enabled,
+    )
+
+    main_menu_banner_path(db).write_bytes(b"{menu 74x7}")
+    session = FakeSession(["s", "m", "m", "m", "c", " ", "b", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    text = _visible(_written_text(session))
+    assert "it's switched off. Use [E]nable." in text
+    assert "[M]ode changes that." in text
+
+    set_main_menu_banner_enabled(db, True)
+    set_main_menu_art_mode(db, SLOTS_MODE)
+    session = FakeSession(["s", "m", "m", "m", "c", " ", "b", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    text = _visible(_written_text(session))
+    assert "switched off" not in text and "[M]ode changes that" not in text
+
+
+def _slot_screen(text: str) -> str:
+    from netbbs.rendering.ansi_parse import parse_ansi_into_buffer
+    from netbbs.rendering.screen_buffer import ScreenBuffer
+
+    buffer = ScreenBuffer(80, 24)
+    parse_ansi_into_buffer(text, buffer)
+    return "\n".join("".join(buffer.get_cell(r, c).char for c in range(80)) for r in range(24))
+
+
+def test_slot_preview_counts_whos_online_and_ignores_the_sysops_own_mail(db, sysop):
+    from netbbs.mail import send_mail
+    from netbbs.net.main_menu import main_menu_entries, slot_menu_preview
+    from netbbs.rendering.art_slots import parse_slot_art
+
+    session = FakeSession()
+    # The SysOp has unread mail; a level-0 caller in the preview must not.
+    other = create_user(db, "harold", password="parker51", user_level=10)
+    send_mail(db, sender=other, recipient=sysop, subject="hi", body="hello")
+    art = parse_slot_art("{menu 78x12}")
+    plan = slot_menu_preview(session, db, sysop, art, level=0)
+    assert plan.text is not None
+    visible = _slot_screen(plan.text)
+    assert "[W]ho's online" in visible
+    assert "unread" not in visible
+    # Your own preview keeps your mail.
+    assert "unread" in _slot_screen(slot_menu_preview(session, db, sysop, art).text)
+    # A running node offers [W]ho's online; without node controls it isn't.
+    assert "[W]ho's online" not in "".join(_visible(e) for e in main_menu_entries(session, db, sysop).labels)
+
+
 def test_masthead_gallery_applying_a_slot_preset_makes_it_the_menu(db, lane, sysop):
     from netbbs.net.banner_presets import load_main_menu_banner_preset
     from netbbs.net.main_menu_banner import SLOTS_MODE, main_menu_art_mode, main_menu_banner_path
