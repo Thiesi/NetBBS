@@ -70,7 +70,8 @@ from netbbs.net.picker import pick_item
 from netbbs.net.char_input import reject_unhandled_key
 from netbbs.net.session import Session, write_prompt
 from netbbs.rendering import action_bar, menu_key
-from netbbs.rendering.reflow import terminal_wrapped
+from netbbs.rendering.reflow import print_wrapped, terminal_wrapped
+from netbbs.admin.levels_report import LevelsReportError, render_json, run_levels_report
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 
@@ -408,6 +409,22 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"the node's identity directory (default: {_DEFAULT_IDENTITY_DIR})",
     )
     _add_common(rotate, defaults=False)
+    levels = subcommands.add_parser(
+        "levels",
+        help="show what each level opens, one level in full, or one account's level change",
+        description=(
+            "Read-only. With no arguments: every level in use, its name, how many accounts hold it "
+            "and what it first opens. With a level (a number or a level's name): what that level "
+            "opens and what stays closed to it. With --user and --to: what moving that account to "
+            "that level would gain, lose and still leave blocked, as the console shows before a "
+            "level change. Nothing is changed."
+        ),
+    )
+    levels.add_argument("level", nargs="?", help="a level, as a number or a level's name")
+    levels.add_argument("--user", help="the account whose level change to show")
+    levels.add_argument("--to", help="the level to show --user's change to")
+    levels.add_argument("--json", action="store_true", help="print JSON instead of text")
+    _add_common(levels, defaults=False)
     return parser
 
 
@@ -442,6 +459,21 @@ def main(argv: list[str] | None = None) -> None:
                 stream=sys.stderr,
             )
         ) from exc
+
+    if args.command == "levels":
+        # Read-only and attributed to nobody: no SysOp to pick, no raw terminal.
+        try:
+            lines, data = run_levels_report(db, level=args.level, user=args.user, to=args.to)
+        except LevelsReportError as exc:
+            raise SystemExit(terminal_wrapped(str(exc), stream=sys.stderr)) from exc
+        finally:
+            db.close()
+        if args.json:
+            print(render_json(data))
+        else:
+            for line in lines:
+                print_wrapped(line)
+        return
 
     try:
         with raw_terminal():

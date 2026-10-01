@@ -72,10 +72,13 @@ from netbbs.access_map import (
     AccountChange,
     Gate,
     GateKind,
+    GATE_WORDS,
     LadderStep,
     LevelSource,
     LevelContext,
     account_level_change,
+    gate_source,
+    ladder_summary,
     level_context,
     level_ladder,
     list_gates,
@@ -241,6 +244,7 @@ from netbbs.config import (
     set_registration_mode,
 )
 from netbbs.digits import is_ascii_number
+from netbbs.level_names import LevelNameError, get_level_names, level_label, parse_level, set_level_name
 from netbbs.doors import (
     Door,
     DoorError,
@@ -2429,42 +2433,9 @@ async def _users_menu(
             await session.write(reject_unhandled_key(choice))
 
 
-_SOURCE_WORDS = {
-    LevelSource.RESOURCE: "set here",
-    LevelSource.DEFAULT: "default",
-    LevelSource.SETTING: "Settings",
-    LevelSource.FIXED: "fixed",
-}
-
-
-def _gate_source(gate: Gate) -> str:
-    """Where a gate's level comes from, in a few words."""
-    if gate.source is LevelSource.COMMUNITY:
-        return f"Community {gate.community_name}"
-    return _SOURCE_WORDS[gate.source]
-
-
-def _ladder_summary(step: LadderStep) -> str:
-    """What a level first opens, counted by kind: `2 read · 1 post · Mail`."""
-    counts: dict[str, int] = {}
-    named: list[str] = []
-    for gate in step.opens:
-        action, what = _GATE_WORDS[gate.kind]
-        if what == "node-wide":
-            named.append(gate.name)
-        else:
-            label = {"channel": "channel", "door": "door"}.get(what, action)
-            counts[label] = counts.get(label, 0) + 1
-    order = ("read", "post", "download", "upload", "channel", "door")
-    parts = [f"{counts[label]} {label}" for label in order if label in counts]
-    if step.level >= SYSOP_LEVEL:
-        return "everything"
-    return " · ".join(parts + named) or "nothing new"
-
-
 _LADDER_COLUMNS = [
     ListColumn("users", 5, VALUE_COLOR, align_right=True),
-    ListColumn("opens here", 52, VALUE_COLOR),
+    ListColumn("opens here", 46, VALUE_COLOR),
 ]
 
 _LEVEL_VIEWS = {
@@ -2491,12 +2462,12 @@ def _gate_stable_id(gate: Gate) -> int:
 
 
 def _gate_columns(gate: Gate) -> list[str]:
-    action, _what = _GATE_WORDS[gate.kind]
+    action, _what = GATE_WORDS[gate.kind]
     also = [f"off: {gate.off}"] if gate.off else []
     also += list(gate.conditions)
     if gate.note:
         also.append(gate.note)
-    return [action, str(gate.opens_at), _gate_source(gate), ", ".join(also)]
+    return [action, str(gate.opens_at), gate_source(gate), ", ".join(also)]
 
 
 def _gate_description(gate: Gate) -> str:
@@ -2527,7 +2498,7 @@ async def _open_gate_resource(
     deleted one, the door supervisor, the transfer grants."""
     from netbbs.doors.registry import list_doors
 
-    what = _GATE_WORDS[gate.kind][1]
+    what = GATE_WORDS[gate.kind][1]
     listing = {"board": list_boards, "file area": list_file_areas, "channel": list_channels, "door": list_doors}[what]
     resource = next((r for r in await lane.run(listing) if r.id == gate.object_id), None)
     if resource is None:
@@ -2576,6 +2547,7 @@ async def _level_detail_screen(
         return await _load()
 
     chrome = await _load_chrome(lane, actor)
+    names = await lane.run(get_level_names)
     users = await lane.run(
         lambda db: db.connection.execute(
             "SELECT COUNT(*) FROM users WHERE user_level = ? AND disabled_at IS NULL AND pending_approval = 0",
@@ -2590,7 +2562,7 @@ async def _level_detail_screen(
             columns=_GATE_COLUMNS,
             column_values_of=_gate_columns,
             description_of=_gate_description,
-            title=f"Level {level}",
+            title=f"Level {level_label(level, names)}",
             empty_message=f"Nothing in this view of level {level}.",
             refresh=_load,
             live_keys={"v": _next_view},
@@ -2622,23 +2594,56 @@ async def _levels_screen(
     opens. Picking a level shows what it opens in full; `[G]o to level`
     asks for any level, in use or not."""
     start: int | None = None
+    names: dict[int, str] = {}
+    status: str | None = None
 
     async def _load() -> list[LadderStep]:
-        return await lane.run(level_ladder)
+        nonlocal names
+        ladder, names = await lane.run(lambda db: (level_ladder(db), get_level_names(db)))
+        return ladder
+
+    async def _name_level(step: LadderStep) -> list[LadderStep] | None:
+        """Issue #1009: name, rename or clear a level's name. The name is a
+        label; nobody's access changes."""
+        nonlocal status
+        if step.level >= SYSOP_LEVEL:
+            status = f"{SYSOP_LEVEL} is always called SysOp."
+            return None
+        await write_field_prompt(
+            session, colored(f"Name for level {step.level} (blank clears it):", fg_color=MUTED_COLOR),
+            hint=_EDIT_HINT,
+        )
+        try:
+            raw = await _read_seeded_line(session, initial=names.get(step.level, ""))
+        except InputCancelled:
+            return None
+        try:
+            updated = await lane.run(set_level_name, step.level, raw, changed_by=actor)
+        except LevelNameError as exc:
+            status = str(exc)
+            return None
+        name = updated.get(step.level)
+        status = f"Level {step.level} is now called {name}." if name else f"Level {step.level} has no name now."
+        return await _load()
+
+    def _status_line() -> str:
+        return status or "Each row: what that level adds to the ones below it"
 
     async def _other_level() -> list[LadderStep] | None:
         await write_field_prompt(
-            session, colored(f"Which level? (0-{SYSOP_LEVEL})", fg_color=MUTED_COLOR), hint=_EDIT_HINT
+            session, colored(f"Which level? (0-{SYSOP_LEVEL}, or a level's name)", fg_color=MUTED_COLOR),
+            hint=_EDIT_HINT,
         )
         try:
             raw = (await _read_seeded_line(session, initial="")).strip()
         except InputCancelled:
             return None
-        if not is_ascii_number(raw) or not 0 <= int(raw) <= SYSOP_LEVEL:
+        chosen = parse_level(raw, names)
+        if chosen is None or not 0 <= chosen <= SYSOP_LEVEL:
             await session.write("\a")
             return None
         await _level_detail_screen(
-            session, lane, actor, int(raw), node_controls=node_controls, link_context=link_context
+            session, lane, actor, chosen, node_controls=node_controls, link_context=link_context
         )
         # A level may have been changed on the way: count again.
         return await _load()
@@ -2647,19 +2652,23 @@ async def _levels_screen(
     while True:
         picked = await _pick_item(
             session, await _load(),
-            name_of=lambda step: f"Level {step.level}",
+            name_of=lambda step: level_label(step.level, names),
             stable_id_of=lambda step: step.level,
             columns=_LADDER_COLUMNS,
-            column_values_of=lambda step: [str(step.users), _ladder_summary(step)],
+            column_values_of=lambda step: [str(step.users), ladder_summary(step)],
             description_of=lambda step: (
-                f"{step.users} user{'s' if step.users != 1 else ''}; opens {_ladder_summary(step)}"
+                f"{step.users} user{'s' if step.users != 1 else ''}; opens {ladder_summary(step)}"
             ),
             title="Levels",
             empty_message="No levels in use.",
             refresh=_load,
             live_keys={"g": _other_level},
-            live_nav=[MenuEntry(label=menu_key("G", "o to level"), brief="What any level opens")],
-            live_label=lambda: "Each row: what that level adds to the ones below it",
+            item_keys={"m": _name_level},
+            live_nav=[
+                MenuEntry(label=menu_key("G", "o to level"), brief="What any level opens"),
+                MenuEntry(label=menu_key("m", "e", prefix="Na"), brief="Name or rename a level"),
+            ],
+            live_label=_status_line,
             start_stable_id=start,
             description_level=await lane.run(menu_description_level, actor),
             redraw_in_place=chrome.redraw_in_place,
@@ -6682,7 +6691,7 @@ async def _draw_user_detail(
     entries = await lane.run(list_actions_for_target_user, target.id)
     sections = [
         Section("Account", [
-            _editable("l", "Level", str(target.user_level)),
+            _editable("l", "Level", level_label(target.user_level, await lane.run(get_level_names))),
             _editable("t", "Status", status, color=SUCCESS_COLOR if status == "active" else WARNING_COLOR),
             Field("Member since", member_since, color=METADATA_COLOR),
             _editable(
@@ -6951,23 +6960,9 @@ async def _show_user_detail_help(
     await show_help(session, "Field help", lines[:-1], header_color=header_color, unicode_style=unicode_style)
 
 
-_GATE_WORDS: dict[GateKind, tuple[str, str]] = {
-    GateKind.BOARD_READ: ("read", "board"),
-    GateKind.BOARD_WRITE: ("post", "board"),
-    GateKind.AREA_READ: ("download", "file area"),
-    GateKind.AREA_WRITE: ("upload", "file area"),
-    GateKind.CHANNEL: ("join", "channel"),
-    GateKind.DOOR: ("play", "door"),
-    GateKind.NODE_MAP: ("open", "node-wide"),
-    GateKind.MAIL: ("use", "node-wide"),
-    GateKind.MRC_OPEN_ROOM: ("open", "node-wide"),
-    GateKind.SYSOP: ("use", "node-wide"),
-}
-
-
 def _gate_row(gate: Gate, extra: str | None = None) -> tuple[str, str, str]:
     """`(action, name, what)` cells for one gate in a level-change preview."""
-    action, what = _GATE_WORDS[gate.kind]
+    action, what = GATE_WORDS[gate.kind]
     name = gate.name + (" (hidden)" if gate.hidden else "")
     remarks = [text for text in (extra, gate.note) if text]
     return action, name, "; ".join([what, *remarks])
@@ -6994,10 +6989,12 @@ async def _preview_level_change(
     this account, shown before it is made. Returns whether the SysOp applied
     it; `[B]ack` leaves the level as it was."""
     chrome = await _load_chrome(lane, actor)
+    names = await lane.run(get_level_names)
     choice, _page = await show_detail(
         session,
         title=_detail_title(
-            session, chrome, f"Level {change.old_level} → {change.new_level}",
+            session, chrome,
+            f"Level {level_label(change.old_level, names)} → {level_label(change.new_level, names)}",
             breadcrumb=("SysOp", "Users", target.username),
             subtitle=f"What changes for {target.username} by level. Grants and other gates are counted.",
         ),
@@ -7165,11 +7162,11 @@ async def _user_detail_screen(
             except InputCancelled:
                 raw = ""
             if raw and raw != str(target.user_level):
-                try:
-                    new_level = int(raw)
-                except ValueError:
-                    _announce_line(session, colored("Not a number -- cancelled.", fg_color=MUTED_COLOR))
-                else:
+                # A level's name works as well as its number (issue #1009).
+                new_level = parse_level(raw, await lane.run(get_level_names))
+                if new_level is None:
+                    _announce_line(session, colored("Not a level or a level's name -- cancelled.", fg_color=MUTED_COLOR))
+                elif new_level != target.user_level:
                     target = await _change_user_level(session, lane, actor, target, new_level, node_controls)
             blocked = await _redraw()
         elif choice == "t":
@@ -17015,11 +17012,11 @@ def _plain_level_label(levels: LevelContext | None, level: int | None) -> str:
         return "none"
     if levels is None:
         return str(level)
-    return f"{level} \u00b7 {_users_phrase(levels.users_at_or_above(level))}"
+    return f"{level_label(level, levels.names)} \u00b7 {_users_phrase(levels.users_at_or_above(level))}"
 
 
 def _setting_level_label(levels: LevelContext, level: int) -> str:
-    return f"level {level} and up · {_users_phrase(levels.users_at_or_above(level))}"
+    return f"level {level_label(level, levels.names)} and up · {_users_phrase(levels.users_at_or_above(level))}"
 
 
 def _effective_draft_level(levels: LevelContext, draft: dict, key: str) -> tuple[int, str | None]:
@@ -17043,7 +17040,8 @@ def _resource_level_label(levels: LevelContext | None, draft: dict, key: str) ->
     if levels is None:
         return _optional_int_label(draft.get(key))
     level, where = _effective_draft_level(levels, draft, key)
-    shown = f"none: {level} {where}" if where is not None else str(level)
+    label = level_label(level, levels.names)
+    shown = f"none: {label} {where}" if where is not None else label
     counted, extra = level, ""
     if key == "min_write_level":
         read_level, _ = _effective_draft_level(levels, draft, "min_read_level")
@@ -17060,7 +17058,7 @@ def _community_default_label(levels: LevelContext | None, draft: dict, key: str,
     if levels is None:
         return label
     if value is not None:
-        label = f"{value} \u00b7 {_users_phrase(levels.users_at_or_above(value))}"
+        label = f"{level_label(value, levels.names)} \u00b7 {_users_phrase(levels.users_at_or_above(value))}"
     direction = "read" if "read" in key else "write"
     inheriting = levels.inheriting.get((community_id, direction), {}) if community_id is not None else {}
     parts = [f"{count} {what}{'s' if count != 1 else ''}" for what, count in sorted(inheriting.items())]

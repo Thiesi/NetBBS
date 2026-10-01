@@ -117,7 +117,7 @@ def test_plain_and_setting_levels_count_too(db, market):
     levels = level_context(db)
 
     assert _plain_level_label(levels, 10) == "10 · 4 users"
-    assert _plain_level_label(levels, 255) == "255 · 1 user"
+    assert _plain_level_label(levels, 255) == "255 (SysOp) · 1 user"
     assert _setting_level_label(levels, 0) == "level 0 and up · 5 users"
 
 
