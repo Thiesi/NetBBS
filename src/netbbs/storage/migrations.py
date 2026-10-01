@@ -3965,6 +3965,20 @@ MIGRATIONS = [
     ),
     Migration(
         description=(
+            "Issue #672: `link_events.stale_signer` -- set on a stored copy that verifies only under "
+            "a key its signer has since marked compromised, naming that signer. Such a copy is not "
+            "declared in inventory and not served, so it is asked for again and replaced in place "
+            "by the signer's re-signed copy, which clears the column. The projection (post, line, "
+            "file) is untouched throughout. NULL for every existing row: the running node marks "
+            "what it finds stale at its next sync pass."
+        ),
+        sql="""
+        ALTER TABLE link_events ADD COLUMN stale_signer TEXT;
+        CREATE INDEX idx_link_events_stale ON link_events(stale_signer) WHERE stale_signer IS NOT NULL;
+        """,
+    ),
+    Migration(
+        description=(
             "Issue #1036: `link_trust_signals.evidence_verified_at` -- when this node itself "
             "reproduced a self-verifying signal's embedded evidence (design doc §12.6). Only a "
             "verified self-verifying signal counts toward automatic policy; one this node could "

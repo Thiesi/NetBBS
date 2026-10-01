@@ -931,12 +931,22 @@ on a screen that already uses those letters. A list that grows without bound
 (an account's admin actions, trust configuration history) is a screen of its
 own rather than the tail of another. A detail screen that keeps its own
 described menu gives the menu only the rows the panel leaves, and falls back to
-the packed action bar before it lets the panel's top row scroll away. That
-fallback is not paging: on a terminal much narrower than 80 columns, where the
-packed bar itself wraps to several rows, a screen of this kind (a board, file
-area, channel or user's detail, the Settings overview, a banner menu, the
-landing page) can still be taller than the terminal. Paged screens are not
-affected.
+the packed action bar before it lets the panel's top row scroll away. The
+banner and masthead screens do the same (issue #662): each fits at 40, 64 and
+71 columns, and the board-list, file-area and chat-channel mastheads, which ran
+three rows past 80x24 before, fit there too.
+
+**Known limit below 72 columns (issue #662, decided).** Below 72 columns
+`menu_grid` gives each entry two rows and paired fields go one to a row, and
+the packed-bar fallback is not paging. Five screens are still taller than 24
+rows there, measured with the gallery: the landing dashboard (34 rows at 71
+columns, 35 at 64, 40 at 40), a board's detail (28, 28, 34), and a user's, a
+file area's and a channel's detail (25 at 64-71, 27-28 at 40). With redraw in
+place on, their tops scroll away. This is accepted: a SysOp running the
+console below 72 columns is rare, and fitting these screens would mean paging
+the detail screens (losing their described menus and moving the user detail's
+field cursor across pages) and a third, narrower dashboard layout. Paged
+screens are not affected. Revisit if a SysOp actually works that narrow.
 
 A menu too short for a description under each entry puts each one on its
 entry's own line, cut to fit, before it hides them (issue #840): at 80x24 the
@@ -1567,7 +1577,10 @@ states in the revoke it signs:
   objects again under the new key. A key retired routinely can be declared
   compromised later by a second revoke that says so. A node that knows the
   rotating node only by introduction learns the revoke from whoever carries
-  that node's content, beside the content (§8.11, issue #914).
+  that node's content, beside the content (§8.11, issue #914). A copy a node
+  already held when it learned the revoke, signed only by the compromised key,
+  is held as stale from then on: not declared, not served, and replaced in
+  place by the re-signed copy when a peer offers it (§8.11, issue #672).
 
 What counts as signed "while current" is decided per object family. A
 long-lived event is checked against the current key and then every key retired
@@ -1732,6 +1745,25 @@ visible. Local maintenance follows:
 
 with a grace period between expiration and deletion. Local pruning never
 becomes a network-wide deletion instruction.
+
+A revision ages from the later of its own `created_at` and its post's first
+revision's (issue #793). This applies to every revision: edits, withdrawals and
+moderator edits.
+- **Why not its own alone:** a revision carried over the Link is stamped by its
+  author's clock, display metadata that may run far behind (§7.2). Aged by its
+  own stamp, an edit from a node with a badly wrong clock expired on arrival,
+  and the post fell back to the revision before it. For a withdrawal, that
+  re-showed the withdrawn text. Now an edit can never expire before its post.
+- **A genuine later edit still keeps a post alive,** as before: its own stamp
+  is the later one.
+- **If the first revision was also stamped by the bad clock,** the post and its
+  edits expire together, which is the accepted cost.
+- **Receipt time was rejected:** ageing carried content by when this node
+  received it would keep old history, carried late to a newly subscribing
+  node, alive for a full maximum age.
+- **Where it applies:** the sweep's expire and delete steps, the read-only
+  listed count and the board rankings. A file has no revisions and ages by its
+  own `created_at`.
 
 **Pinning and keeping** (issue #675). A moderator with the board's or area's
 edit permission can pin a post or file, and can keep it from expiring:
@@ -5287,7 +5319,10 @@ as part of a chain, though. A carrier's inventory response names, under
 `key_chains`, the signing-key history of each node whose content it serves in
 that response, when that history holds more than the first authorization and
 is no longer than 64 transitions; at most 32 chains per response, never the
-carrier's own or the requester's (issue #914). The requester merges each into
+carrier's own or the requester's (issue #914). It also names the chain of
+whoever signed what the requester declares it holds, when that signer has
+marked a key compromised: a requester holding a stale copy is served nothing of
+that signer's, and would otherwise never hear (issue #672). The requester merges each into
 an identity it knows **by introduction only**, checked against the root key
 already on file. A direct peer's chain comes only from that peer; an identity
 the requester has not been introduced to is learned whole, by introduction.
@@ -5295,6 +5330,26 @@ Without this, a compromise never reached an introduced-only node: its bundle
 still held the compromised key as current, old-key copies verified and were
 accepted, and nothing failed to prompt a refresh. With it the same pull skips
 them, per object.
+
+**Stale copies.** A copy a node already holds, signed only by a key its
+signer has since marked compromised, is not re-checked by being kept; it was
+accepted when that key was current. When the node learns the compromise --
+from the signer's own revoke or hello, or from a carried chain -- it looks
+through what it stores of the inventory-carried kinds, among the copies that
+name that signer as author or origin, for those that verify under that key and
+under none the signer still stands behind, once per newly
+compromised key, and marks them stale (`link_events.stale_signer`). A stale
+copy is neither declared in inventory nor served, so the next exchange asks
+for it again. The signer re-signed its content in its compromise response
+(§4.5); a content id covers the envelope and not the signature, so the
+re-signed copy has the same id and the same envelope. It replaces the stale
+copy in place -- the stored envelope, and a carried genesis on its board,
+channel or file area row -- and the projection built from that envelope is
+left as it is: the post, line or file stays visible throughout and is never
+doubled. Each hop learns the compromise in turn, so re-signed copies travel
+through any chain of carriers without a change on the wire (issue #672). A
+second stale copy offered meanwhile, by a carrier that has not heard yet, is
+dropped.
 
 A bundle on file can still be stale another way: after a rotation it no
 longer verifies what the new key signs. The requester knows which identity the
@@ -6970,7 +7025,16 @@ time alone (a recovery hold's release, an override's or a signal's expiry,
 probation's age requirement), which have no input change of their own; without
 it a running node applied them only at its next restart (issue #802). For every restriction the SysOp can inspect the subject,
 dimension, effects, rule/threshold, evidence, counted domains/weights, times,
-overrides, audit history, and requirements for release. Caller-facing behavior
+overrides, audit history, and requirements for release. Counted domains and
+weight appear whenever the dimension has a self-verifying identity report that
+counts toward the two-domain threshold, whatever decided its state; a
+dimension that cannot quarantine by that threshold never shows them. The
+console states them as the distance to quarantine
+("1 of 2 domains, weight 1.0 of 2.0"), so a SysOp sees how close one more
+report would bring the subject (issue #752). Probation's
+`active_trigger_count` counts every applicable dimension, because any trigger
+blocks graduation in all of them; `dimension_trigger_count` beside it counts
+only the dimension shown. Caller-facing behavior
 states that local policy restricted content/delivery without claiming a
 network-wide verdict or leaking private evidence.
 
@@ -13711,9 +13775,9 @@ finishes a response that a stop interrupted.
 A copy that another node already holds is not reached. It stays accepted
 there, and a node that later pulls it from that carrier skips it *per
 object*, as it does a trust object signed by a superseded key: a stale copy
-must never end the response it arrives in. That node gets the object from its
-origin instead. Carrying re-signed copies onward to carriers is a propagation
-mechanism of its own, not built (issue #672).
+must never end the response it arrives in. A carrier that has learned the compromise holds such a copy as
+stale and asks for it again, so the re-signed copy reaches it and then the
+nodes behind it (§8.11 "Stale copies", issue #672).
 
 **Decision 4 — a rotation is saved before anything live changes.** It is also
 journaled, because the node is running. The new key is staged beside its
@@ -14290,7 +14354,7 @@ their place.
 **Decision 5: narrow terminals drop columns, never wrap.** Below 80 columns
 the Monitor drops the address, terminal size and transport columns, in that
 order. User, idle time and activity always stay. How narrow the console must
-still work follows #662.
+still work is decided in §3.4 (issue #662).
 
 ### Issue #836 — delegation short of SysOp — decided
 
@@ -14672,7 +14736,7 @@ that made reproduced evidence the receiver's own observation, written for the
 digest path. With automatic issuance (#589), promotion would let one issuing
 node quarantine its subject everywhere; the two-domain rule keeps the
 independence §12.7 is built on. Existing signals stop counting until their
-evidence reproduces here (migration 111; release note).
+evidence reproduces here (migration 112; release note).
 
 **Decision 4 — the digest-evidence path is deleted.** `fetch_trust_evidence`,
 `verify_evidence_bytes` and `activate_reproduced_digest_signal` had no
@@ -14710,6 +14774,47 @@ of at most 64 transitions; a chain holding only the first authorization is not
 sent. An ordinary response is unchanged, an older requester ignores the field,
 and an older carrier simply sends none. Longer chains fall back to the
 stale-bundle refresh.
+
+### Issue #672 — carriers holding copies signed by a compromised key — decided
+
+After a compromise rotation the origin re-signs its own content, but a re-signed
+object keeps its content id, and inventory diffs by content id: carriers kept
+serving the old-signed copies, and the re-signed ones never spread past the
+origin's own peers. Normative description: §8.11, "Stale copies".
+
+**Decision 1 — a node that learns a compromise treats what that key alone
+signed as missing** (the maintainer's choice). It stops declaring and serving
+those copies, keeps their projections, and takes the re-signed copy in place
+when the ordinary inventory exchange offers it. No change on the wire. Rejected:
+the origin pushing its re-signed events once to each peer, which reaches only
+its own peers and leaves every carrier further out, which already holds the old
+copy, as stale as before; and naming the signer in every inventory entry, which
+spreads through every hop but changes the inventory format of every event for a
+rare case.
+
+**Decision 2 — learned from any source.** A direct peer's revoke or hello, an
+introduction, or a chain a carrier sends. A carrier also sends the chain of a
+signer whose content the requester only declares, when that signer has marked a
+key compromised, since a requester holding a stale copy is served nothing of
+that signer's (§8.11).
+
+**Decision 3 — bounded.** An identity's chain is looked at again only when it
+has changed since the sweep last saw it, and a hello or introduction looks only
+at the identity it changed, so an ordinary hello verifies nothing. Each newly
+compromised key costs one look through the stored events of the kinds inventory
+carries, once per process; a stale mark is stored, so a restart does not forget
+it. Mail, its acknowledgements and key transitions travel outside inventory and
+are left as they are.
+
+**Decision 4 — only an event's own signer speaks for it.** A chain is any
+root's to write, and nothing stops a node from authorizing another node's
+public key as its own and then declaring it compromised. A copy is therefore
+tested only against the compromised keys of the identity it names as its
+signer (author, origin), never against another identity's; such a claim
+affects nothing but the claiming node's own content. Rejecting a chain that
+claims a key another identity already holds was considered and not done: the
+receiver cannot know every identity's keys, so the rule could not be enforced
+consistently, and attributing by signer already makes the claim harmless.
 
 ### SFTP over the SSH transport — declined
 

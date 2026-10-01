@@ -736,7 +736,7 @@ from netbbs.rendering.art_slots import (
     parse_slot_art,
     render_list_slot_art,
 )
-from netbbs.rendering.ansi import move_cursor
+from netbbs.rendering.ansi import clear_screen, move_cursor
 from netbbs.net.logoff_banner import (
     MAX_LOGOFF_BANNER_SIZE_BYTES,
     load_logoff_banner,
@@ -1429,6 +1429,31 @@ def _fitted_menu(options: list[MenuEntry], description_level: str, *, session: S
     return action_bar([entry.label for entry in options], width=session.terminal_width)
 
 
+async def _write_counted(session: Session, text: str) -> int:
+    """Write `text` and return the rows it leaves on screen, counting each
+    line break after the last clear -- for a screen that fits its menu under
+    what it has drawn (issue #662). A break before a clear is erased with it;
+    counting it pushed the main-menu masthead's described menu, which fits
+    80x24 to the row, into the packed one."""
+    await session.write_line(text)
+    return len(text.rsplit(clear_screen(), 1)[-1].split("\r\n"))
+
+
+async def _write_banner_menu(
+    session: Session, options: list[MenuEntry], description_level: str, *, used_rows: int, help_text: str,
+) -> None:
+    """A banner or masthead screen's menu and its help line, fitted under the
+    `used_rows` already on screen (issue #662). Built with `_menu_row`, these
+    screens budgeted the described menu against the whole terminal, so below
+    72 columns, where `menu_grid` lays it out one entry per two rows, the
+    screen's own title scrolled away before Choice: appeared."""
+    help_rows = len(wrap_to_width(help_text, session.terminal_width)) or 1
+    await session.write_line(
+        "\r\n" + _fitted_menu(options, description_level, session=session, used_rows=used_rows + 1 + help_rows)
+    )
+    await session.write_line(colored(help_text, fg_color=MUTED_COLOR))
+
+
 def _description_field(description: str | None) -> Field:
     if description:
         return Field("Description", description)
@@ -1445,6 +1470,35 @@ def _gate_field(label: str, value: int | str | None) -> Field:
     if value is None or value == "":
         return Field(label, "none", color=MUTED_COLOR)
     return Field(label, str(value), color=GATE_COLOR)
+
+
+def _quarantine_distance_text(explanation: dict) -> str:
+    """How far a dimension's remote reports are from the two-domain
+    quarantine threshold, in words (issue #752): "1 of 2 domains, weight 1.0
+    of 2.0". Empty when the explanation counts no remote reports."""
+    domains = explanation.get("counted_domains") or {}
+    if not domains:
+        # Nothing counted toward the threshold: no distance to state, even if
+        # an older explanation stored the fields (review of #1030).
+        return ""
+    try:
+        weight = float(explanation.get("counted_weight", 0.0))
+        required_weight = float(explanation.get("required_weight", 2.0))
+        required_domains = int(explanation.get("required_domains", 2))
+    except (TypeError, ValueError):
+        return ""
+    return (
+        f"Remote reports toward quarantine: {len(domains)} of {required_domains} domains, "
+        f"weight {weight:.1f} of {required_weight:.1f}"
+    )
+
+
+def _trust_state_note(explanation: dict) -> str | None:
+    """A dimension's explanation for the subject screen: the distance to
+    quarantine in words first, when there is one, then the stored pairs."""
+    parts = [part for part in (_quarantine_distance_text(explanation or {}), _audit_details_text(explanation))
+             if part]
+    return ". ".join(parts) or None
 
 
 def _audit_details_text(details: dict) -> str:
@@ -1477,6 +1531,7 @@ def _banner_status_section(
     sauce: Sauce | None = None,
     credit_line: bool | None = None,
     too_wide: str = "no art",
+    speed: int | None = None,
 ) -> Section:
     """Whether a banner or masthead is switched on, and the state of the file
     behind it -- the two facts every one of these seven menus leads with. They
@@ -1489,7 +1544,10 @@ def _banner_status_section(
     CP437's; the caller reads the record off the event loop
     (`_banner_sauce`). `too_wide` is what a caller whose terminal is
     narrower than the art sees instead. `credit_line` is the welcome
-    banner's caller-facing credit setting, shown when given."""
+    banner's caller-facing credit setting, shown when given. `speed` is the
+    art's playback speed (issue #929), shown when the screen has a `[S]peed`
+    entry: its description alone could be packed away by a fitted menu
+    (issue #662), and a SysOp who pressed it would not see what it is now."""
     fields = [
         Field(
             "Shown to callers",
@@ -1509,6 +1567,8 @@ def _banner_status_section(
         if not sauce.font_is_cp437:
             font = "".join(ch for ch in sauce.font if ch.isprintable())
             fields.append(Field("Font", f"made for {font}; shown with CP437's characters", color=WARNING_COLOR))
+    if speed is not None:
+        fields.append(Field("Speed", _art_speed_brief(speed), color=VALUE_COLOR if speed else MUTED_COLOR))
     if credit_line is not None:
         fields.append(Field("Credit line", "shown under the banner" if credit_line else "off", color=VALUE_COLOR if credit_line else MUTED_COLOR))
     return Section("Status", fields)
@@ -4588,7 +4648,7 @@ async def _trust_subject_screen(
                 state.dimension.value,
                 status_badge(state.state.value, tone=_TRUST_STATE_TONE[state.state], unicode_style=chrome.unicode_style)
                 + colored(f"  ({sanitize_text(state.reason_code)})", fg_color=METADATA_COLOR),
-                styled=True, note=_audit_details_text(state.explanation) or None,
+                styled=True, note=_trust_state_note(state.explanation),
             )
             for state in states
         ]))
@@ -13643,7 +13703,7 @@ async def _banners_and_mastheads_menu(session: Session, lane: DatabaseLane, acto
 
 async def _write_wrapped_subtitle(
     session: Session, text: str, *, color: int | tuple[int, int, int] = MUTED_COLOR, bold: bool = False
-) -> None:
+) -> int:
     """Word-wrap a screen's plain-text descriptive subtitle to the real
     terminal width before coloring it, one wrapped physical line at a
     time -- coloring the whole sentence first and relying on the
@@ -13653,9 +13713,13 @@ async def _write_wrapped_subtitle(
     `bold` (dogfood report: `[S]hutdown`/`[D]rain`'s own alert-colored
     warning lines had this exact same unwrapped-raw-`colored()` bug,
     just with `bold=True` on top) -- passed straight through to
-    `colored()` for a caller that needs its wrapped lines bold too."""
-    for wrapped in wrap_to_width(text, session.terminal_width) or [text]:
+    `colored()` for a caller that needs its wrapped lines bold too.
+
+    Returns the rows written, for a screen that fits its menu under them."""
+    lines = wrap_to_width(text, session.terminal_width) or [text]
+    for wrapped in lines:
         await session.write_line(colored(wrapped, fg_color=color, bold=bold))
+    return len(lines)
 
 
 async def _draw_banners_and_mastheads_menu(
@@ -13775,38 +13839,37 @@ async def _draw_welcome_banner_menu(
     collapsed: bool,
 ) -> None:
     status = await lane.run(welcome_banner_status)
-    await session.write_line("\r\n" + screen_title("Welcome banner",
+    rows = await _write_counted(session, "\r\n" + screen_title("Welcome banner",
             breadcrumb=(session.node_display_name, "Settings", "Mastheads & banners", "Banners"), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
             header_color=await lane.run(effective_header_color_256), node_name_gradient=session.node_name_gradient))
     credit_line = await lane.run(is_welcome_banner_credit_enabled)
-    await _write_sections(
+    speed = await lane.run(art_speed, WELCOME_ART)
+    rows += await _write_sections(
         session,
         [_banner_status_section(
             status, unicode_style=unicode_style, sauce=await asyncio.to_thread(_banner_sauce, status),
-            credit_line=credit_line, too_wide="the default banner",
+            credit_line=credit_line, too_wide="the default banner", speed=speed,
         )],
         unicode_style=unicode_style,
     )
-    await session.write_line(
-        "\r\n" + _menu_row(
-            [
-                MenuEntry(label=menu_key("P", "review"), brief="Show the banner as callers see it"),
-                MenuEntry(label=menu_key("S", "peed"), brief=_art_speed_brief(await lane.run(art_speed, WELCOME_ART))),
-                MenuEntry(label=menu_key("E", "nable"), brief="Turn the banner on"),
-                MenuEntry(label=menu_key("D", "isable"), brief="Turn the banner off"),
-                MenuEntry(label=menu_key("i", "t", prefix="Ed"), brief="Edit the banner text"),
-                MenuEntry(label=menu_key("C", "redit line"), brief="Credit the art under the banner"),
-                MenuEntry(label=menu_key("G", "allery"), brief="Apply a bundled sample banner"),
-                MenuEntry(label=menu_key("F", "rom disk"), brief="Load your own .ans from this node"),
-                MenuEntry(label=menu_key("U", "pload"), brief="Send an .ans from your computer"),
-                MenuEntry(label=menu_key("B", "ack"), brief="Return to Banners"),
-            ],
-            description_level,
-            width=session.terminal_width,
-            height=session.terminal_height,
-        )
+    await _write_banner_menu(
+        session,
+        [
+            MenuEntry(label=menu_key("P", "review"), brief="Show the banner as callers see it"),
+            MenuEntry(label=menu_key("S", "peed"), brief=_art_speed_brief(speed)),
+            MenuEntry(label=menu_key("E", "nable"), brief="Turn the banner on"),
+            MenuEntry(label=menu_key("D", "isable"), brief="Turn the banner off"),
+            MenuEntry(label=menu_key("i", "t", prefix="Ed"), brief="Edit the banner text"),
+            MenuEntry(label=menu_key("C", "redit line"), brief="Credit the art under the banner"),
+            MenuEntry(label=menu_key("G", "allery"), brief="Apply a bundled sample banner"),
+            MenuEntry(label=menu_key("F", "rom disk"), brief="Load your own .ans from this node"),
+            MenuEntry(label=menu_key("U", "pload"), brief="Send an .ans from your computer"),
+            MenuEntry(label=menu_key("B", "ack"), brief="Return to Banners"),
+        ],
+        description_level,
+        used_rows=rows,
+        help_text="(Ctrl-H for where to place your own .ans files)",
     )
-    await session.write_line(colored("(Ctrl-H for where to place your own .ans files)", fg_color=MUTED_COLOR))
     await _choice_prompt(session)
 
 
@@ -14449,43 +14512,43 @@ async def _draw_main_menu_banner_menu(
 ) -> None:
     status = await lane.run(main_menu_banner_status)
     mode = await lane.run(main_menu_art_mode)
-    await session.write_line("\r\n" + screen_title("Main-menu masthead",
+    rows = await _write_counted(session, "\r\n" + screen_title("Main-menu masthead",
             breadcrumb=(session.node_display_name, "Settings", "Mastheads & banners", "Mastheads"), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
             header_color=await lane.run(effective_header_color_256), node_name_gradient=session.node_name_gradient))
     sauce = await asyncio.to_thread(_banner_sauce, status)
-    await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style, sauce=sauce)], unicode_style=unicode_style)
+    speed = await lane.run(art_speed, MAIN_MENU_ART)
+    rows += await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style, sauce=sauce, speed=speed)], unicode_style=unicode_style)
     await session.write_line("")
-    await _write_wrapped_subtitle(
+    rows += 1
+    rows += await _write_wrapped_subtitle(
         session,
         # One row each, so the screen with its [S]peed entry fits 80x24.
         "Mode: above the menu. The art is shown above the live main menu."
         if mode == MASTHEAD_MODE else
         "Mode: the menu itself. Callers' items and live values fill its slots.",
     )
-    await session.write_line(
-        "\r\n" + _menu_row(
-            [
-                MenuEntry(label=menu_key("P", "review"), brief="Show it as callers see it"),
-                MenuEntry(label=menu_key("S", "peed"), brief=_art_speed_brief(await lane.run(art_speed, MAIN_MENU_ART))),
-                MenuEntry(
-                    label=menu_key("M", "ode"),
-                    brief="Make the art the menu itself" if mode == MASTHEAD_MODE else "Show the art above the menu",
-                ),
-                MenuEntry(label=menu_key("C", "heck"), brief="Slots, problems and menu fit"),
-                MenuEntry(label=menu_key("E", "nable"), brief="Turn the masthead on"),
-                MenuEntry(label=menu_key("D", "isable"), brief="Turn the masthead off"),
-                MenuEntry(label=menu_key("i", "t", prefix="Ed"), brief="Edit the masthead art"),
-                MenuEntry(label=menu_key("G", "allery"), brief="Apply a bundled sample masthead"),
-                MenuEntry(label=menu_key("F", "rom disk"), brief="Load your own .ans from this node"),
-                MenuEntry(label=menu_key("U", "pload"), brief="Send an .ans from your computer"),
-                MenuEntry(label=menu_key("B", "ack"), brief="Return to Mastheads"),
-            ],
-            description_level,
-            width=session.terminal_width,
-            height=session.terminal_height,
-        )
+    await _write_banner_menu(
+        session,
+        [
+            MenuEntry(label=menu_key("P", "review"), brief="Show it as callers see it"),
+            MenuEntry(label=menu_key("S", "peed"), brief=_art_speed_brief(speed)),
+            MenuEntry(
+                label=menu_key("M", "ode"),
+                brief="Make the art the menu itself" if mode == MASTHEAD_MODE else "Show the art above the menu",
+            ),
+            MenuEntry(label=menu_key("C", "heck"), brief="Slots, problems and menu fit"),
+            MenuEntry(label=menu_key("E", "nable"), brief="Turn the masthead on"),
+            MenuEntry(label=menu_key("D", "isable"), brief="Turn the masthead off"),
+            MenuEntry(label=menu_key("i", "t", prefix="Ed"), brief="Edit the masthead art"),
+            MenuEntry(label=menu_key("G", "allery"), brief="Apply a bundled sample masthead"),
+            MenuEntry(label=menu_key("F", "rom disk"), brief="Load your own .ans from this node"),
+            MenuEntry(label=menu_key("U", "pload"), brief="Send an .ans from your computer"),
+            MenuEntry(label=menu_key("B", "ack"), brief="Return to Mastheads"),
+        ],
+        description_level,
+        used_rows=rows,
+        help_text="(Ctrl-H for where to place your own .ans files)",
     )
-    await session.write_line(colored("(Ctrl-H for where to place your own .ans files)", fg_color=MUTED_COLOR))
     await _choice_prompt(session)
 
 
@@ -14989,35 +15052,33 @@ async def _draw_logoff_banner_menu(
     unicode_style: bool, collapsed: bool, header_color: int | tuple[int, int, int],
 ) -> None:
     status = await lane.run(logoff_banner_status)
-    await session.write_line("\r\n" + screen_title("Logoff banner",
+    rows = await _write_counted(session, "\r\n" + screen_title("Logoff banner",
             breadcrumb=(session.node_display_name, "Settings", "Mastheads & banners", "Banners"), width=session.terminal_width,
             clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, header_color=header_color,
             node_name_gradient=session.node_name_gradient))
-    await _write_wrapped_subtitle(
+    rows += await _write_wrapped_subtitle(
         session,
         "Shown above the ordinary Goodbye message on an intentional Log off only -- never on an idle "
         "timeout, kick, or account revocation.",
     )
     sauce = await asyncio.to_thread(_banner_sauce, status)
-    await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style, sauce=sauce)], unicode_style=unicode_style)
-    await session.write_line(
-        "\r\n" + _menu_row(
-            [
-                MenuEntry(label=menu_key("P", "review"), brief="Show the banner as callers see it"),
-                MenuEntry(label=menu_key("E", "nable"), brief="Turn the banner on"),
-                MenuEntry(label=menu_key("D", "isable"), brief="Turn the banner off"),
-                MenuEntry(label=menu_key("i", "t", prefix="Ed"), brief="Edit the banner text"),
-                MenuEntry(label=menu_key("G", "allery"), brief="Apply a bundled sample banner"),
-                MenuEntry(label=menu_key("F", "rom disk"), brief="Load your own .ans from this node"),
-                MenuEntry(label=menu_key("U", "pload"), brief="Send an .ans from your computer"),
-                MenuEntry(label=menu_key("B", "ack"), brief="Return to Banners"),
-            ],
-            description_level,
-            width=session.terminal_width,
-            height=session.terminal_height,
-        )
+    rows += await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style, sauce=sauce)], unicode_style=unicode_style)
+    await _write_banner_menu(
+        session,
+        [
+            MenuEntry(label=menu_key("P", "review"), brief="Show the banner as callers see it"),
+            MenuEntry(label=menu_key("E", "nable"), brief="Turn the banner on"),
+            MenuEntry(label=menu_key("D", "isable"), brief="Turn the banner off"),
+            MenuEntry(label=menu_key("i", "t", prefix="Ed"), brief="Edit the banner text"),
+            MenuEntry(label=menu_key("G", "allery"), brief="Apply a bundled sample banner"),
+            MenuEntry(label=menu_key("F", "rom disk"), brief="Load your own .ans from this node"),
+            MenuEntry(label=menu_key("U", "pload"), brief="Send an .ans from your computer"),
+            MenuEntry(label=menu_key("B", "ack"), brief="Return to Banners"),
+        ],
+        description_level,
+        used_rows=rows,
+        help_text="(Ctrl-H for where to place your own .ans files)",
     )
-    await session.write_line(colored("(Ctrl-H for where to place your own .ans files)", fg_color=MUTED_COLOR))
     await _choice_prompt(session)
 
 
@@ -15261,35 +15322,33 @@ async def _draw_new_account_banner_before_menu(
     unicode_style: bool, collapsed: bool, header_color: int | tuple[int, int, int],
 ) -> None:
     status = await lane.run(new_account_banner_before_status)
-    await session.write_line("\r\n" + screen_title("New account banner (before)",
+    rows = await _write_counted(session, "\r\n" + screen_title("New account banner (before)",
             breadcrumb=(session.node_display_name, "Settings", "Mastheads & banners", "Banners"), width=session.terminal_width,
             clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, header_color=header_color,
             node_name_gradient=session.node_name_gradient))
-    await _write_wrapped_subtitle(
+    rows += await _write_wrapped_subtitle(
         session,
         "Shown once, right when a caller starts self-service signup -- before the Create "
         "account prompts, never repeated on a fixable retry.",
     )
     sauce = await asyncio.to_thread(_banner_sauce, status)
-    await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style, sauce=sauce)], unicode_style=unicode_style)
-    await session.write_line(
-        "\r\n" + _menu_row(
-            [
-                MenuEntry(label=menu_key("P", "review"), brief="Show the banner as callers see it"),
-                MenuEntry(label=menu_key("E", "nable"), brief="Turn the banner on"),
-                MenuEntry(label=menu_key("D", "isable"), brief="Turn the banner off"),
-                MenuEntry(label=menu_key("i", "t", prefix="Ed"), brief="Edit the banner text"),
-                MenuEntry(label=menu_key("G", "allery"), brief="Apply a bundled sample banner"),
-                MenuEntry(label=menu_key("F", "rom disk"), brief="Load your own .ans from this node"),
-                MenuEntry(label=menu_key("U", "pload"), brief="Send an .ans from your computer"),
-                MenuEntry(label=menu_key("B", "ack"), brief="Return to Banners"),
-            ],
-            description_level,
-            width=session.terminal_width,
-            height=session.terminal_height,
-        )
+    rows += await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style, sauce=sauce)], unicode_style=unicode_style)
+    await _write_banner_menu(
+        session,
+        [
+            MenuEntry(label=menu_key("P", "review"), brief="Show the banner as callers see it"),
+            MenuEntry(label=menu_key("E", "nable"), brief="Turn the banner on"),
+            MenuEntry(label=menu_key("D", "isable"), brief="Turn the banner off"),
+            MenuEntry(label=menu_key("i", "t", prefix="Ed"), brief="Edit the banner text"),
+            MenuEntry(label=menu_key("G", "allery"), brief="Apply a bundled sample banner"),
+            MenuEntry(label=menu_key("F", "rom disk"), brief="Load your own .ans from this node"),
+            MenuEntry(label=menu_key("U", "pload"), brief="Send an .ans from your computer"),
+            MenuEntry(label=menu_key("B", "ack"), brief="Return to Banners"),
+        ],
+        description_level,
+        used_rows=rows,
+        help_text="(Ctrl-H for where to place your own .ans files)",
     )
-    await session.write_line(colored("(Ctrl-H for where to place your own .ans files)", fg_color=MUTED_COLOR))
     await _choice_prompt(session)
 
 
@@ -15541,35 +15600,33 @@ async def _draw_new_account_banner_after_menu(
     unicode_style: bool, collapsed: bool, header_color: int | tuple[int, int, int],
 ) -> None:
     status = await lane.run(new_account_banner_after_status)
-    await session.write_line("\r\n" + screen_title("New account banner (after)",
+    rows = await _write_counted(session, "\r\n" + screen_title("New account banner (after)",
             breadcrumb=(session.node_display_name, "Settings", "Mastheads & banners", "Banners"), width=session.terminal_width,
             clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, header_color=header_color,
             node_name_gradient=session.node_name_gradient))
-    await _write_wrapped_subtitle(
+    rows += await _write_wrapped_subtitle(
         session,
         "Shown once self-service signup succeeds -- covers both an immediate login and a "
         "pending-approval account, alongside the existing message either way.",
     )
     sauce = await asyncio.to_thread(_banner_sauce, status)
-    await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style, sauce=sauce)], unicode_style=unicode_style)
-    await session.write_line(
-        "\r\n" + _menu_row(
-            [
-                MenuEntry(label=menu_key("P", "review"), brief="Show the banner as callers see it"),
-                MenuEntry(label=menu_key("E", "nable"), brief="Turn the banner on"),
-                MenuEntry(label=menu_key("D", "isable"), brief="Turn the banner off"),
-                MenuEntry(label=menu_key("i", "t", prefix="Ed"), brief="Edit the banner text"),
-                MenuEntry(label=menu_key("G", "allery"), brief="Apply a bundled sample banner"),
-                MenuEntry(label=menu_key("F", "rom disk"), brief="Load your own .ans from this node"),
-                MenuEntry(label=menu_key("U", "pload"), brief="Send an .ans from your computer"),
-                MenuEntry(label=menu_key("B", "ack"), brief="Return to Banners"),
-            ],
-            description_level,
-            width=session.terminal_width,
-            height=session.terminal_height,
-        )
+    rows += await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style, sauce=sauce)], unicode_style=unicode_style)
+    await _write_banner_menu(
+        session,
+        [
+            MenuEntry(label=menu_key("P", "review"), brief="Show the banner as callers see it"),
+            MenuEntry(label=menu_key("E", "nable"), brief="Turn the banner on"),
+            MenuEntry(label=menu_key("D", "isable"), brief="Turn the banner off"),
+            MenuEntry(label=menu_key("i", "t", prefix="Ed"), brief="Edit the banner text"),
+            MenuEntry(label=menu_key("G", "allery"), brief="Apply a bundled sample banner"),
+            MenuEntry(label=menu_key("F", "rom disk"), brief="Load your own .ans from this node"),
+            MenuEntry(label=menu_key("U", "pload"), brief="Send an .ans from your computer"),
+            MenuEntry(label=menu_key("B", "ack"), brief="Return to Banners"),
+        ],
+        description_level,
+        used_rows=rows,
+        help_text="(Ctrl-H for where to place your own .ans files)",
     )
-    await session.write_line(colored("(Ctrl-H for where to place your own .ans files)", fg_color=MUTED_COLOR))
     await _choice_prompt(session)
 
 
@@ -16091,43 +16148,43 @@ async def _draw_board_list_masthead_menu(
 ) -> None:
     status = await lane.run(board_list_banner_status)
     mode = await lane.run(list_art_mode, BOARD_LIST)
-    await session.write_line("\r\n" + screen_title("Board list masthead",
+    rows = await _write_counted(session, "\r\n" + screen_title("Board list masthead",
             breadcrumb=(session.node_display_name, "Settings", "Mastheads & banners", "Mastheads"), width=session.terminal_width,
             clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, header_color=header_color,
             node_name_gradient=session.node_name_gradient))
-    await _write_wrapped_subtitle(
+    rows += await _write_wrapped_subtitle(
         session,
         "Shown above every board-browsing view -- the top level, a category, or a "
         "Community.",
     )
     sauce = await asyncio.to_thread(_banner_sauce, status)
-    await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style, sauce=sauce)], unicode_style=unicode_style)
+    speed = await lane.run(art_speed, BOARD_LIST)
+    rows += await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style, sauce=sauce, speed=speed)], unicode_style=unicode_style)
     await session.write_line("")
-    await _write_wrapped_subtitle(session, _list_art_mode_line(mode))
-    await session.write_line(
-        "\r\n" + _menu_row(
-            [
-                MenuEntry(label=menu_key("P", "review"), brief="Show it as callers see it"),
-                MenuEntry(label=menu_key("S", "peed"), brief=_art_speed_brief(await lane.run(art_speed, BOARD_LIST))),
-                MenuEntry(
-                    label=menu_key("M", "ode"),
-                    brief="Make the art the list itself" if mode == LIST_MASTHEAD_MODE else "Show the art above the list",
-                ),
-                MenuEntry(label=menu_key("C", "heck"), brief="Slots, problems and list fit"),
-                MenuEntry(label=menu_key("E", "nable"), brief="Turn the masthead on"),
-                MenuEntry(label=menu_key("D", "isable"), brief="Turn the masthead off"),
-                MenuEntry(label=menu_key("i", "t", prefix="Ed"), brief="Edit the masthead art"),
-                MenuEntry(label=menu_key("G", "allery"), brief="Apply a bundled sample masthead"),
-                MenuEntry(label=menu_key("F", "rom disk"), brief="Load your own .ans from this node"),
-                MenuEntry(label=menu_key("U", "pload"), brief="Send an .ans from your computer"),
-                MenuEntry(label=menu_key("B", "ack"), brief="Return to Mastheads"),
-            ],
-            description_level,
-            width=session.terminal_width,
-            height=session.terminal_height,
-        )
+    rows += 1
+    rows += await _write_wrapped_subtitle(session, _list_art_mode_line(mode))
+    await _write_banner_menu(
+        session,
+        [
+            MenuEntry(label=menu_key("P", "review"), brief="Show it as callers see it"),
+            MenuEntry(label=menu_key("S", "peed"), brief=_art_speed_brief(speed)),
+            MenuEntry(
+                label=menu_key("M", "ode"),
+                brief="Make the art the list itself" if mode == LIST_MASTHEAD_MODE else "Show the art above the list",
+            ),
+            MenuEntry(label=menu_key("C", "heck"), brief="Slots, problems and list fit"),
+            MenuEntry(label=menu_key("E", "nable"), brief="Turn the masthead on"),
+            MenuEntry(label=menu_key("D", "isable"), brief="Turn the masthead off"),
+            MenuEntry(label=menu_key("i", "t", prefix="Ed"), brief="Edit the masthead art"),
+            MenuEntry(label=menu_key("G", "allery"), brief="Apply a bundled sample masthead"),
+            MenuEntry(label=menu_key("F", "rom disk"), brief="Load your own .ans from this node"),
+            MenuEntry(label=menu_key("U", "pload"), brief="Send an .ans from your computer"),
+            MenuEntry(label=menu_key("B", "ack"), brief="Return to Mastheads"),
+        ],
+        description_level,
+        used_rows=rows,
+        help_text="(Ctrl-H for where to place your own .ans files)",
     )
-    await session.write_line(colored("(Ctrl-H for where to place your own .ans files)", fg_color=MUTED_COLOR))
     await _choice_prompt(session)
 
 
@@ -16391,43 +16448,43 @@ async def _draw_file_area_masthead_menu(
 ) -> None:
     status = await lane.run(file_area_banner_status)
     mode = await lane.run(list_art_mode, FILE_AREA)
-    await session.write_line("\r\n" + screen_title("File area masthead",
+    rows = await _write_counted(session, "\r\n" + screen_title("File area masthead",
             breadcrumb=(session.node_display_name, "Settings", "Mastheads & banners", "Mastheads"), width=session.terminal_width,
             clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, header_color=header_color,
             node_name_gradient=session.node_name_gradient))
-    await _write_wrapped_subtitle(
+    rows += await _write_wrapped_subtitle(
         session,
         "Shown above every file-area-browsing view -- the top level, a category, or a "
         "Community.",
     )
     sauce = await asyncio.to_thread(_banner_sauce, status)
-    await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style, sauce=sauce)], unicode_style=unicode_style)
+    speed = await lane.run(art_speed, FILE_AREA)
+    rows += await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style, sauce=sauce, speed=speed)], unicode_style=unicode_style)
     await session.write_line("")
-    await _write_wrapped_subtitle(session, _list_art_mode_line(mode))
-    await session.write_line(
-        "\r\n" + _menu_row(
-            [
-                MenuEntry(label=menu_key("P", "review"), brief="Show it as callers see it"),
-                MenuEntry(label=menu_key("S", "peed"), brief=_art_speed_brief(await lane.run(art_speed, FILE_AREA))),
-                MenuEntry(
-                    label=menu_key("M", "ode"),
-                    brief="Make the art the list itself" if mode == LIST_MASTHEAD_MODE else "Show the art above the list",
-                ),
-                MenuEntry(label=menu_key("C", "heck"), brief="Slots, problems and list fit"),
-                MenuEntry(label=menu_key("E", "nable"), brief="Turn the masthead on"),
-                MenuEntry(label=menu_key("D", "isable"), brief="Turn the masthead off"),
-                MenuEntry(label=menu_key("i", "t", prefix="Ed"), brief="Edit the masthead art"),
-                MenuEntry(label=menu_key("G", "allery"), brief="Apply a bundled sample masthead"),
-                MenuEntry(label=menu_key("F", "rom disk"), brief="Load your own .ans from this node"),
-                MenuEntry(label=menu_key("U", "pload"), brief="Send an .ans from your computer"),
-                MenuEntry(label=menu_key("B", "ack"), brief="Return to Mastheads"),
-            ],
-            description_level,
-            width=session.terminal_width,
-            height=session.terminal_height,
-        )
+    rows += 1
+    rows += await _write_wrapped_subtitle(session, _list_art_mode_line(mode))
+    await _write_banner_menu(
+        session,
+        [
+            MenuEntry(label=menu_key("P", "review"), brief="Show it as callers see it"),
+            MenuEntry(label=menu_key("S", "peed"), brief=_art_speed_brief(speed)),
+            MenuEntry(
+                label=menu_key("M", "ode"),
+                brief="Make the art the list itself" if mode == LIST_MASTHEAD_MODE else "Show the art above the list",
+            ),
+            MenuEntry(label=menu_key("C", "heck"), brief="Slots, problems and list fit"),
+            MenuEntry(label=menu_key("E", "nable"), brief="Turn the masthead on"),
+            MenuEntry(label=menu_key("D", "isable"), brief="Turn the masthead off"),
+            MenuEntry(label=menu_key("i", "t", prefix="Ed"), brief="Edit the masthead art"),
+            MenuEntry(label=menu_key("G", "allery"), brief="Apply a bundled sample masthead"),
+            MenuEntry(label=menu_key("F", "rom disk"), brief="Load your own .ans from this node"),
+            MenuEntry(label=menu_key("U", "pload"), brief="Send an .ans from your computer"),
+            MenuEntry(label=menu_key("B", "ack"), brief="Return to Mastheads"),
+        ],
+        description_level,
+        used_rows=rows,
+        help_text="(Ctrl-H for where to place your own .ans files)",
     )
-    await session.write_line(colored("(Ctrl-H for where to place your own .ans files)", fg_color=MUTED_COLOR))
     await _choice_prompt(session)
 
 
@@ -16689,43 +16746,43 @@ async def _draw_chat_channel_picker_masthead_menu(
 ) -> None:
     status = await lane.run(chat_channel_picker_banner_status)
     mode = await lane.run(list_art_mode, CHAT_CHANNEL_PICKER)
-    await session.write_line("\r\n" + screen_title("Chat channel picker masthead",
+    rows = await _write_counted(session, "\r\n" + screen_title("Chat channel picker masthead",
             breadcrumb=(session.node_display_name, "Settings", "Mastheads & banners", "Mastheads"), width=session.terminal_width,
             clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, header_color=header_color,
             node_name_gradient=session.node_name_gradient))
-    await _write_wrapped_subtitle(
+    rows += await _write_wrapped_subtitle(
         session,
         "Shown above every channel-picker view -- the top level, a category, or a "
         "Community. Never inside a live channel.",
     )
     sauce = await asyncio.to_thread(_banner_sauce, status)
-    await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style, sauce=sauce)], unicode_style=unicode_style)
+    speed = await lane.run(art_speed, CHAT_CHANNEL_PICKER)
+    rows += await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style, sauce=sauce, speed=speed)], unicode_style=unicode_style)
     await session.write_line("")
-    await _write_wrapped_subtitle(session, _list_art_mode_line(mode))
-    await session.write_line(
-        "\r\n" + _menu_row(
-            [
-                MenuEntry(label=menu_key("P", "review"), brief="Show it as callers see it"),
-                MenuEntry(label=menu_key("S", "peed"), brief=_art_speed_brief(await lane.run(art_speed, CHAT_CHANNEL_PICKER))),
-                MenuEntry(
-                    label=menu_key("M", "ode"),
-                    brief="Make the art the list itself" if mode == LIST_MASTHEAD_MODE else "Show the art above the list",
-                ),
-                MenuEntry(label=menu_key("C", "heck"), brief="Slots, problems and list fit"),
-                MenuEntry(label=menu_key("E", "nable"), brief="Turn the masthead on"),
-                MenuEntry(label=menu_key("D", "isable"), brief="Turn the masthead off"),
-                MenuEntry(label=menu_key("i", "t", prefix="Ed"), brief="Edit the masthead art"),
-                MenuEntry(label=menu_key("G", "allery"), brief="Apply a bundled sample masthead"),
-                MenuEntry(label=menu_key("F", "rom disk"), brief="Load your own .ans from this node"),
-                MenuEntry(label=menu_key("U", "pload"), brief="Send an .ans from your computer"),
-                MenuEntry(label=menu_key("B", "ack"), brief="Return to Mastheads"),
-            ],
-            description_level,
-            width=session.terminal_width,
-            height=session.terminal_height,
-        )
+    rows += 1
+    rows += await _write_wrapped_subtitle(session, _list_art_mode_line(mode))
+    await _write_banner_menu(
+        session,
+        [
+            MenuEntry(label=menu_key("P", "review"), brief="Show it as callers see it"),
+            MenuEntry(label=menu_key("S", "peed"), brief=_art_speed_brief(speed)),
+            MenuEntry(
+                label=menu_key("M", "ode"),
+                brief="Make the art the list itself" if mode == LIST_MASTHEAD_MODE else "Show the art above the list",
+            ),
+            MenuEntry(label=menu_key("C", "heck"), brief="Slots, problems and list fit"),
+            MenuEntry(label=menu_key("E", "nable"), brief="Turn the masthead on"),
+            MenuEntry(label=menu_key("D", "isable"), brief="Turn the masthead off"),
+            MenuEntry(label=menu_key("i", "t", prefix="Ed"), brief="Edit the masthead art"),
+            MenuEntry(label=menu_key("G", "allery"), brief="Apply a bundled sample masthead"),
+            MenuEntry(label=menu_key("F", "rom disk"), brief="Load your own .ans from this node"),
+            MenuEntry(label=menu_key("U", "pload"), brief="Send an .ans from your computer"),
+            MenuEntry(label=menu_key("B", "ack"), brief="Return to Mastheads"),
+        ],
+        description_level,
+        used_rows=rows,
+        help_text="(Ctrl-H for where to place your own .ans files)",
     )
-    await session.write_line(colored("(Ctrl-H for where to place your own .ans files)", fg_color=MUTED_COLOR))
     await _choice_prompt(session)
 
 
