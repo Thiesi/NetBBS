@@ -49,17 +49,20 @@ Then run the complete suite:
 NetBBS remains private/experimental federation. The automated §12.10 gate is
 necessary evidence. The 2026-09 exercise closed the real-node quarantine and
 independently administered rows. Phase 4 and issue #131 are still not complete,
-and no public-network readiness claim is justified, while three things stand:
+and no public-network readiness claim is justified, while two things stand:
 
 - the compromise response does not reach nodes that know the compromised node
   only by introduction (#914);
-- one probationary caller's chat line stops their whole node's event push to
-  the peer that refuses it (#897);
 - issue #83's sustained run has not been recorded.
 
 Automatic recovery waited for a restart (#802). A running node now re-evaluates
 trust on every Link sync pass; a later exercise should see a hold release on a
 real node without one.
+
+One probationary caller's chat line used to stop their whole node's event
+push to the peer that refused it (#897). Events are now judged one by one, and
+a refused one is set aside by its sender; a later exercise should see the rest
+arrive on real nodes.
 
 The exercise's other findings affect operation rather than the trust model:
 #700, #745, #752 and #860.

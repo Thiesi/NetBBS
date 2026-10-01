@@ -455,7 +455,8 @@ would not fit. ASCII callers, a terminal smaller than the art, and art that
 fails the check get the generated menu too. Art narrower than the screen is
 drawn left-aligned, and the prompt goes below the art unless a `{prompt}`
 token places it. The main menu, welcome and logoff banners use slots today;
-the three lists, hand-drawn items and pacing below are being built.
+the three lists and hand-drawn items below are being built. Pacing works for
+the welcome banner and the main menu's art.
 
 *List screens.* The Boards, file areas and Chat channels lists take a `{list
 WxH}` region. The current page fills it, one row per entry: the number to
@@ -496,17 +497,26 @@ to a staff member, so a drawn `[S]ysOp` item is blanked for staff, whose
 several rows are not supported.
 
 *Pacing.* Art can be played at an emulated line speed so that it draws itself
-the way it did over a modem. NetBBS paces the bytes itself, in small chunks,
-and checks for a waiting key between them; any key ends the effect, writes the
-rest at once, and is consumed, so Enter cannot submit an empty prompt that
-follows. Each banner's speed is off, 2400, 9600 or 38400 bps, off by default,
-and one draw never takes longer than 5 seconds. Pacing applies to the welcome
-banner and to the first arrival at a screen with art in a session; never to a
-redraw, a notice, the screen restored after a break-in, or a door. Plain
-banners play in the order they were drawn, so cursor-moving ANSI animations
-work; slot art is rebuilt cell by cell and is revealed top to bottom. Callers
-can turn animations off in Profile ("Animations", on by default), and ASCII
-callers never get them.
+the way it did over a modem (`netbbs.net.art_pacing`). Each banner's speed is
+off, 2400, 9600 or 38400 bps, off by default, set with **Speed** on its console
+screen. NetBBS paces the bytes itself, in small chunks, and checks for a
+waiting key between them (`Session.take_waiting_key`); any key ends the effect
+and writes the rest at once, and it is consumed with anything typed behind it,
+so Enter cannot submit an empty prompt that follows. One draw is paced for at
+most 5 seconds; past that the rest goes out at once. Each piece of art plays
+once per connection: the welcome banner when a caller connects, the main
+menu's art on the first main menu, and a list's art on the first visit once
+list slots land. It never plays on a redraw, after a notice, on the screen
+restored after a break-in, or in a door. Plain banners play in the order they
+were drawn, so cursor-moving ANSI animations work, and art that moves the
+cursor back over rows it drew is exempt from the row-end trimming of still art
+(`revisits_rows`), since its trailing spaces may erase an earlier frame. Slot
+art is rebuilt cell by cell and is revealed top to bottom; the whole art is
+prepared once (iCE colours, CTerm's bright backgrounds) so no chunk loses a
+colour state. Nothing is paced for a session with no live terminal
+(`Session.paces_art`, set only by the Telnet, SSH and web transports), during
+a break-in, for ASCII callers, or for callers who chose quick under
+**Profile → [Q]uick or animated banners** (animated by default).
 
 A SysOp may override three of the node's branding colors -- accent (board/
 channel/user names and other navigable-item branding), header (section
@@ -2085,6 +2095,51 @@ to end it.
 Staff permissions, the Staff list and the away notice are local to the node.
 None of them is carried over Link: a staff member's moderation of carried
 content follows §5.2 and §9.5 exactly as a moderator's does.
+
+### 5.7 The access map (issue #1004)
+
+Level gates are set in many places: on each board, file area, channel and
+door, as Community defaults, and in node settings. The access map is the one
+list of all of them, so a SysOp can see what a level opens and what a level
+change gains or loses without opening every resource. The SysOp's level
+screens (#1006-#1009) show it; this section says what it contains.
+
+**What is on it.** One gate per thing a level opens:
+
+- each board and file area twice, for reading and for posting or uploading;
+- each chat channel (entering it) and each door (playing it);
+- the node-wide gates: the node map, mail, opening new MRC rooms, and the
+  SysOp console at 255.
+
+Resources excluded from this node (§9.5) are left out, since nobody reaches
+them.
+
+**Each gate says where its level comes from:** set on the resource, inherited
+from its Community's default, the system default of 0, a node setting, or
+fixed (the SysOp level).
+
+**The level a gate opens at.** Usually its own level. Posting on a board or
+uploading to an area also needs its read level, since a caller who cannot
+open the board cannot post on it, so a write gate opens at the higher of the
+two.
+
+**Levels only.** The map answers what a level opens. It does not claim more:
+
+- Age, verified-name, members-only and hidden are facts about each account
+  or each channel's membership. The map names them as the gate's conditions,
+  such as "age 18+", rather than counting them in.
+- A read or write grant (§5.2) lets one account past one resource's level.
+  It belongs to that account, not to a level, so the map does not list it.
+- A gate that opens for nobody right now says why: a closed board, Link off
+  for the node map, MRC open rooms switched off.
+- A carried Linked board's write level holds only this node's callers: posts
+  carried in from other nodes are not held to it (issue #993). The map says
+  so on that gate.
+
+**It agrees with the checks.** The map is built from the same effective-level
+functions the checks use, and the test suite holds each gate's answer to the
+real check for accounts at every threshold. Every level check in the code is
+either on the map or recorded as not a gate, so a new gate cannot be left off.
 
 ---
 
@@ -6596,6 +6651,21 @@ budget. Valid board posts from probationary users enter the local pending
 approval queue, and so do their edits: an approved post must not be rewritten
 with unreviewed text. Services without an approval projection, including Link
 mail, refuse such content with a stable reason code.
+
+A pushed events request is judged event by event once the sending node itself
+is allowed (issue #897). An event refused for its author does not refuse the
+rest: the receiver takes what it may and answers 200 with
+`refused: [{content_id, reason_code}]` beside `accepted`. Only a request with
+nothing acceptable left is refused outright with 403, and that body carries the
+same `refused` list, so a single pushed letter keeps its refusal. A refusal
+about the sending node remains a 403 for the whole request. The sender sets
+each refused event aside for that peer for `DEFERRED_EVENT_RETRY_SECONDS` and
+then offers it again while the peer's inventory still asks for it, so content
+from an author on probation there arrives once that author may post, and
+refused events never fill a request ahead of everything else. A partial
+refusal is about authors, not the sending node, so it does not mark the peer
+as refusing this node's content. Senders older than this rule ignore
+`refused`, and a 200 means only that the rest arrived.
 
 Enforcement attributes independently signed content to its author/home node,
 not to a carrier recorded in `link_events.sender_fingerprint`. Current display
@@ -14212,7 +14282,35 @@ faintly.
 can emulate a line speed itself (`CSI Ps1 ; Ps2 * r`), but bytes already sent
 cannot be skipped, it works only in SyncTERM, and turning it off again queues
 behind the art. Server-side pacing works on every terminal and stops at once
-on a key.
+on a key. The skipping key is swallowed, not passed on as Voidrunner passes
+its interrupting key, because a prompt follows the art. At the 5-second cap the
+rest is sent at once; a cap that sped the art up instead was rejected, since
+the speed is part of how the art was meant to look.
+
+### Issue #1004 — the access map — decided
+
+Dogfooding found that a SysOp could not tell what giving an account a level
+meant without opening every board, file area, channel, door, Community and
+setting, nor be sure a promotion opened nothing unwanted. Normative
+description: §5.7. Step 1 (#1005) builds the map; the screens follow.
+
+**Decision 1 — one map, held to the checks by tests.** The map is computed
+from the same effective-level functions the checks use, a test compares each
+gate with the real check at every threshold, and a scan of the source fails
+on any level check the map does not account for. Rejected: routing every
+check through the map, which would rewrite every flow's gate for no change in
+behaviour; and a hand-kept list, which is the drift the map exists to end.
+
+**Decision 2 — levels only; conditions named, grants left out.** Age,
+verified-name, members-only and hidden appear as a gate's conditions, and
+read or write grants are not on the map, because they belong to accounts,
+not to levels. Rejected: answering "what can this account do" in the same
+structure, which the change preview (#1006) does per account where it needs
+to.
+
+**Decision 3 — a write gate opens at the higher of its read and write
+levels.** That is what a caller experiences. The gate still shows its own
+write level and where it comes from.
 
 ### SFTP over the SSH transport — declined
 
