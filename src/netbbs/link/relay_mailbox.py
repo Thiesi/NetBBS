@@ -50,6 +50,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
+from netbbs.link.attestation_bundles import SealedAttestationBundle
 from netbbs.link.events import (
     LINK_MESSAGE_ACCEPTED_OBJECT_TYPE,
     LINK_MESSAGE_BOUNCED_OBJECT_TYPE,
@@ -87,6 +88,19 @@ MAX_MAILBOX_ENVELOPES_PER_RECIPIENT = 50
 # SysOp setting like `max_relay_clients`: a relay set to a week would turn
 # the sender's "may not have arrived" into "certainly did not".
 RELAY_MAILBOX_RETENTION_DAYS = 30
+
+# Issue #632: sealed attestation bundles. One slot per (issuer, recipient), so
+# what a recipient can be made to hold is bounded by how many issuers it has,
+# and that is capped too: a hostile depositor can fill at most this many slots
+# per recipient, and never touches its mail slots.
+MAX_ATTESTATION_BUNDLE_ISSUERS_PER_RECIPIENT = 32
+
+# A bundle is a snapshot its issuer re-sends at least weekly while it has
+# anything to say, so one left this long was abandoned by both ends: the
+# issuer stopped naming the recipient or went away, and the recipient never
+# came back. Longer than the issuer's own 90-day retry for a final, empty
+# snapshot, so a retraction still waiting here is never the one dropped early.
+RELAY_ATTESTATION_BUNDLE_RETENTION_DAYS = 90
 
 
 class RelayMailboxFullError(Exception):
@@ -251,3 +265,79 @@ def pickup_relay_mailbox_envelopes(db: Database, recipient_fingerprint: str) -> 
         _ENVELOPE_TYPES_BY_OBJECT_TYPE[row["object_type"]].from_dict(json.loads(row["envelope_json"]))
         for row in rows
     ]
+
+
+def deposit_relay_attestation_bundle(
+    db: Database, recipient_fingerprint: str, bundle: SealedAttestationBundle
+) -> bool:
+    """Hold `bundle` in its (issuer, recipient) slot until the recipient picks
+    it up (issue #632). Returns whether it was stored.
+
+    A bundle is a complete snapshot, so a newer one replaces whatever older
+    one from the same issuer is waiting, and one whose sequence is not newer
+    than the one held is ignored: it can only be a replay or a reordered
+    resend, and the newer snapshot already says everything it would.
+
+    Raises `ValueError` if the bundle names a different recipient, and
+    `RelayMailboxFullError` if it would give the recipient a slot from a new
+    issuer past `MAX_ATTESTATION_BUNDLE_ISSUERS_PER_RECIPIENT`.
+    """
+    if bundle.recipient_fingerprint != recipient_fingerprint:
+        raise ValueError("bundle is addressed to a different recipient")
+    issuer = bundle.issuer_fingerprint
+    held = db.connection.execute(
+        """SELECT sequence FROM link_relay_attestation_bundles
+           WHERE issuer_fingerprint = ? AND recipient_fingerprint = ?""",
+        (issuer, recipient_fingerprint),
+    ).fetchone()
+    if held is not None and held["sequence"] >= bundle.sequence:
+        return False
+    if held is None:
+        issuers = db.connection.execute(
+            "SELECT COUNT(*) AS n FROM link_relay_attestation_bundles WHERE recipient_fingerprint = ?",
+            (recipient_fingerprint,),
+        ).fetchone()["n"]
+        if issuers >= MAX_ATTESTATION_BUNDLE_ISSUERS_PER_RECIPIENT:
+            raise RelayMailboxFullError(
+                f"{recipient_fingerprint} already has bundles from {issuers} issuers held at this relay"
+            )
+    db.connection.execute(
+        """INSERT INTO link_relay_attestation_bundles
+               (issuer_fingerprint, recipient_fingerprint, sequence, bundle_json, received_at)
+           VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(issuer_fingerprint, recipient_fingerprint) DO UPDATE SET
+               sequence = excluded.sequence, bundle_json = excluded.bundle_json,
+               received_at = excluded.received_at""",
+        (issuer, recipient_fingerprint, bundle.sequence, json.dumps(bundle.to_dict()), utc_now_iso()),
+    )
+    db.connection.commit()
+    return True
+
+
+def pickup_relay_attestation_bundles(db: Database, recipient_fingerprint: str) -> list[SealedAttestationBundle]:
+    """Every bundle held for `recipient_fingerprint`, deleted as it is read --
+    the same read-and-delete hand-over as `pickup_relay_mailbox_envelopes`,
+    and the same unverified objects: the recipient checks each one itself."""
+    rows = db.connection.execute(
+        "SELECT bundle_json FROM link_relay_attestation_bundles WHERE recipient_fingerprint = ? "
+        "ORDER BY received_at ASC",
+        (recipient_fingerprint,),
+    ).fetchall()
+    db.connection.execute(
+        "DELETE FROM link_relay_attestation_bundles WHERE recipient_fingerprint = ?", (recipient_fingerprint,)
+    )
+    db.connection.commit()
+    return [SealedAttestationBundle.from_dict(json.loads(row["bundle_json"])) for row in rows]
+
+
+def prune_expired_relay_attestation_bundles(db: Database, *, now: datetime | None = None) -> int:
+    """Drop bundles held longer than `RELAY_ATTESTATION_BUNDLE_RETENTION_DAYS`;
+    returns how many. Run every sync pass beside the mail prune."""
+    moment = now or datetime.now(timezone.utc)
+    cutoff = utc_iso(moment - timedelta(days=RELAY_ATTESTATION_BUNDLE_RETENTION_DAYS))
+    dropped = db.connection.execute(
+        "DELETE FROM link_relay_attestation_bundles WHERE received_at < ?", (cutoff,)
+    ).rowcount
+    if dropped:
+        db.connection.commit()
+    return dropped

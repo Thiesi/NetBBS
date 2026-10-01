@@ -402,6 +402,14 @@ refuse the field as a malformed frame, so it is only ever sent to a peer that
 advertises this. The frame may also carry a `content_id`; it is accepted for
 compatibility and ignored, since nothing keys on an unverified id."""
 
+SEALED_ATTESTATIONS_CAPABILITY = "sealed_attestations"
+"""Issue #632: this node takes sealed attestation bundles -- as a relay, into
+its mailbox for a node it relays for, and as a recipient, by direct push or
+from its own relays. An issuer sends one only to a recipient advertising this,
+and deposits it only at a relay advertising it; an older relay would refuse
+the unknown type, and an older recipient would never pick it up. Advertised
+once this node can also apply what it picks up."""
+
 LINK_CAPABILITIES: tuple[str, ...] = (
     INVENTORY_NOT_CARRIED_CAPABILITY, INVENTORY_PAGES_CAPABILITY, CHANNEL_RELAY_CAPABILITY,
 )

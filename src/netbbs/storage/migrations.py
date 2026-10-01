@@ -3963,4 +3963,25 @@ MIGRATIONS = [
         CREATE INDEX idx_opaque_events_board ON opaque_events(board_id);
         """,
     ),
+    Migration(
+        description=(
+            "Issue #632 (design doc §16): sealed attestation bundles a relay holds for a recipient "
+            "it relays for. One slot per (issuer, recipient): a newer bundle from the same issuer "
+            "replaces the older one, since a bundle is a complete snapshot. Kept apart from "
+            "`link_relay_mailbox`, so bundles never take one of a recipient's 50 mail slots. "
+            "Empty on upgrade."
+        ),
+        sql="""
+        CREATE TABLE link_relay_attestation_bundles (
+            issuer_fingerprint    TEXT NOT NULL,
+            recipient_fingerprint TEXT NOT NULL,
+            sequence              INTEGER NOT NULL,
+            bundle_json           TEXT NOT NULL,
+            received_at           TEXT NOT NULL,
+            PRIMARY KEY (issuer_fingerprint, recipient_fingerprint)
+        );
+        CREATE INDEX idx_link_relay_attestation_bundles_recipient
+            ON link_relay_attestation_bundles(recipient_fingerprint);
+        """,
+    ),
 ]

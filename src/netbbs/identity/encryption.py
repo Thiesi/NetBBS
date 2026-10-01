@@ -76,3 +76,19 @@ def decrypt_with(identity: Identity, ciphertext: bytes) -> bytes:
         return box.decrypt(ciphertext)
     except CryptoError as exc:
         raise EncryptionError("could not decrypt: wrong key or corrupted ciphertext") from exc
+
+
+def decrypt_with_any(identities, ciphertext: bytes) -> bytes:
+    """Open `ciphertext` with the first of `identities` it was sealed to.
+
+    A sender seals to the key it last learned, so something composed before
+    it heard of a rotation arrives sealed to the key that rotation retired
+    (issue #624). Callers pass the current key first, since that is the
+    likely one. Shared by Link mail and sealed attestation bundles (#632).
+    """
+    for identity in identities:
+        try:
+            return decrypt_with(identity, ciphertext)
+        except EncryptionError:
+            continue
+    raise EncryptionError("sealed to none of the given keys")

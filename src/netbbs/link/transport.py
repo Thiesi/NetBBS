@@ -155,7 +155,9 @@ from netbbs.link.mail import (
     deliver_link_message,
 )
 from netbbs.link.mail_refusals import VIA_DIRECT, record_link_mail_refusal
-from netbbs.link.node_identity import NodeIdentity, resolve_current_operational_key, rotate_operational_key
+from netbbs.link.node_identity import (
+    NodeIdentity, NodeIdentityError, resolve_current_operational_key, rotate_operational_key,
+)
 from netbbs.identity.encryption import derive_encryption_private_key
 from netbbs.link.protocol import (
     _MAX_EVENTS_PER_REQUEST,
@@ -181,7 +183,14 @@ from netbbs.link.protocol import (
 from netbbs.link.carry import KIND_LABELS, accept_genesis, genesis_kind
 from netbbs.link.store import event_is_stored, forget_opaque_event, opaque_events_to_rejudge, store_opaque_event
 from netbbs.link.realtime_proxy import open_realtime_connection, record_handshake_outcome
+from netbbs.link.attestation_bundles import (
+    SEALED_ATTESTATION_BUNDLE_OBJECT_TYPE,
+    MalformedBundle,
+    SealedAttestationBundle,
+)
 from netbbs.link.relay_mailbox import (
+    deposit_relay_attestation_bundle,
+    pickup_relay_attestation_bundles,
     RelayableEnvelope,
     RelayMailboxFullError,
     deposit_relay_mailbox_envelope,
@@ -2671,6 +2680,8 @@ class LinkServer:
         try:
             body = await request.json(loads=strict_json_loads)
             object_type = body["envelope"]["object_type"]
+            if object_type == SEALED_ATTESTATION_BUNDLE_OBJECT_TYPE:
+                return await self._deposit_attestation_bundle(recipient_fingerprint, body)
             envelope_cls = {
                 LINK_MESSAGE_OBJECT_TYPE: LinkMessage,
                 LINK_MESSAGE_ACCEPTED_OBJECT_TYPE: LinkMessageAccepted,
@@ -2707,6 +2718,42 @@ class LinkServer:
 
         return web.json_response({"deposited": True})
 
+    async def _deposit_attestation_bundle(self, recipient_fingerprint: str, body: object) -> web.Response:
+        """Issue #632: hold a sealed attestation bundle in its (issuer,
+        recipient) slot. The same open-to-a-stranger deposit as mail, with one
+        check mail cannot have: when this relay knows the issuer's keys it
+        verifies the outer signature, so a third party cannot push a genuine
+        issuer's snapshot out of its slot with a forged, higher-numbered one.
+        An issuer this relay has never met is taken unverified, as mail is;
+        the recipient verifies everything itself on pickup."""
+        try:
+            bundle = SealedAttestationBundle.from_dict(body)
+        except MalformedBundle as exc:
+            return web.json_response({"error": f"malformed attestation bundle: {exc}"}, status=400)
+        if bundle.recipient_fingerprint != recipient_fingerprint:
+            return web.json_response({"error": "bundle is addressed to a different recipient"}, status=400)
+        if recipient_fingerprint not in self._node.relaying_for:
+            return web.json_response(
+                {"error": f"this node is not currently relaying for {recipient_fingerprint}"}, status=404
+            )
+        recipient_decision = await self._decide(recipient_fingerprint, LinkPolicyAction.RELAY)
+        if recipient_decision is not None and not recipient_decision.allowed:
+            return self._policy_rejection(recipient_decision)
+        try:
+            keys = [
+                self._node.resolve_known_signing_key(bundle.issuer_fingerprint, "attestation bundle"),
+                *self._node.resolve_known_superseded_signing_keys(bundle.issuer_fingerprint),
+            ]
+        except (LinkProtocolError, NodeIdentityError, ValueError):
+            keys = []
+        if keys and not bundle.verifies(keys):
+            return web.json_response({"error": "attestation bundle signature does not verify"}, status=400)
+        try:
+            stored = await self._lane.run(deposit_relay_attestation_bundle, recipient_fingerprint, bundle)
+        except RelayMailboxFullError as exc:
+            return web.json_response({"error": str(exc)}, status=507)
+        return web.json_response({"deposited": True, "superseded": not stored})
+
     async def _handle_relay_mailbox_pickup(self, request: web.Request) -> web.Response:
         """
         Issue #58: hand back (and clear) whatever mail this
@@ -2740,7 +2787,14 @@ class LinkServer:
         await self._lane.run(save_peer, peer)
 
         envelopes = await self._lane.run(pickup_relay_mailbox_envelopes, peer.fingerprint)
-        return web.json_response({"envelopes": [e.to_dict() for e in envelopes]})
+        # Issue #632: bundles ride in their own key, which an older recipient
+        # ignores -- and an issuer only ever addresses one to a recipient that
+        # advertises the capability, so an older one has none waiting.
+        bundles = await self._lane.run(pickup_relay_attestation_bundles, peer.fingerprint)
+        return web.json_response({
+            "envelopes": [e.to_dict() for e in envelopes],
+            "bundles": [b.to_dict() for b in bundles],
+        })
 
 
 async def dial_hello(
@@ -3772,7 +3826,7 @@ async def deposit_into_relay_mailbox(
     session: ClientSession,
     relay_base_url: str,
     recipient_fingerprint: str,
-    message: RelayableEnvelope,
+    message: RelayableEnvelope | SealedAttestationBundle,
     *,
     timeout: float = _DEFAULT_TIMEOUT_SECONDS,
 ) -> None:
@@ -3811,6 +3865,27 @@ async def pickup_from_relay_mailbox(
     *,
     timeout: float = _DEFAULT_TIMEOUT_SECONDS,
 ) -> list[RelayableEnvelope]:
+    """`pickup_from_relay_mailbox_all`, mail only."""
+    return (await pickup_from_relay_mailbox_all(session, relay_base_url, hello, timeout=timeout)).envelopes
+
+
+@dataclass(frozen=True)
+class RelayPickup:
+    """Everything one relay handed over: mail-family envelopes and, from a
+    relay that holds them (issue #632), sealed attestation bundles. Neither is
+    verified yet."""
+
+    envelopes: list[RelayableEnvelope]
+    bundles: list[SealedAttestationBundle]
+
+
+async def pickup_from_relay_mailbox_all(
+    session: ClientSession,
+    relay_base_url: str,
+    hello: HelloMessage,
+    *,
+    timeout: float = _DEFAULT_TIMEOUT_SECONDS,
+) -> RelayPickup:
     """
     Pick up (and clear) whatever mail the relay at `relay_base_url` is
     currently holding for this node -- design doc §12, issue
@@ -3860,6 +3935,17 @@ async def pickup_from_relay_mailbox(
         for raw in raw_envelopes:
             envelope_cls = envelope_types_by_object_type[raw["envelope"]["object_type"]]
             result.append(envelope_cls.from_dict(raw))
-        return result
     except (KeyError, ValueError, TypeError) as exc:
         raise LinkTransportError(f"malformed envelope in relay mailbox pickup response from {url}: {exc}") from exc
+    # Issue #632. Absent from an older relay's answer. A malformed bundle is
+    # dropped on its own: the relay has already deleted what it handed over,
+    # so refusing the whole answer would lose the mail with it.
+    raw_bundles = body.get("bundles", []) if isinstance(body, dict) else []
+    bundles: list[SealedAttestationBundle] = []
+    if isinstance(raw_bundles, list):
+        for raw in raw_bundles:
+            try:
+                bundles.append(SealedAttestationBundle.from_dict(raw))
+            except MalformedBundle:
+                continue
+    return RelayPickup(envelopes=result, bundles=bundles)
