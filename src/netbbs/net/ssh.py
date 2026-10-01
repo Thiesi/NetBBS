@@ -66,6 +66,8 @@ from netbbs.net.signup_text import pending_approval_notice, username_problem_lin
 from netbbs.staff import approvers_away_line
 from netbbs.net.throttle import LoginThrottle
 from netbbs.net.welcome_banner import load_welcome_banner
+from netbbs.net.banner_fields import banner_fields
+from netbbs.rendering.art_slots import fill_field_slots
 from netbbs.net.terminal_detect import (
     classify_terminal_types,
     clean_terminal_type,
@@ -503,7 +505,9 @@ class _NetBBSSSHServer(asyncssh.SSHServer):
         # same "capability negotiation hasn't completed yet" problem
         # Telnet's own pre-login banner has.
         assert self._conn is not None  # connection_made always runs first
-        lines = [load_welcome_banner(self._db, truecolor=False, unicode_style=False)]
+        # Field slots (issue #929) are filled here too, so a SysOp's
+        # {node} or {time} never reaches an SSH caller as a raw token.
+        lines = [fill_field_slots(load_welcome_banner(self._db, truecolor=False, unicode_style=False), banner_fields(self._db))]
         registration_open = get_registration_mode(self._db) != RegistrationMode.CLOSED
         if registration_open:
             lines.append(f"New here? Connect as {NEW_ACCOUNT_SENTINEL!r} to register.")
