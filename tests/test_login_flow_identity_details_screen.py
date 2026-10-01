@@ -351,29 +351,45 @@ def test_remote_sharing_reports_an_attestation_removed_since_the_draw(db, lane, 
     assert get_attestation(db, alice, "name") is None
 
 
+def _deliver_to(db, fingerprint):
+    """Record that `fingerprint` was sent the current snapshot (issue #632)."""
+    from netbbs.link.attestation_delivery import plan_attestation_deliveries, record_attestation_delivery
+
+    for plan in plan_attestation_deliveries(db):
+        if plan.recipient_fingerprint == fingerprint:
+            record_attestation_delivery(db, fingerprint, digest=plan.digest, route="relay", final=False)
+
+
 def test_remote_sharing_shows_how_many_nodes_it_reaches(db, lane, alice):
-    """Issue #596, Decision 4: the caller is told how many, never which."""
+    """Issue #596, Decision 4: the caller is told how many, never which.
+    Issue #632: and how many were actually sent it, not who could ask."""
     from netbbs.link.remote_attestation import configure_attestation_recipient
 
     verifier = create_user(db, "sysop", password="hunter2", user_level=255)
     attest_name(db, alice, "Alice Wonderland", verifier=verifier)
     configure_attestation_recipient(db, "a" * 32, reason="first")
+    _deliver_to(db, "a" * 32)
 
     session = FakeSession(["h", "b"])
     asyncio.run(profile_flow._identity_details_screen(session, lane, alice))
     text = squeezed(_visible(session))
-    assert "Share verified name over Link: on (reaches 1 node)" in text
+    assert "Share verified name over Link: on (sent to 1 node)" in text
     assert "a" * 32 not in text
 
     configure_attestation_recipient(db, "b" * 32, reason="second")
     session = FakeSession(["b"])
     asyncio.run(profile_flow._identity_details_screen(session, lane, alice))
-    assert "Share verified name over Link: on (reaches 2 nodes)" in squeezed(_visible(session))
+    assert "Share verified name over Link: on (sent to 1 of 2 nodes)" in squeezed(_visible(session))
+    _deliver_to(db, "b" * 32)
+    session = FakeSession(["b"])
+    asyncio.run(profile_flow._identity_details_screen(session, lane, alice))
+    assert "Share verified name over Link: on (sent to 2 nodes)" in squeezed(_visible(session))
 
 
-def test_remote_sharing_does_not_say_reaches_on_a_node_nobody_can_dial(db, lane, alice):
-    """Issue #627: an attestation is fetched from this node, and relays do not
-    carry them. "Reaches 1 node" would be a promise nothing keeps."""
+def test_remote_sharing_says_not_delivered_until_a_snapshot_is_sent(db, lane, alice):
+    """Issue #632: whether the node can be dialed no longer decides this; what
+    was sent does. Named recipients that nothing was sent to yet read as not
+    delivered, on any node."""
     from netbbs.link.onboarding import record_link_reachability
     from netbbs.link.remote_attestation import configure_attestation_recipient
 
@@ -386,5 +402,5 @@ def test_remote_sharing_does_not_say_reaches_on_a_node_nobody_can_dial(db, lane,
     asyncio.run(profile_flow._identity_details_screen(session, lane, alice))
 
     text = squeezed(_visible(session))
-    assert "Share verified name over Link: on (not delivered: node is unreachable)" in text
-    assert "reaches" not in text
+    assert "Share verified name over Link: on (not delivered yet)" in text
+    assert "sent to" not in text

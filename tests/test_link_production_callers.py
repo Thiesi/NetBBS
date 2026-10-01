@@ -44,9 +44,6 @@ LINK = SRC / "netbbs" / "link"
 # subsystem shipped with no production caller, which is the thing the check
 # exists to stop.
 ALLOWED: dict[str, str] = {
-    # Issue #632, part 2 of 3: the per-recipient delivery status lands before
-    # the Published identity screen that shows it (part 3), which takes it off.
-    "list_attestation_delivery_status": "#632",
     # Issue #589 -- a node can issue a vouch (slice 1, `trust_issuance`), which
     # took `build_trust_vouch` and `build_trust_revocation` off this list.  It
     # still cannot issue a trust *signal*: when a node accuses another node is

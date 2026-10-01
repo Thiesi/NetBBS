@@ -366,6 +366,7 @@ from netbbs.link.node_profiles import (
 from netbbs.link.relay_mailbox import (
     MAX_MAILBOX_ENVELOPES_PER_RECIPIENT, RELAY_MAILBOX_RETENTION_DAYS, mailbox_holdings,
 )
+from netbbs.link.attestation_delivery import list_attestation_delivery_status
 from netbbs.link.remote_attestation import (
     clear_remote_attestation_override,
     configure_attestation_authority,
@@ -5854,6 +5855,17 @@ def _issued_columns(record) -> list[str | tuple[str, SegmentColor]]:
     ]
 
 
+def _delivery_state(status) -> tuple[str, str]:
+    """One recipient's delivery state on Published identity (issue #632)."""
+    if status.removed:
+        return "retracting: sends it an empty snapshot", WARNING_COLOR
+    if status.current:
+        return "has the current snapshot", SUCCESS_COLOR
+    if status.last_error:
+        return sanitize_text(status.last_error), WARNING_COLOR
+    return "update goes out on the next Link sync pass", VALUE_COLOR
+
+
 def _issued_when(record) -> str:
     """The date a row's own status is about.
 
@@ -5938,18 +5950,34 @@ async def _published_identity_screen(
             delivery.append(Field(
                 "Given to", f"{recipient_count} recipient node{'s' if recipient_count != 1 else ''}"
             ))
-            if await lane.run(link_is_outgoing_only):
-                # Issue #627: said here because the line above reads as delivery.
-                delivery.append(Note(
-                    "Nobody can dial this node, and an attestation is only ever fetched from "
-                    "the node that issued it, so no recipient receives any of this yet.",
-                    color=WARNING_COLOR,
-                ))
         else:
             delivery.append(Field("Given to", "no recipient nodes", color=WARNING_COLOR))
             delivery.append(Note(
                 "No recipient nodes are named, so none of this leaves the node. [R]ecipients names them.",
                 color=WARNING_COLOR,
+            ))
+        # Issue #632: each recipient is sent a sealed snapshot of all of this,
+        # directly or through its relays. Said per recipient, with why the
+        # last attempt failed, so "given to" never reads as "received by".
+        # A removed recipient stays listed while it is owed its retraction.
+        statuses = await lane.run(list_attestation_delivery_status)
+        if statuses:
+            labels = {
+                s.recipient_fingerprint: (await lane.run(identity_for_fingerprint, s.recipient_fingerprint)).label
+                for s in statuses
+            }
+            delivery.append(Table(
+                ("Recipient", "Route", "Sent", "State"),
+                [
+                    [
+                        (labels[s.recipient_fingerprint], ACCENT_COLOR),
+                        (s.route or "none yet", VALUE_COLOR if s.route else MUTED_COLOR),
+                        (sanitize_text((s.sent_at or "never")[:10]), DATE_COLOR),
+                        _delivery_state(s),
+                    ]
+                    for s in statuses
+                ],
+                flex=3,
             ))
         pending = [record for record in live if record.status == "withdrawing"]
         if pending:

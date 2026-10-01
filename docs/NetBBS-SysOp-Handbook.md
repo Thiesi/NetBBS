@@ -1176,8 +1176,8 @@ there are none, in which case a vouch reaches nobody yet, and warns when one
 of them did not take your vouches at the last attempt, which the Link log
 explains. A node that names
 yours a trusted reporter needs to have met one of your relays. Verified ages
-and names are not carried this way: on a node nobody can dial, **Published
-identity** and each caller's Profile say that nothing is delivered.
+and names travel differently, sealed to each recipient (below), so they reach
+recipients whether or not anyone can dial your node.
 
 To stand behind an identity for the benefit of other nodes, open it under
 **Settings → Policy trust → Subjects** and choose **Vouch**. You give a reason,
@@ -1198,13 +1198,26 @@ caller switches sharing on in their Profile. You name the receiving node under
 **Settings → Policy trust → Published identity → Recipients**; the list starts
 empty, and until you add a node nothing leaves yours whatever callers have
 switched on. The other SysOp names your node under **Identity authorities** on
-their side. If you have named an authority and nothing arrives, look in
-**Diagnostics**: a refusal there means its SysOp has not added your node as a
-recipient yet. Removing a recipient stops future sharing only. That node keeps
-what it already pulled until each attestation expires, within 90 days, and it
-receives no further withdrawals. When a caller switches sharing off, your node
-stops serving the value, deletes its signed copy, and tells its recipients to
-forget it. Backups you took while it was shared still contain it.
+their side. Your node then sends each recipient one sealed snapshot of
+everything it should hold from you: directly if the recipient can be dialed,
+otherwise through the relays that recipient names. Only the recipient can open
+it; a relay sees that your node sent it something, roughly how large, and
+when. A changed snapshot goes out on the next Link sync pass, and an unchanged
+one again every week. **Published identity** lists each recipient with how it
+was last reached, when, and whether that was the current snapshot, or why the
+last attempt failed (for example, a recipient nobody can dial that names no
+relay your node has met). Callers see only how many nodes were sent their
+value, never which. A recipient running a NetBBS from before sealed snapshots
+still fetches from you, which works only if your node can be dialed.
+
+If you have named an authority and nothing arrives, look in **Diagnostics**: a
+refusal there means its SysOp has not added your node as a recipient yet.
+Removing a recipient takes back what it holds: your node sends it a final,
+empty snapshot, and a node running NetBBS forgets everything it had from
+yours. **Published identity** shows it as retracting until that is delivered,
+for up to 90 days. When a caller switches sharing off, your node stops
+sending the value, deletes its signed copy, and its recipients forget it with
+the next snapshot. Backups you took while it was shared still contain it.
 
 A familiar name attached to a new fingerprint produces an identity warning.
 Confirm the full **Technical identity** with the other operator before trusting

@@ -267,6 +267,14 @@ def list_attestation_delivery_status(db: Database, *, now: datetime | None = Non
     return result
 
 
+def attestation_delivery_counts(db: Database, *, now: datetime | None = None) -> tuple[int, int]:
+    """(delivered, named): how many of the currently named recipients hold the
+    current snapshot, and how many are named. What the Profile toggle shows a
+    caller -- counts only, never which nodes (#596 Decision 4)."""
+    statuses = [s for s in list_attestation_delivery_status(db, now=now) if not s.removed]
+    return sum(1 for s in statuses if s.current), len(statuses)
+
+
 # -- recipient ------------------------------------------------------------
 
 
