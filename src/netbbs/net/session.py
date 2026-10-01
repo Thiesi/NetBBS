@@ -582,10 +582,18 @@ class Session(ABC):
         while self._break_in_over is not None:
             await self._break_in_over.wait()
 
-    async def write_through(self, text: str) -> None:
+    async def write_through(self, text: str, *, restoring_copy: bool = False) -> None:
         """Write past a break-in's hold, and past the screen copy: the
         chat is drawn over the caller's screen, and the copy keeps what is
-        underneath, to be put back."""
+        underneath, to be put back.
+
+        `restoring_copy` marks text that is the copy itself being put back.
+        The copy holds art's pictographs as glyphs (`write_art`); ordinary
+        text reaches it already mapped, so on a CP437 session every
+        pictograph in it is art and goes back as the byte that draws it.
+        The chat drawn over the screen is ordinary text and never does."""
+        if restoring_copy and self.output_charset == CP437:
+            text = art_glyphs_to_cp437_controls(text)
         await self._send_text(map_text(text, self.output_charset))
 
     def _held_raw_prefix(self) -> bytes:
@@ -626,7 +634,7 @@ class Session(ABC):
                 # kept its size while the repaint -- and the held prefix after
                 # it -- were on their way.
                 before = (self._copy_generation, self.physical_width, self.terminal_height)
-                await self.write_through(self.screen_copy().restore_ansi())
+                await self.write_through(self.screen_copy().restore_ansi(), restoring_copy=True)
                 await self._send_held_prefix()
                 if before == (self._copy_generation, self.physical_width, self.terminal_height):
                     break
@@ -639,7 +647,7 @@ class Session(ABC):
                 # released alongside it, so it is given up on both sides.
                 self._drop_held_prefix()
                 self._output_held = False
-                await self.write_through(self.screen_copy().restore_ansi())
+                await self.write_through(self.screen_copy().restore_ansi(), restoring_copy=True)
         finally:
             self._output_held = False
             self._break_in_input = None
