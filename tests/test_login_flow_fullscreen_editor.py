@@ -268,6 +268,18 @@ def test_profile_redraw_in_place_toggle_switches_on_and_off(db, lane, alice):
     assert "In-place redraw: off" in squeezed(text)
 
 
+def test_profile_banner_animations_toggle_applies_at_once(db, lane, alice):
+    # Issue #929, step 6: paced art plays unless the caller chose quick.
+    from netbbs.net.animation_preference import animations_enabled
+
+    assert animations_enabled(db, alice) is True  # default
+    session = FakeSession(["q", "b"])
+    asyncio.run(profile_flow._edit_profile(session, lane, alice))
+    assert animations_enabled(db, alice) is False
+    assert session.animations_enabled is False
+    assert "Banner animations: quick" in squeezed(_visible(session))
+
+
 def test_profile_character_set_cycles_and_applies_at_once(db, lane, alice):
     # Issue #929: Auto -> Unicode -> CP437 -> ASCII, each saved and
     # applied to the session as it is chosen.

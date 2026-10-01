@@ -51,6 +51,7 @@ from netbbs.net.door_flow import _visible_doors, browse_doors, has_visible_doors
 from netbbs.net.file_flow import browse_file_areas, visible_areas
 from netbbs.net.mail_arrivals import NOTICE_COLOR as NEW_MAIL_COLOR, arrival_event, login_mail_notice, waiting_mail_counts
 from netbbs.net.mail_flow import browse_mail, caller_mail_refusal
+from netbbs.net.art_pacing import MAIN_MENU_ART, art_speed, write_paced_art, write_paced_art_text
 from netbbs.net.main_menu_banner import load_main_menu_banner, load_main_menu_slot_art
 from netbbs.net.menu_description_preference import menu_description_level
 from netbbs.net.node_theme import (
@@ -72,8 +73,6 @@ from netbbs.net.scan_and_find import _find_screen, _new_scan_screen
 from netbbs.net.session import (
     Session,
     physical_terminal_width,
-    write_art_text,
-    write_preformatted_line,
     write_prompt,
 )
 from netbbs.net.session_activity import activity, set_root_activity
@@ -399,7 +398,9 @@ async def _draw_main_menu(
     if slot_art is not None:
         labels = [entry.label for entry in (*explore_options, *personal_options, *system_options)]
         fields = _slot_fields(session, db, user, node_controls, has_mail=has_mail, unread=unread)
-        if await _draw_slot_main_menu(session, slot_art, labels, fields, extra_lines, prompt):
+        if await _draw_slot_main_menu(
+            session, slot_art, labels, fields, extra_lines, prompt, speed=art_speed(db, MAIN_MENU_ART)
+        ):
             return
 
     collapsed = breadcrumb_collapsed_enabled(db, user)
@@ -442,7 +443,10 @@ async def _draw_main_menu(
     )
     if masthead:
         prefix = clear_screen() if redraw else ""
-        await write_preformatted_line(session, f"{prefix}{masthead}")
+        # Paced on the first main menu of the connection only (issue #929).
+        await write_paced_art(
+            session, f"{prefix}{masthead}", speed=art_speed(db, MAIN_MENU_ART), once=MAIN_MENU_ART
+        )
         await session.write_line(f"{title}\r\n{options}\r\n")
     else:
         # Masthead disabled (the default): identical bytes to before
@@ -552,7 +556,14 @@ def slot_menu_preview(session: Session, db: Database, user: User, art: SlotArt, 
 
 
 async def _draw_slot_main_menu(
-    session: Session, art: SlotArt, labels: list[str], fields: dict[str, str], extra_lines: list[str], prompt: str
+    session: Session,
+    art: SlotArt,
+    labels: list[str],
+    fields: dict[str, str],
+    extra_lines: list[str],
+    prompt: str,
+    *,
+    speed: int = 0,
 ) -> bool:
     """Draw the main menu as the SysOp's slot art, or return `False`
     without writing anything when this caller gets the generated menu
@@ -567,7 +578,9 @@ async def _draw_slot_main_menu(
         if "don't fit" in plan.reason:
             _log_slot_overflow(len(labels), art)
         return False
-    await write_art_text(session, plan.text)
+    # Paced on the first main menu of the connection only (issue #929),
+    # revealed top to bottom.
+    await write_paced_art_text(session, plan.text, speed=speed, once=MAIN_MENU_ART)
     await session.write(move_cursor(art.height + 1, 1))
     for line in extra_lines:
         await session.write_line(line)

@@ -1103,6 +1103,19 @@ class WebSession(Session):
         elif not (isinstance(item, str) and item == _LF):
             self._pushed_back_item = item
 
+    paces_art = True
+
+    async def take_waiting_key(self, timeout: float) -> bool:
+        """Web counterpart to ``char_input.take_waiting_key``: any queued
+        item -- a key, a special key, a click -- ends paced art, and it and
+        whatever follows it are swallowed."""
+        try:
+            await asyncio.wait_for(self._read_item(), timeout=timeout)
+        except asyncio.TimeoutError:
+            return False
+        await self.discard_buffered_input()
+        return True
+
     async def discard_buffered_input(self) -> None:
         """Web counterpart to ``char_input.discard_buffered_input``.
 

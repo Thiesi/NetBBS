@@ -455,7 +455,8 @@ would not fit. ASCII callers, a terminal smaller than the art, and art that
 fails the check get the generated menu too. Art narrower than the screen is
 drawn left-aligned, and the prompt goes below the art unless a `{prompt}`
 token places it. The main menu, welcome and logoff banners use slots today;
-the three lists, hand-drawn items and pacing below are being built.
+the three lists and hand-drawn items below are being built. Pacing works for
+the welcome banner and the main menu's art.
 
 *List screens.* The Boards, file areas and Chat channels lists take a `{list
 WxH}` region. The current page fills it, one row per entry: the number to
@@ -487,17 +488,26 @@ and the console's check lists it. Buttons drawn over several rows are not
 supported.
 
 *Pacing.* Art can be played at an emulated line speed so that it draws itself
-the way it did over a modem. NetBBS paces the bytes itself, in small chunks,
-and checks for a waiting key between them; any key ends the effect, writes the
-rest at once, and is consumed, so Enter cannot submit an empty prompt that
-follows. Each banner's speed is off, 2400, 9600 or 38400 bps, off by default,
-and one draw never takes longer than 5 seconds. Pacing applies to the welcome
-banner and to the first arrival at a screen with art in a session; never to a
-redraw, a notice, the screen restored after a break-in, or a door. Plain
-banners play in the order they were drawn, so cursor-moving ANSI animations
-work; slot art is rebuilt cell by cell and is revealed top to bottom. Callers
-can turn animations off in Profile ("Animations", on by default), and ASCII
-callers never get them.
+the way it did over a modem (`netbbs.net.art_pacing`). Each banner's speed is
+off, 2400, 9600 or 38400 bps, off by default, set with **Speed** on its console
+screen. NetBBS paces the bytes itself, in small chunks, and checks for a
+waiting key between them (`Session.take_waiting_key`); any key ends the effect
+and writes the rest at once, and it is consumed with anything typed behind it,
+so Enter cannot submit an empty prompt that follows. One draw is paced for at
+most 5 seconds; past that the rest goes out at once. Each piece of art plays
+once per connection: the welcome banner when a caller connects, the main
+menu's art on the first main menu, and a list's art on the first visit once
+list slots land. It never plays on a redraw, after a notice, on the screen
+restored after a break-in, or in a door. Plain banners play in the order they
+were drawn, so cursor-moving ANSI animations work, and art that moves the
+cursor back over rows it drew is exempt from the row-end trimming of still art
+(`revisits_rows`), since its trailing spaces may erase an earlier frame. Slot
+art is rebuilt cell by cell and is revealed top to bottom; the whole art is
+prepared once (iCE colours, CTerm's bright backgrounds) so no chunk loses a
+colour state. Nothing is paced for a session with no live terminal
+(`Session.paces_art`, set only by the Telnet, SSH and web transports), during
+a break-in, for ASCII callers, or for callers who chose quick under
+**Profile → [Q]uick or animated banners** (animated by default).
 
 A SysOp may override three of the node's branding colors -- accent (board/
 channel/user names and other navigable-item branding), header (section
@@ -14263,7 +14273,10 @@ faintly.
 can emulate a line speed itself (`CSI Ps1 ; Ps2 * r`), but bytes already sent
 cannot be skipped, it works only in SyncTERM, and turning it off again queues
 behind the art. Server-side pacing works on every terminal and stops at once
-on a key.
+on a key. The skipping key is swallowed, not passed on as Voidrunner passes
+its interrupting key, because a prompt follows the art. At the 5-second cap the
+rest is sent at once; a cap that sped the art up instead was rejected, since
+the speed is part of how the art was meant to look.
 
 ### Issue #1004 — the access map — decided
 
