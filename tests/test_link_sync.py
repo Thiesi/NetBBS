@@ -1646,6 +1646,83 @@ def test_sync_warns_once_a_node_has_reached_nothing_for_several_passes(tmp_path,
         node_db.close()
 
 
+def test_events_a_peer_refused_one_by_one_are_set_aside_then_offered_again(tmp_path, monkeypatch, caplog):
+    """Issue #897, sender side: a refused event stays in the peer's `wanted`
+    list. Sent every pass, refused events could fill a whole request again,
+    so they wait out the retry time; the SysOp hears about each once."""
+    import netbbs.link.sync as sync_module
+    from netbbs.link.protocol import DEFERRED_EVENT_RETRY_SECONDS
+    from netbbs.link.transport import LinkPolicyRefused, RefusedEvent
+
+    class Event:
+        def __init__(self, content_id):
+            self.content_id = content_id
+
+    events = [Event("chat-1"), Event("post-2"), Event("post-3")]
+    node = LinkNode(identity=bootstrap_node_identity("setting-aside"))
+    node_db = _NodeDb(tmp_path, "setting-aside")
+    monkeypatch.setattr(sync_module, "load_own_board_events", lambda db, fp: events)
+    monkeypatch.setattr(sync_module, "load_own_channel_events", lambda db, fp: [])
+    monkeypatch.setattr(sync_module, "load_own_file_area_events", lambda db, fp: [])
+    clock = {"now": 1_000_000.0}
+    monkeypatch.setattr(sync_module.time, "time", lambda: clock["now"])
+    pushed: list[list[str]] = []
+    reason = "link_policy_user_probationary_approval_required"
+
+    async def fake_push(node, session, url, chunk):
+        ids = [event.content_id for event in chunk if isinstance(event, Event)]
+        pushed.append(ids)
+        refused = [RefusedEvent("chat-1", reason)] if "chat-1" in ids else []
+        if refused and len(ids) == 1:
+            raise LinkPolicyRefused("refused", reason, refused)
+        return [cid for cid in ids if cid != "chat-1"], refused
+
+    monkeypatch.setattr(sync_module, "push_events_partial", fake_push)
+
+    def push(wanted, declared=frozenset({"chat-1", "post-2", "post-3"})):
+        asyncio.run(sync_module._push_own_events(
+            node, None, "http://peer", node_db.lane, wanted=wanted,
+            peer_fingerprint="peer", fallback_offsets={}, declared=declared,
+        ))
+
+    def warnings():
+        return [r.getMessage() for r in caplog.records
+                if r.levelname == "WARNING" and "one by one" in r.getMessage()]
+
+    try:
+        with caplog.at_level(logging.WARNING, logger="netbbs.link.sync"):
+            push(["chat-1", "post-2", "post-3"])
+            exchange = node.peer_exchange["peer"]
+            assert pushed[-1] == ["chat-1", "post-2", "post-3"]
+            assert set(exchange.set_aside) == {"chat-1"}
+            assert exchange.refused_reason is None, "one author's refusal is not about this node"
+            assert len(warnings()) == 1 and "peer" in warnings()[0] and reason in warnings()[0]
+
+            # Next pass the peer still wants it; it is not offered yet.
+            pushes = len(pushed)
+            push(["chat-1"])
+            assert all(ids == [] for ids in pushed[pushes:]), "only key transitions go out"
+
+            # After the retry time it is offered again, alone, refused with a
+            # 403, and set aside again without a second warning.
+            clock["now"] += DEFERRED_EVENT_RETRY_SECONDS + 1
+            push(["chat-1"])
+            assert pushed[-1] == ["chat-1"]
+            assert exchange.set_aside["chat-1"][1] > clock["now"]
+            assert len(warnings()) == 1
+
+            # A paged inventory that did not declare it this pass says
+            # nothing about it: it stays set aside.
+            push([], declared=frozenset({"post-2"}))
+            assert set(exchange.set_aside) == {"chat-1"}
+
+            # Once the peer, asked about it, no longer wants it, it is forgotten.
+            push([])
+            assert exchange.set_aside == {}
+    finally:
+        node_db.close()
+
+
 def test_a_sync_pass_releases_an_elapsed_recovery_hold(tmp_path, caplog):
     """Issue #802: a recovery hold's release has no event of its own, so a
     quiet subject stayed quarantined until the node restarted. A sync pass
@@ -1833,20 +1910,21 @@ def test_sync_still_warns_when_a_retained_relay_is_offline(tmp_path, caplog):
 
 
 def _recording_push(monkeypatch):
-    """Wraps `netbbs.link.sync`'s own `push_events` so a test can see
-    exactly how many push requests one pass made and what each carried
-    -- the whole point of issue #478 is the shape of those requests, not
-    only what ends up on the peer."""
+    """Wraps `netbbs.link.sync`'s own `push_events_partial` (what the
+    content push sends with, issue #897) so a test can see exactly how many
+    push requests one pass made and what each carried -- the whole point of
+    issue #478 is the shape of those requests, not only what ends up on the
+    peer."""
     import netbbs.link.sync as sync_module
 
-    real_push = sync_module.push_events
+    real_push = sync_module.push_events_partial
     calls: list[list[str]] = []
 
     async def recording(node, session, base_url, events, **kwargs):
         calls.append([event.content_id for event in events])
         return await real_push(node, session, base_url, events, **kwargs)
 
-    monkeypatch.setattr(sync_module, "push_events", recording)
+    monkeypatch.setattr(sync_module, "push_events_partial", recording)
     return calls
 
 

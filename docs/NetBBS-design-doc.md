@@ -6588,6 +6588,21 @@ approval queue, and so do their edits: an approved post must not be rewritten
 with unreviewed text. Services without an approval projection, including Link
 mail, refuse such content with a stable reason code.
 
+A pushed events request is judged event by event once the sending node itself
+is allowed (issue #897). An event refused for its author does not refuse the
+rest: the receiver takes what it may and answers 200 with
+`refused: [{content_id, reason_code}]` beside `accepted`. Only a request with
+nothing acceptable left is refused outright with 403, and that body carries the
+same `refused` list, so a single pushed letter keeps its refusal. A refusal
+about the sending node remains a 403 for the whole request. The sender sets
+each refused event aside for that peer for `DEFERRED_EVENT_RETRY_SECONDS` and
+then offers it again while the peer's inventory still asks for it, so content
+from an author on probation there arrives once that author may post, and
+refused events never fill a request ahead of everything else. A partial
+refusal is about authors, not the sending node, so it does not mark the peer
+as refusing this node's content. Senders older than this rule ignore
+`refused`, and a 200 means only that the rest arrived.
+
 Enforcement attributes independently signed content to its author/home node,
 not to a carrier recorded in `link_events.sender_fingerprint`. Current display
 suppression is evaluated from retained signed authorship at read time; changing
