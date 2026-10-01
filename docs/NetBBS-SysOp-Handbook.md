@@ -1363,6 +1363,13 @@ the menu as you see it, then as a level-0 caller sees it. The gallery's
 colours with characters classic terminals have; applying one switches the mode
 for you.
 
+The welcome and log-off banners take the field tokens too, but not `{menu}`
+or `{prompt}`. The welcome banner is shown before anyone signs in, so it fills
+only `{node}`, `{time}`, `{date}` and `{online}`. The log-off banner adds
+`{user}` and `{level}`. Any other field is left blank, and SSH's sign-in banner
+fills `{node}`, `{time}` and `{date}`. A banner without tokens is sent exactly
+as before.
+
 Every caller gets text in the character set their terminal reads:
 
 - **Detection when they connect:**

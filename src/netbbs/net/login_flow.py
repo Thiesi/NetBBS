@@ -95,6 +95,9 @@ from netbbs.net.unicode_style_preference import (
 from netbbs.guest import guest_is_eligible, guest_login_for, pre_login_notice
 from netbbs.net.welcome_banner import load_welcome_banner, pre_login_unicode_style
 from netbbs.permissions import meets_level
+from netbbs.net.banner_fields import banner_fields, count_callers_online
+from netbbs.rendering.art_slots import fill_field_slots
+from netbbs.rendering.charset import ellipsis_for
 from netbbs.rendering import (
     ACCENT_COLOR,
     ALERT_COLOR,
@@ -395,11 +398,20 @@ async def _run_authenticated_session(
     try:
         await write_preformatted_line(
             session,
-            load_welcome_banner(
-                db,
-                truecolor=session.supports_truecolor,
-                unicode_style=pre_login_unicode_style(session),
-                max_width=physical_terminal_width(session),
+            # Field slots (issue #929): before sign-in, only what is true
+            # for every caller -- the node, the time, callers online.
+            fill_field_slots(
+                load_welcome_banner(
+                    db,
+                    truecolor=session.supports_truecolor,
+                    unicode_style=pre_login_unicode_style(session),
+                    max_width=physical_terminal_width(session),
+                ),
+                banner_fields(db, callers_online=count_callers_online(
+                    node_controls.session_registry if node_controls is not None else None
+                )),
+                ellipsis=ellipsis_for(session),
+                width=getattr(session, "physical_width", session.terminal_width),
             ),
         )
         # Design doc -- node management, Thiesi's own request: shown to
@@ -890,6 +902,15 @@ async def run_authenticated_session(
     # unrelated call site.
     logoff_banner = load_logoff_banner(db, max_width=physical_terminal_width(session))
     if logoff_banner:
+        # Field slots (issue #929): the caller's name, the node, the time.
+        logoff_banner = fill_field_slots(
+            logoff_banner,
+            banner_fields(db, user=user, callers_online=count_callers_online(
+                node_controls.session_registry if node_controls is not None else None
+            )),
+            ellipsis=ellipsis_for(session),
+            width=getattr(session, "physical_width", session.terminal_width),
+        )
         await write_preformatted_line(session, logoff_banner)
     if intentional_logoff and completed_history_entry is not None:
         await _show_logoff_summary_screen(session, db, user, completed_history_entry)
