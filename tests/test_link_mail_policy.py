@@ -129,6 +129,24 @@ def test_user_probation_still_holds_that_users_posts_and_refuses_other_content(d
     ).reason_code == REASON_USER_PROBATIONARY
 
 
+def test_a_probationary_callers_chat_line_is_accepted_like_mail(db):
+    """Issue #860: chat has no approval queue, so refusing a probationary
+    caller's line left a new node's callers unheard in a Linked channel.
+    Probation does not hold chat back; quarantine still does."""
+    _establish_node(db, "home")
+    chat = {"envelope": {"object_type": "channel_message", "payload": {"author": {
+        "kind": "node_vouched_user", "home_node_fingerprint": "home", "local_user_id": "nib",
+    }}}}
+    decision = decide_event_authorship(db, chat, transport_peer_fingerprint="home")
+    assert decision.allowed and not decision.requires_approval
+
+    _set_state(db, TrustSubject.user("home", "nib"), TrustState.QUARANTINED,
+               dimensions=(TrustDimension.CONTENT_CONDUCT,))
+    assert decide_event_authorship(
+        db, chat, transport_peer_fingerprint="home"
+    ).reason_code == REASON_USER_QUARANTINED
+
+
 def test_mail_from_a_node_still_on_probation_is_refused(db):
     decision = decide_event_authorship(db, _mail_envelope(), transport_peer_fingerprint="home")
     assert not decision.allowed
