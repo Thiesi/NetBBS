@@ -148,7 +148,12 @@
     var start = col, end = col;
     while (start > 0 && !(text[start - 1] === " " && text[start - 2] === " ")) start--;
     while (end < text.length && !(text[end] === " " && text[end + 1] === " ")) end++;
-    var entry = /\[([^\]\s])\]/.exec(text.slice(start, end));
+    var run = text.slice(start, end);
+    // A numbered row drawn inside SysOp art starts after the art's own
+    // frame, not at the start of the line (issue #929).
+    var drawn = /(?:^|\s)(\d{2})\.\s/.exec(run);
+    if (drawn) return drawn[1];
+    var entry = /\[([^\]\s])\]/.exec(run);
     return entry ? entry[1].toLowerCase() : null;
   }
 
