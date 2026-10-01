@@ -17,7 +17,7 @@ pretending the level is the whole answer.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 
 from netbbs.auth.users import SYSOP_LEVEL, User
@@ -300,65 +300,72 @@ def account_level_change(db: Database, user: User, new_level: int) -> AccountCha
     }
     channels = {channel.id: channel for channel in list_channels(db)}
 
-    def granted(gate: Gate) -> bool:
+    # Every check that depends on the level -- the SysOp's bypass in
+    # has_permission, whether the guest login still treats the account as
+    # the guest -- is asked of the account as it would be at that level.
+    before_account, after_account = user, replace(user, user_level=new_level)
+
+    def granted(gate: Gate, account: User) -> bool:
         object_type, bit = _GRANT_KINDS[gate.kind]
         return has_permission(
-            db, user, object_type=object_type, object_id=gate.object_id, permission=BoardPermission[bit]
+            db, account, object_type=object_type, object_id=gate.object_id, permission=BoardPermission[bit]
         )
 
-    def passes(gate: Gate, level: int) -> bool:
+    def passes(gate: Gate, account: User) -> bool:
+        level = account.user_level
         if gate.off is not None:
             return False
         if gate.kind not in _GRANT_KINDS:
             return level >= gate.opens_at
-        if gate.kind in _READ_GATE_OF and not passes(by_key[(_READ_GATE_OF[gate.kind], gate.object_id)], level):
+        if gate.kind in _READ_GATE_OF and not passes(by_key[(_READ_GATE_OF[gate.kind], gate.object_id)], account):
             return False
-        return level >= gate.level or granted(gate)
+        return level >= gate.level or granted(gate, account)
 
-    def unmet(gate: Gate) -> tuple[str, ...]:
+    def unmet(gate: Gate, account: User) -> tuple[str, ...]:
         if gate.kind in _GRANT_KINDS:
             resource = resources[_GRANT_KINDS[gate.kind][0]][gate.object_id]
-            fails = () if meets_age(db, user, get_effective_min_age(db, resource)) else _age_condition(
+            fails = () if meets_age(db, account, get_effective_min_age(db, resource)) else _age_condition(
                 get_effective_min_age(db, resource)
             )
             if gate.kind in _READ_GATE_OF and not meets_name_requirement(
-                db, user, get_effective_name_requirement(db, resource)
+                db, account, get_effective_name_requirement(db, resource)
             ):
                 fails += _name_condition(get_effective_name_requirement(db, resource))
             return fails
         if gate.kind is GateKind.CHANNEL:
             channel = channels[gate.object_id]
-            fails = () if meets_age(db, user, get_effective_min_age(db, channel)) else _age_condition(
+            fails = () if meets_age(db, account, get_effective_min_age(db, channel)) else _age_condition(
                 get_effective_min_age(db, channel)
             )
-            if not meets_name_requirement(db, user, get_effective_name_requirement(db, channel)):
+            if not meets_name_requirement(db, account, get_effective_name_requirement(db, channel)):
                 fails += _name_condition(get_effective_name_requirement(db, channel))
             if channel.members_only and not (
-                is_member(db, channel, user) or has_pending_invitation(db, channel, user)
+                is_member(db, channel, account) or has_pending_invitation(db, channel, account)
             ):
                 fails += ("members only",)
             return fails
         if gate.kind is GateKind.MRC_OPEN_ROOM:
             rooms = load_open_room_settings(db)
-            fails = () if meets_age(db, user, rooms.min_age) else _age_condition(rooms.min_age)
-            if not meets_name_requirement(db, user, rooms.name_requirement):
+            fails = () if meets_age(db, account, rooms.min_age) else _age_condition(rooms.min_age)
+            if not meets_name_requirement(db, account, rooms.name_requirement):
                 fails += _name_condition(rooms.name_requirement)
             return fails
-        if gate.kind is GateKind.MAIL and guest_is_eligible(db, user):
+        if gate.kind is GateKind.MAIL and guest_is_eligible(db, account):
             return ("the guest account",)
         return ()
 
     gained, lost, blocked = [], [], []
     for gate in gates:
-        before, after = passes(gate, user.user_level), passes(gate, new_level)
+        before, after = passes(gate, before_account), passes(gate, after_account)
         if before == after:
             continue
-        fails = unmet(gate)
-        if after and fails:
-            blocked.append((gate, fails))
-        elif after:
-            gained.append(gate)
-        elif not fails:
+        if after:
+            fails = unmet(gate, after_account)
+            if fails:
+                blocked.append((gate, fails))
+            else:
+                gained.append(gate)
+        elif not unmet(gate, before_account):
             # Something it was kept out of anyway is not a loss.
             lost.append(gate)
     return AccountChange(user.user_level, new_level, tuple(gained), tuple(lost), tuple(blocked))
