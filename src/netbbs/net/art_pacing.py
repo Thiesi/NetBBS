@@ -87,8 +87,7 @@ def will_pace(session: Session, speed: int, once: str) -> bool:
         return False
     if getattr(session, "output_charset", None) == ASCII:
         return False
-    in_break_in = getattr(session, "in_break_in", None)
-    if in_break_in is not None and in_break_in():
+    if getattr(session, "in_break_in", False):
         return False
     return once not in _played(session)
 
@@ -151,7 +150,7 @@ async def pace(
     sent = 0
     index = 0
     while index < len(atoms):
-        if session.in_break_in():
+        if session.in_break_in:
             await write("".join(atoms[index:]))
             return
         chunk: list[str] = []

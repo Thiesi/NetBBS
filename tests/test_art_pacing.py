@@ -19,6 +19,7 @@ from netbbs.net.art_pacing import (
     write_paced_art,
     write_paced_art_text,
 )
+from netbbs.net.session import Session
 from netbbs.rendering.ansi_art import decode_banner_bytes, decode_banner_bytes_fitting, revisits_rows
 from netbbs.rendering.charset import ASCII, CP437, UTF8
 
@@ -54,7 +55,10 @@ class _Stub:
     async def write(self, text: str) -> None:
         self.writes.append(text)
 
+    @property
     def in_break_in(self) -> bool:
+        # A property, as on `Session` (Claude review on #1012: a method here
+        # hid that the real one is not callable).
         return self.breaking_in_after is not None and len(self.writes) >= self.breaking_in_after
 
     async def take_waiting_key(self, timeout: float) -> bool:
@@ -224,3 +228,51 @@ def test_paced_art_is_prepared_once_so_no_chunk_loses_its_colours() -> None:
     assert len(session.writes) > 1
     assert sent.startswith(f"{ESC}[?33h") and sent.endswith(f"{ESC}[?33l")
     assert sent.count(f"{ESC}[?33h") == 1
+
+
+class _RealSession(Session):
+    """A real `Session`: its `in_break_in` is the real property, and art goes
+    through the real write path."""
+
+    write = Session.write
+    paces_art = True
+
+    def __init__(self) -> None:
+        self.output_charset = UTF8
+        self.terminal_width = 80
+        self.terminal_wraps_immediately = False
+        self.sent: list[str] = []
+        self.keys = 0
+
+    async def _send_text(self, text: str) -> None:
+        self.sent.append(text)
+
+    async def take_waiting_key(self, timeout: float) -> bool:
+        self.keys += 1
+        return self.keys >= 2
+
+    async def read_line(self, *args, **kwargs) -> str:
+        raise AssertionError("unused")
+
+    async def read_key(self, *args, **kwargs) -> str:
+        raise AssertionError("unused")
+
+    async def read_editor_key(self):
+        raise AssertionError("unused")
+
+    async def close(self) -> None:
+        pass
+
+
+def test_a_real_session_plays_paced_art():
+    session = _RealSession()
+    assert will_pace(session, 9600, "welcome")
+    _run(write_paced_art(session, "q" * 500, speed=9600, once="welcome"))
+    assert "".join(session.sent).count("q") == 500
+    assert len(session.sent) == 3  # two chunks, then the rest at the key
+
+
+def test_a_real_session_in_a_break_in_is_not_paced():
+    session = _RealSession()
+    session._break_in_input = asyncio.Queue()
+    assert not will_pace(session, 9600, "welcome")
