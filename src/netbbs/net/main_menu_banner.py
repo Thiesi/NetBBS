@@ -37,6 +37,7 @@ from pathlib import Path
 
 from netbbs.config import get_config, set_config
 from netbbs.rendering import RESET, decode_banner_bytes
+from netbbs.rendering.art_slots import SlotArt, parse_slot_art
 from netbbs.storage.database import Database
 
 _logger = logging.getLogger(__name__)
@@ -47,6 +48,15 @@ _logger = logging.getLogger(__name__)
 MAX_MASTHEAD_SIZE_BYTES = 262_144  # 256 KiB
 
 _MAIN_MENU_BANNER_ENABLED_CONFIG_KEY = "main_menu_banner_enabled"
+_MAIN_MENU_BANNER_MODE_CONFIG_KEY = "main_menu_banner_mode"
+
+#: How the main-menu art is used (issue #929, step 4): `"masthead"` draws
+#: it above the generated menu (issue #161, the default), `"slots"` makes
+#: it the menu itself, with the caller's items drawn into its `{menu}`
+#: slot (`netbbs.rendering.art_slots`).
+MASTHEAD_MODE = "masthead"
+SLOTS_MODE = "slots"
+MAIN_MENU_ART_MODES = (MASTHEAD_MODE, SLOTS_MODE)
 
 
 def is_main_menu_banner_enabled(db: Database) -> bool:
@@ -55,6 +65,17 @@ def is_main_menu_banner_enabled(db: Database) -> bool:
 
 def set_main_menu_banner_enabled(db: Database, enabled: bool) -> None:
     set_config(db, _MAIN_MENU_BANNER_ENABLED_CONFIG_KEY, "1" if enabled else "0")
+
+
+def main_menu_art_mode(db: Database) -> str:
+    mode = get_config(db, _MAIN_MENU_BANNER_MODE_CONFIG_KEY)
+    return mode if mode in MAIN_MENU_ART_MODES else MASTHEAD_MODE
+
+
+def set_main_menu_art_mode(db: Database, mode: str) -> None:
+    if mode not in MAIN_MENU_ART_MODES:
+        raise ValueError(f"unknown main menu art mode {mode!r}")
+    set_config(db, _MAIN_MENU_BANNER_MODE_CONFIG_KEY, mode)
 
 
 def main_menu_banner_path(db: Database) -> Path:
@@ -98,30 +119,71 @@ def load_main_menu_banner(db: Database) -> str:
     independently anyway, since it runs unattended on every menu draw
     regardless of how the flag got set.
     """
-    if not is_main_menu_banner_enabled(db):
+    if not is_main_menu_banner_enabled(db) or main_menu_art_mode(db) != MASTHEAD_MODE:
         return ""
-
-    path = main_menu_banner_path(db)
-    if not path.exists():
-        _logger.warning("main menu banner enabled but missing at %s -- showing no masthead", path)
+    data = _read_main_menu_banner(db)
+    if data is None:
         return ""
-
-    try:
-        size = path.stat().st_size
-        if size > MAX_MASTHEAD_SIZE_BYTES:
-            _logger.warning(
-                "main menu banner at %s is %d bytes, over the %d byte limit -- showing no masthead",
-                path, size, MAX_MASTHEAD_SIZE_BYTES,
-            )
-            return ""
-        data = path.read_bytes()
-    except OSError:
-        _logger.warning("could not read main menu banner at %s -- showing no masthead", path, exc_info=True)
-        return ""
-
     # decode_ansi_bytes cannot raise (see its own docstring) -- no
     # decode-failure fallback is needed here, by construction. RESET at
     # the end matters here specifically, unlike a truly final screen --
     # the real, dynamic main menu is drawn immediately after this, and
     # must never inherit color state left open by the masthead's own art.
     return decode_banner_bytes(data) + RESET
+
+
+def _read_main_menu_banner(db: Database) -> bytes | None:
+    """The banner file's bytes, or `None` (logged) when it is missing,
+    oversized or unreadable -- shared by both modes."""
+    path = main_menu_banner_path(db)
+    if not path.exists():
+        _logger.warning("main menu banner enabled but missing at %s -- showing the generated menu only", path)
+        return None
+
+    try:
+        size = path.stat().st_size
+        if size > MAX_MASTHEAD_SIZE_BYTES:
+            _logger.warning(
+                "main menu banner at %s is %d bytes, over the %d byte limit -- showing the generated menu only",
+                path, size, MAX_MASTHEAD_SIZE_BYTES,
+            )
+            return None
+        data = path.read_bytes()
+    except OSError:
+        _logger.warning(
+            "could not read main menu banner at %s -- showing the generated menu only", path, exc_info=True
+        )
+        return None
+
+    return data
+
+
+_slot_art_cache: dict[tuple[str, int, int], SlotArt] = {}
+
+
+def load_main_menu_slot_art(db: Database) -> SlotArt | None:
+    """The main-menu art parsed for slots (issue #929, step 4) when the
+    banner is enabled in slots mode, else `None`. Parsed once per version
+    of the file (its path, size and modification time), since this runs
+    on every main-menu draw. Art with problems is returned as it is: the
+    menu checks `problems` and falls back to the generated menu."""
+    if not is_main_menu_banner_enabled(db) or main_menu_art_mode(db) != SLOTS_MODE:
+        return None
+    data = _read_main_menu_banner(db)
+    if data is None:
+        return None
+    path = main_menu_banner_path(db)
+    try:
+        stat = path.stat()
+        key = (str(path), stat.st_size, stat.st_mtime_ns)
+    except OSError:
+        key = None
+    if key is not None and key in _slot_art_cache:
+        return _slot_art_cache[key]
+    art = parse_slot_art(decode_banner_bytes(data))
+    if art.problems:
+        _logger.warning("main menu slot art at %s can't be used: %s", path, "; ".join(art.problems))
+    if key is not None:
+        _slot_art_cache.clear()
+        _slot_art_cache[key] = art
+    return art

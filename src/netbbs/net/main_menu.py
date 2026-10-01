@@ -15,6 +15,7 @@ assembled from both pieces rather than one contiguous cut.
 from __future__ import annotations
 
 import asyncio
+import logging
 
 from netbbs.auth.users import (
     SYSOP_LEVEL, User, current_account, describe_staff_permissions, is_usable_sysop, list_users,
@@ -40,7 +41,7 @@ from netbbs.files import list_file_areas
 from netbbs.net.board_flow import _browse_boards, visible_boards
 from netbbs.net.breadcrumb_preference import breadcrumb_collapsed_enabled
 from netbbs.boards.moderation_notices import acknowledge_moderation_notices, pending_moderation_notices
-from netbbs.net.notices import announce, announce_styled, write_notices
+from netbbs.net.notices import announce, announce_styled, pending_notice_rows, write_notices
 from netbbs.net.char_input import HELP_KEY, REDRAW_KEY, InputHistory, reject_unhandled_key
 from netbbs.net.chat_flow import browse_channels, run_direct_chat_loop, visible_channels
 from netbbs.net.confirm import prompt_yes_no
@@ -49,7 +50,7 @@ from netbbs.net.door_flow import _visible_doors, browse_doors, has_visible_doors
 from netbbs.net.file_flow import browse_file_areas, visible_areas
 from netbbs.net.mail_arrivals import NOTICE_COLOR as NEW_MAIL_COLOR, arrival_event, login_mail_notice, waiting_mail_counts
 from netbbs.net.mail_flow import browse_mail, caller_mail_refusal
-from netbbs.net.main_menu_banner import load_main_menu_banner
+from netbbs.net.main_menu_banner import load_main_menu_banner, load_main_menu_slot_art
 from netbbs.net.menu_description_preference import menu_description_level
 from netbbs.net.node_theme import (
     effective_accent_color,
@@ -100,10 +101,16 @@ from netbbs.staff import (
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 from netbbs.timeutil import format_for_display, is_utc_zone_name, resolve_display_preferences, utc_now_iso
+from netbbs.rendering.ansi import move_cursor, strip_ansi
+from netbbs.rendering.art_slots import SlotArt, layout_menu_slot, render_slot_art
+from netbbs.rendering.charset import ASCII, ellipsis_for
+from netbbs.rendering.width import display_width
 
 #: What the SysOp monitor shows for a caller who took each main-menu branch
 #: (issue #762), named as the menu names it. Every key `_main_menu_loop`
 #: dispatches on needs an entry; a test holds the two in step.
+_logger = logging.getLogger(__name__)
+
 _MENU_ACTIVITY = {
     "m": "Message boards",
     "c": "Chat",
@@ -331,6 +338,34 @@ async def _draw_main_menu(
     system_options.append(MenuEntry(label=menu_key("L", "ogoff"), brief="Disconnect from this node"))
 
     unicode_style = unicode_style_enabled(db, user)
+    extra_lines: list[str] = []
+    if meets_level(user, SYSOP_LEVEL) and not (list_boards(db) or list_channels(db) or list_file_areas(db)):
+        arrow = "\u2192" if unicode_style else "->"
+        extra_lines.append(
+            colored(f"No boards yet: create one under SysOp {arrow} Content.", fg_color=MUTED_COLOR)
+        )
+    if told_of_pending_accounts(user):
+        # Issue #835 (F071): only the console dashboard used to say that
+        # signups were waiting. Told to whoever can approve them (§5.6).
+        waiting = count_pending_accounts(db)
+        if waiting:
+            arrow = "\u2192" if unicode_style else "->"
+            where = f"SysOp {arrow} Users" if meets_level(user, SYSOP_LEVEL) else f"Staff {arrow} Accounts waiting"
+            extra_lines.append(colored(
+                f"{waiting} account{'' if waiting == 1 else 's'} awaiting approval: {where}.",
+                fg_color=WARNING_COLOR,
+            ))
+    if notice:
+        extra_lines.append(notice)
+    prompt = _main_menu_prompt(db, user, node_controls)
+
+    slot_art = load_main_menu_slot_art(db)
+    if slot_art is not None:
+        labels = [entry.label for entry in (*explore_options, *personal_options, *system_options)]
+        fields = _slot_fields(session, db, user, node_controls, has_mail=has_mail, unread=unread)
+        if await _draw_slot_main_menu(session, slot_art, labels, fields, extra_lines, prompt):
+            return
+
     collapsed = breadcrumb_collapsed_enabled(db, user)
     # "mail" pluralized is "mails," which reads oddly -- the Mail submenu's
     # own header (now the mailbox's, `_MailboxScreen`) settled this wording as
@@ -378,29 +413,85 @@ async def _draw_main_menu(
         # issue #161, unconditionally -- no existing node's output
         # changes just because this module now exists.
         await session.write_line(f"\r\n{title}\r\n{options}\r\n")
-    if meets_level(user, SYSOP_LEVEL) and not (list_boards(db) or list_channels(db) or list_file_areas(db)):
-        arrow = "\u2192" if unicode_style else "->"
-        await session.write_line(
-            colored(f"No boards yet: create one under SysOp {arrow} Content.", fg_color=MUTED_COLOR)
-        )
-    if told_of_pending_accounts(user):
-        # Issue #835 (F071): only the console dashboard used to say that
-        # signups were waiting. Told to whoever can approve them (§5.6).
-        waiting = count_pending_accounts(db)
-        if waiting:
-            arrow = "\u2192" if unicode_style else "->"
-            where = f"SysOp {arrow} Users" if meets_level(user, SYSOP_LEVEL) else f"Staff {arrow} Accounts waiting"
-            await session.write_line(colored(
-                f"{waiting} account{'' if waiting == 1 else 's'} awaiting approval: {where}.",
-                fg_color=WARNING_COLOR,
-            ))
-    if notice:
-        await session.write_line(notice)
+    for line in extra_lines:
+        await session.write_line(line)
     # An outcome from a flow that unwound all the way back here (a download
     # whose browser link was the whole of the transfer) is shown here
     # rather than erased by this menu's clear (issue #680).
     await write_notices(session)
-    await write_prompt(session, _main_menu_prompt(db, user, node_controls))
+    await write_prompt(session, prompt)
+
+
+def _slot_fields(
+    session: Session, db: Database, user: User, node_controls: NodeControls | None, *, has_mail: bool, unread: int
+) -> dict[str, str]:
+    """The live values a main-menu art's field slots can show (issue #929,
+    step 4) -- nothing the generated menu doesn't already show or the
+    Who's online screen doesn't already count."""
+    _fmt, tz_name = resolve_display_preferences(db)
+    now = utc_now_iso()
+    fields = {
+        "user": sanitize_text(user.username),
+        "node": session.node_display_name,
+        "level": f"level {user.user_level}",
+        "mail": (f"{unread} unread" if unread else "mail caught up") if has_mail else "",
+        "time": format_for_display(now, override_format="%H:%M", override_timezone=tz_name),
+        "date": format_for_display(now, override_format="%Y-%m-%d", override_timezone=tz_name),
+        "online": "",
+    }
+    if node_controls is not None:
+        callers = sum(1 for entry in node_controls.session_registry.list_entries() if entry.username)
+        fields["online"] = f"{callers} online"
+    return fields
+
+
+async def _draw_slot_main_menu(
+    session: Session, art: SlotArt, labels: list[str], fields: dict[str, str], extra_lines: list[str], prompt: str
+) -> bool:
+    """Draw the main menu as the SysOp's slot art (issue #929, step 4), or
+    return `False` without writing anything when this caller gets the
+    generated menu instead: art with problems, an ASCII-only caller, a
+    terminal narrower than the art or too short for it plus what goes
+    below it, or items that don't fit the `{menu}` region. Nothing is
+    ever left out to make the art fit."""
+    if art.problems or art.menu is None or getattr(session, "output_charset", None) == ASCII:
+        return False
+    physical_width = getattr(session, "physical_width", session.terminal_width)
+    below = len(extra_lines) + pending_notice_rows(session)
+    prompt_at_slot = art.prompt is not None and (
+        art.prompt.col + display_width(strip_ansi(prompt)) + 2 <= physical_width
+    )
+    rows_needed = art.height + below + (0 if prompt_at_slot else 1)
+    # Nothing is drawn on the last row, so a terminal that wraps the moment
+    # it writes the bottom-right cell never scrolls the art (issue #964).
+    if art.width > physical_width or rows_needed >= session.terminal_height:
+        return False
+    menu_rows = layout_menu_slot(labels, art.menu.width, art.menu.height)
+    if menu_rows is None:
+        _log_slot_overflow(len(labels), art)
+        return False
+    await session.write(render_slot_art(art, fields=fields, menu_rows=menu_rows, ellipsis=ellipsis_for(session)))
+    await session.write(move_cursor(art.height + 1, 1))
+    for line in extra_lines:
+        await session.write_line(line)
+    await write_notices(session)
+    if prompt_at_slot:
+        await session.write(move_cursor(art.prompt.row + 1, art.prompt.col + 1))
+    await write_prompt(session, prompt)
+    return True
+
+
+_overflow_logged: set[tuple[int, int, int]] = set()
+
+
+def _log_slot_overflow(count: int, art: SlotArt) -> None:
+    key = (count, art.menu.width, art.menu.height)
+    if key not in _overflow_logged:
+        _overflow_logged.add(key)
+        _logger.info(
+            "main menu art: %d items don't fit its %dx%d {menu} slot -- drawing the generated menu",
+            count, art.menu.width, art.menu.height,
+        )
 
 
 def _main_menu_prompt(db: Database, user: User, node_controls: NodeControls | None) -> str:
