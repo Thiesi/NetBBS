@@ -36,7 +36,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from netbbs.config import get_config, set_config
-from netbbs.rendering import RESET, decode_banner_bytes
+from netbbs.rendering import RESET, decode_banner_bytes, decode_banner_bytes_fitting
 from netbbs.rendering.art_slots import SlotArt, parse_slot_art
 from netbbs.storage.database import Database
 
@@ -104,7 +104,7 @@ def main_menu_banner_status(db: Database) -> MainMenuBannerStatus:
     )
 
 
-def load_main_menu_banner(db: Database) -> str:
+def load_main_menu_banner(db: Database, *, max_width: int | None = None) -> str:
     """Resolves the masthead to prepend above the main menu: the
     SysOp's custom file if enabled and usable, or `""` (no masthead --
     today's main menu, unchanged) otherwise. Synchronous, matching
@@ -129,7 +129,15 @@ def load_main_menu_banner(db: Database) -> str:
     # the end matters here specifically, unlike a truly final screen --
     # the real, dynamic main menu is drawn immediately after this, and
     # must never inherit color state left open by the masthead's own art.
-    return decode_banner_bytes(data) + RESET
+    text = decode_banner_bytes_fitting(data, max_width)
+    if text is None:
+        # Its SAUCE record says it was drawn wider than this caller's
+        # terminal (issue #929): wrapping every row would turn it to noise.
+        _logger.info(
+            "main menu banner at %s is wider than %d columns -- showing nothing", main_menu_banner_path(db), max_width
+        )
+        return ""
+    return text + RESET
 
 
 def _read_main_menu_banner(db: Database) -> bytes | None:
