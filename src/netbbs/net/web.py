@@ -40,6 +40,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import ipaddress
 import json
 import re
 import logging
@@ -1136,6 +1137,44 @@ async def _set_server_header(request: web.Request, response: web.StreamResponse)
     response.headers["Server"] = "NetBBS"
 
 
+def caller_address(
+    peer: str | None,
+    forwarded_for: list[str],
+    trusted_proxies: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...],
+) -> str | None:
+    """The address a web caller is known by (issue #980).
+
+    The TCP peer, unless it is a trusted reverse proxy. Then it is the
+    rightmost `X-Forwarded-For` entry that is not itself a trusted proxy:
+    each proxy appends the address it received the request from, so the
+    entries to the right of that one were written by proxies this node
+    trusts, and anything to its left was written by the caller and proves
+    nothing. A header that is missing, empty or malformed there leaves the
+    proxy's own address, as before this setting existed."""
+    if not trusted_proxies or peer is None or not _is_trusted(peer, trusted_proxies):
+        return peer
+    entries = [entry.strip() for header in forwarded_for for entry in header.split(",")]
+    for entry in reversed(entries):
+        try:
+            address = ipaddress.ip_address(entry)
+        except ValueError:
+            return peer
+        if not any(address in network for network in trusted_proxies):
+            return str(address)
+    return peer
+
+
+def _is_trusted(peer: str, trusted_proxies) -> bool:
+    try:
+        address = ipaddress.ip_address(peer)
+    except ValueError:
+        return False
+    # An IPv4 client reached over an IPv6 socket shows as ::ffff:a.b.c.d.
+    mapped = getattr(address, "ipv4_mapped", None)
+    return any(candidate in network for network in trusted_proxies for candidate in (address, mapped)
+               if candidate is not None and candidate.version == network.version)
+
+
 class WebServer:
     """
     Web server producing `WebSession` objects and handing each to a
@@ -1160,10 +1199,14 @@ class WebServer:
         *,
         allowed_origins: set[str] | None = None,
         transfers=None,
+        trusted_proxies: tuple[str, ...] = (),
     ):
         self._host = host
         self._port = port
         self._session_handler = session_handler
+        self._trusted_proxies = tuple(
+            ipaddress.ip_network(network, strict=False) for network in trusted_proxies
+        )
         # Issue #475: the file-transfer gateway, when this node has one.
         # Registered onto the same application as the terminal because a
         # node offering transfer links has an HTTP listener by
@@ -1244,12 +1287,17 @@ class WebServer:
             # F102).
             raise web.HTTPBadRequest(text="This address is for the NetBBS browser terminal.")
         await ws.prepare(request)
-        session = WebSession(ws, request.remote)
+        # Issue #980: decided once, here, so the login throttle, the logs
+        # and the SysOp's screens all see the same address.
+        address = caller_address(
+            request.remote, request.headers.getall("X-Forwarded-For", []), self._trusted_proxies,
+        )
+        session = WebSession(ws, address)
         try:
             await self._session_handler(session)
         except SessionClosedError:
             # A caller closing the tab is routine: one INFO line, no traceback.
-            _logger.info("web caller %s disconnected", request.remote or "?")
+            _logger.info("web caller %s disconnected", address or "?")
         except Exception:
             _logger.exception("unhandled error in web session handler")
         finally:
