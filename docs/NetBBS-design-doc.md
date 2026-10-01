@@ -465,7 +465,7 @@ only on the generated list. A page holds as many entries as the region has
 rows; numbering, one-digit selection, browser clicks, search and the paging
 keys work as on the generated list, and the navigation block and prompt go
 below the art unless `{prompt}` places it. The cursor row is drawn reversed in
-the token's colour, and moving it repaints only the two rows involved. Three
+the token's colour. Three
 more fields serve lists: `{title N}`, `{page N}` ("2/5") and `{count N}`. A
 region under 3 rows, or one that leaves the name under 12 columns, falls back
 to the generated list, as does every case that makes the main menu fall back.
