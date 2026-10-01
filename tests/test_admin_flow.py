@@ -5181,7 +5181,7 @@ def test_masthead_menu_check_reports_hand_drawn_items(db, lane, sysop):
     assert "Drawn items:" in text
     assert "[m] '[M]essage boards' at row 1, column 3" in text
     assert "'[x] marks the spot' at row 2, column 20: not a main-menu key" in text
-    assert "holds 2 keys and counts as [D] only" in text
+    assert "'[D]irectory [P]rofile' holds 2 keys" in text
     assert "Your menu: fits." in text
     assert "Blanked, as this caller can't use them: [S]" in text
     assert "In the {menu} slot, as the art doesn't draw them:" in text
