@@ -159,6 +159,18 @@ def test_a_notice_goes_below_the_art(tmp_path):
     db.close()
 
 
+def test_a_multi_line_notice_counts_every_row_it_takes(tmp_path):
+    # The art is 11 rows with the prompt at its slot. A one-row notice fits a
+    # 13-row terminal (11 + 1 < 13); the same notice as four CR LF-joined
+    # lines (an access change) needs 15 rows and gets the generated menu.
+    db, user = _setup(tmp_path)
+    assert "Main menu" not in _draw(db, user, FakeSession(height=13), notice="Level changed.")
+    four = "\r\n".join(["Level changed.", "Verify granted.", "Staff granted.", "Staff removed."])
+    assert "Main menu" in _draw(db, user, FakeSession(height=13), notice=four)
+    assert "Main menu" not in _draw(db, user, FakeSession(height=16), notice=four)
+    db.close()
+
+
 def test_a_disabled_banner_draws_the_generated_menu(tmp_path):
     db, user = _setup(tmp_path)
     set_main_menu_banner_enabled(db, False)
