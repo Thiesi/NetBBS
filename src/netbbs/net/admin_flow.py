@@ -68,6 +68,21 @@ from zoneinfo import available_timezones
 
 import nacl.signing
 
+from netbbs.access_map import (
+    AccountChange,
+    Gate,
+    GateKind,
+    GATE_WORDS,
+    LadderStep,
+    LevelSource,
+    LevelContext,
+    account_level_change,
+    gate_source,
+    ladder_summary,
+    level_context,
+    level_ladder,
+    list_gates,
+)
 from netbbs.attestation import AttestationError, withdraw_link_visibility
 from netbbs.auth.users import (
     CO_SYSOP_PRESET,
@@ -93,6 +108,7 @@ from netbbs.auth.users import (
     list_users,
     release_retired_username,
     describe_staff_permissions,
+    check_user_level_change,
     is_usable_sysop,
     set_can_verify_identity,
     set_staff_permissions,
@@ -227,6 +243,8 @@ from netbbs.config import (
     set_node_display_name,
     set_registration_mode,
 )
+from netbbs.digits import is_ascii_number
+from netbbs.level_names import LevelNameError, get_level_names, level_label, parse_level, set_level_name
 from netbbs.doors import (
     Door,
     DoorError,
@@ -642,6 +660,7 @@ from netbbs.update_apply import (
     PIP_TIMEOUT_SECONDS,
 )
 from netbbs.net.ansi_editor import edit_ansi_art
+from netbbs.net.art_pacing import ART_SPEEDS, MAIN_MENU_ART, WELCOME_ART, art_speed, set_art_speed
 from netbbs.net.welcome_banner import (
     MAX_BANNER_SIZE_BYTES,
     banner_path,
@@ -682,7 +701,7 @@ from netbbs.net.main_menu_banner import (
     set_main_menu_art_mode,
     set_main_menu_banner_enabled,
 )
-from netbbs.rendering.art_slots import SlotArt, describe_slots, parse_slot_art
+from netbbs.rendering.art_slots import SlotArt, describe_items, describe_slots, parse_slot_art
 from netbbs.rendering.ansi import move_cursor
 from netbbs.net.logoff_banner import (
     MAX_LOGOFF_BANNER_SIZE_BYTES,
@@ -1582,7 +1601,7 @@ async def admin_menu(
             )
         elif choice == "u":
             await session.write_line("")
-            await _users_menu(session, lane, user, node_controls=node_controls)
+            await _users_menu(session, lane, user, node_controls=node_controls, link_context=link_context)
             dashboard_state = await _draw_admin_menu(
                 session, lane, user, node_controls=node_controls, link_context=link_context
             )
@@ -2329,7 +2348,8 @@ def _compact_dashboard_panel(
 
 
 async def _users_menu(
-    session: Session, lane: DatabaseLane, actor: User, *, node_controls: NodeControls | None
+    session: Session, lane: DatabaseLane, actor: User, *, node_controls: NodeControls | None,
+    link_context: LinkContext | None = None,
 ) -> None:
     """Every user-account action, grouped together (design doc): create,
     list/detail, registration policy, promote/demote, enable/disable,
@@ -2399,6 +2419,11 @@ async def _users_menu(
             await _pick_and_edit_user(session, lane, actor, node_controls, title="Delete which user?")
             stats = await lane.run(_load_stats)
             await _draw_users_menu(session, stats=stats)
+        elif choice == "v":
+            await session.write_line("")
+            await _levels_screen(session, lane, actor, node_controls=node_controls, link_context=link_context)
+            stats = await lane.run(_load_stats)
+            await _draw_users_menu(session, stats=stats)
         elif choice == "t":
             await session.write_line("")
             await _retired_usernames_screen(session, lane, actor)
@@ -2406,6 +2431,258 @@ async def _users_menu(
             await _draw_users_menu(session, stats=stats)
         else:
             await session.write(reject_unhandled_key(choice))
+
+
+_LADDER_COLUMNS = [
+    ListColumn("users", 5, VALUE_COLOR, align_right=True),
+    ListColumn("opens here", 46, VALUE_COLOR),
+]
+
+_LEVEL_VIEWS = {
+    "new": "New at this level",
+    "open": "Everything open",
+    "closed": "Still closed",
+    "conditions": "Open, with other gates",
+}
+_LEVEL_VIEW_ORDER = tuple(_LEVEL_VIEWS)
+
+# The access word says the kind on its own (read/post a board, download/
+# upload a file area, join a channel, play a door), which keeps the table
+# inside 80 columns with a name still worth reading.
+_GATE_COLUMNS = [
+    ListColumn("access", 8, VALUE_COLOR),
+    ListColumn("level", 5, VALUE_COLOR, align_right=True),
+    ListColumn("from", 16, MUTED_COLOR),
+    ListColumn("also", 24, MUTED_COLOR),
+]
+
+
+def _gate_stable_id(gate: Gate) -> int:
+    return list(GateKind).index(gate.kind) * 10_000_000 + (gate.object_id or 0)
+
+
+def _gate_columns(gate: Gate) -> list[str]:
+    action, _what = GATE_WORDS[gate.kind]
+    also = [f"off: {gate.off}"] if gate.off else []
+    also += list(gate.conditions)
+    if gate.note:
+        also.append(gate.note)
+    return [action, str(gate.opens_at), gate_source(gate), ", ".join(also)]
+
+
+def _gate_description(gate: Gate) -> str:
+    """The table's columns as one line, for a terminal too narrow for the
+    table: `post at 10, from Community Market; age 18+`."""
+    action, level, source, also = _gate_columns(gate)
+    return f"{action} at {level}, {source}" + (f"; {also}" if also else "")
+
+
+def _gates_in_view(gates: list[Gate], level: int, view: str) -> list[Gate]:
+    if view == "new":
+        return [g for g in gates if g.off is None and g.opens_at == level]
+    if view == "open":
+        return [g for g in gates if g.opens_for(level)]
+    if view == "closed":
+        return [g for g in gates if not g.opens_for(level)]
+    return [g for g in gates if g.opens_for(level) and g.conditions]
+
+
+async def _open_gate_resource(
+    session: Session, lane: DatabaseLane, actor: User, gate: Gate, *,
+    node_controls: NodeControls | None, link_context: LinkContext | None,
+) -> None:
+    """The board's, file area's, channel's or door's own detail screen, the
+    one the Content menu opens, so its levels can be changed from here. It
+    gets the same live services the Content menu hands it: the chat hub
+    that refuses renaming an occupied channel and moves callers out of a
+    deleted one, the door supervisor, the transfer grants."""
+    from netbbs.doors.registry import list_doors
+
+    what = GATE_WORDS[gate.kind][1]
+    listing = {"board": list_boards, "file area": list_file_areas, "channel": list_channels, "door": list_doors}[what]
+    resource = next((r for r in await lane.run(listing) if r.id == gate.object_id), None)
+    if resource is None:
+        _announce_line(session, colored("That no longer exists.", fg_color=MUTED_COLOR))
+        return
+    controls = node_controls
+    if what == "board":
+        await _board_detail_screen(session, lane, actor, resource, link_context=link_context)
+    elif what == "file area":
+        await _area_detail_screen(
+            session, lane, actor, resource, link_context=link_context,
+            transfers=controls.transfers if controls is not None else None,
+        )
+    elif what == "channel":
+        await _channel_detail_screen(
+            session, lane, actor, resource, link_context=link_context,
+            mrc_bridge=controls.mrc_bridge if controls is not None else None,
+            chat_hub=controls.chat_hub if controls is not None else None,
+        )
+    else:
+        await _door_detail_screen(
+            session, lane, actor, resource,
+            door_services=controls.door_services if controls is not None else None,
+            backup_identity_dir=controls.backup_identity_dir if controls is not None else None,
+        )
+
+
+async def _level_detail_screen(
+    session: Session, lane: DatabaseLane, actor: User, level: int, *,
+    node_controls: NodeControls | None, link_context: LinkContext | None,
+) -> None:
+    """Design doc §5.7, issue #1007: what one level opens, gate by gate, with
+    where each level comes from. `[V]iew` steps through what is new at this
+    level, everything open, what stays closed, and what opens with another
+    gate still in the way; picking a board, file area, channel or door opens
+    its own screen."""
+    view = "new"
+    start: int | None = None
+
+    async def _load() -> list[Gate]:
+        return _gates_in_view(await lane.run(list_gates), level, view)
+
+    async def _next_view() -> list[Gate]:
+        nonlocal view
+        view = _LEVEL_VIEW_ORDER[(_LEVEL_VIEW_ORDER.index(view) + 1) % len(_LEVEL_VIEW_ORDER)]
+        return await _load()
+
+    chrome = await _load_chrome(lane, actor)
+    names = await lane.run(get_level_names)
+    users = await lane.run(
+        lambda db: db.connection.execute(
+            "SELECT COUNT(*) FROM users WHERE user_level = ? AND disabled_at IS NULL AND pending_approval = 0",
+            (level,),
+        ).fetchone()[0]
+    )
+    while True:
+        picked = await _pick_item(
+            session, await _load(),
+            name_of=lambda gate: gate.name + (" (hidden)" if gate.hidden else ""),
+            stable_id_of=_gate_stable_id,
+            columns=_GATE_COLUMNS,
+            column_values_of=_gate_columns,
+            description_of=_gate_description,
+            title=f"Level {level_label(level, names)}",
+            empty_message=f"Nothing in this view of level {level}.",
+            refresh=_load,
+            live_keys={"v": _next_view},
+            live_nav=[MenuEntry(label=menu_key("V", "iew"), brief="New, open, closed, other gates")],
+            live_label=lambda: f"Showing: {_LEVEL_VIEWS[view]}, {users} account{'s' if users != 1 else ''} at {level}",
+            selectable_of=lambda gate: gate.object_id is not None,
+            start_stable_id=start,
+            description_level=await lane.run(menu_description_level, actor),
+            redraw_in_place=chrome.redraw_in_place,
+            unicode_style=chrome.unicode_style,
+            collapsed=chrome.collapsed,
+            accent_color=chrome.accent_color,
+            header_color=chrome.header_color,
+        )
+        if picked is None:
+            return
+        start = _gate_stable_id(picked)
+        await _open_gate_resource(
+            session, lane, actor, picked, node_controls=node_controls, link_context=link_context
+        )
+
+
+async def _levels_screen(
+    session: Session, lane: DatabaseLane, actor: User, *,
+    node_controls: NodeControls | None, link_context: LinkContext | None,
+) -> None:
+    """Design doc §5.7, issue #1007: the level ladder -- every level that
+    matters on this node, how many accounts hold it, and what it first
+    opens. Picking a level shows what it opens in full; `[G]o to level`
+    asks for any level, in use or not."""
+    start: int | None = None
+    names: dict[int, str] = {}
+    status: str | None = None
+
+    async def _load() -> list[LadderStep]:
+        nonlocal names
+        ladder, names = await lane.run(lambda db: (level_ladder(db), get_level_names(db)))
+        return ladder
+
+    async def _name_level(step: LadderStep) -> list[LadderStep] | None:
+        """Issue #1009: name, rename or clear a level's name. The name is a
+        label; nobody's access changes."""
+        nonlocal status
+        if step.level >= SYSOP_LEVEL:
+            status = f"{SYSOP_LEVEL} is always called SysOp."
+            return None
+        await write_field_prompt(
+            session, colored(f"Name for level {step.level} (blank clears it):", fg_color=MUTED_COLOR),
+            hint=_EDIT_HINT,
+        )
+        try:
+            raw = await _read_seeded_line(session, initial=names.get(step.level, ""))
+        except InputCancelled:
+            return None
+        try:
+            updated = await lane.run(set_level_name, step.level, raw, changed_by=actor)
+        except LevelNameError as exc:
+            status = str(exc)
+            return None
+        name = updated.get(step.level)
+        status = f"Level {step.level} is now called {name}." if name else f"Level {step.level} has no name now."
+        return await _load()
+
+    def _status_line() -> str:
+        return status or "Each row: what that level adds to the ones below it"
+
+    async def _other_level() -> list[LadderStep] | None:
+        await write_field_prompt(
+            session, colored(f"Which level? (0-{SYSOP_LEVEL}, or a level's name)", fg_color=MUTED_COLOR),
+            hint=_EDIT_HINT,
+        )
+        try:
+            raw = (await _read_seeded_line(session, initial="")).strip()
+        except InputCancelled:
+            return None
+        chosen = parse_level(raw, names)
+        if chosen is None or not 0 <= chosen <= SYSOP_LEVEL:
+            await session.write("\a")
+            return None
+        await _level_detail_screen(
+            session, lane, actor, chosen, node_controls=node_controls, link_context=link_context
+        )
+        # A level may have been changed on the way: count again.
+        return await _load()
+
+    chrome = await _load_chrome(lane, actor)
+    while True:
+        picked = await _pick_item(
+            session, await _load(),
+            name_of=lambda step: level_label(step.level, names),
+            stable_id_of=lambda step: step.level,
+            columns=_LADDER_COLUMNS,
+            column_values_of=lambda step: [str(step.users), ladder_summary(step)],
+            description_of=lambda step: (
+                f"{step.users} user{'s' if step.users != 1 else ''}; opens {ladder_summary(step)}"
+            ),
+            title="Levels",
+            empty_message="No levels in use.",
+            refresh=_load,
+            live_keys={"g": _other_level},
+            item_keys={"m": _name_level},
+            live_nav=[
+                MenuEntry(label=menu_key("G", "o to level"), brief="What any level opens"),
+                MenuEntry(label=menu_key("m", "e", prefix="Na"), brief="Name or rename a level"),
+            ],
+            live_label=_status_line,
+            start_stable_id=start,
+            description_level=await lane.run(menu_description_level, actor),
+            redraw_in_place=chrome.redraw_in_place,
+            unicode_style=chrome.unicode_style,
+            collapsed=chrome.collapsed,
+            accent_color=chrome.accent_color,
+            header_color=chrome.header_color,
+        )
+        if picked is None:
+            return
+        start = picked.level
+        await _level_detail_screen(
+            session, lane, actor, picked.level, node_controls=node_controls, link_context=link_context
+        )
 
 
 async def _draw_users_menu(session: Session, *, stats: dict[str, Any]) -> None:
@@ -2509,6 +2786,7 @@ async def _draw_users_menu(session: Session, *, stats: dict[str, Any]) -> None:
         MenuEntry(label=menu_key("L", "ist users"), brief="Browse and edit accounts"),
         MenuEntry(label=menu_key("R", "egistration"), brief="Signup policy settings"),
         MenuEntry(label=menu_key("P", "romote/demote"), brief="Change a user's level"),
+        MenuEntry(label=menu_key("v", "els", prefix="Le"), brief="What each level opens"),
         MenuEntry(label=menu_key("E", "nable/disable"), brief="Toggle account access"),
         MenuEntry(label=menu_key("D", "elete user"), brief="Permanently remove a user"),
         MenuEntry(label=menu_key("t", "ired names", prefix="Re"), brief="Names held for deleted accounts"),
@@ -6413,7 +6691,7 @@ async def _draw_user_detail(
     entries = await lane.run(list_actions_for_target_user, target.id)
     sections = [
         Section("Account", [
-            _editable("l", "Level", str(target.user_level)),
+            _editable("l", "Level", level_label(target.user_level, await lane.run(get_level_names))),
             _editable("t", "Status", status, color=SUCCESS_COLOR if status == "active" else WARNING_COLOR),
             Field("Member since", member_since, color=METADATA_COLOR),
             _editable(
@@ -6682,6 +6960,82 @@ async def _show_user_detail_help(
     await show_help(session, "Field help", lines[:-1], header_color=header_color, unicode_style=unicode_style)
 
 
+def _gate_row(gate: Gate, extra: str | None = None) -> tuple[str, str, str]:
+    """`(action, name, what)` cells for one gate in a level-change preview."""
+    action, what = GATE_WORDS[gate.kind]
+    name = gate.name + (" (hidden)" if gate.hidden else "")
+    remarks = [text for text in (extra, gate.note) if text]
+    return action, name, "; ".join([what, *remarks])
+
+
+def _level_change_sections(change: AccountChange) -> list[Section]:
+    sections = []
+    for title, gates in (("Gains", change.gained), ("Loses", change.lost)):
+        rows = [_gate_row(gate) for gate in gates]
+        sections.append(Section(title, [Table(("", "Name", "What"), rows, flex=1)] if rows else [Note("Nothing.")]))
+    if change.blocked:
+        rows = [_gate_row(gate, "needs " + ", ".join(fails)) for gate, fails in change.blocked]
+        sections.append(Section("Still blocked", [
+            Note("The new level opens these, but another gate keeps this account out."),
+            Table(("", "Name", "What"), rows, flex=1),
+        ]))
+    return sections
+
+
+async def _preview_level_change(
+    session: Session, lane: DatabaseLane, actor: User, target: User, change: AccountChange
+) -> bool:
+    """Design doc §5.7, issue #1006: what a level change opens and closes for
+    this account, shown before it is made. Returns whether the SysOp applied
+    it; `[B]ack` leaves the level as it was."""
+    chrome = await _load_chrome(lane, actor)
+    names = await lane.run(get_level_names)
+    choice, _page = await show_detail(
+        session,
+        title=_detail_title(
+            session, chrome,
+            f"Level {level_label(change.old_level, names)} → {level_label(change.new_level, names)}",
+            breadcrumb=("SysOp", "Users", target.username),
+            subtitle=f"What changes for {target.username} by level. Grants and other gates are counted.",
+        ),
+        sections=_level_change_sections(change),
+        actions=[("a", menu_key("A", "pply")), _BACK_ACTION],
+        redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+    )
+    return choice == "a"
+
+
+async def _change_user_level(
+    session: Session, lane: DatabaseLane, actor: User, target: User, new_level: int,
+    node_controls: NodeControls | None,
+) -> User:
+    """Preview, then apply, a level change from the user detail screen.
+    A change that opens and closes nothing for the account is applied
+    without the preview; the outcome line says so. Returns the account as
+    it now stands."""
+    try:
+        # Refused before it is previewed, not after the SysOp read the preview.
+        await lane.run(check_user_level_change, target, new_level, changed_by=actor)
+    except UserManagementError as exc:
+        _announce_line(session, colored(str(exc), fg_color=MUTED_COLOR))
+        return target
+    change = await lane.run(account_level_change, target, new_level)
+    if not change.changes_nothing and not await _preview_level_change(session, lane, actor, target, change):
+        _announce_line(session, colored(f"{target.username!r} stays at level {target.user_level}.", fg_color=MUTED_COLOR))
+        return target
+    try:
+        updated = await lane.run(set_user_level, target, new_level, changed_by=actor)
+    except UserManagementError as exc:
+        _announce_line(session, colored(str(exc), fg_color=MUTED_COLOR))
+        return target
+    outcome = f"{updated.username!r} is now level {updated.user_level}."
+    if change.changes_nothing:
+        outcome += " That opens and closes nothing for them."
+    _announce_line(session, outcome)
+    _request_live_access_recheck(node_controls, updated)
+    return updated
+
+
 async def _user_detail_screen(
     session: Session, lane: DatabaseLane, actor: User, target: User, node_controls: NodeControls | None
 ) -> None:
@@ -6808,18 +7162,12 @@ async def _user_detail_screen(
             except InputCancelled:
                 raw = ""
             if raw and raw != str(target.user_level):
-                try:
-                    new_level = int(raw)
-                except ValueError:
-                    _announce_line(session, colored("Not a number -- cancelled.", fg_color=MUTED_COLOR))
-                else:
-                    try:
-                        target = await lane.run(set_user_level, target, new_level, changed_by=actor)
-                    except UserManagementError as exc:
-                        _announce_line(session, colored(str(exc), fg_color=MUTED_COLOR))
-                    else:
-                        _announce_line(session, f"{target.username!r} is now level {target.user_level}.")
-                        _request_live_access_recheck(node_controls, target)
+                # A level's name works as well as its number (issue #1009).
+                new_level = parse_level(raw, await lane.run(get_level_names))
+                if new_level is None:
+                    _announce_line(session, colored("Not a level or a level's name -- cancelled.", fg_color=MUTED_COLOR))
+                elif new_level != target.user_level:
+                    target = await _change_user_level(session, lane, actor, target, new_level, node_controls)
             blocked = await _redraw()
         elif choice == "t":
             await session.write_line("")
@@ -8723,6 +9071,7 @@ async def _limits_settings_screen(session: Session, lane: DatabaseLane, actor: U
             return _format_bytes(current["upload_bytes"])
         return f"{d['upload_mib']} MiB"
 
+    levels = await lane.run(level_context)
     fields = [
         FieldSpec(
             key="upload_mib", hotkey="u", menu_text=menu_key("U", "pload cap (MiB)"), label="Upload cap",
@@ -8772,7 +9121,7 @@ async def _limits_settings_screen(session: Session, lane: DatabaseLane, actor: U
         FieldSpec(
             key="map_level", hotkey="n", menu_text=menu_key("N", "ode map level"),
             label="Node map level",
-            render=lambda d: f"level {d['map_level']} and up",
+            render=lambda d: _setting_level_label(levels, d["map_level"]),
             prompt=_int_field("map_level", "Lowest level"),
             brief="Who may open the node map", section="Directory",
             help=(
@@ -8784,7 +9133,7 @@ async def _limits_settings_screen(session: Session, lane: DatabaseLane, actor: U
         FieldSpec(
             key="mail_level", hotkey="m", menu_text=menu_key("M", "ail level"),
             label="Mail level",
-            render=lambda d: f"level {d['mail_level']} and up",
+            render=lambda d: _setting_level_label(levels, d["mail_level"]),
             prompt=_int_field("mail_level", "Lowest level"),
             brief="Who may read and send mail", section="Mail",
             help=(
@@ -9279,6 +9628,7 @@ async def _mrc_settings_screen(
             lines.append(colored("(Changes apply the next time the node runs.)", fg_color=MUTED_COLOR))
         return "\r\n".join(lines)
 
+    levels = await lane.run(level_context)
     fields = [
         FieldSpec(
             key="enabled", hotkey="e", menu_text=menu_key("E", "nable/Disable"), label="Enabled",
@@ -9373,7 +9723,8 @@ async def _mrc_settings_screen(
         FieldSpec(
             key="open_min_level", hotkey="v", menu_text=menu_key("v", "el for open rooms", prefix="Le"),
             label="Minimum level (open rooms)",
-            render=lambda d: str(d["open_min_level"]), prompt=_int_field("open_min_level", "Minimum level"),
+            render=lambda d: _plain_level_label(levels, d["open_min_level"]),
+            prompt=_int_field("open_min_level", "Minimum level"),
             brief="Level needed to open or enter one", section="Open rooms",
         ),
         FieldSpec(
@@ -12916,6 +13267,10 @@ async def _welcome_banner_menu(session: Session, lane: DatabaseLane, actor: User
             await session.write_line("")
             await _preview_welcome_banner_screen(session, lane, actor)
             await _draw_welcome_banner_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed)
+        elif choice == "s":
+            await session.write_line("")
+            await _cycle_art_speed(lane, actor, WELCOME_ART)
+            await _draw_welcome_banner_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed)
         elif choice == "e":
             await session.write_line("")
             await _enable_welcome_banner_screen(session, lane, actor)
@@ -12958,6 +13313,24 @@ async def _welcome_banner_menu(session: Session, lane: DatabaseLane, actor: User
             await session.write(reject_unhandled_key(choice))
 
 
+def _art_speed_brief(speed: int) -> str:
+    """The `[S]peed` entry's description (issue #929): the speed now set."""
+    return f"Plays at {speed} bps" if speed else "Drawn at once"
+
+
+async def _cycle_art_speed(lane: DatabaseLane, actor: User, kind: str) -> None:
+    """`[S]peed` (issue #929): the next of `ART_SPEEDS` for this art -- off,
+    2400, 9600, 38400 bps, then off again. The menu shows the new speed."""
+    current = await lane.run(art_speed, kind)
+    following = ART_SPEEDS[(ART_SPEEDS.index(current) + 1) % len(ART_SPEEDS)]
+
+    def apply(db: Database) -> None:
+        set_art_speed(db, kind, following)
+        record_action(db, actor=actor, action="set_art_speed", detail=f"{kind}={following}")
+
+    await lane.run(apply)
+
+
 async def _draw_welcome_banner_menu(
     session: Session, lane: DatabaseLane, description_level: str, redraw_in_place: bool,
     unicode_style: bool,
@@ -12980,6 +13353,7 @@ async def _draw_welcome_banner_menu(
         "\r\n" + _menu_row(
             [
                 MenuEntry(label=menu_key("P", "review"), brief="Show the banner as callers see it"),
+                MenuEntry(label=menu_key("S", "peed"), brief=_art_speed_brief(await lane.run(art_speed, WELCOME_ART))),
                 MenuEntry(label=menu_key("E", "nable"), brief="Turn the banner on"),
                 MenuEntry(label=menu_key("D", "isable"), brief="Turn the banner off"),
                 MenuEntry(label=menu_key("i", "t", prefix="Ed"), brief="Edit the banner text"),
@@ -13582,6 +13956,10 @@ async def _main_menu_banner_menu(session: Session, lane: DatabaseLane, actor: Us
             await session.write_line("")
             await _preview_main_menu_banner_screen(session, lane, actor)
             await _draw_main_menu_banner_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed)
+        elif choice == "s":
+            await session.write_line("")
+            await _cycle_art_speed(lane, actor, MAIN_MENU_ART)
+            await _draw_main_menu_banner_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed)
         elif choice == "e":
             await session.write_line("")
             await _enable_main_menu_banner_screen(session, lane, actor)
@@ -13641,15 +14019,16 @@ async def _draw_main_menu_banner_menu(
     await session.write_line("")
     await _write_wrapped_subtitle(
         session,
-        "Mode: above the menu. The art is shown above the main menu, which stays live underneath it."
+        # One row each, so the screen with its [S]peed entry fits 80x24.
+        "Mode: above the menu. The art is shown above the live main menu."
         if mode == MASTHEAD_MODE else
-        "Mode: the menu itself. The art is the main menu, with each caller's items and live values "
-        "drawn into its {menu}, {user} and other slots.",
+        "Mode: the menu itself. Callers' items and live values fill its slots.",
     )
     await session.write_line(
         "\r\n" + _menu_row(
             [
                 MenuEntry(label=menu_key("P", "review"), brief="Show it as callers see it"),
+                MenuEntry(label=menu_key("S", "peed"), brief=_art_speed_brief(await lane.run(art_speed, MAIN_MENU_ART))),
                 MenuEntry(
                     label=menu_key("M", "ode"),
                     brief="Make the art the menu itself" if mode == MASTHEAD_MODE else "Show the art above the menu",
@@ -13735,12 +14114,14 @@ def _read_slot_art(db: Database) -> SlotArt | None:
 
 
 async def _check_main_menu_slot_art_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
-    """[C]heck (issue #929, step 4): the slots found in the art, what makes
-    it unusable, and whether your own menu and a level-0 caller's fit its
-    `{menu}` slot on a terminal the size of yours. A menu that doesn't fit
-    isn't cut: those callers get the generated menu instead."""
+    """[C]heck (issue #929, steps 4 and 5): the slots and hand-drawn items
+    found in the art, what makes it unusable, and whether your own menu and
+    a level-0 caller's fit on a terminal the size of yours -- which drawn
+    items each of them has blanked, and which of their items go into the
+    `{menu}` slot. A menu that doesn't fit isn't cut: those callers get the
+    generated menu instead."""
     # Imported here: netbbs.net.main_menu imports this module.
-    from netbbs.net.main_menu import slot_menu_preview
+    from netbbs.net.main_menu import MAIN_MENU_KEYS, slot_menu_preview
 
     art = await lane.run(_read_slot_art)
     enabled, mode = await lane.run(lambda db: (is_main_menu_banner_enabled(db), main_menu_art_mode(db)))
@@ -13762,6 +14143,18 @@ async def _check_main_menu_slot_art_screen(session: Session, lane: DatabaseLane,
         await session.write_line(f"Art: {art.width} columns, {art.height} rows.")
         for line in describe_slots(art) or ["No slots found."]:
             await session.write_line(f"  {line}")
+        if art.items:
+            await session.write_line("Drawn items:")
+            for item, line in zip(art.items, describe_items(art)):
+                if any(key in MAIN_MENU_KEYS for key in item.keys):
+                    await session.write_line(f"  {line}")
+                else:
+                    await session.write_line(colored(
+                        f"  {line}: not a main-menu key, so it stays as drawn for everyone",
+                        fg_color=WARNING_COLOR,
+                    ))
+        for note in art.notes:
+            await session.write_line(colored(f"  Note: {note}", fg_color=WARNING_COLOR))
         if art.problems:
             for problem in art.problems:
                 await session.write_line(colored(f"  Problem: {problem}", fg_color=ERROR_COLOR))
@@ -13770,12 +14163,27 @@ async def _check_main_menu_slot_art_screen(session: Session, lane: DatabaseLane,
                 plan = await lane.run(lambda db, level=level: slot_menu_preview(session, db, actor, art, level=level))
                 if plan.text is not None:
                     await session.write_line(colored(f"  {label}: fits.", fg_color=SUCCESS_COLOR))
+                    for line in _drawn_item_outcome(plan):
+                        await session.write_line(f"    {line}")
                 else:
                     await session.write_line(
                         colored(f"  {label}: generated menu instead -- {plan.reason}.", fg_color=WARNING_COLOR)
                     )
     await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
     await session.read_any_key()
+
+
+def _drawn_item_outcome(plan) -> list[str]:
+    """What a fitting slot-menu plan does with hand-drawn items (#929, step
+    5): which it blanks for that caller, and which of their items go into
+    the `{menu}` slot because the art doesn't draw them."""
+    lines = []
+    if plan.hidden_keys:
+        keys = ", ".join(f"[{key.upper() if key.isalpha() else key}]" for key in plan.hidden_keys)
+        lines.append(f"Blanked, as this caller can't use them: {keys}")
+    if plan.overflow:
+        lines.append(f"In the {{menu}} slot, as the art doesn't draw them: {', '.join(plan.overflow)}")
+    return lines
 
 
 async def _write_slot_art_preview(
@@ -16593,6 +17001,70 @@ def _optional_int_label(value: int | None, *, none_word: str = "none") -> str:
     return str(value) if value is not None else none_word
 
 
+def _users_phrase(count: int) -> str:
+    return f"{count} user{'s' if count != 1 else ''}"
+
+
+def _plain_level_label(levels: LevelContext | None, level: int | None) -> str:
+    """A channel's, door's or setting's level, with how many enabled,
+    approved accounts it lets in (design doc §5.7, issue #1008)."""
+    if level is None:
+        return "none"
+    if levels is None:
+        return str(level)
+    return f"{level_label(level, levels.names)} \u00b7 {_users_phrase(levels.users_at_or_above(level))}"
+
+
+def _setting_level_label(levels: LevelContext, level: int) -> str:
+    return f"level {level_label(level, levels.names)} and up · {_users_phrase(levels.users_at_or_above(level))}"
+
+
+def _effective_draft_level(levels: LevelContext, draft: dict, key: str) -> tuple[int, str | None]:
+    """A board's or file area's read or write level as the draft stands:
+    `(level, where)`, `where` saying where an inherited level comes from."""
+    stored = draft.get(key)
+    if stored is not None:
+        return stored, None
+    community = levels.communities.get(draft.get("community_id"))
+    default = getattr(community, f"default_{key}", None) if community is not None else None
+    if default is not None:
+        return default, f"from Community {community.name}"
+    return 0, "the default"
+
+
+def _resource_level_label(levels: LevelContext | None, draft: dict, key: str) -> str:
+    """`min_read_level`/`min_write_level` on a board or file area editor:
+    the value, where an inherited one comes from, and how many accounts it
+    lets in. Posting needs reading too, so a write level below the read
+    level is counted at the read level and says so."""
+    if levels is None:
+        return _optional_int_label(draft.get(key))
+    level, where = _effective_draft_level(levels, draft, key)
+    label = level_label(level, levels.names)
+    shown = f"none: {label} {where}" if where is not None else label
+    counted, extra = level, ""
+    if key == "min_write_level":
+        read_level, _ = _effective_draft_level(levels, draft, "min_read_level")
+        if read_level > level:
+            counted, extra = read_level, f" (reading needs {read_level})"
+    return f"{shown} \u00b7 {_users_phrase(levels.users_at_or_above(counted))}{extra}"
+
+
+def _community_default_label(levels: LevelContext | None, draft: dict, key: str, community_id: int | None) -> str:
+    """A Community's default read or write level, with how many accounts it
+    lets in and how many boards and file areas inherit it."""
+    value = draft.get(key)
+    label = _optional_int_label(value)
+    if levels is None:
+        return label
+    if value is not None:
+        label = f"{level_label(value, levels.names)} \u00b7 {_users_phrase(levels.users_at_or_above(value))}"
+    direction = "read" if "read" in key else "write"
+    inheriting = levels.inheriting.get((community_id, direction), {}) if community_id is not None else {}
+    parts = [f"{count} {what}{'s' if count != 1 else ''}" for what, count in sorted(inheriting.items())]
+    return label + (f" \u00b7 inherited by {', '.join(parts)}" if parts else "")
+
+
 # Tri-state "recommend this to Link peers" cycle -- `[L]ink this board`/
 # `[L]ink this file area`'s own `default_moderated` field (dogfood
 # report: converting these screens from their old fixed linear prompt
@@ -16847,7 +17319,9 @@ async def _draw_community_menu(
     await _choice_prompt(session)
 
 
-def _community_field_specs() -> list[FieldSpec]:
+def _community_field_specs(
+    *, levels: LevelContext | None = None, community_id: int | None = None
+) -> list[FieldSpec]:
     """One shared field list drives both create and edit (design doc,
     dogfood feature request) -- see `_community_screen`. Unlike board/
     channel/file-area, a Community has no `community_id`/`category_id`
@@ -16884,7 +17358,7 @@ def _community_field_specs() -> list[FieldSpec]:
         FieldSpec(
             key="default_min_read_level", hotkey="r", menu_text=menu_key("R", "ead level"),
             label="Default read level",
-            render=lambda d: _optional_int_label(d.get("default_min_read_level")),
+            render=lambda d: _community_default_label(levels, d, "default_min_read_level", community_id),
             prompt=_optional_int_field("default_min_read_level", "Default minimum read level"),
             brief="Default read level, inherited",
             help=(
@@ -16896,7 +17370,7 @@ def _community_field_specs() -> list[FieldSpec]:
         FieldSpec(
             key="default_min_write_level", hotkey="w", menu_text=menu_key("W", "rite level"),
             label="Default write level",
-            render=lambda d: _optional_int_label(d.get("default_min_write_level")),
+            render=lambda d: _community_default_label(levels, d, "default_min_write_level", community_id),
             prompt=_optional_int_field("default_min_write_level", "Default minimum write level"),
             brief="Default write level, inherited",
             help=(
@@ -16984,7 +17458,10 @@ async def _community_screen(
     community = await edit_resource_draft(
         session, lane,
         title="Edit Community" if existing is not None else "Create Community",
-        fields=_community_field_specs(), draft=draft, save=save, error_type=CommunityError,
+        fields=_community_field_specs(
+            levels=await lane.run(level_context), community_id=existing.id if existing is not None else None,
+        ),
+        draft=draft, save=save, error_type=CommunityError,
         save_menu_text=menu_key("S", "ave"), back_menu_text=menu_key("B", "ack"),
         description_level=await lane.run(menu_description_level, actor),
         redraw_in_place=redraw_in_place, redraw_hint=redraw_hint,
@@ -17223,7 +17700,8 @@ async def _draw_board_menu(
 
 
 def _board_field_specs(
-    *, actor: User, redraw_in_place: bool = False, unicode_style: bool = False, collapsed: bool = False
+    *, actor: User, redraw_in_place: bool = False, unicode_style: bool = False, collapsed: bool = False,
+    levels: LevelContext | None = None,
 ) -> list[FieldSpec]:
     """One shared field list drives both create and edit (design doc,
     dogfood feature request) -- see `_board_screen`. `redraw_in_place`/
@@ -17249,7 +17727,7 @@ def _board_field_specs(
         ),
         FieldSpec(
             key="min_read_level", hotkey="r", menu_text=menu_key("R", "ead level"), label="Min read level",
-            render=lambda d: _optional_int_label(d.get("min_read_level")),
+            render=lambda d: _resource_level_label(levels, d, "min_read_level"),
             prompt=_optional_int_field("min_read_level", "Minimum read level"),
             brief="Level required to read it",
             help=(
@@ -17261,7 +17739,7 @@ def _board_field_specs(
         ),
         FieldSpec(
             key="min_write_level", hotkey="w", menu_text=menu_key("W", "rite level"), label="Min write level",
-            render=lambda d: _optional_int_label(d.get("min_write_level")),
+            render=lambda d: _resource_level_label(levels, d, "min_write_level"),
             prompt=_optional_int_field("min_write_level", "Minimum write level"),
             brief="Level required to post",
             help=(
@@ -17441,6 +17919,7 @@ async def _board_screen(
         fields=_board_field_specs(
             actor=actor, redraw_in_place=redraw_in_place,
             unicode_style=unicode_style, collapsed=collapsed,
+            levels=await lane.run(level_context),
         ),
         draft=draft, save=save, error_type=BoardError,
         save_menu_text=menu_key("S", "ave"), back_menu_text=menu_key("B", "ack"),
@@ -19081,7 +19560,8 @@ def _gc_report_section(report: GCReport) -> Section:
 
 
 def _area_field_specs(
-    *, actor: User, redraw_in_place: bool = False, unicode_style: bool = False, collapsed: bool = False
+    *, actor: User, redraw_in_place: bool = False, unicode_style: bool = False, collapsed: bool = False,
+    levels: LevelContext | None = None,
 ) -> list[FieldSpec]:
     """One shared field list drives both create and edit (design doc,
     dogfood feature request) -- see `_area_screen`. Identical shape to
@@ -19105,7 +19585,7 @@ def _area_field_specs(
         ),
         FieldSpec(
             key="min_read_level", hotkey="r", menu_text=menu_key("R", "ead level"), label="Min read level",
-            render=lambda d: _optional_int_label(d.get("min_read_level")),
+            render=lambda d: _resource_level_label(levels, d, "min_read_level"),
             prompt=_optional_int_field("min_read_level", "Minimum read level"),
             brief="Level required to browse it",
             help=(
@@ -19117,7 +19597,7 @@ def _area_field_specs(
         ),
         FieldSpec(
             key="min_write_level", hotkey="w", menu_text=menu_key("W", "rite level"), label="Min write level",
-            render=lambda d: _optional_int_label(d.get("min_write_level")),
+            render=lambda d: _resource_level_label(levels, d, "min_write_level"),
             prompt=_optional_int_field("min_write_level", "Minimum write level"),
             brief="Level required to upload",
             help=(
@@ -19272,6 +19752,7 @@ async def _area_screen(
         fields=_area_field_specs(
             actor=actor, redraw_in_place=redraw_in_place,
             unicode_style=unicode_style, collapsed=collapsed,
+            levels=await lane.run(level_context),
         ),
         draft=draft, save=save, error_type=FileAreaError,
         save_menu_text=menu_key("S", "ave"), back_menu_text=menu_key("B", "ack"),
@@ -19990,7 +20471,7 @@ async def _draw_door_menu(
     await _choice_prompt(session)
 
 
-def _door_field_specs(*, actor: User) -> list[FieldSpec]:
+def _door_field_specs(*, actor: User, levels: LevelContext | None = None) -> list[FieldSpec]:
     """One shared field list drives both create and edit, same "single
     source of truth" precedent as `_area_field_specs`/`_board_field_
     specs`. `args` is edited as one space-separated line and split with
@@ -20034,7 +20515,7 @@ def _door_field_specs(*, actor: User) -> list[FieldSpec]:
         ),
         FieldSpec(
             key="min_play_level", hotkey="p", menu_text=menu_key("P", "lay level"), label="Min play level",
-            render=lambda d: str(d.get("min_play_level")),
+            render=lambda d: _plain_level_label(levels, d.get("min_play_level")),
             prompt=_int_field("min_play_level", "Minimum play level"),
             brief="Level required to launch it",
             help="The permission level a caller needs to launch/play this door.",
@@ -20119,7 +20600,7 @@ async def _door_screen(
     door = await edit_resource_draft(
         session, lane,
         title="Edit door" if existing is not None else "Register door",
-        fields=_door_field_specs(actor=actor),
+        fields=_door_field_specs(actor=actor, levels=await lane.run(level_context)),
         draft=draft, save=save, error_type=DoorError,
         save_menu_text=menu_key("S", "ave"), back_menu_text=menu_key("B", "ack"),
         description_level=await lane.run(menu_description_level, actor),
@@ -21375,7 +21856,8 @@ async def _draw_channel_menu(
 
 
 def _channel_field_specs(
-    *, actor: User, redraw_in_place: bool = False, unicode_style: bool = False, collapsed: bool = False
+    *, actor: User, redraw_in_place: bool = False, unicode_style: bool = False, collapsed: bool = False,
+    levels: LevelContext | None = None,
 ) -> list[FieldSpec]:
     """One shared field list drives both create and edit (design doc,
     dogfood feature request) -- see `_channel_screen`."""
@@ -21398,7 +21880,7 @@ def _channel_field_specs(
         ),
         FieldSpec(
             key="min_level", hotkey="l", menu_text=menu_key("L", "evel"), label="Min level",
-            render=lambda d: str(d.get("min_level")),
+            render=lambda d: _plain_level_label(levels, d.get("min_level")),
             prompt=_int_field("min_level", "Minimum level"),
             brief="Level required to join",
             help=(
@@ -21584,6 +22066,7 @@ async def _channel_screen(
         fields=_channel_field_specs(
             actor=actor, redraw_in_place=redraw_in_place,
             unicode_style=unicode_style, collapsed=collapsed,
+            levels=await lane.run(level_context),
         ),
         draft=draft, save=save, error_type=ChannelError,
         save_menu_text=menu_key("S", "ave"), back_menu_text=menu_key("B", "ack"),

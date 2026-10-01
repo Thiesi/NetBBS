@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from dataclasses import dataclass, replace
 
 from netbbs.auth.users import (
@@ -51,6 +52,7 @@ from netbbs.net.door_flow import _visible_doors, browse_doors, has_visible_doors
 from netbbs.net.file_flow import browse_file_areas, visible_areas
 from netbbs.net.mail_arrivals import NOTICE_COLOR as NEW_MAIL_COLOR, arrival_event, login_mail_notice, waiting_mail_counts
 from netbbs.net.mail_flow import browse_mail, caller_mail_refusal
+from netbbs.net.art_pacing import MAIN_MENU_ART, art_speed, write_paced_art, write_paced_art_text
 from netbbs.net.main_menu_banner import load_main_menu_banner, load_main_menu_slot_art
 from netbbs.net.menu_description_preference import menu_description_level
 from netbbs.net.node_theme import (
@@ -72,8 +74,6 @@ from netbbs.net.scan_and_find import _find_screen, _new_scan_screen
 from netbbs.net.session import (
     Session,
     physical_terminal_width,
-    write_art_text,
-    write_preformatted_line,
     write_prompt,
 )
 from netbbs.net.session_activity import activity, set_root_activity
@@ -140,6 +140,34 @@ _MENU_ACTIVITY = {
     "t": "Staff list",
     "l": "Logging off",
 }
+
+
+#: Every key the main menu reads (`_main_menu_loop`), whoever is calling.
+#: A key drawn into menu art (#929, step 5) that the caller can't use is
+#: blanked only if it's one of these; any other bracketed key is the
+#: SysOp's own decoration and stays as drawn.
+MAIN_MENU_KEYS = frozenset("mcfgon/?dpehrwtivsal")
+
+_LABEL_KEY = re.compile(r"\[([^\]\s])\]")
+
+#: Keys whose item depends on who is calling: [S] is a SysOp's console
+#: for a SysOp and the staff console for a staff member. A drawn item on
+#: such a key is that caller's item only when it names their meaning.
+ROLE_KEYS = {"s": frozenset({"sysop", "staff"})}
+
+
+def key_word(text: str, key: str) -> str:
+    """The word a bracketed `key` sits in within `text`, lowercased and
+    without the brackets: `sysop` for `[S]ysOp console`, `moderation` for
+    `Moder[a]tion (3)`, `e` for `[E]-mail`. Empty when `key` isn't there."""
+    match = re.search(r"([A-Za-z]*)\[" + re.escape(key) + r"\]([A-Za-z]*)", text, re.IGNORECASE)
+    return (match.group(1) + key + match.group(2)).lower() if match else ""
+
+
+def menu_label_key(label: str) -> str | None:
+    """The key a `menu_key` label is chosen with, lowercased."""
+    match = _LABEL_KEY.search(strip_ansi(label))
+    return match.group(1).lower() if match else None
 
 
 @dataclass(frozen=True)
@@ -399,7 +427,9 @@ async def _draw_main_menu(
     if slot_art is not None:
         labels = [entry.label for entry in (*explore_options, *personal_options, *system_options)]
         fields = _slot_fields(session, db, user, node_controls, has_mail=has_mail, unread=unread)
-        if await _draw_slot_main_menu(session, slot_art, labels, fields, extra_lines, prompt):
+        if await _draw_slot_main_menu(
+            session, slot_art, labels, fields, extra_lines, prompt, speed=art_speed(db, MAIN_MENU_ART)
+        ):
             return
 
     collapsed = breadcrumb_collapsed_enabled(db, user)
@@ -442,7 +472,10 @@ async def _draw_main_menu(
     )
     if masthead:
         prefix = clear_screen() if redraw else ""
-        await write_preformatted_line(session, f"{prefix}{masthead}")
+        # Paced on the first main menu of the connection only (issue #929).
+        await write_paced_art(
+            session, f"{prefix}{masthead}", speed=art_speed(db, MAIN_MENU_ART), once=MAIN_MENU_ART
+        )
         await session.write_line(f"{title}\r\n{options}\r\n")
     else:
         # Masthead disabled (the default): identical bytes to before
@@ -490,6 +523,11 @@ class SlotMenuPlan:
     text: str | None
     reason: str
     prompt_at_slot: bool = False
+    #: Keys of the drawn items blanked for this caller (#929, step 5).
+    hidden_keys: tuple[str, ...] = ()
+    #: This caller's items the art doesn't draw, as plain labels: they go
+    #: into the `{menu}` region.
+    overflow: tuple[str, ...] = ()
 
 
 def plan_slot_main_menu(
@@ -499,9 +537,14 @@ def plan_slot_main_menu(
     The generated menu is used for art with problems, an ASCII-only
     caller, a terminal narrower than the art or too short for it plus
     `rows_below`, or items that don't fit the `{menu}` region. Nothing is
-    ever left out to make the art fit."""
-    if art.problems or art.menu is None:
-        return SlotMenuPlan(None, "the art has problems: " + "; ".join(art.problems or ("no {menu} slot",)))
+    ever left out to make the art fit.
+
+    Items the SysOp drew into the art (#929, step 5) stand for themselves:
+    a drawn item this caller can't use is blanked, and only the caller's
+    items the art doesn't draw go into the `{menu}` region. Art with no
+    `{menu}` region must draw every item the caller has."""
+    if art.problems:
+        return SlotMenuPlan(None, "the art has problems: " + "; ".join(art.problems))
     if getattr(session, "output_charset", None) == ASCII:
         return SlotMenuPlan(None, "this caller reads plain ASCII")
     physical_width = getattr(session, "physical_width", session.terminal_width)
@@ -515,13 +558,54 @@ def plan_slot_main_menu(
     # it writes the bottom-right cell never scrolls the art (issue #964).
     if rows_needed >= session.terminal_height:
         return SlotMenuPlan(None, f"the art needs {rows_needed + 1} rows, the terminal has {session.terminal_height}")
-    menu_rows = layout_menu_slot(labels, art.menu.width, art.menu.height)
-    if menu_rows is None:
-        return SlotMenuPlan(
-            None, f"{len(labels)} items don't fit the {art.menu.width}x{art.menu.height} {{menu}} slot"
-        )
-    text = render_slot_art(art, fields=fields, menu_rows=menu_rows, ellipsis=ellipsis_for(session))
-    return SlotMenuPlan(text, "drawn as slot art", prompt_at_slot)
+    meaning = {menu_label_key(label): key_word(strip_ansi(label), menu_label_key(label) or "") for label in labels}
+
+    def caller_keys(item) -> set[str]:
+        # The drawn keys that are this caller's items. A role key drawn as
+        # the other role's item ([S]ysOp for a staff member) isn't theirs.
+        keys = set()
+        for key in item.keys:
+            if key not in meaning:
+                continue
+            if key in ROLE_KEYS:
+                word = key_word(item.text, key)
+                if word in ROLE_KEYS[key] and word != meaning[key]:
+                    continue
+            keys.add(key)
+        return keys
+
+    drawn: set[str] = set()
+    hidden = []
+    for item in art.items:
+        theirs = caller_keys(item)
+        drawn |= theirs
+        # A run holding several keys can't be blanked in part: it is blanked
+        # only when it holds a menu key and none of this caller's.
+        if not theirs and any(key in MAIN_MENU_KEYS for key in item.keys):
+            hidden.append(item)
+    overflow = [label for label in labels if menu_label_key(label) not in drawn]
+    overflow_plain = tuple(strip_ansi(label) for label in overflow)
+    if art.menu is None:
+        if overflow:
+            return SlotMenuPlan(
+                None,
+                f"the art has no {{menu}} slot for the items it doesn't draw: {', '.join(overflow_plain)}",
+                overflow=overflow_plain,
+            )
+        menu_rows = None
+    else:
+        menu_rows = layout_menu_slot(overflow, art.menu.width, art.menu.height)
+        if menu_rows is None:
+            return SlotMenuPlan(
+                None, f"{len(overflow)} items don't fit the {art.menu.width}x{art.menu.height} {{menu}} slot",
+                overflow=overflow_plain,
+            )
+    text = render_slot_art(art, fields=fields, menu_rows=menu_rows, ellipsis=ellipsis_for(session), hidden=hidden)
+    return SlotMenuPlan(
+        text, "drawn as slot art", prompt_at_slot,
+        hidden_keys=tuple(dict.fromkeys(key for item in hidden for key in item.keys if key in MAIN_MENU_KEYS)),
+        overflow=overflow_plain,
+    )
 
 
 #: Rows the console's check leaves below the art: one result line, as a
@@ -552,7 +636,14 @@ def slot_menu_preview(session: Session, db: Database, user: User, art: SlotArt, 
 
 
 async def _draw_slot_main_menu(
-    session: Session, art: SlotArt, labels: list[str], fields: dict[str, str], extra_lines: list[str], prompt: str
+    session: Session,
+    art: SlotArt,
+    labels: list[str],
+    fields: dict[str, str],
+    extra_lines: list[str],
+    prompt: str,
+    *,
+    speed: int = 0,
 ) -> bool:
     """Draw the main menu as the SysOp's slot art, or return `False`
     without writing anything when this caller gets the generated menu
@@ -564,10 +655,12 @@ async def _draw_slot_main_menu(
     below += pending_notice_rows(session)
     plan = plan_slot_main_menu(session, art, labels, fields, rows_below=below, prompt=prompt)
     if plan.text is None:
-        if "don't fit" in plan.reason:
-            _log_slot_overflow(len(labels), art)
+        if plan.overflow:
+            _log_slot_overflow(plan, art)
         return False
-    await write_art_text(session, plan.text)
+    # Paced on the first main menu of the connection only (issue #929),
+    # revealed top to bottom.
+    await write_paced_art_text(session, plan.text, speed=speed, once=MAIN_MENU_ART)
     await session.write(move_cursor(art.height + 1, 1))
     for line in extra_lines:
         await session.write_line(line)
@@ -578,17 +671,18 @@ async def _draw_slot_main_menu(
     return True
 
 
-_overflow_logged: set[tuple[int, int, int]] = set()
+_overflow_logged: set[tuple] = set()
 
 
-def _log_slot_overflow(count: int, art: SlotArt) -> None:
-    key = (count, art.menu.width, art.menu.height)
+def _log_slot_overflow(plan: SlotMenuPlan, art: SlotArt) -> None:
+    # Once per art layout and set of missing items, keyed on their keys:
+    # the reason's text carries live counts (unread mail, held posts) that
+    # change all the time, and a busy node draws the menu constantly.
+    region = (art.menu.width, art.menu.height) if art.menu is not None else None
+    key = (region, tuple(sorted(menu_label_key(label) or "" for label in plan.overflow)))
     if key not in _overflow_logged:
         _overflow_logged.add(key)
-        _logger.info(
-            "main menu art: %d items don't fit its %dx%d {menu} slot -- drawing the generated menu",
-            count, art.menu.width, art.menu.height,
-        )
+        _logger.info("main menu art: %s -- drawing the generated menu", plan.reason)
 
 
 def _main_menu_prompt(db: Database, user: User, node_controls: NodeControls | None) -> str:

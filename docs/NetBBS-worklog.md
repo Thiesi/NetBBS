@@ -721,6 +721,32 @@ Moderation actions are audited. Audit history survives account deletion;
 denormalized author/uploader labels and fingerprints preserve content
 attribution after account removal.
 
+A board's or file area's stored `min_read_level`/`min_write_level` is `None`
+when it inherits (§5.1), so it must never reach a comparison directly. Gate
+through the resource (`meets_read_gate`/`meets_write_gate`,
+`require_read_gate`/`require_write_gate`), which resolve the effective level;
+the raw-level form is private. The domain post, upload and file-listing
+checks once took the stored value and crashed on every inheriting resource,
+while the flows' own checks, which resolved it, passed first.
+
+### The access map is held to the checks (issue #1005)
+
+`netbbs.access_map` lists every level gate for the SysOp's level screens.
+`tests/test_access_map.py` keeps it honest two ways:
+
+- for accounts at levels on both sides of every threshold, each gate's
+  `opens_for` must match the check the caller's screens make (the visible
+  lists, `_read_only_reason`, `_authorize_channel_entry`,
+  `mail_access_refusal` and so on), not a copy of their logic;
+- an AST scan finds every function that compares an account's level with
+  anything but `SYSOP_LEVEL` (`meets_level`, `require_level`, the level-gate
+  helpers, or `user_level` in an ordering comparison), and each must be in
+  `LEVEL_CHECK_SITES` with its gate kind or a reason it is not a gate.
+
+A new level check therefore fails the scan until it is put on the map or
+explained. A new gate kind needs an entry in `_real_check` too, and the
+fixture node must contain one.
+
 ### Membership is not moderation
 
 Channel membership/invitations are authorization state, not moderator grants.

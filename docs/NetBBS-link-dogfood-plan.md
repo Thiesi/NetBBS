@@ -336,7 +336,8 @@ Two rules apply to every row:
       side **in the channel at the same moment**: live chat is not stored,
       and a node's history shows only its own callers' lines. Use callers who
       are not probationary on the other node, because their chat events are
-      refused and block that node's whole event push (issue #897). *(2026-09,
+      refused (before issue #897's fix this also blocked that node's whole
+      event push). *(2026-09,
       on R: A was back 17 s after the rotation. Chat from the channel's
       origin A reached R live. R's replies never reached A, live or later:
       issue #860. `/msg` was not tried.)*

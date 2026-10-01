@@ -89,7 +89,7 @@ def test_a_changed_user_level_is_confirmed_on_the_redrawn_user_screen(db, lane, 
     alice = create_user(db, "alice", password="hunter2")
     rows = _screen(lane, sysop, ["u", "l", "s", "alice", "l", "10"])
     assert rows[0].endswith("alice")
-    assert "'alice' is now level 10." in rows
+    assert "'alice' is now level 10. That opens and closes nothing for them." in rows
     assert any("Level: 10" in " ".join(row.split()) for row in rows)
 
 

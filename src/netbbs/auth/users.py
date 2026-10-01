@@ -60,6 +60,13 @@ _T = TypeVar("_T")
 # than just another elevated tier.
 SYSOP_LEVEL = 255
 
+LEVEL_RANGE_MESSAGE = f"levels run from 0 to {SYSOP_LEVEL}"
+
+
+def is_valid_level(level: int) -> bool:
+    """Whether `level` is one an account may hold: 0 to `SYSOP_LEVEL`."""
+    return 0 <= level <= SYSOP_LEVEL
+
 # The reserved username self-service registration is triggered by
 # (design doc) -- typed at Telnet/web's ordinary username
 # prompt, or connected as directly over SSH to trigger keyboard-
@@ -534,6 +541,8 @@ def _create_user_with_password_hash(
 ) -> User:
     """Persist an account after any expensive password hashing is complete."""
     _validate_username(username)
+    if not is_valid_level(user_level):
+        raise AuthError(LEVEL_RANGE_MESSAGE)
     if verify_key is not None:
         public_key_b64 = base64.b64encode(bytes(verify_key)).decode("ascii")
         fingerprint = fingerprint_from_verify_key(verify_key)
@@ -1063,6 +1072,39 @@ def _require_account_authority(db: Database, actor: User, target: User, permissi
         )
 
 
+def _check_level_change(db: Database, current: User, new_level: int, changed_by: User) -> None:
+    """Every refusal `set_user_level` makes, against the account as read
+    now. Raises `UserManagementError`."""
+    if not is_valid_level(new_level):
+        raise UserManagementError(LEVEL_RANGE_MESSAGE)
+    _require_account_authority(db, changed_by, current, StaffPermission.MANAGE_ACCOUNTS)
+    if new_level >= SYSOP_LEVEL:
+        # Design doc §5.6: 255 is given only by a SysOp.
+        _require_sysop(db, changed_by)
+    if new_level >= SYSOP_LEVEL and current.pending_approval:
+        # GitHub issue #44: a pending account promoted straight to
+        # SysOp level would satisfy the "last SysOp" check below
+        # (it's a second level-255 row) while remaining unable to
+        # log in at all, letting the node get talked into
+        # disabling/demoting/deleting its one actually-usable
+        # SysOp. Approve first.
+        raise UserManagementError(
+            f"cannot promote {current.username!r} to SysOp level while its "
+            "registration is still pending approval -- approve the account first"
+        )
+    _refuse_if_last_sysop(db, current, removes_active_sysop=new_level < SYSOP_LEVEL)
+
+
+def check_user_level_change(db: Database, target: User, new_level: int, *, changed_by: User) -> None:
+    """Raise the `UserManagementError` `set_user_level` would, without
+    changing anything: so the console can refuse a change before it
+    previews what the change would open (design doc §5.7, issue #1006).
+    `set_user_level` checks again when it applies the change."""
+    current = _get_user_by_id(db, target.id)
+    if new_level != current.user_level:
+        _check_level_change(db, current, new_level, changed_by)
+
+
 def set_user_level(db: Database, target: User, new_level: int, *, changed_by: User) -> User:
     """
     Promote or demote `target` to `new_level`, refusing a demotion
@@ -1096,22 +1138,7 @@ def set_user_level(db: Database, target: User, new_level: int, *, changed_by: Us
         if new_level == current.user_level:
             db.connection.rollback()
             return current
-        _require_account_authority(db, changed_by, current, StaffPermission.MANAGE_ACCOUNTS)
-        if new_level >= SYSOP_LEVEL:
-            # Design doc §5.6: 255 is given only by a SysOp.
-            _require_sysop(db, changed_by)
-        if new_level >= SYSOP_LEVEL and current.pending_approval:
-            # GitHub issue #44: a pending account promoted straight to
-            # SysOp level would satisfy the "last SysOp" check below
-            # (it's a second level-255 row) while remaining unable to
-            # log in at all, letting the node get talked into
-            # disabling/demoting/deleting its one actually-usable
-            # SysOp. Approve first.
-            raise UserManagementError(
-                f"cannot promote {current.username!r} to SysOp level while its "
-                "registration is still pending approval -- approve the account first"
-            )
-        _refuse_if_last_sysop(db, current, removes_active_sysop=new_level < SYSOP_LEVEL)
+        _check_level_change(db, current, new_level, changed_by)
         db.connection.execute("UPDATE users SET user_level = ? WHERE id = ?", (new_level, current.id))
         record_action_without_commit(
             db, actor=changed_by,
