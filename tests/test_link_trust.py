@@ -251,6 +251,40 @@ def test_a_report_that_cannot_count_toward_the_threshold_shows_no_distance(db):
     assert _quarantine_distance_text(content.explanation) == ""
 
 
+def test_a_sole_authority_quarantine_outside_identity_claims_no_distance(db):
+    """Re-review of #1030: a resource dimension quarantined by a sole
+    authority has no report that counts toward the two-domain threshold, so
+    it must not show "0 of 2 domains" beside its quarantined badge."""
+    subject = register_old_node(db)
+    configure_trust_domain(db, "domain-a", display_name="Domain A", now_iso=stamp(NOW))
+    configure_trusted_reporter(
+        db, "flood-reporter", domain_id="domain-a",
+        scopes=[(TrustDimension.RESOURCE_BEHAVIOR, "request_flood")], now_iso=stamp(NOW),
+    )
+    record_trust_signal(
+        db, content_id="flood-1", issuer_fingerprint="flood-reporter", subject=subject,
+        dimension=TrustDimension.RESOURCE_BEHAVIOR, category="request_flood",
+        evidence_class=EvidenceClass.OBSERVER_ATTESTED,
+        observed_at=stamp(NOW - timedelta(hours=2)), issued_at=stamp(NOW - timedelta(hours=1)),
+        expires_at=stamp(NOW + timedelta(days=5)), now_iso=stamp(NOW),
+    )
+    configure_sole_authority(
+        db, "flood-reporter", TrustDimension.RESOURCE_BEHAVIOR, "request_flood",
+        reason="our own relay operator", now_iso=stamp(NOW),
+    )
+    state = get_effective_trust_state(db, subject, TrustDimension.RESOURCE_BEHAVIOR)
+    assert (state.state, state.reason_code) == (TrustState.QUARANTINED, "sole_authority_signal")
+    assert "counted_domains" not in state.explanation
+    assert "required_domains" not in state.explanation
+
+    from netbbs.net.admin_flow import _quarantine_distance_text
+
+    assert _quarantine_distance_text(state.explanation) == ""
+    # An explanation stored before this rule, with the fields but nothing
+    # counted, reads the same.
+    assert _quarantine_distance_text({"counted_domains": {}, "counted_weight": 0.0}) == ""
+
+
 def test_an_override_still_explains_the_remote_reports_it_sets_aside(db):
     subject = register_old_node(db)
     configure_reporter(db, "reporter-a", "domain-a")

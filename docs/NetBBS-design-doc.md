@@ -6938,8 +6938,10 @@ probation's age requirement), which have no input change of their own; without
 it a running node applied them only at its next restart (issue #802). For every restriction the SysOp can inspect the subject,
 dimension, effects, rule/threshold, evidence, counted domains/weights, times,
 overrides, audit history, and requirements for release. Counted domains and
-weight appear whenever the dimension has active remote evidence, whatever
-decided its state, and the console states them as the distance to quarantine
+weight appear whenever the dimension has a self-verifying identity report that
+counts toward the two-domain threshold, whatever decided its state; a
+dimension that cannot quarantine by that threshold never shows them. The
+console states them as the distance to quarantine
 ("1 of 2 domains, weight 1.0 of 2.0"), so a SysOp sees how close one more
 report would bring the subject (issue #752). Probation's
 `active_trigger_count` counts every applicable dimension, because any trigger

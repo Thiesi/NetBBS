@@ -1451,9 +1451,11 @@ def _quarantine_distance_text(explanation: dict) -> str:
     """How far a dimension's remote reports are from the two-domain
     quarantine threshold, in words (issue #752): "1 of 2 domains, weight 1.0
     of 2.0". Empty when the explanation counts no remote reports."""
-    if "counted_domains" not in explanation:
-        return ""
     domains = explanation.get("counted_domains") or {}
+    if not domains:
+        # Nothing counted toward the threshold: no distance to state, even if
+        # an older explanation stored the fields (review of #1030).
+        return ""
     try:
         weight = float(explanation.get("counted_weight", 0.0))
         required_weight = float(explanation.get("required_weight", 2.0))
