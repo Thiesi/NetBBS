@@ -458,6 +458,26 @@ token places it. The main menu comes first, then the welcome and logoff
 fields; the Boards, Chat and Files lists need a list region with paging and
 get their own design.
 
+**Hand-drawn menu items (issue #929, step 5).** A SysOp may draw the menu's
+items into the art themselves instead of, or as well as, leaving a `{menu}`
+region. No token is needed: every bracketed key drawn in the art -- `[B]oards`,
+`Moder[a]tion` -- is an item, and the item is the run of text around the key,
+bounded by two or more spaces, the same rule the browser uses to turn a click
+into a key. Box-drawing and block characters also end an item, so a frame
+drawn one space from it is not part of it; a run holding two keys counts as its
+first, and the console's check says so. An item drawn inside a slot is not an
+item, since the slot is drawn over it. For each caller, a drawn item whose key
+is a main-menu key the caller cannot use is blanked: its cells are repainted as
+spaces in the background each cell shows, so the frame and fill around it stay
+whole, and the item is neither visible nor clickable. A bracketed key that is
+no main-menu key at all is the SysOp's own decoration and stays as drawn. The
+caller's items that the art does not draw go into the `{menu}` region; art
+with no `{menu}` region must draw every item the caller has, or that caller
+gets the generated menu. Art that draws its items needs no `{menu}` region.
+Blanking was chosen over dimming: a dimmed item still advertises a key that
+does nothing, such as the SysOp console, and depends on a colour some
+terminals render faintly. Buttons drawn over several rows are deferred.
+
 A SysOp may override three of the node's branding colors -- accent (board/
 channel/user names and other navigable-item branding), header (section
 titles and frame borders), and clock (the main-menu prompt's time display)
