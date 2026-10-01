@@ -26,6 +26,16 @@ decided by the menu code exactly as for the generated menu -- this
 module only places them. When they don't fit the region,
 `layout_menu_slot` says so and the caller falls back to the generated
 menu for that draw, so nothing a caller may use is ever hidden.
+
+Hand-drawn items (#929 step 5): a SysOp may also draw menu items into
+the art themselves, as text holding a bracketed key -- `[B]oards`,
+`Moder[a]tion`. Every such `[K]` is found with no token at all, by the
+same rule the browser uses to turn a click into a key
+(`netbbs-terminal.js`, `keyAt`): the item is the run of text around the
+key, bounded by two or more spaces. A drawn item the caller can't use
+is blanked -- repainted as spaces in each cell's own background, so the
+frames and fills around it stay whole -- and an item the caller can use
+that the art doesn't draw goes into the `{menu}` region, as overflow.
 """
 
 from __future__ import annotations
@@ -56,6 +66,13 @@ _MAX_ART_HEIGHT = 200
 #: than checked pair by pair.
 MAX_SLOTS = 64
 
+#: A drawn hotkey: one character in brackets -- the browser's rule for a
+#: clickable key (`netbbs-terminal.js`, `keyAt`), so whatever a caller can
+#: click in the art is exactly what this module counts as an item.
+_DRAWN_KEY = re.compile(r"\[([^\]\s])\]")
+#: Two or more spaces end a drawn item, as they end a clickable one.
+_ITEM_GAP = re.compile(r" {2,}")
+
 _TOKEN = re.compile(r"\{(menu|prompt|" + "|".join(FIELD_NAMES) + r")(?: ([0-9]{1,3})(?:x([0-9]{1,3}))?)?\}")
 
 
@@ -79,6 +96,27 @@ class Slot:
 
 
 @dataclass(frozen=True)
+class DrawnItem:
+    """A menu item the SysOp drew into the art (#929, step 5): `key` is
+    its bracketed key, lowercased as the menu reads keys; `row`/`col`/
+    `width` are the cells it covers on its one row, and `text` what it
+    says, for the console's check. `keys` holds every key drawn in the
+    run -- normally just `key`, but `[B]oards [E]-mail` with one space is
+    one run holding two, and each counts as drawn."""
+
+    key: str
+    row: int
+    col: int
+    width: int
+    text: str
+    keys: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not self.keys:
+            object.__setattr__(self, "keys", (self.key,))
+
+
+@dataclass(frozen=True)
 class SlotArt:
     """Art parsed for slots. `buffer` holds the art with every token blanked
     in its own style; `width`/`height` are the drawn extent, slots included.
@@ -91,6 +129,11 @@ class SlotArt:
     prompt: Slot | None
     fields: tuple[Slot, ...]
     problems: tuple[str, ...]
+    #: Hand-drawn items, in reading order (#929, step 5).
+    items: tuple[DrawnItem, ...] = ()
+    #: What the console's check mentions without it stopping the art from
+    #: being used -- a run of text holding two keys, for one.
+    notes: tuple[str, ...] = ()
 
     @property
     def slots(self) -> tuple[Slot, ...]:
@@ -124,8 +167,11 @@ def parse_slot_art(text: str, *, width: int = 80, require_menu: bool = True) -> 
         problems.append(f"{len(menus)} {{menu}} slots; use one")
     if len(prompts) > 1:
         problems.append(f"{len(prompts)} {{prompt}} slots; use one")
-    if require_menu and not menus:
-        problems.append("no {menu WxH} slot: the menu has nowhere to go")
+    items, notes = _find_drawn_items(buffer, width, found)
+    # Art that draws its items needs no `{menu}` region of its own; a
+    # caller whose items it doesn't all draw then gets the generated menu.
+    if require_menu and not menus and not items:
+        problems.append("no {menu WxH} slot and no drawn [K] items: the menu has nowhere to go")
     for slot in found:
         if slot.col + slot.width > width:
             problems.append(f"{_describe(slot)} runs past column {width}")
@@ -147,8 +193,81 @@ def parse_slot_art(text: str, *, width: int = 80, require_menu: bool = True) -> 
     return SlotArt(
         buffer=buffer, width=width, height=max(height, 1),
         menu=menus[0] if menus else None, prompt=prompts[0] if prompts else None,
-        fields=fields, problems=tuple(problems),
+        fields=fields, problems=tuple(problems), items=items, notes=notes,
     )
+
+
+def _find_drawn_items(
+    buffer: ScreenBuffer, width: int, slots: list[Slot]
+) -> tuple[tuple[DrawnItem, ...], tuple[str, ...]]:
+    """Every `[K]` drawn in the art (tokens already blanked), each with the
+    run of text around it. A run is bounded by two or more spaces, as a
+    click is (`keyAt`), and also by box-drawing and block characters, so a
+    frame drawn one space from an item is never taken for part of it.
+    Items inside a slot are left out: the slot's content is drawn over
+    them."""
+    items: list[DrawnItem] = []
+    notes: list[str] = []
+    for row in range(buffer.height):
+        line = "".join(buffer.get_cell(row, col).char or "\0" for col in range(width))
+        if "[" not in line:
+            continue
+        start = 0
+        for gap in [*_ITEM_GAP.finditer(line), None]:
+            end = gap.start() if gap is not None else len(line)
+            keys = list(_DRAWN_KEY.finditer(line, start, end))
+            if keys:
+                if len(keys) > 1:
+                    notes.append(
+                        f"row {row + 1}: {line[start:end].strip()!r} holds {len(keys)} keys, so it is blanked "
+                        "only for a caller who can use none of them; put two spaces between items"
+                    )
+                item = _drawn_item(
+                    line, row, start, end, keys[0].start(), keys[-1].start(), tuple(k.group(1) for k in keys)
+                )
+                if not any(_inside(item, slot) for slot in slots):
+                    items.append(item)
+            if gap is None:
+                break
+            start = gap.end()
+    return tuple(items), tuple(notes)
+
+
+def _is_frame(char: str) -> bool:
+    # Box drawing (U+2500-257F) and block elements (U+2580-259F): CP437's
+    # frames and fills, never part of an item's words.
+    return "\u2500" <= char <= "\u259f"
+
+
+def _drawn_item(
+    line: str, row: int, start: int, end: int, first: int, last: int, keys: tuple[str, ...]
+) -> DrawnItem:
+    left = first
+    while left > start and not _is_frame(line[left - 1]):
+        left -= 1
+    right = last + 3
+    while right < end and not _is_frame(line[right]):
+        right += 1
+    while left < first and line[left] == " ":
+        left += 1
+    while right > last + 3 and line[right - 1] == " ":
+        right -= 1
+    lowered = tuple(dict.fromkeys(key.lower() for key in keys))
+    return DrawnItem(lowered[0], row, left, right - left, line[left:right].replace("\0", ""), lowered)
+
+
+def _inside(item: DrawnItem, slot: Slot) -> bool:
+    return (
+        slot.row <= item.row < slot.row + slot.height
+        and item.col < slot.col + slot.width and slot.col < item.col + item.width
+    )
+
+
+def blank_cell(cell: Cell) -> Cell:
+    """`cell` repainted as a space in the background it shows -- its
+    foreground when drawn in reverse -- with no underline, so a blanked
+    item leaves the art's fill around it exactly as it was."""
+    return Cell(char=" ", bg=cell.fg if cell.reverse else cell.bg)
 
 
 def _slot_from_match(match: re.Match[str], row: int, buffer: ScreenBuffer, problems: list[str]) -> Slot | None:
@@ -194,6 +313,11 @@ def describe_slots(art: SlotArt) -> list[str]:
     ]
 
 
+def describe_items(art: SlotArt) -> list[str]:
+    """One line per hand-drawn item, for the SysOp console's check."""
+    return [f"[{item.key}] {item.text!r} at row {item.row + 1}, column {item.col + 1}" for item in art.items]
+
+
 def layout_menu_slot(labels: list[str], width: int, height: int) -> list[str] | None:
     """Arrange menu item `labels` (styled `menu_key` output or plain text)
     in columns within a `width` x `height` region, filling each column top
@@ -221,17 +345,22 @@ def layout_menu_slot(labels: list[str], width: int, height: int) -> list[str] | 
 
 
 def render_slot_art(
-    art: SlotArt, *, fields: dict[str, str], menu_rows: list[str] | None, ellipsis: str = "..."
+    art: SlotArt, *, fields: dict[str, str], menu_rows: list[str] | None, ellipsis: str = "...",
+    hidden: tuple[DrawnItem, ...] | list[DrawnItem] = (),
 ) -> str:
     """The full-screen draw of `art` with its slots filled: a clear screen,
     the art, each field's value cut to its slot, and `menu_rows` (from
     `layout_menu_slot`) in the menu region with each `[X]` key highlighted
     the way `menu_key` highlights it. Positioned cell by cell, so no row
-    relies on the terminal's own wrapping."""
+    relies on the terminal's own wrapping. Each drawn item in `hidden` --
+    the ones this caller can't use -- is blanked (`blank_cell`)."""
     buffer = ScreenBuffer(art.width, art.height)
     for row in range(art.height):
         for col in range(art.width):
             buffer.put_cell(row, col, art.buffer.get_cell(row, col))
+    for item in hidden:
+        for col in range(item.col, min(item.col + item.width, art.width)):
+            buffer.put_cell(item.row, col, blank_cell(buffer.get_cell(item.row, col)))
     for slot in art.fields:
         # Field values are live text (a name, a node name) -- sanitized
         # here, the one place they enter the screen, like every other

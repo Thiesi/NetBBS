@@ -478,14 +478,20 @@ leaving them to a `{menu WxH}` region (written `{menu}` below; it is the same
 token). Every bracketed key drawn in the art,
 `[K]`, marks one item; the item spans the run of text around it, bounded by
 two or more spaces, which is also how the browser terminal finds what a click
-means. An item the caller cannot use is blanked: its cells are repainted as
-spaces in their own background colour, so frames and fills stay whole and the
-caller sees only what the generated menu would show. Items the caller can use
-that the art does not draw go into the art's `{menu}` region; art with no
-`{menu}` region and an undrawn item falls back to the generated menu, so
-nothing is ever hidden. A drawn `[X]` that matches no item is left as drawn,
-and the console's check lists it. Buttons drawn over several rows are not
-supported.
+means. Box-drawing and block characters also end an item, so a frame drawn
+one space from it is not part of it, and an item drawn inside a slot is not an
+item, since the slot is drawn over it. A run holding two keys, such as
+`[B]oards [E]-mail` with one space, is one item holding both: both count as
+drawn, it is blanked only for a caller who can use neither, and the console's
+check suggests two spaces between them. An item the caller cannot use is
+blanked: its cells are repainted as spaces in the background each cell shows,
+so frames and fills stay whole and the caller sees only what the generated
+menu would show. Items the caller can use that the art does not draw go into
+the art's `{menu}` region; art with no `{menu}` region and an undrawn item
+falls back to the generated menu, so nothing is ever hidden, and art that
+draws its items needs no `{menu}` region of its own. A drawn `[X]` that is no
+main-menu key is the SysOp's decoration: it stays as drawn, and the console's
+check lists it. Buttons drawn over several rows are not supported.
 
 *Pacing.* Art can be played at an emulated line speed so that it draws itself
 the way it did over a modem (`netbbs.net.art_pacing`). Each banner's speed is
