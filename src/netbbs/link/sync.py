@@ -287,7 +287,15 @@ from netbbs.link.trust_wire import (
     load_trust_pull_cursor,
     save_trust_pull_cursor,
 )
-from netbbs.link.trust import TrustState, recompute_all_trust_states, trust_policy_generation
+from netbbs.link.equivocation import SubjectKeys, reproduce_equivocation, subject_keys_from_record
+from netbbs.link.trust import (
+    TrustState,
+    mark_signal_evidence_verified,
+    mark_signal_reverify_attempted,
+    recompute_all_trust_states,
+    trust_policy_generation,
+    unverified_equivocation_signals,
+)
 from netbbs.link.work_items import (
     KIND_LINK_MAIL_ACK,
     KIND_LINK_MAIL_DELIVERY,
@@ -537,6 +545,7 @@ async def run_link_sync(
             node, session, lane, enforce_trust_policy=enforce_trust_policy
         )
         await _forget_retired_attestations(lane)
+        await _reverify_signal_evidence(node, lane)
         await _reevaluate_trust_over_time(node, lane)
         # Issue #672: a compromise learned from a hello this pass (a direct
         # peer's chain) has no batch of its own to sweep after.
@@ -1688,7 +1697,9 @@ async def _pull_one_trust_reporter(
                     raw_objects, verify_key, superseded_keys, issuer
                 )
                 if parsed:
-                    result = await lane.run(ingest_trust_objects, parsed)
+                    result = await lane.run(
+                        ingest_trust_objects, parsed, subject_keys=_signal_subject_keys(node, parsed),
+                    )
                     for skipped in result.skipped:
                         _logger.info(
                             "Link trust pull: skipped an object from %s that this node has no "
@@ -1806,6 +1817,57 @@ async def _forget_retired_attestations(lane: DatabaseLane) -> None:
         await lane.run(forget_retired_remote_attestations)
     except (ValueError, sqlite3.Error) as exc:
         _logger.warning("Link attestations: could not forget retired values: %s", exc)
+
+
+def _known_subject_keys(node: LinkNode, fingerprint: str) -> SubjectKeys | None:
+    record = node.known_identity(fingerprint)
+    return subject_keys_from_record(record) if record is not None else None
+
+
+def _signal_subject_keys(node: LinkNode, objects: list) -> dict[str, SubjectKeys]:
+    """What this node knows of the keys of the nodes `objects`' signals are
+    about (issue #1036), for `ingest_trust_objects` to reproduce their
+    evidence against. Built here, on the loop, because the keys live on the
+    running node, not in the database."""
+    keys: dict[str, SubjectKeys] = {}
+    for obj in objects:
+        subject = obj.payload.get("subject") if isinstance(obj.payload, dict) else None
+        fingerprint = subject.get("node_fingerprint") if isinstance(subject, dict) else None
+        if not isinstance(fingerprint, str) or fingerprint in keys:
+            continue
+        found = _known_subject_keys(node, fingerprint)
+        if found is not None:
+            keys[fingerprint] = found
+    return keys
+
+
+async def _reverify_signal_evidence(node: LinkNode, lane: DatabaseLane) -> None:
+    """Re-check equivocation evidence this node could not reproduce when it
+    arrived (issue #1036): typically the subject was not known yet, and has
+    been introduced or has said hello since. Bounded per pass."""
+    try:
+        pending = await lane.run(unverified_equivocation_signals)
+    except sqlite3.Error as exc:
+        _logger.warning("Link trust: could not list unverified signals: %s", exc)
+        return
+    failed: list[str] = []
+    for content_id, fingerprint, data in pending:
+        keys = _known_subject_keys(node, fingerprint)
+        if keys is None or not reproduce_equivocation(data, subject_fingerprint=fingerprint, keys=keys):
+            failed.append(content_id)
+            continue
+        try:
+            if await lane.run(mark_signal_evidence_verified, content_id):
+                _logger.info(
+                    "Link trust: reproduced the equivocation evidence in signal %s about node %s; "
+                    "it now counts", content_id, fingerprint,
+                )
+        except (ValueError, sqlite3.Error) as exc:
+            _logger.warning("Link trust: could not record verified evidence for %s: %s", content_id, exc)
+    try:
+        await lane.run(mark_signal_reverify_attempted, failed)
+    except sqlite3.Error as exc:
+        _logger.warning("Link trust: could not record re-check attempts: %s", exc)
 
 
 async def _reevaluate_trust_over_time(node: LinkNode, lane: DatabaseLane) -> None:
