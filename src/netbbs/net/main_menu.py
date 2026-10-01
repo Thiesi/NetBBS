@@ -150,6 +150,19 @@ MAIN_MENU_KEYS = frozenset("mcfgon/?dpehrwtivsal")
 
 _LABEL_KEY = re.compile(r"\[([^\]\s])\]")
 
+#: Keys whose item depends on who is calling: [S] is a SysOp's console
+#: for a SysOp and the staff console for a staff member. A drawn item on
+#: such a key is that caller's item only when it names their meaning.
+ROLE_KEYS = {"s": frozenset({"sysop", "staff"})}
+
+
+def key_word(text: str, key: str) -> str:
+    """The word a bracketed `key` sits in within `text`, lowercased and
+    without the brackets: `sysop` for `[S]ysOp console`, `moderation` for
+    `Moder[a]tion (3)`, `e` for `[E]-mail`. Empty when `key` isn't there."""
+    match = re.search(r"([A-Za-z]*)\[" + re.escape(key) + r"\]([A-Za-z]*)", text, re.IGNORECASE)
+    return (match.group(1) + key + match.group(2)).lower() if match else ""
+
 
 def menu_label_key(label: str) -> str | None:
     """The key a `menu_key` label is chosen with, lowercased."""
@@ -545,15 +558,31 @@ def plan_slot_main_menu(
     # it writes the bottom-right cell never scrolls the art (issue #964).
     if rows_needed >= session.terminal_height:
         return SlotMenuPlan(None, f"the art needs {rows_needed + 1} rows, the terminal has {session.terminal_height}")
-    usable = {menu_label_key(label) for label in labels}
-    drawn = {key for item in art.items for key in item.keys}
-    # A run holding several keys can't be blanked in part: it is blanked
-    # only when none of its menu keys is one this caller can use.
-    hidden = [
-        item for item in art.items
-        if any(key in MAIN_MENU_KEYS for key in item.keys)
-        and not any(key in usable for key in item.keys)
-    ]
+    meaning = {menu_label_key(label): key_word(strip_ansi(label), menu_label_key(label) or "") for label in labels}
+
+    def caller_keys(item) -> set[str]:
+        # The drawn keys that are this caller's items. A role key drawn as
+        # the other role's item ([S]ysOp for a staff member) isn't theirs.
+        keys = set()
+        for key in item.keys:
+            if key not in meaning:
+                continue
+            if key in ROLE_KEYS:
+                word = key_word(item.text, key)
+                if word in ROLE_KEYS[key] and word != meaning[key]:
+                    continue
+            keys.add(key)
+        return keys
+
+    drawn: set[str] = set()
+    hidden = []
+    for item in art.items:
+        theirs = caller_keys(item)
+        drawn |= theirs
+        # A run holding several keys can't be blanked in part: it is blanked
+        # only when it holds a menu key and none of this caller's.
+        if not theirs and any(key in MAIN_MENU_KEYS for key in item.keys):
+            hidden.append(item)
     overflow = [label for label in labels if menu_label_key(label) not in drawn]
     overflow_plain = tuple(strip_ansi(label) for label in overflow)
     if art.menu is None:

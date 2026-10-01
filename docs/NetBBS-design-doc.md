@@ -491,7 +491,10 @@ the art's `{menu}` region; art with no `{menu}` region and an undrawn item
 falls back to the generated menu, so nothing is ever hidden, and art that
 draws its items needs no `{menu}` region of its own. A drawn `[X]` that is no
 main-menu key is the SysOp's decoration: it stays as drawn, and the console's
-check lists it. Buttons drawn over several rows are not supported.
+check lists it. `[S]` means the SysOp console to a SysOp and the staff console
+to a staff member, so a drawn `[S]ysOp` item is blanked for staff, whose
+`[S]taff` item goes into `{menu}`, and the other way round. Buttons drawn over
+several rows are not supported.
 
 *Pacing.* Art can be played at an emulated line speed so that it draws itself
 the way it did over a modem (`netbbs.net.art_pacing`). Each banner's speed is

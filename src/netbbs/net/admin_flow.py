@@ -685,7 +685,7 @@ from netbbs.net.main_menu_banner import (
     set_main_menu_art_mode,
     set_main_menu_banner_enabled,
 )
-from netbbs.rendering.art_slots import SlotArt, describe_slots, parse_slot_art
+from netbbs.rendering.art_slots import SlotArt, describe_items, describe_slots, parse_slot_art
 from netbbs.rendering.ansi import move_cursor
 from netbbs.net.logoff_banner import (
     MAX_LOGOFF_BANNER_SIZE_BYTES,
@@ -13848,12 +13848,14 @@ def _read_slot_art(db: Database) -> SlotArt | None:
 
 
 async def _check_main_menu_slot_art_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
-    """[C]heck (issue #929, step 4): the slots found in the art, what makes
-    it unusable, and whether your own menu and a level-0 caller's fit its
-    `{menu}` slot on a terminal the size of yours. A menu that doesn't fit
-    isn't cut: those callers get the generated menu instead."""
+    """[C]heck (issue #929, steps 4 and 5): the slots and hand-drawn items
+    found in the art, what makes it unusable, and whether your own menu and
+    a level-0 caller's fit on a terminal the size of yours -- which drawn
+    items each of them has blanked, and which of their items go into the
+    `{menu}` slot. A menu that doesn't fit isn't cut: those callers get the
+    generated menu instead."""
     # Imported here: netbbs.net.main_menu imports this module.
-    from netbbs.net.main_menu import slot_menu_preview
+    from netbbs.net.main_menu import MAIN_MENU_KEYS, slot_menu_preview
 
     art = await lane.run(_read_slot_art)
     enabled, mode = await lane.run(lambda db: (is_main_menu_banner_enabled(db), main_menu_art_mode(db)))
@@ -13875,6 +13877,18 @@ async def _check_main_menu_slot_art_screen(session: Session, lane: DatabaseLane,
         await session.write_line(f"Art: {art.width} columns, {art.height} rows.")
         for line in describe_slots(art) or ["No slots found."]:
             await session.write_line(f"  {line}")
+        if art.items:
+            await session.write_line("Drawn items:")
+            for item, line in zip(art.items, describe_items(art)):
+                if any(key in MAIN_MENU_KEYS for key in item.keys):
+                    await session.write_line(f"  {line}")
+                else:
+                    await session.write_line(colored(
+                        f"  {line}: not a main-menu key, so it stays as drawn for everyone",
+                        fg_color=WARNING_COLOR,
+                    ))
+        for note in art.notes:
+            await session.write_line(colored(f"  Note: {note}", fg_color=WARNING_COLOR))
         if art.problems:
             for problem in art.problems:
                 await session.write_line(colored(f"  Problem: {problem}", fg_color=ERROR_COLOR))
@@ -13883,12 +13897,27 @@ async def _check_main_menu_slot_art_screen(session: Session, lane: DatabaseLane,
                 plan = await lane.run(lambda db, level=level: slot_menu_preview(session, db, actor, art, level=level))
                 if plan.text is not None:
                     await session.write_line(colored(f"  {label}: fits.", fg_color=SUCCESS_COLOR))
+                    for line in _drawn_item_outcome(plan):
+                        await session.write_line(f"    {line}")
                 else:
                     await session.write_line(
                         colored(f"  {label}: generated menu instead -- {plan.reason}.", fg_color=WARNING_COLOR)
                     )
     await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
     await session.read_any_key()
+
+
+def _drawn_item_outcome(plan) -> list[str]:
+    """What a fitting slot-menu plan does with hand-drawn items (#929, step
+    5): which it blanks for that caller, and which of their items go into
+    the `{menu}` slot because the art doesn't draw them."""
+    lines = []
+    if plan.hidden_keys:
+        keys = ", ".join(f"[{key.upper() if key.isalpha() else key}]" for key in plan.hidden_keys)
+        lines.append(f"Blanked, as this caller can't use them: {keys}")
+    if plan.overflow:
+        lines.append(f"In the {{menu}} slot, as the art doesn't draw them: {', '.join(plan.overflow)}")
+    return lines
 
 
 async def _write_slot_art_preview(

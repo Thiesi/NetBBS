@@ -1398,7 +1398,8 @@ The art only decorates. Each caller sees exactly the items the normal menu
 would show them, with the same keys; the art can't add or hide any. A caller
 gets the normal menu instead whenever the art can't be used as drawn:
 - **their items don't fit** the `{menu}` region (a SysOp's menu is the longest);
-- **the art has a problem**, such as no `{menu}` or two slots overlapping;
+- **the art has a problem**, such as no `{menu}` and no drawn items, or two
+  slots overlapping;
 - **their terminal is too small**, narrower than the art or too short for it;
 - **they read plain ASCII.**
 
@@ -1408,6 +1409,32 @@ the menu as you see it, then as a level-0 caller sees it. The gallery's
 **Quill Ledger** and **Inkwell Blocks** samples are drawn this way, in 16
 colours with characters classic terminals have; applying one switches the mode
 for you.
+
+You can also draw the menu's items into the art yourself, such as `[B]oards`
+or `Moder[a]tion`, instead of leaving all of them to `{menu}`:
+- **Any bracketed key is an item.** You don't need a token. The item is the
+  text around the key, up to two spaces or a frame character on either side,
+  which is also what a browser caller can click. Put at least two spaces
+  between items: `[B]oards [E]-mail` with one space is one item, blanked
+  only for a caller who can use neither key, and a browser click on it
+  always means `[B]`.
+- **Items a caller can't use are blanked.** A level-20 caller doesn't see your
+  drawn `[S]ysOp console` at all: its cells are painted over in the colour
+  behind them, so your frame and fill stay whole. Putting staff-only items on
+  their own row keeps the gap tidy. A staff member's `[S]` opens the Staff
+  console, so they don't see a drawn `[S]ysOp` either: their `[S]taff` goes
+  into `{menu}` instead.
+- **Items you didn't draw go into `{menu}`.** Games, Communities, Who's online,
+  Moderation and Invitations appear only for some callers. Leave a `{menu}`
+  region for them: without one, a caller with an item you didn't draw gets the
+  normal menu.
+- **Other bracketed text stays as drawn.** `[x] marks the spot` is decoration,
+  since X is no menu key.
+
+**Check** lists the items it found and says which items it blanks, and which
+go into `{menu}`, for you and for a level-0 caller. **Preview** shows both
+menus with those items already blanked and moved. The gallery's **Card
+Catalogue** sample is drawn this way.
 
 The welcome and log-off banners take the field tokens too, but not `{menu}`
 or `{prompt}`. The welcome banner is shown before anyone signs in, so it fills

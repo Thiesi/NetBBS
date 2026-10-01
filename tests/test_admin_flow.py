@@ -5166,6 +5166,74 @@ def test_masthead_menu_check_lists_slots_problems_and_fit(db, lane, sysop):
     assert "Problem: no {menu WxH} slot" in _visible(_written_text(session))
 
 
+def test_masthead_menu_check_reports_hand_drawn_items(db, lane, sysop):
+    from netbbs.net.main_menu_banner import main_menu_banner_path
+
+    art = (
+        b"  [M]essage boards  [C]hat  [F]iles  [N]ew scan  [/] Find  [?] Help  [L]ogoff\r\n"
+        b"  [S]ysOp console  [x] marks the spot  [D]irectory [P]rofile\r\n"
+        b"{menu 78x4}"
+    )
+    main_menu_banner_path(db).write_bytes(art)
+    session = FakeSession(["s", "m", "m", "m", "c", " ", "b", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    text = _visible(_written_text(session))
+    assert "Drawn items:" in text
+    assert "[m] '[M]essage boards' at row 1, column 3" in text
+    assert "'[x] marks the spot' at row 2, column 20: not a main-menu key" in text
+    assert "'[D]irectory [P]rofile' holds 2 keys" in text
+    assert "Your menu: fits." in text
+    assert "Blanked, as this caller can't use them: [S]" in text
+    assert "In the {menu} slot, as the art doesn't draw them:" in text
+    assert "[E]-mail" in text
+
+
+def test_slot_preview_shows_blanking_and_adds_no_rows_below_the_art(db, lane, sysop):
+    from netbbs.net.main_menu_banner import SLOTS_MODE, main_menu_banner_path, set_main_menu_art_mode
+
+    main_menu_banner_path(db).write_bytes(b"  [S]ysOp console  [L]ogoff\r\n{menu 78x6}")
+    set_main_menu_art_mode(db, SLOTS_MODE)
+    session = FakeSession(["s", "m", "m", "m", "p", " ", " ", "b", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    text = _visible(_written_text(session))
+    # Check reports blanking in words; Preview only draws it, so nothing
+    # but its own prompt lands in the one row budgeted below the art.
+    assert "Blanked, as this caller" not in text
+    assert text.count("(the main menu as a level-0 caller sees it)") == 1
+
+
+def test_check_counts_a_run_with_any_menu_key_as_a_menu_item(db, lane, sysop):
+    from netbbs.net.main_menu_banner import main_menu_banner_path
+
+    main_menu_banner_path(db).write_bytes(b"  [x] trade [G]ames  [L]ogoff\r\n{menu 78x6}")
+    session = FakeSession(["s", "m", "m", "m", "c", " ", "b", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    text = _visible(_written_text(session))
+    assert "'[x] trade [G]ames' at row 1, column 3" in text
+    assert "not a main-menu key" not in text
+
+
+def test_a_staff_member_does_not_get_the_drawn_sysop_item(db, sysop):
+    from dataclasses import replace
+
+    from netbbs.net.main_menu import main_menu_entries, slot_menu_preview
+    from netbbs.rendering.art_slots import parse_slot_art
+
+    staff = create_user(db, "priya", password="parker51", user_level=50)
+    staff = replace(staff, staff_permissions=1)
+    labels = [_visible(label) for label in main_menu_entries(FakeSession(), db, staff, whos_online=True).labels]
+    assert "[S]taff" in labels  # this caller's S is the staff console
+    art = parse_slot_art("  [S]ysOp console  [L]ogoff\r\n{menu 78x8}")
+    plan = slot_menu_preview(FakeSession(), db, staff, art)
+    assert plan.text is not None
+    screen = _slot_screen(plan.text)
+    assert "[S]ysOp" not in screen.splitlines()[0]
+    assert "[S]taff" in screen  # in the {menu} slot instead
+    # A SysOp keeps the drawn item.
+    screen = _slot_screen(slot_menu_preview(FakeSession(), db, sysop, art).text)
+    assert "[S]ysOp console" in screen.splitlines()[0]
+
+
 def test_masthead_menu_check_says_when_callers_do_not_see_the_art(db, lane, sysop):
     from netbbs.net.main_menu_banner import (
         SLOTS_MODE,
@@ -5233,7 +5301,7 @@ def test_masthead_preview_in_slots_mode_says_when_the_art_is_switched_off(db, la
 
 def test_every_slot_sample_fits_a_sysops_longest_menu(db, sysop):
     from netbbs.net.banner_presets import MAIN_MENU_BANNER_PRESETS, load_main_menu_banner_preset
-    from netbbs.net.main_menu import slot_menu_preview
+    from netbbs.net.main_menu import menu_label_key, slot_menu_preview
     from netbbs.rendering import decode_banner_bytes
     from netbbs.rendering.art_slots import layout_menu_slot, parse_slot_art
 
@@ -5253,7 +5321,10 @@ def test_every_slot_sample_fits_a_sysops_longest_menu(db, sysop):
             "[W]ho's online", "S[t]aff list", "[I]nvitations", "[V]erify", "[S]ysOp", "Moder[a]tion (999)",
             "[S]taff", "[L]ogoff",
         ]
-        assert layout_menu_slot(longest, art.menu.width, art.menu.height) is not None, preset.key
+        # Items the art draws itself (#929, step 5) stay out of the slot.
+        drawn = {key for item in art.items for key in item.keys}
+        undrawn = [label for label in longest if menu_label_key(label) not in drawn]
+        assert layout_menu_slot(undrawn, art.menu.width, art.menu.height) is not None, preset.key
 
 
 def test_masthead_gallery_applying_a_slot_preset_makes_it_the_menu(db, lane, sysop):
