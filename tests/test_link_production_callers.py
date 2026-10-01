@@ -50,6 +50,7 @@ ALLOWED: dict[str, str] = {
     "open_sealed_attestation_bundle": "#632",
     "snapshot_digest": "#632",
     "prune_expired_relay_attestation_bundles": "#632",
+    "deposit_attestation_bundle": "#632",
     # Issue #589 -- a node can issue a vouch (slice 1, `trust_issuance`), which
     # took `build_trust_vouch` and `build_trust_revocation` off this list.  It
     # still cannot issue a trust *signal*: when a node accuses another node is
