@@ -302,6 +302,20 @@ class AttestationDeliveryStatus:
     delivered_ids: frozenset[str] = frozenset()  # the objects it was given
 
 
+def _holds_current(row, snapshot_ids: set[str]) -> bool:
+    """Whether a recipient holds exactly what it should now (review of #1042).
+
+    A snapshot replaces what the recipient holds, so a pushed one is current
+    only if it held exactly the live set: when an object drops out (expiry, a
+    retracted value), the recipient still holds it until the resend withdraws
+    it. A pull only ever adds, and is withdrawn by revocations it fetches, so
+    for the pull route holding everything live is what counts."""
+    delivered = set(json.loads(row["delivered_ids_json"]))
+    if row["route"] == "pull":
+        return snapshot_ids <= delivered
+    return snapshot_ids == delivered
+
+
 def list_attestation_delivery_status(db: Database, *, now: datetime | None = None) -> list[AttestationDeliveryStatus]:
     """Per recipient: how this node last reached it, whether that delivered
     the current snapshot, and why the last attempt failed. For the Published
@@ -322,7 +336,7 @@ def list_attestation_delivery_status(db: Database, *, now: datetime | None = Non
             route=row["route"] if row is not None else None,
             sent_at=row["sent_at"] if row is not None else None,
             current=row is not None and row["sent_at"] is not None
-            and snapshot_ids <= set(json.loads(row["delivered_ids_json"])),
+            and _holds_current(row, snapshot_ids),
             delivered_ids=frozenset(json.loads(row["delivered_ids_json"])) if row is not None else frozenset(),
             last_error=row["last_error"] if row is not None else None,
             removed=removed,
