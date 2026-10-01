@@ -19161,7 +19161,7 @@ async def _draw_board_detail(
         options.append(MenuEntry(label=menu_key("T", "ransfer origin"), brief="Hand off origin to a peer"))
         options.append(MenuEntry(label=menu_key("C", "lose message board"), brief="Stop accepting new posts"))
     if link_context is not None and linked and is_origin and not is_closed:
-        options.append(MenuEntry(label=menu_key("W", "ho posts"), brief="Anyone, or this node starts threads/posts"))
+        options.append(MenuEntry(label=menu_key("W", "ho posts"), brief="Who may post, network-wide"))
     if has_incoming_offer:
         options.append(MenuEntry(label=menu_key("A", "ccept transfer"), brief="Accept incoming origin transfer"))
     options.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to the list"))
