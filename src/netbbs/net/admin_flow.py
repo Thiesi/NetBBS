@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import time
 import hashlib
 import json
 import logging
@@ -352,7 +353,10 @@ from netbbs.link.dial_in import (
 )
 from netbbs.link.key_rotation import KeyRotationError
 from netbbs.link.node_identity import operational_key_history
-from netbbs.link.enforcement import REASON_NODE_PROBATIONARY, decide_user_authorship, node_transport_state
+from netbbs.link.enforcement import (
+    REASON_NODE_PROBATIONARY, REASON_USER_PROBATIONARY, REASON_USER_QUARANTINED, decide_user_authorship,
+    node_transport_state,
+)
 from netbbs.link.node_profiles import (
     UNKNOWN_NODE_NAME, dismiss_identity_observation, identity_for_fingerprint, identity_for_peer,
     link_address_label,
@@ -399,7 +403,9 @@ from netbbs.link.carry import (
 )
 from netbbs.link.realtime_proxy import describe_proxy_status
 from netbbs.link.store import introduced_by
-from netbbs.link.trust_carriage import relays_refusing_trust_deposits
+from netbbs.link.trust_carriage import (
+    relays_refusing_trust_deposits, release_trust_deposit_backoffs, trust_deposits_waiting,
+)
 from netbbs.link.onboarding import (
     Participation,
     get_configured_link_enabled,
@@ -410,6 +416,7 @@ from netbbs.link.onboarding import (
 )
 from netbbs.link.reliable_nodes import effective_reliable_nodes, reliable_nodes_source
 from netbbs.link.store import load_peer_last_contact
+from netbbs.link.protocol import REPORTER_REFRESH
 from netbbs.link.node_map import CANDIDATE as NODE_MAP_CANDIDATE
 from netbbs.link.node_map import (
     NodeMapEntry, build_node_map, has_known_nodes, relative_time, unknown_node_label,
@@ -436,6 +443,7 @@ from netbbs.link.trust_issuance import (
     withdraw_vouch_intent,
 )
 from netbbs.link.trust import (
+    trust_policy_generation,
     NodeProbation,
     TrustDimension,
     TrustState,
@@ -4129,22 +4137,31 @@ async def _trust_menu(
         if choice == "b":
             await session.write_line("")
             return
-        if choice == "s":
+        if choice in ("d", "a", "r", "e"):
+            # Issue #700: a change to anchors, domains, reporters or their
+            # exceptions can change how any held-back event is judged, so
+            # everything set aside is retried on a pass that starts now.
+            # Offline, the running node sees the same change on its next pass.
+            before = await lane.run(trust_policy_generation)
+            if choice == "d":
+                await _trust_domains_screen(session, lane, actor)
+            elif choice == "a":
+                await _trust_anchors_screen(session, lane, actor)
+            elif choice == "r":
+                await _trust_reporters_screen(session, lane, actor)
+            else:
+                await _trust_exceptions_screen(session, lane, actor)
+            if link_context is not None and await lane.run(trust_policy_generation) != before:
+                link_context.link_node.deferred_events.release_all()
+                link_context.link_node.wake_sync()
+        elif choice == "s":
             await _trust_subjects_screen(session, lane, actor, link_context=link_context)
         elif choice == "v":
             await _published_vouches_screen(session, lane, actor, link_context=link_context)
-        elif choice == "d":
-            await _trust_domains_screen(session, lane, actor)
-        elif choice == "a":
-            await _trust_anchors_screen(session, lane, actor)
-        elif choice == "r":
-            await _trust_reporters_screen(session, lane, actor)
         elif choice == "i":
             await _attestation_authorities_screen(session, lane, actor)
         elif choice == "p":
             await _published_identity_screen(session, lane, actor, link_context=link_context)
-        elif choice == "e":
-            await _trust_exceptions_screen(session, lane, actor)
         elif choice == "h":
             await _trust_config_history_screen(session, lane, actor)
         else:
@@ -4220,10 +4237,15 @@ def _retry_deferred_events(link_context: LinkContext | None, subject: TrustSubje
     and refused on every pass. A SysOp who has just established its author
     should not wait out that hour, so whatever was waiting on this node is
     asked for again on the next pass. Nothing to do offline: the set-aside list
-    lives in the running node.
+    lives in the running node, which notices the change on its next pass
+    (`netbbs.link.trust.trust_policy_generation`, issue #700).
+
+    Issue #700: that pass now runs at once, rather than up to an interval
+    later, so the effect of the decision is seen while the SysOp is looking.
     """
     if link_context is not None:
         link_context.link_node.deferred_events.release_identity(subject.node_fingerprint)
+        link_context.link_node.wake_sync()
 
 
 _VOUCH_STATUS_TONE = {
@@ -10512,6 +10534,10 @@ async def _link_status_sections(
         relays.append(Field("Relay mailbox", "empty", color=MUTED_COLOR))
     sections.append(Section("Relays", relays))
 
+    waiting = await _link_waiting_rows(lane, node)
+    if waiting:
+        sections.append(Section("Waiting", waiting))
+
     content = [Field("Linked boards", str(len(node.boards)))]
     if config is not None:
         # Issue #683: every kind the carry caps govern, not boards alone.
@@ -10544,6 +10570,147 @@ async def _link_status_sections(
 # Issue #891: how many recipients the Link status screen lists under the
 # relay mailbox line; the rest are counted, not listed.
 _RELAY_MAILBOX_ROWS_SHOWN = 10
+
+
+# Issue #700: rows of each kind the Waiting section shows before "and N more".
+_WAITING_ROWS_SHOWN = 3
+
+# Issue #700: why a peer refused events of this node's one by one, in words.
+_REFUSED_THERE_TEXT = {
+    REASON_USER_PROBATIONARY: "their author is on probation there",
+    REASON_USER_QUARANTINED: "their author is restricted there",
+    REASON_NODE_PROBATIONARY: "your node is on probation there",
+}
+
+
+def _waiting_node_name(db: Database, fingerprint: str) -> str:
+    identity = identity_for_fingerprint(db, fingerprint)
+    if identity.friendly_name == UNKNOWN_NODE_NAME:
+        return unknown_node_label(fingerprint)
+    return identity.friendly_name
+
+
+async def _link_waiting_rows(lane: DatabaseLane, node) -> list[Field | Note | Table]:
+    """Link status's Waiting section (issue #700): every hour-long Link wait
+    that is holding something back now, with when it is next tried. Empty
+    when nothing waits, and the section is then left out. Each wait has a
+    reason -- an unfixable refusal must not cost a download on every pass --
+    but a SysOp who has just fixed the cause needs to see that it is a wait,
+    not a failure, and `[R]etry now` ends it."""
+    now = time.time()
+    set_aside = sorted(node.deferred_events.waiting().items(), key=lambda item: item[1][1])
+    refused = sorted(
+        (
+            (fingerprint, content_id, reason, retry_at)
+            for fingerprint, exchange in node.peer_exchange.items()
+            for content_id, (reason, retry_at) in exchange.set_aside.items()
+            if retry_at > now
+        ),
+        key=lambda item: item[3],
+    )
+    introductions: dict[tuple[bool, str], float] = {}
+    for (carrier, fingerprint), retry_at in node.unanswered_identities.items():
+        if retry_at <= now:
+            continue
+        key = (carrier == REPORTER_REFRESH, fingerprint)
+        introductions[key] = min(introductions.get(key, retry_at), retry_at)
+    deposits = await lane.run(trust_deposits_waiting)
+    if not (set_aside or refused or introductions or deposits):
+        return []
+
+    named = {fingerprint for (_why, fingerprint) in dict(set_aside) if fingerprint}
+    named |= {fingerprint for fingerprint, *_ in refused}
+    named |= {fingerprint for (_reporter, fingerprint) in introductions}
+    named |= {relay for relay, _ in deposits}
+    names = await lane.run(lambda db: {fp: _waiting_node_name(db, fp) for fp in named})
+    display_format, display_timezone = await lane.run(resolve_display_preferences)
+
+    def when(value: float | str) -> str:
+        if isinstance(value, str):
+            stamp = value
+        else:
+            try:
+                stamp = datetime.datetime.fromtimestamp(value, datetime.timezone.utc).strftime(
+                    "%Y-%m-%dT%H:%M:%S.%fZ"
+                )
+            except (OverflowError, OSError, ValueError):
+                return "later"  # a time no clock can show; never a reason to fail the screen
+        return format_for_display(stamp, override_format=display_format, override_timezone=display_timezone)
+
+    entries: list[tuple[str, str, str]] = []
+    more: list[str] = []
+
+    def add(kind: str, lines: list[tuple[str, float | str]]) -> None:
+        for what, retry_at in lines[:_WAITING_ROWS_SHOWN]:
+            entries.append((kind, what, when(retry_at)))
+        if len(lines) > _WAITING_ROWS_SHOWN:
+            more.append(f"{len(lines) - _WAITING_ROWS_SHOWN} more {kind.lower()}")
+
+    add("Set aside", [
+        (
+            f"{count} event(s) from {names[fingerprint]}, held back by its trust state here"
+            if why == "held" else
+            f"{count} event(s) signed by {names[fingerprint]}, a node not yet known here"
+            if why == "unknown" else
+            f"{count} event(s) waiting on an earlier one",
+            retry_at,
+        )
+        for (why, fingerprint), (count, retry_at) in set_aside
+    ])
+    by_peer: dict[str, tuple[int, set[str], float]] = {}
+    for fingerprint, _content_id, reason, retry_at in refused:
+        count, reasons, soonest = by_peer.get(fingerprint, (0, set(), retry_at))
+        by_peer[fingerprint] = (count + 1, reasons | {reason}, min(soonest, retry_at))
+    add("Refused there", [
+        (
+            f"{count} of yours at {names[fingerprint]}: "
+            + ", ".join(sorted(_REFUSED_THERE_TEXT.get(reason, sanitize_text(reason)[:80]) for reason in reasons)),
+            retry_at,
+        )
+        for fingerprint, (count, reasons, retry_at) in by_peer.items()
+    ])
+    add("Introduction", [
+        (
+            f"{names[fingerprint]}: reporter looked up again"
+            if reporter else
+            f"{names[fingerprint]}: no carrier could say who it is",
+            retry_at,
+        )
+        for (reporter, fingerprint), retry_at in sorted(introductions.items(), key=lambda item: item[1])
+    ])
+    add("Trust deposit", [(f"refused by {names[relay]}", retry_at) for relay, retry_at in deposits])
+
+    rows: list[Field | Note | Table] = [Table(("Wait", "What", "Next try"), entries, flex=1)]
+    if more:
+        rows.append(Note("... and " + ", ".join(more) + ".", color=MUTED_COLOR))
+    rows.append(Note(
+        "These are waits, not failures: each is tried again on its own. [R]etry now ends them all "
+        "and runs a sync pass at once -- use it once you have fixed what held something back.",
+        color=MUTED_COLOR,
+    ))
+    return rows
+
+
+async def _retry_link_now(lane: DatabaseLane, link_context: LinkContext) -> str:
+    """Issue #700's `[R]etry now`: forget every hour-long wait and wake the sync
+    loop. Returns the result line."""
+    node = link_context.link_node
+    released = node.release_waits()
+    deposits = await lane.run(release_trust_deposit_backoffs)
+    node.wake_sync()
+    parts = [
+        f"{count} {label}"
+        for count, label in (
+            (released.set_aside, "set-aside event(s)"),
+            (released.refused_at_peers, "event(s) refused at peers"),
+            (released.introductions, "introduction wait(s)"),
+            (deposits, "trust-deposit wait(s)"),
+        )
+        if count
+    ]
+    if not parts:
+        return "Nothing was waiting. A sync pass is starting now."
+    return "Released " + ", ".join(parts) + ". A sync pass is starting now."
 
 
 def _relay_mailbox_rows(db: Database) -> list[tuple[str, int, datetime.datetime | None]]:
@@ -11128,6 +11295,8 @@ async def _link_status_screen(
             actions.append(("p", menu_key("P", "eers")))
         if identity_notices:
             actions.append(("a", menu_key("A", "cknowledge identity changes")))
+        # Issue #700: let go of every hour-long wait and run a pass now.
+        actions.append(("r", menu_key("R", "etry now")))
         # Issue #624: the node's own keys and their rotation.
         actions.append(("k", menu_key("K", "eys")))
         # Issue #777: where callers reach this board.
@@ -11164,6 +11333,8 @@ async def _link_status_screen(
             for notice in identity_notices[:5]:
                 await lane.run(dismiss_identity_observation, notice.id)
             message = colored("Identity changes acknowledged.", fg_color=SUCCESS_COLOR)
+        elif choice == "r":
+            message = colored(await _retry_link_now(lane, link_context), fg_color=SUCCESS_COLOR)
         elif choice == "o":
             await _carry_decisions_screen(
                 session, lane, actor, link_context=link_context, state=OFFERED,

@@ -1054,6 +1054,9 @@ class TrustTransition:
     previous_state: str | None
     new_state: str
     reason_code: str
+    #: The node the subject is, or a user subject's home node (issue #700:
+    #: what this node holds back from that node is retried at once).
+    node_fingerprint: str | None = None
 
 
 def recompute_all_trust_states(db: Database, *, now_iso: str | None = None) -> list[TrustTransition]:
@@ -1072,17 +1075,37 @@ def recompute_all_trust_states(db: Database, *, now_iso: str | None = None) -> l
         ).fetchone()[0]
         _recompute_all(db, now_value, now, actor_user_id=None)
         rows = db.connection.execute(
-            """SELECT subject_id, dimension, previous_state, new_state, reason_code
-               FROM link_trust_decision_audit WHERE audit_id > ? ORDER BY audit_id""",
+            """SELECT a.subject_id, a.dimension, a.previous_state, a.new_state, a.reason_code,
+                      s.node_fingerprint
+               FROM link_trust_decision_audit AS a
+               LEFT JOIN link_trust_subjects AS s ON s.subject_id = a.subject_id
+               WHERE a.audit_id > ? ORDER BY a.audit_id""",
             (before,),
         ).fetchall()
     return [
         TrustTransition(
             row["subject_id"], row["dimension"], row["previous_state"],
-            row["new_state"], row["reason_code"],
+            row["new_state"], row["reason_code"], row["node_fingerprint"],
         )
         for row in rows
     ]
+
+
+def trust_policy_generation(db: Database) -> tuple[int, ...]:
+    """A value that changes whenever a SysOp changes trust policy (issue #700):
+    an override set or cleared, or an anchor, domain, reporter or
+    sole-authority exception changed. Read from the tables those writes
+    already leave rows in, so a change made with `python -m netbbs.admin`,
+    where no running node can be told, is seen by the sync loop on its next
+    pass without a marker of its own."""
+    row = db.connection.execute(
+        """SELECT
+               (SELECT COALESCE(MAX(audit_id), 0) FROM link_trust_config_audit),
+               (SELECT COALESCE(MAX(audit_id), 0) FROM link_trust_policy_audit),
+               (SELECT COALESCE(MAX(override_id), 0) FROM link_trust_overrides),
+               (SELECT COUNT(*) FROM link_trust_overrides WHERE cleared_at IS NOT NULL)"""
+    ).fetchone()
+    return tuple(int(value) for value in row)
 
 
 def maintain_trust_state(
