@@ -10541,6 +10541,44 @@ def test_the_subject_screen_says_when_a_node_was_learned_from_a_carrier(db, lane
     assert "identity integrity and its resource behavior to established with [O]verride" in text
 
 
+def test_the_subject_screen_says_how_far_remote_reports_are_from_quarantine(db, lane, sysop):
+    """Issue #752: one report against a node, below the two-domain threshold.
+    The SysOp sees, in words, how close one more report would bring it."""
+    from datetime import datetime, timedelta, timezone
+
+    from netbbs.link.trust import (
+        EvidenceClass, configure_trust_domain, configure_trusted_reporter, record_trust_signal,
+    )
+
+    now = datetime.now(timezone.utc)
+
+    def stamp(value):
+        return value.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+    subject = TrustSubject.node("reported-node")
+    register_subject(db, subject, first_accepted_at=stamp(now - timedelta(days=40)), now_iso=stamp(now))
+    configure_trust_domain(db, "domain-a", display_name="Domain A", now_iso=stamp(now))
+    configure_trusted_reporter(
+        db, "reporter-a", domain_id="domain-a",
+        scopes=[(TrustDimension.IDENTITY_INTEGRITY, "signed_equivocation")], now_iso=stamp(now),
+    )
+    record_trust_signal(
+        db, content_id="signal-1", issuer_fingerprint="reporter-a", subject=subject,
+        dimension=TrustDimension.IDENTITY_INTEGRITY, category="signed_equivocation",
+        evidence_class=EvidenceClass.SELF_VERIFYING,
+        observed_at=stamp(now - timedelta(hours=2)), issued_at=stamp(now - timedelta(hours=1)),
+        expires_at=stamp(now + timedelta(days=30)), now_iso=stamp(now),
+        # Issue #1036: only a signal whose evidence reproduced here counts.
+        evidence_verified_at=stamp(now),
+    )
+    session = FakeSession(["s", "p", "s", "0", "1", "b", "b", "b", "b"])
+
+    _run(session, lane, sysop)
+
+    text = " ".join(_visible(_written_text(session)).split())
+    assert "Remote reports toward quarantine: 1 of 2 domains, weight 1.0 of 2.0" in text
+
+
 def test_a_trust_decision_about_a_node_stops_holding_back_what_it_sent(db, lane, sysop):
     """Issue #630: content refused by policy is set aside for an hour. A SysOp
     who has just established its author must not have to wait that hour out."""

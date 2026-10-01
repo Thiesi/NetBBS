@@ -186,9 +186,9 @@ def test_per_subject_category_quota_is_visible_and_atomic(db, reporter):
 
 
 def test_digest_evidence_is_carried_but_never_counts(db, reporter):
-    """Issue #589: a signal whose evidence is only a digest and a locator is
-    stored and served like any object, and never becomes policy evidence --
-    there is no fetch, so nothing could reproduce it."""
+    """Issue #1036: a signal whose evidence is only a digest and a locator is
+    stored and served like any object and never becomes policy evidence --
+    nothing fetches a locator, so nothing could reproduce it."""
     configure_reporter(db, reporter.fingerprint)
     body = b'{"proof":true}'
     pending = signal(reporter, evidence={

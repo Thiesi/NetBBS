@@ -256,6 +256,7 @@ from netbbs.link.transport import (
     deposit_trust_objects,
     dial_hello,
     persist_accepted_events,
+    persist_stale_copy_changes,
     pickup_from_relay_mailbox,
     RefusedEvent,
     push_events,
@@ -293,6 +294,7 @@ from netbbs.link.equivocation import SubjectKeys, reproduce_equivocation, subjec
 from netbbs.link.trust import (
     TrustState,
     mark_signal_evidence_verified,
+    mark_signal_reverify_attempted,
     recompute_all_trust_states,
     trust_policy_generation,
     unverified_equivocation_signals,
@@ -550,6 +552,10 @@ async def run_link_sync(
         await _forget_retired_attestations(lane)
         await _reverify_signal_evidence(node, lane)
         await _reevaluate_trust_over_time(node, lane)
+        # Issue #672: a compromise learned from a hello this pass (a direct
+        # peer's chain) has no batch of its own to sweep after.
+        node.sweep_compromised_copies()
+        await persist_stale_copy_changes(lane, node)
         # Issue #891: mail held here as a relay that its recipient never
         # came back for. Every pass, whatever this node's own mode: a node
         # that stopped serving relays still holds what it took before.
@@ -1891,9 +1897,11 @@ async def _reverify_signal_evidence(node: LinkNode, lane: DatabaseLane) -> None:
     except sqlite3.Error as exc:
         _logger.warning("Link trust: could not list unverified signals: %s", exc)
         return
+    failed: list[str] = []
     for content_id, fingerprint, data in pending:
         keys = _known_subject_keys(node, fingerprint)
         if keys is None or not reproduce_equivocation(data, subject_fingerprint=fingerprint, keys=keys):
+            failed.append(content_id)
             continue
         try:
             if await lane.run(mark_signal_evidence_verified, content_id):
@@ -1903,6 +1911,10 @@ async def _reverify_signal_evidence(node: LinkNode, lane: DatabaseLane) -> None:
                 )
         except (ValueError, sqlite3.Error) as exc:
             _logger.warning("Link trust: could not record verified evidence for %s: %s", content_id, exc)
+    try:
+        await lane.run(mark_signal_reverify_attempted, failed)
+    except sqlite3.Error as exc:
+        _logger.warning("Link trust: could not record re-check attempts: %s", exc)
 
 
 async def _reevaluate_trust_over_time(node: LinkNode, lane: DatabaseLane) -> None:

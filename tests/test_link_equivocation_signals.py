@@ -185,6 +185,28 @@ def test_a_root_key_that_forks_its_own_chain_is_kept_as_evidence():
     assert {o["envelope"]["object_type"] for o in evidence["data"]["objects"]} == {"key_transition"}
 
 
+def test_a_fork_at_the_head_of_a_long_chain_is_kept_as_evidence():
+    """Review of #1048: only the oldest 64 events of a chain were compared, so
+    a fork at a recent slot -- a node restored from an older backup editing
+    its latest version again -- went unnoticed past 64 edits."""
+    author = LinkNode(identity=bootstrap_node_identity("forker"))
+    observer = LinkNode(identity=bootstrap_node_identity("observer"))
+    observer.handle_hello(hello(author))
+    setup, post = board_and_post(author)
+    chain, head = [], post_id(post)
+    for number in range(70):
+        extension = edit(author, post, f"edit {number}", previous=head)
+        chain.append(extension)
+        head = post_id(extension)
+    observer.handle_events(author.identity.fingerprint, [*setup, *chain])
+    rival = edit(author, post, "a different last edit", previous=post_id(chain[-2]))
+    with pytest.raises(LinkProtocolError):
+        observer.handle_events(author.identity.fingerprint, [rival])
+
+    [(subject, _evidence)] = observer.observed_equivocations
+    assert subject == author.identity.fingerprint
+
+
 # -- recording and issuing -------------------------------------------------------
 
 

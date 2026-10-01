@@ -3965,15 +3965,32 @@ MIGRATIONS = [
     ),
     Migration(
         description=(
+            "Issue #672: `link_events.stale_signer` -- set on a stored copy that verifies only under "
+            "a key its signer has since marked compromised, naming that signer. Such a copy is not "
+            "declared in inventory and not served, so it is asked for again and replaced in place "
+            "by the signer's re-signed copy, which clears the column. The projection (post, line, "
+            "file) is untouched throughout. NULL for every existing row: the running node marks "
+            "what it finds stale at its next sync pass."
+        ),
+        sql="""
+        ALTER TABLE link_events ADD COLUMN stale_signer TEXT;
+        CREATE INDEX idx_link_events_stale ON link_events(stale_signer) WHERE stale_signer IS NOT NULL;
+        """,
+    ),
+    Migration(
+        description=(
             "Issue #1036: `link_trust_signals.evidence_verified_at` -- when this node itself "
             "reproduced a self-verifying signal's embedded evidence (design doc §12.6). Only a "
             "verified self-verifying signal counts toward automatic policy; one this node could "
             "not reproduce is kept for diagnostics and shown as unverified. NULL for every existing "
             "row: nothing before this checked the evidence, so a signal that counted only on its "
-            "label stops counting until its evidence reproduces here."
+            "label stops counting until its evidence reproduces here. "
+            "`reverify_attempted_at` is when the per-pass re-check last tried and failed, so that "
+            "check rotates through unverified signals instead of retrying the same oldest ones."
         ),
         sql="""
         ALTER TABLE link_trust_signals ADD COLUMN evidence_verified_at TEXT;
+        ALTER TABLE link_trust_signals ADD COLUMN reverify_attempted_at TEXT;
         """,
     ),
     Migration(

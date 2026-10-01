@@ -266,3 +266,41 @@ def test_evidence_about_a_node_not_yet_known_verifies_once_it_is(tmp_path, repor
     finally:
         lane.close()
         db.close()
+
+
+def test_signals_that_never_reproduce_do_not_starve_the_recheck(tmp_path, reporter, subject_node):
+    """Review of #1041: the per-pass re-check took the same oldest 50 rows
+    every pass, so 50 signals that never reproduce kept the rest waiting
+    forever. Failed attempts go to the back of the queue."""
+    from netbbs.link.trust import MAX_SIGNALS_REVERIFIED_PER_PASS
+
+    db = Database(tmp_path / "node.db")
+    lane = DatabaseLane(db.path)
+    try:
+        configure_reporter(db, reporter.fingerprint)
+        # Ten per unknown node: a receiver holds at most ten live signals per
+        # issuer, subject and category.
+        strangers = [LinkNode(identity=bootstrap_node_identity(f"never-met-{n}")) for n in range(6)]
+        junk = [
+            signal(reporter, strangers[n // 10].identity.fingerprint,
+                   build_equivocation_evidence(edit(strangers[n // 10].identity.signing_key, f"a{n}"),
+                                               edit(strangers[n // 10].identity.signing_key, f"b{n}")),
+                   number=n)
+            for n in range(MAX_SIGNALS_REVERIFIED_PER_PASS + 10)
+        ]
+        for start in range(0, len(junk), 50):
+            ingest_trust_objects(db, junk[start:start + 50], now_iso=stamp(NOW), subject_keys={})
+        fingerprint = subject_node.identity.fingerprint
+        mine = subject_node.identity.signing_key
+        good = signal(reporter, fingerprint,
+                      build_equivocation_evidence(edit(mine, "one"), edit(mine, "two")), number=999)
+        ingest_trust_objects(db, [good], now_iso=stamp(NOW + timedelta(seconds=1)), subject_keys={})
+
+        receiver = LinkNode(identity=bootstrap_node_identity("receiver"))
+        receiver.handle_hello(hello(subject_node))  # the junk's subject stays unknown
+        for _ in range(2):
+            asyncio.run(link_sync._reverify_signal_evidence(receiver, lane))
+        assert verified_at(db, good.content_id) is not None
+    finally:
+        lane.close()
+        db.close()
