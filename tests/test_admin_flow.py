@@ -4900,12 +4900,9 @@ def test_main_menu_masthead_subtitle_wraps_on_a_narrow_terminal(db, lane, sysop)
     _run(session, lane, sysop)
 
     text = _visible(_written_text(session))
-    full_sentence = (
-        "Shown above the main menu, which stays fully live/dynamic underneath "
-        "it -- disabled by default, no effect on any existing node."
-    )
+    full_sentence = "Mode: above the menu. The art is shown above the main menu, which stays live underneath it."
     assert full_sentence not in text
-    assert "Shown above the main menu" in text
+    assert "Mode: above the menu." in text
     for line in text.split("\n"):
         assert len(line.rstrip("\r")) <= 60
 
@@ -5085,6 +5082,93 @@ def test_masthead_gallery_declining_the_apply_prompt_leaves_the_masthead_disable
     _run(session, lane, sysop)
     assert "Applied and enabled." not in _written_text(session)
     assert is_main_menu_banner_enabled(db) is False
+
+
+# -- main-menu slot art (issue #929, step 4) ---------------------------------
+
+
+def _slot_preset_keys():
+    from netbbs.net.banner_presets import MAIN_MENU_BANNER_PRESETS
+
+    index = next(i for i, p in enumerate(MAIN_MENU_BANNER_PRESETS, start=1) if p.mode == "slots")
+    return list(f"{index:02d}"), MAIN_MENU_BANNER_PRESETS[index - 1]
+
+
+def test_masthead_menu_mode_toggles_to_slots_and_back(db, lane, sysop):
+    from netbbs.net.main_menu_banner import MASTHEAD_MODE, SLOTS_MODE, main_menu_art_mode
+
+    session = FakeSession(["s", "m", "m", "m", "m", "b", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    assert main_menu_art_mode(db) == SLOTS_MODE
+    assert "The art is now the main menu itself." in _written_text(session)
+    rows = db.connection.execute(
+        "SELECT detail FROM moderation_log WHERE action = 'set_main_menu_art_mode'"
+    ).fetchall()
+    assert [r["detail"] for r in rows] == [SLOTS_MODE]
+
+    session = FakeSession(["s", "m", "m", "m", "m", "b", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    assert main_menu_art_mode(db) == MASTHEAD_MODE
+
+
+def test_masthead_menu_check_without_art_says_so(db, lane, sysop):
+    session = FakeSession(["s", "m", "m", "m", "c", " ", "b", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    assert "No usable art file." in _written_text(session)
+
+
+def test_masthead_menu_check_lists_slots_problems_and_fit(db, lane, sysop):
+    from netbbs.net.main_menu_banner import main_menu_banner_path
+
+    main_menu_banner_path(db).write_bytes(b"{menu 74x7}\r\n\r\n\r\n\r\n\r\n\r\n\r\n{user 10} {user 10}")
+    session = FakeSession(["s", "m", "m", "m", "c", " ", "b", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    text = _visible(_written_text(session))
+    assert "{menu 74x7} at row 1, column 1" in text
+    assert "{user} at row 8, column 1, 10 wide" in text
+    assert "Your menu: fits." in text
+    assert "A level-0 caller's menu: fits." in text
+
+    main_menu_banner_path(db).write_bytes(b"{menu 10x1}")
+    session = FakeSession(["s", "m", "m", "m", "c", " ", "b", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    text = _visible(_written_text(session))
+    assert "Your menu: generated menu instead" in text
+    assert "don't fit the 10x1 {menu} slot" in text
+
+    main_menu_banner_path(db).write_bytes(b"no slots here")
+    session = FakeSession(["s", "m", "m", "m", "c", " ", "b", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    assert "Problem: no {menu WxH} slot" in _visible(_written_text(session))
+
+
+def test_masthead_gallery_applying_a_slot_preset_makes_it_the_menu(db, lane, sysop):
+    from netbbs.net.banner_presets import load_main_menu_banner_preset
+    from netbbs.net.main_menu_banner import SLOTS_MODE, main_menu_art_mode, main_menu_banner_path
+
+    keys, preset = _slot_preset_keys()
+    session = FakeSession(["s", "m", "m", "m", "g", *keys, "a", "b", "b", "b", "b", "b"])
+    session.terminal_height = 60  # every preset on one page, so its number picks it
+    _run(session, lane, sysop)
+    text = _visible(_written_text(session))
+    assert "as the main menu" in text
+    assert main_menu_art_mode(db) == SLOTS_MODE
+    assert main_menu_banner_path(db).read_bytes() == load_main_menu_banner_preset(preset)
+
+
+def test_masthead_preview_in_slots_mode_shows_both_menus(db, lane, sysop):
+    from netbbs.net.banner_presets import load_main_menu_banner_preset
+    from netbbs.net.main_menu_banner import SLOTS_MODE, main_menu_banner_path, set_main_menu_art_mode
+
+    _keys, preset = _slot_preset_keys()
+    main_menu_banner_path(db).write_bytes(load_main_menu_banner_preset(preset))
+    set_main_menu_art_mode(db, SLOTS_MODE)
+    session = FakeSession(["s", "m", "m", "m", "p", " ", " ", "b", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    text = _visible(_written_text(session))
+    assert "(the main menu as you see it)" in text
+    assert "(the main menu as a level-0 caller sees it)" in text
+    assert text.count("Signed in as") == 2
 
 
 # -- masthead filesystem picker (issue #170) ---------------------------------

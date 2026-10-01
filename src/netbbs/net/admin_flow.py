@@ -667,12 +667,18 @@ from netbbs.net.banner_presets import (
     load_welcome_banner_preset,
 )
 from netbbs.net.main_menu_banner import (
+    MASTHEAD_MODE,
     MAX_MASTHEAD_SIZE_BYTES,
+    SLOTS_MODE,
     load_main_menu_banner,
+    main_menu_art_mode,
     main_menu_banner_path,
     main_menu_banner_status,
+    set_main_menu_art_mode,
     set_main_menu_banner_enabled,
 )
+from netbbs.rendering.art_slots import SlotArt, describe_slots, parse_slot_art
+from netbbs.rendering.ansi import move_cursor
 from netbbs.net.logoff_banner import (
     MAX_LOGOFF_BANNER_SIZE_BYTES,
     load_logoff_banner,
@@ -13520,6 +13526,14 @@ async def _main_menu_banner_menu(session: Session, lane: DatabaseLane, actor: Us
             await session.write_line("")
             await _upload_banner_piece(session, lane, actor, path_of=main_menu_banner_path, label="the main-menu masthead", audit_action="upload_main_menu_banner")
             await _draw_main_menu_banner_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed)
+        elif choice == "m":
+            await session.write_line("")
+            await _toggle_main_menu_art_mode(session, lane, actor)
+            await _draw_main_menu_banner_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed)
+        elif choice == "c":
+            await session.write_line("")
+            await _check_main_menu_slot_art_screen(session, lane, actor)
+            await _draw_main_menu_banner_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed)
         elif choice == HELP_KEY:
             await session.write_line("")
             header_color = await lane.run(effective_header_color_256)
@@ -13538,6 +13552,7 @@ async def _draw_main_menu_banner_menu(
     collapsed: bool,
 ) -> None:
     status = await lane.run(main_menu_banner_status)
+    mode = await lane.run(main_menu_art_mode)
     await session.write_line("\r\n" + screen_title("Main-menu masthead",
             breadcrumb=(session.node_display_name, "Settings", "Mastheads & banners", "Mastheads"), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
             header_color=await lane.run(effective_header_color_256), node_name_gradient=session.node_name_gradient))
@@ -13545,13 +13560,20 @@ async def _draw_main_menu_banner_menu(
     await session.write_line("")
     await _write_wrapped_subtitle(
         session,
-        "Shown above the main menu, which stays fully live/dynamic underneath "
-        "it -- disabled by default, no effect on any existing node.",
+        "Mode: above the menu. The art is shown above the main menu, which stays live underneath it."
+        if mode == MASTHEAD_MODE else
+        "Mode: the menu itself. The art is the main menu, with each caller's items and live values "
+        "drawn into its {menu}, {user} and other slots.",
     )
     await session.write_line(
         "\r\n" + _menu_row(
             [
                 MenuEntry(label=menu_key("P", "review"), brief="Show it as callers see it"),
+                MenuEntry(
+                    label=menu_key("M", "ode"),
+                    brief="Use the art as the menu itself" if mode == MASTHEAD_MODE else "Show the art above the menu",
+                ),
+                MenuEntry(label=menu_key("C", "heck"), brief="List the art's slots and whether the menu fits"),
                 MenuEntry(label=menu_key("E", "nable"), brief="Turn the masthead on"),
                 MenuEntry(label=menu_key("D", "isable"), brief="Turn the masthead off"),
                 MenuEntry(label=menu_key("i", "t", prefix="Ed"), brief="Edit the masthead art"),
@@ -13581,6 +13603,10 @@ async def _preview_main_menu_banner_screen(session: Session, lane: DatabaseLane,
     the same "trusted, already-composed art" tier as the welcome
     banner's own custom-file path)."""
 
+    if await lane.run(main_menu_art_mode) == SLOTS_MODE:
+        await _preview_main_menu_slot_art(session, lane, actor)
+        return
+
     def _load(db: Database) -> tuple:
         return main_menu_banner_status(db), load_main_menu_banner(db)
 
@@ -13598,6 +13624,96 @@ async def _preview_main_menu_banner_screen(session: Session, lane: DatabaseLane,
     # before it can actually be read.
     await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
     await session.read_any_key()
+
+
+async def _toggle_main_menu_art_mode(session: Session, lane: DatabaseLane, actor: User) -> None:
+    """[M]ode (issue #929, step 4): the art above the main menu, or the
+    art as the menu itself with live slots."""
+
+    def _apply(db: Database) -> str:
+        mode = SLOTS_MODE if main_menu_art_mode(db) == MASTHEAD_MODE else MASTHEAD_MODE
+        set_main_menu_art_mode(db, mode)
+        record_action(db, actor=actor, action="set_main_menu_art_mode", detail=mode)
+        return mode
+
+    mode = await lane.run(_apply)
+    if mode == SLOTS_MODE:
+        _announce_line(session, "The art is now the main menu itself. Use [C]heck to see whether the menu fits it.")
+    else:
+        _announce_line(session, "The art is now shown above the main menu.")
+
+
+def _read_slot_art(db: Database) -> SlotArt | None:
+    path = main_menu_banner_path(db)
+    try:
+        if not path.exists() or path.stat().st_size > MAX_MASTHEAD_SIZE_BYTES:
+            return None
+        return parse_slot_art(decode_banner_bytes(path.read_bytes()))
+    except OSError:
+        return None
+
+
+async def _check_main_menu_slot_art_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
+    """[C]heck (issue #929, step 4): the slots found in the art, what makes
+    it unusable, and whether your own menu and a level-0 caller's fit its
+    `{menu}` slot on a terminal the size of yours. A menu that doesn't fit
+    isn't cut: those callers get the generated menu instead."""
+    # Imported here: netbbs.net.main_menu imports this module.
+    from netbbs.net.main_menu import slot_menu_preview
+
+    art = await lane.run(_read_slot_art)
+    await session.write_line(colored("\r\nChecking the main-menu art for slots:", fg_color=MUTED_COLOR))
+    if art is None:
+        await session.write_line("No usable art file. Apply a gallery sample, upload one, or draw one first.")
+    else:
+        await session.write_line(f"Art: {art.width} columns, {art.height} rows.")
+        for line in describe_slots(art) or ["No slots found."]:
+            await session.write_line(f"  {line}")
+        if art.problems:
+            for problem in art.problems:
+                await session.write_line(colored(f"  Problem: {problem}", fg_color=ERROR_COLOR))
+        else:
+            for label, level in (("Your menu", None), ("A level-0 caller's menu", 0)):
+                plan = await lane.run(lambda db, level=level: slot_menu_preview(session, db, actor, art, level=level))
+                if plan.text is not None:
+                    await session.write_line(colored(f"  {label}: fits.", fg_color=SUCCESS_COLOR))
+                else:
+                    await session.write_line(
+                        colored(f"  {label}: generated menu instead -- {plan.reason}.", fg_color=WARNING_COLOR)
+                    )
+    await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+    await session.read_any_key()
+
+
+async def _write_slot_art_preview(
+    session: Session, lane: DatabaseLane, actor: User, art: SlotArt, *, level: int | None
+) -> None:
+    from netbbs.net.main_menu import slot_menu_preview
+
+    plan = await lane.run(lambda db: slot_menu_preview(session, db, actor, art, level=level))
+    if plan.text is None:
+        await session.write_line(
+            colored(f"Callers like this get the generated menu instead: {plan.reason}.", fg_color=WARNING_COLOR)
+        )
+        return
+    await session.write(plan.text)
+    await session.write(move_cursor(art.height + 1, 1))
+
+
+async def _preview_main_menu_slot_art(session: Session, lane: DatabaseLane, actor: User) -> None:
+    """[P]review in slots mode: the main menu as you see it, then as a
+    level-0 caller sees it."""
+    art = await lane.run(_read_slot_art)
+    if art is None:
+        await session.write_line(colored("\r\nNo usable art file to preview.", fg_color=MUTED_COLOR))
+        await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+        await session.read_any_key()
+        return
+    for intro, level in (("as you see it", None), ("as a level-0 caller sees it", 0)):
+        # The art clears the screen, so what is being shown is said below it.
+        await _write_slot_art_preview(session, lane, actor, art, level=level)
+        await session.write_line(colored(f"(the main menu {intro}) Press any key to continue...", fg_color=MUTED_COLOR))
+        await session.read_any_key()
 
 
 async def _enable_main_menu_banner_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
@@ -13689,15 +13805,21 @@ async def _main_menu_banner_gallery_screen(
         preset = selection[1]
         data = load_main_menu_banner_preset(preset)
         await session.write_line(colored(f"\r\nPreviewing {preset.name!r}:", fg_color=MUTED_COLOR))
-        await write_preformatted_line(session, decode_banner_bytes(data) + RESET)
+        if preset.mode == SLOTS_MODE:
+            art = parse_slot_art(decode_banner_bytes(data))
+            await _write_slot_art_preview(session, lane, actor, art, level=None)
+        else:
+            await write_preformatted_line(session, decode_banner_bytes(data) + RESET)
 
-        if not await _preview_apply_choice(session, f"Apply {preset.name!r} as the masthead"):
+        what = "as the main menu" if preset.mode == SLOTS_MODE else "as the masthead"
+        if not await _preview_apply_choice(session, f"Apply {preset.name!r} {what}"):
             continue
 
         def _apply(db: Database) -> Path:
             path = main_menu_banner_path(db)
             path.write_bytes(data)
             set_main_menu_banner_enabled(db, True)
+            set_main_menu_art_mode(db, preset.mode)
             record_action(db, actor=actor, action="apply_main_menu_banner_preset", detail=f"{preset.key} -> {path}")
             return path
 
