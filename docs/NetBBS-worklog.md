@@ -754,6 +754,18 @@ own fingerprint: board_flow and the door outbound path both check first.
 §9.3 before chaining anything else into `link_lifecycle_json`, which holds
 one event per board.
 
+### A new Link event type must be added to `KNOWN_EVENT_OBJECT_TYPES` (issue #1022)
+
+`LinkNode.handle_events` accepts any type outside
+`netbbs.link.protocol.KNOWN_EVENT_OBJECT_TYPES` opaquely, and
+`persist_accepted_events` routes those to `opaque_events` before any
+type-specific handling. A new `elif object_type == ...` branch whose type is
+missing from that set would be handled and then stored as opaque instead of
+persisted; `tests/test_link_opaque_events.py` fails when the two disagree.
+Opaque events of a type a build understands are left out of
+`known_event_ids` at load so `rejudge_opaque_events` can judge them at
+startup.
+
 ### The access map is held to the checks (issue #1005)
 
 `netbbs.access_map` lists every level gate for the SysOp's level screens.

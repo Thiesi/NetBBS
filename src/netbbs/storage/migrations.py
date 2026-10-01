@@ -3942,4 +3942,25 @@ MIGRATIONS = [
         ALTER TABLE boards ADD COLUMN link_posting_json TEXT;
         """,
     ),
+    Migration(
+        description=(
+            "Issue #1022 (design doc §7.5): Link events of a type this node does not understand, "
+            "kept opaquely instead of refusing the batch they came in. Never projected; served in "
+            "a carried board's inventory when the payload names one; re-judged at startup once "
+            "the node understands the type. Bounded per sending peer and by age, since they "
+            "cannot be verified: who must sign depends on the type."
+        ),
+        sql="""
+        CREATE TABLE opaque_events (
+            content_id         TEXT PRIMARY KEY,
+            sender_fingerprint TEXT NOT NULL,
+            object_type        TEXT NOT NULL,
+            board_id           TEXT,
+            envelope_json      TEXT NOT NULL,
+            received_at        TEXT NOT NULL
+        );
+        CREATE INDEX idx_opaque_events_sender ON opaque_events(sender_fingerprint, received_at);
+        CREATE INDEX idx_opaque_events_board ON opaque_events(board_id);
+        """,
+    ),
 ]

@@ -1213,6 +1213,19 @@ async def run(
             own_hello_provider = _build_own_hello_provider(
                 link_node, config.link, db, _live_relays_provider
             )
+            # Issue #1022: events this node kept without understanding them,
+            # judged now that this build may understand their type -- before
+            # any peer is heard from, so they come first, as received.
+            from netbbs.link.transport import rejudge_opaque_events
+
+            await rejudge_opaque_events(
+                background_lane, link_node,
+                max_carried_boards=config.link.max_carried_boards,
+                max_carried_channels=config.link.max_carried_channels,
+                max_carried_file_areas=config.link.max_carried_file_areas,
+                max_remote_files_per_area=config.link.max_remote_files_per_area,
+                enforce_trust_policy=True,
+            )
 
         # Design doc §13.11, issue #60: attached once, here, on every run.
         # It used to be gated on Link being enabled (a Link-disabled node

@@ -159,6 +159,8 @@ from netbbs.link.node_identity import NodeIdentity, resolve_current_operational_
 from netbbs.identity.encryption import derive_encryption_private_key
 from netbbs.link.protocol import (
     _MAX_EVENTS_PER_REQUEST,
+    KNOWN_EVENT_OBJECT_TYPES,
+    MissingDependency,
     _parse_aware_timestamp,
     FileChunkRequest,
     HelloMessage,
@@ -177,7 +179,7 @@ from netbbs.link.protocol import (
     validate_realtime_frame_payload,
 )
 from netbbs.link.carry import KIND_LABELS, accept_genesis, genesis_kind
-from netbbs.link.store import event_is_stored
+from netbbs.link.store import event_is_stored, forget_opaque_event, opaque_events_to_rejudge, store_opaque_event
 from netbbs.link.realtime_proxy import open_realtime_connection, record_handshake_outcome
 from netbbs.link.relay_mailbox import (
     RelayableEnvelope,
@@ -371,6 +373,50 @@ def _forget_genesis(node: LinkNode, kind: str, content_id: str, envelope: dict) 
         del geneses[resource_id]
 
 
+async def rejudge_opaque_events(
+    lane: DatabaseLane,
+    node: LinkNode,
+    *,
+    max_carried_boards: int | None,
+    max_carried_channels: int | None = None,
+    max_carried_file_areas: int | None = None,
+    max_remote_files_per_area: int | None = None,
+    enforce_trust_policy: bool = False,
+) -> int:
+    """At startup (issue #1022): every kept opaque event whose type this build
+    understands goes through `handle_events` as if just received from the
+    peer that sent it, and is persisted like any accepted event. One that
+    fails its checks is dropped; one that waits for something this node does
+    not have yet (its signer, what it builds on) stays kept for the next
+    start, or until it expires. Returns how many were accepted."""
+    taken = 0
+    for content_id, sender, raw in await lane.run(opaque_events_to_rejudge, KNOWN_EVENT_OBJECT_TYPES):
+        try:
+            accepted = node.handle_events(sender, [raw])
+        except MissingDependency:
+            continue
+        except KeyError:
+            # The peer that sent it is no longer one this node knows.
+            continue
+        except (LinkProtocolError, TypeError, ValueError) as exc:
+            _logger.info("Link: dropped a kept %s event that does not pass its checks: %s",
+                         raw.get("envelope", {}).get("object_type"), exc)
+            await lane.run(forget_opaque_event, content_id)
+            continue
+        if accepted:
+            await persist_accepted_events(
+                lane, node, accepted, sender_fingerprint=sender, max_carried_boards=max_carried_boards,
+                max_carried_channels=max_carried_channels, max_carried_file_areas=max_carried_file_areas,
+                max_remote_files_per_area=max_remote_files_per_area, enforce_trust_policy=enforce_trust_policy,
+            )
+            taken += len(accepted)
+        if content_id in node.known_event_ids:
+            await lane.run(forget_opaque_event, content_id)
+    if taken:
+        _logger.info("Link: %d kept event(s) of a type this node now understands were taken in", taken)
+    return taken
+
+
 async def _forget_unless_stored(
     lane: DatabaseLane, node: LinkNode, content_id: str, *, edit_root: str | None = None
 ) -> None:
@@ -429,6 +475,18 @@ async def persist_accepted_events(
     for content_id in accepted:
         envelope = node.events[content_id]
         object_type = envelope["envelope"]["object_type"]
+        if object_type not in KNOWN_EVENT_OBJECT_TYPES:
+            # Issue #1022 (design doc §7.5): kept opaquely, within the
+            # sending peer's bound. One dropped by that bound is forgotten,
+            # so it can be taken again later.
+            kept = await lane.run(
+                store_opaque_event, sender_fingerprint=sender_fingerprint, content_id=content_id,
+                object_type=object_type, envelope=envelope,
+            )
+            if not kept:
+                node.known_event_ids.discard(content_id)
+                node.events.pop(content_id, None)
+            continue
         mail_decision = (
             await lane.run(
                 decide_event_authorship, envelope, transport_peer_fingerprint=sender_fingerprint,
