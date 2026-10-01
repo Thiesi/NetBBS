@@ -24,6 +24,7 @@ from netbbs.rendering.ansi import bg as ansi_bg
 from netbbs.rendering.ansi import bg_rgb as ansi_bg_rgb
 from netbbs.rendering.ansi import fg as ansi_fg
 from netbbs.rendering.ansi import fg_rgb as ansi_fg_rgb
+from netbbs.rendering.charset import art_glyphs_to_cp437_controls, art_pictographs_to_glyphs
 from netbbs.rendering.screen_buffer import ScreenBuffer
 from netbbs.rendering.sauce import Sauce, split_sauce
 
@@ -55,14 +56,25 @@ def decode_art_bytes(data: bytes) -> tuple[str, Sauce | None]:
     first (`netbbs.rendering.sauce.split_sauce`), so scene art no longer
     shows its title, author and group as junk under the picture. A file
     with a SAUCE record is classic ANSI art and is read as CP437 without
-    the UTF-8 attempt; one without keeps the UTF-8-then-CP437 guess."""
+    the UTF-8 attempt; one without keeps the UTF-8-then-CP437 guess.
+
+    The pictographs of CP437's control range (☺ ♥ ♫ ► and the rest,
+    `netbbs.rendering.charset.ART_PICTOGRAPHS`) become the glyphs they draw,
+    not control characters that would reach a UTF-8 terminal as raw control
+    bytes. That holds for UTF-8 art too: in art those bytes have no other
+    use, and a file of plain ASCII plus pictograph bytes is valid UTF-8."""
     body, sauce = split_sauce(data)
     if sauce is not None:
-        return body.decode("cp437"), sauce
+        return decode_cp437_art(body), sauce
     try:
-        return body.decode("utf-8"), None
+        return art_pictographs_to_glyphs(body.decode("utf-8")), None
     except UnicodeDecodeError:
-        return body.decode("cp437"), None
+        return decode_cp437_art(body), None
+
+
+def decode_cp437_art(data: bytes) -> str:
+    """CP437 art bytes as text, control-range pictographs included."""
+    return art_pictographs_to_glyphs(data.decode("cp437"))
 
 
 _CSI = re.compile(r"\x1b\[([0-9;?]*)([@-~])")
@@ -210,4 +222,10 @@ def encode_ansi_bytes(buffer: ScreenBuffer) -> bytes:
         parts.append("\r\n")
         current_style = None  # each row starts fresh so a mid-row style isn't assumed carried over
     parts.append(RESET)
-    return "".join(parts).encode("cp437", errors="replace")
+    return encode_cp437_art("".join(parts))
+
+
+def encode_cp437_art(text: str) -> bytes:
+    """Art text as CP437 bytes, its control-range pictographs as the bytes
+    that draw them. Never raises: what CP437 lacks becomes "?"."""
+    return art_glyphs_to_cp437_controls(text).encode("cp437", errors="replace")
