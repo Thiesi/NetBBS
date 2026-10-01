@@ -648,3 +648,127 @@ def test_the_table_of_introduced_identities_is_bounded_and_takes_its_untouched_s
     ).fetchone()[0] == 0
     # And a restart loads no more than the bound, whatever the table holds.
     assert len(load_link_node(db, b.identity).introduced) == 2
+
+
+# -- issue #914: a carrier serves its signers' key histories ----------------------------------
+
+
+def test_a_carried_chain_makes_a_compromised_keys_old_copy_skipped(cast):
+    """B's bundle for A predates A's compromise, so A's old-key post verifies.
+    The chain R serves beside it teaches B the compromise first."""
+    r, a, b = cast["R"], cast["A"], cast["B"]
+    b.handle_events(r.identity.fingerprint, [genesis_by(r).to_dict()])
+    b.handle_introduction(hello(a))
+    old = post_by(a, "old key")
+    rotated = LinkNode(identity=rotate_operational_key(a.identity, purpose="signing", compromised=True))
+    r.handle_hello(hello(rotated, created_at="2026-03-01T00:00:00+00:00"))
+
+    chains = r.build_carried_key_chains([old.to_dict()], requester_fingerprint=b.identity.fingerprint)
+    assert [chain["fingerprint"] for chain in chains] == [a.identity.fingerprint]
+
+    changed = b.apply_carried_key_chains(chains)
+    assert [record.fingerprint for record in changed] == [a.identity.fingerprint]
+    accepted, deferred, refusal, skipped = b.handle_events_tolerantly(r.identity.fingerprint, [old.to_dict()])
+    assert (accepted, deferred, refusal, skipped) == ([], [], None, (old.content_id,))
+    # And content A signed with its new key verifies with no fresh bundle.
+    new = post_by(rotated, "new key")
+    assert b.handle_events_tolerantly(r.identity.fingerprint, [new.to_dict()])[0] == [new.content_id]
+    # Applying the same chain again is not news.
+    assert b.apply_carried_key_chains(chains) == []
+
+
+def test_without_a_carried_chain_the_old_copy_is_accepted(cast):
+    """The defect itself, kept as a statement of what the chain is for."""
+    r, a, b = cast["R"], cast["A"], cast["B"]
+    b.handle_events(r.identity.fingerprint, [genesis_by(r).to_dict()])
+    b.handle_introduction(hello(a))
+    old = post_by(a, "old key")
+    rotate_operational_key(a.identity, purpose="signing", compromised=True)
+    assert b.handle_events_tolerantly(r.identity.fingerprint, [old.to_dict()])[0] == [old.content_id]
+
+
+def test_carried_chains_are_bounded_and_carry_only_news(cast):
+    from netbbs.link.protocol import MAX_CARRIED_CHAIN_TRANSITIONS, MAX_CARRIED_KEY_CHAINS
+
+    r, a, b = cast["R"], cast["A"], cast["B"]
+    # A lone authorization is in every bundle already: nothing to carry.
+    assert r.build_carried_key_chains([post_by(a).to_dict()], requester_fingerprint=b.identity.fingerprint) == []
+    # Never the carrier's own chain, nor the requester's.
+    r_rotated = rotate_operational_key(r.identity, purpose="signing")
+    r.identity = r_rotated
+    b.identity = rotate_operational_key(b.identity, purpose="signing")
+    r.handle_hello(hello(b, created_at="2026-03-01T00:00:00+00:00"))
+    events = [post_by(r).to_dict(), post_by(b).to_dict()]
+    assert r.build_carried_key_chains(events, requester_fingerprint=b.identity.fingerprint) == []
+
+    # At most MAX_CARRIED_KEY_CHAINS signers.
+    authors = []
+    for index in range(MAX_CARRIED_KEY_CHAINS + 3):
+        node = LinkNode(identity=rotate_operational_key(bootstrap_node_identity(f"S{index}"), purpose="signing"))
+        r.handle_hello(hello(node))
+        authors.append(post_by(node).to_dict())
+    assert len(r.build_carried_key_chains(authors, requester_fingerprint=b.identity.fingerprint)) == MAX_CARRIED_KEY_CHAINS
+
+    # A chain longer than the cap is left to the stale-bundle refresh.
+    long_identity = bootstrap_node_identity("long")
+    for _ in range(MAX_CARRIED_CHAIN_TRANSITIONS // 2 + 1):
+        long_identity = rotate_operational_key(long_identity, purpose="signing")
+    long_node = LinkNode(identity=long_identity)
+    r.handle_hello(hello(long_node))
+    assert r.build_carried_key_chains([post_by(long_node).to_dict()], requester_fingerprint=b.identity.fingerprint) == []
+
+
+def test_a_carried_chain_updates_only_an_introduced_identity_and_only_if_it_verifies(cast):
+    r, a, b = cast["R"], cast["A"], cast["B"]
+    b.handle_introduction(hello(a))
+    rotated = LinkNode(identity=rotate_operational_key(a.identity, purpose="signing", compromised=True))
+    r.handle_hello(hello(rotated, created_at="2026-03-01T00:00:00+00:00"))
+    [chain] = r.build_carried_key_chains([post_by(a).to_dict()], requester_fingerprint=b.identity.fingerprint)
+
+    # A direct peer's chain comes only from that peer.
+    r_chain = dict(chain, fingerprint=r.identity.fingerprint)
+    # An identity B was never introduced to is learned whole, by introduction.
+    stranger = dict(chain, fingerprint="z" * 32)
+    # A chain that does not belong to the root on file.
+    wrong_root = dict(chain, root_public_key=base64.b64encode(bytes(r.identity.root.verify_key)).decode("ascii"))
+    # A forged transition: the right shape, signed by nobody.
+    forged_transitions = [dict(t) for t in chain["transitions"]]
+    forged_transitions[-1] = dict(forged_transitions[-1], signature=base64.b64encode(b"x" * 64).decode("ascii"))
+    forged = dict(chain, transitions=forged_transitions)
+    # A transition whose envelope has no payload at all (review of #1027): it
+    # passes the shape and version checks and used to escape at the merge.
+    no_payload_transitions = [dict(t) for t in chain["transitions"]]
+    no_payload_transitions[-1] = dict(no_payload_transitions[-1], envelope={"netbbs_protocol": 1})
+    no_payload = dict(chain, transitions=no_payload_transitions)
+    assert b.apply_carried_key_chains(
+        [r_chain, stranger, wrong_root, forged, no_payload, "junk", {"fingerprint": 7}]
+    ) == []
+    assert b.apply_carried_key_chains("not a list") == []
+    before = b.introduced[a.identity.fingerprint].transitions
+    assert len(before) == 1
+
+    assert [record.fingerprint for record in b.apply_carried_key_chains([chain])] == [a.identity.fingerprint]
+
+
+def test_a_stale_bundle_cannot_roll_back_a_learned_compromise(cast):
+    """`PeerDirectory.introduce` merges now. A bundle from before the
+    compromise verifies against itself; replacing the chain on file with it
+    would make the compromised key current again. Merging keeps every
+    transition, and a descriptor signed by a key the merged chain no longer
+    trusts is not adopted."""
+    r, a, b = cast["R"], cast["A"], cast["B"]
+    b.handle_events(r.identity.fingerprint, [genesis_by(r).to_dict()])
+    b.handle_introduction(hello(a))
+    rotated = LinkNode(identity=rotate_operational_key(a.identity, purpose="signing", compromised=True))
+    r.handle_hello(hello(rotated, created_at="2026-03-01T00:00:00+00:00"))
+    b.apply_carried_key_chains(
+        r.build_carried_key_chains([post_by(a).to_dict()], requester_fingerprint=b.identity.fingerprint)
+    )
+    merged = b.introduced[a.identity.fingerprint]
+
+    # Whoever holds the compromised key signs a fresh descriptor under the old chain.
+    stale = hello(a, created_at="2026-06-01T00:00:00+00:00")
+    assert b.handle_introduction(stale) is None
+    assert b.introduced[a.identity.fingerprint] == merged
+    old = post_by(a, "old key")
+    assert b.handle_events_tolerantly(r.identity.fingerprint, [old.to_dict()])[3] == (old.content_id,)

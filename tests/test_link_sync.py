@@ -3254,6 +3254,55 @@ class _ThreeNodes:
             node_db.close()
 
 
+def test_a_compromise_reaches_a_node_that_knows_the_signer_only_by_introduction(tmp_path, caplog):
+    """Issue #914, the Phase 4 exercise's row 9 on real sockets. B learned A
+    from R before A rotated its signing key as compromised. B's bundle still
+    held the compromised key as current, so a copy R had kept from before the
+    rotation verified on B, was accepted, and nothing was logged. R now serves
+    A's key history beside A's content, so B skips the old-key copy on the
+    same pull -- and takes what A signed after the rotation without needing
+    a fresh bundle first."""
+    from netbbs.link.node_identity import rotate_operational_key
+
+    net = _ThreeNodes(tmp_path, enforce=False)
+
+    async def scenario():
+        server = await net.start()
+        try:
+            async with aiohttp.ClientSession() as session:
+                for name in ("A", "B"):
+                    await net.dial(name, session)
+                net.post("A", "before")
+                await net.dial("A", session)
+                await net.dial("B", session)  # B is introduced to A here
+                net.post("A", "old key, after B looked")
+                await net.dial("A", session)  # R keeps this copy
+                rotated = rotate_operational_key(net.ids["A"], purpose="signing", compromised=True)
+                net.ids["A"] = rotated
+                net.nodes["A"].identity = rotated
+                net.post("A", "new key")
+                await net.dial("A", session)  # R learns the compromise from A
+                with caplog.at_level(logging.INFO, logger="netbbs.link.sync"):
+                    await net.dial("B", session)
+        finally:
+            await server.stop()
+
+    try:
+        asyncio.run(scenario())
+        assert net.subjects_on("B") == ["before", "new key"]
+        messages = [record.getMessage() for record in caplog.records]
+        assert any("carried newer key history" in m and net.ids["A"].fingerprint in m for m in messages)
+        assert any("marked compromised" in m for m in messages)
+        # Persisted, so a restart does not bring the compromised key back.
+        stored = net.dbs["B"].db.connection.execute(
+            "SELECT transitions_json FROM link_introduced_identities WHERE fingerprint = ?",
+            (net.ids["A"].fingerprint,),
+        ).fetchone()[0]
+        assert '"compromised": true' in stored
+    finally:
+        net.close()
+
+
 def test_two_nodes_that_never_met_see_each_others_posts_through_their_common_seed(tmp_path):
     """The defect, with policy out of the way. B had never completed a hello
     with A, refused A's post as coming from a stranger, and with it the whole
@@ -3474,11 +3523,11 @@ def test_a_wrong_event_ends_a_response_without_losing_what_was_accepted_before_i
     forge = {"on": True}
 
     async def _with_a_forgery(node, session, base_url, inventory_request):
-        events, more, wanted = await real_request_inventory(node, session, base_url, inventory_request)
+        events, more, wanted, key_chains = await real_request_inventory(node, session, base_url, inventory_request)
         if forge["on"] and len(events) >= 2:
             forged = {**events[-1], "signature": base64.b64encode(b"x" * 64).decode("ascii")}
             events = [*events[:-1], forged]
-        return events, more, wanted
+        return events, more, wanted, key_chains
 
     monkeypatch.setattr(sync_module, "request_inventory", _with_a_forgery)
 
