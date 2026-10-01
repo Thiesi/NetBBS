@@ -295,6 +295,7 @@ enabled = true
 host = "127.0.0.1"
 port = 8080
 public_url = "https://bbs.example.org"
+trusted_proxies = ["127.0.0.1", "::1"]
 ```
 
 Point the HTTPS proxy at that local port, forwarding WebSocket upgrades as
@@ -327,6 +328,7 @@ location / {
     proxy_set_header Upgrade $http_upgrade;
     proxy_set_header Connection "upgrade";
     proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     proxy_read_timeout 1h;
     client_max_body_size 101m;
 }
@@ -334,6 +336,35 @@ location / {
 
 `proxy_read_timeout` keeps nginx from cutting off a browser caller who sits
 idle for a minute, and `client_max_body_size` follows the upload cap.
+
+With Apache httpd 2.4.47 or later, with `mod_proxy` and `mod_proxy_http`
+loaded, inside the `VirtualHost` that already holds your certificate:
+
+```apache
+ProxyPreserveHost On
+ProxyPass "/" "http://127.0.0.1:8080/" upgrade=websocket timeout=1800
+ProxyPassReverse "/" "http://127.0.0.1:8080/"
+LimitRequestBody 105906176
+```
+
+NetBBS sends no WebSocket pings, so without `timeout=` Apache cuts off an idle
+browser caller at its global `Timeout`. On NetBSD, one host refused every
+backend connection with `AH00957 (22)Invalid argument` when it was set to
+3600, while 600 and 1800 work; stay at 1800 or below there.
+`LimitRequestBody` is in bytes, 101 MiB here.
+
+**Each browser caller's own address.** Behind any of these proxies, every
+browser caller reaches NetBBS from the proxy's address. `trusted_proxies`
+tells NetBBS which addresses are your proxies: for a connection from one of
+them, NetBBS takes the caller's address from the `X-Forwarded-For` header the
+proxy adds (Caddy and Apache add it by default; the nginx example above has
+the line). Without it, all web callers share one address: one caller
+mistyping a password, or one script guessing, soon throttles **every** web
+login on the node, and the SysOp screens cannot tell browser callers apart.
+List only proxies you run. A caller can write anything into the header, so
+NetBBS reads it only from a connection whose own address is listed, and then
+only the entry your proxy added. Entries are IP addresses or networks such as
+`10.0.0.0/8`, never hostnames.
 
 `public_url` supplies the externally reachable base address for transfer links.
 Without it, a node bound to a wildcard or loopback address cannot give remote

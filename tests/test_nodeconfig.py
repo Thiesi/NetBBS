@@ -1231,3 +1231,41 @@ def test_a_managed_dns_service_url_may_not_embed_credentials():
     # The escape hatch the message names, for the path segment the rule
     # costs.
     config("https://dns.example.org/tenant%40a").validate()
+
+
+def test_web_trusted_proxies_are_read_and_normalized(tmp_path):
+    """Issue #980: `[web] trusted_proxies`, off by default."""
+    from netbbs.net.nodeconfig import load_config
+
+    path = tmp_path / "netbbs.toml"
+    path.write_text(
+        '[web]\nenabled = true\ntrusted_proxies = ["127.0.0.1", "::1", "10.0.0.0/8"]\n',
+        encoding="utf-8",
+    )
+    config = load_config(["--config", str(path)])
+    assert config.web.trusted_proxies == ("127.0.0.1/32", "::1/128", "10.0.0.0/8")
+    # A listener flag keeps them (it rebuilt the transport and used to drop
+    # whatever it did not name).
+    assert load_config(["--config", str(path), "--web-port", "9090"]).web.trusted_proxies \
+        == ("127.0.0.1/32", "::1/128", "10.0.0.0/8")
+    path.write_text("[web]\nenabled = true\n", encoding="utf-8")
+    assert load_config(["--config", str(path)]).web.trusted_proxies == ()
+
+
+@pytest.mark.parametrize(
+    ("section", "value", "message"),
+    [
+        ("web", '"127.0.0.1"', "must be a list"),
+        ("web", '["proxy.example.org"]', "not an IP address or network"),
+        ("web", "[8080]", "must be strings"),
+        ("telnet", '["127.0.0.1"]', "unknown setting"),
+        ("ssh", '["127.0.0.1"]', "unknown setting"),
+    ],
+)
+def test_bad_trusted_proxies_are_refused(tmp_path, section, value, message):
+    from netbbs.net.nodeconfig import ConfigError, load_config
+
+    path = tmp_path / "netbbs.toml"
+    path.write_text(f"[{section}]\ntrusted_proxies = {value}\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match=message):
+        load_config(["--config", str(path)])
