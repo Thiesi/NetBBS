@@ -487,6 +487,24 @@ can post on a board through a grant does not "lose" it in a demotion. Press
 opens and closes nothing is applied straight away, and the line under the
 screen says so.
 
+New callers can also move up on their own. Under **Users ▸ Pr[o]motion
+rules**, `C` creates a rule: accounts at one level are raised to a higher
+one once they are old enough (hours since signup), have logged in often
+enough, and optionally have posted enough here. A common first rule is
+`0 → 10` after 24 hours and 2 logins. Each row shows what an account needs,
+how many accounts would be promoted at their next login (**ready**), and
+what the step opens. Rules are checked when a caller logs in; the caller
+starts that session at the new level and is told so. One rule applies per
+login, and only one rule can start from each level. A rule never raises
+anyone to 255.
+
+The rules never touch the guest account, staff, SysOps, or pending and
+disabled accounts. They also leave alone any account whose level you set by
+hand, so a caller you demote stays demoted. The account screen shows
+**Auto promotion: on** or **off** and why; `U` turns it back on, or off.
+Each automatic promotion appears in the moderation log as **(system)**,
+naming the rule.
+
 To see what every level opens in one place, open **Users ▸ Le[v]els**. Each
 row is a level that matters on your node: one some board, file area,
 channel, door or setting is gated at, or one an account holds. The row shows

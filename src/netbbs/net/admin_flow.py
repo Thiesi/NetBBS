@@ -62,7 +62,7 @@ import threading
 import weakref
 from pathlib import Path
 import dataclasses
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any, Awaitable, Callable, Sequence
 from zoneinfo import available_timezones
 
@@ -79,6 +79,7 @@ from netbbs.access_map import (
     account_level_change,
     gate_source,
     ladder_summary,
+    level_change,
     level_context,
     level_ladder,
     list_gates,
@@ -110,6 +111,7 @@ from netbbs.auth.users import (
     describe_staff_permissions,
     check_user_level_change,
     is_usable_sysop,
+    set_automatic_promotion,
     set_can_verify_identity,
     set_staff_permissions,
     set_user_disabled,
@@ -245,6 +247,14 @@ from netbbs.config import (
 )
 from netbbs.digits import is_ascii_number
 from netbbs.level_names import LevelNameError, get_level_names, level_label, parse_level, set_level_name
+from netbbs.promotion import (
+    PromotionRule,
+    PromotionRuleError,
+    count_qualifying,
+    get_promotion_rules,
+    kept_from_rules,
+    save_promotion_rules,
+)
 from netbbs.doors import (
     Door,
     DoorError,
@@ -2419,6 +2429,11 @@ async def _users_menu(
             await _pick_and_edit_user(session, lane, actor, node_controls, title="Delete which user?")
             stats = await lane.run(_load_stats)
             await _draw_users_menu(session, stats=stats)
+        elif choice == "o":
+            await session.write_line("")
+            await _promotion_rules_screen(session, lane, actor)
+            stats = await lane.run(_load_stats)
+            await _draw_users_menu(session, stats=stats)
         elif choice == "v":
             await session.write_line("")
             await _levels_screen(session, lane, actor, node_controls=node_controls, link_context=link_context)
@@ -2685,6 +2700,191 @@ async def _levels_screen(
         )
 
 
+@dataclass(frozen=True)
+class _RuleRow:
+    """One row of the Promotion rules screen: the rule, how many accounts it
+    would promote at their next login, and what its step opens."""
+
+    rule: PromotionRule
+    qualifying: int
+    opens: str
+
+
+_RULE_COLUMNS = [
+    ListColumn("needs", 22, VALUE_COLOR),
+    ListColumn("ready", 5, VALUE_COLOR, align_right=True),
+    ListColumn("opens", 24, MUTED_COLOR),
+]
+
+
+def _load_rule_rows(db: Database) -> tuple[list[_RuleRow], dict[int, str]]:
+    gates = list_gates(db)
+    rows = []
+    for rule in get_promotion_rules(db):
+        gained = level_change(gates, rule.from_level, rule.to_level).gained
+        opens = ladder_summary(LadderStep(rule.to_level, 0, gained)) if gained else "nothing"
+        rows.append(_RuleRow(rule, count_qualifying(db, rule), opens))
+    return rows, get_level_names(db)
+
+
+class _RuleDraftError(PromotionRuleError):
+    pass
+
+
+async def _edit_promotion_rule(
+    session: Session, lane: DatabaseLane, actor: User, existing: PromotionRule | None,
+) -> PromotionRule | None:
+    """Create or edit one rule (issue #992). Five values are a draft (§3.5)."""
+    draft: dict = dict(asdict(existing)) if existing is not None else {
+        "from_level": 0, "to_level": 10, "min_age_hours": 24, "min_logins": 2, "min_posts": 0,
+    }
+    names = await lane.run(get_level_names)
+    fields = [
+        FieldSpec(
+            key="from_level", hotkey="f", menu_text=menu_key("F", "rom level"), label="From level",
+            render=lambda d: level_label(d["from_level"], names),
+            prompt=_int_field("from_level", "Level the account is at"), brief="Accounts at this level",
+            help="The rule looks at accounts at exactly this level. One rule per level.", section="Step",
+        ),
+        FieldSpec(
+            key="to_level", hotkey="t", menu_text=menu_key("T", "o level"), label="To level",
+            render=lambda d: level_label(d["to_level"], names),
+            prompt=_int_field("to_level", "Level to raise it to"), brief="Raised to this level",
+            help=f"The level the account is raised to; higher than From, at most {SYSOP_LEVEL - 1}.",
+            section="Step",
+        ),
+        FieldSpec(
+            key="min_age_hours", hotkey="a", menu_text=menu_key("A", "ge (hours)"), label="Account age",
+            render=lambda d: f"{d['min_age_hours']} hours",
+            prompt=_int_field("min_age_hours", "Hours since the account was created"),
+            brief="Hours since signup", help="How long the account must have existed.", section="Needs",
+        ),
+        FieldSpec(
+            key="min_logins", hotkey="l", menu_text=menu_key("L", "ogins"), label="Logins",
+            render=lambda d: str(d["min_logins"]),
+            prompt=_int_field("min_logins", "Logins, this one included"),
+            brief="Logins, this one included",
+            help="How many times the account must have logged in, counting the login being checked.",
+            section="Needs",
+        ),
+        FieldSpec(
+            key="min_posts", hotkey="p", menu_text=menu_key("P", "osts"), label="Posts",
+            render=lambda d: str(d["min_posts"]),
+            prompt=_int_field("min_posts", "Approved posts"), brief="Approved posts on this node",
+            help="Approved posts the account wrote on this node, each counted once however often edited. "
+                 "0 asks for none.",
+            section="Needs",
+        ),
+    ]
+
+    async def save(values: dict) -> PromotionRule:
+        rule = PromotionRule(**{key: values[key] for key in (
+            "from_level", "to_level", "min_age_hours", "min_logins", "min_posts")})
+
+        def _persist(db: Database) -> PromotionRule:
+            others = [r for r in get_promotion_rules(db) if existing is None or r.from_level != existing.from_level]
+            try:
+                save_promotion_rules(db, [*others, rule], changed_by=actor)
+            except PromotionRuleError as exc:
+                raise _RuleDraftError(str(exc)) from exc
+            return rule
+
+        return await lane.run(_persist)
+
+    rule = await edit_resource_draft(
+        session, lane,
+        title="Edit promotion rule" if existing is not None else "New promotion rule",
+        fields=fields, draft=draft, save=save, error_type=_RuleDraftError,
+        save_menu_text=menu_key("S", "ave"), back_menu_text=menu_key("B", "ack"),
+        description_level=await lane.run(menu_description_level, actor),
+        redraw_in_place=await lane.run(redraw_in_place_enabled, actor),
+        unicode_style=await lane.run(unicode_style_enabled, actor),
+        collapsed=await lane.run(breadcrumb_collapsed_enabled, actor),
+        accent_color=await lane.run(effective_accent_color_256),
+        header_color=await lane.run(effective_header_color_256),
+    )
+    if rule is not None:
+        _announce_line(session, f"Saved: {rule.from_level} -> {rule.to_level} ({rule.describe()}).")
+    return rule
+
+
+async def _promotion_rules_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
+    """Design doc §4.3, issue #992: the node's promotion rules. Each row says
+    what an account needs, how many accounts would be promoted at their next
+    login, and what the step opens. `[C]reate` adds a rule, picking one
+    edits it, `[D]elete` removes the highlighted one."""
+    names: dict[int, str] = {}
+    status: str | None = None
+    start: int | None = None
+    # The picker returns what `[C]reate` made as the pick; that rule was
+    # just edited, so it is not opened again.
+    created: int | None = None
+
+    async def _load() -> list[_RuleRow]:
+        nonlocal names
+        rows, names = await lane.run(_load_rule_rows)
+        return rows
+
+    async def _create() -> _RuleRow | None:
+        nonlocal created
+        rule = await _edit_promotion_rule(session, lane, actor, None)
+        if rule is None:
+            return None
+        created = rule.from_level
+        return next((row for row in await _load() if row.rule == rule), None)
+
+    async def _delete(row: _RuleRow) -> list[_RuleRow] | None:
+        nonlocal status
+        await session.write_line("")
+        if not await prompt_yes_no(session, f"Delete the rule {row.rule.from_level} -> {row.rule.to_level}?",
+                                   default=False):
+            return None
+
+        def _persist(db: Database) -> None:
+            rules = [r for r in get_promotion_rules(db) if r.from_level != row.rule.from_level]
+            save_promotion_rules(db, rules, changed_by=actor)
+
+        await lane.run(_persist)
+        status = f"Deleted the rule {row.rule.from_level} -> {row.rule.to_level}."
+        return await _load()
+
+    chrome = await _load_chrome(lane, actor)
+    while True:
+        picked = await _pick_item(
+            session, await _load(),
+            name_of=lambda row: f"{row.rule.from_level} → {level_label(row.rule.to_level, names)}",
+            stable_id_of=lambda row: row.rule.from_level,
+            columns=_RULE_COLUMNS,
+            column_values_of=lambda row: [row.rule.describe(), str(row.qualifying), row.opens],
+            description_of=lambda row: (
+                f"needs {row.rule.describe()}; {row.qualifying} ready; opens {row.opens}"
+            ),
+            title="Promotion rules",
+            empty_message="No promotion rules. [C]reate one: levels then change by hand only.",
+            refresh=_load,
+            on_create=_create,
+            item_keys={"d": _delete},
+            live_nav=[MenuEntry(label=menu_key("D", "elete"), brief="Remove a rule")],
+            live_label=lambda: status or "Checked at each login, one step per login. Ready: promoted at next login",
+            start_stable_id=start,
+            description_level=await lane.run(menu_description_level, actor),
+            redraw_in_place=chrome.redraw_in_place,
+            unicode_style=chrome.unicode_style,
+            collapsed=chrome.collapsed,
+            accent_color=chrome.accent_color,
+            header_color=chrome.header_color,
+        )
+        if picked is None:
+            return
+        start = picked.rule.from_level
+        if created == picked.rule.from_level:
+            created = None
+            continue
+        rule = await _edit_promotion_rule(session, lane, actor, picked.rule)
+        if rule is not None:
+            start = rule.from_level
+
+
 async def _draw_users_menu(session: Session, *, stats: dict[str, Any]) -> None:
     unicode_style = stats["unicode_style"]
     collapsed = stats["collapsed"]
@@ -2787,6 +2987,7 @@ async def _draw_users_menu(session: Session, *, stats: dict[str, Any]) -> None:
         MenuEntry(label=menu_key("R", "egistration"), brief="Signup policy settings"),
         MenuEntry(label=menu_key("P", "romote/demote"), brief="Change a user's level"),
         MenuEntry(label=menu_key("v", "els", prefix="Le"), brief="What each level opens"),
+        MenuEntry(label=menu_key("o", "motion rules", prefix="Pr"), brief="Raise new accounts automatically"),
         MenuEntry(label=menu_key("E", "nable/disable"), brief="Toggle account access"),
         MenuEntry(label=menu_key("D", "elete user"), brief="Permanently remove a user"),
         MenuEntry(label=menu_key("t", "ired names", prefix="Re"), brief="Names held for deleted accounts"),
@@ -6729,6 +6930,8 @@ async def _draw_user_detail(
                 color=VALUE_COLOR if target.staff_permissions else MUTED_COLOR,
             ),
             _editable("i", "Can verify identity", f"{_yes_no(target.can_verify_identity)} (age/name attestation)"),
+            # Issue #992: last, so the arrow order of the fields above holds.
+            _editable("u", "Auto promotion", _auto_promotion_label(await lane.run(kept_from_rules, target))),
             _grants_field(await lane.run(_grant_summaries, target)),
         ]),
     ]
@@ -6748,6 +6951,8 @@ async def _draw_user_detail(
         options.append(MenuEntry(label=menu_key("A", "pprove"), brief="Approve this pending signup"))
     if "l" in offered:
         options.append(MenuEntry(label=menu_key("L", "evel"), brief="Change this user's access level"))
+    if "u" in offered:
+        options.append(MenuEntry(label=menu_key("u", "to promotion", prefix="A"), brief="Promotion rules on or off"))
     if "t" in offered:
         options.append(MenuEntry(label=menu_key("T", "oggle enable/disabled"), brief="Enable or disable this account"))
     if "s" in offered:
@@ -6776,10 +6981,15 @@ async def _draw_user_detail(
     return blocked
 
 
-_USER_DETAIL_FIELD_ORDER = ("l", "t", "r", "k", "p", "s", "i")
+_USER_DETAIL_FIELD_ORDER = ("l", "t", "r", "k", "p", "s", "i", "u")
 
 #: Every action key on the account detail -- what a SysOp gets.
-_ALL_USER_DETAIL_KEYS = frozenset("altrkpsihd")
+_ALL_USER_DETAIL_KEYS = frozenset("alutrkpsihd")
+
+
+def _auto_promotion_label(kept: str | None) -> str:
+    """Whether the promotion rules (issue #992) may raise this account."""
+    return "on" if kept is None else f"off ({kept})"
 
 
 def _user_detail_keys(actor: User, target: User) -> frozenset[str]:
@@ -6799,7 +7009,7 @@ def _user_detail_keys(actor: User, target: User) -> frozenset[str]:
     keys = {"h"}
     within_reach = target.user_level < SYSOP_LEVEL and not target.staff_permissions
     if within_reach and actor.has_staff(StaffPermission.MANAGE_ACCOUNTS):
-        keys |= {"l", "t", "p"}
+        keys |= {"l", "u", "t", "p"}
     if within_reach and target.pending_approval and actor.has_staff(StaffPermission.APPROVE_ACCOUNTS):
         keys |= {"a", "d"}
     return frozenset(keys)
@@ -6895,6 +7105,13 @@ async def _read_user_detail_key(session: Session) -> EditorKey:
 # screen's status lines are drawn by `_draw_user_detail` directly, not
 # through `netbbs.net.resource_editor`.
 _USER_DETAIL_HELP: dict[str, tuple[str, str]] = {
+    "u": (
+        "Auto promotion",
+        "Whether the node's promotion rules (Users > Promotion rules) may raise this "
+        "account at its next login. Setting its level by hand turns them off, so a "
+        "demotion is not undone; this turns them back on, or off. They never apply to "
+        "the guest account, staff, SysOps, or pending and disabled accounts.",
+    ),
     "l": (
         "Level",
         "The account's permission level. 0 is an ordinary caller; higher numbers unlock "
@@ -7168,6 +7385,21 @@ async def _user_detail_screen(
                     _announce_line(session, colored("Not a level or a level's name -- cancelled.", fg_color=MUTED_COLOR))
                 elif new_level != target.user_level:
                     target = await _change_user_level(session, lane, actor, target, new_level, node_controls)
+            blocked = await _redraw()
+        elif choice == "u":
+            # A toggle toggles (design doc §3.5): nothing to confirm.
+            try:
+                target = await lane.run(
+                    set_automatic_promotion, target, target.level_set_by_hand, changed_by=actor
+                )
+            except UserManagementError as exc:
+                _announce_line(session, colored(str(exc), fg_color=MUTED_COLOR))
+            else:
+                _announce_line(
+                    session,
+                    f"Promotion rules {'no longer apply' if target.level_set_by_hand else 'apply again'} "
+                    f"to {target.username!r}.",
+                )
             blocked = await _redraw()
         elif choice == "t":
             await session.write_line("")

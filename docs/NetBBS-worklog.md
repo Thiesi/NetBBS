@@ -729,6 +729,16 @@ the raw-level form is private. The domain post, upload and file-listing
 checks once took the stored value and crashed on every inheriting resource,
 while the flows' own checks, which resolved it, passed first.
 
+### Automatic promotion acts as no account (issue #992)
+
+`promote_automatically` is the one path that changes a level without an
+acting account: it skips `_require_account_authority`, re-checks the account
+inside its own `BEGIN IMMEDIATE`, and logs with `actor=None`, which the log
+viewers show as "(system)". Every person-made level change goes through
+`set_user_level`, which also sets `users.level_set_by_hand`; keep it that way,
+or a demotion becomes something the next login undoes. Count logins from
+`users.login_count`, never from `session_history`, which is pruned.
+
 ### The access map is held to the checks (issue #1005)
 
 `netbbs.access_map` lists every level gate for the SysOp's level screens.
