@@ -370,6 +370,18 @@ MAIN_MENU_BANNER_PRESETS: tuple[BannerPreset, ...] = (
         ),
         resource="slots_inkwell_blocks.ans", mode="slots",
     ),
+    # Hand-drawn items (issue #929, step 5): every item drawn into the art
+    # itself; a caller's items it can't use are blanked, and the ones it
+    # doesn't draw (Games, Who's online, Moderation...) fill the one-row
+    # {menu} slot under them.
+    BannerPreset(
+        key="slots_card_catalogue", name="Card Catalogue (items drawn in)", depth="16-color ANSI",
+        description=(
+            "Every menu item drawn into a blue catalogue card: items a caller can't use are "
+            "left blank, and anything extra they have fills the row underneath."
+        ),
+        resource="slots_card_catalogue.ans", mode="slots",
+    ),
 )
 
 

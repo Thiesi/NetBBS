@@ -5142,6 +5142,39 @@ def test_masthead_menu_check_lists_slots_problems_and_fit(db, lane, sysop):
     assert "Problem: no {menu WxH} slot" in _visible(_written_text(session))
 
 
+def test_masthead_menu_check_reports_hand_drawn_items(db, lane, sysop):
+    from netbbs.net.main_menu_banner import main_menu_banner_path
+
+    art = (
+        b"  [M]essage boards  [C]hat  [F]iles  [N]ew scan  [/] Find  [?] Help  [L]ogoff\r\n"
+        b"  [S]ysOp console  [x] marks the spot  [D]irectory [P]rofile\r\n"
+        b"{menu 78x4}"
+    )
+    main_menu_banner_path(db).write_bytes(art)
+    session = FakeSession(["s", "m", "m", "m", "c", " ", "b", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    text = _visible(_written_text(session))
+    assert "Drawn items:" in text
+    assert "[m] '[M]essage boards' at row 1, column 3" in text
+    assert "'[x] marks the spot' at row 2, column 20: not a main-menu key" in text
+    assert "holds 2 keys and counts as [D] only" in text
+    assert "Your menu: fits." in text
+    assert "Blanked, as this caller can't use them: [S]" in text
+    assert "In the {menu} slot, as the art doesn't draw them:" in text
+    assert "[E]-mail" in text
+
+
+def test_slot_preview_says_what_a_level_0_caller_has_blanked(db, lane, sysop):
+    from netbbs.net.main_menu_banner import SLOTS_MODE, main_menu_banner_path, set_main_menu_art_mode
+
+    main_menu_banner_path(db).write_bytes(b"  [S]ysOp console  [L]ogoff\r\n{menu 78x6}")
+    set_main_menu_art_mode(db, SLOTS_MODE)
+    session = FakeSession(["s", "m", "m", "m", "p", " ", " ", "b", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    text = _visible(_written_text(session))
+    assert text.count("Blanked, as this caller can't use them: [S]") == 1
+
+
 def test_masthead_menu_check_says_when_callers_do_not_see_the_art(db, lane, sysop):
     from netbbs.net.main_menu_banner import (
         SLOTS_MODE,
@@ -5209,7 +5242,7 @@ def test_masthead_preview_in_slots_mode_says_when_the_art_is_switched_off(db, la
 
 def test_every_slot_sample_fits_a_sysops_longest_menu(db, sysop):
     from netbbs.net.banner_presets import MAIN_MENU_BANNER_PRESETS, load_main_menu_banner_preset
-    from netbbs.net.main_menu import slot_menu_preview
+    from netbbs.net.main_menu import menu_label_key, slot_menu_preview
     from netbbs.rendering import decode_banner_bytes
     from netbbs.rendering.art_slots import layout_menu_slot, parse_slot_art
 
@@ -5229,7 +5262,10 @@ def test_every_slot_sample_fits_a_sysops_longest_menu(db, sysop):
             "[W]ho's online", "S[t]aff list", "[I]nvitations", "[V]erify", "[S]ysOp", "Moder[a]tion (999)",
             "[S]taff", "[L]ogoff",
         ]
-        assert layout_menu_slot(longest, art.menu.width, art.menu.height) is not None, preset.key
+        # Items the art draws itself (#929, step 5) stay out of the slot.
+        drawn = {item.key for item in art.items}
+        undrawn = [label for label in longest if menu_label_key(label) not in drawn]
+        assert layout_menu_slot(undrawn, art.menu.width, art.menu.height) is not None, preset.key
 
 
 def test_masthead_gallery_applying_a_slot_preset_makes_it_the_menu(db, lane, sysop):
