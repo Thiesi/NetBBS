@@ -735,7 +735,14 @@ def test_a_carried_chain_updates_only_an_introduced_identity_and_only_if_it_veri
     forged_transitions = [dict(t) for t in chain["transitions"]]
     forged_transitions[-1] = dict(forged_transitions[-1], signature=base64.b64encode(b"x" * 64).decode("ascii"))
     forged = dict(chain, transitions=forged_transitions)
-    assert b.apply_carried_key_chains([r_chain, stranger, wrong_root, forged, "junk", {"fingerprint": 7}]) == []
+    # A transition whose envelope has no payload at all (review of #1027): it
+    # passes the shape and version checks and used to escape at the merge.
+    no_payload_transitions = [dict(t) for t in chain["transitions"]]
+    no_payload_transitions[-1] = dict(no_payload_transitions[-1], envelope={"netbbs_protocol": 1})
+    no_payload = dict(chain, transitions=no_payload_transitions)
+    assert b.apply_carried_key_chains(
+        [r_chain, stranger, wrong_root, forged, no_payload, "junk", {"fingerprint": 7}]
+    ) == []
     assert b.apply_carried_key_chains("not a list") == []
     before = b.introduced[a.identity.fingerprint].transitions
     assert len(before) == 1

@@ -2649,11 +2649,15 @@ class LinkNode:
                     self._check_protocol_version(
                         transition.envelope, kind="key_transition", sender_fingerprint=fingerprint,
                     )
+                # Inside the guard: the merge is the first thing to read each
+                # transition's payload, which nothing above has checked exists
+                # (review of #1027). Outside it, one malformed chain ended the
+                # whole sync pass with that seed.
+                merged = merge_key_chain(existing, transitions)
             except (KeyError, TypeError, ValueError, LinkProtocolError):
                 continue
             except Exception:  # noqa: BLE001 -- unvalidated input
                 continue
-            merged = merge_key_chain(existing, transitions)
             if merged is None or merged == existing.transitions:
                 continue
             record = replace(existing, transitions=merged)
