@@ -5322,7 +5322,7 @@ def test_every_slot_sample_fits_a_sysops_longest_menu(db, sysop):
             "[S]taff", "[L]ogoff",
         ]
         # Items the art draws itself (#929, step 5) stay out of the slot.
-        drawn = {item.key for item in art.items}
+        drawn = {key for item in art.items for key in item.keys}
         undrawn = [label for label in longest if menu_label_key(label) not in drawn]
         assert layout_menu_slot(undrawn, art.menu.width, art.menu.height) is not None, preset.key
 
