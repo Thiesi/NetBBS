@@ -183,7 +183,7 @@ from netbbs.link.protocol import (
 from netbbs.link.carry import KIND_LABELS, accept_genesis, genesis_kind
 from netbbs.link.store import event_is_stored, forget_opaque_event, opaque_events_to_rejudge, store_opaque_event
 from netbbs.link.realtime_proxy import open_realtime_connection, record_handshake_outcome
-from netbbs.link.attestation_delivery import receive_attestation_bundle
+from netbbs.link.attestation_delivery import receive_attestation_bundle_safely
 from netbbs.link.attestation_bundles import (
     SEALED_ATTESTATION_BUNDLE_OBJECT_TYPE,
     MalformedBundle,
@@ -2770,7 +2770,7 @@ class LinkServer:
             return web.json_response({"error": f"malformed attestation bundle: {exc}"}, status=400)
         if bundle.recipient_fingerprint != self._node.identity.fingerprint:
             return web.json_response({"error": "bundle is addressed to another node"}, status=400)
-        result = await receive_attestation_bundle(
+        result = await receive_attestation_bundle_safely(
             self._node, self._lane, bundle, enforce_trust_policy=self._enforce_trust_policy,
         )
         return web.json_response({"applied": result.applied, "reason": result.reason})

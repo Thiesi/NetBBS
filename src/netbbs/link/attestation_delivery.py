@@ -33,6 +33,7 @@ from typing import TYPE_CHECKING, Any
 
 import nacl.signing
 
+from netbbs.boards.content_id import ContentIdError
 from netbbs.identity.encryption import EncryptionError
 from netbbs.link.attestation_bundles import (
     MalformedBundle,
@@ -92,7 +93,13 @@ def _object_content_id(raw: dict[str, Any]) -> str:
     envelope = raw.get("envelope")
     if not isinstance(envelope, dict):
         raise ValueError("attestation object has no envelope")
-    return hashlib.sha256(canonical_bytes(envelope)).hexdigest()
+    try:
+        return hashlib.sha256(canonical_bytes(envelope)).hexdigest()
+    except ContentIdError as exc:
+        # Not a ValueError on every version: an object carrying a value
+        # canonical JSON refuses (a float, an unsafe integer) is unusable,
+        # and must not escape as anything else (review of #1042).
+        raise ValueError(f"attestation object cannot be canonicalized: {exc}") from exc
 
 
 # -- issuer ---------------------------------------------------------------
@@ -301,7 +308,7 @@ def _verify_key_for(raw: dict[str, Any], verify_keys: list[nacl.signing.VerifyKe
         try:
             _verify_wire(raw, key)
             return key
-        except ValueError:
+        except (ValueError, ContentIdError):
             continue
     return None
 
@@ -330,7 +337,7 @@ def _ingest_objects(
         except UnknownAttestationSubject:
             if len(pending) < MAX_PENDING_OBJECTS_PER_ISSUER:
                 pending.append(raw)
-        except ValueError as exc:
+        except (ValueError, ContentIdError) as exc:
             _logger.info("Link attestation snapshot: skipped an object from %s: %s", issuer, exc)
             skipped += 1
     return ingested, pending, skipped
@@ -429,16 +436,38 @@ def retry_pending_attestation_objects(
 
 
 def _issuer_verify_keys(node: "LinkNode", issuer: str) -> list[nacl.signing.VerifyKey]:
+    """The issuer's current signing key only, as the pull verifies (review of
+    #1042). A snapshot is signed fresh, and the issuer re-signs what it still
+    asserts after a rotation (#623), so a superseded key's signature -- on the
+    bundle or on an object inside it -- is skipped for good, never accepted."""
     from netbbs.link.node_identity import NodeIdentityError
     from netbbs.link.protocol import LinkProtocolError
 
     try:
-        return [
-            node.resolve_known_signing_key(issuer, "attestation bundle"),
-            *node.resolve_known_superseded_signing_keys(issuer),
-        ]
+        return [node.resolve_known_signing_key(issuer, "attestation bundle")]
     except (LinkProtocolError, NodeIdentityError, ValueError):
         return []
+
+
+async def receive_attestation_bundle_safely(
+    node: "LinkNode", lane: "DatabaseLane", bundle: SealedAttestationBundle,
+    *, enforce_trust_policy: bool = False, via: str = "direct",
+) -> AppliedSnapshot:
+    """`receive_attestation_bundle`, whose failure costs that bundle and
+    nothing else (review of #1042). Both callers -- the sync pass's relay
+    pickup and the direct-delivery route -- handle bundles a peer chose; one
+    that raises past every check must not end the sync task or answer 500."""
+    import sqlite3
+
+    try:
+        return await receive_attestation_bundle(
+            node, lane, bundle, enforce_trust_policy=enforce_trust_policy, via=via,
+        )
+    except (ValueError, TypeError, KeyError, ContentIdError, sqlite3.Error) as exc:
+        _logger.warning(
+            "Link attestations: skipped a snapshot from %s (%s): %s", bundle.issuer_fingerprint, via, exc,
+        )
+        return AppliedSnapshot(False, "unusable")
 
 
 async def receive_attestation_bundle(

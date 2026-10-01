@@ -500,3 +500,120 @@ def test_a_dialable_recipient_is_reached_directly(tmp_path):
     finally:
         i_db.close()
         r_db.close()
+
+
+
+# -- review of #1042: what a peer put inside a bundle cannot stop the pass ----
+
+
+def _deposit_crafted(net, objects, *, sequence):
+    """Seal `objects` -- whatever they are -- into a genuine bundle from the
+    issuer and leave it at the recipient's relay, as a hostile or buggy issuer
+    could."""
+    import base64
+    import json as json_module
+
+    from netbbs.identity.encryption import encrypt_for
+    from netbbs.link.attestation_bundles import SealedAttestationBundle
+    from netbbs.link.events import canonical_bytes
+    from netbbs.link.transport import deposit_attestation_bundle
+
+    # Plain JSON, not canonical: our own builder could not seal a float at all.
+    plaintext = json_module.dumps({"objects": objects, "pad": ""}).encode("utf-8")
+    envelope = {
+        "netbbs_protocol": 1, "object_type": "sealed_attestation_bundle",
+        "payload": {
+            "issuer_fingerprint": net.i.identity.fingerprint,
+            "recipient_fingerprint": net.r.identity.fingerprint,
+            "sequence": sequence, "created_at": _now(),
+            "ciphertext": base64.b64encode(
+                encrypt_for(net.r.identity.signing_key.verify_key, plaintext)
+            ).decode("ascii"),
+        },
+    }
+    signature = net.i.identity.signing_key.signing_key.sign(canonical_bytes(envelope)).signature
+    bundle = SealedAttestationBundle(envelope=envelope, signature=signature)
+    hello = net.i.build_hello(addresses=None, outgoing_only=True, created_at="2026-01-01T00:00:00+00:00")
+    return bundle, hello, deposit_attestation_bundle
+
+
+def test_an_object_with_a_float_inside_a_bundle_is_skipped_and_the_rest_applied(net):
+    """A float anywhere in an object makes canonical JSON refuse it with an
+    error that is not a ValueError. It used to escape the per-object handling
+    and end the whole sync task. Now that object is skipped and the genuine
+    one beside it is applied."""
+    genuine = snapshot_objects(net.i_db.db)
+    poisoned = {"envelope": {"netbbs_protocol": 1, "object_type": "remote_identity_attestation",
+                             "payload": {"issuer_fingerprint": net.i.identity.fingerprint, "weight": 1.5}},
+                "signature": "AAAA"}
+
+    async def scenario():
+        await net.start()
+        try:
+            async with aiohttp.ClientSession() as session:
+                bundle, hello, deposit = _deposit_crafted(net, [poisoned, *genuine], sequence=10**12)
+                await deposit(session, f"http://127.0.0.1:{net.server.port}", net.r.identity.fingerprint, bundle, hello)
+                return await net.pickup(session)
+        finally:
+            await net.stop()
+
+    assert asyncio.run(scenario()) is True  # the pass carried on
+    assert remote_meets_age(net.r_db.db, net.subject, 18, now_iso=_now())
+
+
+def test_a_bundle_that_fails_as_a_whole_costs_only_itself(net, monkeypatch):
+    """Per bundle as well as per object: whatever escapes the checks is
+    logged and that bundle skipped, on the relay pickup (the mail picked up
+    with it still arrives) and on the direct route (a 200, not a 500)."""
+    import netbbs.link.attestation_delivery as delivery
+    from netbbs.boards.content_id import ContentIdError
+
+    def explode(*args, **kwargs):
+        raise ContentIdError("float in payload")
+
+    monkeypatch.setattr(delivery, "apply_attestation_snapshot", explode)
+
+    async def scenario():
+        await net.start()
+        try:
+            async with aiohttp.ClientSession() as session:
+                await net.deliver(session)
+                reached = await net.pickup(session)
+                bundle, _, _ = _deposit_crafted(net, [], sequence=10**13)
+                url = f"http://127.0.0.1:{net.server.port}"
+                from netbbs.link.transport import send_attestation_bundle
+                # The relay node is not the recipient, so stand up the recipient's own route.
+                server = await _run_server(net.r, lambda: net.r.build_hello(
+                    addresses=None, outgoing_only=True, created_at="2026-01-01T00:00:00+00:00"), net.r_db.lane)
+                try:
+                    await send_attestation_bundle(session, f"http://127.0.0.1:{server.port}", bundle)
+                finally:
+                    await server.stop()
+                return reached, url
+        finally:
+            await net.stop()
+
+    reached, _ = asyncio.run(scenario())
+    assert reached is True
+
+
+def test_an_object_signed_by_a_rotated_out_key_is_not_ingested(net):
+    """As the pull: only the issuer's current key counts. An object the issuer
+    signed before a rotation, carried in a snapshot signed after it, is
+    skipped; the issuer re-signs what it still asserts."""
+    async def scenario():
+        await net.start()
+        try:
+            # Rotate without re-signing the issued objects.
+            net.i.identity = rotate_operational_key(net.i.identity, purpose="signing")
+            rotated_hello = net.i.build_hello(addresses=None, outgoing_only=True, created_at="2026-03-01T00:00:00+00:00")
+            net.r.handle_introduction(rotated_hello)
+            async with aiohttp.ClientSession() as session:
+                await _deliver_attestation_bundles(net.i, session, net.i_db.lane, lambda: rotated_hello)
+                await net.pickup(session)
+        finally:
+            await net.stop()
+
+    asyncio.run(scenario())
+    assert not remote_meets_age(net.r_db.db, net.subject, 18, now_iso=_now())
+    assert has_attestation_snapshot_from(net.r_db.db, net.i.identity.fingerprint)  # the bundle itself applied

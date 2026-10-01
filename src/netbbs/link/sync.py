@@ -189,7 +189,7 @@ from netbbs.link.attestation_bundles import BundleTooLarge, SealedAttestationBun
 from netbbs.link.attestation_delivery import (
     has_attestation_snapshot_from,
     plan_attestation_deliveries,
-    receive_attestation_bundle,
+    receive_attestation_bundle_safely,
     record_attestation_delivery,
     record_attestation_delivery_failure,
     retry_pending_attestations,
@@ -2681,7 +2681,7 @@ async def _pickup_relay_mail(
         for bundle in pickup.bundles:
             # Issue #632. Checked and applied exactly as a directly delivered
             # one; the relay is only where it waited.
-            result = await receive_attestation_bundle(
+            result = await receive_attestation_bundle_safely(
                 node, lane, bundle, enforce_trust_policy=enforce_trust_policy, via="relay",
             )
             if not result.applied and result.reason not in {"stale_sequence"}:
