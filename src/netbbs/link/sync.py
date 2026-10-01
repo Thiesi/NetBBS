@@ -189,6 +189,7 @@ from netbbs.link.enforcement import (
     decide_event_authorship,
     decide_node_action,
     ensure_node_subject,
+    record_direct_activity,
     event_author,
     node_transport_state,
     LinkPolicyAction,
@@ -918,6 +919,9 @@ async def _sync_one_seed(
             seed_peer.fingerprint, peer_state.value,
         )
         return True
+    if enforce_trust_policy:
+        # Issue #1035: a completed hello is a day of direct interaction.
+        await lane.run(record_direct_activity, seed_peer.fingerprint)
 
     # Design doc §8.8, issue #85 (§9.6, issue #87 for channels; §11,
     # issue #93 for file-area catalogues): pull-based catch-up, asked of
