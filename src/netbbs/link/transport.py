@@ -594,6 +594,14 @@ async def persist_accepted_events(
             )
             if projected is None:
                 await _forget_unless_stored(lane, node, content_id)
+            elif node.on_channel_message_materialized is not None:
+                # Issue #860: callers in the channel see it now, not on rejoin.
+                try:
+                    await node.on_channel_message_materialized(
+                        envelope["envelope"]["payload"]["channel_id"], content_id, projected,
+                    )
+                except Exception:  # Live display must never cost the persist.
+                    _logger.exception("could not show a carried channel message live")
             continue
         elif object_type == FILE_DESCRIPTOR_OBJECT_TYPE:
             # Design doc §11.2, issue #89: same shape -- catalogue
@@ -1334,6 +1342,10 @@ class LinkRealtimeSessionRegistry:
 
     def retire_transport_key(self, key: bytes) -> None:
         self._retired_transport_keys.add(key)
+
+    @property
+    def own_fingerprint(self) -> str:
+        return self._own_fingerprint
 
     def get(self, fingerprint: str) -> LinkRealtimeSession | None:
         return self._sessions.get(fingerprint)

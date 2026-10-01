@@ -394,7 +394,17 @@ of a declaration too large to send whole. Advertised for the same reason as
 `INVENTORY_NOT_CARRIED_CAPABILITY`: the field is signed, so an older responder
 would refuse a request that carries it."""
 
-LINK_CAPABILITIES: tuple[str, ...] = (INVENTORY_NOT_CARRIED_CAPABILITY, INVENTORY_PAGES_CAPABILITY)
+CHANNEL_RELAY_CAPABILITY = "channel_relay"
+"""Issue #860: this node understands a live `channel_message` frame's
+optional `author_node_fingerprint` and `content_id`. A channel's origin
+relays a subscriber's live line to its other subscribers with the first, and
+any sender adds the second so a receiver shows a line once even when its
+signed event arrives later. A node without it would refuse those fields as a
+malformed frame, so they are only ever sent to a peer that advertises this."""
+
+LINK_CAPABILITIES: tuple[str, ...] = (
+    INVENTORY_NOT_CARRIED_CAPABILITY, INVENTORY_PAGES_CAPABILITY, CHANNEL_RELAY_CAPABILITY,
+)
 """Every optional behaviour this version advertises in its own descriptor."""
 
 

@@ -66,7 +66,7 @@ from collections import deque
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from string import hexdigits
-from typing import NamedTuple
+from typing import Any, Awaitable, Callable, NamedTuple
 
 import nacl.signing
 
@@ -674,12 +674,21 @@ def _validate_node_presence_delta_payload(payload: dict, *, path: str) -> None:
     )
 
 
+_CHANNEL_MESSAGE_FRAME_KEYS = frozenset({"channel_id", "user_id", "display_label", "body", "created_at"})
+# Issue #860, sent only to a peer advertising `CHANNEL_RELAY_CAPABILITY`.
+_CHANNEL_MESSAGE_FRAME_OPTIONAL_KEYS = frozenset({"author_node_fingerprint", "content_id"})
+
+
 def _validate_channel_message_payload(payload: dict, *, path: str) -> None:
-    if set(payload) != {"channel_id", "user_id", "display_label", "body", "created_at"}:
+    keys = set(payload)
+    if not _CHANNEL_MESSAGE_FRAME_KEYS <= keys or keys - _CHANNEL_MESSAGE_FRAME_KEYS - _CHANNEL_MESSAGE_FRAME_OPTIONAL_KEYS:
         raise LinkProtocolError(
-            f"{path} must contain exactly channel_id, user_id, display_label, body, and created_at"
+            f"{path} must contain exactly channel_id, user_id, display_label, body, and created_at, "
+            "optionally with author_node_fingerprint and content_id"
         )
     _validate_bounded_id(payload["channel_id"], path=f"{path}.channel_id")
+    for key in _CHANNEL_MESSAGE_FRAME_OPTIONAL_KEYS & keys:
+        _validate_bounded_id(payload[key], path=f"{path}.{key}")
     _validate_bounded_id(payload["user_id"], path=f"{path}.user_id")
     _validate_bounded_text(
         payload["display_label"], path=f"{path}.display_label", max_bytes=_REALTIME_MAX_DISPLAY_LABEL_BYTES
@@ -973,15 +982,23 @@ def build_node_presence_delta_frame(
 
 def build_channel_message_frame(
     channel_id: str, user_id: str, display_label: str, body: str, created_at: str,
-    *, message_id: str | None = None,
+    *, message_id: str | None = None, content_id: str | None = None,
+    author_node_fingerprint: str | None = None,
 ) -> RealtimeFrame:
+    """`content_id` and `author_node_fingerprint` (issue #860) only for a
+    peer advertising `CHANNEL_RELAY_CAPABILITY`; see its docstring."""
+    payload = {
+        "channel_id": channel_id, "user_id": user_id, "display_label": display_label,
+        "body": body, "created_at": created_at,
+    }
+    if content_id is not None:
+        payload["content_id"] = content_id
+    if author_node_fingerprint is not None:
+        payload["author_node_fingerprint"] = author_node_fingerprint
     frame = RealtimeFrame(
         type="channel_message",
         message_id=message_id or new_realtime_message_id(),
-        payload={
-            "channel_id": channel_id, "user_id": user_id, "display_label": display_label,
-            "body": body, "created_at": created_at,
-        },
+        payload=payload,
     )
     validate_realtime_frame_payload(frame)
     return frame
@@ -2098,6 +2115,13 @@ class LinkNode:
     # Issue #844: per peer this node dials, what it last learned about that
     # peer taking this node's own content. Memory only; see `PeerExchange`.
     peer_exchange: dict[str, PeerExchange] = field(default_factory=dict)
+    # Issue #860: told about each carried `channel_message` once it is
+    # materialized, so callers already in the channel see it without
+    # rejoining. Set by `netbbs.__main__` to the live-channel bridge; None in
+    # a node without one.
+    on_channel_message_materialized: (
+        Callable[[str, str, Any], Awaitable[None]] | None
+    ) = field(default=None, repr=False, compare=False)
 
     @property
     def peers(self) -> dict[str, "PeerRecord"]:
