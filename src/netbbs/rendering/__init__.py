@@ -35,8 +35,10 @@ from netbbs.rendering.ansi_art import (
     decode_art_bytes,
     decode_cp437_art,
     decode_banner_bytes,
+    decode_banner_bytes_fitting,
     encode_ansi_bytes,
     encode_cp437_art,
+    ice_to_bright_background,
     trim_trailing_blank_rows,
 )
 from netbbs.rendering.ansi_parse import parse_ansi_into_buffer
@@ -105,8 +107,10 @@ __all__ = [
     "decode_art_bytes",
     "decode_cp437_art",
     "decode_banner_bytes",
+    "decode_banner_bytes_fitting",
     "encode_ansi_bytes",
     "encode_cp437_art",
+    "ice_to_bright_background",
     "parse_ansi_into_buffer",
     "fg",
     "fg_rgb",

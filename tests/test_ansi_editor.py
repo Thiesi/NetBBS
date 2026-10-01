@@ -21,6 +21,7 @@ from netbbs.rendering import clear_screen
 from netbbs.rendering.ansi_art import decode_ansi_bytes
 from netbbs.rendering.ansi_parse import parse_ansi_into_buffer
 from netbbs.rendering.screen_buffer import ScreenBuffer
+from tests.eventually import eventually
 
 _EDITOR_KEY_SENTINELS: dict[str, EditorKeyKind] = {
     "ENTER": EditorKeyKind.ENTER,
@@ -692,8 +693,12 @@ def test_autosave_writes_the_draft_while_dirty(tmp_path):
         task = asyncio.create_task(
             edit_ansi_art(session, initial_bytes=None, draft_path=draft, autosave_interval_seconds=0.02)
         )
-        await asyncio.sleep(0.15)
-        assert draft.exists()
+        # Wait for the autosave itself, not a fixed time (issue #999): on a
+        # loaded machine the first 0.02 s tick can land well after 0.15 s.
+        # The draft is written synchronously on the loop, so once it exists
+        # it is complete.
+        assert await eventually(lambda: draft.exists() or task.done()), "no autosave"
+        assert not task.done(), "the editor ended before it autosaved"
         buf = _buffer_from(draft.read_bytes())
         assert buf.get_cell(0, 0).char == "A"
         task.cancel()

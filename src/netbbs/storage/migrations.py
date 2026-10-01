@@ -3870,4 +3870,41 @@ MIGRATIONS = [
         ALTER TABLE mail_messages ADD COLUMN resent_at TEXT;
         """,
     ),
+    Migration(
+        description=(
+            "Issue #745: a trusted reporter's scope saved as `dimension:*` was stored literally and "
+            "matched no signal. Replace each such row with one row per category of that dimension "
+            "(the categories `netbbs.link.trust` knew when this migration was written), as saving "
+            "the grant now does, and drop that reporter's pull cursors so the next pass re-reads "
+            "what was skipped, as `configure_trusted_reporter` does when a grant changes. Effective "
+            "trust is recomputed at startup."
+        ),
+        sql="""
+        WITH categories(dimension, category) AS (VALUES
+            ('identity_integrity', 'signed_equivocation'),
+            ('identity_integrity', 'revoked_key_use'),
+            ('identity_integrity', 'invalid_authority'),
+            ('identity_integrity', 'invalid_signature_delivery'),
+            ('resource_behavior', 'malformed_traffic'),
+            ('resource_behavior', 'request_flood'),
+            ('resource_behavior', 'quota_evasion'),
+            ('resource_behavior', 'inventory_nondelivery'),
+            ('resource_behavior', 'relay_abuse'),
+            ('content_conduct', 'spam'),
+            ('content_conduct', 'harassment'),
+            ('content_conduct', 'illegal_content'),
+            ('content_conduct', 'off_topic'),
+            ('content_conduct', 'other')
+        )
+        INSERT OR IGNORE INTO link_trust_reporter_scopes (reporter_fingerprint, dimension, category)
+        SELECT scope.reporter_fingerprint, scope.dimension, categories.category
+        FROM link_trust_reporter_scopes AS scope
+        JOIN categories ON categories.dimension = scope.dimension
+        WHERE scope.category = '*';
+        DELETE FROM link_trust_pull_cursors WHERE issuer_fingerprint IN (
+            SELECT reporter_fingerprint FROM link_trust_reporter_scopes WHERE category = '*'
+        );
+        DELETE FROM link_trust_reporter_scopes WHERE category = '*';
+        """,
+    ),
 ]
