@@ -454,9 +454,69 @@ node logs it once; the console's check warns when a level-255 SysOp's menu
 would not fit. ASCII callers, a terminal smaller than the art, and art that
 fails the check get the generated menu too. Art narrower than the screen is
 drawn left-aligned, and the prompt goes below the art unless a `{prompt}`
-token places it. The main menu comes first, then the welcome and logoff
-fields; the Boards, Chat and Files lists need a list region with paging and
-get their own design.
+token places it. The main menu, welcome and logoff banners use slots today;
+the three lists and hand-drawn items below are being built. Pacing works for
+the welcome banner and the main menu's art.
+
+*List screens.* The Boards, file areas and Chat channels lists take a `{list
+WxH}` region. The current page fills it, one row per entry: the number to
+press for it, the name, and one compact column the screen chooses (unread
+posts for boards, files for areas, people for channels). A board, area or
+channel whose name requirement the caller does not meet shows "needs
+verification" in that column instead, so the gate note §3.6 requires survives
+in art too. Descriptions and full tables appear only on the generated list. A
+page holds as many entries as the region has rows; numbering, one-digit
+selection, browser clicks, search and the paging keys work as on the generated
+list, and the navigation block and prompt go below the art unless `{prompt}`
+places it. The cursor row is drawn reversed in the token's colour. Three more
+fields serve lists: `{title N}`, `{page N}` ("2/5") and `{count N}`. A region
+under 3 rows, or one that leaves the name under 12 columns, falls back to the
+generated list, as does every case that makes the main menu fall back.
+
+*Hand-drawn items.* A SysOp may draw the menu's items into the art instead of
+leaving them to a `{menu WxH}` region (written `{menu}` below; it is the same
+token). Every bracketed key drawn in the art,
+`[K]`, marks one item; the item spans the run of text around it, bounded by
+two or more spaces, which is also how the browser terminal finds what a click
+means. Box-drawing and block characters also end an item, so a frame drawn
+one space from it is not part of it, and an item drawn inside a slot is not an
+item, since the slot is drawn over it. A run holding two keys, such as
+`[B]oards [E]-mail` with one space, is one item holding both: both count as
+drawn, it is blanked only for a caller who can use neither, and the console's
+check suggests two spaces between them. An item the caller cannot use is
+blanked: its cells are repainted as spaces in the background each cell shows,
+so frames and fills stay whole and the caller sees only what the generated
+menu would show. Items the caller can use that the art does not draw go into
+the art's `{menu}` region; art with no `{menu}` region and an undrawn item
+falls back to the generated menu, so nothing is ever hidden, and art that
+draws its items needs no `{menu}` region of its own. A drawn `[X]` that is no
+main-menu key is the SysOp's decoration: it stays as drawn, and the console's
+check lists it. `[S]` means the SysOp console to a SysOp and the staff console
+to a staff member, so a drawn `[S]ysOp` item is blanked for staff, whose
+`[S]taff` item goes into `{menu}`, and the other way round. Buttons drawn over
+several rows are not supported.
+
+*Pacing.* Art can be played at an emulated line speed so that it draws itself
+the way it did over a modem (`netbbs.net.art_pacing`). Each banner's speed is
+off, 2400, 9600 or 38400 bps, off by default, set with **Speed** on its console
+screen. NetBBS paces the bytes itself, in small chunks, and checks for a
+waiting key between them (`Session.take_waiting_key`); any key ends the effect
+and writes the rest at once, and it is consumed with anything typed behind it,
+so Enter cannot submit an empty prompt that follows. One draw is paced for at
+most 5 seconds; past that the rest goes out at once. Each piece of art plays
+once per connection: the welcome banner when a caller connects, the main
+menu's art on the first main menu, and a list's art on the first visit once
+list slots land. It never plays on a redraw, after a notice, on the screen
+restored after a break-in, or in a door. Plain banners play in the order they
+were drawn, so cursor-moving ANSI animations work, and art that moves the
+cursor back over rows it drew is exempt from the row-end trimming of still art
+(`revisits_rows`), since its trailing spaces may erase an earlier frame. Slot
+art is rebuilt cell by cell and is revealed top to bottom; the whole art is
+prepared once (iCE colours, CTerm's bright backgrounds) so no chunk loses a
+colour state. Nothing is paced for a session with no live terminal
+(`Session.paces_art`, set only by the Telnet, SSH and web transports), during
+a break-in, for ASCII callers, or for callers who chose quick under
+**Profile → [Q]uick or animated banners** (animated by default).
 
 A SysOp may override three of the node's branding colors -- accent (board/
 channel/user names and other navigable-item branding), header (section
@@ -2035,6 +2095,106 @@ to end it.
 Staff permissions, the Staff list and the away notice are local to the node.
 None of them is carried over Link: a staff member's moderation of carried
 content follows §5.2 and §9.5 exactly as a moderator's does.
+
+### 5.7 The access map (issue #1004)
+
+Level gates are set in many places: on each board, file area, channel and
+door, as Community defaults, and in node settings. The access map is the one
+list of all of them, so a SysOp can see what a level opens and what a level
+change gains or loses without opening every resource. The SysOp's level
+screens (#1006-#1009) show it; this section says what it contains.
+
+**What is on it.** One gate per thing a level opens:
+
+- each board and file area twice, for reading and for posting or uploading;
+- each chat channel (entering it) and each door (playing it);
+- the node-wide gates: the node map, mail, opening new MRC rooms, and the
+  SysOp console at 255.
+
+Resources excluded from this node (§9.5) are left out, since nobody reaches
+them.
+
+**Each gate says where its level comes from:** set on the resource, inherited
+from its Community's default, the system default of 0, a node setting, or
+fixed (the SysOp level).
+
+**The level a gate opens at.** Usually its own level. Posting on a board or
+uploading to an area also needs its read level, since a caller who cannot
+open the board cannot post on it, so a write gate opens at the higher of the
+two.
+
+**Levels only.** The map answers what a level opens. It does not claim more:
+
+- Age, verified-name, members-only and hidden are facts about each account
+  or each channel's membership. The map names them as the gate's conditions,
+  such as "age 18+", rather than counting them in.
+- A read or write grant (§5.2) lets one account past one resource's level.
+  It belongs to that account, not to a level, so the map does not list it.
+- A gate that opens for nobody right now says why: a closed board, Link off
+  for the node map, MRC open rooms switched off.
+- A carried Linked board's write level holds only this node's callers: posts
+  carried in from other nodes are not held to it (issue #993). The map says
+  so on that gate.
+
+**The Levels screen** (issue #1007). `Users ▸ Le[v]els` lists the levels that
+matter: 0, every level a gate opens at (switched-off gates aside), and every
+level an enabled, approved account holds. Each row shows how many such
+accounts hold exactly that level and what it first opens. A level's own
+screen lists its gates with their level and its source, in four views: new
+at this level, everything open, still closed, and open with another gate
+still applying. Picking a board, file area, channel or door opens the screen
+the Content menu opens for it. Any level, in use or not, can be looked at.
+
+**Level fields say what they mean** (issue #1008). Every level field in an
+editor shows, next to its value, how many enabled, approved accounts are at
+that level or above, recounted from the draft as the SysOp types:
+
+- on a board or file area, a level left to inherit shows the level it
+  inherits and from where ("none: 10 from Community Market");
+- a write level below the read level is counted at the read level, since
+  posting needs reading, and says so;
+- a Community's default read and write levels also show how many boards and
+  file areas inherit them;
+- channels, doors and the node settings (node map, mail, MRC open rooms) show
+  the count alone.
+
+The count is by level only; age and verified-name gates depend on each
+account and are not counted in.
+
+**Level names** (issue #1009). A SysOp can name any level from 0 to 254, such
+as "Member" for 10, from the Levels screen; 255 is always "SysOp". A name is a
+label: gates and accounts keep their numbers, and naming, renaming or clearing
+a level changes nobody's access. The console shows a named level as
+`10 (Member)` wherever it shows a level: the Levels screens, the change
+preview, the user screen and the editors' level fields. The user screen's
+level prompt and `[G]o to level` take a level's name as well as its number.
+A name is at most 12 characters, needs a letter (so it cannot read as a
+number), and is unique regardless of case. Names are node configuration and
+travel in backups. Naming is recorded in the moderation log.
+
+**From the shell.** `python -m netbbs.admin levels` prints the ladder;
+`levels <level>` (a number or a name) prints what a level opens and what stays
+closed; `levels --user <name> --to <level>` prints the change preview for one
+account. Each takes `--json`. The command only reads.
+
+**A level change is previewed for the account** (issue #1006). Changing an
+account's level from its detail screen shows what the change gains, loses and
+leaves blocked for that account before anything is written. Unlike the map
+itself, the preview is about one account: it counts that account's read and
+write grants, so a grant that keeps a board open is no loss, and it moves
+whatever another gate still keeps the account out of (age, verified name, a
+members-only channel it is not in, mail for the guest account) into its own
+"still blocked" list instead of the gains. Something the account was kept out
+of anyway is not shown as a loss. The screen's `[A]pply` makes the change and
+`[B]ack` leaves the level as it was. A change that would be refused (the last
+SysOp, a level outside 0-255, a staff member raising someone to 255) is
+refused before the preview, and a change that opens and closes nothing is
+applied at once, its outcome line saying so.
+
+**It agrees with the checks.** The map is built from the same effective-level
+functions the checks use, and the test suite holds each gate's answer to the
+real check for accounts at every threshold. Every level check in the code is
+either on the map or recorded as not a gate, so a new gate cannot be left off.
 
 ---
 
@@ -6547,6 +6707,21 @@ approval queue, and so do their edits: an approved post must not be rewritten
 with unreviewed text. Services without an approval projection, including Link
 mail, refuse such content with a stable reason code.
 
+A pushed events request is judged event by event once the sending node itself
+is allowed (issue #897). An event refused for its author does not refuse the
+rest: the receiver takes what it may and answers 200 with
+`refused: [{content_id, reason_code}]` beside `accepted`. Only a request with
+nothing acceptable left is refused outright with 403, and that body carries the
+same `refused` list, so a single pushed letter keeps its refusal. A refusal
+about the sending node remains a 403 for the whole request. The sender sets
+each refused event aside for that peer for `DEFERRED_EVENT_RETRY_SECONDS` and
+then offers it again while the peer's inventory still asks for it, so content
+from an author on probation there arrives once that author may post, and
+refused events never fill a request ahead of everything else. A partial
+refusal is about authors, not the sending node, so it does not mark the peer
+as refusing this node's content. Senders older than this rule ignore
+`refused`, and a 200 means only that the rest arrived.
+
 Enforcement attributes independently signed content to its author/home node,
 not to a carrier recorded in `link_events.sender_fingerprint`. Current display
 suppression is evaluated from retained signed authorship at read time; changing
@@ -6982,6 +7157,20 @@ transfer, relay store, and bandwidth consumer needs:
 - safe defaults.
 
 Security state and unread user data must not be silently discarded.
+
+A caller's address is the key for per-source limits such as the login
+throttle, so it must be one the caller cannot choose. For Telnet and SSH it is
+the TCP peer. The web transport normally sits behind a reverse proxy, where the
+TCP peer is the proxy for every browser caller. `[web] trusted_proxies` (issue
+#980; empty by default) names the proxies, as IP addresses or networks, never
+hostnames. Only for a connection from one of them does NetBBS read
+`X-Forwarded-For`, and then it takes the rightmost entry that is not itself a
+trusted proxy: each proxy appends the address it received the request from, so
+everything left of that entry was written by the caller. A missing or malformed
+entry falls back to the proxy's address. The address is decided once, when the
+web session is built, so the throttle, the logs and the SysOp's screens agree.
+The `Forwarded` header (RFC 7239) is not read: the proxies the Handbook
+documents all write `X-Forwarded-For`.
 
 ### 13.6 Operational control surface
 
@@ -14095,8 +14284,9 @@ and animation pacing are later steps of #929 and build on this layer.
 
 ### Issue #929 — SysOp art: SAUCE and live slots — decided
 
-Steps 3 and 4 of #929. Normative description: §3.2, "SysOp art: storage and
-SAUCE" and "Art with live slots".
+Steps 3 to 6 of #929. Normative description: §3.2, "SysOp art: storage and
+SAUCE" and "Art with live slots", including its list screens, hand-drawn items
+and pacing.
 
 **Decision 1 — the `.ans` file is the only source.** SAUCE, pictographs and
 iCE colours are handled when the file is read. Rejected: a normalised copy in
@@ -14125,6 +14315,81 @@ which editors strip and nobody sees.
 **Decision 6 — items that do not fit fall back to the generated menu.**
 Rejected: filling the region and moving the rest behind a "more" entry, which
 silently moves items a caller can use out of sight.
+
+**Decision 7 — lists in art show a compact row.** A list region shows the
+number, the name and one column per screen; descriptions and tables stay on
+the generated list. Rejected: drawing the generated list inside the region,
+whose tables and descriptions do not fit a drawn box and whose page arithmetic
+assumes the full screen; and hiding NetBBS's own list under the art, which
+shows stale rows.
+
+**Decision 8 — hand-drawn items are found, not declared.** A drawn `[K]` is
+the item, with no extra token. Rejected: a sidecar map or SAUCE comments
+holding coordinates, which editors strip and SysOps cannot see.
+
+**Decision 9 — items a caller cannot use are blanked.** Chosen over dimming
+them after a mockup: blanking matches the generated menu, which hides them,
+and does not advertise SysOp keys. Dimming keeps the art's full shape but
+shows keys that do nothing, and relies on a colour some terminals render
+faintly.
+
+**Decision 10 — pacing on the server, not CTerm's speed sequence.** SyncTERM
+can emulate a line speed itself (`CSI Ps1 ; Ps2 * r`), but bytes already sent
+cannot be skipped, it works only in SyncTERM, and turning it off again queues
+behind the art. Server-side pacing works on every terminal and stops at once
+on a key. The skipping key is swallowed, not passed on as Voidrunner passes
+its interrupting key, because a prompt follows the art. At the 5-second cap the
+rest is sent at once; a cap that sped the art up instead was rejected, since
+the speed is part of how the art was meant to look.
+
+### Issue #1004 — the access map — decided
+
+Dogfooding found that a SysOp could not tell what giving an account a level
+meant without opening every board, file area, channel, door, Community and
+setting, nor be sure a promotion opened nothing unwanted. Normative
+description: §5.7. Step 1 (#1005) builds the map; the screens follow.
+
+**Decision 1 — one map, held to the checks by tests.** The map is computed
+from the same effective-level functions the checks use, a test compares each
+gate with the real check at every threshold, and a scan of the source fails
+on any level check the map does not account for. Rejected: routing every
+check through the map, which would rewrite every flow's gate for no change in
+behaviour; and a hand-kept list, which is the drift the map exists to end.
+
+**Decision 2 — levels only; conditions named, grants left out.** Age,
+verified-name, members-only and hidden appear as a gate's conditions, and
+read or write grants are not on the map, because they belong to accounts,
+not to levels. Rejected: answering "what can this account do" in the same
+structure, which the change preview (#1006) does per account where it needs
+to.
+
+**Decision 3 — a write gate opens at the higher of its read and write
+levels.** That is what a caller experiences. The gate still shows its own
+write level and where it comes from.
+
+**Decision 4 — the change preview is a screen, not a question** (#1006). It
+shows its content with `[A]pply` and `[B]ack` in the action bar, as §3.5 asks
+of every screen. Rejected: a yes/no prompt after the list, which §3.5 keeps
+for irreversible or network-touching actions, and a level change can be
+undone. A change that opens and closes nothing skips the screen, since
+there is nothing to check. Refusals are checked first, so a SysOp never reads
+a preview for a change that would then be refused.
+
+**Decision 5 — levels run from 0 to 255.** Nothing enforced the range before:
+an account could be created at, or changed to, a negative level or one above
+255. Both are refused now.
+
+**Decision 6 — level names are labels in node configuration** (#1009).
+Rejected: named levels as the stored value, with gates and accounts
+referring to a name, which would make renaming a level a migration of every
+gate and leave Link genesis events, which carry numbers, needing a mapping.
+A JSON object in the config table, rather than a table of its own, because
+it is a handful of short strings read together.
+
+**Decision 7 — a name is typed where a level is asked for on the user
+screen and the Levels screen, not in the resource editors.** Those are where
+a SysOp thinks in names (promote alice to Member). A resource editor's level
+fields keep taking numbers, and show the name beside the value.
 
 ### SFTP over the SSH transport — declined
 
