@@ -51,7 +51,6 @@ ALLOWED: dict[str, str] = {
     "build_trust_signal": "#589",
     "activate_reproduced_digest_signal": "#589",
     "fetch_trust_evidence": "#589",
-    "record_activity": "#589",
     "clear_local_observation": "#589",
 }
 
