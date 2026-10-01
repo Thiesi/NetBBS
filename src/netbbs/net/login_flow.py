@@ -63,7 +63,13 @@ from netbbs.net.node_theme import effective_accent_color, effective_header_color
 from netbbs.net.nodeconfig import ThrottleConfig
 from netbbs.net.notices import announce_styled
 from netbbs.net.redraw_preference import start_new_account_redrawing_in_place
-from netbbs.net.session import Session, SessionClosedError, write_preformatted_line, write_prompt
+from netbbs.net.session import (
+    Session,
+    SessionClosedError,
+    physical_terminal_width,
+    write_preformatted_line,
+    write_prompt,
+)
 from netbbs.net.signup_text import pending_approval_notice, username_problem_line
 from netbbs.staff import approvers_away_line
 from netbbs.net.session_activity import set_root_activity
@@ -89,6 +95,9 @@ from netbbs.net.unicode_style_preference import (
 from netbbs.guest import guest_is_eligible, guest_login_for, pre_login_notice
 from netbbs.net.welcome_banner import load_welcome_banner, pre_login_unicode_style
 from netbbs.permissions import meets_level
+from netbbs.net.banner_fields import banner_fields, count_callers_online
+from netbbs.rendering.art_slots import fill_field_slots
+from netbbs.rendering.charset import ellipsis_for
 from netbbs.rendering import (
     ACCENT_COLOR,
     ALERT_COLOR,
@@ -389,8 +398,20 @@ async def _run_authenticated_session(
     try:
         await write_preformatted_line(
             session,
-            load_welcome_banner(
-                db, truecolor=session.supports_truecolor, unicode_style=pre_login_unicode_style(session)
+            # Field slots (issue #929): before sign-in, only what is true
+            # for every caller -- the node, the time, callers online.
+            fill_field_slots(
+                load_welcome_banner(
+                    db,
+                    truecolor=session.supports_truecolor,
+                    unicode_style=pre_login_unicode_style(session),
+                    max_width=physical_terminal_width(session),
+                ),
+                banner_fields(db, callers_online=count_callers_online(
+                    node_controls.session_registry if node_controls is not None else None
+                )),
+                ellipsis=ellipsis_for(session),
+                width=getattr(session, "physical_width", session.terminal_width),
             ),
         )
         # Design doc -- node management, Thiesi's own request: shown to
@@ -879,8 +900,17 @@ async def run_authenticated_session(
     # show this banner too. Not a new gap this change introduces, and not
     # fixed here -- out of scope for adding a banner to an existing,
     # unrelated call site.
-    logoff_banner = load_logoff_banner(db)
+    logoff_banner = load_logoff_banner(db, max_width=physical_terminal_width(session))
     if logoff_banner:
+        # Field slots (issue #929): the caller's name, the node, the time.
+        logoff_banner = fill_field_slots(
+            logoff_banner,
+            banner_fields(db, user=user, callers_online=count_callers_online(
+                node_controls.session_registry if node_controls is not None else None
+            )),
+            ellipsis=ellipsis_for(session),
+            width=getattr(session, "physical_width", session.terminal_width),
+        )
         await write_preformatted_line(session, logoff_banner)
     if intentional_logoff and completed_history_entry is not None:
         await _show_logoff_summary_screen(session, db, user, completed_history_entry)
@@ -1429,7 +1459,7 @@ async def _register_new_account(
     actually succeeds, covering *both* successful outcomes (immediate
     login and pending-approval) -- see that call site below.
     """
-    before_banner = load_new_account_banner_before(db)
+    before_banner = load_new_account_banner_before(db, max_width=physical_terminal_width(session))
     if before_banner:
         await write_preformatted_line(session, before_banner)
     for attempt in range(1, _REGISTRATION_MAX_ATTEMPTS + 1):
@@ -1572,7 +1602,7 @@ async def _register_new_account(
         # still convey. Never shown for a validation failure/cancel --
         # those `continue`/`return None` above this point, never reaching
         # here.
-        after_banner = load_new_account_banner_after(db)
+        after_banner = load_new_account_banner_after(db, max_width=physical_terminal_width(session))
         if after_banner:
             await write_preformatted_line(session, after_banner)
 

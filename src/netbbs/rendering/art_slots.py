@@ -33,7 +33,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, replace
 
-from netbbs.rendering.ansi import strip_ansi
+from netbbs.rendering.ansi import RESET, colored, strip_ansi
 from netbbs.rendering.ansi_parse import parse_ansi_into_buffer
 from netbbs.rendering.sanitize import sanitize_text
 from netbbs.rendering.screen_buffer import Cell, ScreenBuffer, full_render_ansi
@@ -268,3 +268,48 @@ def _fill(buffer: ScreenBuffer, slot: Slot, rows: list[str], *, highlight_keys: 
         while col < end:
             buffer.put_cell(row, col, base)
             col += 1
+
+
+def fill_field_slots(text: str, fields: dict[str, str], *, ellipsis: str = "...", width: int = 80) -> str:
+    """Banner art (the welcome and log-off screens) with its field slots
+    filled in, returned as rows of ANSI text the art's own width, for
+    `write_preformatted_line`. Art without field tokens -- every banner
+    before issue #929 -- comes back unchanged, byte for byte, and so does
+    art whose tokens have problems or that holds a `{menu}` or `{prompt}`
+    slot, which only the main menu fills. Fields with no value in `fields`
+    are left blank."""
+    if "{" not in text:
+        return text
+    art = parse_slot_art(text, width=width, require_menu=False)
+    if not art.fields or art.problems or art.menu is not None or art.prompt is not None:
+        return text
+    buffer = ScreenBuffer(art.width, art.height)
+    for row in range(art.height):
+        for col in range(art.width):
+            buffer.put_cell(row, col, art.buffer.get_cell(row, col))
+    for slot in art.fields:
+        value = truncate_to_width(sanitize_text(fields.get(slot.name, "")), slot.width, ellipsis=ellipsis)
+        _fill(buffer, slot, [value], highlight_keys=False)
+    return "\r\n".join(_render_row(buffer, row) for row in range(art.height)) + RESET
+
+
+def _render_row(buffer: ScreenBuffer, row: int) -> str:
+    cells = [buffer.get_cell(row, col) for col in range(buffer.width)]
+    while cells and cells[-1] == Cell():
+        cells.pop()
+    parts: list[str] = []
+    index = 0
+    while index < len(cells):
+        style = _cell_style(cells[index])
+        start = index
+        while index < len(cells) and _cell_style(cells[index]) == style:
+            index += 1
+        text = "".join(cell.char for cell in cells[start:index])
+        fg, bg, bold, underline, reverse = style
+        parts.append(colored(text, fg_color=fg, bg_color=bg, bold=bold, underline=underline, reverse=reverse)
+                     if any((fg is not None, bg is not None, bold, underline, reverse)) else text)
+    return "".join(parts)
+
+
+def _cell_style(cell: Cell) -> tuple:
+    return (cell.fg, cell.bg, cell.bold, cell.underline, cell.reverse)

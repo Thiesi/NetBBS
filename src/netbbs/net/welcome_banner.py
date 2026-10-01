@@ -41,15 +41,17 @@ from netbbs.net.node_theme import accent_color_override, header_color_override
 from netbbs.rendering import (
     ACCENT_COLOR,
     HEADER_COLOR,
+    MUTED_COLOR,
     RESET,
     colored,
-    decode_banner_bytes,
+    decode_banner_bytes_fitting,
     gradient_color,
     gradient_text,
     nearest_256,
 )
 from netbbs.rendering.charset import ASCII, UTF8
 from netbbs.rendering.layout import double_frame
+from netbbs.rendering.sauce import Sauce, split_sauce
 from netbbs.storage.database import Database
 
 _logger = logging.getLogger(__name__)
@@ -222,6 +224,29 @@ def set_welcome_banner_enabled(db: Database, enabled: bool) -> None:
     set_config(db, _WELCOME_BANNER_ENABLED_CONFIG_KEY, "1" if enabled else "0")
 
 
+_WELCOME_BANNER_CREDIT_CONFIG_KEY = "welcome_banner_credit"
+
+
+def is_welcome_banner_credit_enabled(db: Database) -> bool:
+    """Whether callers see the art's credit under a SysOp's own welcome
+    banner (issue #929): off until the SysOp turns it on."""
+    return get_config(db, _WELCOME_BANNER_CREDIT_CONFIG_KEY) == "1"
+
+
+def set_welcome_banner_credit_enabled(db: Database, enabled: bool) -> None:
+    set_config(db, _WELCOME_BANNER_CREDIT_CONFIG_KEY, "1" if enabled else "0")
+
+
+def art_credit_line(sauce: Sauce | None) -> str:
+    """The caller-facing credit for art with a SAUCE record, "art: Title by
+    Author/Group" with the missing parts left out, or "" when the record
+    names nobody. Only printable characters of the record are kept."""
+    if sauce is None:
+        return ""
+    credit = "".join(ch for ch in sauce.credit if ch.isprintable())
+    return f"art: {credit}" if credit.strip() else ""
+
+
 def banner_path(db: Database) -> Path:
     """The well-known path a custom banner file must be placed at,
     colocated with the database file. Deliberately does not
@@ -273,7 +298,9 @@ def pre_login_unicode_style(session: object) -> bool:
     return getattr(session, "output_charset", UTF8) != ASCII
 
 
-def load_welcome_banner(db: Database, *, truecolor: bool = False, unicode_style: bool = True) -> str:
+def load_welcome_banner(
+    db: Database, *, truecolor: bool = False, unicode_style: bool = True, max_width: int | None = None
+) -> str:
     """
     Resolve the banner to show at login: the SysOp's custom file if
     enabled and usable, the default banner otherwise. Synchronous
@@ -331,4 +358,14 @@ def load_welcome_banner(db: Database, *, truecolor: bool = False, unicode_style:
 
     # decode_ansi_bytes cannot raise (see its own docstring) -- no
     # decode-failure fallback is needed here, by construction.
-    return decode_banner_bytes(data) + RESET
+    text = decode_banner_bytes_fitting(data, max_width)
+    if text is None:
+        # Its SAUCE record says it was drawn wider than this caller's
+        # terminal (issue #929): wrapping every row would turn it to noise.
+        _logger.info("welcome banner at %s is wider than %d columns -- using default", path, max_width)
+        return default()
+    if is_welcome_banner_credit_enabled(db):
+        credit = art_credit_line(split_sauce(data)[1])
+        if credit:
+            return text + RESET + "\r\n" + colored(credit, fg_color=MUTED_COLOR)
+    return text + RESET
