@@ -24,7 +24,7 @@ from netbbs.link.introduction import (
     build_identity_request,
     referenced_identities,
 )
-from netbbs.link.node_identity import bootstrap_node_identity, rotate_operational_key
+from netbbs.link.node_identity import bootstrap_node_identity, operational_key_history, rotate_operational_key
 from netbbs.link.protocol import (
     DEFERRED_EVENT_RETRY_SECONDS,
     DeferredEvents,
@@ -772,3 +772,95 @@ def test_a_stale_bundle_cannot_roll_back_a_learned_compromise(cast):
     assert b.introduced[a.identity.fingerprint] == merged
     old = post_by(a, "old key")
     assert b.handle_events_tolerantly(r.identity.fingerprint, [old.to_dict()])[3] == (old.content_id,)
+
+
+# -- Issue #672, review of #1034: whose compromise a sweep may act on --------
+
+
+def _chain_claiming(owner: LinkNode, victim: LinkNode):
+    """`owner`'s chain, root-signed and valid, that authorizes `victim`'s real
+    signing key as owner's own and then revokes it as compromised -- what any
+    node can write about any public key."""
+    from netbbs.link.events import build_key_transition
+
+    root = owner.identity.root
+    own = owner.identity.transitions
+    signing_head = [t for t in own if t.payload["purpose"] == "signing"][-1]
+    revoke_own = build_key_transition(
+        root=root, purpose="signing", action="revoke",
+        operational_key=owner.identity.signing_key.verify_key,
+        previous_transition_id=signing_head.content_id, created_at="2026-02-01T00:00:00+00:00",
+    )
+    claim = build_key_transition(
+        root=root, purpose="signing", action="authorize",
+        operational_key=victim.identity.signing_key.verify_key,
+        previous_transition_id=revoke_own.content_id, created_at="2026-02-01T00:00:01+00:00",
+    )
+    burn = build_key_transition(
+        root=root, purpose="signing", action="revoke",
+        operational_key=victim.identity.signing_key.verify_key,
+        previous_transition_id=claim.content_id, created_at="2026-02-01T00:00:02+00:00", compromised=True,
+    )
+    fresh = build_key_transition(
+        root=root, purpose="signing", action="authorize",
+        operational_key=owner.identity.signing_key.verify_key,
+        previous_transition_id=burn.content_id, created_at="2026-02-01T00:00:03+00:00",
+    )
+    return own + (revoke_own, claim, burn, fresh)
+
+
+def test_a_chain_cannot_mark_another_nodes_content_stale(cast):
+    """M writes a valid chain that authorizes A's real signing key as M's own
+    and then calls it compromised. Every copy A signed verifies under that
+    key, but only A's own chain may speak for A's content: it stays known and
+    served on B."""
+    from dataclasses import replace
+
+    r, a, b = cast["R"], cast["A"], cast["B"]
+    m = LinkNode(identity=bootstrap_node_identity("M"))
+    b.handle_introduction(hello(a))
+    post = post_by(a)
+    b.known_event_ids.add(post.content_id)
+    b.events[post.content_id] = post.to_dict()
+
+    b.handle_hello(hello(m))
+    chain = _chain_claiming(m, a)
+    history = operational_key_history(
+        chain, root_verify_key=m.identity.root.verify_key,
+        subject_fingerprint=m.identity.fingerprint, purpose="signing",
+    )
+    assert [record.status for record in history].count("compromised") == 1, "the attack chain resolves"
+    b.peer_directory.admit(replace(b.peers[m.identity.fingerprint], transitions=chain))
+
+    assert b.sweep_compromised_copies() == 0
+    assert post.content_id in b.known_event_ids
+    assert b.stale_copies == {}
+
+
+def test_a_hello_that_changes_nothing_verifies_no_chain(cast, monkeypatch):
+    """Review of #1034: the sweep ran on every hello and re-verified every
+    known identity's chain first. An unchanged chain now costs nothing."""
+    import netbbs.link.protocol as protocol_module
+
+    r, a, b = cast["R"], cast["A"], cast["B"]
+    b.handle_introduction(hello(a))
+    # R's chain holds a compromise, so only remembering what was already
+    # looked at -- not the cheap "no compromise in it" check -- spares it.
+    r.identity = rotate_operational_key(r.identity, purpose="signing", compromised=True)
+    b.handle_hello(hello(r, created_at="2026-02-01T00:00:00+00:00"))
+    b.sweep_compromised_copies()
+    calls = []
+    real = protocol_module.operational_key_history
+
+    def counting(*args, **kwargs):
+        calls.append(kwargs.get("subject_fingerprint"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(protocol_module, "operational_key_history", counting)
+    b.handle_hello(hello(r, created_at="2026-02-15T00:00:00+00:00"))
+    b.sweep_compromised_copies()
+    assert calls == []
+
+    rotated = LinkNode(identity=rotate_operational_key(a.identity, purpose="signing", compromised=True))
+    b.handle_introduction(hello(rotated, created_at="2026-03-02T00:00:00+00:00"))
+    assert calls == [a.identity.fingerprint], "only the identity whose chain changed"
