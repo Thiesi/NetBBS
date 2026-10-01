@@ -1281,3 +1281,237 @@ def test_a_peers_user_name_cannot_pose_as_another_nodes_in_a_chat_label(tmp_path
             await subscriber.teardown()
 
     asyncio.run(scenario())
+
+
+# -- Issue #860: a subscriber's live line goes up to the origin, which shows
+# -- it and relays it to its other subscribers; a line that arrives later by
+# -- sync is shown once.
+
+
+class _FakeSession:
+    """Just enough of a session for a frame handler: who sent it."""
+
+    def __init__(self, fingerprint: str) -> None:
+        self.remote_fingerprint = fingerprint
+
+
+def test_a_subscribers_live_line_reaches_the_origin_and_the_other_subscribers(tmp_path):
+    from netbbs.link.channels import materialize_carried_channel as carry
+
+    async def scenario():
+        origin = _Node(tmp_path, "origin-up")
+        first = _Node(tmp_path, "sub-one")
+        second = _Node(tmp_path, "sub-two")
+        origin_channel, first_channel = _setup_linked_channel(origin, first, name="square")
+        genesis_json = origin.db.connection.execute(
+            "SELECT link_genesis_json FROM channels WHERE id = ?", (origin_channel.id,)
+        ).fetchone()[0]
+        from netbbs.link.events import ChannelGenesis
+        import json as _json
+        second_channel = carry(second.db, ChannelGenesis.from_dict(_json.loads(genesis_json)))
+        # Every node here advertises the relay capability.
+        for node in (origin, first, second):
+            node.bridge._peer_capable = lambda fingerprint: True
+
+        server = LinkRealtimeServer(
+            host="127.0.0.1", port=0, identity=origin.identity, registry=origin.registry,
+            on_frame=origin.bridge.on_frame, lane=origin.lane, enforce_trust_policy=True,
+        )
+        await server.start()
+        try:
+            for subscriber, channel in ((first, first_channel), (second, second_channel)):
+                _establish_trust(origin.db, subscriber.identity.fingerprint)
+                _establish_trust(subscriber.db, origin.identity.fingerprint)
+                session = await dial_realtime_session(
+                    "127.0.0.1", server.port, subscriber.identity, on_frame=subscriber.bridge.on_frame,
+                    registry=subscriber.registry,
+                )
+                await subscriber.bridge.track_session(session)
+                await session.send(build_subscribe_frame(channel.channel_id))
+            assert await _wait_until(
+                lambda: len(origin.bridge._subscribers.get(origin_channel.channel_id, {})) == 2
+            )
+            # The second subscriber judges a relayed line by the author's
+            # node, as it would the line's signed event: it has established
+            # the first subscriber's node.
+            _establish_trust(second.db, first.identity.fingerprint)
+
+            at_origin = origin.hub.join(origin_channel.name, ParticipantId(username="o-watcher", session_key=1))
+            at_second = second.hub.join(second_channel.name, ParticipantId(username="s-watcher", session_key=2))
+            at_first = first.hub.join(first_channel.name, ParticipantId(username="f-watcher", session_key=3))
+
+            speaker = create_user(first.db, "nib", password="hunter2", user_level=10)
+            line = record_message(
+                first.db, first_channel, kind="message", author_label=speaker.username,
+                author_fingerprint=speaker.fingerprint, body="hello from a subscriber",
+            )
+            event = queue_channel_message_if_linked(first.db, line, first_channel, node_identity=first.identity)
+            await first.bridge.broadcast_local_message_live(first_channel, line)
+
+            shown_at_origin = await asyncio.wait_for(at_origin.get(), timeout=2.0)
+            assert shown_at_origin.body == "hello from a subscriber"
+            assert shown_at_origin.author_label == f"nib@{first.identity.fingerprint}"
+            assert shown_at_origin.author_fingerprint == first.identity.fingerprint
+
+            relayed = await asyncio.wait_for(at_second.get(), timeout=2.0)
+            assert relayed.body == "hello from a subscriber"
+            # Named for the node that wrote it, not the origin that relayed it.
+            assert relayed.author_label == f"nib@{first.identity.fingerprint}"
+            assert relayed.author_fingerprint == first.identity.fingerprint
+
+            # Not echoed back to the node it came from.
+            await asyncio.sleep(0.3)
+            assert at_first.empty()
+
+            # The signed event arriving later by sync is not shown again.
+            await second.bridge.on_carried_message_materialized(
+                event.content_id, event.payload, relayed,
+            )
+            await asyncio.sleep(0.1)
+            assert at_second.empty()
+        finally:
+            await server.stop()
+            for node in (origin, first, second):
+                await node.teardown()
+
+    asyncio.run(scenario())
+
+
+def test_only_the_origin_may_relay_another_nodes_line(tmp_path):
+    from netbbs.link.protocol import build_channel_message_frame
+
+    async def scenario():
+        origin = _Node(tmp_path, "origin-relay-rule")
+        subscriber = _Node(tmp_path, "sub-relay-rule")
+        _origin_channel, subscriber_channel = _setup_linked_channel(origin, subscriber, name="rules")
+        stranger = bootstrap_node_identity("stranger").fingerprint
+        other = bootstrap_node_identity("other").fingerprint
+        _establish_trust(subscriber.db, stranger)
+        frame = build_channel_message_frame(
+            subscriber_channel.channel_id, "mallory", "mallory", "not mine to relay", utc_now_iso(),
+            author_node_fingerprint=other,
+        )
+        try:
+            with pytest.raises(LinkProtocolError, match="does not originate"):
+                await subscriber.bridge.on_frame(_FakeSession(stranger), frame)
+        finally:
+            await origin.teardown()
+            await subscriber.teardown()
+
+    asyncio.run(scenario())
+
+
+def test_a_line_that_arrives_by_sync_is_shown_to_callers_in_the_channel(tmp_path):
+    async def scenario():
+        origin = _Node(tmp_path, "origin-async")
+        subscriber = _Node(tmp_path, "sub-async")
+        _origin_channel, subscriber_channel = _setup_linked_channel(origin, subscriber, name="porch")
+        watcher = subscriber.hub.join(subscriber_channel.name, ParticipantId(username="w", session_key=1))
+        speaker = create_user(origin.db, "quill", password="hunter2", user_level=10)
+        line = record_message(origin.db, _origin_channel, kind="message", author_label=speaker.username, body="late")
+        event = queue_channel_message_if_linked(origin.db, line, _origin_channel, node_identity=origin.identity)
+        try:
+            await subscriber.bridge.on_carried_message_materialized(event.content_id, event.payload, line)
+            shown = await asyncio.wait_for(watcher.get(), timeout=2.0)
+            assert shown.body == "late"
+            # Twice (a duplicate delivery) is still shown once.
+            await subscriber.bridge.on_carried_message_materialized(event.content_id, event.payload, line)
+            await asyncio.sleep(0.1)
+            assert watcher.empty()
+        finally:
+            await origin.teardown()
+            await subscriber.teardown()
+
+    asyncio.run(scenario())
+
+
+# -- Review of #1028: dedupe keyed on what a line is, never on a peer's
+# -- claimed content id; a refused relayed name writes nothing.
+
+
+def _origin_line(origin, channel, username, body):
+    line = record_message(origin.db, channel, kind="message", author_label=username, body=body)
+    event = queue_channel_message_if_linked(origin.db, line, channel, node_identity=origin.identity)
+    return line, event
+
+
+def test_a_live_line_without_a_content_id_is_not_shown_again_when_its_event_arrives(tmp_path):
+    from netbbs.link.protocol import build_channel_message_frame
+
+    async def scenario():
+        origin = _Node(tmp_path, "origin-noid")
+        subscriber = _Node(tmp_path, "sub-noid")
+        origin_channel, subscriber_channel = _setup_linked_channel(origin, subscriber, name="noid")
+        _establish_trust(subscriber.db, origin.identity.fingerprint)
+        watcher = subscriber.hub.join(subscriber_channel.name, ParticipantId(username="w", session_key=1))
+        line, event = _origin_line(origin, origin_channel, "quill", "said once")
+        # What a sender that does not think this node capable sends: no id.
+        frame = build_channel_message_frame(
+            subscriber_channel.channel_id, line.author_label, line.author_label, line.body, line.created_at,
+        )
+        try:
+            await subscriber.bridge.on_frame(_FakeSession(origin.identity.fingerprint), frame)
+            assert (await asyncio.wait_for(watcher.get(), timeout=2.0)).body == "said once"
+            await subscriber.bridge.on_carried_message_materialized(event.content_id, event.payload, line)
+            await asyncio.sleep(0.1)
+            assert watcher.empty()
+        finally:
+            await origin.teardown()
+            await subscriber.teardown()
+
+    asyncio.run(scenario())
+
+
+def test_a_claimed_content_id_cannot_suppress_another_line(tmp_path):
+    from netbbs.link.protocol import build_channel_message_frame
+
+    async def scenario():
+        origin = _Node(tmp_path, "origin-claim")
+        subscriber = _Node(tmp_path, "sub-claim")
+        origin_channel, subscriber_channel = _setup_linked_channel(origin, subscriber, name="claim")
+        _establish_trust(subscriber.db, origin.identity.fingerprint)
+        watcher = subscriber.hub.join(subscriber_channel.name, ParticipantId(username="w", session_key=1))
+        _real_line, real_event = _origin_line(origin, origin_channel, "quill", "the real line")
+        # A peer's live line naming the real event's id as its own.
+        frame = build_channel_message_frame(
+            subscriber_channel.channel_id, "mallory", "mallory", "something else", utc_now_iso(),
+            content_id=real_event.content_id,
+        )
+        try:
+            await subscriber.bridge.on_frame(_FakeSession(origin.identity.fingerprint), frame)
+            assert (await asyncio.wait_for(watcher.get(), timeout=2.0)).body == "something else"
+            await subscriber.bridge.on_carried_message_materialized(real_event.content_id, real_event.payload, _real_line)
+            assert (await asyncio.wait_for(watcher.get(), timeout=2.0)).body == "the real line"
+        finally:
+            await origin.teardown()
+            await subscriber.teardown()
+
+    asyncio.run(scenario())
+
+
+def test_a_refused_relayed_author_leaves_no_trust_subject_row(tmp_path):
+    from netbbs.link.protocol import build_channel_message_frame
+
+    async def scenario():
+        origin = _Node(tmp_path, "origin-junk")
+        subscriber = _Node(tmp_path, "sub-junk")
+        _origin_channel, subscriber_channel = _setup_linked_channel(origin, subscriber, name="junk")
+        _establish_trust(subscriber.db, origin.identity.fingerprint)
+        watcher = subscriber.hub.join(subscriber_channel.name, ParticipantId(username="w", session_key=1))
+        junk = bootstrap_node_identity("never-met").fingerprint
+        frame = build_channel_message_frame(
+            subscriber_channel.channel_id, "someone", "someone", "relayed", utc_now_iso(),
+            author_node_fingerprint=junk,
+        )
+        try:
+            await subscriber.bridge.on_frame(_FakeSession(origin.identity.fingerprint), frame)
+            await asyncio.sleep(0.1)
+            assert watcher.empty(), "an unestablished author's relayed line is not shown"
+            assert subscriber.db.connection.execute(
+                "SELECT COUNT(*) FROM link_trust_subjects WHERE node_fingerprint = ?", (junk,)
+            ).fetchone()[0] == 0
+        finally:
+            await origin.teardown()
+            await subscriber.teardown()
+
+    asyncio.run(scenario())

@@ -902,7 +902,7 @@ class _NodeDb:
 
 
 def test_one_refused_event_does_not_refuse_the_rest_of_a_push(tmp_path):
-    """Issue #897: a probationary caller's chat line refused the whole
+    """Issue #897: one refused caller's chat line refused the whole
     events request, and the sender resent it unchanged every pass, so
     nothing queued behind it ever arrived. Each event is judged on its own;
     the refused one is named, the rest are taken."""
@@ -939,10 +939,20 @@ def test_one_refused_event_does_not_refuse_the_rest_of_a_push(tmp_path):
                         bob.db, subject, dimension, TrustState.ESTABLISHED,
                         reason="known peer", now_iso="2026-08-14T12:00:30+00:00",
                     )
+                # A probationary caller's chat line is accepted since issue
+                # #860; a quarantined caller's is still refused.
+                caller = TrustSubject.user(alice_identity.fingerprint, "probation-user")
+                register_subject(bob.db, caller, first_accepted_at="2026-08-14T12:00:35+00:00",
+                                 now_iso="2026-08-14T12:00:35+00:00")
+                set_trust_override(
+                    bob.db, caller,
+                    TrustDimension.CONTENT_CONDUCT, TrustState.QUARANTINED,
+                    reason="spam", now_iso="2026-08-14T12:00:40+00:00",
+                )
                 accepted, refused = await push_events_partial(alice_node, session, base_url, [chat, genesis])
                 assert accepted == [genesis.content_id]
                 assert [(item.content_id, item.reason_code) for item in refused] == [
-                    (chat.content_id, "link_policy_user_probationary_approval_required"),
+                    (chat.content_id, "link_policy_user_quarantined"),
                 ]
                 assert bob.db.connection.execute(
                     "SELECT 1 FROM link_events WHERE content_id = ?", (genesis.content_id,)
@@ -968,7 +978,7 @@ def test_one_refused_event_does_not_refuse_the_rest_of_a_push(tmp_path):
                 # outright -- a pushed letter keeps its 403 -- and names it.
                 with pytest.raises(LinkPolicyRefused) as refusal:
                     await push_events_partial(alice_node, session, base_url, [chat])
-                assert refusal.value.reason_code == "link_policy_user_probationary_approval_required"
+                assert refusal.value.reason_code == "link_policy_user_quarantined"
                 assert [item.content_id for item in refusal.value.refused] == [chat.content_id]
                 # `push_events`, for callers that send one thing, never reads
                 # a partial refusal as delivered.
