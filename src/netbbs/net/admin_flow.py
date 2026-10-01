@@ -1472,6 +1472,35 @@ def _gate_field(label: str, value: int | str | None) -> Field:
     return Field(label, str(value), color=GATE_COLOR)
 
 
+def _quarantine_distance_text(explanation: dict) -> str:
+    """How far a dimension's remote reports are from the two-domain
+    quarantine threshold, in words (issue #752): "1 of 2 domains, weight 1.0
+    of 2.0". Empty when the explanation counts no remote reports."""
+    domains = explanation.get("counted_domains") or {}
+    if not domains:
+        # Nothing counted toward the threshold: no distance to state, even if
+        # an older explanation stored the fields (review of #1030).
+        return ""
+    try:
+        weight = float(explanation.get("counted_weight", 0.0))
+        required_weight = float(explanation.get("required_weight", 2.0))
+        required_domains = int(explanation.get("required_domains", 2))
+    except (TypeError, ValueError):
+        return ""
+    return (
+        f"Remote reports toward quarantine: {len(domains)} of {required_domains} domains, "
+        f"weight {weight:.1f} of {required_weight:.1f}"
+    )
+
+
+def _trust_state_note(explanation: dict) -> str | None:
+    """A dimension's explanation for the subject screen: the distance to
+    quarantine in words first, when there is one, then the stored pairs."""
+    parts = [part for part in (_quarantine_distance_text(explanation or {}), _audit_details_text(explanation))
+             if part]
+    return ". ".join(parts) or None
+
+
 def _audit_details_text(details: dict) -> str:
     """An audit row's stored details as `key: value` pairs a person can read,
     rather than the JSON they are kept as. A nested mapping is flattened into
@@ -4619,7 +4648,7 @@ async def _trust_subject_screen(
                 state.dimension.value,
                 status_badge(state.state.value, tone=_TRUST_STATE_TONE[state.state], unicode_style=chrome.unicode_style)
                 + colored(f"  ({sanitize_text(state.reason_code)})", fg_color=METADATA_COLOR),
-                styled=True, note=_audit_details_text(state.explanation) or None,
+                styled=True, note=_trust_state_note(state.explanation),
             )
             for state in states
         ]))

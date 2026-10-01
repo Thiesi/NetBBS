@@ -41,10 +41,24 @@ def _fake_tool(script: str) -> tuple[str, ...]:
 
 
 def test_normalize_strips_control_characters_and_carriage_returns():
-    # ESC itself goes, which is what disarms the sequence; the ordinary
-    # characters that followed it stay as text -- exactly what
-    # `netbbs.rendering.sanitize.sanitize_text` does to untrusted text.
-    assert diz.normalize_description("a\x1b[31mb\r\nc\x07") == "a[31mb\nc"
+    assert diz.normalize_description("a\x01b\r\nc\x07") == "ab\nc"
+
+
+def test_normalize_removes_whole_escape_sequences_not_only_the_esc_byte():
+    # Issue #1000: removing only ESC left each sequence's printable remains
+    # -- `ESC [ 0 m` became the text `[0m`.
+    assert diz.normalize_description("a\x1b[31mb\x1b[0m\r\nc") == "ab\nc"
+    assert diz.normalize_description("\x1b[1;33;40mbold\x1b[0m \x1b[38;5;208mwarm") == "bold warm"
+    # Cursor moves, charset selection and an OSC title go the same way.
+    assert diz.normalize_description("x\x1b[2Ay\x1b(0z\x1b]0;title\x07!") == "xyz!"
+    # A lone ESC still goes, by the control-character filter if nothing else.
+    assert diz.normalize_description("cut off\x1b") == "cut off"
+
+
+def test_fit_removes_escape_sequences_from_a_carried_description():
+    # The Link file_descriptor path (`netbbs.link.files`) fits what a peer
+    # sends with the same rules.
+    assert diz.fit_description("\x1b[0m\nArt pack \x1b[36m0526\x1b[0m") == "Art pack 0526"
 
 
 def test_normalize_strips_bidi_overrides():
@@ -93,6 +107,16 @@ def test_decode_of_empty_bytes_is_none():
     assert diz.decode_diz(b"") is None
 
 
+def test_decode_drops_a_sauce_record_and_everything_after_eof():
+    # Art tools append SAUCE to a DIZ like to any other text file. Only its
+    # control bytes used to be stripped, leaving `SAUCE00...` as text.
+    sauce = b"SAUCE00" + b"Title".ljust(35) + b"Artist".ljust(20) + b"Group".ljust(20) + b"20261001"
+    sauce += bytes(128 - len(sauce))
+    raw = b"Art pack 0526\r\nby somebody\r\n\x1a" + sauce
+    assert diz.decode_diz(raw) == "Art pack 0526\nby somebody"
+    assert diz.decode_diz(b"before\x1aafter") == "before"
+
+
 # -- ZIP ----------------------------------------------------------------------
 
 
@@ -109,6 +133,19 @@ def test_zip_with_file_id_diz(tmp_path):
         "FILE_ID.DIZ": b"Cool Game v1.0\r\nBy Someone\r\n",
     })
     assert _read(archive, "game.zip") == "Cool Game v1.0\nBy Someone"
+
+
+def test_a_colour_diz_reads_as_plain_text(tmp_path):
+    """The shape issue #1000 was found with: Mistigris's mist0526.zip, whose
+    FILE_ID.DIZ begins with `ESC [ 0 m CR LF`, then colour codes mid-line
+    around CP437 art. The first line used to read `[0m`."""
+    diz_bytes = (
+        b"\x1b[0m\r\n"
+        b"\x1b[1;35mMISTIGRIS\x1b[0m \x1b[36mpack\x1b[0m 0526\r\n"
+        b"\x1b[34m\xc4\xc4\xc4\x1b[0m art \x1b[34m\xc4\xc4\xc4\x1b[0m\r\n"
+    )
+    archive = _zip(tmp_path / "mist0526.zip", {"FILE_ID.DIZ": diz_bytes})
+    assert _read(archive, "mist0526.zip") == "MISTIGRIS pack 0526\n\u2500\u2500\u2500 art \u2500\u2500\u2500"
 
 
 def test_zip_member_name_matching_is_case_insensitive_and_ignores_directories(tmp_path):
