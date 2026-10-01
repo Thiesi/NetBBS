@@ -6906,7 +6906,14 @@ time alone (a recovery hold's release, an override's or a signal's expiry,
 probation's age requirement), which have no input change of their own; without
 it a running node applied them only at its next restart (issue #802). For every restriction the SysOp can inspect the subject,
 dimension, effects, rule/threshold, evidence, counted domains/weights, times,
-overrides, audit history, and requirements for release. Caller-facing behavior
+overrides, audit history, and requirements for release. Counted domains and
+weight appear whenever the dimension has active remote evidence, whatever
+decided its state, and the console states them as the distance to quarantine
+("1 of 2 domains, weight 1.0 of 2.0"), so a SysOp sees how close one more
+report would bring the subject (issue #752). Probation's
+`active_trigger_count` counts every applicable dimension, because any trigger
+blocks graduation in all of them; `dimension_trigger_count` beside it counts
+only the dimension shown. Caller-facing behavior
 states that local policy restricted content/delivery without claiming a
 network-wide verdict or leaking private evidence.
 

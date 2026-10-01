@@ -199,6 +199,44 @@ def test_remote_quarantine_requires_two_full_weight_domains(db):
     assert state.explanation["counted_weight"] == 2.0
 
 
+def test_below_the_threshold_the_explanation_counts_domains_and_weight(db):
+    """Issue #752: one domain's signal does not quarantine, and the SysOp must
+    still see what it counted and how far that is from the threshold. Those
+    fields used to appear only once the subject was already quarantined."""
+    subject = register_old_node(db)
+    configure_reporter(db, "reporter-a", "domain-a")
+    add_signal(db, subject, "reporter-a", 1)
+
+    identity = get_effective_trust_state(db, subject, TrustDimension.IDENTITY_INTEGRITY)
+    assert identity.state == TrustState.PROBATIONARY
+    assert identity.explanation["counted_domains"] == {"domain-a": 1.0}
+    assert identity.explanation["counted_weight"] == 1.0
+    assert identity.explanation["required_domains"] == 2
+    assert identity.explanation["required_weight"] == 2.0
+    # The signal blocks graduation everywhere, but sits in one dimension only.
+    assert identity.explanation["active_trigger_count"] == 1
+    assert identity.explanation["dimension_trigger_count"] == 1
+    resource = get_effective_trust_state(db, subject, TrustDimension.RESOURCE_BEHAVIOR)
+    assert resource.explanation["active_trigger_count"] == 1
+    assert resource.explanation["dimension_trigger_count"] == 0
+    # No remote evidence in that dimension: nothing to count there.
+    assert "counted_domains" not in resource.explanation
+
+
+def test_an_override_still_explains_the_remote_reports_it_sets_aside(db):
+    subject = register_old_node(db)
+    configure_reporter(db, "reporter-a", "domain-a")
+    add_signal(db, subject, "reporter-a", 1)
+    set_trust_override(
+        db, subject, TrustDimension.IDENTITY_INTEGRITY, TrustState.ESTABLISHED,
+        reason="known operator", now_iso=stamp(NOW),
+    )
+    state = get_effective_trust_state(db, subject, TrustDimension.IDENTITY_INTEGRITY)
+    assert state.reason_code == "sysop_override"
+    assert state.explanation["counted_domains"] == {"domain-a": 1.0}
+    assert state.explanation["counted_weight"] == 1.0
+
+
 def test_compromised_reporter_removal_is_audited_and_releases_after_recovery_hold(db):
     subject = register_old_node(db)
     configure_reporter(db, "reporter-a", "domain-a")
