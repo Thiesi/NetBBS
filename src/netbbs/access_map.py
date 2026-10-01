@@ -17,6 +17,7 @@ pretending the level is the whole answer.
 
 from __future__ import annotations
 
+from bisect import bisect_left
 from dataclasses import dataclass, replace
 from enum import Enum
 
@@ -24,11 +25,13 @@ from netbbs.auth.users import SYSOP_LEVEL, User
 from netbbs.boards.boards import Board, list_boards
 from netbbs.chat.channels import list_channels
 from netbbs.communities import (
+    Community,
     get_community,
     get_effective_min_age,
     get_effective_min_read_level,
     get_effective_min_write_level,
     get_effective_name_requirement,
+    list_communities,
 )
 from netbbs.config import get_mail_min_level, get_node_map_min_level
 from netbbs.doors.registry import list_doors
@@ -369,6 +372,39 @@ def account_level_change(db: Database, user: User, new_level: int) -> AccountCha
             # Something it was kept out of anyway is not a loss.
             lost.append(gate)
     return AccountChange(user.user_level, new_level, tuple(gained), tuple(lost), tuple(blocked))
+
+
+@dataclass(frozen=True)
+class LevelContext:
+    """What an editor's level field needs to say what its value means
+    (design doc §5.7, issue #1008): the levels the node's usable accounts
+    hold, its Communities, and how many boards and file areas inherit each
+    Community's read and write default. Loaded once per editor, so a field
+    can recount as the SysOp types a new value without a database trip."""
+
+    levels: tuple[int, ...]
+    communities: dict[int, Community]
+    inheriting: dict[tuple[int, str], dict[str, int]]
+
+    def users_at_or_above(self, level: int) -> int:
+        """Enabled, approved accounts at `level` or higher."""
+        return len(self.levels) - bisect_left(self.levels, level)
+
+
+def level_context(db: Database) -> LevelContext:
+    levels = tuple(sorted(row[0] for row in db.connection.execute(
+        "SELECT user_level FROM users WHERE disabled_at IS NULL AND pending_approval = 0"
+    )))
+    inheriting: dict[tuple[int, str], dict[str, int]] = {}
+    for what, resources in (("board", list_boards(db)), ("file area", list_file_areas(db))):
+        for resource in resources:
+            if resource.community_id is None:
+                continue
+            for direction, stored in (("read", resource.min_read_level), ("write", resource.min_write_level)):
+                if stored is None:
+                    counts = inheriting.setdefault((resource.community_id, direction), {})
+                    counts[what] = counts.get(what, 0) + 1
+    return LevelContext(levels, {c.id: c for c in list_communities(db)}, inheriting)
 
 
 @dataclass(frozen=True)

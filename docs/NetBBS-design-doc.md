@@ -2085,6 +2085,22 @@ at this level, everything open, still closed, and open with another gate
 still applying. Picking a board, file area, channel or door opens the screen
 the Content menu opens for it. Any level, in use or not, can be looked at.
 
+**Level fields say what they mean** (issue #1008). Every level field in an
+editor shows, next to its value, how many enabled, approved accounts are at
+that level or above, recounted from the draft as the SysOp types:
+
+- on a board or file area, a level left to inherit shows the level it
+  inherits and from where ("none: 10 from Community Market");
+- a write level below the read level is counted at the read level, since
+  posting needs reading, and says so;
+- a Community's default read and write levels also show how many boards and
+  file areas inherit them;
+- channels, doors and the node settings (node map, mail, MRC open rooms) show
+  the count alone.
+
+The count is by level only; age and verified-name gates depend on each
+account and are not counted in.
+
 **A level change is previewed for the account** (issue #1006). Changing an
 account's level from its detail screen shows what the change gains, loses and
 leaves blocked for that account before anything is written. Unlike the map
