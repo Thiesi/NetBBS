@@ -210,6 +210,13 @@ def decide_event_authorship(
         if not home.allowed:
             return home
         user = decide_user_authorship(db, author.node_fingerprint, author.opaque_user_id or "")
+        if user.allowed and user.requires_approval and object_type == "channel_message":
+            # Issue #860: chat has no approval queue, so refusing a
+            # probationary caller's line left every caller of a node this one
+            # had just met unheard in a Linked channel until they graduated.
+            # Like mail (`decide_link_mail_sender`), probation does not hold
+            # chat back; a quarantined or blocked caller is still refused.
+            return LinkPolicyDecision(True, None, user.state)
         if user.requires_approval and object_type not in {"board_post", "board_post_edit"}:
             return LinkPolicyDecision(False, REASON_USER_PROBATIONARY, user.state)
         return user

@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections import OrderedDict
 from typing import Awaitable, Callable
 
 from netbbs.chat.channels import Channel
@@ -40,6 +41,8 @@ from netbbs.link.enforcement import (
     LinkPolicyAction,
     content_visible_for_subject,
     decide_node_action,
+    decide_user_authorship,
+    link_content_visible,
     ensure_node_subject,
     event_author,
     node_transport_state,
@@ -204,6 +207,49 @@ def _accept_scrollback_snapshot(
     return channel, messages
 
 
+#: How many channel lines already shown live a bridge remembers (issue
+#: #860), so the signed event arriving later is not shown a second time.
+#: Live delivery and its async catch-up are minutes apart at most, so this
+#: only needs to outlast one sync interval of chat.
+_MAX_SHOWN_LIVE = 1024
+
+ShownKey = tuple[str, str, str, str]
+
+
+def shown_key(author_node: str, user_id: str, created_at: str, body: str) -> ShownKey:
+    """What a channel line *is*, for showing it once (issue #860): its
+    author's home node, the author's local user id, when it was written and
+    what it says. Derived here from what was received -- never a key the
+    sender names -- the same way for a live frame and for the signed event:
+    the sending node builds both from one `channel_messages` row
+    (`queue_channel_message_if_linked`: `local_user_id` and the frame's
+    `user_id` are its `author_label`, `created_at` and `body` the row's).
+    A live line is attributed to its session peer, or to the node the
+    channel's origin names, so a peer can only ever mark its own callers'
+    lines as shown, and an origin only lines it would show anyway."""
+    return (author_node, user_id, created_at, body)
+
+
+def _live_author_allowed(db: Database, node_fingerprint: str, user_id: str, *, relayed: bool) -> bool:
+    """This node's own policy for one live line's author (issue #860), the
+    same as for their signed `channel_message` (`decide_event_authorship`):
+    the caller is not quarantined or blocked -- a probationary caller is
+    allowed -- and their node may publish here. For the session's own peer
+    that is the real-time check already passed; for a node the origin relays
+    for, which this node may never have met, it is the `EVENTS` rule the
+    async copy of the same line meets, so the two never disagree.
+
+    Decided before anything is written: a fingerprint the origin names is
+    remote input, and an unregistered subject is probationary, which `EVENTS`
+    refuses -- so a refused name leaves no trust-subject row behind (review
+    of #1028). Registered only once allowed, like any node first seen."""
+    if relayed:
+        if not decide_node_action(db, node_fingerprint, LinkPolicyAction.EVENTS).allowed:
+            return False
+        ensure_node_subject(db, node_fingerprint)
+    return decide_user_authorship(db, node_fingerprint, user_id).allowed
+
+
 def _decide_channel_subscribe_authorization(db: Database, *, channel_id: str, peer_fingerprint: str) -> Channel:
     """Design doc §8.10.2: "checks that the channel exists, is linked,
     is locally allowed by trust policy, and is available to the
@@ -237,12 +283,19 @@ class LiveChannelBridge:
     just channel subscribers."""
 
     def __init__(
-        self, *, hub: ChatHub, lane: DatabaseLane, presence: PresenceRegistry, registry: LinkRealtimeSessionRegistry
+        self, *, hub: ChatHub, lane: DatabaseLane, presence: PresenceRegistry, registry: LinkRealtimeSessionRegistry,
+        peer_capable: Callable[[str], bool] | None = None,
     ) -> None:
         self._hub = hub
         self._lane = lane
         self._presence = presence
         self._registry = registry
+        # Issue #860: whether a peer advertises `CHANNEL_RELAY_CAPABILITY`,
+        # the only peers sent a frame's optional fields. None: no peer is.
+        self._peer_capable = peer_capable or (lambda fingerprint: False)
+        # Content IDs of channel lines already shown live here, oldest first,
+        # so the signed event that follows is not shown again.
+        self._shown_live: OrderedDict[ShownKey, None] = OrderedDict()
         # channel_id -> {peer_fingerprint: session}
         self._subscribers: dict[str, dict[str, LinkRealtimeSession]] = {}
         self._watchers: set[asyncio.Task] = set()
@@ -538,21 +591,100 @@ class LiveChannelBridge:
         if not subscribers:
             del self._subscribers[channel_id]
 
+    def _remember_shown(self, key: ShownKey) -> bool:
+        """Record a line as shown here; False if it already was."""
+        if key in self._shown_live:
+            return False
+        self._shown_live[key] = None
+        while len(self._shown_live) > _MAX_SHOWN_LIVE:
+            self._shown_live.popitem(last=False)
+        return True
+
     async def _handle_channel_message(self, session: LinkRealtimeSession, frame: RealtimeFrame) -> None:
+        payload = frame.payload
         channel = await self._lane.run(
-            _decide_channel_subscribe_authorization, channel_id=frame.payload["channel_id"],
+            _decide_channel_subscribe_authorization, channel_id=payload["channel_id"],
             peer_fingerprint=session.remote_fingerprint,
         )
-        node_label = (await self._lane.run(identity_for_fingerprint, session.remote_fingerprint)).label
+        own = self._registry.own_fingerprint
+        origin = await self._lane.run(channel_origin_fingerprint, channel)
+        # Issue #860: a line can reach this node live three ways -- from the
+        # channel's origin about its own caller, from a subscriber about its
+        # caller (this node being the origin), or relayed by the origin about
+        # a third node's caller. Only the origin may speak for another node.
+        author_node = payload.get("author_node_fingerprint", session.remote_fingerprint)
+        if author_node != session.remote_fingerprint and session.remote_fingerprint != origin:
+            raise LinkProtocolError(
+                f"node {session.remote_fingerprint!r} relayed a line in channel "
+                f"{payload['channel_id']!r}, which it does not originate"
+            )
+        if author_node == own:
+            return  # This node's own caller's line, echoed back.
+        if not await self._lane.run(
+            _live_author_allowed, author_node, payload["user_id"],
+            relayed=author_node != session.remote_fingerprint,
+        ):
+            return  # Refused by this node's policy: not shown, and not passed on.
+        # A `content_id` an older sender of this capability adds is accepted
+        # and ignored: it is unverified, so nothing is keyed on it.
+        if not self._remember_shown(
+            shown_key(author_node, payload["user_id"], payload["created_at"], payload["body"])
+        ):
+            return
+        node_label = (await self._lane.run(identity_for_fingerprint, author_node)).label
         message = LocalChannelMessage(
             id=-1, channel_id=channel.id, kind="message",
-            author_label=link_address_label(frame.payload["user_id"], node_label),
-            # The authenticated Noise peer is the technical identity behind
-            # this ephemeral assertion. Keep it for collision warnings while
-            # continuing to render the friendly label by default.
-            author_fingerprint=session.remote_fingerprint,
-            body=frame.payload["body"], created_at=frame.payload["created_at"],
+            author_label=link_address_label(payload["user_id"], node_label),
+            # The authenticated Noise peer (or, relayed, the node the origin
+            # names) is the technical identity behind this ephemeral
+            # assertion. Keep it for collision warnings while continuing to
+            # render the friendly label by default.
+            author_fingerprint=author_node,
+            body=payload["body"], created_at=payload["created_at"],
         )
+        await self._hub.broadcast(channel.name, message)
+        if origin == own:
+            await self._relay_to_subscribers(channel, frame, author_node=author_node)
+
+    async def _relay_to_subscribers(
+        self, channel: Channel, frame: RealtimeFrame, *, author_node: str
+    ) -> None:
+        """The origin passes a subscriber's live line on to its other live
+        subscribers (issue #860), so a Linked channel is one room live, not
+        only after each subscriber's next sync. Only to a peer advertising
+        `CHANNEL_RELAY_CAPABILITY`: without `author_node_fingerprint` the line
+        would read as the origin's own caller, so an older subscriber gets it
+        through async catch-up instead."""
+        payload = frame.payload
+        relayed = build_channel_message_frame(
+            payload["channel_id"], payload["user_id"], payload["display_label"],
+            payload["body"], payload["created_at"], author_node_fingerprint=author_node,
+        )
+        for session in await self._live_subscribers(channel):
+            if session.remote_fingerprint == author_node or not self._peer_capable(session.remote_fingerprint):
+                continue
+            try:
+                await session.send(relayed)
+            except LinkTransportError:
+                pass
+
+    async def on_carried_message_materialized(
+        self, content_id: str, payload: dict, message: LocalChannelMessage
+    ) -> None:
+        """Show a `channel_message` that arrived by async sync to the
+        callers already in its channel (issue #860), unless it was shown
+        live already. `payload` is the verified signed event's payload.
+        `LinkNode.on_channel_message_materialized` points here. Hidden
+        content (a quarantined or blocked author) is not shown, the same as
+        in scrollback."""
+        author = payload["author"]
+        if not self._remember_shown(shown_key(
+            author["home_node_fingerprint"], author["local_user_id"], payload["created_at"], payload["body"],
+        )):
+            return
+        channel = await self._lane.run(get_channel_by_channel_id, payload["channel_id"])
+        if channel is None or not await self._lane.run(link_content_visible, content_id):
+            return
         await self._hub.broadcast(channel.name, message)
 
     async def _handle_presence_delta(self, session: LinkRealtimeSession, frame: RealtimeFrame) -> None:
@@ -691,16 +823,29 @@ class LiveChannelBridge:
         return live
 
     async def broadcast_local_message_live(self, channel: Channel, message: LocalChannelMessage) -> None:
-        """Push a just-locally-authored channel message out to every
-        currently live-subscribed peer session for `channel` -- the
-        outbound half of `_handle_channel_message`. One slow/dead peer
-        session degrades to just that session closing (`LinkRealtime
-        Session.send` already handles a full queue) and must never block
-        delivery to anyone else or to the local caller who just sent
-        the message."""
+        """Push a just-locally-authored channel message out live -- the
+        outbound half of `_handle_channel_message`. On the channel's origin,
+        to every currently live-subscribed peer session; on a subscriber, up
+        to the origin over the session it already has (issue #860), which
+        shows it to its callers and relays it to its other subscribers. One
+        slow/dead peer session degrades to just that session closing
+        (`LinkRealtimeSession.send` already handles a full queue) and must
+        never block delivery to anyone else or to the local caller who just
+        sent the message."""
         sessions = await self._live_subscribers(channel)
+        origin = await self._lane.run(channel_origin_fingerprint, channel)
+        if origin is not None and origin != self._registry.own_fingerprint:
+            upstream = self._registry.get(origin)
+            if upstream is not None and await self._lane.run(
+                lambda db: decide_node_action(db, origin, LinkPolicyAction.REALTIME).allowed
+            ):
+                sessions.append(upstream)
         if not sessions:
             return
+        # This node's own line, should its signed event ever come back by sync.
+        self._remember_shown(shown_key(
+            self._registry.own_fingerprint, message.author_label, message.created_at, message.body or "",
+        ))
         frame = build_channel_message_frame(
             channel.channel_id, message.author_label, message.author_label,
             message.body or "", message.created_at,

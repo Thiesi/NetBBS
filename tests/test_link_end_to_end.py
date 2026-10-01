@@ -1976,3 +1976,64 @@ def test_a_withdrawal_is_refused_when_the_origin_is_no_longer_a_peer(tmp_path):
     finally:
         dialer.close()
         seed.close()
+
+
+def test_a_subscribers_probationary_caller_reaches_an_outgoing_only_origin(tmp_path):
+    """Issue #860: on the Phase 4 nodes a subscriber's chat lines never
+    reached the channel's outgoing-only origin. The pull path itself works;
+    what stopped them was trust policy -- the subscriber's callers were on
+    probation at the origin, and a probationary caller's `channel_message`
+    was refused because chat has no approval queue. Origin O dials full node
+    R (as an outgoing-only node does), R carries O's channel, a caller on R
+    who O has never seen posts, and O's next pass brings the line home."""
+    from netbbs.link.trust import TrustDimension, TrustState, TrustSubject, register_subject, set_trust_override
+
+    origin_identity = bootstrap_node_identity("origin")
+    relay_identity = bootstrap_node_identity("relay")
+    origin_node = LinkNode(identity=origin_identity)
+    relay_node = LinkNode(identity=relay_identity)
+    origin = _NodeDb(tmp_path, "origin")
+    relay = _NodeDb(tmp_path, "relay")
+
+    alice = create_user(origin.db, "alice", password="hunter2", user_level=10)
+    channel = create_channel(origin.db, "lobby", creator=alice)
+    genesis = link_channel(origin.db, channel, node_identity=origin_identity)
+    # As the console does when a SysOp links a channel on a running node.
+    origin_node.channels[channel.channel_id] = genesis
+    first = record_message(origin.db, channel, kind="message", author_label="alice", body="from origin")
+    queue_channel_message_if_linked(origin.db, first, channel, node_identity=origin_identity)
+    # O has established R; R's callers are new to O, so on probation there.
+    relay_subject = TrustSubject.node(relay_identity.fingerprint)
+    register_subject(origin.db, relay_subject, first_accepted_at="2026-01-01T00:00:00.000000Z")
+    for dimension in (TrustDimension.IDENTITY_INTEGRITY, TrustDimension.RESOURCE_BEHAVIOR):
+        set_trust_override(origin.db, relay_subject, dimension, TrustState.ESTABLISHED, reason="known")
+
+    async def one_pass():
+        server = await _run_server(relay_node, relay.lane)
+        try:
+            async with aiohttp.ClientSession() as session:
+                task = asyncio.create_task(run_link_sync(
+                    origin_node, session, [f"http://127.0.0.1:{server.port}"],
+                    lambda: _hello_for(origin_node), origin.lane, interval_seconds=60.0,
+                    enforce_trust_policy=True,
+                ))
+                await _run_sync_briefly(task, settle=0.2)
+        finally:
+            await server.stop()
+
+    try:
+        asyncio.run(one_pass())
+        carried = get_channel_by_name(relay.db, "lobby")
+        assert [m.body for m in get_scrollback(relay.db, carried)] == ["from origin"]
+
+        create_user(relay.db, "bob", password="hunter2", user_level=10)
+        reply = record_message(relay.db, carried, kind="message", author_label="bob", body="from subscriber")
+        queue_channel_message_if_linked(relay.db, reply, carried, node_identity=relay_identity)
+
+        asyncio.run(one_pass())
+        landed = get_scrollback(origin.db, channel)
+        assert [m.body for m in landed] == ["from origin", "from subscriber"]
+        assert landed[1].author_label == f"bob@{relay_identity.fingerprint}"
+    finally:
+        origin.close()
+        relay.close()

@@ -1108,9 +1108,21 @@ async def run(
                 link_realtime_registry = LinkRealtimeSessionRegistry(
                     own_fingerprint=node_identity.fingerprint, on_contact=_record_realtime_contact,
                 )
+                from netbbs.link.events import CHANNEL_RELAY_CAPABILITY, descriptor_has_capability
+
+                def _peer_relays_channel_lines(fingerprint: str) -> bool:
+                    peer = link_node.peers.get(fingerprint)
+                    return peer is not None and peer.descriptor is not None and descriptor_has_capability(
+                        peer.descriptor, CHANNEL_RELAY_CAPABILITY
+                    )
+
                 link_realtime_bridge = LiveChannelBridge(
-                    hub=hub, lane=background_lane, presence=presence, registry=link_realtime_registry
+                    hub=hub, lane=background_lane, presence=presence, registry=link_realtime_registry,
+                    peer_capable=_peer_relays_channel_lines,
                 )
+                # Issue #860: a channel line that arrives by sync is shown to
+                # the callers already in its channel.
+                link_node.on_channel_message_materialized = link_realtime_bridge.on_carried_message_materialized
                 # Issue #168 (design doc §8.10.3): the live-relay server half
                 # (serves only as a full peer with relay serving on -- an
                 # outgoing-only node has no address to attach to), the party

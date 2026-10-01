@@ -5014,6 +5014,32 @@ label. If that fingerprint has an undismissed cryptographic-identity collision,
 the live channel line carries the same non-blocking caution used at mail and
 direct-message interaction boundaries.
 
+Live lines flow both ways over the one session a subscriber holds to the
+channel's origin (issue #860). A subscriber sends its callers' lines up that
+session, and the origin shows them to its own callers and relays them to its
+other live subscribers, so a Linked channel is one room live. The relayed frame
+names the author's node in an optional `author_node_fingerprint`. A receiver accepts
+`author_node_fingerprint` only from the channel's origin; anyone else naming
+another node is a protocol strike. A relayed line meets the same policy as its
+signed event: the author's node must be one allowed to publish here (`EVENTS`),
+and the caller must not be quarantined or blocked. A node that has not
+established the author's node sees the line neither live nor by sync. Older
+nodes refuse unknown frame keys, so that key goes only to peers advertising the
+`channel_relay` capability. A frame's optional `content_id` is accepted and
+ignored: it is the sender's unverified claim. An older subscriber gets relayed
+lines through async catch-up instead; an older origin still shows a
+subscriber's plain frame to its own callers.
+
+A line that arrives by async sync is shown at once to callers already in its
+channel, not only on their next join. The bridge remembers the lines it has
+shown (bounded), so the signed event that follows a live line is not shown
+twice. A line is keyed on what it is -- author's home node, author's local user
+id, `created_at` and body -- derived locally the same way from the live frame
+(author node: the session peer, or the node the origin names) and from the
+signed event's verified payload; the sender builds both from one stored row. A
+peer therefore can only mark its own callers' lines as shown, never suppress
+another node's line by claiming its id.
+
 Presence is leased, scoped to subscribed linked channels, and advisory. A
 snapshot establishes current state after subscription; deltas update it.
 Disconnect or lease expiry removes that node's remote presence without
@@ -6847,8 +6873,13 @@ request type. The URL fingerprint is routing information, never attribution.
 Probationary inventory responses use one quarter of the established event
 budget. Valid board posts from probationary users enter the local pending
 approval queue, and so do their edits: an approved post must not be rewritten
-with unreviewed text. Services without an approval projection, including Link
-mail, refuse such content with a stable reason code.
+with unreviewed text. Link mail (issue #804) and Linked chat lines (issue
+#860) from a probationary user of a node allowed here are delivered: mail goes
+to one recipient, and chat has no approval queue, so refusing a probationary
+caller's line left every caller of a newly met node unheard in a Linked channel
+until they graduated. Quarantine and block still refuse both. Other services
+without an approval projection, such as file uploads, refuse such content with
+a stable reason code.
 
 A pushed events request is judged event by event once the sending node itself
 is allowed (issue #897). An event refused for its author does not refuse the
