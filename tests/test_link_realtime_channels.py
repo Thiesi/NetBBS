@@ -500,7 +500,10 @@ def test_track_session_sends_the_initial_snapshot_only_once(tmp_path):
 
             await origin.bridge.track_session(origin_session)
             await origin.bridge.track_session(origin_session)  # same session again -- e.g. a second subscribe
-            await asyncio.sleep(0.05)  # give a wrongly-duplicated send a chance to arrive
+            # The one real send is waited for (issue #999); then a short
+            # settle gives a wrongly-duplicated send a chance to arrive.
+            assert await _wait_until(lambda: len(received) >= 1, timeout=30.0)
+            await asyncio.sleep(0.05)
             assert len(received) == 1
         finally:
             await server.stop()

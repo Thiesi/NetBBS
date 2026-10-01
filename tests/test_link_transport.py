@@ -527,9 +527,10 @@ def test_dial_realtime_session_completes_a_handshake_and_registers_both_sides():
             )
             try:
                 await session_a.send(build_subscribe_frame("channel-1"))
-                await asyncio.sleep(0.05)
                 assert registry_a.get(bob.fingerprint) is session_a
-                assert registry_b.get(alice.fingerprint) is not None
+                # The listener registers its side when it processes the
+                # connection: waited for, not slept for (issue #999).
+                assert await _wait_until(lambda: registry_b.get(alice.fingerprint) is not None, timeout=30.0)
                 assert session_a.remote_fingerprint == bob.fingerprint
             finally:
                 await session_a.close(reason="test_done")
