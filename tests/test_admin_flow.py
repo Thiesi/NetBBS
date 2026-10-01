@@ -683,6 +683,30 @@ def test_sysop_can_clear_a_trust_override_and_view_decision_history_through_real
     assert "blocked" in text and "probationary" in text
 
 
+def test_reporter_scopes_expand_a_star_and_name_unknown_categories(db, lane, sysop):
+    # Issue #745: `identity_integrity:*` saved as a grant that matched
+    # nothing, and a mistyped category was just as silent.
+    from netbbs.link.trust import list_trusted_reporters
+
+    reporter = "abcdefghijklmnopqrstuvwxyz234567"
+    session = FakeSession(
+        [
+            "s", "p",
+            "d", "a", "i", "emergency", "n", "Emergency operator", "w", "1.0", "s", "b",
+            "r", "a", "n", "0", "1", reporter, "d", "emergency",
+            "c", "identity_integrity:*, content_conduct:spamm", "s", "b",
+            "b", "b", "b",
+        ]
+    )
+    _run(session, lane, sysop)
+    granted = {(dimension.value, category) for dimension, category in list_trusted_reporters(db)[0].scopes}
+    assert ("identity_integrity", "signed_equivocation") in granted
+    assert ("identity_integrity", "*") not in granted
+    assert ("content_conduct", "spamm") in granted
+    text = _visible(_written_text(session))
+    assert "Not a category this version knows, so it has no effect yet: content_conduct:spamm." in " ".join(text.split())
+
+
 def test_declined_sole_authority_confirmation_leaves_policy_safe(db, lane, sysop):
     reporter = "abcdefghijklmnopqrstuvwxyz234567"
     session = FakeSession(

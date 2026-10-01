@@ -538,6 +538,82 @@ def test_future_signal_and_invalid_category_evidence_pair_are_rejected(db):
         )
 
 
+def test_a_star_scope_grants_every_category_of_its_dimension(db):
+    # Issue #745: `identity_integrity:*` was stored literally and matched no
+    # signal, while every screen showed it as a normal grant.
+    from netbbs.link.trust import IDENTITY_CATEGORIES
+    from netbbs.link.trust_wire import _reporter_scope_allows
+
+    subject = register_old_node(db)
+    for reporter, domain in (("reporter-a", "domain-a"), ("reporter-b", "domain-b")):
+        configure_trust_domain(db, domain, display_name=domain, now_iso=stamp(NOW))
+        configure_trusted_reporter(
+            db, reporter, domain_id=domain,
+            scopes=[(TrustDimension.IDENTITY_INTEGRITY, "*"), (TrustDimension.CONTENT_CONDUCT, " spam ")],
+            now_iso=stamp(NOW),
+        )
+    granted = list_trusted_reporters(db)[0].scopes
+    assert {category for dimension, category in granted if dimension == TrustDimension.IDENTITY_INTEGRITY}         == IDENTITY_CATEGORIES
+    assert (TrustDimension.CONTENT_CONDUCT, "spam") in granted
+    assert all(category != "*" for _, category in granted)
+    assert _reporter_scope_allows(db, "reporter-a", "identity_integrity", "signed_equivocation")
+    assert not _reporter_scope_allows(db, "reporter-a", "resource_behavior", "request_flood")
+
+    add_signal(db, subject, "reporter-a", 1)
+    add_signal(db, subject, "reporter-b", 2)
+    state = get_effective_trust_state(db, subject, TrustDimension.IDENTITY_INTEGRITY)
+    assert (state.state, state.reason_code) == (TrustState.QUARANTINED, "remote_domain_threshold")
+
+
+def test_migration_expands_a_star_scope_saved_before_745(tmp_path, monkeypatch):
+    # A node that saved `identity_integrity:*` before the fix holds a grant
+    # that matches nothing. The migration turns it into what saving it now
+    # stores, and drops that reporter's pull cursor so what the pull skipped
+    # is read again.
+    import netbbs.storage.database as database_module
+    from netbbs.link.trust import IDENTITY_CATEGORIES
+    from netbbs.storage.migrations import MIGRATIONS
+
+    index = next(i for i, m in enumerate(MIGRATIONS) if "Issue #745" in m.description)
+    monkeypatch.setattr(database_module, "MIGRATIONS", MIGRATIONS[:index])
+    path = tmp_path / "node.db"
+    old = Database(path)
+    configure_trust_domain(old, "domain", display_name="Domain", now_iso=stamp(NOW))
+    configure_trusted_reporter(
+        old, "starred", domain_id="domain",
+        scopes=[(TrustDimension.CONTENT_CONDUCT, "spam")], now_iso=stamp(NOW),
+    )
+    configure_trusted_reporter(
+        old, "exact", domain_id="domain",
+        scopes=[(TrustDimension.IDENTITY_INTEGRITY, "signed_equivocation")], now_iso=stamp(NOW),
+    )
+    # What the pre-#745 code stored for `identity_integrity:*`.
+    old.connection.execute(
+        "INSERT INTO link_trust_reporter_scopes VALUES ('starred', 'identity_integrity', '*')"
+    )
+    old.connection.executemany(
+        "INSERT INTO link_trust_pull_cursors VALUES ('carrier', ?, 'after', ?)",
+        [("starred", stamp(NOW)), ("exact", stamp(NOW))],
+    )
+    old.connection.commit()
+    old.close()
+    monkeypatch.undo()
+
+    db = Database(path)
+    try:
+        scopes = {r.fingerprint: set(r.scopes) for r in list_trusted_reporters(db)}
+        assert scopes["starred"] == {(TrustDimension.CONTENT_CONDUCT, "spam")} | {
+            (TrustDimension.IDENTITY_INTEGRITY, category) for category in IDENTITY_CATEGORIES
+        }
+        assert scopes["exact"] == {(TrustDimension.IDENTITY_INTEGRITY, "signed_equivocation")}
+        cursors = [row[0] for row in db.connection.execute(
+            "SELECT issuer_fingerprint FROM link_trust_pull_cursors"
+        )]
+        assert cursors == ["exact"]
+    finally:
+        db.close()
+
+
 def test_unknown_versioned_category_is_retained_but_has_no_policy_effect(db):
     subject = register_old_node(db)
     configure_trust_domain(db, "domain", display_name="Domain", now_iso=stamp(NOW))

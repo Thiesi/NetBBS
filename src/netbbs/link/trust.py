@@ -57,6 +57,38 @@ _CATEGORIES_BY_DIMENSION = {
     TrustDimension.RESOURCE_BEHAVIOR: RESOURCE_CATEGORIES,
     TrustDimension.CONTENT_CONDUCT: CONTENT_CATEGORIES,
 }
+#: The scope category a SysOp writes for "every category of this dimension"
+#: (issue #745). Expanded when the grant is saved, never stored: matching is
+#: by exact category everywhere.
+ALL_CATEGORIES = "*"
+
+
+def known_categories(dimension: TrustDimension | str) -> frozenset[str]:
+    """The categories of `dimension` this version gives a policy effect."""
+    return _CATEGORIES_BY_DIMENSION[_dimension(dimension)]
+
+
+def expand_reporter_scopes(
+    scopes: Iterable[tuple[TrustDimension | str, str]],
+) -> list[tuple[str, str]]:
+    """A reporter grant's `(dimension, category)` pairs as they are stored.
+
+    `dimension:*` becomes every category of that dimension this version
+    knows. Before issue #745 it was stored literally, matched no signal, and
+    looked like a normal grant on every screen. Another category this
+    version does not know is kept as written: a later version may define it,
+    and a signal in it is retained without effect until then."""
+    result: set[tuple[str, str]] = set()
+    for dimension, category in scopes:
+        normalized = _dimension(dimension)
+        category = category.strip()
+        if category == ALL_CATEGORIES:
+            result.update((normalized.value, known) for known in _CATEGORIES_BY_DIMENSION[normalized])
+        else:
+            result.add((normalized.value, category))
+    return sorted(result)
+
+
 _MAX_LIFETIME = {
     EvidenceClass.SELF_VERIFYING: timedelta(days=90),
     EvidenceClass.OBSERVER_ATTESTED: timedelta(days=7),
@@ -1355,7 +1387,7 @@ def configure_trusted_reporter(
 ) -> None:
     if not fingerprint:
         raise ValueError("reporter fingerprint must not be empty")
-    normalized_scopes = sorted({(_dimension(d).value, category) for d, category in scopes})
+    normalized_scopes = expand_reporter_scopes(scopes)
     now_value, now = _now(now_iso)
     with db.connection:
         if not db.connection.execute(

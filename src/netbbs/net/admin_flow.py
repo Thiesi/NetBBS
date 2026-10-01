@@ -413,7 +413,9 @@ from netbbs.link.trust import (
     configure_trust_anchor,
     configure_trust_domain,
     configure_trusted_reporter,
+    ALL_CATEGORIES,
     get_effective_trust_state,
+    known_categories,
     node_probation,
     is_registered_subject,
     list_sole_authorities,
@@ -4825,8 +4827,8 @@ def _parse_reporter_scopes(value: str) -> list[tuple[TrustDimension, str]]:
         dimension, separator, category = item.strip().partition(":")
         if not separator or not category:
             raise ValueError("scopes must use dimension:category, separated by commas")
-        normalized = TrustDimension(dimension)
-        result.append((normalized, category))
+        normalized = TrustDimension(dimension.strip())
+        result.append((normalized, category.strip()))
     if not result:
         raise ValueError("at least one reporter scope is required")
     return result
@@ -4946,7 +4948,8 @@ async def _trust_reporters_screen(session: Session, lane: DatabaseLane, actor: U
                 brief="dimension:category, by commas",
                 help=(
                     "Which evidence this reporter may speak to, as dimension:category pairs separated by "
-                    "commas -- e.g. identity_integrity:signed_equivocation, content_conduct:spam."
+                    "commas -- e.g. identity_integrity:signed_equivocation, content_conduct:spam. "
+                    "dimension:* grants every category of that dimension, listed by name once saved."
                 ),
             ),
             FieldSpec(
@@ -4977,7 +4980,20 @@ async def _trust_reporters_screen(session: Session, lane: DatabaseLane, actor: U
                 can_vouch_nodes=draft["can_vouch_nodes"], can_vouch_users=draft["can_vouch_users"],
                 actor_user_id=actor.id,
             )
-            listing.say("Trusted reporter changed and audited.")
+            # Issue #745: a scope that matches nothing used to look like any
+            # other grant. A category this version does not know is still kept
+            # (a later version may define it), but the SysOp hears about it.
+            unknown = [
+                f"{dimension.value}:{category}" for dimension, category in scopes
+                if category != ALL_CATEGORIES and category not in known_categories(dimension)
+            ]
+            if unknown:
+                listing.say(
+                    "Trusted reporter changed and audited. Not a category this version knows, so "
+                    f"it has no effect yet: {', '.join(unknown)}."
+                )
+            else:
+                listing.say("Trusted reporter changed and audited.")
             return True
 
         await _trust_editor(
