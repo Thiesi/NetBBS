@@ -35,19 +35,30 @@ subject established *here* uses an override, which is the local act.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
+from netbbs.config import get_config, set_config
 from netbbs.identity.keys import Identity, verify_signature
-from netbbs.link.events import canonical_bytes
-from netbbs.link.trust import TrustSubject
+from netbbs.link.equivocation import SIGNED_EQUIVOCATION
+from netbbs.link.events import canonical_bytes, event_content_id
+from netbbs.link.trust import (
+    EvidenceClass,
+    TrustDimension,
+    TrustSubject,
+    record_local_observation,
+    register_subject,
+)
 from netbbs.link.trust_wire import (
+    TRUST_SIGNAL_OBJECT_TYPE,
     TRUST_VOUCH_OBJECT_TYPE,
     TRUST_VOUCH_REVOCATION_OBJECT_TYPE,
     SignedTrustObject,
     build_trust_revocation,
+    build_trust_signal,
     build_trust_vouch,
     store_issued_trust_object,
 )
@@ -509,3 +520,227 @@ def get_vouch_intent(
         if intent.subject == subject:
             return intent
     return None
+
+
+# -- automatic equivocation signals (issue #589) -------------------------------
+
+#: The node-wide switch for automatic signals: on unless the SysOp turned it off.
+AUTOMATIC_SIGNALS_CONFIG_KEY = "trust_automatic_equivocation_signals"
+#: At most this many automatic signals are signed in any 24 hours: a node that
+#: suddenly sees many forks is more likely broken than surrounded by liars.
+MAX_AUTOMATIC_SIGNALS_PER_DAY = 5
+AUTOMATIC_SIGNAL_EXPLANATION = (
+    "Automatic: this node saw the subject sign two different objects into the same "
+    "slot of one chain. Both are attached."
+)
+
+
+@dataclass(frozen=True)
+class IssuedSignalChange:
+    """One signing action `reconcile_issued_signals` took."""
+
+    action: str  # "issued" | "renewed" | "revoked" | "deferred"
+    content_id: str | None
+    subject_fingerprint: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class IssuedSignal:
+    """A signal this node signed about another node, and where it stands."""
+
+    content_id: str
+    observation_id: str
+    subject_fingerprint: str
+    issued_at: str
+    expires_at: str
+    revoked_at: str | None
+
+
+def automatic_signals_enabled(db: Database) -> bool:
+    return get_config(db, AUTOMATIC_SIGNALS_CONFIG_KEY, "1") != "0"
+
+
+def set_automatic_signals_enabled(db: Database, enabled: bool) -> None:
+    set_config(db, AUTOMATIC_SIGNALS_CONFIG_KEY, "1" if enabled else "0")
+
+
+def equivocation_observation_id(evidence: dict) -> str:
+    """One observation per pair of conflicting objects, whichever was seen first."""
+    ids = sorted(event_content_id(raw["envelope"]) for raw in evidence["data"]["objects"])
+    return "equivocation:" + hashlib.sha256("\n".join(ids).encode("ascii")).hexdigest()[:32]
+
+
+def record_observed_equivocation(
+    db: Database, subject_fingerprint: str, evidence: dict, *, now_iso: str | None = None,
+) -> bool:
+    """Record equivocation this node observed itself (issue #589).
+
+    A self-verifying identity observation, which quarantines the subject's
+    identity integrity here (design doc §12.8) and, unless the SysOp turned
+    automatic signals off, is published by the next `reconcile_issued_signals`.
+    Returns False if the same pair was already recorded."""
+    now_value, _ = _now(now_iso)
+    subject = TrustSubject.node(subject_fingerprint)
+    register_subject(db, subject, first_accepted_at=now_value, now_iso=now_value)
+    return record_local_observation(
+        db,
+        observation_id=equivocation_observation_id(evidence),
+        subject=subject,
+        dimension=TrustDimension.IDENTITY_INTEGRITY,
+        category=SIGNED_EQUIVOCATION,
+        evidence_class=EvidenceClass.SELF_VERIFYING,
+        observed_at=now_value,
+        evidence=evidence,
+        explanation="Signed two different objects into the same slot of one chain (seen here).",
+        now_iso=now_value,
+    )
+
+
+def _live_own_signals(db: Database, home_node_fingerprint: str, now_value: str):
+    return db.connection.execute(
+        """SELECT content_id, envelope_json, signature_b64, subject_id, expires_at, received_at
+           FROM link_trust_wire_objects
+           WHERE issuer_fingerprint = ? AND object_type = ? AND revoked_at IS NULL AND expires_at > ?
+           ORDER BY received_at DESC, content_id""",
+        (home_node_fingerprint, TRUST_SIGNAL_OBJECT_TYPE, now_value),
+    ).fetchall()
+
+
+def _publishable_observations(db: Database, home_node_fingerprint: str, now_value: str):
+    """Active equivocation this node observed about another node, oldest first."""
+    return db.connection.execute(
+        """SELECT o.observation_id, o.subject_id, o.observed_at, o.expires_at, o.evidence_json,
+                  o.publication_withdrawn_at, s.node_fingerprint
+           FROM link_trust_local_observations AS o
+           JOIN link_trust_subjects AS s ON s.subject_id = o.subject_id
+           WHERE o.category = ? AND o.evidence_class = 'self_verifying' AND o.cleared_at IS NULL
+             AND o.expires_at > ? AND s.subject_kind = 'node' AND s.node_fingerprint != ?
+             AND o.evidence_json IS NOT NULL
+           ORDER BY o.observed_at, o.observation_id""",
+        (SIGNED_EQUIVOCATION, now_value, home_node_fingerprint),
+    ).fetchall()
+
+
+def _revoke_signal(
+    db: Database, identity: Identity, content_id: str, *, home_node_fingerprint: str, now_value: str,
+) -> SignedTrustObject:
+    revocation = build_trust_revocation(
+        signing_identity=identity,
+        issuer_fingerprint=home_node_fingerprint,
+        revocation_id=secrets.token_hex(16),
+        revoked_content_id=content_id,
+        issued_at=now_value,
+    )
+    store_issued_trust_object(db, revocation, issued_at=now_value)
+    db.connection.execute(
+        """UPDATE link_trust_wire_objects SET revoked_by_content_id = ?, revoked_at = ?
+           WHERE content_id = ? AND revoked_at IS NULL""",
+        (revocation.content_id, now_value, content_id),
+    )
+    return revocation
+
+
+def reconcile_issued_signals(
+    db: Database,
+    signing_identity: Identity,
+    *,
+    home_node_fingerprint: str,
+    now_iso: str | None = None,
+) -> list[IssuedSignalChange]:
+    """Publish, re-sign and revoke this node's automatic equivocation signals
+    (issue #589). Called once per sync pass.
+
+    A signal is signed for each active equivocation observation about another
+    node -- at most one live signal per subject, at most
+    `MAX_AUTOMATIC_SIGNALS_PER_DAY` signed in 24 hours -- while automatic
+    signals are on and the SysOp has not withdrawn that one. A live signal is
+    revoked when its observation is cleared or has expired, when the SysOp
+    withdraws it, or when automatic signals are turned off; one signed by a
+    key this node has since rotated away from is re-signed. Its evidence is
+    the two conflicting objects themselves, which every receiver reproduces
+    before it counts the signal (issue #1036).
+    """
+    now_value, now = _now(now_iso)
+    enabled = automatic_signals_enabled(db)
+    changes: list[IssuedSignalChange] = []
+    with db.connection:
+        observations = {row["observation_id"]: row for row in _publishable_observations(
+            db, home_node_fingerprint, now_value)}
+        live_subjects: set[str] = set()
+        for row in _live_own_signals(db, home_node_fingerprint, now_value):
+            payload = json.loads(row["envelope_json"])["payload"]
+            observation = observations.get(payload["signal_id"])
+            subject_fingerprint = payload["subject"]["node_fingerprint"]
+            if observation is None:
+                reason = "observation_cleared"
+            elif observation["publication_withdrawn_at"] is not None:
+                reason = "withdrawn_by_sysop"
+            elif not enabled:
+                reason = "automatic_signals_off"
+            elif not _signed_by(row, signing_identity):
+                reason = "signing_key_rotated"
+            else:
+                live_subjects.add(row["subject_id"])
+                continue
+            revocation = _revoke_signal(
+                db, signing_identity, row["content_id"],
+                home_node_fingerprint=home_node_fingerprint, now_value=now_value,
+            )
+            changes.append(IssuedSignalChange("revoked", revocation.content_id, subject_fingerprint, reason))
+        if not enabled:
+            return changes
+        signed_today = db.connection.execute(
+            """SELECT COUNT(*) FROM link_trust_wire_objects
+               WHERE issuer_fingerprint = ? AND object_type = ? AND received_at > ?""",
+            (home_node_fingerprint, TRUST_SIGNAL_OBJECT_TYPE, _stamp(now - timedelta(days=1))),
+        ).fetchone()[0]
+        for observation_id, observation in observations.items():
+            if observation["publication_withdrawn_at"] is not None or observation["subject_id"] in live_subjects:
+                continue
+            subject_fingerprint = observation["node_fingerprint"]
+            if signed_today >= MAX_AUTOMATIC_SIGNALS_PER_DAY:
+                changes.append(IssuedSignalChange("deferred", None, subject_fingerprint, "daily_limit"))
+                continue
+            evidence = json.loads(observation["evidence_json"])
+            if not isinstance(evidence, dict) or evidence.get("mode") != "embedded":
+                continue
+            signal = build_trust_signal(
+                signing_identity=signing_identity,
+                issuer_fingerprint=home_node_fingerprint,
+                signal_id=observation_id,
+                subject=TrustSubject.node(subject_fingerprint),
+                dimension=TrustDimension.IDENTITY_INTEGRITY,
+                category=SIGNED_EQUIVOCATION,
+                evidence_class=EvidenceClass.SELF_VERIFYING,
+                evidence=evidence,
+                observed_at=observation["observed_at"],
+                issued_at=now_value,
+                expires_at=observation["expires_at"],
+                explanation=AUTOMATIC_SIGNAL_EXPLANATION,
+            )
+            store_issued_trust_object(db, signal, issued_at=now_value)
+            live_subjects.add(observation["subject_id"])
+            signed_today += 1
+            changes.append(IssuedSignalChange("issued", signal.content_id, subject_fingerprint, "observed_here"))
+    return changes
+
+
+def list_issued_signals(db: Database, *, home_node_fingerprint: str, limit: int = 100) -> list[IssuedSignal]:
+    """Signals this node signed about other nodes, newest first."""
+    rows = db.connection.execute(
+        """SELECT content_id, envelope_json, received_at, expires_at, revoked_at
+           FROM link_trust_wire_objects
+           WHERE issuer_fingerprint = ? AND object_type = ?
+           ORDER BY received_at DESC, content_id LIMIT ?""",
+        (home_node_fingerprint, TRUST_SIGNAL_OBJECT_TYPE, limit),
+    ).fetchall()
+    result = []
+    for row in rows:
+        payload = json.loads(row["envelope_json"])["payload"]
+        result.append(IssuedSignal(
+            content_id=row["content_id"], observation_id=payload["signal_id"],
+            subject_fingerprint=payload["subject"]["node_fingerprint"],
+            issued_at=row["received_at"], expires_at=row["expires_at"], revoked_at=row["revoked_at"],
+        ))
+    return result

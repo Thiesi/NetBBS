@@ -3995,6 +3995,17 @@ MIGRATIONS = [
     ),
     Migration(
         description=(
+            "Issue #589: `link_trust_local_observations.publication_withdrawn_at` -- when the "
+            "SysOp withdrew the automatic trust signal this node published about an observed "
+            "equivocation, while keeping the observation itself. NULL for every existing row: "
+            "no node published signals before this."
+        ),
+        sql="""
+        ALTER TABLE link_trust_local_observations ADD COLUMN publication_withdrawn_at TEXT;
+        """,
+    ),
+    Migration(
+        description=(
             "Issue #632 (design doc §16): sealed attestation bundles a relay holds for a recipient "
             "it relays for. One slot per (issuer, recipient): a newer bundle from the same issuer "
             "replaces the older one, since a bundle is a complete snapshot. Kept apart from "

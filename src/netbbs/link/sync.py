@@ -242,7 +242,11 @@ from netbbs.link.introduction import (
     MAX_IDENTITIES_PER_REQUEST, build_identity_request, referenced_identities,
 )
 from netbbs.link.node_identity import NodeIdentityError
-from netbbs.link.trust_issuance import reconcile_issued_vouches
+from netbbs.link.trust_issuance import (
+    reconcile_issued_signals,
+    reconcile_issued_vouches,
+    record_observed_equivocation,
+)
 from netbbs.link.transport import (
     request_identities,
     AttestationRecipientRefused,
@@ -533,6 +537,8 @@ async def run_link_sync(
         # recorded or withdrawn since the last pass is already what a
         # subscriber reads this pass.
         await _reconcile_own_vouches(node, lane)
+        await _record_observed_equivocations(node, lane)
+        await _reconcile_own_signals(node, lane)
         await _pull_trust_subscriptions(
             node, session, lane, enforce_trust_policy=enforce_trust_policy
         )
@@ -1554,6 +1560,51 @@ async def _reconcile_own_vouches(node: LinkNode, lane: DatabaseLane) -> None:
         _logger.info(
             "Link trust: %s a vouch for %s %s (%s)",
             change.action, change.subject.kind, change.subject.node_fingerprint, change.reason,
+        )
+
+
+async def _record_observed_equivocations(node: LinkNode, lane: DatabaseLane) -> None:
+    """Record the equivocation `handle_events` saw since the last pass (issue
+    #589): each one quarantines its subject's identity integrity here, and is
+    published by `_reconcile_own_signals` unless the SysOp turned that off."""
+    pending, node.observed_equivocations[:] = list(node.observed_equivocations), []
+    for subject_fingerprint, evidence in pending:
+        try:
+            if await lane.run(record_observed_equivocation, subject_fingerprint, evidence):
+                _logger.warning(
+                    "Link trust: node %s signed two different objects into the same chain slot. "
+                    "Its identity integrity is quarantined here until a SysOp clears the evidence "
+                    "on its trust screen (Settings -> Policy trust -> Subjects).",
+                    subject_fingerprint,
+                )
+        except (ValueError, sqlite3.Error) as exc:
+            _logger.warning("Link trust: could not record equivocation by %s: %s", subject_fingerprint, exc)
+
+
+async def _reconcile_own_signals(node: LinkNode, lane: DatabaseLane) -> None:
+    """Sign, re-sign and revoke this node's automatic equivocation signals
+    (issue #589). Every pass, like the vouches: revocation follows a SysOp
+    clearing evidence or turning automatic signals off."""
+    try:
+        changes = await lane.run(
+            reconcile_issued_signals,
+            node.identity.signing_key,
+            home_node_fingerprint=node.identity.fingerprint,
+        )
+    except (ValueError, sqlite3.Error) as exc:
+        _logger.warning("Link trust: could not reconcile this node's own signals: %s", exc)
+        return
+    for change in changes:
+        if change.action == "deferred":
+            _log_once(
+                node, f"signal-deferred:{change.subject_fingerprint}",
+                "Link trust: an automatic signal about %s waits: this node already signed the "
+                "most it signs in a day.", change.subject_fingerprint,
+            )
+            continue
+        _logger.warning(
+            "Link trust: %s an automatic equivocation signal about node %s (%s)",
+            change.action, change.subject_fingerprint, change.reason,
         )
 
 
