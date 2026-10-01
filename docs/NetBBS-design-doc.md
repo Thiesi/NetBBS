@@ -454,28 +454,60 @@ node logs it once; the console's check warns when a level-255 SysOp's menu
 would not fit. ASCII callers, a terminal smaller than the art, and art that
 fails the check get the generated menu too. Art narrower than the screen is
 drawn left-aligned, and the prompt goes below the art unless a `{prompt}`
-token places it. The main menu comes first, then the welcome and logoff
-fields; the Boards, Chat and Files lists need a list region with paging and
-get their own design.
+token places it. The main menu, welcome and logoff banners use slots today;
+the three lists and hand-drawn items below are being built. Pacing works for
+the welcome banner and the main menu's art.
 
-**Paced art (issue #929, step 6).** A SysOp can give a piece of art a speed --
-2400, 9600 or 38400 bps, off by default -- and NetBBS then sends it in small
-chunks at the speed a modem of the day would have drawn it
-(`netbbs.net.art_pacing`). Art that moves the cursor back over rows it drew
-plays as the ANSImation it was made to be, and is exempt from the row-end
-trimming of still art (`revisits_rows`), since its trailing spaces may erase an
-earlier frame; still art and slot art build up top to bottom. The pacing is
-NetBBS's own, so it works in every terminal, and a key ends it: the rest of the
-art is drawn at once, and that key -- with anything typed behind it -- is
-swallowed (`Session.take_waiting_key`), so an Enter pressed to skip the
-welcome art never submits an empty username. One draw takes at most 5 seconds;
-past that the rest goes out at once. Each piece of art plays once per
-connection: the welcome art before sign-in, and the main menu's art on the
-first main menu, never on a redraw, after a notice, or when a break-in hands
-the screen back. Nothing is paced for a session with no live terminal
+*List screens.* The Boards, file areas and Chat channels lists take a `{list
+WxH}` region. The current page fills it, one row per entry: the number to
+press for it, the name, and one compact column the screen chooses (unread
+posts for boards, files for areas, people for channels). A board, area or
+channel whose name requirement the caller does not meet shows "needs
+verification" in that column instead, so the gate note §3.6 requires survives
+in art too. Descriptions and full tables appear only on the generated list. A
+page holds as many entries as the region has rows; numbering, one-digit
+selection, browser clicks, search and the paging keys work as on the generated
+list, and the navigation block and prompt go below the art unless `{prompt}`
+places it. The cursor row is drawn reversed in the token's colour. Three more
+fields serve lists: `{title N}`, `{page N}` ("2/5") and `{count N}`. A region
+under 3 rows, or one that leaves the name under 12 columns, falls back to the
+generated list, as does every case that makes the main menu fall back.
+
+*Hand-drawn items.* A SysOp may draw the menu's items into the art instead of
+leaving them to a `{menu WxH}` region (written `{menu}` below; it is the same
+token). Every bracketed key drawn in the art,
+`[K]`, marks one item; the item spans the run of text around it, bounded by
+two or more spaces, which is also how the browser terminal finds what a click
+means. An item the caller cannot use is blanked: its cells are repainted as
+spaces in their own background colour, so frames and fills stay whole and the
+caller sees only what the generated menu would show. Items the caller can use
+that the art does not draw go into the art's `{menu}` region; art with no
+`{menu}` region and an undrawn item falls back to the generated menu, so
+nothing is ever hidden. A drawn `[X]` that matches no item is left as drawn,
+and the console's check lists it. Buttons drawn over several rows are not
+supported.
+
+*Pacing.* Art can be played at an emulated line speed so that it draws itself
+the way it did over a modem (`netbbs.net.art_pacing`). Each banner's speed is
+off, 2400, 9600 or 38400 bps, off by default, set with **Speed** on its console
+screen. NetBBS paces the bytes itself, in small chunks, and checks for a
+waiting key between them (`Session.take_waiting_key`); any key ends the effect
+and writes the rest at once, and it is consumed with anything typed behind it,
+so Enter cannot submit an empty prompt that follows. One draw is paced for at
+most 5 seconds; past that the rest goes out at once. Each piece of art plays
+once per connection: the welcome banner when a caller connects, the main
+menu's art on the first main menu, and a list's art on the first visit once
+list slots land. It never plays on a redraw, after a notice, on the screen
+restored after a break-in, or in a door. Plain banners play in the order they
+were drawn, so cursor-moving ANSI animations work, and art that moves the
+cursor back over rows it drew is exempt from the row-end trimming of still art
+(`revisits_rows`), since its trailing spaces may erase an earlier frame. Slot
+art is rebuilt cell by cell and is revealed top to bottom; the whole art is
+prepared once (iCE colours, CTerm's bright backgrounds) so no chunk loses a
+colour state. Nothing is paced for a session with no live terminal
 (`Session.paces_art`, set only by the Telnet, SSH and web transports), during
-a break-in, for a plain-ASCII caller, or for a caller who chose quick under
-**Profile → [Q]uick or animated banners**, and doors are never paced.
+a break-in, for ASCII callers, or for callers who chose quick under
+**Profile → [Q]uick or animated banners** (animated by default).
 
 A SysOp may override three of the node's branding colors -- accent (board/
 channel/user names and other navigable-item branding), header (section
@@ -14114,8 +14146,9 @@ and animation pacing are later steps of #929 and build on this layer.
 
 ### Issue #929 — SysOp art: SAUCE and live slots — decided
 
-Steps 3 and 4 of #929. Normative description: §3.2, "SysOp art: storage and
-SAUCE" and "Art with live slots".
+Steps 3 to 6 of #929. Normative description: §3.2, "SysOp art: storage and
+SAUCE" and "Art with live slots", including its list screens, hand-drawn items
+and pacing.
 
 **Decision 1 — the `.ans` file is the only source.** SAUCE, pictographs and
 iCE colours are handled when the file is read. Rejected: a normalised copy in
@@ -14145,15 +14178,31 @@ which editors strip and nobody sees.
 Rejected: filling the region and moving the rest behind a "more" entry, which
 silently moves items a caller can use out of sight.
 
-**Decision 7 — art is paced by NetBBS, not by the terminal (step 6).**
-CTerm's `CSI Ps1 ; Ps2 * r` sets SyncTERM's own emulated line speed, but only
-SyncTERM has it, bytes already handed to the terminal can't be skipped, and
-turning it off queues behind the art. NetBBS sends the art in chunks itself and
-checks for a key between them. The skipping key is swallowed, not passed on as
-Voidrunner passes its interrupting key, because a prompt follows the art.
-Speeds are off, 2400, 9600 or 38400 bps per piece of art, off by default, with
-a 5-second cap per draw; a cap that slowed the art instead of ending the
-pacing was rejected, since the speed is part of how the art was meant to look.
+**Decision 7 — lists in art show a compact row.** A list region shows the
+number, the name and one column per screen; descriptions and tables stay on
+the generated list. Rejected: drawing the generated list inside the region,
+whose tables and descriptions do not fit a drawn box and whose page arithmetic
+assumes the full screen; and hiding NetBBS's own list under the art, which
+shows stale rows.
+
+**Decision 8 — hand-drawn items are found, not declared.** A drawn `[K]` is
+the item, with no extra token. Rejected: a sidecar map or SAUCE comments
+holding coordinates, which editors strip and SysOps cannot see.
+
+**Decision 9 — items a caller cannot use are blanked.** Chosen over dimming
+them after a mockup: blanking matches the generated menu, which hides them,
+and does not advertise SysOp keys. Dimming keeps the art's full shape but
+shows keys that do nothing, and relies on a colour some terminals render
+faintly.
+
+**Decision 10 — pacing on the server, not CTerm's speed sequence.** SyncTERM
+can emulate a line speed itself (`CSI Ps1 ; Ps2 * r`), but bytes already sent
+cannot be skipped, it works only in SyncTERM, and turning it off again queues
+behind the art. Server-side pacing works on every terminal and stops at once
+on a key. The skipping key is swallowed, not passed on as Voidrunner passes
+its interrupting key, because a prompt follows the art. At the 5-second cap the
+rest is sent at once; a cap that sped the art up instead was rejected, since
+the speed is part of how the art was meant to look.
 
 ### SFTP over the SSH transport — declined
 
