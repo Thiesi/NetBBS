@@ -1733,16 +1733,16 @@ visible. Local maintenance follows:
 with a grace period between expiration and deletion. Local pruning never
 becomes a network-wide deletion instruction.
 
-A post ages from its original revision (issue #793). Every revision of it
-(edits, withdrawals, moderator edits) is judged by the first revision's
-`created_at`, never by its own:
-- **Why not its own:** a revision carried over the Link is stamped by its
+A revision ages from the later of its own `created_at` and its post's first
+revision's (issue #793). This applies to every revision: edits, withdrawals and
+moderator edits.
+- **Why not its own alone:** a revision carried over the Link is stamped by its
   author's clock, display metadata that may run far behind (§7.2). Aged by its
   own stamp, an edit from a node with a badly wrong clock expired on arrival,
   and the post fell back to the revision before it. For a withdrawal, that
   re-showed the withdrawn text. Now an edit can never expire before its post.
-- **Editing does not extend a post's life.** A post is gone at its board's
-  limit, counted from when it was first written.
+- **A genuine later edit still keeps a post alive,** as before: its own stamp
+  is the later one.
 - **If the first revision was also stamped by the bad clock,** the post and its
   edits expire together, which is the accepted cost.
 - **Receipt time was rejected:** ageing carried content by when this node

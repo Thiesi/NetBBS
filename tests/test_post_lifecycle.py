@@ -533,12 +533,7 @@ def test_expired_post_still_referenced_by_an_edit_is_not_deleted(db, sysop, alic
     )
     original = create_post(db, board, alice, "Subject", "Original")
     edited = edit_post(db, original, board, subject="Subject", body="Edited", edited_by=alice)
-    _age_post(db, original, days_old=40)  # past expiry and the 5-day grace
-    # Every revision ages from the root (issue #793), so keep the edit row
-    # itself from expiring: the root is then deletable by age while a live
-    # edit still references it, which is the guard under test.
-    db.connection.execute("UPDATE posts SET exempt_from_expiry = 1 WHERE post_id = ?", (edited.post_id,))
-    db.connection.commit()
+    _age_post(db, original, days_old=40)  # only the root ages past deletion, not the edit
 
     list_posts_page(db, board, alice)  # triggers the sweep -- must not raise
 

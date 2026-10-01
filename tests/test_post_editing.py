@@ -275,22 +275,21 @@ def test_cannot_edit_a_post_with_no_currently_approved_version(db, alice):
 # -- expiry interaction ---------------------------------------------------
 
 
-def test_an_edit_does_not_keep_a_post_past_its_age(db, alice):
-    """Issue #793: every revision ages from its post's original revision, so
-    editing a post does not extend its life (and an edit can never expire
-    before the post it belongs to). Before, a fresh edit kept the post listed
-    past its board's limit."""
+def test_an_edit_keeps_a_post_alive_even_after_the_original_root_expires(db, alice):
     board = create_board(db, "general", creator=alice, max_post_age_days=30)
     original = create_post(db, board, alice, "Subject", "Old body")
-    edit_post(db, original, board, subject="Subject", body="Fresh body", edited_by=alice)
-    # Past max_post_age_days=30, inside the default 7-day grace period.
+    edited = edit_post(db, original, board, subject="Subject", body="Fresh body", edited_by=alice)
+    # Old enough to sweep to 'expired' (past max_post_age_days=30) but
+    # not old enough to be hard-deleted (default grace period is 7
+    # more days) -- the "does an edit still surviving past hard-delete"
+    # case is covered separately, more precisely, by
+    # tests/test_post_lifecycle.py::
+    # test_expired_post_still_referenced_by_an_edit_is_not_deleted.
     _age(db, original, days_old=35)
 
     page = list_posts_page(db, board, alice)
-    assert page.posts == []
-    assert {row["status"] for row in db.connection.execute(
-        "SELECT status FROM posts WHERE root_post_id = ?", (original.post_id,)
-    )} == {"expired"}
+    assert len(page.posts) == 1
+    assert page.posts[0].body == "Fresh body"
 
 
 # -- pinned posts also resolve to latest content --------------------------

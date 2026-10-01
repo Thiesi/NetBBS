@@ -1,12 +1,15 @@
-"""Every revision of a post ages from the post's original revision (issue #793).
+"""A revision ages from the later of its own and its post's original
+`created_at` (issue #793).
 
 A carried revision's `created_at` is its author's clock, display metadata that
-may run far behind (design doc §7.2). Aged by its own timestamp, an edit from a
-node whose clock was weeks behind expired on arrival, and the post fell back to
-the revision before it -- for a withdrawal, the very text the author took back.
-Aging every revision by its post's first revision means an edit can never
-expire before the post it belongs to. Ageing by when this node received content
-was considered and rejected: it would keep old history carried late to a newly
+may run far behind (design doc §7.2). Aged by its own timestamp alone, an edit
+from a node whose clock was weeks behind expired on arrival, and the post fell
+back to the revision before it -- for a withdrawal, the very text the author
+took back. Taking the later of the two means an edit can never expire before
+the post it belongs to, while a genuine later edit still keeps the post alive
+(`tests/test_post_editing.py::test_an_edit_keeps_a_post_alive_even_after_the_
+original_root_expires`). Ageing by when this node received content was
+considered and rejected: it would keep old history carried late to a newly
 subscribing node alive for a full maximum age."""
 
 from __future__ import annotations
@@ -69,11 +72,12 @@ def test_a_withdrawal_from_a_clock_far_behind_does_not_bring_the_text_back(db, r
 def test_old_history_carried_late_still_expires_on_schedule(db, remote_node_identity):
     """The case receipt time got wrong: a post written 60 days ago that reaches
     a newly subscribing node today is past a 30-day limit already, and an edit
-    made since does not keep it alive."""
+    stamped by a clock even further behind does not rescue it."""
     board_id, board = _carried_board_with_age_limit(db, remote_node_identity)
     root = _remote_post(remote_node_identity, board_id=board_id, body="old news", created_at=OLD)
     materialize_carried_post(db, root, sender_fingerprint=remote_node_identity.fingerprint)
-    edit = _remote_edit(remote_node_identity, root, body="old news, corrected", created_at=_iso(NOW))
+    edit = _remote_edit(remote_node_identity, root, body="old news, corrected",
+                        created_at=_iso(NOW - datetime.timedelta(days=90)))
     materialize_carried_post_edit(db, edit, sender_fingerprint=remote_node_identity.fingerprint)
 
     assert count_listed_posts(db, board)[0] == 0
