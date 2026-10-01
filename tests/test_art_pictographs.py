@@ -107,3 +107,28 @@ def test_an_art_post_keeps_pictographs_as_glyphs_not_control_bytes():
     body = art_body_from_editor(encode_cp437_art("\x1b[0m♥ ☺ ►\r\n"))
     assert "♥ ☺ ►" in body
     assert not any(c in body for c in "\x01\x03\x10")
+
+
+def test_the_screen_copy_gets_glyphs_not_control_bytes():
+    # Review on #987: the copy read 0x0B and 0x0C as cursor moves, so the
+    # SysOp's snoop view and a break-in repaint came out misaligned.
+    session = _Session(CP437)
+    session.terminal_height = 24
+    asyncio.run(write_preformatted_line(session, decode_banner_bytes(b"\x0bA\x0cB\x03")))
+    assert "\x0b" in "".join(session.sent)  # the terminal gets the bytes
+    assert session.screen_copy().text_rows()[0].startswith("♂A♀B♥")
+
+
+def test_the_art_editor_canvas_sends_pictograph_bytes_to_a_cp437_terminal():
+    # Review on #987: the canvas went through plain `write`, so a CP437
+    # terminal saw "*" and "@" where the art had ♥ and ☺.
+    from netbbs.rendering import ScreenBuffer, full_render_ansi
+    from netbbs.rendering.screen_buffer import Cell
+
+    buffer = ScreenBuffer(10, 2)
+    buffer.put_cell(0, 0, Cell(char="♥"))
+    buffer.put_cell(0, 1, Cell(char="☺"))
+    session = _Session(CP437)
+    asyncio.run(session.write_art(full_render_ansi(buffer.snapshot())))
+    sent = "".join(session.sent)
+    assert "\x03\x01" in sent and "*@" not in sent

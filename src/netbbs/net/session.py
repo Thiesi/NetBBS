@@ -18,7 +18,14 @@ from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Awaitable, Callable
 
-from netbbs.rendering.charset import CP437, UTF8, Charset, art_glyphs_to_cp437_controls, map_text
+from netbbs.rendering.charset import (
+    CP437,
+    UTF8,
+    Charset,
+    art_glyphs_to_cp437_controls,
+    art_pictographs_to_glyphs,
+    map_text,
+)
 from netbbs.rendering.pipe_codes import PastedColor
 from netbbs.rendering.reflow import fills_last_column, wrap_terminal_text
 from netbbs.rendering.ansi import strip_ansi
@@ -388,6 +395,30 @@ class Session(ABC):
         if self._output_held:
             return
         await self._send_text(text)
+
+    async def write_art(self, text: str) -> None:
+        """`write` for SysOp art (issue #929): the pictographs of CP437's
+        control range (☺ ♥ ►) reach a CP437 terminal as the bytes that draw
+        them, where `write` would send a printable substitute. The screen
+        copy gets the glyphs, not those bytes, which it would read as
+        controls (0x0B and 0x0C move the cursor). Every other session gets
+        exactly what `write` sends."""
+        if self.output_charset != CP437:
+            await self.write(text)
+            return
+        wire = art_glyphs_to_cp437_controls(text)
+        if type(self).write is not Session.write:
+            # A test double that captures `write` itself.
+            await self.write(wire)
+            return
+        if self._raw_decoder is not None:
+            self._copy_output(self._raw_decoder.decode(b"", final=True))
+            self._raw_decoder = None
+        wire = map_text(wire, CP437)
+        self._copy_output(_normalize_newlines(art_pictographs_to_glyphs(wire)))
+        if self._output_held:
+            return
+        await self._send_text(wire)
 
     async def write_raw(self, data: bytes) -> None:
         """
@@ -865,9 +896,15 @@ async def write_preformatted_line(session: Session, text: str) -> None:
     would get a printable substitute.
     """
     rows = preformatted_rows(session, text)
-    if getattr(session, "output_charset", UTF8) == CP437:
-        rows = art_glyphs_to_cp437_controls(rows)
-    await session.write(rows)
+    write_art = getattr(session, "write_art", None)
+    if write_art is None:
+        # A stand-in session that is not a `Session` (tests): it gets what
+        # the terminal would, as `write_art` gives a double of `write`.
+        if getattr(session, "output_charset", UTF8) == CP437:
+            rows = art_glyphs_to_cp437_controls(rows)
+        await session.write(rows)
+        return
+    await write_art(rows)
 
 
 async def write_laid_out_row(session: Session, row: str) -> None:

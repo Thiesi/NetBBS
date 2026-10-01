@@ -190,7 +190,7 @@ async def edit_ansi_art(
     )
     try:
         previous = buffer.snapshot()
-        await session.write(full_render_ansi(previous))
+        await session.write_art(full_render_ansi(previous))
         await _flush(session, state)
 
         while True:
@@ -217,7 +217,7 @@ async def edit_ansi_art(
                 # the prose editor's own Ctrl+X handling; a real full
                 # clear-and-repaint is the only redraw that erases it.
                 previous = state.buffer.snapshot()
-                await session.write(full_render_ansi(previous))
+                await session.write_art(full_render_ansi(previous))
                 await _flush(session, state)
                 continue
 
@@ -230,7 +230,7 @@ async def edit_ansi_art(
                 # Ctrl+L repaints everything, as it does at every picker
                 # and menu (issue #841: it did nothing here).
                 previous = buffer.snapshot()
-                await session.write(full_render_ansi(previous))
+                await session.write_art(full_render_ansi(previous))
                 await _flush(session, state)
                 continue
 
@@ -273,7 +273,7 @@ async def edit_ansi_art(
                     unicode_style=unicode_style,
                 )
                 previous = buffer.snapshot()
-                await session.write(full_render_ansi(previous))
+                await session.write_art(full_render_ansi(previous))
                 await _flush(session, state)
                 continue
 
@@ -444,7 +444,7 @@ async def _repaint(session: Session, state: _EditorState) -> Snapshot:
     nothing about, so after one only a full repaint puts the drawing back
     (issue #841: the picker's rows stayed on screen instead)."""
     current = state.buffer.snapshot()
-    await session.write(full_render_ansi(current))
+    await session.write_art(full_render_ansi(current))
     await _flush(session, state)
     return current
 
@@ -453,7 +453,7 @@ async def _redraw(session: Session, state: _EditorState, previous: Snapshot) -> 
     current = state.buffer.snapshot()
     diff = diff_ansi(previous, current)
     if diff:
-        await session.write(diff)
+        await session.write_art(diff)
     await _flush(session, state)
     return current
 
